@@ -402,8 +402,8 @@ cp_gather_and_upconvert_fp8_kv_cache_v2_kernel(const uint8_t* __restrict__ src_c
                                                const int64_t dst_fused_stride,
                                                const int32_t batch_size,
                                                const int64_t total_tokens) {
-    const int     warp_id          = threadIdx.x >> 5;
-    const int     lane             = threadIdx.x & 31;
+    const int warp_id = threadIdx.x >> 5;
+    const int lane    = threadIdx.x & 31;
     const int64_t token_global_idx = (int64_t)blockIdx.x * (blockDim.x >> 5) + warp_id;
     if (token_global_idx >= total_tokens)
         return;
@@ -431,59 +431,60 @@ cp_gather_and_upconvert_fp8_kv_cache_v2_kernel(const uint8_t* __restrict__ src_c
     const int32_t page_offset = local_idx % block_size;
     const int32_t block_id    = block_table[bid * block_table_stride + page_idx];
 
-    const uint8_t*       token_ptr  = src_cache + block_id * cache_block_stride + page_offset * cache_entry_stride;
-    __nv_bfloat16*       dst_ptr    = dst_fused + token_global_idx * dst_fused_stride;
+    const uint8_t* token_ptr = src_cache + block_id * cache_block_stride + page_offset * cache_entry_stride;
+    __nv_bfloat16* dst_ptr   = dst_fused + token_global_idx * dst_fused_stride;
     const float*         scales_ptr = reinterpret_cast<const float*>(token_ptr + 512);
     const __nv_bfloat16* rope_ptr   = reinterpret_cast<const __nv_bfloat16*>(token_ptr + 528);
 
     // Broadcast 4 scales via shfl
-    float s0        = (lane == 0) ? __ldg(scales_ptr) : 0.f;
-    float s1        = (lane == 0) ? __ldg(scales_ptr + 1) : 0.f;
-    float s2        = (lane == 0) ? __ldg(scales_ptr + 2) : 0.f;
-    float s3        = (lane == 0) ? __ldg(scales_ptr + 3) : 0.f;
-    s0              = __shfl_sync(0xffffffff, s0, 0);
-    s1              = __shfl_sync(0xffffffff, s1, 0);
-    s2              = __shfl_sync(0xffffffff, s2, 0);
-    s3              = __shfl_sync(0xffffffff, s3, 0);
+    float s0 = (lane == 0) ? __ldg(scales_ptr)     : 0.f;
+    float s1 = (lane == 0) ? __ldg(scales_ptr + 1) : 0.f;
+    float s2 = (lane == 0) ? __ldg(scales_ptr + 2) : 0.f;
+    float s3 = (lane == 0) ? __ldg(scales_ptr + 3) : 0.f;
+    s0 = __shfl_sync(0xffffffff, s0, 0);
+    s1 = __shfl_sync(0xffffffff, s1, 0);
+    s2 = __shfl_sync(0xffffffff, s2, 0);
+    s3 = __shfl_sync(0xffffffff, s3, 0);
     float scales[4] = {s0, s1, s2, s3};
 
     // uint4 load: 16 fp8 elements at once per lane (128 bits)
-    const int       base   = lane * 16;
-    const float     scale  = scales[base >> 7];
-    uint4           packed = *reinterpret_cast<const uint4*>(token_ptr + base);
-    const uint32_t* u32    = reinterpret_cast<const uint32_t*>(&packed);
+    const int base       = lane * 16;
+    const float scale    = scales[base >> 7];
+    uint4 packed         = *reinterpret_cast<const uint4*>(token_ptr + base);
+    const uint32_t* u32  = reinterpret_cast<const uint32_t*>(&packed);
 
     // fp8x2 batch convert to bf16
     __nv_bfloat162 out[8];
 #pragma unroll
     for (int i = 0; i < 4; i++) {
-        uint32_t             val = u32[i];
-        __nv_fp8x2_storage_t p0  = static_cast<__nv_fp8x2_storage_t>(val & 0xFFFFu);
-        __nv_fp8x2_storage_t p1  = static_cast<__nv_fp8x2_storage_t>((val >> 16) & 0xFFFFu);
-        __half2_raw          h0  = __nv_cvt_fp8x2_to_halfraw2(p0, __NV_E4M3);
-        __half2_raw          h1  = __nv_cvt_fp8x2_to_halfraw2(p1, __NV_E4M3);
-        float2               f0  = __half22float2(*reinterpret_cast<__half2*>(&h0));
-        float2               f1  = __half22float2(*reinterpret_cast<__half2*>(&h1));
-        out[2 * i]               = __floats2bfloat162_rn(f0.x * scale, f0.y * scale);
-        out[2 * i + 1]           = __floats2bfloat162_rn(f1.x * scale, f1.y * scale);
+        uint32_t val = u32[i];
+        __nv_fp8x2_storage_t p0 = static_cast<__nv_fp8x2_storage_t>(val & 0xFFFFu);
+        __nv_fp8x2_storage_t p1 = static_cast<__nv_fp8x2_storage_t>((val >> 16) & 0xFFFFu);
+        __half2_raw h0 = __nv_cvt_fp8x2_to_halfraw2(p0, __NV_E4M3);
+        __half2_raw h1 = __nv_cvt_fp8x2_to_halfraw2(p1, __NV_E4M3);
+        float2 f0 = __half22float2(*reinterpret_cast<__half2*>(&h0));
+        float2 f1 = __half22float2(*reinterpret_cast<__half2*>(&h1));
+        out[2 * i]     = __floats2bfloat162_rn(f0.x * scale, f0.y * scale);
+        out[2 * i + 1] = __floats2bfloat162_rn(f1.x * scale, f1.y * scale);
     }
 
     // 2x uint4 store: 32 bytes = 16 bf16
     uint4* dst_u4 = reinterpret_cast<uint4*>(dst_ptr + base);
-    dst_u4[0]     = *reinterpret_cast<const uint4*>(&out[0]);
-    dst_u4[1]     = *reinterpret_cast<const uint4*>(&out[4]);
+    dst_u4[0] = *reinterpret_cast<const uint4*>(&out[0]);
+    dst_u4[1] = *reinterpret_cast<const uint4*>(&out[4]);
 
     // Rope: 32 lanes x 2 bf16 = 64 bf16
-    *reinterpret_cast<int32_t*>(dst_ptr + 512 + lane * 2) = *reinterpret_cast<const int32_t*>(rope_ptr + lane * 2);
+    *reinterpret_cast<int32_t*>(dst_ptr + 512 + lane * 2) =
+        *reinterpret_cast<const int32_t*>(rope_ptr + lane * 2);
 }
 
 void cp_gather_and_upconvert_fp8_kv_cache_v2(const torch::Tensor& src_cache,
-                                             torch::Tensor&       dst_fused,
-                                             const torch::Tensor& block_table,
-                                             const torch::Tensor& seq_lens,
-                                             const torch::Tensor& workspace_starts,
-                                             int64_t              batch_size,
-                                             int64_t              total_tokens) {
+                                              torch::Tensor&       dst_fused,
+                                              const torch::Tensor& block_table,
+                                              const torch::Tensor& seq_lens,
+                                              const torch::Tensor& workspace_starts,
+                                              int64_t              batch_size,
+                                              int64_t              total_tokens) {
     const c10::cuda::CUDAGuard device_guard(src_cache.device());
     const cudaStream_t         stream = c10::cuda::getCurrentCUDAStream();
 

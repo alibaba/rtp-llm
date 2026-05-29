@@ -41,6 +41,10 @@ from rtp_llm.models_py.triton_kernels.common.strided_slice_copy import (
 from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
     triton_convert_req_index_to_global_index,
 )
+from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla import (
+    fused_qk_rope_cat_cache_mla,
+)
+from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
@@ -412,6 +416,16 @@ class SparseMlaImpl(MlaImplBase):
         self.kv_cache_write_op = MlaKVCacheWriteOp(
             kv_cache_dtype=attn_configs.kv_cache_dtype,
         )
+
+        self._fuse_qk_rope_cat_cache_mla = fuse_kernels_enabled()
+        self._kv_cache_type = (
+            "fp8_ds_mla"
+            if attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+            else "auto"
+        )
+        self._cos_sin_cache = cos_sin_cache
+        self._is_neox_style = attn_configs.rope_config.is_neox_style
+
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
         # create_params is a hook subclasses (e.g. SparseMlaCpImpl) override
@@ -525,8 +539,25 @@ class SparseMlaImpl(MlaImplBase):
 
         # 1. RoPE on q_pe and k_pe; write KV to cache + optional store
         q_pe = q[:, :, self.nope_head_dim :]
-        self.rope_impl.forward(q_pe, k_pe, self.rope_params)
-        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
+        if self._fuse_qk_rope_cat_cache_mla and kv_cache is not None:
+            fused_qk_rope_cat_cache_mla(
+                q=q,
+                compressed_kv=compressed_kv,
+                k_pe=k_pe,
+                kv_cache=kv_cache.kv_cache_base,
+                slot_mapping=self.rope_params.slot_mapping,
+                positions=self.rope_params.positions_d,
+                cos_sin_cache=self._cos_sin_cache,
+                kv_lora_rank=self.kv_lora_rank,
+                rope_head_dim=self.rope_head_dim,
+                is_neox_style=self._is_neox_style,
+                kv_cache_type=self._kv_cache_type,
+            )
+        else:
+            self.rope_impl.forward(q_pe, k_pe, self.rope_params)
+            self.kv_cache_write_op.forward(
+                compressed_kv, k_pe, kv_cache, self.rope_params
+            )
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
