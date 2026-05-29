@@ -1,10 +1,16 @@
 """CP-aware slot mapping builder for DSV4 prefill writer (Stage 5b-2).
 
-Under ``prefill_cp_config.kv_cache_sharded=true`` the pool is RR-sharded
-across CP ranks: logical block ``g_blk`` is owned by rank ``g_blk %
-cp_size``. Each rank's per-request ``block_table`` only contains the
-1/cp_size physical blocks it owns, in compact form (local block ``l`` ↔
+Under ``prefill_cp_config.kv_cache_sharded=true`` the DSV4 paged KV pools
+are RR-sharded across CP ranks: logical block ``g_blk`` is owned by rank
+``g_blk % cp_size``. Each rank's per-request ``block_table`` only contains
+the 1/cp_size physical blocks it owns, in compact form (local block ``l`` ↔
 global logical block ``cp_rank + l*cp_size``).
+
+The fixed/SWA pools (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) are
+different: each logical block exists on every rank, but its entries are
+split into contiguous intra-block slices. A rank writes only offsets
+``[cp_rank * local_eb, (cp_rank + 1) * local_eb)`` within the full logical
+block; decode later loads every peer slice into the full block.
 
 The writer (compressor / SWA / indexer write paths) computes a slot
 mapping ``[N]`` int64 telling each token where to land in the local
@@ -21,8 +27,6 @@ This is the central primitive consumed by Stage 5b's writer-side
 modifications. Pure tensor logic; no NCCL involvement (the gather happens
 on the reader side).
 
-Only paged KV pools use this ownership mapping. STATE pools are intentionally
-excluded: every CP rank keeps the full STATE block table.
 """
 
 from __future__ import annotations
@@ -132,17 +136,42 @@ def cp_state_slot_mapping(
     block_table_local: torch.Tensor,
     b_idx: torch.Tensor,
     state_eb: int,
+    tokens_per_block: int,
     cp_size: int,
     cp_rank: int,
+    seq_end_per_req: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Deprecated guardrail.
+    """CP-aware fixed STATE slot mapping for intra-block slices.
 
-    STATE pools are not CP-sharded in the DSV4 FP8 path: every rank keeps the
-    full STATE block table. Applying CP ownership masking here would make the
-    writer skip non-owned positions and leave decode-visible garbage. Keep this
-    symbol only to fail fast if old scaffolding tries to use it.
+    ``state_eb`` is this rank's local entries per physical block. The full
+    logical ring has ``state_eb * cp_size`` entries. Only positions whose
+    full-ring offset belongs to ``cp_rank`` get a real local slot.
     """
-    del positions, block_table_local, b_idx, state_eb, cp_size, cp_rank
-    raise RuntimeError(
-        "cp_state_slot_mapping is invalid: DSV4 STATE pools are not CP-sharded"
-    )
+    if state_eb <= 0 or tokens_per_block <= 0 or cp_size <= 0:
+        return torch.full_like(positions, -1, dtype=torch.int64)
+    if positions.dtype != torch.int64:
+        positions = positions.to(torch.int64)
+    if b_idx.dtype != torch.int64:
+        b_idx = b_idx.to(torch.int64)
+    bt_long = block_table_local.to(torch.int64)
+    max_blocks = int(bt_long.shape[1])
+    if max_blocks <= 0:
+        return torch.full_like(positions, -1, dtype=torch.int64)
+
+    full_eb = int(state_eb) * int(cp_size)
+    block_in_seq_raw = positions // int(tokens_per_block)
+    block_in_seq = block_in_seq_raw % max_blocks
+    logical_offset = positions % full_eb
+    owner_rank = logical_offset // int(state_eb)
+    local_offset = logical_offset - owner_rank * int(state_eb)
+    block_id = bt_long[b_idx, block_in_seq]
+
+    valid = (owner_rank == int(cp_rank)) & (block_id > 0)
+    if seq_end_per_req is not None:
+        seq_end = seq_end_per_req.to(device=positions.device, dtype=torch.int64)[b_idx]
+        block_end = (block_in_seq_raw + 1) * int(tokens_per_block)
+        effective_end = torch.minimum(block_end, seq_end)
+        valid = valid & ((positions + full_eb) >= effective_end)
+
+    slot = block_id * int(state_eb) + local_offset
+    return torch.where(valid, slot, torch.full_like(slot, -1))

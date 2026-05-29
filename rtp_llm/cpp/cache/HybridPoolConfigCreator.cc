@@ -284,7 +284,8 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     config.is_sparse          = model_config.attn_config.is_sparse;
 
     if (!model_config.attn_config.layer_compress_ratios.empty()) {
-        DSV4CacheConfigHelper::applyConfig(config, model_config, kv_cache_config, gen_num_per_cycle);
+        DSV4CacheConfigHelper::applyConfig(
+            config, model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     } else {
         RTP_LLM_CHECK_WITH_INFO(model_config.hybrid_attention_config.enable_hybrid_attention,
                                 "HybridPoolConfigCreator requires DSV4 layer_compress_ratios or hybrid attention");

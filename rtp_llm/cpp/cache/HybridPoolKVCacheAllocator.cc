@@ -34,25 +34,25 @@ bool HybridPoolKVCacheAllocator::doInit() {
     group_block_pools_.reserve(static_cast<size_t>(group_nums));
     kv_cache_groups_.reserve(static_cast<size_t>(group_nums));
 
-    SharedBlockCache* shared_cache_raw = shared_block_cache_ ? shared_block_cache_.get() : nullptr;
-    static constexpr double kBytesPerMB = 1024.0 * 1024.0;
+    SharedBlockCache*       shared_cache_raw = shared_block_cache_ ? shared_block_cache_.get() : nullptr;
+    static constexpr double kBytesPerMB      = 1024.0 * 1024.0;
     std::array<size_t, 3>   dsv4_paged_pool_group_bytes{0, 0, 0};
     std::array<uint32_t, 3> dsv4_paged_pool_group_blocks{0, 0, 0};
-    size_t                 dsv4_paged_pool_total_bytes = 0;
-    bool                   has_dsv4_paged_pool         = false;
+    size_t                  dsv4_paged_pool_total_bytes = 0;
+    bool                    has_dsv4_paged_pool         = false;
     std::array<size_t, 4>   dsv4_fixed_pool_group_bytes{0, 0, 0, 0};
     std::array<uint32_t, 4> dsv4_fixed_pool_group_blocks{0, 0, 0, 0};
-    size_t                 dsv4_fixed_pool_total_bytes = 0;
-    bool                   has_dsv4_fixed_pool         = false;
+    size_t                  dsv4_fixed_pool_total_bytes = 0;
+    bool                    has_dsv4_fixed_pool         = false;
 
     std::vector<BlockPoolConfig> group_pool_configs;
     group_pool_configs.reserve(static_cast<size_t>(group_nums));
     for (int gid = 0; gid < group_nums; ++gid) {
         auto pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(gid));
         if (gid >= 0 && gid <= 2) {
-            const size_t paged_idx                 = static_cast<size_t>(gid);
-            has_dsv4_paged_pool                    = true;
-            dsv4_paged_pool_group_bytes[paged_idx] = pool_config.total_size_bytes;
+            const size_t paged_idx                  = static_cast<size_t>(gid);
+            has_dsv4_paged_pool                     = true;
+            dsv4_paged_pool_group_bytes[paged_idx]  = pool_config.total_size_bytes;
             dsv4_paged_pool_group_blocks[paged_idx] = pool_config.block_num;
             dsv4_paged_pool_total_bytes += pool_config.total_size_bytes;
         }
@@ -112,8 +112,8 @@ bool HybridPoolKVCacheAllocator::doInit() {
                                 gid);
         const auto group_type = config_.group_types[static_cast<size_t>(gid)];
 
-        const auto& pool_config = group_pool_configs[static_cast<size_t>(gid)];
-        const bool use_pinned_cpu_backing = allocation_type_ == AllocationType::DEVICE
+        const auto& pool_config            = group_pool_configs[static_cast<size_t>(gid)];
+        const bool  use_pinned_cpu_backing = allocation_type_ == AllocationType::DEVICE
                                             && config_.fixed_pool_uses_pinned_cpu
                                             && static_cast<size_t>(gid) < config_.group_region_names.size()
                                             && isDsv4FixedRegion(config_.group_region_names[static_cast<size_t>(gid)]);
@@ -566,9 +566,14 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
     const int  reserve_step   = malloc_info.complete_token_ids->getReserveStep();
     const bool reuse_enabled  = malloc_info.reuse_cache;
 
-    size_t total_available_blocks = 0;
-    for (const auto& pool : group_block_pools_) {
-        total_available_blocks += pool->availableBlocksNum();
+    size_t total_reservable_available_blocks = 0;
+    for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
+        const auto region =
+            gid < config_.group_region_names.size() ? config_.group_region_names[gid] : KVCacheRegionName::DEFAULT;
+        if (isDsv4FixedRegion(region)) {
+            continue;
+        }
+        total_reservable_available_blocks += group_block_pools_[gid]->availableBlocksNum();
     }
 
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
@@ -579,9 +584,13 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
         if (need_blocks <= 0) {
             continue;
         }
-        const size_t available_blocks = group_block_pools_[static_cast<size_t>(gid)]->availableBlocksNum();
-        const size_t group_reserve_blocks =
-            total_available_blocks > 0 ? reserve_blocks * available_blocks / total_available_blocks : 0;
+        const size_t available_blocks     = group_block_pools_[static_cast<size_t>(gid)]->availableBlocksNum();
+        const auto   region               = static_cast<size_t>(gid) < config_.group_region_names.size() ?
+                                                config_.group_region_names[static_cast<size_t>(gid)] :
+                                                KVCacheRegionName::DEFAULT;
+        const size_t group_reserve_blocks = isDsv4FixedRegion(region) || total_reservable_available_blocks == 0 ?
+                                                0 :
+                                                reserve_blocks * available_blocks / total_reservable_available_blocks;
         if (available_blocks < static_cast<size_t>(need_blocks) + group_reserve_blocks) {
             if (malloc_info.verbose) {
                 RTP_LLM_LOG_INFO("HybridPool initMalloc rejected by reserve blocks: request_id=%ld group=%d "
