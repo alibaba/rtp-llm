@@ -1,13 +1,55 @@
 #include <gtest/gtest.h>
 #include <algorithm>
-#include <vector>
+#include <cstdlib>
 #include <memory>
+#include <string>
+#include <vector>
+
+#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 
 namespace rtp_llm {
 namespace test {
+
+namespace {
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* name, const char* value): name_(name) {
+        const char* old_value = std::getenv(name_);
+        if (old_value != nullptr) {
+            old_value_ = old_value;
+            had_value_ = true;
+        }
+        setenv(name_, value, 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (had_value_) {
+            setenv(name_, old_value_.c_str(), 1);
+        } else {
+            unsetenv(name_);
+        }
+    }
+
+private:
+    const char* name_;
+    std::string old_value_;
+    bool        had_value_ = false;
+};
+
+std::shared_ptr<DSV4StateSpec> makeDsv4StateSpec(KVCacheRegionName region_name, int seq_size_per_block) {
+    return std::make_shared<DSV4StateSpec>(region_name,
+                                           /*layer_count=*/1,
+                                           /*state_elements=*/1024,
+                                           /*block_entries=*/128,
+                                           DataType::TYPE_FP32,
+                                           seq_size_per_block);
+}
+
+}  // namespace
 
 class SWAKVCacheGroupTest: public ::testing::Test {
 protected:
@@ -196,6 +238,36 @@ TEST_F(SWAKVCacheGroupTest, Malloc_NoOpWhenEnoughBlocks) {
     ASSERT_TRUE(group.malloc(block_ids, 8));
     EXPECT_EQ(block_ids.blocksNum(), 2u);
     EXPECT_EQ(block_pool_->freeBlocksNum(), free_after_first);
+}
+
+TEST_F(SWAKVCacheGroupTest, Malloc_DSV4TrapSkipsHCAStateNullTail) {
+    ScopedEnvVar env("DSV4_TRAP_INVALID_KV_ACCESS", "1");
+    auto         spec  = makeDsv4StateSpec(KVCacheRegionName::HCA_STATE, 4);
+    auto         group = SWAKVCacheGroup({}, spec, block_pool_, 5, 0, shared_cache_.get());
+    BlockIds     block_ids(1);
+    block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+
+    EXPECT_NO_THROW((void)group.malloc(block_ids, 12));
+}
+
+TEST_F(SWAKVCacheGroupTest, Malloc_DSV4TrapChecksSWAKVNullTail) {
+    ScopedEnvVar env("DSV4_TRAP_INVALID_KV_ACCESS", "1");
+    auto         spec  = makeDsv4StateSpec(KVCacheRegionName::SWA_KV, 4);
+    auto         group = SWAKVCacheGroup({}, spec, block_pool_, 6, 0, shared_cache_.get());
+    BlockIds     block_ids(1);
+    block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+
+    EXPECT_THROW((void)group.malloc(block_ids, 12), std::exception);
+}
+
+TEST_F(SWAKVCacheGroupTest, Malloc_DSV4TrapChecksNonSkipStateNullTail) {
+    ScopedEnvVar env("DSV4_TRAP_INVALID_KV_ACCESS", "1");
+    auto         spec  = makeDsv4StateSpec(KVCacheRegionName::CSA_STATE, 4);
+    auto         group = SWAKVCacheGroup({}, spec, block_pool_, 4, 0, shared_cache_.get());
+    BlockIds     block_ids(1);
+    block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+
+    EXPECT_THROW((void)group.malloc(block_ids, 12), std::exception);
 }
 
 TEST_F(SWAKVCacheGroupTest, Malloc_WithReserveStep) {
