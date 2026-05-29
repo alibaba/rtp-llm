@@ -396,14 +396,18 @@ public class EngineHealthReporter {
     public void reportPrefillResult(
             String model, long predictedMs, long actualUs, long totalInput, int batchSize) {
         long actualMs = actualUs / 1000;
+        String modelTag = model == null ? "default" : model;
         String bucket = tokenBucket(totalInput);
-        FlexMetricTags tags = FlexMetricTags.of(
-                "model", model == null ? "default" : model,
-                "token_bucket", bucket);
-        monitor.report(V1_DP_SLO_PREFILL_DURATION_MS, tags, actualMs);
-        monitor.report(V1_DP_SLO_PREFILL_PREDICTION_ERROR_MS, tags, predictedMs - actualMs);
-        monitor.report(V1_DP_SLO_BATCH_INPUT_TOKENS, tags, totalInput);
-        monitor.report(V1_DP_SLO_BATCH_SIZE, tags, batchSize);
+        FlexMetricTags bucketTags = FlexMetricTags.of("model", modelTag, "token_bucket", bucket);
+        FlexMetricTags modelTags = FlexMetricTags.of("model", modelTag);
+
+        monitor.report(V1_DP_SLO_PREFILL_DURATION_MS, bucketTags, actualMs);
+        monitor.report(V1_DP_SLO_PREFILL_DURATION_MS, modelTags, actualMs);
+        monitor.report(V1_DP_SLO_PREFILL_PREDICTION_ERROR_MS, bucketTags, predictedMs - actualMs);
+        monitor.report(V1_DP_SLO_PREFILL_PREDICTION_ERROR_MS, modelTags, predictedMs - actualMs);
+        monitor.report(V1_DP_SLO_BATCH_INPUT_TOKENS, modelTags, totalInput);
+        monitor.report(V1_DP_SLO_BATCH_SIZE, bucketTags, batchSize);
+        monitor.report(V1_DP_SLO_BATCH_SIZE, modelTags, batchSize);
     }
 
     private static String tokenBucket(long tokens) {
