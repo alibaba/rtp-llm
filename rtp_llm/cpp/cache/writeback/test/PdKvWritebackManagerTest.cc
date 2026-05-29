@@ -1,6 +1,9 @@
 #include "rtp_llm/cpp/cache/writeback/PdKvWritebackManager.h"
 
+#include <algorithm>
 #include <string>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -66,7 +69,8 @@ public:
     explicit RecordingRpcClient(std::vector<std::string>* events): events_(events) {}
 
     absl::Status requestPrefillReceive(const PdKvWritebackLaunchRequest& request,
-                                       const PdKvWritebackTopologyPlan&   topology) override {
+                                       const PdKvWritebackTopologyPlan&  topology) override {
+        std::lock_guard<std::mutex> lock(mutex_);
         events_->push_back("prefill_rpc");
         last_request = request;
         prefill_targets.clear();
@@ -77,7 +81,8 @@ public:
     }
 
     absl::Status requestDecodeSend(const PdKvWritebackLaunchRequest& request,
-                                   const PdKvWritebackTopologyPlan&   topology) override {
+                                   const PdKvWritebackTopologyPlan&  topology) override {
+        std::lock_guard<std::mutex> lock(mutex_);
         events_->push_back("decode_rpc");
         last_request = request;
         decode_targets.clear();
@@ -94,6 +99,42 @@ public:
 
 private:
     std::vector<std::string>* events_;
+    std::mutex                mutex_;
+};
+
+class BlockingPrefillRpcClient: public PdKvWritebackRpcClient {
+public:
+    absl::Status requestPrefillReceive(const PdKvWritebackLaunchRequest& request,
+                                       const PdKvWritebackTopologyPlan&  topology) override {
+        (void)request;
+        (void)topology;
+        std::unique_lock<std::mutex> lock(mutex_);
+        prefill_started = true;
+        cv_.notify_all();
+        if (!cv_.wait_for(lock, std::chrono::seconds(1), [&]() { return decode_started; })) {
+            prefill_timed_out = true;
+            return absl::DeadlineExceededError("decode send did not start while prefill receive was waiting");
+        }
+        return absl::OkStatus();
+    }
+
+    absl::Status requestDecodeSend(const PdKvWritebackLaunchRequest& request,
+                                   const PdKvWritebackTopologyPlan&  topology) override {
+        (void)request;
+        (void)topology;
+        std::lock_guard<std::mutex> lock(mutex_);
+        decode_started = true;
+        cv_.notify_all();
+        return absl::OkStatus();
+    }
+
+    bool prefill_started   = false;
+    bool decode_started    = false;
+    bool prefill_timed_out = false;
+
+private:
+    std::mutex              mutex_;
+    std::condition_variable cv_;
 };
 
 PdKvWritebackLaunchRequest makeReceiveRequest() {
@@ -165,8 +206,8 @@ TEST(PdKvWritebackManagerTest, EnabledCompatibleLaunchFailsWithoutRpcClient) {
     pd_config.enable_pd_kv_cache_writeback = true;
     PdKvWritebackManager manager(pd_config, nullptr);
 
-    auto request                = makeReceiveRequest();
-    request.decode_worker_addrs = {"127.0.0.1:8000"};
+    auto request                      = makeReceiveRequest();
+    request.decode_worker_addrs       = {"127.0.0.1:8000"};
     request.source_prefill_grpc_addrs = {"127.0.0.1:9000"};
 
     auto result = manager.launchFromDecode(request);
@@ -178,12 +219,11 @@ TEST(PdKvWritebackManagerTest, EnabledCompatibleLaunchFailsWithoutRpcClient) {
 TEST(PdKvWritebackManagerTest, LaunchTpEqualFansOutToAllPrefillAndDecodeRanks) {
     PDSepConfig pd_config;
     pd_config.enable_pd_kv_cache_writeback = true;
-    std::vector<std::string> events;
-    auto                     transfer_client = std::make_shared<RecordingTransferClient>(&events);
-    auto                     rpc_client      = std::make_shared<RecordingRpcClient>(&events);
+    std::vector<std::string>       events;
+    auto                           transfer_client          = std::make_shared<RecordingTransferClient>(&events);
+    auto                           rpc_client               = std::make_shared<RecordingRpcClient>(&events);
     const std::vector<std::string> decode_worker_grpc_addrs = {"d0:1000", "d1:1000", "d2:1000", "d3:1000"};
-    PdKvWritebackManager           manager(
-        pd_config, nullptr, transfer_client, rpc_client, decode_worker_grpc_addrs, nullptr);
+    PdKvWritebackManager manager(pd_config, nullptr, transfer_client, rpc_client, decode_worker_grpc_addrs, nullptr);
 
     auto request = makeFourRankLaunchRequest();
 
@@ -192,12 +232,32 @@ TEST(PdKvWritebackManagerTest, LaunchTpEqualFansOutToAllPrefillAndDecodeRanks) {
     EXPECT_EQ(result.status, PdKvWritebackLaunchStatus::Started);
     manager.waitForWritebackTasksForTest();
 
-    EXPECT_EQ(events, std::vector<std::string>({"prefill_rpc", "decode_rpc"}));
+    ASSERT_EQ(events.size(), 2);
+    EXPECT_NE(std::find(events.begin(), events.end(), "prefill_rpc"), events.end());
+    EXPECT_NE(std::find(events.begin(), events.end(), "decode_rpc"), events.end());
     EXPECT_TRUE(transfer_client->last_plan.request_key.empty());
     EXPECT_EQ(rpc_client->last_request.manifest.request_id, request.manifest.request_id);
     EXPECT_EQ(rpc_client->last_request.decode_worker_addrs, decode_worker_grpc_addrs);
     EXPECT_EQ(rpc_client->prefill_targets, request.source_prefill_grpc_addrs);
     EXPECT_EQ(rpc_client->decode_targets, decode_worker_grpc_addrs);
+}
+
+TEST(PdKvWritebackManagerTest, LaunchStartsDecodeSendWhilePrefillReceiveIsWaiting) {
+    PDSepConfig pd_config;
+    pd_config.enable_pd_kv_cache_writeback                  = true;
+    auto                           rpc_client               = std::make_shared<BlockingPrefillRpcClient>();
+    const std::vector<std::string> decode_worker_grpc_addrs = {"d0:1000", "d1:1000", "d2:1000", "d3:1000"};
+    PdKvWritebackManager           manager(pd_config, nullptr, nullptr, rpc_client, decode_worker_grpc_addrs, nullptr);
+
+    auto request = makeFourRankLaunchRequest();
+
+    auto result = manager.launchFromDecode(request);
+    ASSERT_EQ(result.status, PdKvWritebackLaunchStatus::Started);
+    manager.waitForWritebackTasksForTest();
+
+    EXPECT_TRUE(rpc_client->prefill_started);
+    EXPECT_TRUE(rpc_client->decode_started);
+    EXPECT_FALSE(rpc_client->prefill_timed_out);
 }
 
 TEST(PdKvWritebackTransferTest, ParsesDedicatedWritebackPortFromWorkerAddr) {
@@ -250,7 +310,7 @@ TEST(PdKvWritebackManagerTest, ReceiveFreesAllocatedBlocksWhenTransferFails) {
 TEST(PdKvWritebackManagerTest, SendOnDecodeTransfersFromHeldSourceBlocks) {
     PDSepConfig pd_config;
     pd_config.enable_pd_kv_cache_writeback = true;
-    auto transfer_client = std::make_shared<RecordingTransferClient>();
+    auto                 transfer_client   = std::make_shared<RecordingTransferClient>();
     PdKvWritebackManager manager(pd_config, nullptr, transfer_client, nullptr, {}, nullptr);
 
     auto source_resource = std::make_shared<BatchKVCacheResource>();

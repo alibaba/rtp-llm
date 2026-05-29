@@ -101,7 +101,7 @@ PdKvWritebackManager::PdKvWritebackManager(const PDSepConfig&                   
 
 PdKvWritebackLaunchResult PdKvWritebackManager::launchFromDecode(const PdKvWritebackLaunchRequest& request) const {
     const int64_t launch_begin_us = currentTimeUs();
-    auto report_launch = [&](PdKvWritebackLaunchStatus status, const std::string& reason) {
+    auto          report_launch   = [&](PdKvWritebackLaunchStatus status, const std::string& reason) {
         PdKvWritebackMetricsCollector collector;
         collector.launch_qps        = true;
         collector.launch_latency_us = currentTimeUs() - launch_begin_us;
@@ -116,7 +116,8 @@ PdKvWritebackLaunchResult PdKvWritebackManager::launchFromDecode(const PdKvWrite
                                   collector,
                                   "launch",
                                   status == PdKvWritebackLaunchStatus::Started ? "started" :
-                                      status == PdKvWritebackLaunchStatus::Skipped ? "skipped" : "failed",
+                                             status == PdKvWritebackLaunchStatus::Skipped ? "skipped" :
+                                                                                            "failed",
                                   reason,
                                   pdKvRoleName(pd_config_.role_type),
                                   request.destination.partition_count,
@@ -144,8 +145,8 @@ PdKvWritebackLaunchResult PdKvWritebackManager::launchFromDecode(const PdKvWrite
     auto topology_status = buildPdKvWritebackTopology(buildTopologyInput(request_for_topology));
     if (!topology_status.ok()) {
         const std::string reason = topology_status.status().code() == absl::StatusCode::kUnimplemented ?
-            "unsupported_topology" :
-            "topology_mismatch";
+                                       "unsupported_topology" :
+                                       "topology_mismatch";
         report_launch(PdKvWritebackLaunchStatus::Skipped, reason);
         return {PdKvWritebackLaunchStatus::Skipped, std::string(topology_status.status().message())};
     }
@@ -161,24 +162,25 @@ PdKvWritebackLaunchResult PdKvWritebackManager::launchFromDecode(const PdKvWrite
     auto rpc_client_owner = owned_rpc_client_;
     {
         std::lock_guard<std::mutex> lock(writeback_tasks_mutex_);
-        writeback_tasks_.push_back(std::async(std::launch::async,
-                                              [request_copy, topology, rpc_client, rpc_client_owner]() {
-                                                  auto receive_status =
-                                                      rpc_client->requestPrefillReceive(request_copy, topology);
-                                                  auto send_status = rpc_client->requestDecodeSend(request_copy, topology);
-                                                  if (!receive_status.ok()) {
-                                                      RTP_LLM_LOG_WARNING(
-                                                          "PD KV writeback prefill receive fanout failed, request_id=%ld, error=%s",
-                                                          request_copy.manifest.request_id,
-                                                          receive_status.ToString().c_str());
-                                                  }
-                                                  if (!send_status.ok()) {
-                                                      RTP_LLM_LOG_WARNING(
-                                                          "PD KV writeback decode send fanout failed, request_id=%ld, error=%s",
-                                                          request_copy.manifest.request_id,
-                                                          send_status.ToString().c_str());
-                                                  }
-                                              }));
+        writeback_tasks_.push_back(
+            std::async(std::launch::async, [request_copy, topology, rpc_client, rpc_client_owner]() {
+                auto receive_task =
+                    std::async(std::launch::async, [request_copy, topology, rpc_client, rpc_client_owner]() {
+                        return rpc_client->requestPrefillReceive(request_copy, topology);
+                    });
+                auto send_status    = rpc_client->requestDecodeSend(request_copy, topology);
+                auto receive_status = receive_task.get();
+                if (!receive_status.ok()) {
+                    RTP_LLM_LOG_WARNING("PD KV writeback prefill receive fanout failed, request_id=%ld, error=%s",
+                                        request_copy.manifest.request_id,
+                                        receive_status.ToString().c_str());
+                }
+                if (!send_status.ok()) {
+                    RTP_LLM_LOG_WARNING("PD KV writeback decode send fanout failed, request_id=%ld, error=%s",
+                                        request_copy.manifest.request_id,
+                                        send_status.ToString().c_str());
+                }
+            }));
     }
     report_launch(PdKvWritebackLaunchStatus::Started, "started");
     return {PdKvWritebackLaunchStatus::Started, "started"};
@@ -197,7 +199,7 @@ void PdKvWritebackManager::waitForWritebackTasksForTest() const {
 
 absl::Status PdKvWritebackManager::receiveOnPrefill(const PdKvWritebackLaunchRequest& request,
                                                     const BatchKVCacheResourcePtr&    destination_resource) {
-    const int64_t receive_begin_us = currentTimeUs();
+    const int64_t                 receive_begin_us = currentTimeUs();
     PdKvWritebackMetricsCollector collector;
     collector.receive_qps = true;
     collector.block_count = request.manifest.reusable_block_count;
@@ -249,17 +251,17 @@ absl::Status PdKvWritebackManager::receiveOnPrefill(const PdKvWritebackLaunchReq
                      request.manifest.cache_keys.size());
 
     const int64_t malloc_begin_us = currentTimeUs();
-    auto status = cache_writer_->mallocWritebackBlocks(destination_resource,
+    auto          status          = cache_writer_->mallocWritebackBlocks(destination_resource,
                                                        static_cast<size_t>(request.manifest.reusable_block_count));
-    collector.malloc_latency_us = currentTimeUs() - malloc_begin_us;
+    collector.malloc_latency_us   = currentTimeUs() - malloc_begin_us;
     if (!status.ok()) {
         report_receive("failed", "malloc_failed");
         return status;
     }
     const int64_t transfer_begin_us = currentTimeUs();
     collector.transfer_qps          = true;
-    auto transfer_status = transfer_client_->transfer(buildTransferPlan(request, destination_resource));
-    collector.transfer_latency_us = currentTimeUs() - transfer_begin_us;
+    auto transfer_status            = transfer_client_->transfer(buildTransferPlan(request, destination_resource));
+    collector.transfer_latency_us   = currentTimeUs() - transfer_begin_us;
     if (!transfer_status.ok()) {
         collector.transfer_failed_qps = true;
         cache_writer_->freeWritebackBlocks(destination_resource);
@@ -279,7 +281,7 @@ absl::Status PdKvWritebackManager::receiveOnPrefill(const PdKvWritebackLaunchReq
 
 absl::Status PdKvWritebackManager::sendOnDecode(const PdKvWritebackLaunchRequest& request,
                                                 const BatchKVCacheResourcePtr&    source_resource) {
-    const int64_t send_begin_us = currentTimeUs();
+    const int64_t                 send_begin_us = currentTimeUs();
     PdKvWritebackMetricsCollector collector;
     collector.transfer_qps = true;
     collector.block_count  = request.manifest.reusable_block_count;
