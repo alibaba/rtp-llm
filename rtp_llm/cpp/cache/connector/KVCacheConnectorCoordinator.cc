@@ -230,7 +230,10 @@ bool KVCacheConnectorCoordinator::init() {
     if (!initP2PConnectorInternal()) {
         RTP_LLM_LOG_WARNING("init P2P connector failed, P2P path disabled — engine continues without it");
     }
-    initPdKvWriteback();
+    if (!initPdKvWriteback()) {
+        RTP_LLM_LOG_ERROR("init PD KV writeback failed");
+        return false;
+    }
     initUpdateThread();
     return true;
 }
@@ -361,12 +364,12 @@ std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnecto
 #endif
 }
 
-void KVCacheConnectorCoordinator::initPdKvWriteback() {
+bool KVCacheConnectorCoordinator::initPdKvWriteback() {
     if (!pd_sep_config_.enable_pd_kv_cache_writeback || pd_sep_config_.decode_entrance) {
-        return;
+        return true;
     }
     if (pd_sep_config_.role_type != RoleType::PREFILL && pd_sep_config_.role_type != RoleType::DECODE) {
-        return;
+        return true;
     }
 
     const uint32_t layer_all_num         = static_cast<uint32_t>(cache_config_.layer_all_num);
@@ -379,8 +382,8 @@ void KVCacheConnectorCoordinator::initPdKvWriteback() {
     }
     auto worker = std::make_shared<P2PConnectorWorker>(worker_config, layer_block_converter, metrics_reporter_);
     if (!worker->init()) {
-        RTP_LLM_LOG_WARNING("init PD KV writeback worker failed, writeback disabled");
-        return;
+        RTP_LLM_LOG_ERROR("init PD KV writeback worker failed");
+        return false;
     }
 
     pd_kv_writeback_worker_       = std::move(worker);
@@ -394,6 +397,7 @@ void KVCacheConnectorCoordinator::initPdKvWriteback() {
                                                                       pd_kv_writeback_cache_writer_.get(),
                                                                       pd_kv_writeback_transfer_client_,
                                                                       pd_kv_writeback_rpc_client_);
+    return true;
 }
 
 void KVCacheConnectorCoordinator::updateOnce() {

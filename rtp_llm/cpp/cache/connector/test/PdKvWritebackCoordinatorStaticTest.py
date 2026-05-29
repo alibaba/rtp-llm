@@ -51,6 +51,20 @@ class PdKvWritebackCoordinatorStaticTest(unittest.TestCase):
         self.assertIn("pd_sep_config", normal_engine_cc)
         self.assertIn("cache_store_config", normal_engine_cc)
 
+    def test_enabled_writeback_init_failure_fails_service_startup(self):
+        coordinator_h = (
+            REPO_ROOT / "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
+        ).read_text()
+        coordinator_cc = (
+            REPO_ROOT / "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.cc"
+        ).read_text()
+
+        self.assertRegex(coordinator_h, r"bool\s+initPdKvWriteback\(\);")
+        self.assertIn("if (!initPdKvWriteback())", coordinator_cc)
+        self.assertIn("init PD KV writeback worker failed", coordinator_cc)
+        self.assertIn("return false;", coordinator_cc)
+        self.assertNotIn("writeback disabled", coordinator_cc)
+
 
 if __name__ == "__main__":
     unittest.main()

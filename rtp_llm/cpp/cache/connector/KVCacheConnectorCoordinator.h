@@ -74,7 +74,7 @@ public:
 private:
     std::shared_ptr<KVCacheMemoryConnector> initMemoryConnector();
     std::shared_ptr<RemoteConnector>        initRemoteConnector();
-    void                                    initPdKvWriteback();
+    bool                                    initPdKvWriteback();
     bool                                    initP2PConnectorInternal();
     void                                    initUpdateThread();
     void                                    updateOnce();
