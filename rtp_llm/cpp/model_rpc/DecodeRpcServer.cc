@@ -6,6 +6,7 @@
 #include <exception>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
@@ -112,7 +113,7 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
 void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
-    auto input = QueryConverter::transQuery(&decode_context.allocate_request.input());
+    auto input                  = QueryConverter::transQuery(&decode_context.allocate_request.input());
     decode_context.request_info = input->request_info;
     if (applyTimelineGate(decode_context.request_key,
                           input->generate_config->gen_timeline,
@@ -693,20 +694,69 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
         return CacheGroupType::FULL;
     };
-    auto shouldLoadGroupFromPeer = [&](CacheGroupType group_type, int peer_idx) {
+    auto isCpSlicedFixedRegion = [](KVCacheRegionName region_name) {
+        return region_name == KVCacheRegionName::INDEXER_STATE || region_name == KVCacheRegionName::CSA_STATE
+               || region_name == KVCacheRegionName::HCA_STATE || region_name == KVCacheRegionName::SWA_KV;
+    };
+    auto shouldLoadGroupFromPeer = [&](CacheGroupType group_type, KVCacheRegionName region_name, int peer_idx) {
         if (!is_page_level_rr) {
             return true;
         }
-        // Page-RR CP sharding only applies to FULL paged groups. Non-FULL
-        // groups are replicated by prefill ranks, so decode must choose one
-        // source rank to avoid duplicate writes.
-        return group_type == CacheGroupType::FULL || peer_idx == 0;
+        if (group_type == CacheGroupType::FULL) {
+            return true;
+        }
+        // These DSV4 fixed/SWA pools are CP-sliced inside one logical block on
+        // prefill, while decode still owns the full block. Pull every peer
+        // slice and place it into the matching destination offset.
+        return isCpSlicedFixedRegion(region_name) || peer_idx == 0;
     };
     auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx) {
         if (!is_page_level_rr || group_type != CacheGroupType::FULL) {
             return true;
         }
         return (static_cast<int>(block_pos) % load_context.prefill_cp_size) == peer_idx;
+    };
+    auto cpFixedSliceBytes = [&](const CacheConfig& cfg, size_t gid) {
+        RTP_LLM_CHECK_WITH_INFO(gid < cfg.cache_specs.size(), "group id out of range for cache_specs: %zu", gid);
+        const auto& spec = cfg.cache_specs[gid];
+        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "null cache spec for group %zu", gid);
+        const auto* state_spec = dynamic_cast<const DSV4StateSpec*>(spec.get());
+        RTP_LLM_CHECK_WITH_INFO(state_spec != nullptr,
+                                "CP-sliced fixed DSV4 group %zu expects DSV4StateSpec, got %s",
+                                gid,
+                                spec->debugString().c_str());
+        const size_t cp_size = static_cast<size_t>(load_context.prefill_cp_size);
+        RTP_LLM_CHECK_WITH_INFO(state_spec->entries_per_block % cp_size == 0,
+                                "CP-sliced fixed region entries %u not divisible by cp_size %zu",
+                                state_spec->entries_per_block,
+                                cp_size);
+        const size_t local_entries = state_spec->entries_per_block / cp_size;
+        return local_entries * static_cast<size_t>(state_spec->state_dim) * getTypeSize(state_spec->store_dtype);
+    };
+    auto sliceFixedDestinationForPeer = [&](std::vector<BlockInfo> parts,
+                                            const CacheConfig&     cfg,
+                                            KVCacheRegionName      region_name,
+                                            size_t                 gid,
+                                            int                    peer_idx) {
+        if (!is_page_level_rr || !isCpSlicedFixedRegion(region_name) || load_context.prefill_cp_size <= 1) {
+            return parts;
+        }
+        RTP_LLM_CHECK_WITH_INFO(
+            parts.size() == 1, "Dsv4 fixed/SWA opaque block expects one part when CP-sliced, got %zu", parts.size());
+        auto& block = parts[0];
+        RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null DSV4 fixed/SWA block addr while slicing");
+        const size_t slice_bytes  = cpFixedSliceBytes(cfg, gid);
+        const size_t slice_offset = slice_bytes * static_cast<size_t>(peer_idx);
+        RTP_LLM_CHECK_WITH_INFO(slice_offset + slice_bytes <= block.size_bytes,
+                                "Dsv4 fixed/SWA slice [%zu, %zu) exceeds block bytes %zu (region=%d, gid=%zu)",
+                                slice_offset,
+                                slice_offset + slice_bytes,
+                                block.size_bytes,
+                                static_cast<int>(region_name),
+                                gid);
+        block.addr       = static_cast<void*>(static_cast<char*>(block.addr) + slice_offset);
+        block.size_bytes = slice_bytes;
+        return parts;
     };
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
@@ -748,7 +798,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                                      group_type,
                                                                      /*hybrid_full_from_begin=*/true);
 
-                if (!shouldLoadGroupFromPeer(group_type, i)) {
+                if (!shouldLoadGroupFromPeer(group_type, region_name, i)) {
                     continue;
                 }
                 for (size_t block_pos : block_pos_list) {
@@ -769,6 +819,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                  cache_manager->convertIndexToBuffer(
                                 block_id, layer_id, region_name, local_part_cnt, local_part_id) :
                                  cache_manager->convertIndexToBuffer(block_id, layer_id, local_part_cnt, local_part_id);
+
+                    parts = sliceFixedDestinationForPeer(std::move(parts), cache_config, region_name, gid, i);
 
                     auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                         RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null block addr for key=%s", key.c_str());
@@ -883,7 +935,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                                                  group_type,
                                                                                  /*hybrid_full_from_begin=*/true);
 
-                            if (!shouldLoadGroupFromPeer(group_type, i)) {
+                            if (!shouldLoadGroupFromPeer(group_type, region_name, i)) {
                                 continue;
                             }
                             for (size_t block_pos : block_pos_list) {
@@ -907,6 +959,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                             block_id, global_layer_id, region_name, local_part_cnt, local_part_id) :
                                               cache_manager->convertIndexToBuffer(
                                             block_id, global_layer_id, local_part_cnt, local_part_id);
+
+                                parts =
+                                    sliceFixedDestinationForPeer(std::move(parts), mtp_cache_cfg, region_name, gid, i);
 
                                 auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                                     RTP_LLM_CHECK_WITH_INFO(

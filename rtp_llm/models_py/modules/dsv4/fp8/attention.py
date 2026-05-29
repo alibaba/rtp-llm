@@ -221,6 +221,60 @@ def _build_suffix_pool_slot_mapping(
     return torch.where(valid, slot, torch.full_like(slot, -1)).contiguous()
 
 
+def _build_suffix_cp_sliced_slot_mapping(
+    *,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: torch.Tensor,
+    local_entries_per_block: int,
+    tokens_per_block_for_block_table: int,
+    cp_rank: int,
+    cp_size: int,
+) -> torch.Tensor:
+    """Build suffix slots for CP-sliced SWA_KV local blocks.
+
+    The block table is still indexed by the logical/cache-key block size. The
+    physical local SWA block stores only this rank's slice of the full SWA ring,
+    whose size is independent of the logical block-table row size.
+    """
+    assert local_entries_per_block > 0
+    assert tokens_per_block_for_block_table > 0
+    full_entries_per_block = int(local_entries_per_block) * int(cp_size)
+    device = block_table.device
+    B = int(seq_lens.numel())
+    if B == 0:
+        return torch.empty((0, 0), dtype=torch.long, device=device)
+
+    gather_lens_l = gather_lens.to(device=device, dtype=torch.long).reshape(-1)
+    seq_lens_l = seq_lens.to(device=device, dtype=torch.long).reshape(-1)
+    max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
+    if max_gather <= 0:
+        return torch.empty((B, 0), dtype=torch.long, device=device)
+
+    step = torch.arange(max_gather, device=device, dtype=torch.long)
+    start = seq_lens_l - gather_lens_l
+    abs_pos = start.unsqueeze(1) + step.unsqueeze(0)
+    valid_pos = (step.unsqueeze(0) < gather_lens_l.unsqueeze(1)) & (abs_pos >= 0)
+
+    block_in_seq = abs_pos // int(tokens_per_block_for_block_table)
+    ring_offset = abs_pos % full_entries_per_block
+    owner_rank = ring_offset // int(local_entries_per_block)
+    local_offset = ring_offset - owner_rank * int(local_entries_per_block)
+    max_blocks = int(block_table.shape[1])
+    in_capacity = valid_pos & (block_in_seq >= 0) & (block_in_seq < max_blocks)
+    safe_block = torch.where(in_capacity, block_in_seq, torch.zeros_like(block_in_seq))
+
+    bt_long = block_table[:B].to(device=device, dtype=torch.long)
+    req = torch.arange(B, device=device, dtype=torch.long).unsqueeze(1)
+    block_id = bt_long[req, safe_block]
+    block_end = (block_in_seq + 1) * int(tokens_per_block_for_block_table)
+    effective_end = torch.minimum(block_end, seq_lens_l.unsqueeze(1))
+    tail_write = (abs_pos + full_entries_per_block) >= effective_end
+    valid = in_capacity & (block_id > 0) & (owner_rank == int(cp_rank)) & tail_write
+    slot = block_id * int(local_entries_per_block) + local_offset
+    return torch.where(valid, slot, torch.full_like(slot, -1)).contiguous()
+
+
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 
 _DSV4_FP8_KV_ENTRY_BYTES = 584
@@ -4145,22 +4199,47 @@ class AttentionFP8(nn.Module):
                     )
                 )
 
-        swa_cache_slot_mapping = _build_suffix_pool_slot_mapping(
-            block_table=swa_bt_int32,
-            seq_lens=swa_cache_seq_lens,
-            gather_lens=swa_cache_gather_lens,
-            entries_per_block=swa_eb,
-            tokens_per_block_for_block_table=swa_tokens_per_block,
-            ring_entries=swa_eb,
-        )
-        swa_slot_mapping = (
-            _build_suffix_pool_slot_mapping(
+        if kv_cache_sharded and cp_ctx_local is not None and cp_ctx_local.cp_size > 1:
+            swa_cache_slot_mapping = _build_suffix_cp_sliced_slot_mapping(
                 block_table=swa_bt_int32,
-                seq_lens=swa_seq_lens,
-                gather_lens=swa_gather_lens,
+                seq_lens=swa_cache_seq_lens,
+                gather_lens=swa_cache_gather_lens,
+                local_entries_per_block=swa_eb,
+                tokens_per_block_for_block_table=swa_tokens_per_block,
+                cp_rank=int(cp_ctx_local.cp_rank),
+                cp_size=int(cp_ctx_local.cp_size),
+            )
+        else:
+            swa_cache_slot_mapping = _build_suffix_pool_slot_mapping(
+                block_table=swa_bt_int32,
+                seq_lens=swa_cache_seq_lens,
+                gather_lens=swa_cache_gather_lens,
                 entries_per_block=swa_eb,
                 tokens_per_block_for_block_table=swa_tokens_per_block,
                 ring_entries=swa_eb,
+            )
+        swa_slot_mapping = (
+            (
+                _build_suffix_cp_sliced_slot_mapping(
+                    block_table=swa_bt_int32,
+                    seq_lens=swa_seq_lens,
+                    gather_lens=swa_gather_lens,
+                    local_entries_per_block=swa_eb,
+                    tokens_per_block_for_block_table=swa_tokens_per_block,
+                    cp_rank=int(cp_ctx_local.cp_rank),
+                    cp_size=int(cp_ctx_local.cp_size),
+                )
+                if kv_cache_sharded
+                and cp_ctx_local is not None
+                and cp_ctx_local.cp_size > 1
+                else _build_suffix_pool_slot_mapping(
+                    block_table=swa_bt_int32,
+                    seq_lens=swa_seq_lens,
+                    gather_lens=swa_gather_lens,
+                    entries_per_block=swa_eb,
+                    tokens_per_block_for_block_table=swa_tokens_per_block,
+                    ring_entries=swa_eb,
+                )
             )
             if use_cp_raw_q_merge
             else None
@@ -4390,15 +4469,27 @@ class AttentionFP8(nn.Module):
             write_combined_seq_lens = combined_seq_lens
             write_num_tokens = num_tokens
         bt_swa = bt[:write_B].to(device=device, dtype=torch.int32).contiguous()
-        slot_mapping = _swa_ops.compute_swa_slot_mapping(
-            block_table=bt_swa,
-            query_start_loc=write_query_start_loc,
-            seq_lens=write_combined_seq_lens,
-            num_tokens=write_num_tokens,
-            pool_entries_per_block=eb,
-            tokens_per_block_for_block_table=swa_tokens_per_block,
-            ring_entries=eb,
-        )
+        if cp_on_write and bool(getattr(cp_ctx, "kv_cache_sharded", False)):
+            slot_mapping = _swa_ops.compute_swa_cp_sliced_slot_mapping(
+                block_table=bt_swa,
+                query_start_loc=write_query_start_loc,
+                seq_lens=write_combined_seq_lens,
+                num_tokens=write_num_tokens,
+                tokens_per_block_for_block_table=swa_tokens_per_block,
+                local_entries_per_block=eb,
+                cp_rank=int(cp_ctx.cp_rank),
+                cp_size=int(cp_ctx.cp_size),
+            )
+        else:
+            slot_mapping = _swa_ops.compute_swa_slot_mapping(
+                block_table=bt_swa,
+                query_start_loc=write_query_start_loc,
+                seq_lens=write_combined_seq_lens,
+                num_tokens=write_num_tokens,
+                pool_entries_per_block=eb,
+                tokens_per_block_for_block_table=swa_tokens_per_block,
+                ring_entries=eb,
+            )
 
         # CSA/HCA: Group-1 only. Their attention meta lives on workspace_meta.
         if not is_swa_only:
@@ -4465,14 +4556,25 @@ class AttentionFP8(nn.Module):
                 .to(device=device, dtype=torch.int32)[:write_B]
                 .contiguous()
             )
-            cache_slot_mapping = _build_suffix_pool_slot_mapping(
-                block_table=bt_swa,
-                seq_lens=cache_seq_lens,
-                gather_lens=cache_gather_lens,
-                entries_per_block=eb,
-                tokens_per_block_for_block_table=swa_tokens_per_block,
-                ring_entries=eb,
-            )
+            if cp_on_write and bool(getattr(cp_ctx, "kv_cache_sharded", False)):
+                cache_slot_mapping = _build_suffix_cp_sliced_slot_mapping(
+                    block_table=bt_swa,
+                    seq_lens=cache_seq_lens,
+                    gather_lens=cache_gather_lens,
+                    local_entries_per_block=eb,
+                    tokens_per_block_for_block_table=swa_tokens_per_block,
+                    cp_rank=int(cp_ctx.cp_rank),
+                    cp_size=int(cp_ctx.cp_size),
+                )
+            else:
+                cache_slot_mapping = _build_suffix_pool_slot_mapping(
+                    block_table=bt_swa,
+                    seq_lens=cache_seq_lens,
+                    gather_lens=cache_gather_lens,
+                    entries_per_block=eb,
+                    tokens_per_block_for_block_table=swa_tokens_per_block,
+                    ring_entries=eb,
+                )
             if cp_on_write:
                 # CP path: build per-Q-token attention meta with explicit
                 # rank-local CP positions. B>1 needs request offsets in the

@@ -267,6 +267,41 @@ TEST(HybridPoolConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGrou
     EXPECT_EQ(swa_pool.memory_layouts[0].kernel_blocks_per_kv_block, 1u);
 }
 
+TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlocks) {
+    ParallelismConfig pc;
+    pc.role_type                          = RoleType::PREFILL;
+    pc.tp_size                            = 4;
+    pc.prefill_cp_config.kv_cache_sharded = true;
+
+    auto mc                       = makeProModelConfig();
+    mc.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
+    auto config                   = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+
+    ASSERT_EQ(config.cache_specs.size(), 7u);
+    ASSERT_EQ(config.group_kv_block_stride_bytes.size(), 7u);
+
+    EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 19008u);
+    EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 1152u);
+    EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 32u * 132u);
+    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 2u * 512u * 4u);
+    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 2u * 2048u * 4u);
+    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 32u * 1024u * 4u);
+
+    EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), 32u * 584u);  // contiguous natural CP slice
+    EXPECT_EQ(config.group_kv_block_stride_bytes[3], config.cache_specs[3]->block_size_bytes());
+    EXPECT_EQ(config.group_kv_block_stride_bytes[4], config.cache_specs[4]->block_size_bytes());
+    EXPECT_EQ(config.group_kv_block_stride_bytes[5], config.cache_specs[5]->block_size_bytes());
+    EXPECT_EQ(config.group_kv_block_stride_bytes[6], config.cache_specs[6]->block_size_bytes());
+    EXPECT_EQ(config.group_seq_size_per_block[6], kDsv4TokensPerBlock);
+
+    pc.role_type       = RoleType::DECODE;
+    auto decode_config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    EXPECT_EQ(decode_config.cache_specs[3]->block_size_bytes(), 8u * 512u * 4u);
+    EXPECT_EQ(decode_config.cache_specs[4]->block_size_bytes(), 8u * 2048u * 4u);
+    EXPECT_EQ(decode_config.cache_specs[5]->block_size_bytes(), 128u * 1024u * 4u);
+    EXPECT_EQ(decode_config.cache_specs[6]->block_size_bytes(), 74880u);
+}
+
 // ============================================================
 // CacheConfig output
 // ============================================================
@@ -823,7 +858,7 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
 }
 
 TEST(HybridPoolConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
-    // gen_num_per_cycle=2 → CSA/INDEXER R=10, HCA R=130, SWA=130.
+    // gen_num_per_cycle=2 -> CSA/INDEXER R=10, HCA R=130, SWA physical=128.
     // Formula: R = ceil_even((1 + overlap) * ratio + gen_num_per_cycle)
     auto              mc = makeFlashModelConfig();
     ParallelismConfig pc;
@@ -843,11 +878,11 @@ TEST(HybridPoolConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
     auto* hca_state = dynamic_cast<DSV4StateSpec*>(config.cache_specs[5].get());
     ASSERT_NE(hca_state, nullptr);
     EXPECT_EQ(hca_state->entries_per_block, 130u);
-    // Pool 6: SWA_KV → entries_per_block = ceil_even(128 + 2) = 130
+    // Pool 6: SWA_KV keeps the fixed 128-entry physical block
     auto* swa_kv = dynamic_cast<DSV4StateSpec*>(config.cache_specs[6].get());
     ASSERT_NE(swa_kv, nullptr);
     EXPECT_EQ(swa_kv->cache_type, KVCacheRegionName::SWA_KV);
-    EXPECT_EQ(swa_kv->entries_per_block, 130u);
+    EXPECT_EQ(swa_kv->entries_per_block, 128u);
 }
 
 TEST(CacheConfigTest, DSV4NonMtpSpConfigDoesNotInflateRing) {
@@ -1608,6 +1643,46 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksAreDistributedAcrossGroups) {
     auto      cti       = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
     auto      gi        = std::make_shared<GenerateInput>();
     gi->input_ids       = torch::arange(spb, torch::kInt32);
+    gi->generate_config = std::make_shared<GenerateConfig>();
+    cti->init(gi);
+
+    MallocInfo info{batch_res, cti};
+    info.enable_device_cache = false;
+    info.reuse_cache         = false;
+    info.verbose             = true;
+    auto result              = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+
+    FreeInfo free_info{batch_res};
+    allocator->free(free_info);
+}
+
+TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitFixedPoolCapacity) {
+    auto              mc = makeFlashModelConfig();
+    ParallelismConfig pc;
+    auto              kv_config = makeDsv4KvCacheConfig(/*fixed_pool_blocks=*/11);
+    auto              config    = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
+    config.block_num            = 40;
+    config.group_block_nums.assign(config.groupNums(), config.block_num);
+    for (size_t gid = 0; gid < config.group_region_names.size(); ++gid) {
+        if (isDsv4FixedRegion(config.group_region_names[gid])) {
+            config.group_block_nums[gid] = 11;
+        }
+    }
+
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(
+        config, AllocationType::DEVICE, nullptr, /*reserve_block_ratio=*/50);
+    ASSERT_TRUE(allocator->init());
+
+    auto batch_res = std::make_shared<BatchKVCacheResource>();
+    batch_res->resetBatchSize(1);
+    batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
+
+    const int spb       = allocator->seqSizePerBlock();
+    const int seq_len   = 10 * spb;
+    auto      cti       = std::make_shared<CompleteTokenIds>(1, 1, seq_len + spb, spb);
+    auto      gi        = std::make_shared<GenerateInput>();
+    gi->input_ids       = torch::arange(seq_len, torch::kInt32);
     gi->generate_config = std::make_shared<GenerateConfig>();
     cti->init(gi);
 

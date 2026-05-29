@@ -31,7 +31,10 @@ from typing import List
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import compute_swa_slot_mapping
+from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
+    compute_swa_cp_sliced_slot_mapping,
+    compute_swa_slot_mapping,
+)
 
 
 def _ref_compute_swa_slot_mapping(
@@ -70,6 +73,42 @@ def _ref_compute_swa_slot_mapping(
             else:
                 slot = block_id * pool_entries_per_block + in_block
             out[qs + i] = slot
+    return out
+
+
+def _ref_compute_swa_cp_sliced_slot_mapping(
+    block_table: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    num_tokens: int,
+    tokens_per_block_for_block_table: int,
+    local_entries_per_block: int,
+    cp_rank: int,
+    cp_size: int,
+) -> torch.Tensor:
+    """Reference for CP-sliced SWA: block rows and ring entries are separate."""
+    out = torch.full((num_tokens,), -1, dtype=torch.long, device=block_table.device)
+    full_entries = int(local_entries_per_block) * int(cp_size)
+    max_blocks = int(block_table.shape[1])
+    qsl = query_start_loc.tolist()
+    seq_lens_l = seq_lens.tolist()
+    bt_cpu = block_table.cpu().tolist()
+    for b in range(int(seq_lens.shape[0])):
+        qs, qe = qsl[b], qsl[b + 1]
+        query_len = qe - qs
+        sp = seq_lens_l[b] - query_len
+        for i in range(query_len):
+            global_pos = sp + i
+            block_in_seq = global_pos // int(tokens_per_block_for_block_table)
+            ring_offset = global_pos % full_entries
+            owner_rank = ring_offset // int(local_entries_per_block)
+            local_offset = ring_offset - owner_rank * int(local_entries_per_block)
+            block_id = bt_cpu[b][block_in_seq] if block_in_seq < max_blocks else -1
+            block_end = (block_in_seq + 1) * int(tokens_per_block_for_block_table)
+            effective_end = min(block_end, seq_lens_l[b])
+            tail_write = global_pos + full_entries >= effective_end
+            if block_id > 0 and owner_rank == int(cp_rank) and tail_write:
+                out[qs + i] = block_id * int(local_entries_per_block) + local_offset
     return out
 
 
@@ -341,6 +380,53 @@ class SwaSlotMappingTest(unittest.TestCase):
         self.assertEqual(got[0].item(), -1)
         self.assertEqual(got[127].item(), -1)
         self.assertGreater(got[128].item(), 0)
+
+    def test_cp_sliced_uses_ring_for_owner_but_logical_block_for_table(self):
+        """CP SWA sharding must not derive block-table rows from ring slices."""
+        bt, qsl, seq_lens, num_tokens = self._make_inputs(
+            [[11, 12, 13]], query_lens=[160], sp_values=[0]
+        )
+        tpb = 64
+        local_entries = 32
+        cp_size = 4
+        for cp_rank in range(cp_size):
+            with self.subTest(cp_rank=cp_rank):
+                got = compute_swa_cp_sliced_slot_mapping(
+                    block_table=bt,
+                    query_start_loc=qsl,
+                    seq_lens=seq_lens,
+                    num_tokens=num_tokens,
+                    tokens_per_block_for_block_table=tpb,
+                    local_entries_per_block=local_entries,
+                    cp_rank=cp_rank,
+                    cp_size=cp_size,
+                )
+                ref = _ref_compute_swa_cp_sliced_slot_mapping(
+                    bt,
+                    qsl,
+                    seq_lens,
+                    num_tokens,
+                    tokens_per_block_for_block_table=tpb,
+                    local_entries_per_block=local_entries,
+                    cp_rank=cp_rank,
+                    cp_size=cp_size,
+                )
+                self.assertTrue(
+                    torch.equal(got, ref),
+                    msg=f"rank={cp_rank} got={got.tolist()} ref={ref.tolist()}",
+                )
+        rank2 = compute_swa_cp_sliced_slot_mapping(
+            block_table=bt,
+            query_start_loc=qsl,
+            seq_lens=seq_lens,
+            num_tokens=num_tokens,
+            tokens_per_block_for_block_table=tpb,
+            local_entries_per_block=local_entries,
+            cp_rank=2,
+            cp_size=cp_size,
+        )
+        self.assertEqual(int(rank2[64].item()), 12 * local_entries)
+        self.assertEqual(int(rank2[159].item()), -1)
 
 
 if __name__ == "__main__":
