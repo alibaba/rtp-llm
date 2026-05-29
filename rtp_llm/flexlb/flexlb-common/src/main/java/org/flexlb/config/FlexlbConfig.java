@@ -144,6 +144,14 @@ public class FlexlbConfig {
      */
     private int nettyWorkerThreadMultiplier = 2;
 
+    private int httpClientWorkerMultiplier = 2;
+
+    private int grpcEventLoopMultiplier = 2;
+
+    private int engineSyncPoolSize = 4;
+
+    private int statusCheckPoolSize = 4;
+
     // ========== V1-α DP Batching Configuration ==========
 
     /**
