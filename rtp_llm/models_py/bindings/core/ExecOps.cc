@@ -18,6 +18,7 @@
 #include <iomanip>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <atomic>
 #include <algorithm>
@@ -616,6 +617,48 @@ at::cuda::CUDAStream& getNoBlockCopyStream() {
     static thread_local auto stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
     return stream;
 }
+
+int getDevicePointerDevice(const void* ptr) {
+    cudaPointerAttributes attr;
+    auto                  status = cudaPointerGetAttributes(&attr, ptr);
+    if (status != cudaSuccess) {
+        cudaGetLastError();
+        return -1;
+    }
+#if CUDART_VERSION >= 10000
+    if (attr.type == cudaMemoryTypeDevice || attr.type == cudaMemoryTypeManaged) {
+        return attr.device;
+    }
+#else
+    if (attr.memoryType == cudaMemoryTypeDevice) {
+        return attr.device;
+    }
+#endif
+    return -1;
+}
+
+int resolveNoBlockCopyDevice(const torch::Tensor& dst, const torch::Tensor& src) {
+    if (!src.is_cuda() && !dst.is_cuda()) {
+        return -1;
+    }
+
+    // Prefer the real pointer owner. Cache-store worker threads may not inherit
+    // the rank's CUDA current device, and from_blob(cuda) can therefore carry a
+    // stale device index even though the pointer itself is valid on this rank.
+    if (dst.is_cuda()) {
+        auto device = getDevicePointerDevice(dst.data_ptr());
+        if (device >= 0) {
+            return device;
+        }
+    }
+    if (src.is_cuda()) {
+        auto device = getDevicePointerDevice(src.data_ptr());
+        if (device >= 0) {
+            return device;
+        }
+    }
+    return static_cast<int>(getDeviceId());
+}
 #endif
 }  // anonymous namespace
 
@@ -624,7 +667,18 @@ void execNoBlockCopy(const CopyParams& params) {
     const auto& src = params.src;
     const auto& dst = params.dst;
 #if USING_CUDA
-    auto stream = getNoBlockCopyStream().stream();
+    if (src.data_ptr() == dst.data_ptr()) {
+        return;
+    }
+    if (!src.is_cuda() && !dst.is_cuda()) {
+        std::memcpy(dst.data_ptr(), src.data_ptr(), src.nbytes());
+        return;
+    }
+
+    auto copy_device = resolveNoBlockCopyDevice(dst, src);
+    RTP_LLM_CHECK_WITH_INFO(copy_device >= 0, "execNoBlockCopy failed to resolve CUDA copy device.");
+    DeviceGuard guard(copy_device);
+    auto        stream = getNoBlockCopyStream().stream();
     check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), src.nbytes(), cudaMemcpyDefault, stream));
     check_cuda_value(cudaStreamSynchronize(stream));
     check_cuda_error();
