@@ -60,6 +60,8 @@ class CkptDatabase(BaseDatabase):
     finetune_type: FinetuneType
 
     def __init__(self, path: Optional[str], ptuning_path: Optional[str] = None) -> None:
+        # ckpt directory; used to read config.json on demand
+        self.path: Optional[str] = path
 
         if path is None:
             return
