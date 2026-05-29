@@ -13,7 +13,11 @@
                 },
                 "yield_generator": true
             },
-            "result": {}
+            "result": {
+                "response": " Flask is a lightweight web framework that is designed to",
+                "iter_count": 10,
+                "finished": true
+            }
         },
         {
             "query": {
@@ -27,7 +31,18 @@
                     "top_p": 0
                 }
             },
-            "result": {}
+            "result": {
+                "response_batch": [
+                    {
+                        "response": " I'm looking for a Flask alternative that is"
+                    },
+                    {
+                        "response": "\n\nI am trying to use the screen\\_"
+                    }
+                ],
+                "iter_count": 10,
+                "finished": true
+            }
         },
         {
             "query": {
@@ -40,7 +55,14 @@
                 },
                 "yield_generator": true
             },
-            "result": {}
+            "result": {
+                "response": [
+                    " Flask is a lightweight web framework that is designed to",
+                    " Flask is a lightweight web framework that is designed to"
+                ],
+                "iter_count": 10,
+                "finished": true
+            }
         },
         {
             "query": {
@@ -55,7 +77,11 @@
                 },
                 "yield_generator": true
             },
-            "result": {}
+            "result": {
+                "response": " Flask is a lightweight web framework that is designed to",
+                "iter_count": 10,
+                "finished": true
+            }
         },
         {
             "query": {
@@ -70,7 +96,11 @@
                 },
                 "yield_generator": false
             },
-            "result": {}
+            "result": {
+                "response": " Flask is a lightweight web framework that is designed to",
+                "iter_count": 10,
+                "finished": true
+            }
         },
         {
             "query": {
@@ -86,7 +116,11 @@
                 },
                 "yield_generator": true
             },
-            "result": {}
+            "result": {
+                "response": " Flask is a lightweight web framework that is designed to",
+                "iter_count": 10,
+                "finished": true
+            }
         }
     ]
 }
