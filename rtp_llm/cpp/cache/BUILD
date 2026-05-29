@@ -44,6 +44,7 @@ cc_library(
         "MLAKVCacheSpec.h",
         "Types.h",
         "WarmUpResult.h",
+        "ZeroSwaCacheHelper.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -167,6 +168,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":cache_types",
         ":kv_cache_allocator_hdr",
         ":kv_cache_group",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",

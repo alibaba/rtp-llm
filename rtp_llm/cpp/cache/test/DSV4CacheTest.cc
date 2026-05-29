@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
+#include "rtp_llm/cpp/cache/ZeroSwaCacheHelper.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -31,10 +32,13 @@ constexpr uint32_t kDsv4FixedPoolBlocks   = 256;
 
 }  // namespace
 
-static KVCacheConfig makeDsv4KvCacheConfig(uint32_t fixed_pool_blocks = kDsv4FixedPoolBlocks) {
+static KVCacheConfig makeDsv4KvCacheConfig(uint32_t fixed_pool_blocks        = kDsv4FixedPoolBlocks,
+                                           uint32_t seq_size_per_block       = kDsv4TokensPerBlock,
+                                           uint32_t kernel_seq_size_per_block = 0) {
     KVCacheConfig config;
-    config.seq_size_per_block     = 128;
-    config.dsv4_fixed_pool_blocks = fixed_pool_blocks;
+    config.seq_size_per_block        = seq_size_per_block;
+    config.kernel_seq_size_per_block = kernel_seq_size_per_block;
+    config.dsv4_fixed_pool_blocks    = fixed_pool_blocks;
     return config;
 }
 
@@ -131,6 +135,69 @@ TEST(HybridPoolConfigCreatorTest, FlashLayerClassification) {
     EXPECT_EQ(config.global_layer_ids[0].size(), 21u);
     EXPECT_EQ(config.global_layer_ids[1].size(), 20u);
     EXPECT_EQ(config.global_layer_ids[6].size(), 43u);
+}
+
+TEST(HybridPoolConfigCreatorTest, ZeroSwaRestoreWindowAlignsToOne8192TokenBlock) {
+    ParallelismConfig pc;
+    auto config = HybridPoolConfigCreator::createConfig(
+        makeProModelConfig(),
+        pc,
+        makeDsv4KvCacheConfig(kDsv4FixedPoolBlocks, /*seq_size_per_block=*/8192, /*kernel_seq_size_per_block=*/128),
+        false,
+        0);
+    config.dsv4_zero_swa_caching = true;
+
+    EXPECT_EQ(config.swa_window_size, 128u);
+    EXPECT_EQ(config.layer_num, 61u);
+    EXPECT_EQ(config.seq_size_per_block, 8192u);
+    EXPECT_EQ(config.kernel_seq_size_per_block, 128u);
+    EXPECT_EQ(config.kernelBlocksPerKvBlock(), 64u);
+    EXPECT_EQ(zeroSwaRestoreWindowTokens(config), 7808u);
+    EXPECT_EQ(zeroSwaRestoreWindowBlocks(config, config.seq_size_per_block), 1u);
+    EXPECT_EQ(capReuseBlocksForZeroSwaCaching(config, 4, static_cast<int>(config.seq_size_per_block)), 3);
+    EXPECT_EQ(capReuseBlocksForZeroSwaCaching(config, 1, static_cast<int>(config.seq_size_per_block)), 0);
+}
+
+TEST(HybridPoolConfigCreatorTest, ZeroSwaRestoreWindowUsesCpVirtualBlockUnit) {
+    ParallelismConfig pc;
+    auto config = HybridPoolConfigCreator::createConfig(
+        makeProModelConfig(),
+        pc,
+        makeDsv4KvCacheConfig(kDsv4FixedPoolBlocks, /*seq_size_per_block=*/8192, /*kernel_seq_size_per_block=*/128),
+        false,
+        0);
+    config.dsv4_zero_swa_caching = true;
+
+    const size_t cp2_virtual_block_tokens = config.seq_size_per_block * 2;
+    EXPECT_EQ(zeroSwaRestoreWindowTokens(config), 7808u);
+    EXPECT_EQ(zeroSwaRestoreWindowBlocks(config, cp2_virtual_block_tokens), 1u);
+    EXPECT_EQ(capReuseBlocksForZeroSwaCaching(config, 4u, cp2_virtual_block_tokens), 3u);
+    EXPECT_EQ(capReuseBlocksForZeroSwaCaching(config, 1u, cp2_virtual_block_tokens), 0u);
+}
+
+TEST(HybridPoolConfigCreatorTest, ZeroSwaRestoreWindowCoversRuntimeActiveTail) {
+    ParallelismConfig pc;
+    auto config = HybridPoolConfigCreator::createConfig(
+        makeProModelConfig(),
+        pc,
+        makeDsv4KvCacheConfig(kDsv4FixedPoolBlocks, /*seq_size_per_block=*/8192, /*kernel_seq_size_per_block=*/128),
+        false,
+        0);
+    config.dsv4_zero_swa_caching = true;
+
+    // Runtime SWA active tail = kZeroSwaRuntimeActiveTailBlocks(2) * kernel_block(128) = 256 tokens.
+    EXPECT_EQ(zeroSwaActiveTailTokens(config), 256u);
+    // Restore window 7808 tokens >> 256, so the invariant holds for DSV4 Pro.
+    EXPECT_TRUE(zeroSwaRestoreWindowCoversActiveTail(config));
+
+    // Degenerate config whose restore window is below the active tail must be rejected.
+    config.swa_window_size = 1;
+    config.layer_num       = 1;
+    EXPECT_FALSE(zeroSwaRestoreWindowCoversActiveTail(config));
+
+    // Disabled config always passes the invariant (no constraint when off).
+    config.dsv4_zero_swa_caching = false;
+    EXPECT_TRUE(zeroSwaRestoreWindowCoversActiveTail(config));
 }
 
 TEST(HybridPoolConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
@@ -1535,6 +1602,80 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
     EXPECT_GT(result.reuse_len, 0) << "HCA_STATE miss should not veto DSV4 prefix reuse";
     EXPECT_TRUE(isNullBlockIdx(batch_res->blocks(0, 5).at(2))) << "HCA_STATE should remain non-reused";
     EXPECT_EQ(batch_res->blocks(0, 6).at(2), cached_blocks[6][2]) << "SWA_KV tail should still gate reuse";
+
+    FreeInfo free_info{batch_res};
+    allocator->free(free_info);
+}
+
+TEST_F(DSV4AllocatorTest, ZeroSwaCachingSkipsSwaKvTailAndRecomputesWindow) {
+    auto config                   = makeDSV4AllocatorConfig();
+    config.dsv4_zero_swa_caching  = true;
+    config.swa_window_size        = 1;
+    config.layer_num              = 1;
+    auto allocator                = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto shared_cache             = std::make_shared<SharedBlockCache>();
+    allocator->setSharedBlockCache(shared_cache);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool = allocator->getBlockPool();
+
+    constexpr int                          group_num   = 7;
+    CacheKeysType                          cached_keys = {100, 101, 102};
+    std::vector<std::vector<BlockIdxType>> cached_blocks(group_num);
+    for (int gid = 0; gid < group_num; gid++) {
+        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
+        ASSERT_EQ(blocks.size(), cached_keys.size());
+        for (size_t i = 0; i < cached_keys.size(); ++i) {
+            if (gid == 6) {
+                continue;
+            }
+            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
+            group_slots[gid] = blocks[i];
+            shared_cache->put(cached_keys[i], group_slots, true);
+        }
+        cached_blocks[gid] = blocks;
+        block_pool->requestFree(blocks);
+    }
+
+    auto batch_res = std::make_shared<BatchKVCacheResource>();
+    batch_res->resetBatchSize(1);
+    batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
+
+    const int spb       = allocator->seqSizePerBlock();
+    auto      cti       = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
+    auto      gi        = std::make_shared<GenerateInput>();
+    gi->input_ids       = torch::arange(3 * spb + 1, torch::kInt32);
+    gi->generate_config = std::make_shared<GenerateConfig>();
+    cti->init(gi);
+
+    MallocInfo info{batch_res, cti};
+    info.enable_device_cache = true;
+    info.reuse_cache         = true;
+    auto result              = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+
+    EXPECT_EQ(result.reuse_len, 2 * spb);
+    for (int gid = 0; gid < 3; gid++) {
+        const auto& out_blocks = batch_res->blocks(0, gid);
+        ASSERT_GE(out_blocks.size(), 2u);
+        EXPECT_EQ(out_blocks[0], cached_blocks[gid][0]);
+        EXPECT_EQ(out_blocks[1], cached_blocks[gid][1]);
+    }
+    // INDEXER_STATE (3) / CSA_STATE (4) still anchor the tail and reuse their tail block.
+    for (int gid = 3; gid < 5; gid++) {
+        const auto& out_blocks = batch_res->blocks(0, gid);
+        ASSERT_GE(out_blocks.size(), 2u);
+        EXPECT_TRUE(isNullBlockIdx(out_blocks[0]));
+        EXPECT_EQ(out_blocks[1], cached_blocks[gid][1]);
+    }
+    // HCA_STATE (5) is excluded from reuse cache (skipReuseCacheRegion); SWA_KV (6) under zero-SWA.
+    for (int gid = 5; gid < 7; gid++) {
+        const auto& out_blocks = batch_res->blocks(0, gid);
+        ASSERT_GE(out_blocks.size(), 2u);
+        EXPECT_TRUE(isNullBlockIdx(out_blocks[0]));
+        EXPECT_TRUE(isNullBlockIdx(out_blocks[1]));
+    }
 
     FreeInfo free_info{batch_res};
     allocator->free(free_info);

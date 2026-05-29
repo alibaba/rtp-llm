@@ -1,6 +1,10 @@
 #include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
 
+#include <cstdlib>
+#include <string>
+
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/ZeroSwaCacheHelper.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -86,6 +90,15 @@ uint32_t maybeSliceFixedEntriesForPrefillCp(uint32_t                 entries,
                          cp_size);
     }
     return aligned_entries / cp_size;
+}
+
+bool envFlagEnabled(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr) {
+        return false;
+    }
+    const std::string flag(value);
+    return !flag.empty() && flag != "0" && flag != "false" && flag != "FALSE" && flag != "off" && flag != "OFF";
 }
 
 DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
@@ -256,6 +269,35 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
     config.use_typed_cache_regions                  = true;
     config.use_opaque_kv_cache_store                = true;
     config.disable_decode_first_malloc_device_reuse = true;
+    config.swa_window_size = model_config.attn_config.sliding_window > 0 ?
+                                 static_cast<uint32_t>(model_config.attn_config.sliding_window) :
+                                 128u;
+    const bool zero_swa_requested = envFlagEnabled("DSV4_ZERO_SWA_CACHING");
+    // Gate zero-SWA to genuine multi-layer models. The restore window is
+    // swa_window * layer_num; a single-layer config (e.g. the one-layer MTP propose
+    // config) has a degenerate window and never benefits, so it must not carry the
+    // flag even though it shares the global env var. The unified score-based config
+    // (layer_num = main model depth) keeps zero-SWA.
+    config.dsv4_zero_swa_caching = zero_swa_requested && config.layer_num > 1;
+    if (config.dsv4_zero_swa_caching) {
+        // Central invariant: the recompute window must cover the runtime SWA active
+        // tail, so the SWA blocks decode reads / PD cache_store transfers are always
+        // freshly recomputed and never reused-but-uninitialized under zero-SWA.
+        RTP_LLM_CHECK_WITH_INFO(
+            zeroSwaRestoreWindowCoversActiveTail(config),
+            "DSV4 zero SWA caching restore window (swa_window=%u * layer_num=%u = %llu tokens) does not cover the "
+            "runtime SWA active tail (%llu tokens); refusing to enable zero-SWA to avoid stale SWA on decode",
+            config.swa_window_size,
+            config.layer_num,
+            static_cast<unsigned long long>(zeroSwaRestoreWindowTokens(config)),
+            static_cast<unsigned long long>(zeroSwaActiveTailTokens(config)));
+        RTP_LLM_LOG_INFO("DSV4 zero SWA caching enabled: swa_window=%u layer_num=%u",
+                         config.swa_window_size,
+                         config.layer_num);
+    } else if (zero_swa_requested) {
+        RTP_LLM_LOG_INFO("DSV4 zero SWA caching requested but gated off: layer_num=%u (<=1, no multi-layer SWA window)",
+                         config.layer_num);
+    }
 
     config.cache_specs.clear();
     config.global_layer_ids.clear();
