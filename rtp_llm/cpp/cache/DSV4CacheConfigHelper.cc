@@ -95,9 +95,11 @@ uint32_t fixedRegionCpSize(const ParallelismConfig& parallelism_config) {
     if (parallelism_config.role_type == RoleType::PREFILL && parallelism_config.tp_size > 1) {
         return static_cast<uint32_t>(parallelism_config.tp_size);
     }
-    if (parallelism_config.role_type == RoleType::DECODE && parallelism_config.prefill_cp_config.is_prefill_enabled()
-        && parallelism_config.world_size > 1) {
-        return static_cast<uint32_t>(parallelism_config.world_size);
+    if (parallelism_config.role_type == RoleType::DECODE && parallelism_config.prefill_cp_config.is_prefill_enabled()) {
+        RTP_LLM_CHECK_WITH_INFO(
+            parallelism_config.prefill_cp_config.prefill_cp_size > 1,
+            "DSV4 fixed/SWA CP sharding decode requires explicit prefill_cp_size when PREFILL_CP and kv_cache_sharded are enabled");
+        return static_cast<uint32_t>(parallelism_config.prefill_cp_config.prefill_cp_size);
     }
     return 1;
 }
@@ -114,21 +116,23 @@ uint32_t maybeAdjustFixedEntriesForCpSharding(uint32_t                 entries,
         return entries;
     }
 
-    const auto aligned_entries  = alignUpToMultiple(entries, cp_size);
-    const bool prefill_sliced   = isPrefillCpSliced(parallelism_config);
-    const auto physical_entries = prefill_sliced ? aligned_entries / cp_size : aligned_entries;
-    RTP_LLM_LOG_INFO("DSV4 fixed/SWA CP sharding region=%s(%d) full_entries=%u aligned_entries=%u "
-                     "physical_entries=%u cp_size=%u prefill_sliced=%d padded=%d role=%d",
+    // CP-aligned entries are the real ring capacity, not dead padding. Prefill
+    // stores one CP slice of that ring; decode stores the complete ring.
+    const auto ring_capacity_entries = alignUpToMultiple(entries, cp_size);
+    const bool prefill_sliced        = isPrefillCpSliced(parallelism_config);
+    const auto entries_per_block     = prefill_sliced ? ring_capacity_entries / cp_size : ring_capacity_entries;
+    RTP_LLM_LOG_INFO("DSV4 fixed/SWA CP sharding region=%s(%d) min_entries=%u ring_capacity_entries=%u "
+                     "entries_per_block=%u cp_size=%u prefill_sliced=%d expanded=%d role=%d",
                      dsv4RegionName(region_name),
                      static_cast<int>(region_name),
                      entries,
-                     aligned_entries,
-                     physical_entries,
+                     ring_capacity_entries,
+                     entries_per_block,
                      cp_size,
                      prefill_sliced,
-                     aligned_entries != entries,
+                     ring_capacity_entries != entries,
                      static_cast<int>(parallelism_config.role_type));
-    return physical_entries;
+    return entries_per_block;
 }
 
 DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
@@ -191,13 +195,12 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
     // SWA_KV ring = window + MTP draft slack, sized like the HCA state ring.
     // Without the +gen_num_per_cycle slack, a decode step's later draft writes
     // wrap onto ring slots still inside earlier tokens' SWA window -> MTP garble.
-    const uint32_t swa_kv_eb =
-        maybeAdjustFixedEntriesForCpSharding(computeStateRing(
-                                                 /*compress_ratio=*/static_cast<int>(kDsv4SwaWindowEntries),
-                                                 /*overlap=*/0,
-                                                 gen_num_per_cycle),
-                                             parallelism_config,
-                                             KVCacheRegionName::SWA_KV);
+    const uint32_t swa_kv_eb = maybeAdjustFixedEntriesForCpSharding(
+        computeStateRing(/*compress_ratio=*/static_cast<int>(kDsv4SwaWindowEntries),
+                         /*overlap=*/0,
+                         gen_num_per_cycle),
+        parallelism_config,
+        KVCacheRegionName::SWA_KV);
     return {
         {KVCacheRegionName::CSA_KV,
          &sets.csa_layers,
