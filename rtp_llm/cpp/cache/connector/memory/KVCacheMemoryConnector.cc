@@ -6,6 +6,7 @@
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/ZeroSwaCacheHelper.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
@@ -78,6 +79,14 @@ static size_t alignUp(size_t value, size_t alignment) {
 
 static size_t regionIndex(KVCacheRegionName region_name) {
     return static_cast<size_t>(region_name);
+}
+
+static size_t memoryConnectorReuseUnitTokens(const CacheConfig& config, const ParallelismConfig& parallelism_config) {
+    size_t cp_size = 1;
+    if (parallelism_config.prefill_cp_config.kv_cache_sharded && parallelism_config.tp_size > 1) {
+        cp_size = static_cast<size_t>(parallelism_config.tp_size);
+    }
+    return static_cast<size_t>(config.seq_size_per_block) * cp_size;
 }
 
 KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
@@ -385,7 +394,8 @@ std::vector<KVCacheMemoryConnector::LayerRegionSlot> KVCacheMemoryConnector::lay
     };
 
     for (size_t layer = 0; layer < layer_num; ++layer) {
-        bool has_typed_slot = false;
+        bool saw_typed_mapping = false;
+        bool has_typed_slot    = false;
         if (layer < cache_config_.layer_region_to_group_id.size()) {
             const auto&  dense = cache_config_.layer_region_to_group_id[layer];
             const size_t n     = std::min(region_name_count, dense.size());
@@ -395,7 +405,8 @@ std::vector<KVCacheMemoryConnector::LayerRegionSlot> KVCacheMemoryConnector::lay
                     continue;
                 }
                 const auto region_name = static_cast<KVCacheRegionName>(attn);
-                if (skipReuseCacheRegion(region_name)) {
+                saw_typed_mapping      = true;
+                if (skipReuseCacheRegion(region_name) || skipSwaKvForZeroSwaCaching(cache_config_, region_name)) {
                     has_typed_slot = true;
                     continue;
                 }
@@ -406,7 +417,7 @@ std::vector<KVCacheMemoryConnector::LayerRegionSlot> KVCacheMemoryConnector::lay
                 has_typed_slot = true;
             }
         }
-        if (!has_typed_slot) {
+        if (!saw_typed_mapping && !has_typed_slot) {
             int gid = 0;
             if (layer < cache_config_.layer_to_group_id.size() && cache_config_.layer_to_group_id[layer] >= 0) {
                 gid = cache_config_.layer_to_group_id[layer];
@@ -549,7 +560,9 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
     // Do not match the last key.  It is either a real partial tail or a
     // connector-level dummy tail used to preserve the same contract after CP
     // Page-RR remap.
-    const auto cache_keys_size = cache_keys.empty() ? 0 : cache_keys.size() - 1;
+    auto cache_keys_size = cache_keys.empty() ? 0 : cache_keys.size() - 1;
+    cache_keys_size = capReuseBlocksForZeroSwaCaching(
+        cache_config_, cache_keys_size, memoryConnectorReuseUnitTokens(cache_config_, parallelism_config_));
     if (cache_keys_size == 0) {
         RTP_LLM_LOG_DEBUG("async match skip, cache keys is empty");
         return nullptr;

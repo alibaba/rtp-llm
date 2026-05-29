@@ -6,6 +6,7 @@
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/ZeroSwaCacheHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -98,10 +99,28 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         full_matched_blocks[static_cast<size_t>(gid)] = std::move(match_result.block_indices);
     }
 
-    int                           pos = min_full_reuse_blocks - 1;
+    const int reuse_unit_tokens = cpVirtualBlockSize(cp_mapper, seqSizePerBlock());
+    const int capped_full_reuse_blocks =
+        capReuseBlocksForZeroSwaCaching(config_, min_full_reuse_blocks, reuse_unit_tokens);
+    if (config_.dsv4_zero_swa_caching && min_full_reuse_blocks != capped_full_reuse_blocks) {
+        RTP_LLM_LOG_DEBUG("zero SWA caching caps device reuse blocks: full_matched=%d capped=%d "
+                          "restore_tokens=%llu reuse_unit_tokens=%d",
+                          min_full_reuse_blocks,
+                          capped_full_reuse_blocks,
+                          static_cast<unsigned long long>(zeroSwaRestoreWindowTokens(config_)),
+                          reuse_unit_tokens);
+    }
+
+    int                           pos = capped_full_reuse_blocks - 1;
     std::vector<BlockIdxType>     linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
     std::vector<BlockIndicesType> swa_tail_blocks(swa_group_ids_.size());
-    const bool                    has_tail_groups = !linear_group_ids_.empty() || !swa_group_ids_.empty();
+    bool                          has_tail_groups = !linear_group_ids_.empty();
+    for (int gid : swa_group_ids_) {
+        if (!skipSwaKvForZeroSwaCaching(config_, gid)) {
+            has_tail_groups = true;
+            break;
+        }
+    }
     for (; pos >= 0 && has_tail_groups; --pos) {
         bool                          all_tail_groups_matched = true;
         std::vector<BlockIdxType>     candidate_linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
@@ -122,6 +141,9 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         }
         for (size_t i = 0; i < swa_group_ids_.size(); ++i) {
             const int gid       = swa_group_ids_[i];
+            if (skipSwaKvForZeroSwaCaching(config_, gid)) {
+                continue;
+            }
             auto*     swa_group = dynamic_cast<SWAKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
             RTP_LLM_CHECK_WITH_INFO(swa_group != nullptr, "group %d is not SWAKVCacheGroup", gid);
             if (skipReuseCacheGroup(gid)) {
@@ -141,8 +163,19 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         }
     }
 
-    const int reuse_blocks_len = has_tail_groups ? std::max(pos + 1, 0) : std::max(min_full_reuse_blocks, 0);
+    const int reuse_blocks_len = has_tail_groups ? std::max(pos + 1, 0) : std::max(capped_full_reuse_blocks, 0);
     if (reuse_blocks_len <= 0) {
+        // Under zero-SWA the STATE tail groups (INDEXER/CSA/HCA_STATE) are still
+        // required to anchor the tail. If they miss at every candidate position,
+        // reuse collapses to 0 even though the FULL groups matched a long prefix --
+        // an all-or-nothing cliff that silently defeats the cache-capacity benefit.
+        // Surface it so the regression is observable instead of looking like a miss.
+        if (config_.dsv4_zero_swa_caching && capped_full_reuse_blocks > 0) {
+            RTP_LLM_LOG_WARNING("zero SWA caching: reuse collapsed to 0 although FULL groups matched %d blocks "
+                                "(capped=%d); STATE tail groups failed to anchor the tail",
+                                min_full_reuse_blocks,
+                                capped_full_reuse_blocks);
+        }
         return 0;
     }
 
@@ -170,7 +203,7 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         const int gid = swa_group_ids_[i];
         kv_resource.mutableBlockIds(0, gid).assign(
             BlockIndicesType(static_cast<size_t>(logical_reuse_len), NULL_BLOCK_IDX));
-        if (skipReuseCacheGroup(gid)) {
+        if (skipReuseCacheGroup(gid) || skipSwaKvForZeroSwaCaching(config_, gid)) {
             continue;
         }
         const size_t tail_begin =
@@ -385,7 +418,7 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                 std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_nums), NULL_BLOCK_IDX);
                 bool                      has_valid = false;
                 for (int gid = 0; gid < group_nums; ++gid) {
-                    if (skipReuseCacheGroup(gid)) {
+                    if (skipReuseCacheGroup(gid) || skipSwaKvForZeroSwaCaching(config_, gid)) {
                         continue;
                     }
                     const auto& blocks = kv_cache_resource->blocks(batch_id, gid);
@@ -420,7 +453,7 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         const size_t token_len = token_ids.size() - 1;
 
         for (int gid = 0; gid < group_nums; ++gid) {
-            if (skipReuseCacheGroup(gid)) {
+            if (skipReuseCacheGroup(gid) || skipSwaKvForZeroSwaCaching(config_, gid)) {
                 continue;
             }
             const int            raw_group_seq = kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock();

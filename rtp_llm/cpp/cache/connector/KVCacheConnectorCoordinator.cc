@@ -3,13 +3,14 @@
 #include <utility>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/ZeroSwaCacheHelper.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #ifdef USE_REMOTE_KV_CACHE
 #include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
 #endif
@@ -159,7 +160,21 @@ bool KVCacheConnectorCoordinator::init() {
                      cache_config_.debugString().c_str(),
                      kv_cache_config_.to_string().c_str(),
                      runtime_config_.to_string().c_str());
+    const bool zero_swa_remote_cache =
+        isZeroSwaCachingEnabled(cache_config_) && kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache;
+    RTP_LLM_CHECK_WITH_INFO(!zero_swa_remote_cache,
+                            "DSV4 zero SWA caching does not support remote KV cache yet; disable remote cache or unset "
+                            "DSV4_ZERO_SWA_CACHING");
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
+        // Zero-SWA memory/disk cache entries omit SWA_KV slots and are not layout-compatible
+        // with full-SWA entries. The online memory cache is process-local, so rolling
+        // deployments do not share these entries across old/new prefill processes. Keep
+        // persistent/shared memory-disk namespaces isolated or cleared when toggling this flag.
+        if (isZeroSwaCachingEnabled(cache_config_)) {
+            RTP_LLM_LOG_WARNING("DSV4 zero SWA caching + memory cache: cache entries OMIT SWA_KV and are NOT "
+                                "layout-compatible with full-SWA entries. This is safe for process-local memory cache; "
+                                "persistent/shared namespaces must be isolated or cleared when toggling the flag.");
+        }
         memory_connector_ = initMemoryConnector();
         connectors_.emplace_back(memory_connector_);
     }
@@ -454,6 +469,10 @@ bool KVCacheConnectorCoordinator::isPdInvertMode() const {
 }
 
 bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
+    if (isZeroSwaCachingEnabled(cache_config_) && isPdInvertMode()) {
+        RTP_LLM_LOG_WARNING("DSV4 zero SWA caching does not support P2P connector yet; P2P path disabled");
+        return true;
+    }
     // TODO: P2P connector initialization is disabled until the next PR enables
     // scheduler async load cache support. Change to `#if 1` to activate.
 #if 0
