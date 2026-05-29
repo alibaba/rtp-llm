@@ -6,7 +6,6 @@ Selected by LinearFactory only when `is_sm12x()` is true; sm_9x / sm_10x
 keep using DeepGEMM via `CudaFp8GEMMLinear`.
 """
 
-import logging
 from typing import Optional
 
 import torch
@@ -21,17 +20,17 @@ if is_cuda() and is_sm12x():
 else:
     cutlass_scaled_mm_blockwise_sm120_fp8 = None
 
-logger = logging.getLogger(__name__)
-
 
 class CudaFp8VllmBlockwiseLinear(LinearBase):
     """CUDA FP8 PER_BLOCK Linear for sm_120 (RTX PRO 5000 / 5090).
 
-    Scale layout (matches vllm Sm120BlockwiseScaleConfig<1, 128, 128, MN, K>):
-      - input_scales : (M, K//128), MN-major (M-stride = 1)
+    Scale layout (matches CUTLASS Sm120BlockwiseScaleConfig<1, 128, 128, MN, K>):
+      - input_scales : (M, K//128), MN-major (M-stride=1, K-group-stride=M)
       - weight_scales: (N//128, K//128), K-major  (K-stride = 1)
-    Both produced naturally by the existing helpers in fp8_kernel.py with
-    column_major_scales=True, scale_tma_aligned=True, scale_ue8m0=False.
+    Input scales use column_major_scales=True, scale_tma_aligned=False
+    because CUTLASS tile_atom_to_shape_SFA computes K-group stride as exactly
+    M (no alignment padding).  scale_tma_aligned=True would pad to ceil4(M),
+    causing a stride mismatch for non-multiple-of-4 M values.
     """
 
     @classmethod
@@ -86,10 +85,6 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
                 f"{self.weight.dim()} and weight scale dim {self.weight_scales.dim()}"
             )
 
-        # Loader yields (K, N) for weight and (scale_K, scale_N) for scales,
-        # mirroring CudaFp8DeepGEMMLinear's reshape — a (N, K)-row-major buffer
-        # is exactly the (K, N) col-major view the vLLM kernel expects for B,
-        # and a (scale_N, scale_K)-row-major buffer is K-major (K-stride=1).
         self.K, self.N = self.weight.shape
         self.scale_K, self.scale_N = self.weight_scales.shape
         self.weight = self.weight.reshape(self.N, self.K)
@@ -142,7 +137,7 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             group_size=128,
             eps=1e-4,
             column_major_scales=True,
-            scale_tma_aligned=True,
+            scale_tma_aligned=False,
             scale_ue8m0=False,
         )
 
