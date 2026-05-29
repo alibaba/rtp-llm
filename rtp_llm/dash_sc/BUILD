@@ -26,6 +26,8 @@ py_library(
         "inference/servicer.py",
         "proxy/__init__.py",
         "proxy/__main__.py",
+        "proxy/access_record.py",
+        "proxy/channel_pool.py",
         "proxy/servicer.py",
         "server.py",
         "think.py",
