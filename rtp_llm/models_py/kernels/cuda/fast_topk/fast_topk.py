@@ -5,6 +5,15 @@ from typing import Optional
 import torch
 
 
+def _cuda_graph_capturing() -> bool:
+    try:
+        return bool(
+            torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+        )
+    except Exception:
+        return False
+
+
 def fast_topk_v2(
     score: torch.Tensor,
     lengths: torch.Tensor,
@@ -101,19 +110,18 @@ def fast_topk_transform_ragged_fused(
     Returns:
         The topk indices tensor of shape (B, topk)
     """
-    import flashinfer
-
     assert score.dim() == 2
 
-    if row_starts is not None and row_starts.any():
+    if row_starts is not None and (_cuda_graph_capturing() or row_starts.any()):
         # flashinfer does not support per-row start offsets; fall back to CUDA kernel.
         from rtp_llm.ops.compute_ops import rtp_llm_ops
+
         topk_indices_ragged = score.new_empty((score.shape[0], topk), dtype=torch.int32)
         rtp_llm_ops.fast_topk_transform_ragged_fused(
             score, lengths, topk_indices_ragged, topk_indices_offset, row_starts
         )
         return topk_indices_ragged
 
-    return flashinfer.top_k_ragged_transform(
-        score, topk_indices_offset, lengths, topk
-    )
+    import flashinfer
+
+    return flashinfer.top_k_ragged_transform(score, topk_indices_offset, lengths, topk)
