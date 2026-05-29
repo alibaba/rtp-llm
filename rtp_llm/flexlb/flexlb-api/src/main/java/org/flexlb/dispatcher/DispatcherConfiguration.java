@@ -3,6 +3,8 @@ package org.flexlb.dispatcher;
 import io.netty.channel.ChannelOption;
 import org.flexlb.config.EnvConfigOverrides;
 import org.flexlb.util.JsonUtils;
+import org.flexlb.util.Logger;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -45,11 +47,27 @@ public class DispatcherConfiguration {
 
     /**
      * How long a request waits for an available connection from the FE pool before failing. Fires
-     * when {@code feMaxConnectionsPerHost} is exhausted AND {@code feMaxPendingAcquirePerHost}
-     * queue has room. Hardcoded because operators tune capacity ({@code feMaxConnectionsPerHost}),
-     * not patience — the right pendingAcquire timeout follows mechanically from capacity sizing.
+     * when {@link #FE_MAX_CONNECTIONS_PER_HOST} is exhausted AND {@link #FE_MAX_PENDING_ACQUIRE_PER_HOST}
+     * queue has room. Hardcoded because operators tune capacity, not patience — the right
+     * pendingAcquire timeout follows mechanically from capacity sizing.
      */
     private static final int FE_PENDING_ACQUIRE_TIMEOUT_MS = 3000;
+
+    /**
+     * Max concurrent TCP connections <strong>per FE host</strong> (not total across the pool).
+     * Reactor-netty's {@code ConnectionProvider} pools per remote address, so with N FE hosts the
+     * effective ceiling is {@code FE_MAX_CONNECTIONS_PER_HOST × N}. Sized for the workloads we run
+     * today (target QPS × avg request time / FE count, with safety margin); change here if the
+     * deployment topology shifts.
+     */
+    private static final int FE_MAX_CONNECTIONS_PER_HOST = 200;
+
+    /**
+     * Max pending acquires <strong>per FE host</strong> when the connection pool is exhausted.
+     * Acts as a backpressure ring buffer; exceeding it makes the dispatcher fail fast instead of
+     * piling up an unbounded queue under overload.
+     */
+    private static final int FE_MAX_PENDING_ACQUIRE_PER_HOST = 1000;
 
     @Bean
     public DispatchConfig dispatchConfig() {
@@ -98,14 +116,6 @@ public class DispatcherConfiguration {
         if (c.getBatchTimeoutMs() <= 0) {
             throw new IllegalArgumentException("batchTimeoutMs must be > 0, got " + c.getBatchTimeoutMs());
         }
-        if (c.getFeMaxConnectionsPerHost() <= 0) {
-            throw new IllegalArgumentException(
-                    "feMaxConnectionsPerHost must be > 0, got " + c.getFeMaxConnectionsPerHost());
-        }
-        if (c.getFeMaxPendingAcquirePerHost() <= 0) {
-            throw new IllegalArgumentException(
-                    "feMaxPendingAcquirePerHost must be > 0, got " + c.getFeMaxPendingAcquirePerHost());
-        }
         if (c.getProbePath() == null || c.getProbePath().isBlank()) {
             throw new IllegalArgumentException(
                     "probePath must not be blank — set DISPATCH_PROBE_PATH=/frontend_health (rtp_llm) "
@@ -118,14 +128,14 @@ public class DispatcherConfiguration {
     /**
      * Dedicated named connection provider so dispatcher fanout cannot starve
      * {@code GeneralHttpNettyService}'s master connections. Reactor-netty pools per remote
-     * address, so the effective ceiling is {@code feMaxConnectionsPerHost × N FE hosts}.
+     * address, so the effective ceiling is {@code FE_MAX_CONNECTIONS_PER_HOST × N FE hosts}.
      */
     @Bean("dispatcherFeConnectionProvider")
-    public ConnectionProvider dispatcherFeConnectionProvider(DispatchConfig cfg) {
+    public ConnectionProvider dispatcherFeConnectionProvider() {
         return ConnectionProvider.builder("dispatcher-fe")
-                .maxConnections(cfg.getFeMaxConnectionsPerHost())
+                .maxConnections(FE_MAX_CONNECTIONS_PER_HOST)
                 .pendingAcquireTimeout(Duration.ofMillis(FE_PENDING_ACQUIRE_TIMEOUT_MS))
-                .pendingAcquireMaxCount(cfg.getFeMaxPendingAcquirePerHost())
+                .pendingAcquireMaxCount(FE_MAX_PENDING_ACQUIRE_PER_HOST)
                 .build();
     }
 
@@ -152,5 +162,20 @@ public class DispatcherConfiguration {
     @Order(Ordered.LOWEST_PRECEDENCE)
     public RouterFunction<ServerResponse> dispatcherRoutes(DispatchRouter router) {
         return router.routes();
+    }
+
+    /**
+     * Emits the boot WARN line surfacing dispatcher footprint. WARN so the line survives default
+     * {@code LOG_LEVEL=null} gating — operators need this exact line to verify which FE pool,
+     * batchSpecs count, and timeouts the dispatcher came up with.
+     */
+    @Bean
+    SmartInitializingSingleton dispatcherBootLog(DispatchConfig cfg, DispatcherFePoolRefresher refresher) {
+        return () -> Logger.warn(
+                "dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatch={}, batchSpecs={}, "
+                        + "batchTimeoutMs={}, probePath={}, preAssignBe={}",
+                cfg.getFePoolServiceId(), refresher.currentSize(), cfg.getSubBatch(),
+                BatchEndpointSpec.SPECS.size(), cfg.getBatchTimeoutMs(),
+                cfg.getProbePath(), cfg.isPreAssignBe());
     }
 }

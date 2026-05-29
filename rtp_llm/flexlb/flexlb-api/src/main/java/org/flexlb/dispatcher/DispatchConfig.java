@@ -48,21 +48,6 @@ public class DispatchConfig {
     private int batchTimeoutMs = 5000;
 
     /**
-     * Max concurrent TCP connections <strong>per FE host</strong> (not total across the pool).
-     * Reactor-netty's {@code ConnectionProvider} pools per remote address, so with N FE hosts the
-     * effective ceiling is {@code feMaxConnectionsPerHost × N}. Tune from target QPS × avg request
-     * time / FE count, with safety margin.
-     */
-    private int feMaxConnectionsPerHost = 200;
-
-    /**
-     * Max pending acquires <strong>per FE host</strong> when the connection pool is exhausted.
-     * Acts as a backpressure ring buffer; exceeding it makes the dispatcher fail fast instead of
-     * piling up an unbounded queue under overload.
-     */
-    private int feMaxPendingAcquirePerHost = 1000;
-
-    /**
      * Path the {@link FeHealthChecker} probes via {@code GET <feUrl><probePath>} every 1s. Default
      * matches rtp_llm FE's {@code /frontend_health} endpoint; switch to {@code /health} for vLLM
      * deployments or any other backend that exposes a different liveness path. The 2-fail-then-dead,

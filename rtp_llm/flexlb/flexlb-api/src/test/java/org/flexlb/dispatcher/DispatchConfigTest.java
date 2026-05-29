@@ -31,22 +31,16 @@ class DispatchConfigTest {
         DispatchConfig c = load("{\"fePoolServiceId\":\"x\"}");
         assertEquals("count:5", c.getSubBatch());
         assertEquals(5000, c.getBatchTimeoutMs());
-        assertEquals(200, c.getFeMaxConnectionsPerHost());
-        assertEquals(1000, c.getFeMaxPendingAcquirePerHost());
     }
 
     @Test
     void parsesFullJson() {
         DispatchConfig c = load("{\"subBatch\":\"size:10\","
                 + "\"fePoolServiceId\":\"com.rtp_llm.fe\","
-                + "\"batchTimeoutMs\":7500,"
-                + "\"feMaxConnectionsPerHost\":64,"
-                + "\"feMaxPendingAcquirePerHost\":256}");
+                + "\"batchTimeoutMs\":7500}");
         assertEquals("size:10", c.getSubBatch());
         assertEquals("com.rtp_llm.fe", c.getFePoolServiceId());
         assertEquals(7500, c.getBatchTimeoutMs());
-        assertEquals(64, c.getFeMaxConnectionsPerHost());
-        assertEquals(256, c.getFeMaxPendingAcquirePerHost());
     }
 
     @Test
@@ -91,13 +85,9 @@ class DispatchConfigTest {
     void envOverridesJsonForEachField() {
         Map<String, String> env = mutableEnv(
                 "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\",\"batchTimeoutMs\":5000}",
-                "DISPATCH_BATCH_TIMEOUT_MS", "8000",
-                "DISPATCH_FE_MAX_CONNECTIONS_PER_HOST", "300",
-                "DISPATCH_FE_MAX_PENDING_ACQUIRE_PER_HOST", "1500");
+                "DISPATCH_BATCH_TIMEOUT_MS", "8000");
         DispatchConfig c = DispatcherConfiguration.loadAndValidate(env);
         assertEquals(8000, c.getBatchTimeoutMs(), "env wins over JSON");
-        assertEquals(300, c.getFeMaxConnectionsPerHost());
-        assertEquals(1500, c.getFeMaxPendingAcquirePerHost());
     }
 
     @Test
