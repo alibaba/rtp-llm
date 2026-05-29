@@ -225,7 +225,8 @@ ErrorInfo P2PConnectorWorkerPrefill::sendKVCacheToPartitions(int64_t            
                                                              const std::string&                      unique_key,
                                                              int64_t                                 deadline_ms,
                                                              const std::vector<AsymmetricTPContext>& tp_partition_ctxs,
-                                                             const std::string&                      target_source) {
+                                                             const std::string&                      target_source,
+                                                             int expected_layer_count) {
     // D（deadline_ms）为 RPC 语义截止；return_deadline_ms = D - return_before，与 decode recv_req.deadline_ms 对齐。
     const int64_t return_before_ms   = config_.p2p_read_return_before_deadline_ms;
     const int64_t return_deadline_ms = deadline_ms - return_before_ms;
@@ -251,7 +252,9 @@ ErrorInfo P2PConnectorWorkerPrefill::sendKVCacheToPartitions(int64_t            
     }
 
     // 计算总传输量
-    const int total_transfers = static_cast<int>(config_.layer_all_num) * static_cast<int>(tp_partition_ctxs.size());
+    const int total_layer_count =
+        expected_layer_count >= 0 ? expected_layer_count : static_cast<int>(config_.layer_all_num);
+    const int total_transfers = total_layer_count * static_cast<int>(tp_partition_ctxs.size());
     auto      transfer_result = std::make_shared<SendTransferResult>();
 
     auto cancel_flag = std::make_shared<std::atomic<bool>>(false);
@@ -326,13 +329,21 @@ ErrorInfo P2PConnectorWorkerPrefill::sendDecodeToPrefillWriteback(const PdKvWrit
         return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
                          std::string(source_resource.status().message()));
     }
+    int valid_layer_count = 0;
     for (int layer_id = 0; layer_id < plan.layer_count; ++layer_id) {
         auto layer_cache_buffer = LayerCacheBufferUtil::convertLayer(**source_resource, 0, layer_id, 0, -1);
         if (!layer_cache_buffer) {
-            return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
-                             "writeback source layer buffer is empty");
+            RTP_LLM_LOG_WARNING("PD KV writeback source layer has no valid blocks, request_id=%ld, layer_id=%d",
+                                plan.request_id,
+                                layer_id);
+            continue;
         }
         computed_buffers_->addBuffer(plan.request_id, layer_cache_buffer, plan.deadline_ms);
+        ++valid_layer_count;
+    }
+    if (valid_layer_count == 0) {
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                         "writeback source layer buffers are empty");
     }
     if (!plan.prefill_transfer_targets.empty()) {
         std::vector<AsymmetricTPContext> tp_partition_ctxs;
@@ -356,10 +367,16 @@ ErrorInfo P2PConnectorWorkerPrefill::sendDecodeToPrefillWriteback(const PdKvWrit
                                            target.remote_partition_count,
                                            target.remote_partition_id);
         }
-        return sendKVCacheToPartitions(
-            plan.request_id, plan.request_key, plan.deadline_ms, tp_partition_ctxs, "writeback_topology");
+        return sendKVCacheToPartitions(plan.request_id,
+                                       plan.request_key,
+                                       plan.deadline_ms,
+                                       tp_partition_ctxs,
+                                       "writeback_topology",
+                                       valid_layer_count);
     }
-    return sendKVCache(plan.request_id, plan.request_key, plan.deadline_ms, plan.prefill_transfer_servers);
+    auto tp_partition_ctxs = asymmetric_tp_util_->handleAsymmetricTP(plan.prefill_transfer_servers);
+    return sendKVCacheToPartitions(
+        plan.request_id, plan.request_key, plan.deadline_ms, tp_partition_ctxs, "asymmetric_tp", valid_layer_count);
 }
 
 P2PConnectorWorkerPrefill::SendResultInfo

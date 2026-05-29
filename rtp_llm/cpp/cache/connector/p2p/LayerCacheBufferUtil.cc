@@ -52,7 +52,14 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(
     for (size_t i = 0; i < block_ids_size; ++i) {
         int     block_id = block_ids[start_block_idx + i];
         int64_t key      = cache_keys[start_block_idx + i];
+        if (isNullBlockIdx(block_id)) {
+            continue;
+        }
         layer_cache_buffer->addBlockId(key, block_id);
+    }
+    if (layer_cache_buffer->blockIdMap().empty()) {
+        RTP_LLM_LOG_WARNING("layer_id %d has no valid block ids", layer_id);
+        return nullptr;
     }
 
     return layer_cache_buffer;
@@ -67,6 +74,9 @@ LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConvert
     int                       layer_id = layer_cache_buffer->getLayerId();
 
     for (const auto& [cache_key, block_id] : layer_cache_buffer->blockIdMap()) {
+        if (isNullBlockIdx(block_id)) {
+            continue;
+        }
         auto block_infos = converter->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 
         transfer::KeyBlockInfo kbi;

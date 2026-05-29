@@ -405,6 +405,33 @@ TEST_F(P2PConnectorWorkerTest, DecodeWritebackSendUsesDecodeBlocksAsSource) {
     EXPECT_EQ(converted_block_ids, std::vector<int>({4, 5, 4, 5}));
 }
 
+TEST_F(P2PConnectorWorkerTest, DecodeWritebackSendSkipsSparseNullBlocks) {
+    PdKvWritebackTransferPlan plan;
+    plan.request_id               = 5003;
+    plan.request_key              = "writeback_sparse_send";
+    plan.deadline_ms              = currentTimeMs() + 5000;
+    plan.layer_count              = 2;
+    plan.group_count              = 2;
+    plan.cache_keys               = {101, 102, 103};
+    plan.decode_group_block_ids   = {{4, 5, 6}, {NULL_BLOCK_IDX, 7, NULL_BLOCK_IDX}};
+    plan.layer_to_group_id        = {0, 1};
+    plan.prefill_transfer_servers = {{"127.0.0.1", 12345}};
+
+    mock_sender_->setShouldSucceed(true);
+    mock_sender_->setAsyncCallback(false);
+    mock_layer_block_converter_->clearConvertCalls();
+
+    auto result = prefill_->sendDecodeToPrefillWriteback(plan);
+
+    EXPECT_TRUE(result.ok()) << result.ToString();
+    std::vector<int> converted_block_ids;
+    for (const auto& call : mock_layer_block_converter_->convertCalls()) {
+        converted_block_ids.push_back(call.block_id);
+    }
+    EXPECT_EQ(converted_block_ids, std::vector<int>({4, 5, 6, 7}));
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 2);
+}
+
 TEST_F(P2PConnectorWorkerTest, DecodeWritebackReceiveUsesPrefillBlocksAsDestination) {
     PdKvWritebackTransferPlan plan;
     plan.request_id              = 5002;
@@ -434,6 +461,38 @@ TEST_F(P2PConnectorWorkerTest, DecodeWritebackReceiveUsesPrefillBlocksAsDestinat
         converted_block_ids.push_back(call.block_id);
     }
     EXPECT_EQ(converted_block_ids, std::vector<int>({8, 9, 8, 9}));
+}
+
+TEST_F(P2PConnectorWorkerTest, DecodeWritebackReceiveSkipsSparseNullBlocks) {
+    PdKvWritebackTransferPlan plan;
+    plan.request_id              = 5004;
+    plan.request_key             = "writeback_sparse_receive";
+    plan.deadline_ms             = currentTimeMs() + 5000;
+    plan.layer_count             = 2;
+    plan.group_count             = 2;
+    plan.cache_keys              = {201, 202, 203};
+    plan.prefill_group_block_ids = {{8, 9, 10}, {NULL_BLOCK_IDX, 11, NULL_BLOCK_IDX}};
+    plan.layer_to_group_id       = {0, 1};
+    plan.remote_tp_size          = 1;
+
+    mock_layer_block_converter_->clearConvertCalls();
+    std::thread completion_thread([this, key = plan.request_key]() {
+        while (!mock_receiver_->hasEnoughTasks(key, 2)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        mock_receiver_->setTaskDone(key + "_0_0", true);
+        mock_receiver_->setTaskDone(key + "_1_0", true);
+    });
+
+    auto result = decode_->receiveDecodeToPrefillWriteback(plan);
+    completion_thread.join();
+
+    EXPECT_TRUE(result.ok()) << result.ToString();
+    std::vector<int> converted_block_ids;
+    for (const auto& call : mock_layer_block_converter_->convertCalls()) {
+        converted_block_ids.push_back(call.block_id);
+    }
+    EXPECT_EQ(converted_block_ids, std::vector<int>({8, 9, 10, 11}));
 }
 
 // ==================== writeByLayer 测试 (Prefill 端) ====================
@@ -1150,6 +1209,29 @@ TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnAll_BlockCountNegativeOne) {
     auto buf = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 0, -1);
     ASSERT_NE(buf, nullptr);
     EXPECT_EQ(static_cast<int>(buf->blockIdMap().size()), 3);
+}
+
+TEST_F(LayerCacheBufferUtilTest, ConvertLayer_SkipsNullBlockIds) {
+    auto resource = createResource(1, 3);
+    resource->mutableBlockIds(0).setAt(1, NULL_BLOCK_IDX);
+
+    auto buf = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 0, -1);
+
+    ASSERT_NE(buf, nullptr);
+    EXPECT_EQ(static_cast<int>(buf->blockIdMap().size()), 2);
+    EXPECT_EQ(buf->getBlockId(1000), 0);
+    EXPECT_EQ(buf->getBlockId(1001), NULL_BLOCK_IDX);
+    EXPECT_EQ(buf->getBlockId(1002), 2);
+}
+
+TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNullWhenAllBlocksAreNull) {
+    auto resource = createResource(1, 2);
+    resource->mutableBlockIds(0).setAt(0, NULL_BLOCK_IDX);
+    resource->mutableBlockIds(0).setAt(1, NULL_BLOCK_IDX);
+
+    auto buf = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 0, -1);
+
+    EXPECT_EQ(buf, nullptr);
 }
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_StartIdxNegative) {

@@ -62,7 +62,8 @@ private:
                                       const std::string&                      unique_key,
                                       int64_t                                 deadline_ms,
                                       const std::vector<AsymmetricTPContext>& tp_partition_ctxs,
-                                      const std::string&                      target_source);
+                                      const std::string&                      target_source,
+                                      int                                     expected_layer_count = -1);
 
     struct SendTransferResult {
         std::atomic<int>        done_count{0};
