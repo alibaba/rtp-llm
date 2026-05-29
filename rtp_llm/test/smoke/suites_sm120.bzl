@@ -143,7 +143,21 @@ def sm120_suites():
                 smoke_args = "--moe_strategy auto --quantization FP8_PER_BLOCK --warm_up 0 --act_type BF16 --tp_size 2 --world_size 2 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64",
                 gpu_type = ["RTX_5000_PRO"],
             ),
-            # ========== PR-5 扩展 (Tier 1: BF16 + dynamic FP8 across Qwen2.5-0.5B / Qwen3-8B) ==========
+            # ========== PR-5 扩展 (Tier 1: BF16 + dynamic FP8 across Qwen2-0.5B / Qwen2.5-0.5B / Qwen3-8B) ==========
+            smoke_test(
+                name="qwen2_0_5b_fp8pb_sm120",
+                task_info="data/model/qwen2/q_r_fp8pb_sm120.json",
+                envs=["LOAD_PYTHON_MODEL=1"],
+                smoke_args="--quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0",
+                gpu_type=["RTX_5000_PRO"],
+            ),
+            smoke_test(
+                name="qwen2_0_5b_fp8pt_sm120",
+                task_info="data/model/qwen2/q_r_fp8pt_sm120.json",
+                envs=["LOAD_PYTHON_MODEL=1"],
+                smoke_args="--quantization FP8_DYNAMIC_PER_TENSOR --act_type BF16",
+                gpu_type=["RTX_5000_PRO"],
+            ),
             smoke_test(
                 name="qwen2_5_0_5b_fp8pb_sm120",
                 task_info="data/model/qwen25/q_r_fp8pb_sm120.json",

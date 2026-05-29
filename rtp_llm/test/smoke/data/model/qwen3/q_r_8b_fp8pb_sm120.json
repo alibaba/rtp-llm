@@ -31,13 +31,9 @@
                         "index": 0,
                         "delta": {
                             "role": "assistant",
-                            "content": "当然可以！以下是围绕“英语听力方法”",
-                            "reasoning_content": null,
-                            "function_call": null,
-                            "tool_calls": null
+                            "content": "当然可以！以下是围绕“英语听力方法”"
                         },
-                        "finish_reason": "length",
-                        "logprobs": null
+                        "finish_reason": "length"
                     }
                 ],
                 "usage": {

@@ -18,10 +18,10 @@
             "result": {
                 "response_batch": [
                     {
-                        "response": " In Django, nested JSON fields are generally achieved with"
+                        "response": " I've been exploring Flask and am interested in a"
                     },
                     {
-                        "response": " In Django, nested JSON fields are generally achieved with"
+                        "response": " I've been exploring Flask and am interested in a"
                     }
                 ]
             }
@@ -39,8 +39,8 @@
             },
             "result": {
                 "response": [
-                    " In my project, I have two models:\n\n``",
-                    " Flask lacks the comprehensive, active official documentation and documentation"
+                    " I know that Flask has a built-in ORM,",
+                    " Can anyone provide the one with the cleanest code"
                 ],
                 "iter_count": 10,
                 "finished": true
