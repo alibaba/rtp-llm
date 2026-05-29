@@ -106,16 +106,20 @@ class GenericBatchHandlerTest {
     }
 
     @Test
-    void allFailedReturns500() {
+    void allFailedReturns500WithDistinctReasons() {
         FanoutService fanout = mock(FanoutService.class);
         when(fanout.dispatchChunks(any(), anyList(), eq(spec))).thenReturn(
                 Mono.just(List.of(
-                        SubBatchResult.failed(2, 0, "fe_down"),
-                        SubBatchResult.failed(2, 2, "fe_down"))));
+                        SubBatchResult.failed(2, 0, "ConnectException: Connection refused"),
+                        SubBatchResult.failed(2, 2, "ConnectException: Connection refused"),
+                        SubBatchResult.failed(2, 4, "ReadTimeoutException"))));
 
         GenericBatchHandler handler = genericBatchHandler(fanout, mapper, "size:2");
         ObjectNode body = mapper.createObjectNode();
-        body.putArray("prompt_batch").add("a").add("b").add("c").add("d");
+        ArrayNode batch = body.putArray("prompt_batch");
+        for (int i = 0; i < 6; i++) {
+            batch.add("p" + i);
+        }
 
         MockServerRequest req = MockServerRequest.builder()
                 .method(HttpMethod.POST)
@@ -123,7 +127,18 @@ class GenericBatchHandlerTest {
                 .body(Mono.just(body));
 
         StepVerifier.create(handler.handle(req, spec))
-                .assertNext(resp -> assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, resp.statusCode()))
+                .assertNext(resp -> {
+                    assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, resp.statusCode());
+                    EntityResponse<?> entity = (EntityResponse<?>) resp;
+                    ObjectNode out = (ObjectNode) entity.entity();
+                    assertEquals("all_sub_batches_failed", out.get("error").asText());
+                    assertEquals(6, out.get("failed_count").asInt());
+                    assertEquals(3, out.get("total_chunks").asInt());
+                    ArrayNode reasons = (ArrayNode) out.get("failed_reasons");
+                    assertEquals(2, reasons.size());
+                    assertEquals("ConnectException: Connection refused", reasons.get(0).asText());
+                    assertEquals("ReadTimeoutException", reasons.get(1).asText());
+                })
                 .verifyComplete();
     }
 

@@ -24,14 +24,19 @@ public final class PartialFailureMerger {
     }
 
     /**
-     * Merge outcome: the client-facing {@code body}, success/total counts, and the absolute item
-     * indices that failed. The handler returns 200 on any success and reserves 500 for the
-     * all-failed case.
+     * Merge outcome: the client-facing {@code body}, success/total counts, the absolute item
+     * indices that failed, and one reason string per failed chunk (in chunk order — typically
+     * homogeneous when an entire FE pool is unhealthy, so callers should de-duplicate before
+     * surfacing). The handler returns 200 on any success and reserves 500 for the all-failed
+     * case; in either case {@code failedReasons} carries what the FE call returned, including
+     * for endpoints whose {@link BatchEndpointSpec.FailedItemFactory} discards reason at the
+     * item level (e.g. {@code /batch_infer}'s {@code NULL} factory).
      */
     public record MergedResponse(ObjectNode body,
                                  int succeededChunks,
                                  int totalChunks,
-                                 List<Integer> failedIndices) {
+                                 List<Integer> failedIndices,
+                                 List<String> failedReasons) {
         public boolean allFailed() {
             return totalChunks > 0 && succeededChunks == 0;
         }
@@ -48,17 +53,24 @@ public final class PartialFailureMerger {
             }
         }
         if (envelope == null) {
-            return new MergedResponse(mapper.createObjectNode(), 0, subs.size(), allIndices(totalItems));
+            List<String> reasons = new ArrayList<>(subs.size());
+            for (SubBatchResult s : subs) {
+                reasons.add(reasonFor(s));
+            }
+            return new MergedResponse(mapper.createObjectNode(), 0, subs.size(),
+                    allIndices(totalItems), reasons);
         }
         ArrayNode merged = (ArrayNode) envelope.get(spec.getResponseArrayField());
         List<Integer> failedIndices = new ArrayList<>();
+        List<String> failedReasons = new ArrayList<>();
         int succeededChunks = 0;
         for (SubBatchResult s : subs) {
             if (wellFormed(s, spec)) {
                 s.body().get(spec.getResponseArrayField()).forEach(merged::add);
                 succeededChunks++;
             } else {
-                String reason = s.isSuccess() ? "malformed_sub_batch" : s.reason();
+                String reason = reasonFor(s);
+                failedReasons.add(reason);
                 for (int i = 0; i < s.chunkSize(); i++) {
                     int abs = s.startIndex() + i;
                     merged.add(spec.getFailedItemFactory().build(abs, reason, mapper));
@@ -76,7 +88,11 @@ public final class PartialFailureMerger {
         if (spec.getPostMerger() != null) {
             spec.getPostMerger().apply(envelope, subs, failedIndices, mapper);
         }
-        return new MergedResponse(envelope, succeededChunks, subs.size(), failedIndices);
+        return new MergedResponse(envelope, succeededChunks, subs.size(), failedIndices, failedReasons);
+    }
+
+    private static String reasonFor(SubBatchResult s) {
+        return s.isSuccess() ? "malformed_sub_batch" : s.reason();
     }
 
     private static boolean wellFormed(SubBatchResult s, BatchEndpointSpec spec) {

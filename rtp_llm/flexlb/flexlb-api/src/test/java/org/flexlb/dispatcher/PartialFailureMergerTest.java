@@ -65,6 +65,7 @@ class PartialFailureMergerTest {
         ArrayNode fi = (ArrayNode) pf.get("failed_indices");
         assertEquals(2, fi.get(0).asInt());
         assertEquals(3, fi.get(1).asInt());
+        assertEquals(List.of("fe_timeout"), merged.failedReasons());
     }
 
     @Test
@@ -75,6 +76,20 @@ class PartialFailureMergerTest {
         var merged = PartialFailureMerger.merge(subs, batchInferSpec, m);
 
         assertTrue(merged.allFailed());
+        assertEquals(List.of("fe_down", "fe_down"), merged.failedReasons());
+    }
+
+    @Test
+    void allFailedCarriesHeterogeneousReasonsInChunkOrder() {
+        var subs = List.of(
+                SubBatchResult.failed(1, 0, "ConnectException: Connection refused"),
+                SubBatchResult.failed(1, 1, "WebClientResponseException$InternalServerError: 500"));
+        var merged = PartialFailureMerger.merge(subs, batchInferSpec, m);
+
+        assertTrue(merged.allFailed());
+        assertEquals(2, merged.failedReasons().size());
+        assertEquals("ConnectException: Connection refused", merged.failedReasons().get(0));
+        assertEquals("WebClientResponseException$InternalServerError: 500", merged.failedReasons().get(1));
     }
 
     @Test
