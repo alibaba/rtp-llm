@@ -1,0 +1,233 @@
+{
+    "model_type": "qwen_3",
+    "model_path": "/mnt/nas1/hf/models--Qwen--Qwen3-1.7B-FP8/snapshots/98342881667bac235ed8605b5ffd8a64a5b99aec",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "$prompt:m2",
+                        "partial": false
+                    },
+                    {
+                        "role": "user",
+                        "content": "$prompt:s6",
+                        "partial": false
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "fcst_result_white_box",
+                            "description": "销量预测白盒，能够分析某货品到某仓库的销量预测白盒化信息。具体输出内容为\"reason\"（归因结果）、\"fcst_sls\"（预测销量）和 \"his_sls\"（历史销量）。",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "code": {
+                                        "description": "服务code",
+                                        "type": "string"
+                                    },
+                                    "params": {
+                                        "description": "服务入参",
+                                        "type": "object",
+                                        "properties": {
+                                            "store_code": {
+                                                "description": "仓code",
+                                                "type": "string"
+                                            },
+                                            "po_id": {
+                                                "description": "采购单ID",
+                                                "type": "string"
+                                            },
+                                            "sc_item_id": {
+                                                "description": "货品id",
+                                                "type": "string"
+                                            }
+                                        },
+                                        "required": [
+                                            "sc_item_id",
+                                            "po_id",
+                                            "store_code"
+                                        ]
+                                    }
+                                },
+                                "required": [
+                                    "code",
+                                    "params"
+                                ]
+                            }
+                        }
+                    }
+                ],
+                "stream": false,
+                "extra_configs": {
+                    "top_k": 1,
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1780011380,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "我理解您希望获得关于新高考的全面规划与升学指导服务，包括强基计划择校、综合评价咨询、志愿填报、海外院校申请等。以下是我为您提供的三年规划与升学指导服务：\n\n### 第一年：基础巩固与兴趣探索\n- **学业规划**：重点巩固各学科基础知识，特别是数学、物理、化学等核心科目。\n- **兴趣探索**：参加各类学科竞赛、兴趣小组，探索自己的兴趣和优势领域。\n- **综合评价**：了解综合评价的评估标准，准备相关材料，为后续申请做准备。\n\n### 第二年：专业选择与志愿填报\n- **专业选择**：根据兴趣和优势领域，选择适合的大学专业，了解相关课程和学习内容。\n- **志愿填报**：根据高考成绩和综合评价结果，合理填报志愿，争取进入理想的大学。\n- **海外院校申请**：了解海外院校的申请要求和流程，准备相关材料，争取进入理想的海外院校。\n\n### 第三年：升学冲刺与职业规划\n- **升学冲刺**：根据高考成绩和综合评价结果，争取进入理想的大学，特别是强基计划和综合评价招生的院校。\n- **职业规划**：结合个人兴趣和专业，制定未来的职业规划，为职业生涯打下坚实基础。\n- **持续学习**：保持学习热情，不断提升自己的综合素质，为未来的发展做好准备。\n\n通过这三年的规划与指导，您将能够更好地应对新高考的挑战，实现学业和职业生涯的全面发展。如果您有具体的问题或需要进一步的帮助，请随时告诉我！",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 497,
+                    "total_tokens": 826,
+                    "completion_tokens": 329,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 4194.333,
+                    "iter_count": 329,
+                    "prefix_len": 0,
+                    "input_len": 497,
+                    "output_len": 329,
+                    "step_output_len": 329,
+                    "first_token_cost_time": 2078.719,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "$prompt:m2",
+                        "partial": false
+                    },
+                    {
+                        "role": "user",
+                        "content": "$prompt:s6",
+                        "partial": false
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "fcst_result_white_box",
+                            "description": "销量预测白盒，能够分析某货品到某仓库的销量预测白盒化信息。具体输出内容为\"reason\"（归因结果）、\"fcst_sls\"（预测销量）和 \"his_sls\"（历史销量）。",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "code": {
+                                        "description": "服务code",
+                                        "type": "string"
+                                    },
+                                    "params": {
+                                        "description": "服务入参",
+                                        "type": "object",
+                                        "properties": {
+                                            "store_code": {
+                                                "description": "仓code",
+                                                "type": "string"
+                                            },
+                                            "po_id": {
+                                                "description": "采购单ID",
+                                                "type": "string"
+                                            },
+                                            "sc_item_id": {
+                                                "description": "货品id",
+                                                "type": "string"
+                                            }
+                                        },
+                                        "required": [
+                                            "sc_item_id",
+                                            "po_id",
+                                            "store_code"
+                                        ]
+                                    }
+                                },
+                                "required": [
+                                    "code",
+                                    "params"
+                                ]
+                            }
+                        }
+                    }
+                ],
+                "stream": true,
+                "extra_configs": {
+                    "top_k": 1,
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "id": "chat",
+                "object": "chat.completion.chunk",
+                "created": 1780011382,
+                "model": null,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "我理解您希望获得关于新高考的全面规划与升学指导服务，包括强基计划择校、综合评价咨询、志愿填报、海外院校申请等。以下是我为您提供的三年规划与升学指导服务：\n\n### 第一年：基础巩固与兴趣探索\n- **学业规划**：重点巩固各学科基础知识，特别是数学、物理、化学等核心科目。\n- **兴趣探索**：参加各类学科竞赛、兴趣小组，探索自己的兴趣和优势领域。\n- **综合评价**：了解综合评价的评估标准，准备相关材料，为后续申请做准备。\n\n### 第二年：专业选择与志愿填报\n- **专业选择**：根据兴趣和优势领域，选择适合的大学专业，了解相关课程和学习内容。\n- **志愿填报**：根据高考成绩和综合评价结果，合理填报志愿，争取进入理想的大学。\n- **海外院校申请**：了解海外院校的申请要求和流程，准备相关材料，争取进入理想的海外院校。\n\n### 第三年：升学冲刺与职业规划\n- **升学冲刺**：根据高考成绩和综合评价结果，争取进入理想的大学，特别是强基计划和综合评价招生的院校。\n- **职业规划**：结合个人兴趣和专业，制定未来的职业规划，为职业生涯打下坚实基础。\n- **持续学习**：保持学习热情，不断提升自己的综合素质，为未来的发展做好准备。\n\n通过这三年的规划与指导，您将能够更好地应对新高考的挑战，实现学业和职业生涯的全面发展。如果您有具体的问题或需要进一步的帮助，请随时告诉我！",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 497,
+                    "total_tokens": 826,
+                    "completion_tokens": 329,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": null,
+                "extra_outputs": null
+            }
+        }
+    ]
+}
