@@ -3,6 +3,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/writeback/PdKvWritebackMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
@@ -118,12 +119,59 @@ PdKvWritebackRequestPB buildPdKvWritebackRequestPB(const PdKvWritebackLaunchRequ
 
 class GrpcPdKvWritebackRpcClient: public PdKvWritebackRpcClient {
 public:
-    absl::Status requestPrefillReceive(const PdKvWritebackLaunchRequest& request) override {
-        if (request.source_prefill_grpc_addrs.empty()) {
-            return absl::InvalidArgumentError("source prefill grpc address is empty");
+    explicit GrpcPdKvWritebackRpcClient(kmonitor::MetricsReporterPtr metrics_reporter):
+        metrics_reporter_(std::move(metrics_reporter)) {}
+
+    absl::Status requestPrefillReceive(const PdKvWritebackLaunchRequest& request,
+                                       const PdKvWritebackTopologyPlan&   topology) override {
+        return fanoutPdKvWriteback(request, topology, false);
+    }
+
+    absl::Status requestDecodeSend(const PdKvWritebackLaunchRequest& request,
+                                   const PdKvWritebackTopologyPlan&   topology) override {
+        return fanoutPdKvWriteback(request, topology, true);
+    }
+
+private:
+    absl::Status fanoutPdKvWriteback(const PdKvWritebackLaunchRequest& request,
+                                     const PdKvWritebackTopologyPlan&   topology,
+                                     bool                              target_decode) {
+        absl::Status first_error = absl::OkStatus();
+        for (const auto& mapping : topology.mappings) {
+            const auto& addr = target_decode ? mapping.decode_grpc_addr : mapping.prefill_grpc_addr;
+            auto        status = sendPdKvWritebackRpc(addr, request, target_decode);
+            if (!status.ok() && first_error.ok()) {
+                first_error = status;
+            }
         }
-        auto connection_status = rpc_pool_.getConnection(request.source_prefill_grpc_addrs.front());
+        return first_error;
+    }
+
+    absl::Status
+    sendPdKvWritebackRpc(const std::string& addr, const PdKvWritebackLaunchRequest& request, bool target_decode) {
+        const auto begin_us = currentTimeUs();
+        PdKvWritebackMetricsCollector collector;
+        collector.rpc_qps     = true;
+        collector.block_count = request.manifest.reusable_block_count;
+        collector.token_count = request.manifest.final_token_count;
+        auto report_rpc = [&](const std::string& status, const std::string& reason) {
+            collector.rpc_latency_us = currentTimeUs() - begin_us;
+            if (status != "success") {
+                collector.rpc_failed_qps = true;
+            }
+            reportPdKvWritebackMetric(metrics_reporter_,
+                                      collector,
+                                      target_decode ? "decode_send_rpc" : "prefill_receive_rpc",
+                                      status,
+                                      reason,
+                                      "decode",
+                                      request.destination.partition_count,
+                                      "tp_equal");
+        };
+
+        auto connection_status = rpc_pool_.getConnection(addr);
         if (!connection_status.ok()) {
+            report_rpc("failed", "connection_failed");
             return connection_status.status();
         }
 
@@ -138,19 +186,24 @@ public:
         PdKvWritebackResponsePB response;
         auto grpc_status = connection_status.value().stub->PdKvWriteback(&client_context, request_pb, &response);
         if (!grpc_status.ok()) {
+            report_rpc("failed", "grpc_failed");
             return absl::InternalError(grpc_status.error_message());
         }
         if (response.has_error_info() && response.error_info().error_code() != ErrorCodePB::NONE_ERROR) {
+            report_rpc("failed", "response_error");
             return absl::InternalError(response.error_info().error_message());
         }
         if (!response.accepted()) {
+            report_rpc("failed", "not_accepted");
             return absl::FailedPreconditionError(response.reason());
         }
+        report_rpc("success", "ok");
         return absl::OkStatus();
     }
 
 private:
-    RPCPool rpc_pool_;
+    RPCPool                      rpc_pool_;
+    kmonitor::MetricsReporterPtr metrics_reporter_;
 };
 
 }  // namespace
@@ -391,12 +444,14 @@ bool KVCacheConnectorCoordinator::initPdKvWriteback() {
     pd_kv_writeback_transfer_client_ =
         std::make_shared<P2PPdKvWritebackTransferClient>(pd_kv_writeback_worker_, pd_sep_config_.role_type);
     if (pd_sep_config_.role_type == RoleType::DECODE) {
-        pd_kv_writeback_rpc_client_ = std::make_shared<GrpcPdKvWritebackRpcClient>();
+        pd_kv_writeback_rpc_client_ = std::make_shared<GrpcPdKvWritebackRpcClient>(metrics_reporter_);
     }
     pd_kv_writeback_manager_ = std::make_shared<PdKvWritebackManager>(pd_sep_config_,
                                                                       pd_kv_writeback_cache_writer_.get(),
                                                                       pd_kv_writeback_transfer_client_,
-                                                                      pd_kv_writeback_rpc_client_);
+                                                                      pd_kv_writeback_rpc_client_,
+                                                                      runtime_config_.worker_grpc_addrs,
+                                                                      metrics_reporter_);
     return true;
 }
 

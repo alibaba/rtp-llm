@@ -65,6 +65,26 @@ class PdKvWritebackCoordinatorStaticTest(unittest.TestCase):
         self.assertIn("return false;", coordinator_cc)
         self.assertNotIn("writeback disabled", coordinator_cc)
 
+    def test_writeback_rpc_client_uses_all_prefill_and_decode_workers(self):
+        coordinator_cc = (
+            REPO_ROOT / "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.cc"
+        ).read_text()
+
+        self.assertIn(
+            "requestPrefillReceive(const PdKvWritebackLaunchRequest& request,",
+            coordinator_cc,
+        )
+        self.assertIn(
+            "requestDecodeSend(const PdKvWritebackLaunchRequest& request,",
+            coordinator_cc,
+        )
+        self.assertNotIn("request.source_prefill_grpc_addrs.front()", coordinator_cc)
+        self.assertIn("runtime_config_.worker_grpc_addrs", coordinator_cc)
+        self.assertIn(
+            "std::make_shared<PdKvWritebackManager>(pd_sep_config_",
+            coordinator_cc,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache/writeback:pd_kv_writeback_manager",
+        "//rtp_llm/cpp/cache/writeback:pd_kv_writeback_metrics",
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p:layer_block_converter",
