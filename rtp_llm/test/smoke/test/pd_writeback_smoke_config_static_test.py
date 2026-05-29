@@ -48,12 +48,12 @@ class PdWritebackSmokeConfigStaticTest(unittest.TestCase):
         self.assertNotIn("--disable_flash_infer", case_block)
         self.assertNotIn("--enable_remote_cache", case_block)
 
-    def test_qwen3_pd_writeback_tp4_case_exists(self):
+    def test_qwen3_pd_writeback_tp2_case_exists(self):
         suite = SUITE.read_text()
 
-        self.assertIn('name="dense_pd_writeback_reuse_tp4"', suite)
-        case_block = _case_block(suite, "dense_pd_writeback_reuse_tp4")
-        self.assertIn("--tp_size 4 --world_size 4", case_block)
+        self.assertIn('name="dense_pd_writeback_reuse_tp2"', suite)
+        case_block = _case_block(suite, "dense_pd_writeback_reuse_tp2")
+        self.assertIn("--tp_size 2 --world_size 2", case_block)
         self.assertIn('"prefill": ["ENABLE_PD_KV_CACHE_WRITEBACK=1"]', case_block)
         self.assertIn('"decode": ["ENABLE_PD_KV_CACHE_WRITEBACK=1"]', case_block)
         self.assertNotIn("--enable_remote_cache", case_block)
