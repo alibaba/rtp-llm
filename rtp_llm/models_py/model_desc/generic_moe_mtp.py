@@ -10,7 +10,7 @@ from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeDecoderLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import Embedding, LinearFactory, RMSNorm, RMSResNorm
-from rtp_llm.ops import CPRotateMethod, HWKernelConfig, MoeConfig, ParallelismConfig
+from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
@@ -141,21 +141,6 @@ class GenericMoeMTPModel(GptModelBase):
         clone._mtp_debug_enabled_flag = self._mtp_debug_enabled_flag
         return clone
 
-    def prepare_fmha_impl(
-        self, inputs: PyModelInputs, is_cuda_graph: bool = False
-    ) -> Any:
-        cp_config = self.parallelism_config.prefill_cp_config
-        saved_method = cp_config.method
-        saved_tp = self.parallelism_config.tp_size
-        if cp_config.is_enabled():
-            cp_config.method = CPRotateMethod.DISABLED
-            self.parallelism_config.tp_size = 1
-        try:
-            return super().prepare_fmha_impl(inputs, is_cuda_graph)
-        finally:
-            cp_config.method = saved_method
-            self.parallelism_config.tp_size = saved_tp
-
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         mtp_debug_enabled = self._mtp_debug_enabled()
@@ -163,7 +148,10 @@ class GenericMoeMTPModel(GptModelBase):
             self._write_mtp_debug_buffer("input_ids", input_ids)
             self._write_mtp_debug_buffer("input_hiddens", inputs.input_hiddens)
             self._write_mtp_attention_debug_buffers(inputs)
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(inputs)
         inputs_embeds = self.embed_tokens(input_ids)
+        inputs_embeds = self._mask_position_zero_embeddings(inputs_embeds, fmha_impl)
         last_hidden_states = inputs.input_hiddens
 
         e_norm = self.pre_fc_norm_embedding(inputs_embeds)
@@ -173,8 +161,6 @@ class GenericMoeMTPModel(GptModelBase):
         if mtp_debug_enabled:
             self._write_mtp_debug_buffer("fc_hidden", hidden_states)
 
-        if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)
@@ -217,6 +203,24 @@ class GenericMoeMTPModel(GptModelBase):
             pre_norm_hidden if is_sp_prefill_cuda_graph else hidden_states
         )
         return PyModelOutputs(output_hidden_states, fmha_impl.fmha_params)
+
+    def _mask_position_zero_embeddings(
+        self, inputs_embeds: torch.Tensor, fmha_impl: Any
+    ) -> torch.Tensor:
+        fmha_params = getattr(fmha_impl, "fmha_params", None)
+        positions = getattr(fmha_params, "positions_d", None)
+        if (
+            positions is None
+            or not torch.is_tensor(positions)
+            or positions.numel() == 0
+        ):
+            return inputs_embeds
+        positions = positions.reshape(-1)
+        if positions.size(0) != inputs_embeds.size(0):
+            return inputs_embeds
+        if positions.device != inputs_embeds.device:
+            positions = positions.to(device=inputs_embeds.device)
+        return torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
 
     def _write_mtp_hidden_buffer(self, flat: torch.Tensor) -> None:
         T, D = flat.size(0), flat.size(1)

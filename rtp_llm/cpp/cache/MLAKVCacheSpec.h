@@ -14,6 +14,16 @@ namespace rtp_llm {
 struct MLAKVCacheSpec: public KVCacheSpec {
     uint32_t kv_lora_rank;
     uint32_t rope_head_dim;
+    // DSA (DeepSeek Sparse Attention) indexer K cache piggybacks on the kv_scale
+    // slot of the layout (132 bytes per token = 128B fp8 K + 4B fp32 scale per
+    // 128-elem block, ×seq_size_per_block per cache block). When ``is_sparse``
+    // is true (set from config.json index_topk for GLM-5 / DeepSeek-V3.2),
+    // ``scale_block_size_bytes()`` returns this stride so BlockPool /
+    // BlockPoolConfigHelper allocate the indexer scale buffer without needing
+    // a special override at the helper. Mirrors SingleConfigCreator's existing
+    // override on the main pool's ``kv_scale_stride_bytes`` (SingleConfigCreator.cc:49-53).
+    bool     is_sparse        = false;
+    uint32_t indexer_head_dim = 0;
 
     MLAKVCacheSpec() = default;
 
@@ -24,6 +34,8 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
         kv_lora_rank       = static_cast<uint32_t>(attn_config.kv_lora_rank);
         rope_head_dim      = static_cast<uint32_t>(attn_config.rope_head_dim);
+        is_sparse          = attn_config.is_sparse;
+        indexer_head_dim   = static_cast<uint32_t>(attn_config.indexer_head_dim);
     }
 
     size_t block_size() const override {
@@ -53,6 +65,17 @@ struct MLAKVCacheSpec: public KVCacheSpec {
     }
     size_t v_block_size_bytes() const override {
         return v_block_size() * rtp_llm::getTypeSize(dtype);
+    }
+
+    // DSA indexer K cache: 128 bytes FP8 + 4 bytes FP32 scale per 128-elem
+    // quant block (`indexer_head_dim/128 * 4`), per token, times
+    // seq_size_per_block tokens per cache block. Returns 0 when DSA is off.
+    size_t scale_block_size_bytes() const override {
+        if (!is_sparse || indexer_head_dim == 0) {
+            return 0;
+        }
+        return static_cast<size_t>(indexer_head_dim + indexer_head_dim / 128 * 4)
+               * static_cast<size_t>(seq_size_per_block);
     }
 
     // Static helper function for MLA - no head partitioning

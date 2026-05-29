@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -183,6 +184,8 @@ class MlaFlashInferPrefillOp(object):
         weights: List[Dict[str, torch.Tensor]] | None,
         quant_config: Optional[object] = None,
         kv_cache_dtype: KvCacheDataType = KvCacheDataType.BASE,
+        is_cuda_graph: bool = False,
+        max_batch_size: int = 0,
     ):
         super().__init__()
 
@@ -199,7 +202,10 @@ class MlaFlashInferPrefillOp(object):
         self.token_per_block = page_size
         self.softmax_extra_scale = softmax_extra_scale
         self.use_mla = use_mla
+        self.use_cuda_graph = is_cuda_graph
         self.kv_cache_type = kv_cache_dtype
+        self._qo_indptr_buf = None
+        self._kv_indptr_buf = None
         global g_workspace_buffer
         if g_workspace_buffer is None:
             g_workspace_buffer = torch.empty(
@@ -208,11 +214,26 @@ class MlaFlashInferPrefillOp(object):
                 device=self.weights[0].get(W.mla_kv_b_w).device,
             )
 
+        if self.use_cuda_graph:
+            if max_batch_size <= 0:
+                raise ValueError(
+                    "max_batch_size must be positive for MLA prefill CUDA graph"
+                )
+            device = self.weights[0].get(W.mla_kv_b_w).device
+            self._qo_indptr_buf = torch.empty(
+                max_batch_size + 1, dtype=torch.int32, device=device
+            )
+            self._kv_indptr_buf = torch.empty(
+                max_batch_size + 1, dtype=torch.int32, device=device
+            )
+
         self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
             g_workspace_buffer,
             "NHD",
             backend="auto",
-            use_cuda_graph=False,
+            use_cuda_graph=self.use_cuda_graph,
+            qo_indptr_buf=self._qo_indptr_buf,
+            kv_indptr_buf=self._kv_indptr_buf,
         )
 
     def plan(self, mla_params: Any):
@@ -228,6 +249,7 @@ class MlaFlashInferPrefillOp(object):
             causal=True,
             q_data_type=torch.bfloat16,
             kv_data_type=torch.bfloat16,
+            disable_split_kv=self.use_cuda_graph,
         )
         self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
         self.qo_indptr = mla_params.qo_indptr_d
@@ -446,6 +468,7 @@ class MlaFlashInferDecodeOp(object):
         self._fp8_prefill_q_lens_h = None
         self._fp8_prefill_max_q_len = 0
         self._fp8_prefill_total_q = 0
+        self._fp8_prefill_kv_cache_tokens = 0
         global g_workspace_buffer
 
         if self._fp8_kv:
@@ -605,14 +628,18 @@ class MlaFlashInferDecodeOp(object):
         if max_q_len <= 0 or max_kv_len <= 0:
             return
         align = self._FP8_SPARSE_TOPK_ALIGN
-        padded_topk = ((max_kv_len + align - 1) // align) * align
+        plan_kv_len = max_kv_len
+        if self.use_cuda_graph and self._fp8_max_context_len > 0:
+            plan_kv_len = max(plan_kv_len, int(self._fp8_max_context_len))
+        padded_topk = ((plan_kv_len + align - 1) // align) * align
 
         indices = torch.full(
-            (B, max_q_len, padded_topk),
+            (total_q, 1, padded_topk),
             -1,
             dtype=torch.int32,
             device=block_table.device,
         )
+        topk_length = torch.ones(total_q, dtype=torch.int32, device=block_table.device)
         for i in range(B):
             q_len = int(q_lens_h[i].item())
             kv_len = int(kvlen_h[i].item())
@@ -629,17 +656,17 @@ class MlaFlashInferDecodeOp(object):
                 + offsets
             )
             for q_pos in range(q_len):
+                q_row = int(qo_indptr_h[i].item()) + q_pos
                 causal_len = min(prefix_len + q_pos + 1, kv_len)
-                indices[i, q_pos, :causal_len] = dense_indices[:causal_len]
+                indices[q_row, 0, :causal_len] = dense_indices[:causal_len]
+                topk_length[q_row] = causal_len
 
         self._fp8_prefill_sched_meta, _ = get_mla_metadata()
         self._fp8_prefill_indices = indices
-        self._fp8_prefill_topk_length = kvlen_h.to(
-            dtype=torch.int32, device=block_table.device
-        )
+        self._fp8_prefill_topk_length = topk_length
         self._fp8_prefill_qo_indptr_h = qo_indptr_h
         self._fp8_prefill_q_lens_h = q_lens_h
-        self._fp8_prefill_max_q_len = max_q_len
+        self._fp8_prefill_max_q_len = 1
         self._fp8_prefill_total_q = total_q
 
     def plan_prefill_cuda_graph(self, fmha_params: Any) -> bool:
@@ -657,33 +684,33 @@ class MlaFlashInferDecodeOp(object):
         )
         kvlen_h = fmha_params.kvlen_h[:B].to(dtype=torch.int32, device="cpu")
         q_lens_h = qo_indptr_h[1:] - qo_indptr_h[:B]
+        total_q = int(qo_indptr_h[B].item())
         max_q_len = int(q_lens_h.max().item())
         max_kv_len = int(kvlen_h.max().item())
-        if max_q_len <= 0 or max_kv_len <= 0:
+        if total_q <= 0 or max_q_len <= 0 or max_kv_len <= 0:
             return True
 
         if (
-            B > self._fp8_prefill_indices.shape[0]
-            or max_q_len > self._fp8_prefill_indices.shape[1]
+            total_q > self._fp8_prefill_indices.shape[0]
+            or self._fp8_prefill_indices.shape[1] != 1
             or max_kv_len > self._fp8_prefill_indices.shape[2]
         ):
             raise ValueError(
                 "FP8 MLA prefill CUDA graph replay exceeds captured absorb plan: "
-                f"B={B}/{self._fp8_prefill_indices.shape[0]}, "
-                f"max_q_len={max_q_len}/{self._fp8_prefill_indices.shape[1]}, "
+                f"total_q={total_q}/{self._fp8_prefill_indices.shape[0]}, "
+                f"q_axis={self._fp8_prefill_indices.shape[1]}, "
                 f"max_kv_len={max_kv_len}/{self._fp8_prefill_indices.shape[2]}"
             )
 
         if self._fp8_prefill_sched_meta is None:
             self._fp8_prefill_sched_meta, _ = get_mla_metadata()
-        self._fp8_prefill_sched_meta.tile_scheduler_metadata = None
-        self._fp8_prefill_sched_meta.num_splits = None
 
-        indices = self._fp8_prefill_indices[:B, :max_q_len]
+        indices = self._fp8_prefill_indices
         indices.fill_(-1)
-        self._fp8_prefill_topk_length[:B].copy_(
-            kvlen_h.to(dtype=torch.int32, device=block_table.device)
-        )
+        # Keep tensor storage stable for CUDA graph replay, but refresh values
+        # to the current causal window. Otherwise the captured sparse MLA graph
+        # scans the max capture-time prefix range and can read padded invalid
+        # indices.
 
         for i in range(B):
             q_len = int(q_lens_h[i].item())
@@ -700,9 +727,75 @@ class MlaFlashInferDecodeOp(object):
                 block_table[i, block_ids].to(torch.int32) * self.token_per_block
                 + offsets
             )
+            if (
+                os.environ.get("RTP_LLM_DEBUG_MLA_PREFILL_PLAN", "0") != "0"
+                and self._fp8_prefill_kv_cache_tokens > 0
+                and dense_indices.numel() > 0
+            ):
+                min_index = int(dense_indices.min().item())
+                max_index = int(dense_indices.max().item())
+                if min_index < 0 or max_index >= self._fp8_prefill_kv_cache_tokens:
+                    raise RuntimeError(
+                        "FP8 MLA prefill CUDA graph replay produced OOB sparse indices: "
+                        f"batch={i} min={min_index} max={max_index} "
+                        f"capacity_tokens={self._fp8_prefill_kv_cache_tokens} "
+                        f"kv_len={kv_len} q_len={q_len} block_table_shape={tuple(block_table.shape)}"
+                    )
             for q_pos in range(q_len):
+                q_row = int(qo_indptr_h[i].item()) + q_pos
                 causal_len = min(prefix_len + q_pos + 1, kv_len)
-                indices[i, q_pos, :causal_len].copy_(dense_indices[:causal_len])
+                indices[q_row, 0, :causal_len].copy_(dense_indices[:causal_len])
+                self._fp8_prefill_topk_length[q_row] = causal_len
+
+        if os.environ.get("RTP_LLM_DEBUG_MLA_PREFILL_PLAN", "0") != "0":
+            real_topk = []
+            captured_topk = []
+            try:
+                real_topk = [
+                    int(
+                        (
+                            max(0, int(kvlen_h[i].item()) - int(q_lens_h[i].item()))
+                            + q_pos
+                            + 1
+                        )
+                    )
+                    for i in range(B)
+                    for q_pos in range(int(q_lens_h[i].item()))
+                ][:8]
+                captured_topk = (
+                    self._fp8_prefill_topk_length[: min(total_q, 8)]
+                    .detach()
+                    .cpu()
+                    .tolist()
+                )
+            except Exception as e:
+                real_topk = [f"summary_error={e}"]
+            logging.warning(
+                "[MLA-FP8-PREFILL-CG-PLAN] B=%s total_q=%s max_q_len=%s max_kv_len=%s "
+                "block_table_shape=%s block_table_head=%s block_table_tail=%s real_topk_head=%s "
+                "captured_topk_head=%s kv_cache_tokens=%s indices_shape=%s",
+                B,
+                total_q,
+                max_q_len,
+                max_kv_len,
+                tuple(block_table.shape),
+                block_table.flatten()[: min(block_table.numel(), 8)]
+                .detach()
+                .cpu()
+                .tolist(),
+                (
+                    block_table.flatten()[-min(block_table.numel(), 8) :]
+                    .detach()
+                    .cpu()
+                    .tolist()
+                    if block_table.numel() > 0
+                    else []
+                ),
+                real_topk,
+                captured_topk,
+                self._fp8_prefill_kv_cache_tokens,
+                tuple(self._fp8_prefill_indices.shape),
+            )
 
         return True
 
@@ -713,9 +806,12 @@ class MlaFlashInferDecodeOp(object):
         sequence_lengths = attn_inputs.sequence_lengths_plus_1_d
         if sequence_lengths is None or sequence_lengths.numel() == 0:
             sequence_lengths = attn_inputs.sequence_lengths + 1
+        block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
+        if block_table is None or block_table.numel() == 0:
+            block_table = attn_inputs.kv_cache_kernel_block_id_device
         self._plan_fp8_from_device(
             sequence_lengths,
-            attn_inputs.kv_cache_kernel_block_id_device,
+            block_table,
         )
         return True
 
@@ -904,39 +1000,10 @@ class MlaFlashInferDecodeOp(object):
         return attn_bmm_output
 
     def _pack_fp8_prefill_q(self, q_absorbed: torch.Tensor) -> torch.Tensor:
-        assert self._fp8_prefill_qo_indptr_h is not None
-        assert self._fp8_prefill_q_lens_h is not None
-        B = int(self._fp8_prefill_q_lens_h.size(0))
-        q_padded = q_absorbed.new_zeros(
-            (
-                B,
-                self._fp8_prefill_max_q_len,
-                self.num_heads,
-                self.kv_lora_rank + self.qk_rope_head_dim,
-            )
-        )
-        for i in range(B):
-            q_len = int(self._fp8_prefill_q_lens_h[i].item())
-            if q_len <= 0:
-                continue
-            start = int(self._fp8_prefill_qo_indptr_h[i].item())
-            q_padded[i, :q_len].copy_(q_absorbed[start : start + q_len])
-        return q_padded
+        return q_absorbed.unsqueeze(1)
 
     def _unpack_fp8_prefill_out(self, attn_out: torch.Tensor) -> torch.Tensor:
-        assert self._fp8_prefill_qo_indptr_h is not None
-        assert self._fp8_prefill_q_lens_h is not None
-        B = int(self._fp8_prefill_q_lens_h.size(0))
-        attn_output = attn_out.new_empty(
-            (self._fp8_prefill_total_q, self.num_heads, self.kv_lora_rank)
-        )
-        for i in range(B):
-            q_len = int(self._fp8_prefill_q_lens_h[i].item())
-            if q_len <= 0:
-                continue
-            start = int(self._fp8_prefill_qo_indptr_h[i].item())
-            attn_output[start : start + q_len].copy_(attn_out[i, :q_len])
-        return attn_output
+        return attn_out.squeeze(1)
 
     def _forward_fp8_prefill_absorb(
         self,
@@ -957,6 +1024,9 @@ class MlaFlashInferDecodeOp(object):
             self.kv_lora_rank + self.kv_lora_rank // 128 * 4 + self.qk_rope_head_dim * 2
         )
         kv_cache_paged = kv_cache_u8.view(-1, self.token_per_block, 1, fp8_per_token)
+        self._fp8_prefill_kv_cache_tokens = (
+            int(kv_cache_paged.shape[0]) * self.token_per_block
+        )
 
         if layer_id == 0:
             self._fp8_prefill_sched_meta.tile_scheduler_metadata = None
