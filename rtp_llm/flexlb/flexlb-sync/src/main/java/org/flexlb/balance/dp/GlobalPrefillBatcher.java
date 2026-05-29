@@ -382,11 +382,11 @@ public class GlobalPrefillBatcher {
     private void planAndDispatch(List<QueuedRequest> drained, int dpSize, FlexlbConfig cfg,
                                   DpBatchReporter.FlushReason flushReason) {
         if (dpBatchReporter != null && flushReason != null) {
-            dpBatchReporter.reportBatchFlush(flushReason, drained.size());
+            dpBatchReporter.reportSloBatchFlush(model, flushReason, drained.size());
             long nowMicros = System.nanoTime() / 1000;
             for (QueuedRequest qr : drained) {
                 long waitMs = (nowMicros - qr.enqueuedAtMicros()) / 1000;
-                dpBatchReporter.reportRequestWaitTime(flushReason, waitMs);
+                dpBatchReporter.reportSloQueueWait(model, flushReason, waitMs);
             }
         }
         DispatchPlan result;

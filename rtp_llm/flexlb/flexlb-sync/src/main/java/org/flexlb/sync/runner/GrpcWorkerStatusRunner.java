@@ -240,7 +240,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                             + "predictedMs={} actualUs={} actualMs={} errorMs={}",
                     batch.getValue().size(), totalInput, totalPrefix,
                     predictedMs, batchStepTimeUs, actualMs, errorMs);
-            engineHealthReporter.reportPrefillPredictionError(
+            engineHealthReporter.reportPrefillResult(
                     modelName, predictedMs, batchStepTimeUs, totalInput, batch.getValue().size());
         }
     }

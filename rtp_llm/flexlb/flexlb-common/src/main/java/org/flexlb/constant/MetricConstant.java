@@ -314,147 +314,57 @@ public class MetricConstant {
      */
     public static final String FORWARD_TO_MASTER_RESULT = "app.forward.to.master.result";
 
-    /* ------------------------ V1 DP Batch Monitoring -------------------------- */
+    /* ------------------------ V1 DP Batch Monitoring (multi-DP path) ----------- */
 
-    /**
-     * V1 DP batch flush QPS, tagged by trigger reason
-     * (BUCKET_FULL / PER_REQUEST_TIMEOUT / DEADLINE / WINDOW_TIMER)
-     */
-    public static final String V1_DP_BATCH_FLUSH_QPS = "app.v1.dp.batch.flush.qps";
-
-    /**
-     * V1 DP batch real-request size at flush (excludes fake-pad slots), tagged by flush reason
-     */
-    public static final String V1_DP_BATCH_SIZE = "app.v1.dp.batch.size";
-
-    /**
-     * V1 DP rank hit QPS, tagged by rank — measures load distribution across dp_ranks
-     */
     public static final String V1_DP_RANK_HIT_QPS = "app.v1.dp.rank.hit.qps";
-
-    /**
-     * V1 fake-pad slot emission QPS (sum of fake slots injected to fill a DP barrier)
-     */
     public static final String V1_DP_FAKE_PAD_SLOT_QPS = "app.v1.dp.fake.pad.slot.qps";
-
-    /**
-     * V1 fake-pad slot count per batch (gauge), tagged by dpSize
-     */
     public static final String V1_DP_FAKE_PAD_COUNT_PER_BATCH = "app.v1.dp.fake.pad.count.per.batch";
-
-    /**
-     * V1 InflightBatchRegistry batch count gauge
-     */
     public static final String V1_DP_INFLIGHT_BATCH_COUNT = "app.v1.dp.inflight.batch.count";
-
-    /**
-     * V1 InflightBatchRegistry request count gauge
-     */
     public static final String V1_DP_INFLIGHT_REQUEST_COUNT = "app.v1.dp.inflight.request.count";
-
-    /**
-     * V1 InflightBatchRegistry safety-net eviction count (cumulative — should be 0 in steady state)
-     */
     public static final String V1_DP_INFLIGHT_EVICTED_COUNT = "app.v1.dp.inflight.evicted.count";
-
-    /**
-     * V1 active per-model batcher count
-     */
-    public static final String V1_DP_BATCHER_COUNT = "app.v1.dp.batcher.count";
-
-    /**
-     * V1 total queued request depth across all per-model batchers
-     */
-    public static final String V1_DP_QUEUE_DEPTH = "app.v1.dp.queue.depth";
-
-    /**
-     * V1 per-request wait time (ms) spent in the per-model batcher queue
-     * before being drained into a batch, tagged by flush reason. Reported
-     * once per request at dispatch time so KMonitor can derive p50/p99.
-     */
-    public static final String V1_DP_BATCH_WAIT_TIME_MS = "app.v1.dp.batch.wait.time.ms";
 
     /* ------------------------ SLO Violation Monitoring -------------------------- */
 
-    /**
-     * Routing SLO violation QPS — incremented when a batch is dispatched past
-     * its SLO deadline (head request's deadline already expired). Distinct from
-     * {@link #ROUTING_FAILURE_QPS} so SLO pressure can be alerted on without
-     * being drowned by worker-reject failures.
-     */
     public static final String ROUTING_SLO_VIOLATION_QPS = "app.routing.slo.violation.qps";
 
-    /* ------------------------ V1 DP SloBudgetBatcher Monitoring -------------------------- */
-    /*
-     * 这些指标专属于 SloBudgetBatcher（dpSize=1 单 DP 单 FIFO + SLO 预算驱动凑批）。
-     * 所有标签均使用 model + role + group + endpoint 组合，不直接用 raw IP。
-     */
+    /* ------------------------ V1 DP SloBudgetBatcher Monitoring ----------------- */
 
-    /**
-     * 算法结果 - SloBudgetBatcher 一次 dispatch 中分配给某个 DP rank 的请求数量。
-     * 标签: model + role + group + endpoint + dp_rank。dpSize=1 时 dp_rank 恒为 0。
-     */
-    public static final String V1_DP_SLO_BATCH_DP_REQ_COUNT = "app.v1.dp.slo.batch.dp.req.count";
+    /** 队列中等待中的请求数量。标签: model。 */
+    public static final String V1_DP_SLO_QUEUE_DEPTH = "app.v1.dp.slo.queue.depth";
 
-    /**
-     * 算法结果 - SloBudgetBatcher 一次 dispatch 中分配给某个 DP rank 的 token 总数。
-     * 标签: model + role + group + endpoint + dp_rank。
-     */
-    public static final String V1_DP_SLO_BATCH_DP_TOKENS = "app.v1.dp.slo.batch.dp.tokens";
-
-    /**
-     * 算法结果 - SloBudgetBatcher 目标 batch token 上限 (batchMaxTokens 配置值)。
-     * 标签: model。用来对比实际 actual tokens 看打满率。
-     */
-    public static final String V1_DP_SLO_BATCH_TARGET_TOKENS = "app.v1.dp.slo.batch.target.tokens";
-
-    /**
-     * 算法结果 - SloBudgetBatcher 实际打包的 batch token 总数。
-     * 标签: model + reason。和 TARGET_TOKENS 比可知 batch 利用率。
-     */
-    public static final String V1_DP_SLO_BATCH_ACTUAL_TOKENS = "app.v1.dp.slo.batch.actual.tokens";
-
-    /**
-     * 算法状态 - SloBudgetBatcher 队列中等待中的请求数量 (含 head)。
-     * 标签: model。每次 loop 迭代上报。
-     */
-    public static final String V1_DP_SLO_QUEUE_REQUESTS = "app.v1.dp.slo.queue.requests";
-
-    /**
-     * 算法状态 - SloBudgetBatcher 队列中等待中的请求 token 总数。
-     * 标签: model。配合 QUEUE_REQUESTS 可知队列平均请求大小。
-     */
+    /** 队列中等待中的请求 token 总数。标签: model。 */
     public static final String V1_DP_SLO_QUEUE_TOKENS = "app.v1.dp.slo.queue.tokens";
 
-    /**
-     * 算法状态 - SloBudgetBatcher 单条请求实际排队时间 (ms)。
-     * 标签: model + reason。PRECISE 类型用于 p50/p95/p99 分位数。
-     */
+    /** 单条请求排队时间 (ms)。标签: model + reason。 */
     public static final String V1_DP_SLO_QUEUE_WAIT_MS = "app.v1.dp.slo.queue.wait.ms";
 
-    /**
-     * 算法状态 - SloBudgetBatcher 请求失败 QPS。
-     * 标签: model + cause (SLO_DROPPED / PLANNER_ERROR / DISPATCH_ERROR)。
-     */
+    /** 凑批触发频次。标签: model + reason。 */
+    public static final String V1_DP_SLO_BATCH_FLUSH_QPS = "app.v1.dp.slo.batch.flush.qps";
+
+    /** 每批请求数。标签: model + reason。 */
+    public static final String V1_DP_SLO_BATCH_REQUESTS = "app.v1.dp.slo.batch.requests";
+
+    /** 配置的 batch token 上限。标签: model。 */
+    public static final String V1_DP_SLO_BATCH_TARGET_TOKENS = "app.v1.dp.slo.batch.target.tokens";
+
+    /** 实际 batch token 总数。标签: model + reason。 */
+    public static final String V1_DP_SLO_BATCH_ACTUAL_TOKENS = "app.v1.dp.slo.batch.actual.tokens";
+
+    /** 请求失败 QPS。标签: model + cause。 */
     public static final String V1_DP_SLO_FAILURE_QPS = "app.v1.dp.slo.failure.qps";
 
-    /**
-     * 算法性能 - SloBudgetBatcher 主循环单次 stepOnce 耗时 (微秒)。
-     * 标签: model + outcome (dispatch / fail / park)。PRECISE 类型。
-     */
-    public static final String V1_DP_SLO_LOOP_DURATION_US = "app.v1.dp.slo.loop.duration.us";
+    /** 单次调度 tick (stepOnce) 耗时 µs。标签: model + outcome。 */
+    public static final String V1_DP_SLO_TICK_DURATION_US = "app.v1.dp.slo.tick.duration.us";
 
-    /**
-     * 算法性能 - SloBudgetBatcher 每次成功 dispatch 之前经历的 loop 次数 (含本次)。
-     * 标签: model + reason。值大表示 SLO 宽松 / park 频繁。
-     */
-    public static final String V1_DP_SLO_LOOPS_PER_DISPATCH = "app.v1.dp.slo.loops.per.dispatch";
+    /** Prefill 实际耗时 ms（worker 返回后计算）。标签: model + token_bucket。 */
+    public static final String V1_DP_SLO_PREFILL_DURATION_MS = "app.v1.dp.slo.prefill.duration.ms";
 
-    public static final String V1_DP_PREFILL_ACTUAL_TIME_US = "app.v1.dp.prefill.actual.time.us";
+    /** Prefill 预测误差 ms (predicted - actual)。标签: model + token_bucket。 */
+    public static final String V1_DP_SLO_PREFILL_PREDICTION_ERROR_MS = "app.v1.dp.slo.prefill.prediction.error.ms";
 
-    public static final String V1_DP_PREFILL_PREDICTION_ERROR_MS = "app.v1.dp.prefill.prediction.error.ms";
+    /** 每批输入 token 总数。标签: model + token_bucket。 */
+    public static final String V1_DP_SLO_BATCH_INPUT_TOKENS = "app.v1.dp.slo.batch.input.tokens";
 
-    public static final String V1_DP_PREFILL_BATCH_INPUT_TOKENS = "app.v1.dp.prefill.batch.input.tokens";
-
-    public static final String V1_DP_PREFILL_BATCH_SIZE = "app.v1.dp.prefill.batch.size";
+    /** 每批请求数（按 token_bucket 切分）。标签: model + token_bucket。 */
+    public static final String V1_DP_SLO_BATCH_SIZE = "app.v1.dp.slo.batch.size";
 }

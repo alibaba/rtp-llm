@@ -3,7 +3,6 @@ package org.flexlb.balance.dp;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.DpBatchReporter;
 import org.flexlb.util.Logger;
@@ -57,8 +56,6 @@ public class SloBudgetBatcher {
 
     private final Thread worker;
     private volatile boolean shutdown = false;
-
-    private int loopsSinceLastDispatch = 0;
 
     public SloBudgetBatcher(String model,
                             ConfigService configService,
@@ -135,11 +132,10 @@ public class SloBudgetBatcher {
                 waitForNonEmpty();
                 long loopStartNs = System.nanoTime();
                 StepResult result = stepOnce();
-                loopsSinceLastDispatch++;
                 long durationUs = (System.nanoTime() - loopStartNs) / 1000;
                 DpBatchReporter.LoopOutcome outcome = classifyOutcome(result);
                 if (dpBatchReporter != null) {
-                    dpBatchReporter.reportSloLoopDuration(model, outcome, durationUs);
+                    dpBatchReporter.reportSloTickDuration(model, outcome, durationUs);
                 }
                 if (result == null) {
                     continue;
@@ -275,11 +271,6 @@ public class SloBudgetBatcher {
             return;
         }
         if (result.drained != null && !result.drained.isEmpty()) {
-            int loopsConsumed = loopsSinceLastDispatch;
-            loopsSinceLastDispatch = 0;
-            if (dpBatchReporter != null) {
-                dpBatchReporter.reportSloLoopsPerDispatch(model, result.reason, loopsConsumed);
-            }
             planAndDispatch(result.drained, result.cfg, result.reason, result.batchMaxTokens);
         }
     }
@@ -334,12 +325,11 @@ public class SloBudgetBatcher {
             actualTokens += computeTokens(qr);
         }
         if (dpBatchReporter != null) {
-            dpBatchReporter.reportBatchFlush(reason, drained.size());
+            dpBatchReporter.reportSloBatchFlush(model, reason, drained.size());
             dpBatchReporter.reportSloBatchTokens(model, reason, batchMaxTokens, actualTokens);
             long nowMicros = System.nanoTime() / 1000;
             for (QueuedRequest qr : drained) {
                 long waitMs = (nowMicros - qr.enqueuedAtMicros()) / 1000;
-                dpBatchReporter.reportRequestWaitTime(reason, waitMs);
                 dpBatchReporter.reportSloQueueWait(model, reason, waitMs);
             }
         }
@@ -368,7 +358,6 @@ public class SloBudgetBatcher {
             fr.request().future().complete(failureResponse(fr.reason(), fr.message()));
         }
         for (PrefillBatch batch : plan.batches()) {
-            reportBatchDpSlots(batch);
             try {
                 dispatchCallback.accept(batch);
             } catch (Throwable t) {
@@ -386,44 +375,13 @@ public class SloBudgetBatcher {
         }
     }
 
-    private void reportBatchDpSlots(PrefillBatch batch) {
-        if (dpBatchReporter == null || batch == null || batch.requests().isEmpty()) {
-            return;
-        }
-        ServerStatus prefill = batch.prefillTarget();
-        String endpoint = endpointOf(prefill);
-        String role = prefill != null && prefill.getRole() != null ? prefill.getRole().name() : "PREFILL";
-        String group = prefill != null ? prefill.getGroup() : null;
-
-        long tokens = 0;
-        for (PendingRequest pr : batch.requests()) {
-            tokens += tokensOfPending(pr);
-        }
-        dpBatchReporter.reportSloBatchDpSlot(model, role, group, endpoint, 0,
-                batch.requests().size(), tokens);
-    }
-
-    private static String endpointOf(ServerStatus s) {
-        if (s == null) {
-            return "unknown";
-        }
-        return s.getServerIp() + ":" + s.getGrpcPort();
-    }
-
-    private static long tokensOfPending(PendingRequest pr) {
-        if (pr == null || pr.ctx() == null || pr.ctx().getRequest() == null) {
-            return 0;
-        }
-        return pr.ctx().getRequest().getSeqLen();
-    }
-
     private void reportFailedRequest(QueuedRequest qr, DpBatchReporter.FlushReason reason) {
         if (dpBatchReporter == null) {
             return;
         }
-        dpBatchReporter.reportBatchFlush(reason, 1);
+        dpBatchReporter.reportSloBatchFlush(model, reason, 1);
         long waitMs = (System.nanoTime() / 1000 - qr.enqueuedAtMicros()) / 1000;
-        dpBatchReporter.reportRequestWaitTime(reason, waitMs);
+        dpBatchReporter.reportSloQueueWait(model, reason, waitMs);
     }
 
     private static Response failureResponse(StrategyErrorType type, String detail) {

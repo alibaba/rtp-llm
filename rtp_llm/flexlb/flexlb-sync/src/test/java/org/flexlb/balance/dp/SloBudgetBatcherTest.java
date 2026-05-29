@@ -138,7 +138,7 @@ class SloBudgetBatcherTest {
 
         verify(reporter, atLeastOnce()).reportSloFailure("m1",
                 DpBatchReporter.FailureCause.SLO_DROPPED);
-        verify(reporter, atLeastOnce()).reportSloLoopDuration(eq("m1"),
+        verify(reporter, atLeastOnce()).reportSloTickDuration(eq("m1"),
                 eq(DpBatchReporter.LoopOutcome.FAIL), anyLong());
     }
 
@@ -303,9 +303,9 @@ class SloBudgetBatcherTest {
         verify(reporter, atLeastOnce()).reportSloQueueSnapshot(eq("m1"), anyInt(), anyLong());
         verify(reporter, atLeastOnce()).reportSloBatchTokens(eq("m1"),
                 eq(DpBatchReporter.FlushReason.BATCH_READY), anyLong(), anyLong());
-        verify(reporter, atLeastOnce()).reportSloBatchDpSlot(eq("m1"), eq("PREFILL"), eq("g1"),
-                eq("10.0.0.1:9080"), eq(0), anyInt(), anyLong());
-        verify(reporter, atLeastOnce()).reportSloLoopDuration(eq("m1"),
+        verify(reporter, atLeastOnce()).reportSloBatchFlush(eq("m1"),
+                eq(DpBatchReporter.FlushReason.BATCH_READY), anyInt());
+        verify(reporter, atLeastOnce()).reportSloTickDuration(eq("m1"),
                 eq(DpBatchReporter.LoopOutcome.DISPATCH), anyLong());
     }
 

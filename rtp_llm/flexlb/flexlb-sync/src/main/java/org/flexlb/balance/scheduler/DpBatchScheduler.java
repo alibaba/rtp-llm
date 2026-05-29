@@ -206,7 +206,6 @@ public class DpBatchScheduler {
                 inflightRegistry.sizeBatches(),
                 inflightRegistry.sizeRequests(),
                 inflightRegistry.getEvictedCount());
-        dpBatchReporter.reportBatcherStats(batcherCount(), totalQueueDepth());
     }
 
     private void handleAck(PrefillBatch batch, long batchId, List<RankAssignment> assignments,
@@ -521,18 +520,4 @@ public class DpBatchScheduler {
         timerExecutor.shutdownNow();
     }
 
-    public int batcherCount() {
-        return batchers.size() + sloBatchers.size();
-    }
-
-    public int totalQueueDepth() {
-        int sum = 0;
-        for (GlobalPrefillBatcher b : batchers.values()) {
-            sum += b.queueSize();
-        }
-        for (SloBudgetBatcher b : sloBatchers.values()) {
-            sum += b.queueSize();
-        }
-        return sum;
-    }
 }

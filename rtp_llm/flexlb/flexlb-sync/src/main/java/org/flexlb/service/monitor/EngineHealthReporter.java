@@ -66,10 +66,10 @@ import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_STEP_LATENCY
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.FORWARD_TO_MASTER_RESULT;
 import static org.flexlb.constant.MetricConstant.REQUEST_ARRIVAL_DELAY_MS;
-import static org.flexlb.constant.MetricConstant.V1_DP_PREFILL_ACTUAL_TIME_US;
-import static org.flexlb.constant.MetricConstant.V1_DP_PREFILL_BATCH_INPUT_TOKENS;
-import static org.flexlb.constant.MetricConstant.V1_DP_PREFILL_BATCH_SIZE;
-import static org.flexlb.constant.MetricConstant.V1_DP_PREFILL_PREDICTION_ERROR_MS;
+import static org.flexlb.constant.MetricConstant.V1_DP_SLO_BATCH_INPUT_TOKENS;
+import static org.flexlb.constant.MetricConstant.V1_DP_SLO_BATCH_SIZE;
+import static org.flexlb.constant.MetricConstant.V1_DP_SLO_PREFILL_DURATION_MS;
+import static org.flexlb.constant.MetricConstant.V1_DP_SLO_PREFILL_PREDICTION_ERROR_MS;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_EVENT;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_NODE;
 
@@ -147,10 +147,10 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_USED_KV_CACHE_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(REQUEST_ARRIVAL_DELAY_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(FORWARD_TO_MASTER_RESULT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        this.monitor.register(V1_DP_PREFILL_ACTUAL_TIME_US, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(V1_DP_PREFILL_PREDICTION_ERROR_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(V1_DP_PREFILL_BATCH_INPUT_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(V1_DP_PREFILL_BATCH_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(V1_DP_SLO_PREFILL_DURATION_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(V1_DP_SLO_PREFILL_PREDICTION_ERROR_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(V1_DP_SLO_BATCH_INPUT_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(V1_DP_SLO_BATCH_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }
 
     public void reportLatencyMetric(String modelName, String role, double result, double result2) {
@@ -393,23 +393,25 @@ public class EngineHealthReporter {
         monitor.report(FORWARD_TO_MASTER_RESULT, FlexMetricTags.of("type", type, "code", code), 1.0);
     }
 
-    public void reportPrefillPredictionError(
+    public void reportPrefillResult(
             String model, long predictedMs, long actualUs, long totalInput, int batchSize) {
-        String bucket = inputBucket(totalInput);
+        long actualMs = actualUs / 1000;
+        String bucket = tokenBucket(totalInput);
         FlexMetricTags tags = FlexMetricTags.of(
                 "model", model == null ? "default" : model,
-                "input_bucket", bucket);
-        monitor.report(V1_DP_PREFILL_ACTUAL_TIME_US, tags, actualUs);
-        monitor.report(V1_DP_PREFILL_PREDICTION_ERROR_MS, tags, predictedMs - actualUs / 1000);
-        monitor.report(V1_DP_PREFILL_BATCH_INPUT_TOKENS, tags, totalInput);
-        monitor.report(V1_DP_PREFILL_BATCH_SIZE, tags, batchSize);
+                "token_bucket", bucket);
+        monitor.report(V1_DP_SLO_PREFILL_DURATION_MS, tags, actualMs);
+        monitor.report(V1_DP_SLO_PREFILL_PREDICTION_ERROR_MS, tags, predictedMs - actualMs);
+        monitor.report(V1_DP_SLO_BATCH_INPUT_TOKENS, tags, totalInput);
+        monitor.report(V1_DP_SLO_BATCH_SIZE, tags, batchSize);
     }
 
-    private static String inputBucket(long tokens) {
-        if (tokens <= 128) return "0-128";
-        if (tokens <= 512) return "128-512";
-        if (tokens <= 2048) return "512-2048";
-        if (tokens <= 8192) return "2048-8192";
-        return "8192+";
+    private static String tokenBucket(long tokens) {
+        if (tokens <= 512) return "0-512";
+        if (tokens <= 2048) return "512-2k";
+        if (tokens <= 8192) return "2k-8k";
+        if (tokens <= 32768) return "8k-32k";
+        if (tokens <= 131072) return "32k-128k";
+        return "128k+";
     }
 }
