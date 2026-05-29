@@ -172,6 +172,8 @@ public class GenericBatchHandler {
         body.put("error", "all_sub_batches_failed");
         body.put("failed_count", merged.failedIndices().size());
         body.put("total_chunks", merged.totalChunks());
+        ArrayNode reasons = body.putArray("failed_reasons");
+        merged.failedReasons().stream().distinct().forEach(reasons::add);
         return json(500, body);
     }
 
