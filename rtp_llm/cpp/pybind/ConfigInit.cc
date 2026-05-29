@@ -368,6 +368,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
+        .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
         .def_readwrite("dsv4_fixed_pool_use_memory", &KVCacheConfig::dsv4_fixed_pool_use_memory)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
@@ -444,10 +445,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reco_client_config,
                                       self.ssm_state_dtype,
                                       self.dsv4_fixed_pool_blocks,
-                                      self.dsv4_fixed_pool_use_memory);
+                                      self.dsv4_fixed_pool_use_memory,
+                                      self.dsv4_hca_state_pool_blocks);
             },
             [](py::tuple t) {
-                if (t.size() != 45 && t.size() != 46 && t.size() < 50)
+                if (t.size() != 45 && t.size() != 46 && t.size() != 47 && t.size() < 50)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -509,6 +511,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     const size_t expected_with_fixed_pool_memory = (has_disk_fields ? 51u : 46u);
                     if (t.size() >= expected_with_fixed_pool_memory) {
                         c.dsv4_fixed_pool_use_memory = t[45 + offset].cast<bool>();
+                    }
+                    const size_t expected_with_hca_state_pool = (has_disk_fields ? 52u : 47u);
+                    if (t.size() >= expected_with_hca_state_pool) {
+                        c.dsv4_hca_state_pool_blocks = t[46 + offset].cast<uint32_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());

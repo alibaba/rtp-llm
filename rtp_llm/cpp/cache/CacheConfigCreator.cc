@@ -32,13 +32,26 @@ size_t fallbackFixedPoolHbmBytes(const CacheConfig& config) {
     if (config.fixed_pool_uses_pinned_cpu) {
         return 0u;
     }
+    if (config.use_typed_cache_regions && !config.group_region_names.empty()
+        && config.group_region_names.size() == config.group_block_size_bytes.size()) {
+        size_t bytes = 0;
+        for (size_t gid = 0; gid < config.group_region_names.size(); ++gid) {
+            const auto region = config.group_region_names[gid];
+            if (!isDsv4FixedRegion(region)) {
+                continue;
+            }
+            const bool explicit_hca = region == KVCacheRegionName::HCA_STATE && config.dsv4_hca_state_pool_blocks > 0;
+            const bool explicit_fixed = config.dsv4_fixed_pool_blocks > 0;
+            if (!explicit_hca && !explicit_fixed) {
+                bytes += config.group_block_size_bytes[gid];
+            }
+        }
+        return bytes;
+    }
     return config.swa_block_size_bytes + config.state_block_size_bytes;
 }
 
 size_t effectivePagedBlockBytes(const CacheConfig& config, int step) {
-    if (config.use_typed_cache_regions && config.dsv4_fixed_pool_blocks > 0) {
-        return config.block_size_bytes;
-    }
     return config.block_size_bytes + steppedBytes(fallbackFixedPoolHbmBytes(config), step);
 }
 
@@ -130,10 +143,11 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         if (config.fixed_pool_reserve_bytes > 0) {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > config.fixed_pool_reserve_bytes,
                                     "kv cache budget %zu MiB is smaller than fixed-pool reservation %zu MiB "
-                                    "(DSV4_FIXED_POOL_BLOCKS=%u; reduce it if needed)",
+                                    "(DSV4_FIXED_POOL_BLOCKS=%u, DSV4_HCA_STATE_POOL_BLOCKS=%u; reduce it if needed)",
                                     kv_cache_mem_size / 1024 / 1024,
                                     config.fixed_pool_reserve_bytes / 1024 / 1024,
-                                    config.dsv4_fixed_pool_blocks);
+                                    config.dsv4_fixed_pool_blocks,
+                                    config.dsv4_hca_state_pool_blocks);
             paged_budget = kv_cache_mem_size - config.fixed_pool_reserve_bytes;
             RTP_LLM_LOG_INFO("kv cache: total budget %zu MiB, fixed-pool reserve %zu MiB, paged budget %zu MiB",
                              kv_cache_mem_size / 1024 / 1024,
@@ -141,12 +155,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                              paged_budget / 1024 / 1024);
         }
         const int  joint_step       = std::max(1, config.linear_step);
-        const bool dsv4_fixed_pools = config.use_typed_cache_regions && config.dsv4_fixed_pool_blocks > 0;
-        if (dsv4_fixed_pools) {
-            block_num = paged_budget / config.block_size_bytes;
-        } else {
-            block_num = paged_budget / effectivePagedBlockBytes(config, joint_step);
-        }
+        block_num = paged_budget / effectivePagedBlockBytes(config, joint_step);
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
