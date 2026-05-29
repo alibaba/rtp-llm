@@ -16,7 +16,7 @@ import grpc
 
 DASH_SC_GRPC_PROTOCOL = "grpc"
 FORWARD_ACCESS_SCHEMA_VERSION = 1
-FORWARD_ACCESS_LOG_VERSION = 1
+FORWARD_ACCESS_LOG_VERSION = 2
 
 _INT_WIDTH = {
     "INT8": 1,
@@ -186,7 +186,10 @@ def _read_input_scalar(request, name: str) -> Optional[int | float | bool]:
         return _first_float(datatype, raw)
     if name in _SAFE_BOOL_INPUTS:
         v = _first_int(datatype, raw)
-        return None if v is None else bool(v)
+        if v is None:
+            fv = _first_float(datatype, raw)
+            return None if fv is None else bool(fv)
+        return bool(v)
     return _first_int(datatype, raw)
 
 
@@ -308,12 +311,10 @@ class ForwardAccessRecord:
     resp_count: int = 0
     request_id: Optional[str] = None
     model_name: Optional[str] = None
-    input_len: Optional[int] = None
     input_token_len: Optional[int] = None
     generate_config: Optional[dict[str, Any]] = None
 
     output_token_len: int = 0
-    output_len: int = 0
     finish_reason: Optional[int] = None
     finished: Optional[bool] = None
     terminal_seen: bool = False
@@ -350,6 +351,18 @@ class ForwardAccessRecord:
     context_active: Optional[bool] = None
     close_reason: Optional[str] = None
 
+    @property
+    def input_len(self) -> Optional[int]:
+        # MetricReporter still reads this common aggregate attribute; the
+        # emitted forward log uses the explicit input_token_len field only.
+        return self.input_token_len
+
+    @property
+    def output_len(self) -> int:
+        # MetricReporter still reads this common aggregate attribute; the
+        # emitted forward log uses the explicit output_token_len field only.
+        return self.output_token_len
+
     def capture_request(self, request) -> None:
         if request is None:
             return
@@ -363,7 +376,6 @@ class ForwardAccessRecord:
             self.model_name = str(model_name)
         if self.input_token_len is None:
             self.input_token_len = extract_input_token_len(request)
-            self.input_len = self.input_token_len
         if self.generate_config is None:
             self.generate_config = extract_generate_config_summary(request)
 
@@ -394,7 +406,6 @@ class ForwardAccessRecord:
         else:
             self.empty_frame_count += 1
         self.output_token_len += stats.output_token_len
-        self.output_len = self.output_token_len
         if stats.finish_reason is not None:
             self.finish_reason = stats.finish_reason
         if stats.finished is not None:
@@ -530,13 +541,11 @@ class ForwardAccessRecord:
             "method": self.method,
             "stream_type": self.stream_type,
             "capture_mode": "forward_summary",
+            "legacy_capture_mode": "raw",
             "forward_log_version": FORWARD_ACCESS_LOG_VERSION,
             "peer": self.peer,
             "req_count": self.req_count,
             "resp_count": self.resp_count,
-            "iteration_count": self.resp_count,
-            "request_iteration_count": self.req_count,
-            "response_iteration_count": self.resp_count,
             "latency_total_ms": elapsed_ms(self.start_ts, end_ts),
             "latency_ttfb_ms": elapsed_ms(self.start_ts, self.first_resp_ts),
             "latency_ttft_ms": elapsed_ms(self.start_ts, self.first_token_ts),
@@ -562,12 +571,18 @@ class ForwardAccessRecord:
             "model_name": self.model_name,
             "upstream_request_id": self.upstream_request_id,
             "upstream_request_id_key": self.upstream_request_id_key,
-            "input_len": self.input_len,
+            "input_len": None,
+            "input_ids": None,
             "input_token_len": self.input_token_len,
             "backend_input_token_len": self.backend_input_token_len,
             "backend_aux_info": self.backend_aux_info(),
             "output_token_len": self.output_token_len,
-            "output_len": self.output_len,
+            "output_len": None,
+            "generated_ids": None,
+            "raw_requests": None,
+            "raw_responses": None,
+            "raw_requests_truncated": None,
+            "raw_responses_truncated": None,
             "finish_reason": self.finish_reason,
             "finished": self.finished,
             "terminal_seen": self.terminal_seen,

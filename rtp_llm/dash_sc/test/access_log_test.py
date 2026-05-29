@@ -855,14 +855,18 @@ class ForwardSummaryBidiTest(ForwardSummaryInterceptorTestBase):
         rec = self.records[0]
 
         self.assertEqual(rec["capture_mode"], "forward_summary")
+        self.assertEqual(rec["legacy_capture_mode"], "raw")
         self.assertEqual(rec["req_count"], 2)
         self.assertEqual(rec["resp_count"], 2)
-        self.assertEqual(rec["request_iteration_count"], 2)
-        self.assertEqual(rec["response_iteration_count"], 2)
+        self.assertNotIn("iteration_count", rec)
+        self.assertNotIn("request_iteration_count", rec)
+        self.assertNotIn("response_iteration_count", rec)
         self.assertEqual(rec["request_read_status"], "eof")
         self.assertIsInstance(rec["first_request_ts_epoch_ms"], int)
         self.assertIsInstance(rec["request_end_ts_epoch_ms"], int)
         self.assertEqual(rec["request_id"], "r1")
+        self.assertIsNone(rec["input_len"])
+        self.assertIsNone(rec["output_len"])
         self.assertEqual(rec["input_token_len"], 3)
         self.assertEqual(rec["output_token_len"], 3)
         self.assertEqual(rec["token_frame_count"], 2)
@@ -871,10 +875,10 @@ class ForwardSummaryBidiTest(ForwardSummaryInterceptorTestBase):
         self.assertTrue(rec["terminal_seen"])
         self.assertEqual(rec["finish_reason"], 0)
         self.assertEqual(rec["status"], "OK")
-        self.assertNotIn("raw_requests", rec)
-        self.assertNotIn("raw_responses", rec)
-        self.assertNotIn("input_ids", rec)
-        self.assertNotIn("generated_ids", rec)
+        self.assertIsNone(rec["raw_requests"])
+        self.assertIsNone(rec["raw_responses"])
+        self.assertIsNone(rec["input_ids"])
+        self.assertIsNone(rec["generated_ids"])
 
     def test_nonterminal_finish_reason_does_not_hide_transport_error(self) -> None:
         class _Rendezvous(grpc.RpcError):
