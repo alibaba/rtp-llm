@@ -130,6 +130,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":block_pool",
+        ":cache_types",
     ],
 )
 

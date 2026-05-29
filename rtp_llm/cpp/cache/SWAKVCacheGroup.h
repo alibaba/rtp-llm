@@ -31,6 +31,8 @@ public:
 
 private:
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
+    bool shouldCheckSWATailBlockIds() const;
+    void checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const;
 
     int linear_step_ = 0;
 };
