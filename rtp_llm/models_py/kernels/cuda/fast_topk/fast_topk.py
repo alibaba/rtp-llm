@@ -112,8 +112,7 @@ def fast_topk_transform_ragged_fused(
     """
     assert score.dim() == 2
 
-    if row_starts is not None and (_cuda_graph_capturing() or row_starts.any()):
-        # flashinfer does not support per-row start offsets; fall back to CUDA kernel.
+    if row_starts is not None:
         from rtp_llm.ops.compute_ops import rtp_llm_ops
 
         topk_indices_ragged = score.new_empty((score.shape[0], topk), dtype=torch.int32)

@@ -803,12 +803,22 @@ class IndexerOp(nn.Module):
             fmha_params.ks.device == logits.device
         ), "ks must be on the same device as logits"
 
+        # ks is all-zero when batch_size == 1 (single request → k_offset stays 0
+        # in fillParamsInternal).  Passing None lets flashinfer's fast path run
+        # and avoids the CUDA fallback kernel overhead.
+        # cu_kv_seqlens is [B+1], so shape[0] > 2 ↔ batch_size > 1.
+        ks_row_starts = (
+            fmha_params.ks
+            if attention_inputs.cu_kv_seqlens.shape[0] > 2
+            else None
+        )
+
         topk_result = fast_topk_transform_ragged_fused(
             score=logits,
             lengths=fmha_params.expanded_seq_lens,
             topk_indices_offset=fmha_params.topk_indices_offset,
             topk=self.index_topk,
-            row_starts=fmha_params.ks,
+            row_starts=ks_row_starts,
         )
 
         return topk_result
@@ -914,6 +924,9 @@ class IndexerOp(nn.Module):
         )
         kv_fp8_full = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
 
+        # Same batch-size gate as _get_topk_ragged: pass None when batch==1.
+        has_ks_offset = cu_kv_seqlens_global.shape[0] > 2
+
         def run_part_logits_topk(
             q_part: torch.Tensor,
             weights_part: torch.Tensor,
@@ -935,7 +948,7 @@ class IndexerOp(nn.Module):
                 lengths=lengths,
                 topk_indices_offset=topk_off,
                 topk=self.index_topk,
-                row_starts=ks,
+                row_starts=ks if has_ks_offset else None,
             )
 
         if total_local_ids.size(0) > 0:
