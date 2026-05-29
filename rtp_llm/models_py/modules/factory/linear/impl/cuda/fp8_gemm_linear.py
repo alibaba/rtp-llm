@@ -1,9 +1,17 @@
-"""CUDA FP8 GEMM wrapper that dispatches between flashinfer and DeepGEMM."""
+"""CUDA FP8 GEMM wrapper that dispatches between flashinfer and DeepGEMM.
+
+The quant step (bf16 -> fp8 + scales) is pulled out to this wrapper level so
+that ``torch.compile`` / Dynamo can capture it in the same FX subgraph as the
+preceding activation.  GraphFX fusion passes (sigmoid_mul, silu_and_mul,
+rmsnorm_gated, add_rmsnorm) match ``activation -> sgl_per_token_group_quant_fp8``
+patterns; keeping the quant visible at the module boundary is essential.
+"""
 
 from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
     CudaFp8DeepGEMMLinear,
@@ -11,6 +19,7 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear impo
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear import (
     CudaFp8FlashinferLinear,
 )
+from rtp_llm.models_py.modules.fuse_kernel_fx.quant_provenance import lookup_quant
 from rtp_llm.ops import HWKernelConfig
 
 
@@ -128,6 +137,12 @@ class CudaFp8GEMMLinear(LinearBase):
     def _should_use_flashinfer(self, input: torch.Tensor) -> bool:
         if self._flashinfer_linear is None:
             return False
+        # Under torch.compile, always use deepgemm to avoid a graph break
+        # from the data-dependent `m >= threshold` check below.  This keeps
+        # the quant call in the same FX subgraph as the preceding activation
+        # so GraphFX fusion passes can match activation+quant patterns.
+        if torch.compiler.is_compiling():
+            return False
         if input.dim() != 2:
             return False
 
@@ -149,12 +164,24 @@ class CudaFp8GEMMLinear(LinearBase):
         input: torch.Tensor,
         input_scales: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # When the caller provides input_scales (fused norm/silu+quant kernel
-        # output), force the deepgemm path: the fused kernels emit
-        # column-major TMA-aligned scales matching deepgemm's layout, and
-        # flashinfer's path expects scales bound at __init__ time.
         if input_scales is not None:
             return self._deepgemm_linear(input, input_scales=input_scales)
+        if not torch.compiler.is_compiling() and input.dtype == torch.bfloat16:
+            cached = lookup_quant(input)
+            if cached is not None:
+                expected = torch.int32 if self.scale_ue8m0 else torch.float32
+                if cached[1].dtype == expected:
+                    return self._deepgemm_linear(cached[0], input_scales=cached[1])
         if not self._should_use_flashinfer(input):
+            if torch.compiler.is_compiling() and input.dtype == torch.bfloat16:
+                input_fp8, quant_scales = sgl_per_token_group_quant_fp8(
+                    input,
+                    group_size=128,
+                    eps=1e-4,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    scale_ue8m0=self.scale_ue8m0,
+                )
+                return self._deepgemm_linear(input_fp8, input_scales=quant_scales)
             return self._deepgemm_linear(input)
         return self._flashinfer_linear(input)

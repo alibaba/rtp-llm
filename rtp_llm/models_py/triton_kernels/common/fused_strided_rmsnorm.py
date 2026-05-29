@@ -37,6 +37,8 @@ always tied or a win. Earlier observed 0.4x slowdowns turned out to be GPU
 contention noise, not a real loss zone.
 """
 
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
@@ -261,6 +263,7 @@ def fused_strided_rmsnorm(
     x: torch.Tensor,
     weight: torch.Tensor,
     eps: float = 1e-6,
+    out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """RMSNorm over a (possibly strided) 2-D input. Returns bf16 normed output.
 
@@ -269,9 +272,12 @@ def fused_strided_rmsnorm(
                 Last dim must be contiguous (stride 1).
         weight: [H] bf16.
         eps:    RMSNorm epsilon.
+        out:    Optional pre-allocated [T, H] bf16 output buffer; the kernel
+                writes directly into it (avoids the caller's ``output.copy_``).
 
     Returns:
-        bf16 normed output, contiguous shape ``[T, H]``.
+        bf16 normed output, contiguous shape ``[T, H]`` (the ``out`` buffer
+        when provided).
 
     Falls back to ``.contiguous() + flashinfer.norm.rmsnorm`` for ``H > 8192``
     or when ``x.stride(-1) != 1``.
@@ -282,9 +288,18 @@ def fused_strided_rmsnorm(
 
     block_n = triton.next_power_of_2(H)
     if block_n > MAX_INREG_H or x.stride(-1) != 1:
-        return _baseline_strided_rmsnorm(x, weight, eps)
+        baseline = _baseline_strided_rmsnorm(x, weight, eps)
+        if out is not None:
+            out.copy_(baseline)
+            return out
+        return baseline
 
-    bf16_out = torch.empty((T, H), dtype=torch.bfloat16, device=x.device)
+    if out is not None:
+        assert out.shape == (T, H) and out.dtype == torch.bfloat16
+        assert out.device == x.device
+        bf16_out = out
+    else:
+        bf16_out = torch.empty((T, H), dtype=torch.bfloat16, device=x.device)
     if T == 0:
         return bf16_out
 
@@ -395,12 +410,18 @@ def fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
     eps: float = 1e-6,
     group_size: int = 128,
     scale_ue8m0: bool = False,
+    out_bf16: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """RMSNorm + per-token-group fp8 quant + bf16 normed output.
 
     Dual-output variant: when one consumer wants bf16 (e.g. q_b_proj is bf16
     or wq_b is bf16) and another wants fp8 (the other one).
     Returns ``(bf16_normed, fp8_out, scale)``.
+
+    Args:
+        out_bf16: Optional pre-allocated [T, H] bf16 buffer for the normed
+                  output. Avoids an allocation when the caller already has
+                  a destination buffer (e.g. strided_rmsnorm_consumer).
     """
     assert x.dim() == 2
     assert weight.dim() == 1 and weight.shape[0] == x.shape[1]
@@ -411,11 +432,19 @@ def fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
 
     block_n = triton.next_power_of_2(H)
     if block_n > MAX_INREG_H or x.stride(-1) != 1:
-        return _baseline_strided_rmsnorm_fp8_quant_with_bf16_output(
+        result = _baseline_strided_rmsnorm_fp8_quant_with_bf16_output(
             x, weight, eps, group_size, scale_ue8m0
         )
+        if out_bf16 is not None:
+            out_bf16.copy_(result[0])
+            return out_bf16, result[1], result[2]
+        return result
 
-    bf16_out = torch.empty((T, H), dtype=torch.bfloat16, device=x.device)
+    if out_bf16 is not None:
+        assert out_bf16.shape == (T, H) and out_bf16.dtype == torch.bfloat16
+        bf16_out = out_bf16
+    else:
+        bf16_out = torch.empty((T, H), dtype=torch.bfloat16, device=x.device)
     fp8_out = torch.empty((T, H), dtype=torch.float8_e4m3fn, device=x.device)
     scale_out = create_per_token_group_quant_fp8_output_scale(
         x_shape=(T, H),

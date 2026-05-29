@@ -16,7 +16,9 @@ if _DEVICE_TYPE == DeviceType.Cuda:
         fused_logits_head_gate,
     )
 else:
-    fused_logits_head_gate = None  # type: ignore
+    fused_logits_head_gate = None  # type: ignore  # noqa: F401  (kept for FX pass import compat)
+
+from rtp_llm.models_py.utils.fuse_dump import dump_fuse_tensors, fuse_dump_active
 
 
 class Indexer(nn.Module):
@@ -39,12 +41,13 @@ class Indexer(nn.Module):
     ):
         super().__init__()
         self.layer_idx = layer_idx
+        # The ``_fuse_logits_head_gate`` eager branch is gone (DSV4 strip);
+        # ``indexer_logits_head_gate_fx`` GraphFX pass takes over.  We still
+        # need ``fuse_kernels_enabled`` to decide whether to contiguify the
+        # weight (small one-time init cost paid only when the FX rewrite will
+        # actually consume it).
         from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 
-        # Resolve once at init: HWKernelConfig.enable_fuse_kernels (or env
-        # ``ENABLE_FUSE_KERNELS``) → ``self._fuse_logits_head_gate``. Keep it
-        # out of the forward path so it's free at decode (no env / config
-        # lookup per token).
         self._fuse_logits_head_gate = (
             fuse_kernels_enabled(hw_kernel_config)
             and fused_logits_head_gate is not None
@@ -136,22 +139,21 @@ class Indexer(nn.Module):
     def _get_logits_head_gate(
         self, x: torch.Tensor, q_scale: torch.Tensor
     ) -> torch.Tensor:
-        # F3: fused (cast + GEMV + 2 elementwise muls) into one Triton kernel.
-        # ``self._fuse_logits_head_gate`` is resolved at __init__ from
-        # ``HWKernelConfig.enable_fuse_kernels``.
+        # DSV4-style: pure-baseline fp32 chain.  GraphFX
+        # (``indexer_logits_head_gate_fx``) rewrites this into
+        # ``fused_logits_head_gate`` at trace time when
+        # ``ENABLE_GRAPHFX_FUSION=1``.  ``maybe_install_graphfx_fusions``
+        # wraps THIS method as its own compile boundary so the FX pass can
+        # see the unfused chain even though the enclosing
+        # ``MlaAttention._run_sparse_indexer`` is compile-disabled.
         scale = self.softmax_scale * self.weights_scale
-        if self._fuse_logits_head_gate and x.is_contiguous():
-            return fused_logits_head_gate(
-                x,
-                q_scale,
-                self.weights_proj.weight,
-                scale,
-                fallback_proj=self.weights_proj,
-            )
-        x = x.float()
-        weights = self.weights_proj(x)
-        weights = weights.float()
-        weights = weights.unsqueeze(-1) * q_scale * scale
+        x_f32 = x.contiguous().float()
+        weight = (
+            self.weights_proj.weight.float()
+            if self.weights_proj.weight.dtype != torch.float32
+            else self.weights_proj.weight
+        )
+        weights = (x_f32 @ weight.T).unsqueeze(-1) * q_scale * scale
         return weights
 
     def _fused_forward_decode(
@@ -160,25 +162,28 @@ class Indexer(nn.Module):
         x: torch.Tensor,
         kv_cache: KVCache,
         fmha_params: Any,
-        x_fp8: Optional[torch.Tensor] = None,
-        x_scale: Optional[torch.Tensor] = None,
-        q_c_fp8: Optional[torch.Tensor] = None,
-        q_c_scale: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Fused decode: QK kernel does K(RoPE+Had→bf16) + Q(RoPE+Had+FP8).
 
         Returns (q_fp8, q_scale).
+
+        Wrapped as its own GraphFX compile boundary by
+        ``maybe_install_graphfx_fusions``.  The inner ``fused_qk_rope_quant``
+        and ``indexer_k_quant_and_cache`` are both wrapped as
+        ``torch.library.custom_op`` (or ``allow_in_graph``-d), so Dynamo can
+        fakify the whole method and the fuse kernels appear as opaque leaf
+        nodes in the FX subgraph.
+
+        FP8 inputs are sourced via the GraphFX cross-graph consumer rewrite:
+        ``wq_b`` and ``wk`` receive bf16 here and ``CudaFp8GEMMLinear.forward``
+        emits an inline ``sgl_per_token_group_quant_fp8`` node that the
+        ``add_rmsnorm_fp8_quant_fx`` consumer pass rewrites to a
+        provenance-lookup token.  Hits eliminate the standalone quant.
         """
-        if q_c_fp8 is not None and q_c_scale is not None:
-            q = self.wq_b(q_c_fp8, input_scales=q_c_scale)
-        else:
-            q = self.wq_b(q_lora)
+        q = self.wq_b(q_lora)
         q = q.view(-1, self.index_n_heads, self.index_head_dim)
 
-        if x_fp8 is not None and x_scale is not None:
-            k = self.wk(x_fp8, input_scales=x_scale)
-        else:
-            k = self.wk(x)
+        k = self.wk(x)
         k = self.k_norm(k)
 
         q_fp8, q_scale, key = self.indexer_op.fused_rope_quant_qk(
@@ -194,21 +199,11 @@ class Indexer(nn.Module):
         x: torch.Tensor,
         flashmla_params: Any,
         cp_params: Optional[Any],
-        x_fp8: Optional[torch.Tensor] = None,
-        x_scale: Optional[torch.Tensor] = None,
-        q_c_fp8: Optional[torch.Tensor] = None,
-        q_c_scale: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if q_c_fp8 is not None and q_c_scale is not None:
-            q = self.wq_b(q_c_fp8, input_scales=q_c_scale)
-        else:
-            q = self.wq_b(q_lora)
+        q = self.wq_b(q_lora)
         q = q.view(-1, self.index_n_heads, self.index_head_dim)
 
-        if x_fp8 is not None and x_scale is not None:
-            k = self.wk(x_fp8, input_scales=x_scale)
-        else:
-            k = self.wk(x)
+        k = self.wk(x)
         k = self.k_norm(k)
 
         if cp_params is not None:
@@ -294,10 +289,6 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         use_fast_path: bool,
         cp_params: Any = None,
-        x_fp8: Optional[torch.Tensor] = None,
-        x_scale: Optional[torch.Tensor] = None,
-        q_c_fp8: Optional[torch.Tensor] = None,
-        q_c_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if use_fast_path:
             key = self._get_k_bf16(hidden_states, fmha_params)
@@ -307,8 +298,6 @@ class Indexer(nn.Module):
         if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None, "cp_params is required for sparse prefill CP"
 
-        # Fused Q-RoPE-Hadamard-Quant path: single Triton kernel does
-        # RoPE + 128-pt Hadamard + ue8m0 FP8 quant for Q (decode only).
         if (
             self._fuse_logits_head_gate
             and not attention_inputs.is_prefill
@@ -319,10 +308,6 @@ class Indexer(nn.Module):
                 hidden_states,
                 kv_cache,
                 fmha_params,
-                x_fp8,
-                x_scale,
-                q_c_fp8,
-                q_c_scale,
             )
         else:
             query, key = self._get_q_k_bf16(
@@ -330,15 +315,10 @@ class Indexer(nn.Module):
                 hidden_states,
                 fmha_params,
                 cp_params,
-                x_fp8,
-                x_scale,
-                q_c_fp8,
-                q_c_scale,
             )
             q_fp8, q_scale = self._quantize_q_k(
                 query, key, kv_cache, fmha_params, attention_inputs, cp_params
             )
-
         weights = self._get_logits_head_gate(hidden_states, q_scale)
         return self._compute_topk(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params

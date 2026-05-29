@@ -158,6 +158,42 @@ class BaseModel(object):
                 remote_jit_dir, "deep_gemm_python"
             )
         self._create_python_model()
+        # GraphFX install gate.
+        #
+        # After the DSV4-style refactor, eager model code no longer dispatches
+        # to fused kernels via ``if self._fuse_*:`` branches — the unfused
+        # chain is the only eager code path. GraphFX is therefore the SOLE way
+        # to recover fused-kernel performance in production.
+        #
+        # Two switches gate installation:
+        #   * ``ENABLE_GRAPHFX_FUSION``      — explicit opt-in (default off)
+        #   * ``HWKernelConfig.enable_fuse_kernels`` (default True) — the
+        #     pre-existing master switch. When the user sets this to False
+        #     they want the pure unfused baseline (precision debugging); skip
+        #     GraphFX install too so we honour that intent.
+        if os.environ.get("ENABLE_GRAPHFX_FUSION", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            try:
+                from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+
+                fuse_on = fuse_kernels_enabled(self.hw_kernel_config)
+            except Exception:
+                fuse_on = True
+            if fuse_on:
+                from rtp_llm.models_py.modules.fuse_kernel_fx.graphfx_injector import (
+                    maybe_install_graphfx_fusions,
+                )
+
+                maybe_install_graphfx_fusions(getattr(self, "py_model", None))
+            else:
+                logging.info(
+                    "ENABLE_GRAPHFX_FUSION=1 ignored because "
+                    "HWKernelConfig.enable_fuse_kernels=False (pure baseline mode)"
+                )
 
     def _create_python_model(self):
         pass

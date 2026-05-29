@@ -45,6 +45,7 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla imp
     fused_qk_rope_cat_cache_mla,
 )
 from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+from rtp_llm.models_py.utils.fuse_dump import dump_fuse_tensors, fuse_dump_active
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
@@ -540,6 +541,9 @@ class SparseMlaImpl(MlaImplBase):
         # 1. RoPE on q_pe and k_pe; write KV to cache + optional store
         q_pe = q[:, :, self.nope_head_dim :]
         if self._fuse_qk_rope_cat_cache_mla and kv_cache is not None:
+            _dd = fuse_dump_active()
+            if _dd:
+                _q_c, _kpe_c = q.clone(), k_pe.clone()
             fused_qk_rope_cat_cache_mla(
                 q=q,
                 compressed_kv=compressed_kv,
@@ -553,6 +557,15 @@ class SparseMlaImpl(MlaImplBase):
                 is_neox_style=self._is_neox_style,
                 kv_cache_type=self._kv_cache_type,
             )
+            if _dd:
+                _u_qpe = _q_c[:, :, self.nope_head_dim :]
+                self.rope_impl.forward(_u_qpe, _kpe_c, self.rope_params)
+                dump_fuse_tensors(
+                    "rope_cache",
+                    layer_id,
+                    {"q_rope": q[:, :, self.nope_head_dim :], "k_pe": k_pe},
+                    {"q_rope": _u_qpe, "k_pe": _kpe_c},
+                )
         else:
             self.rope_impl.forward(q_pe, k_pe, self.rope_params)
             self.kv_cache_write_op.forward(

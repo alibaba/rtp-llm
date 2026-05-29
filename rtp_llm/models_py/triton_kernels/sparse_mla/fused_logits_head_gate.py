@@ -265,7 +265,6 @@ def fused_logits_head_gate(
     w_is_transposed = weight.stride(0) < weight.stride(1)
 
     if T <= 32:
-        # small-T kernel: grid (T, N), one program per (t, n) pair.
         BLOCK_K = triton.next_power_of_2(K)
         num_warps = 4 if K >= 4096 else 2
         _fused_logits_head_gate_small_t_kernel[(T, N)](
