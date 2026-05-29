@@ -11,6 +11,7 @@ from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreO
 from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
     MultimodalDeepstackInjector,
     MultimodalEmbeddingInjector,
+    reshape_extra_input_to_deepstack,
 )
 from rtp_llm.models_py.modules.base.common.norm import (
     AddBiasResLayerNormTorch,
@@ -80,4 +81,5 @@ else:
         "SigmoidGateScaleAdd",
         "MultimodalDeepstackInjector",
         "MultimodalEmbeddingInjector",
+        "reshape_extra_input_to_deepstack",
     ]

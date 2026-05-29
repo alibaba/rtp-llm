@@ -224,8 +224,8 @@ public:
     // hasMultimodalExtraInput() also return RAW counts; consumers that need post-reuse
     // counts compute them on demand.
     std::vector<torch::Tensor> multimodalFeatures() const;
-    std::vector<torch::Tensor> multimodalDeepstackEmbeds() const;
-    bool                       hasMultimodalDeepstackEmbeds() const;
+    std::vector<torch::Tensor> multimodalExtraInput() const;
+    bool                       hasMultimodalExtraInput() const;
     int                        multimodalFeaturesLength() const;
     torch::Tensor              multimodalLocations() const;
 
@@ -302,7 +302,7 @@ public:
         return_all_probs_ = return_all_probs;
     }
 
-    ReturnAllProbsMode getReturnAllProbs() {
+    ReturnAllProbsMode getReturnAllProbs() const {
         return return_all_probs_;
     }
 

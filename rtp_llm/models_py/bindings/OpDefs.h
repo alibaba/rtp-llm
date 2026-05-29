@@ -185,7 +185,7 @@ struct PyAttentionInputs {
     torch::Tensor cu_kv_seqlens;
     torch::Tensor decode_cu_seqlens_host;
     int           context_total_kv_length = 0;
-    int           total_tokens = 0;
+    int           total_tokens            = 0;
     torch::Tensor padding_offset;
     torch::Tensor combo_position_ids;
 
@@ -225,7 +225,7 @@ struct PyEmbeddingInputs {
 struct PyMultimodalInputs {
     std::vector<torch::Tensor> multimodal_features;
     torch::Tensor              mm_features_locs;
-    std::vector<torch::Tensor> mm_deepstack_embeds;
+    std::vector<torch::Tensor> mm_extra_input;
 };
 
 struct PyModelInputs {

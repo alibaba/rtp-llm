@@ -1,7 +1,27 @@
-from typing import Sequence
+from typing import List, Sequence
 
 import torch
 from torch import nn
+
+
+def reshape_extra_input_to_deepstack(
+    extra_input: Sequence[torch.Tensor],
+    multimodal_features: Sequence[torch.Tensor],
+) -> List[torch.Tensor]:
+    """Reshape flat 1-D extra-input tensors back into deepstack [layers, tokens, hidden].
+
+    Each extra-input tensor is the flattened deepstack embedding for one image. Tokens and
+    hidden are taken from the matching multimodal feature ([tokens, hidden]); the number of
+    layers is derived from the element count. This is the model-specific inverse of the
+    flatten done in the qwen3-vl producer.
+    """
+    deepstack: List[torch.Tensor] = []
+    for flat, feature in zip(extra_input, multimodal_features):
+        tokens = feature.size(0)
+        hidden = feature.size(-1)
+        layers = flat.numel() // (tokens * hidden)
+        deepstack.append(flat.reshape(layers, tokens, hidden))
+    return deepstack
 
 
 class MultimodalEmbeddingInjector(nn.Module):
