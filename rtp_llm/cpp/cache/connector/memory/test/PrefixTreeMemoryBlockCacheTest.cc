@@ -149,4 +149,51 @@ TEST(PrefixTreeMemoryBlockCacheTest, DetachPrunesEmptyLeafButKeepsStructuralPare
     EXPECT_EQ(cache.cacheKeys(), (CacheKeysType{1}));
 }
 
+TEST(PrefixTreeMemoryBlockCacheTest, ParentBecomesEvictableAfterChildDetachEvenAfterTouchWhileNonLeaf) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(0), item(1, CacheBlockKind::COMPRESSED_KV, 11)).first);
+    ASSERT_TRUE(cache.putCommitted(2, childDep(1, 1), item(2, CacheBlockKind::COMPRESSED_KV, 12)).first);
+
+    ASSERT_TRUE(cache.match(1, CacheBlockKind::COMPRESSED_KV).found);
+
+    auto child = cache.matchAndMarkInFlight(2, CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(child.found);
+    auto detached_child = cache.detachIfMatch(2,
+                                              CacheBlockKind::COMPRESSED_KV,
+                                              CacheBackingType::MEMORY,
+                                              child.block_index,
+                                              child.disk_slot,
+                                              child.generation);
+    ASSERT_TRUE(detached_child.has_value());
+    cache.releaseInFlight(2,
+                          CacheBlockKind::COMPRESSED_KV,
+                          CacheBackingType::MEMORY,
+                          child.block_index,
+                          child.disk_slot,
+                          child.generation);
+
+    auto evicted = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 1);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, InFlightReleaseRestoresEvictability) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), item(1, CacheBlockKind::COMPRESSED_KV, 11)).first);
+
+    auto in_flight = cache.matchAndMarkInFlight(1, CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(in_flight.found);
+    EXPECT_FALSE(cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV).has_value());
+
+    cache.releaseInFlight(1,
+                          CacheBlockKind::COMPRESSED_KV,
+                          CacheBackingType::MEMORY,
+                          in_flight.block_index,
+                          in_flight.disk_slot,
+                          in_flight.generation);
+    auto evicted = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 1);
+}
+
 }  // namespace rtp_llm::test

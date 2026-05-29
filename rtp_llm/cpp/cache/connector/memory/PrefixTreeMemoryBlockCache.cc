@@ -54,6 +54,7 @@ PrefixTreeMemoryBlockCache::matchAndMarkInFlight(CacheKeyType cache_key, CacheBl
     }
     touchLocked(it->second, kind);
     state.in_flight_ref++;
+    eraseEvictKeyLocked(it->second, kind);
     return {true, state.backing_type, state.block_index, state.disk_slot, state.block_size, state.generation};
 }
 
@@ -148,6 +149,8 @@ void PrefixTreeMemoryBlockCache::releaseInFlight(CacheKeyType     cache_key,
     if (state.detached && state.in_flight_ref == 0) {
         state = KindState{};
         pruneLocked(cache_key);
+    } else if (!state.detached && state.in_flight_ref == 0) {
+        refreshEvictKeyLocked(it->second, kind);
     }
 }
 
@@ -266,6 +269,7 @@ void PrefixTreeMemoryBlockCache::incrementAncestorsLocked(CacheKeyType cache_key
             break;
         }
         it->second.kinds[kindIndex(kind)].subtree_ref_count++;
+        refreshEvictKeyLocked(it->second, kind);
         if (!it->second.has_parent) {
             break;
         }
@@ -284,6 +288,7 @@ void PrefixTreeMemoryBlockCache::decrementAncestorsLocked(CacheKeyType cache_key
         if (count > 0) {
             count--;
         }
+        refreshEvictKeyLocked(it->second, kind);
         if (!it->second.has_parent) {
             break;
         }
@@ -310,6 +315,11 @@ void PrefixTreeMemoryBlockCache::insertEvictKeyLocked(const Node& node, CacheBlo
 void PrefixTreeMemoryBlockCache::eraseEvictKeyLocked(const Node& node, CacheBlockKind kind) {
     const auto& state = node.kinds[kindIndex(kind)];
     leaf_lru_[kindIndex(kind)].erase(EvictKey{state.last_access_seq, node.cache_key, state.generation});
+}
+
+void PrefixTreeMemoryBlockCache::refreshEvictKeyLocked(const Node& node, CacheBlockKind kind) {
+    eraseEvictKeyLocked(node, kind);
+    insertEvictKeyLocked(node, kind);
 }
 
 void PrefixTreeMemoryBlockCache::pruneLocked(CacheKeyType cache_key) {

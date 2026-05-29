@@ -112,6 +112,7 @@ private:
     void  touchLocked(Node& node, CacheBlockKind kind);
     void  insertEvictKeyLocked(const Node& node, CacheBlockKind kind);
     void  eraseEvictKeyLocked(const Node& node, CacheBlockKind kind);
+    void  refreshEvictKeyLocked(const Node& node, CacheBlockKind kind);
     void  pruneLocked(CacheKeyType cache_key);
     std::optional<CacheItem> toItemLocked(const Node& node, CacheBlockKind kind) const;
     bool isKindLeafLocked(const Node& node, CacheBlockKind kind) const;

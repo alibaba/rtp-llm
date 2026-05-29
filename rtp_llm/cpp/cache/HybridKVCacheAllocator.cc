@@ -389,10 +389,10 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         }
         const auto& full_dependencies = kv_cache_resource->cacheResource(batch_id).blockDependencies();
 
-        if (!cp_active && config_.use_typed_cache_regions && config_.use_opaque_kv_cache_store) {
+        if (!cp_active) {
             // Preserve the legacy non-CP GPU reuse surface: aggregate all groups
-            // under one key for DSV4 typed cache, including trailing fixed/SWA
-            // slots. The prefix tree only receives extra dependency metadata here.
+            // under one key. The prefix tree only receives extra dependency
+            // metadata here.
             const size_t max_keys = full_keys.size();
             for (size_t pos = max_keys; pos > 0; --pos) {
                 const size_t              i = pos - 1;
@@ -526,38 +526,45 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
                                   config_.group_types,
                                   config_.layer_region_to_group_id);
 
-    CacheKeysType&                selected_keys = selected_resource->cacheKeys();
+    CacheKeysType                 selected_keys;
     BlockDependenciesType         selected_dependencies;
     std::vector<BlockIndicesType> selected_blocks(static_cast<size_t>(kvcache_resource.groupNums()));
     const auto&                   source_dependencies = kvcache_resource.blockDependencies();
 
     selected_dependencies.reserve(cache_keys.size());
-    for (size_t key_idx = 0; key_idx < cache_keys.size(); ++key_idx) {
-        auto key = cache_keys[key_idx];
+    selected_keys.reserve(cache_keys.size());
+    for (auto key : cache_keys) {
         auto it = key_to_pos.find(key);
         if (it == key_to_pos.end()) {
-            BlockDependency dependency;
-            dependency.ordinal = static_cast<uint32_t>(key_idx);
-            if (key_idx > 0) {
-                dependency.has_parent = true;
-                dependency.parent_key = cache_keys[key_idx - 1];
-            }
-            selected_dependencies.push_back(dependency);
             continue;
         }
         const size_t pos = it->second;
+        bool any_valid_block = false;
+        std::vector<BlockIdxType> blocks_for_key(static_cast<size_t>(kvcache_resource.groupNums()), NULL_BLOCK_IDX);
+        for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
+            const auto& src_blocks = kvcache_resource.blocks(gid);
+            const auto  block      = pos < src_blocks.size() ? src_blocks[pos] : NULL_BLOCK_IDX;
+            blocks_for_key[static_cast<size_t>(gid)] = block;
+            any_valid_block = any_valid_block || (!isNullBlockIdx(block) && block > 0);
+        }
+        if (!any_valid_block) {
+            continue;
+        }
+        selected_keys.push_back(key);
         selected_dependencies.push_back(
             pos < source_dependencies.size() ?
                 source_dependencies[pos] :
                 BlockDependency{false, 0, static_cast<uint32_t>(selected_dependencies.size())});
         for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
-            const auto& src_blocks = kvcache_resource.blocks(gid);
-            selected_blocks[static_cast<size_t>(gid)].push_back(pos < src_blocks.size() ? src_blocks[pos] :
-                                                                                        NULL_BLOCK_IDX);
+            selected_blocks[static_cast<size_t>(gid)].push_back(blocks_for_key[static_cast<size_t>(gid)]);
         }
     }
 
-    selected_keys.assign(cache_keys.begin(), cache_keys.end());
+    if (selected_keys.empty()) {
+        return nullptr;
+    }
+
+    selected_resource->cacheKeys() = std::move(selected_keys);
     selected_resource->setBlockDependencies(std::move(selected_dependencies));
     for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
         BlockIndicesType valid;

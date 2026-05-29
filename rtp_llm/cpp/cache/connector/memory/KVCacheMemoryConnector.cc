@@ -626,18 +626,20 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         resource->ensureLinearBlockDependencies();
         size_t matched_num = already_reuse_num;
         for (size_t i = already_reuse_num; i < cache_keys_size; ++i) {
-            bool ok = true;
+            bool ok           = true;
+            bool required_any = false;
             for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
                 if (!kindRequiredAt(layer_attn_block_ids, slots, i, kind)) {
                     continue;
                 }
+                required_any = true;
                 auto match_result = prefix_block_cache_->match(static_cast<CacheKeyType>(cache_keys.at(i)), kind);
                 if (!match_result.found) {
                     ok = false;
                     break;
                 }
             }
-            if (!ok) {
+            if (!ok || !required_any) {
                 break;
             }
             matched_num = i + 1;
@@ -1308,9 +1310,8 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForWrite(const CacheKeysType&        
         return nullptr;
     }
     if (!allocatePrefixBackingsForWrite(copy_infos)) {
-        for (const auto& copy_info : copy_infos) {
-            releasePrefixRequestBacking(copy_info);
-        }
+        // allocatePrefixBackingsForWrite releases any partially allocated
+        // request refs before returning false.
         return nullptr;
     }
     (void)dependencies;

@@ -736,6 +736,68 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeKindRequiredUsesRuntimeNullSlots) {
     EXPECT_TRUE(connector->kindRequiredAt(layer_attn_blocks, slots, 1, CacheBlockKind::STATE_SWA_KV));
 }
 
+TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWriteAllocationFailureDoesNotDoubleFreePartialBlocks) {
+    auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+    config.group_kv_block_stride_bytes = std::vector<size_t>(config.group_kv_block_stride_bytes.size(), 3072);
+    config.group_kv_scale_stride_bytes = std::vector<size_t>(config.group_kv_scale_stride_bytes.size(), 0);
+
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb             = 1;
+    kv_config.memory_cache_sync_timeout_ms     = 1000;
+    kv_config.enable_prefix_tree_memory_cache  = true;
+    kv_config.enable_legacy_memory_connector_fallback = false;
+
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+    auto connector = std::make_shared<KVCacheMemoryConnector>(
+        config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    ASSERT_TRUE(connector->init());
+    ASSERT_TRUE(connector->usePrefixTreeMemoryCache());
+    ASSERT_EQ(connector->compressed_pool_->totalBlocksNum(), 1u);
+    ASSERT_EQ(connector->state_swa_pool_->totalBlocksNum(), 1u);
+
+    const CacheKeysType cache_keys{101, 102};
+    KVCacheResource     resource;
+    resource.initGroups(static_cast<int>(config.group_types.size()),
+                        static_cast<int>(config.layer_all_num),
+                        config.layer_to_group_id,
+                        /*kernel_blocks_per_kv_block=*/1,
+                        config.group_types,
+                        config.layer_region_to_group_id);
+    resource.resizeBlocks(static_cast<int>(cache_keys.size()), NULL_BLOCK_IDX);
+    resource.setCacheKeys(cache_keys);
+    resource.ensureLinearBlockDependencies();
+
+    for (size_t layer = 0; layer < config.layer_region_to_group_id.size(); ++layer) {
+        for (size_t region = 0; region < config.layer_region_to_group_id[layer].size(); ++region) {
+            const int gid = config.layer_region_to_group_id[layer][region];
+            if (gid < 0) {
+                continue;
+            }
+            auto& blocks = resource.mutableBlockIds(
+                static_cast<int>(layer), static_cast<KVCacheRegionName>(region));
+            blocks.setAt(0, static_cast<BlockIdxType>(10 + gid));
+            blocks.setAt(1, static_cast<BlockIdxType>(20 + gid));
+        }
+    }
+
+    const auto slots = connector->layerRegionSlots();
+    ASSERT_TRUE(connector->isDsv4TypedCacheLayout(slots));
+    const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
+    bool       no_need_write     = true;
+
+    auto plan = connector->buildPrefixCopyPlanForWrite(cache_keys,
+                                                       resource.blockDependencies(),
+                                                       layer_attn_blocks,
+                                                       slots,
+                                                       /*start_index=*/0,
+                                                       /*write_num=*/static_cast<int>(cache_keys.size()),
+                                                       no_need_write);
+    EXPECT_EQ(plan, nullptr);
+    EXPECT_FALSE(no_need_write);
+    EXPECT_EQ(connector->compressed_pool_->freeBlocksNum(), 1u);
+    EXPECT_EQ(connector->state_swa_pool_->freeBlocksNum(), 1u);
+}
+
 }  // namespace rtp_llm::test
 
 int main(int argc, char** argv) {
