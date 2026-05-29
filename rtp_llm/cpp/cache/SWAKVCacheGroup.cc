@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -34,8 +35,21 @@ bool dsv4TrapInvalidKVAccessEnabled() {
     return !flag.empty() && flag != "0" && flag != "false" && flag != "FALSE" && flag != "off" && flag != "OFF";
 }
 
-void checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) {
+}  // namespace
+
+bool SWAKVCacheGroup::shouldCheckSWATailBlockIds() const {
     if (!dsv4TrapInvalidKVAccessEnabled()) {
+        return false;
+    }
+    const auto dsv4_state_spec = std::dynamic_pointer_cast<DSV4StateSpec>(kvcache_spec_);
+    if (dsv4_state_spec != nullptr) {
+        return !skipReuseCacheRegion(dsv4_state_spec->cache_type);
+    }
+    return true;
+}
+
+void SWAKVCacheGroup::checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const {
+    if (!shouldCheckSWATailBlockIds()) {
         return;
     }
 
@@ -56,8 +70,6 @@ void checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) {
                                 block_num);
     }
 }
-
-}  // namespace
 
 void SWAKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
     out.clear();
