@@ -71,6 +71,10 @@ sm90_cuda_copts = [
     '--cuda-include-ptx=sm_90a', '--cuda-gpu-arch=sm_90a',
 ]
 
+sm120_cuda_copts = [
+    '--cuda-include-ptx=sm_120a', '--cuda-gpu-arch=sm_120a',
+]
+
 cc_library(
     name = "context_attention_kernels_sm80",
     srcs = glob([
@@ -124,6 +128,19 @@ cc_library(
 )
 
 cc_library(
+    name = "context_attention_kernels_sm120",
+    srcs = glob([
+        "fmha_v2_cu/*sm120.cu",
+    ]),
+    deps = [
+        ":fmha_v2_impl_src_header",
+    ],
+    copts = sm120_cuda_copts + base_cuda_copts,
+    visibility = ["//visibility:public"],
+    alwayslink = True
+)
+
+cc_library(
     name = "fmha_v2_cubin",
     hdrs = glob([
         "cubin/fmha_cubin.h"
@@ -134,7 +151,10 @@ cc_library(
     deps = [
         ":fmha_v2_impl_src_header",
     ],
-    copts = copts() + ["-DEXCLUDE_SM_100=1", "-DEXCLUDE_SM_120=1"],
+    copts = copts() + ["-DEXCLUDE_SM_100=1"] + select({
+        "@//:using_cuda12_9_x86": [],
+        "//conditions:default": ["-DEXCLUDE_SM_120=1"],
+    }),
     visibility = ["//visibility:public"],
     alwayslink = True,
 )
@@ -155,7 +175,15 @@ cc_library(
             ":context_attention_kernels_sm90",
         ],
         "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda12_9_x86": [
+            ":context_attention_kernels_sm120",
+        ],
+        "//conditions:default": [],
     }),
-    copts = cuda_copts() + ["-DEXCLUDE_SM_100=1", "-DEXCLUDE_SM_120=1"],
+    copts = cuda_copts() + ["-DEXCLUDE_SM_100=1"] + select({
+        "@//:using_cuda12_9_x86": [],
+        "//conditions:default": ["-DEXCLUDE_SM_120=1"],
+    }),
     visibility = ["//visibility:public"],
 )
