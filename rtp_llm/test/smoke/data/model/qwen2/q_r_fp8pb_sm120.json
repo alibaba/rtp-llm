@@ -1,7 +1,7 @@
 {
     "model_type": "qwen_2",
-    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
-    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "model_path": "/mnt/nas1/hf/Qwen2-0.5B",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2-0.5B",
     "query_result": [
         {
             "query": {
@@ -13,11 +13,7 @@
                 },
                 "yield_generator": true
             },
-            "result": {
-                "response": " I'm looking for a Flask alternative that is similar",
-                "iter_count": 10,
-                "finished": true
-            }
+            "result": {}
         },
         {
             "query": {
@@ -31,18 +27,7 @@
                     "top_p": 0
                 }
             },
-            "result": {
-                "response_batch": [
-                    {
-                        "response": " I'm looking for a Flask alternative that is"
-                    },
-                    {
-                        "response": "\n\nI am trying to use the screen\\_"
-                    }
-                ],
-                "iter_count": 10,
-                "finished": true
-            }
+            "result": {}
         },
         {
             "query": {
@@ -55,14 +40,7 @@
                 },
                 "yield_generator": true
             },
-            "result": {
-                "response": [
-                    " I'm looking for a Flask alternative that is similar",
-                    " I'm looking for a Flask alternative that is similar"
-                ],
-                "iter_count": 10,
-                "finished": true
-            }
+            "result": {}
         },
         {
             "query": {
@@ -77,11 +55,7 @@
                 },
                 "yield_generator": true
             },
-            "result": {
-                "response": " I'm looking for a Flask alternative that is similar",
-                "iter_count": 10,
-                "finished": true
-            }
+            "result": {}
         },
         {
             "query": {
@@ -96,11 +70,7 @@
                 },
                 "yield_generator": false
             },
-            "result": {
-                "response": " I'm looking for a Flask alternative that is similar",
-                "iter_count": 10,
-                "finished": true
-            }
+            "result": {}
         },
         {
             "query": {
@@ -116,11 +86,7 @@
                 },
                 "yield_generator": true
             },
-            "result": {
-                "response": " I'm looking for a Flask alternative that is similar",
-                "iter_count": 10,
-                "finished": true
-            }
+            "result": {}
         }
     ]
 }
