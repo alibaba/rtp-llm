@@ -196,6 +196,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
         graph_params.kv_cache_group_num           = params.kv_cache_group_num;
+        // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
+        // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
+        // >0 = factor (Mrope models such as qwen3-vl / qwen35-moe set rope_config.style
+        // = Mrope and rope_config.index_factor accordingly). No Python reflection — the
+        // rope style is intrinsic to the model description and already populated here.
+        graph_params.position_id_len_factor =
+            (description_.attention_conf.rope_config.style == RopeStyle::Mrope)
+                ? description_.attention_conf.rope_config.index_factor
+                : 0;
 
         if (kv_cache_layer_to_group.size() > 0) {
             graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;
@@ -249,12 +258,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_runner_->setTokenTypeEmbedding(weights_.token_type_embedding->kernel.cuda());
         }
         graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
-        auto py_get_factor          = py_instance.attr("get_position_id_len_factor");
-        int  position_id_len_factor = py_get_factor().cast<int>();
-        graph_runner_->setPositionIdLenFactor(position_id_len_factor);
-        auto py_need_combo_position_ids = py_instance.attr("need_combo_position_ids");
-        bool need_combo_position_ids    = py_need_combo_position_ids().cast<bool>();
-        graph_runner_->setNeedComboPositionIds(need_combo_position_ids);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
         auto py_initialize_method = py_instance.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);

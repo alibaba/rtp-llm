@@ -60,7 +60,8 @@ struct GptModelInputs {
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
     torch::Tensor mm_features_locs;  // features index
-    std::optional<std::vector<torch::Tensor>> mm_deepstack_embeds;  // multimodal deepstack embeds
+    std::optional<std::vector<torch::Tensor>>
+        mm_extra_input;  // model-specific extra input (opaque flat 1-D, e.g. deepstack)
 
     std::optional<std::vector<torch::Tensor>> input_embeddings;  // all input embeddings in gathered stream stored here
     torch::Tensor                             input_embeddings_locs;  // input embeddings index

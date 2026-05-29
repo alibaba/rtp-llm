@@ -62,13 +62,13 @@ private:
                     }
                     mm_embedding_res.mm_position_ids = position_ids;
                 }
-                auto                       deepstack_embed_vec = res.attr("deepstack_embeds");
-                std::vector<torch::Tensor> deepstack_embeds;
-                if (!deepstack_embed_vec.is_none()) {
-                    for (auto& deepstack_embed : convertPyObjectToVec(deepstack_embed_vec)) {
-                        deepstack_embeds.emplace_back(convertPyObjectToTensor(deepstack_embed));
+                auto                       extra_input_vec = res.attr("extra_input");
+                std::vector<torch::Tensor> extra_input;
+                if (!extra_input_vec.is_none()) {
+                    for (auto& extra_input_item : convertPyObjectToVec(extra_input_vec)) {
+                        extra_input.emplace_back(convertPyObjectToTensor(extra_input_item));
                     }
-                    mm_embedding_res.mm_deepstack_embeds = deepstack_embeds;
+                    mm_embedding_res.mm_extra_input = extra_input;
                 }
                 return mm_embedding_res;
             } catch (py::error_already_set& e) {

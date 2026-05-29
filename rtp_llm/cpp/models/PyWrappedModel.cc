@@ -338,9 +338,9 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         if (!inputs.warmup && inputs.pd_separation) {
             py_attn_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
         }
-        torch::Tensor combo_position_ids =
-            micro_inputs.combo_position_ids.defined() ? tensorHoldHostAndToCuda(micro_inputs.combo_position_ids) :
-                                                      torch::empty({0});
+        torch::Tensor combo_position_ids = micro_inputs.combo_position_ids.defined() ?
+                                               tensorHoldHostAndToCuda(micro_inputs.combo_position_ids) :
+                                               torch::empty({0});
         setupKVCacheForAttentionInputs(py_attn_inputs, micro_inputs);
 
         calculatePaddingOffset(py_attn_inputs);
@@ -439,12 +439,12 @@ torch_ext::PyMultimodalInputs PyWrappedModel::buildPyMultimodalInputs(const GptM
         }
         multimodal_input.multimodal_features = multimodal_features;
     }
-    if (inputs.mm_deepstack_embeds && !inputs.mm_deepstack_embeds.value().empty()) {
-        std::vector<torch::Tensor> mm_deepstack_embeds;
-        for (const auto& embed : inputs.mm_deepstack_embeds.value()) {
-            mm_deepstack_embeds.emplace_back(embed.cuda());
+    if (inputs.mm_extra_input && !inputs.mm_extra_input.value().empty()) {
+        std::vector<torch::Tensor> mm_extra_input;
+        for (const auto& embed : inputs.mm_extra_input.value()) {
+            mm_extra_input.emplace_back(embed.cuda());
         }
-        multimodal_input.mm_deepstack_embeds = mm_deepstack_embeds;
+        multimodal_input.mm_extra_input = mm_extra_input;
     }
     if (inputs.mm_features_locs.defined()) {
         multimodal_input.mm_features_locs = inputs.mm_features_locs.cuda();
@@ -477,14 +477,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
 
-        torch::Tensor combo_position_ids =
-            inputs.combo_position_ids.defined() ? tensorHoldHostAndToCuda(inputs.combo_position_ids) :
-                                                  torch::empty({0});
+        torch::Tensor combo_position_ids = inputs.combo_position_ids.defined() ?
+                                               tensorHoldHostAndToCuda(inputs.combo_position_ids) :
+                                               torch::empty({0});
 
-        auto      embedding_inputs      = buildPyEmbeddingInputs(inputs);
-        auto      multimodal_inputs     = buildPyMultimodalInputs(inputs);
-        auto      attention_inputs      = buildPyAttentionInputs(inputs);
-        auto      bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+        auto embedding_inputs      = buildPyEmbeddingInputs(inputs);
+        auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
+        auto attention_inputs      = buildPyAttentionInputs(inputs);
+        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
         if (device_props_.enable_prefill_cp) {
             attention_inputs.context_parallel_info = cp_params;
         }

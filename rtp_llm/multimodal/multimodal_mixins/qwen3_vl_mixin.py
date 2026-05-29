@@ -79,7 +79,9 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         mm_type = mm_input.mm_type
         do_resize = True
         if mm_type == MMUrlType.DEFAULT or mm_type == MMUrlType.IMAGE:
-            image = Image.open(get_bytes_io_from_url(mm_input.url))
+            image = Image.open(
+                get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
+            )
             if (
                 mm_input.mm_preprocess_config.height != -1
                 and mm_input.mm_preprocess_config.width != -1
@@ -121,7 +123,8 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
             video = Qwen3_VLImageEmbedding.load_video(
-                get_bytes_io_from_url(mm_input.url), mm_input.mm_preprocess_config
+                get_bytes_io_from_url(mm_input.url, vit_config.download_headers),
+                mm_input.mm_preprocess_config,
             )
             res = processor.video_processor(video, return_tensors="pt", do_resize=True)
             return res["pixel_values_videos"], res["video_grid_thw"]
@@ -142,7 +145,9 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
         embeds = torch.split(embeds, split_sizes)
         pos_id = self.get_position_ids(grid_thw)[0]
-        deepstack_embeds = torch.stack(deepstack_embeds).to(self._data_type)
+        # Flatten deepstack [layers, tokens, hidden] into a 1-D extra-input tensor for
+        # transport; the qwen3vl model reshapes it back using tokens/hidden from features.
+        deepstack_embeds = torch.stack(deepstack_embeds).to(self._data_type).reshape(-1)
         return embeds[0].to(self._data_type), pos_id, deepstack_embeds
 
     @torch.inference_mode()
@@ -169,7 +174,8 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             torch.stack(deepstack_embeds).to(self._data_type).split(split_sizes, dim=1)
         )
         for e, p, d in zip(embeds, pos_id, deepstack_embeds):
-            res_list.append((e.to(self._data_type), p, d))
+            # Flatten per-image deepstack [layers, tokens, hidden] into a 1-D extra-input tensor.
+            res_list.append((e.to(self._data_type), p, d.flatten()))
         return res_list
 
 

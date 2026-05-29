@@ -72,8 +72,8 @@ enum GptModelInputIndex : size_t {
     mmFeaturesNum,   // number of mm features
     mmFeaturesSize,  // hidden_size of mm features
     mmFeaturesDtype,
-    mmHasDeepstackEmbeddings,
-    mmDeepstackLayers,
+    mmHasExtraInput,    // number of extra-input tensors (model-specific, e.g. deepstack)
+    mmExtraInputDtype,  // dtype of extra-input elements
     needAllLogits,
     mtpHiddenStates,
     mtpHiddenStatesDtype,

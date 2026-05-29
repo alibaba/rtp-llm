@@ -9,9 +9,9 @@
 
 namespace rtp_llm {
 struct MultimodalOutput {
-    std::vector<torch::Tensor>                mm_features         = {};
-    std::optional<std::vector<torch::Tensor>> mm_position_ids     = std::nullopt;
-    std::optional<std::vector<torch::Tensor>> mm_deepstack_embeds = std::nullopt;
+    std::vector<torch::Tensor>                mm_features     = {};
+    std::optional<std::vector<torch::Tensor>> mm_position_ids = std::nullopt;
+    std::optional<std::vector<torch::Tensor>> mm_extra_input  = std::nullopt;
 };
 
 class MultimodalFeature {
