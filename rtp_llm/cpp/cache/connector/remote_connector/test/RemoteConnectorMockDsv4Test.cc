@@ -60,7 +60,10 @@ static ModelConfig makeMinimalDsv4Model() {
 static CacheConfig makeMinimalHybridPoolDsv4Config() {
     ParallelismConfig pc;
     auto              mc               = makeMinimalDsv4Model();
-    CacheConfig       config           = HybridPoolConfigCreator::createConfig(mc, pc);
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.seq_size_per_block     = 128;
+    kv_cache_config.dsv4_fixed_pool_blocks = 256;
+    CacheConfig       config           = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
     config.use_independent_block_pools = true;
     config.block_num                   = 200;
     return config;
