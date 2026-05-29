@@ -250,12 +250,16 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
         // Check if this stream can be scheduled based on batch group rules
         if (force_batch && stream->batchGroupId() != -1) {
             auto& info = request_group_info[stream->batchGroupId()];
-            // Check timeout: if expired, treat as normal stream
-            if (now - info.first_arrival_time > stream->batchGroupTimeout()) {
-                force_batch = false;
-            } else if (info.count < stream->batchGroupSize()) {
-                it++;
-                continue;
+            if (info.count < stream->batchGroupSize()) {
+                if (now - info.first_arrival_time > stream->batchGroupTimeout()) {
+                    RTP_LLM_LOG_WARNING("force_batch group %ld incomplete: got %d/%d after %ldms, degrading to normal",
+                                        stream->batchGroupId(), info.count, stream->batchGroupSize(),
+                                        now - info.first_arrival_time);
+                    force_batch = false;
+                } else {
+                    it++;
+                    continue;
+                }
             }
         }
 
