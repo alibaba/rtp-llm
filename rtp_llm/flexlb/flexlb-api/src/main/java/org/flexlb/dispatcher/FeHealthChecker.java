@@ -72,6 +72,18 @@ public class FeHealthChecker {
     }
 
     /**
+     * Raw consecutive-failure counter for {@code url}. {@code 0} for never-probed or
+     * currently-healthy; {@code 1} after the first failure (still alive, in flap-tolerance
+     * window); {@code >= FAIL_THRESHOLD} once {@link #isAlive(String)} flips to false. Exposed
+     * for the snapshot endpoint so operators can distinguish "warming up to dead" from
+     * "freshly dead".
+     */
+    public int consecFails(String url) {
+        AtomicInteger n = consecFails.get(url);
+        return n == null ? 0 : n.get();
+    }
+
+    /**
      * Run one probe round against the current snapshot of {@link #urlSupplier}. Each URL gets a
      * single {@code GET <url><probePath>} with {@value #PROBE_TIMEOUT_MS}ms timeout; 2xx resets
      * the failure counter, everything else (non-2xx, connect refused, read timeout) increments it.

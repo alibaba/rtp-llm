@@ -30,7 +30,7 @@ class DispatchRouterTest {
         GenericBatchHandler batch = mock(GenericBatchHandler.class);
         PassthroughClient passthrough = mock(PassthroughClient.class);
         RouterFunction<ServerResponse> routes =
-                new DispatchRouter(batch, passthrough, List.of(BATCH_INFER)).routes();
+                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(BATCH_INFER)).routes();
         WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
 
         client.post().uri("/batch_infer").bodyValue("{}").exchange().expectStatus().isNotFound();
@@ -47,7 +47,7 @@ class DispatchRouterTest {
         when(passthrough.forward(any()))
                 .thenReturn(ServerResponse.ok().bodyValue("pass"));
         WebTestClient client = WebTestClient.bindToRouterFunction(
-                new DispatchRouter(batch, passthrough, List.of(BATCH_INFER)).routes()).build();
+                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(BATCH_INFER)).routes()).build();
 
         client.get().uri("/dispatcher/v1/models").exchange()
                 .expectStatus().isOk()
@@ -69,7 +69,7 @@ class DispatchRouterTest {
 
         List<BatchEndpointSpec> specs = List.of(BATCH_INFER, EMBEDDINGS);
         RouterFunction<ServerResponse> routes =
-                new DispatchRouter(batch, passthrough, specs).routes();
+                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), specs).routes();
         WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
 
         client.post().uri("/dispatcher/batch_infer").bodyValue("{}").exchange()

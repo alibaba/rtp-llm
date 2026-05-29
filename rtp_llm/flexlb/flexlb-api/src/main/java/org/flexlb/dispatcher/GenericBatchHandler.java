@@ -15,7 +15,6 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -72,18 +71,13 @@ public class GenericBatchHandler {
                 return json(200, emptyEnvelope);
             }
             pv.setTotalItems(arr.size());
-            List<ArrayNode> chunks = splitChunks((ArrayNode) arr);
+            List<ArrayNode> chunks = BatchSplitter.split((ArrayNode) arr, subBatch, mapper);
             pv.setChunkCount(chunks.size());
-            List<ObjectNode> chunkBodies = new ArrayList<>(chunks.size());
-            for (ArrayNode chunk : chunks) {
-                ObjectNode copy = obj.deepCopy();
-                copy.set(spec.getRequestArrayField(), chunk);
-                injectForceBatch(copy);
-                chunkBodies.add(copy);
-            }
+            List<ObjectNode> chunkBodies = BatchChunkBuilder.buildChunkBodies(
+                    obj, chunks, spec.getRequestArrayField());
             return resolvePreAssignedTargets(chunks.size())
                     .flatMap(targets -> {
-                        stampPreAssignedBe(chunkBodies, targets);
+                        BatchChunkBuilder.stampPreAssignedBe(chunkBodies, targets);
                         return fanoutService.dispatchChunks(spec.getPath(), chunkBodies, spec)
                                 .map(subs -> PartialFailureMerger.merge(subs, spec, mapper))
                                 .flatMap(merged -> {
@@ -126,40 +120,6 @@ public class GenericBatchHandler {
         return ServerResponse.status(status).contentType(MediaType.APPLICATION_JSON).bodyValue(body);
     }
 
-    /**
-     * Stamps {@code generate_config.force_batch=true} into each sub-batch body. The legacy
-     * ft_proxy convention is that the dispatch layer — not the user — tags batch traffic with
-     * {@code force_batch} so the per-chunk FE's {@code FIFOScheduler} groups the chunk's prompts
-     * into a single scheduling slot instead of interleaving them with whatever else is queued.
-     * Without this stamp, splitting a batch into chunks would be observationally equivalent to
-     * the user issuing N independent requests, defeating the whole point of going through a
-     * batch endpoint.
-     *
-     * <p>A user-supplied {@code force_batch} is honored verbatim: an explicit {@code false} is a
-     * legitimate opt-out (e.g. for measuring scheduler interleaving) and must not be overwritten.
-     * Any other fields under {@code generate_config} (temperature, max_new_tokens, …) are
-     * preserved by the surrounding deep-copy.
-     */
-    private static void injectForceBatch(ObjectNode chunkBody) {
-        JsonNode gcNode = chunkBody.get("generate_config");
-        ObjectNode gc;
-        if (gcNode instanceof ObjectNode existing) {
-            gc = existing;
-        } else {
-            gc = chunkBody.putObject("generate_config");
-        }
-        if (!gc.has("force_batch")) {
-            gc.put("force_batch", true);
-        }
-    }
-
-    private List<ArrayNode> splitChunks(ArrayNode arr) {
-        return switch (subBatch.mode()) {
-            case SIZE -> BatchSplitter.splitArray(arr, subBatch.value(), mapper);
-            case COUNT -> BatchSplitter.splitByCount(arr, subBatch.value(), mapper);
-        };
-    }
-
     private Mono<ServerResponse> badRequest(String message) {
         ObjectNode err = mapper.createObjectNode();
         err.put("error", "invalid_batch_request");
@@ -190,41 +150,4 @@ public class GenericBatchHandler {
         return batchScheduleClient.requestTargets(chunkCount);
     }
 
-    /**
-     * Appends each chunk's pre-resolved BE target into {@code generate_config.role_addrs} —
-     * the same field FE's existing
-     * {@code rtp_llm.server.backend_rpc_server_visitor.route_ips} skips master on when set
-     * (PD-disagg's prefill→decode handoff uses the same mechanism). No FE-side change
-     * required for this stamping to take effect.
-     *
-     * <p>Wire shape per addr matches Python {@code rtp_llm.config.generate_config.RoleAddr}
-     * exactly: {@code {role, ip, http_port, grpc_port}}. Note {@code ip} (not
-     * {@code server_ip} as in {@link BatchScheduleTarget}'s wire shape) — the rename is
-     * deliberate to align with the FE-side schema.
-     *
-     * <p>Tolerates a short target list (callers degrade to no-stamp if
-     * {@link BatchScheduleClient} returns empty). User-supplied {@code role_addrs} entries
-     * are preserved and the dispatcher's resolved target is appended after them.
-     */
-    private void stampPreAssignedBe(List<ObjectNode> chunkBodies, List<BatchScheduleTarget> targets) {
-        if (targets.isEmpty()) {
-            return;
-        }
-        int max = Math.min(chunkBodies.size(), targets.size());
-        for (int i = 0; i < max; i++) {
-            BatchScheduleTarget target = targets.get(i);
-            ObjectNode chunkBody = chunkBodies.get(i);
-            ObjectNode gc = chunkBody.get("generate_config") instanceof ObjectNode existing
-                    ? existing
-                    : chunkBody.putObject("generate_config");
-            ArrayNode roleAddrs = gc.get("role_addrs") instanceof ArrayNode existingAddrs
-                    ? existingAddrs
-                    : gc.putArray("role_addrs");
-            ObjectNode addr = roleAddrs.addObject();
-            addr.put("role", target.getRole().name());
-            addr.put("ip", target.getServerIp());
-            addr.put("http_port", target.getHttpPort());
-            addr.put("grpc_port", target.getGrpcPort());
-        }
-    }
 }

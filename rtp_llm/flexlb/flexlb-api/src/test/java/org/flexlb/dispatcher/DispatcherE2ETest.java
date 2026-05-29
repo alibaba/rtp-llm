@@ -30,6 +30,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * End-to-end test for the assembled dispatcher: real {@link DispatchRouter} on top of real
@@ -274,6 +277,94 @@ class DispatcherE2ETest {
         verifyChunkHasRoleAddr(fe3.takeRequest(), "10.0.0.3");
     }
 
+    @Test
+    void snapshotEndpointReturnsCurrentFePoolThroughRealRouter() {
+        // Wires the real DispatcherSnapshotHandler through the real DispatchRouter and HTTP
+        // transport to verify the route is registered (and not shadowed by the /dispatcher/**
+        // passthrough catch-all that comes after it in the registration order).
+        WebTestClient client = buildClient(/*subBatchSize=*/2);
+
+        JsonNode resp = client.get().uri("/dispatcher/_snapshot")
+                .exchange()
+                .expectStatus().isOk()
+                .expectHeader().contentTypeCompatibleWith(MediaType.APPLICATION_JSON)
+                .expectBody(JsonNode.class)
+                .returnResult().getResponseBody();
+
+        assertNotNull(resp);
+        JsonNode fePool = resp.get("fePool");
+        assertNotNull(fePool);
+        assertEquals("e2e.fe.publish", fePool.get("serviceId").asText());
+        assertEquals(3, fePool.get("size").asInt());
+        JsonNode hosts = fePool.get("hosts");
+        assertEquals(3, hosts.size());
+        // Order matches the supplier's snapshot order — round-robin order.
+        assertEquals(baseUrl(fe1), hosts.get(0).get("url").asText());
+        assertEquals(baseUrl(fe2), hosts.get(1).get("url").asText());
+        assertEquals(baseUrl(fe3), hosts.get(2).get("url").asText());
+        for (int i = 0; i < 3; i++) {
+            assertTrue(hosts.get(i).get("alive").asBoolean());
+            assertEquals(0, hosts.get(i).get("consecFails").asInt());
+        }
+        // No FE traffic — snapshot reads dispatcher-local state only.
+        assertEquals(0, fe1.getRequestCount());
+        assertEquals(0, fe2.getRequestCount());
+        assertEquals(0, fe3.getRequestCount());
+    }
+
+    @Test
+    void dryRunEndpointReturnsStampedChunksThroughRealRouter() throws Exception {
+        // End-to-end proof that POST /dispatcher/_dryrun/<path> is routed through HTTP transport,
+        // delegates to the real BatchScheduleClient for pre-assign, and returns chunk bodies
+        // byte-equivalent to what the real fanout would have written to FE — without actually
+        // calling any FE.
+        List<org.flexlb.dao.loadbalance.BatchScheduleTarget> targets = List.of(
+                new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.1", 23840, 23841,
+                        org.flexlb.dao.route.RoleType.PDFUSION),
+                new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.2", 23840, 23841,
+                        org.flexlb.dao.route.RoleType.PDFUSION));
+        WebTestClient client = buildClient(/*subBatchSize=*/2, /*preAssignBe=*/true, targets);
+
+        ObjectNode body = mapper.createObjectNode();
+        body.put("model", "qwen");
+        var pb = body.putArray("prompt_batch");
+        for (int i = 0; i < 3; i++) {
+            pb.add("p" + i);
+        }
+
+        JsonNode resp = client.post().uri("/dispatcher/_dryrun/batch_infer")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(JsonNode.class)
+                .returnResult().getResponseBody();
+
+        assertNotNull(resp);
+        assertEquals("/batch_infer", resp.get("path").asText());
+        assertEquals(3, resp.get("totalItems").asInt());
+        assertEquals(2, resp.get("chunkCount").asInt(), "3 items at size:2 → 2 chunks");
+        assertTrue(resp.get("preAssignEffective").asBoolean());
+        assertEquals(2, resp.get("preAssignTargets").size());
+
+        JsonNode chunks = resp.get("chunks");
+        assertEquals(2, chunks.size());
+        for (int i = 0; i < 2; i++) {
+            JsonNode chunk = chunks.get(i);
+            assertEquals("qwen", chunk.get("model").asText(),
+                    "envelope top-level fields preserved per chunk");
+            JsonNode gc = chunk.get("generate_config");
+            assertTrue(gc.get("force_batch").asBoolean());
+            JsonNode roleAddrs = gc.get("role_addrs");
+            assertEquals(1, roleAddrs.size());
+            assertEquals("10.0.0." + (i + 1), roleAddrs.get(0).get("ip").asText());
+        }
+        // Dry-run must not touch any FE.
+        assertEquals(0, fe1.getRequestCount());
+        assertEquals(0, fe2.getRequestCount());
+        assertEquals(0, fe3.getRequestCount());
+    }
+
     private void verifyChunkHasRoleAddr(RecordedRequest rec, String expectedIp) throws Exception {
         assertNotNull(rec);
         JsonNode bodyJson = mapper.readTree(rec.getBody().readUtf8());
@@ -304,12 +395,17 @@ class DispatcherE2ETest {
         List<String> urls = List.of(baseUrl(fe1), baseUrl(fe2), baseUrl(fe3));
         FePool pool = DispatcherTestSupport.fePool(urls);
 
-        DispatchConfig feClientCfg = new DispatchConfig();
-        feClientCfg.setBatchTimeoutMs(5000);
+        DispatchConfig cfg = new DispatchConfig();
+        cfg.setBatchTimeoutMs(5000);
+        cfg.setFePoolServiceId("e2e.fe.publish");
+        cfg.setSubBatch("size:" + subBatchSize);
+        cfg.setSubBatchSpec(SubBatchSpec.parse("size:" + subBatchSize));
+        cfg.setPreAssignBe(preAssignBe);
+
         FeClient feClient = new FeClient(
                 WebClient.builder(),
                 reactor.netty.resources.ConnectionProvider.builder("e2e").build(),
-                feClientCfg);
+                cfg);
         FanoutService fanout = new FanoutService(feClient, pool);
         BatchScheduleClient batchScheduleClient = new BatchScheduleClient(null) {
             @Override
@@ -317,14 +413,28 @@ class DispatcherE2ETest {
                 return reactor.core.publisher.Mono.just(targets);
             }
         };
-        GenericBatchHandler batchHandler = DispatcherTestSupport.genericBatchHandler(
-                fanout, mapper, "size:" + subBatchSize, batchScheduleClient, preAssignBe);
+        GenericBatchHandler batchHandler = new GenericBatchHandler(fanout, mapper, cfg, batchScheduleClient);
 
         PassthroughClient passthrough =
                 new PassthroughClient(WebClient.create(), pool);
 
+        // Real inspection handler — refresher source returns the same pool URLs the router fans
+        // out to, so /dispatcher/_snapshot reflects what dispatcher actually sees. FeHealthChecker
+        // is mocked rather than instantiated to avoid starting the background probe loop in tests;
+        // snapshot reads of isAlive/consecFails route through these stubs. The same handler also
+        // serves /dispatcher/_dryrun, sharing cfg + ObjectMapper + BatchScheduleClient so its
+        // ?pre_assign behavior and stamping logic exercise the same code paths as production.
+        DispatcherFePoolRefresher inspectionRefresher = mock(DispatcherFePoolRefresher.class);
+        when(inspectionRefresher.source()).thenReturn(() -> urls);
+        FeHealthChecker hc = mock(FeHealthChecker.class);
+        when(hc.isAlive(anyString())).thenReturn(true);
+        when(hc.consecFails(anyString())).thenReturn(0);
+        DispatcherInspectionHandler inspectionHandler =
+                new DispatcherInspectionHandler(cfg, inspectionRefresher, hc, batchScheduleClient, mapper);
+
         List<BatchEndpointSpec> specs = BatchEndpointSpec.SPECS;
-        DispatchRouter router = new DispatchRouter(batchHandler, passthrough, specs);
+        DispatchRouter router = new DispatchRouter(
+                batchHandler, passthrough, inspectionHandler, specs);
 
         // Bind to a real Reactor Netty server (rather than WebTestClient.bindToRouterFunction's
         // in-memory connector) so the passthrough's raw DataBuffer body actually traverses an HTTP
