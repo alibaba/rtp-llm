@@ -1399,6 +1399,15 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 response_delta.tool_calls is None
             ), f"Expected tool_calls to be None, got: {response_delta.tool_calls}"
 
+    class KimiLinearTestSuite(KimiK2TestSuite):
+        """Kimi-Linear 与 Kimi-K2 共用同一套 tool-call 协议（标签、id 格式、停止词
+        全部相同），只是 model_type 不同。复用 K2 的 token 序列与断言，只覆写 model_type
+        """
+
+        @override
+        def _get_model_type(self):
+            return "kimi_linear"
+
     class ChatGLM45TestSuite(BaseToolCallTestSuite):
         """GLM45相关测试的内嵌测试套件"""
 
@@ -2163,6 +2172,21 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
     async def test_parse_kimik2_advanced_tool_call_no_stream_stop_words(self):
         """测试KimiK2工具调用非流式场景（包含停止词）"""
         kimi_suite = self.KimiK2AdvancedTestSuite(self)
+        await kimi_suite.test_no_stream_stop_words()
+
+    async def test_parse_kimi_linear_tool_call_streaming_case(self):
+        """测试 Kimi-Linear 工具调用流式场景：复用 K2 协议 + KimiK2Renderer"""
+        kimi_suite = self.KimiLinearTestSuite(self)
+        await kimi_suite.test_streaming_case()
+
+    async def test_parse_kimi_linear_tool_call_no_stream(self):
+        """测试 Kimi-Linear 工具调用非流式场景"""
+        kimi_suite = self.KimiLinearTestSuite(self)
+        await kimi_suite.test_no_stream()
+
+    async def test_parse_kimi_linear_tool_call_no_stream_stop_words(self):
+        """测试 Kimi-Linear 工具调用非流式场景（包含 <|im_end|> 停止词）"""
+        kimi_suite = self.KimiLinearTestSuite(self)
         await kimi_suite.test_no_stream_stop_words()
 
     async def test_parse_chatglm45_tool_call_streaming_case(self):
