@@ -577,6 +577,7 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<KVCacheRegionName>& host_reg
     KVCacheConfig kv_config;
     kv_config.memory_cache_size_mb         = 64;
     kv_config.memory_cache_sync_timeout_ms = 1000;
+    kv_config.enable_prefix_tree_memory_cache = false;
 
     auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config, /*payload_gap_bytes=*/8, host_regions);
 
@@ -698,6 +699,41 @@ TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
 TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedStagedCopySupportsHostBackedStateRegions) {
     runDsv4TypedStagedCopyRoundTrip(
         {KVCacheRegionName::INDEXER_STATE, KVCacheRegionName::CSA_STATE, KVCacheRegionName::HCA_STATE});
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeKindRequiredUsesRuntimeNullSlots) {
+    auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb         = 64;
+    kv_config.memory_cache_sync_timeout_ms = 1000;
+
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+    auto connector = std::make_shared<KVCacheMemoryConnector>(
+        config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    const auto slots = connector->layerRegionSlots();
+    ASSERT_TRUE(connector->isDsv4TypedCacheLayout(slots));
+
+    KVCacheResource resource;
+    resource.initGroups(static_cast<int>(config.group_types.size()),
+                        static_cast<int>(config.layer_all_num),
+                        config.layer_to_group_id,
+                        /*kernel_blocks_per_kv_block=*/1,
+                        config.group_types,
+                        config.layer_region_to_group_id);
+    resource.resizeBlocks(/*reserver_blocks=*/2, NULL_BLOCK_IDX);
+
+    for (int gid = 0; gid <= 2; ++gid) {
+        resource.mutableBlockIds(gid).setAt(0, static_cast<BlockIdxType>(10 + gid));
+    }
+    resource.mutableBlockIds(6).setAt(1, 66);
+
+    const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
+
+    EXPECT_TRUE(connector->kindRequiredAt(layer_attn_blocks, slots, 0, CacheBlockKind::COMPRESSED_KV));
+    EXPECT_FALSE(connector->kindRequiredAt(layer_attn_blocks, slots, 0, CacheBlockKind::STATE_SWA_KV));
+    EXPECT_FALSE(connector->kindRequiredAt(layer_attn_blocks, slots, 1, CacheBlockKind::COMPRESSED_KV));
+    EXPECT_TRUE(connector->kindRequiredAt(layer_attn_blocks, slots, 1, CacheBlockKind::STATE_SWA_KV));
 }
 
 }  // namespace rtp_llm::test

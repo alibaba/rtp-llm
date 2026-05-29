@@ -119,6 +119,8 @@ KVCacheMemoryConnector::~KVCacheMemoryConnector() {
     disk_mount_guard_.reset();
     complete_pool_.reset();
     incomplete_pool_.reset();
+    compressed_pool_.reset();
+    state_swa_pool_.reset();
     {
         std::lock_guard<std::mutex> lock(staged_copy_scratch_mutex_);
         for (auto& [_, scratch] : staged_copy_scratch_by_device_) {
@@ -150,7 +152,8 @@ bool KVCacheMemoryConnector::init() {
     if (diskCacheEnabled()) {
         initDiskBlockPools();
     }
-    block_cache_ = std::make_shared<MemoryDiskBlockCache>();
+    block_cache_        = std::make_shared<MemoryDiskBlockCache>();
+    prefix_block_cache_ = std::make_shared<PrefixTreeMemoryBlockCache>();
 
     broadcast_manager_ = std::make_shared<BroadcastManager>(tp_addrs_);
     RTP_LLM_CHECK_WITH_INFO(broadcast_manager_->init(), "init failed, broadcast manager init failed");
@@ -195,16 +198,61 @@ void KVCacheMemoryConnector::initBlockPool() {
                             memory_cache_size_mb);
 
     const auto slots = layerRegionSlots();
+    const bool prefix_tree_requested = kv_cache_config_.enable_prefix_tree_memory_cache;
+    const bool prefix_tree_supported = isDsv4TypedCacheLayout(slots) && !kv_cache_config_.enable_memory_cache_disk;
+    use_prefix_tree_memory_cache_    = prefix_tree_requested && prefix_tree_supported;
+    RTP_LLM_CHECK_WITH_INFO(use_prefix_tree_memory_cache_ || !prefix_tree_requested
+                                || kv_cache_config_.enable_legacy_memory_connector_fallback,
+                            "prefix-tree memory cache requested but unsupported by this layout/config and legacy "
+                            "memory connector fallback is disabled");
 
     size_t total_block_size     = 0;
     size_t full_only_block_size = 0;
+    size_t compressed_size      = 0;
+    size_t state_swa_size       = 0;
     for (const auto& slot : slots) {
         total_block_size += slot.stride_bytes;
         if (isFullOnlySlot(slot)) {
             full_only_block_size += slot.stride_bytes;
         }
+        if (kindForSlot(slot) == CacheBlockKind::COMPRESSED_KV) {
+            compressed_size += slot.stride_bytes;
+        } else if (kindForSlot(slot) == CacheBlockKind::STATE_SWA_KV) {
+            state_swa_size += slot.stride_bytes;
+        }
     }
     RTP_LLM_CHECK_WITH_INFO(total_block_size > 0, "block size is invalid: %zu", total_block_size);
+
+    if (use_prefix_tree_memory_cache_) {
+        compressed_block_size_ = compressed_size;
+        state_swa_block_size_  = state_swa_size;
+        RTP_LLM_CHECK_WITH_INFO(compressed_block_size_ > 0 && state_swa_block_size_ > 0,
+                                "prefix-tree memory pool size invalid, compressed=%zu state_swa=%zu",
+                                compressed_block_size_,
+                                state_swa_block_size_);
+        const size_t total_bytes       = static_cast<size_t>(memory_cache_size_mb) * 1024ULL * 1024ULL;
+        const size_t bytes_per_key     = compressed_block_size_ + state_swa_block_size_;
+        const size_t key_capacity      = total_bytes / bytes_per_key;
+        RTP_LLM_CHECK_WITH_INFO(key_capacity > 0,
+                                "pool_size_mb=%ld too small for prefix memory pools, compressed=%zu state_swa=%zu",
+                                memory_cache_size_mb,
+                                compressed_block_size_,
+                                state_swa_block_size_);
+        auto make_pool = [](size_t block_size, size_t block_num) -> std::shared_ptr<BlockPool> {
+            const auto pool_config = BlockPoolConfigHelper::createConfig(
+                /*layer_num=*/1, static_cast<uint32_t>(block_num), static_cast<uint32_t>(block_size), TYPE_INT8);
+            auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
+            RTP_LLM_CHECK_WITH_INFO(pool->init(), "memory block pool init failed, block size: %zu", block_size);
+            return pool;
+        };
+        compressed_pool_ = make_pool(compressed_block_size_, key_capacity);
+        state_swa_pool_  = make_pool(state_swa_block_size_, key_capacity);
+        RTP_LLM_LOG_INFO("prefix-tree memory pool init: compressed_size=%zu state_swa_size=%zu key_capacity=%zu",
+                         compressed_block_size_,
+                         state_swa_block_size_,
+                         key_capacity);
+        return;
+    }
 
     const bool use_dual =
         hasTypedLayerRegionSlots(slots) && full_only_block_size > 0 && full_only_block_size < total_block_size;
@@ -574,6 +622,46 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
 
     autil::ScopedTime2 timer;
 
+    if (usePrefixTreeMemoryCache()) {
+        resource->ensureLinearBlockDependencies();
+        size_t matched_num = already_reuse_num;
+        for (size_t i = already_reuse_num; i < cache_keys_size; ++i) {
+            bool ok = true;
+            for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+                if (!kindRequiredAt(layer_attn_block_ids, slots, i, kind)) {
+                    continue;
+                }
+                auto match_result = prefix_block_cache_->match(static_cast<CacheKeyType>(cache_keys.at(i)), kind);
+                if (!match_result.found) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok) {
+                break;
+            }
+            matched_num = i + 1;
+        }
+        if (matched_num <= already_reuse_num) {
+            reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
+            return nullptr;
+        }
+        const int start_read_block_index = static_cast<int>(already_reuse_num);
+        const int read_block_num         = static_cast<int>(matched_num - already_reuse_num);
+        auto copy_plan = buildPrefixCopyPlanForRead(cache_keys,
+                                                    resource->blockDependencies(),
+                                                    layer_attn_block_ids,
+                                                    slots,
+                                                    start_read_block_index,
+                                                    read_block_num);
+        if (!copy_plan || copy_plan->copy_infos.empty()) {
+            reportMatchMetrics(/*success=*/false, timer.done_us(), cache_keys_size, already_reuse_num);
+            return nullptr;
+        }
+        reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
+        return std::make_shared<MemoryAsyncMatchContext>(matched_num, start_read_block_index, read_block_num, copy_plan);
+    }
+
     // matched_num must end at a key that satisfies BOTH:
     // - memory cache key is complete
     // - all gpu blocks for this key are valid (non-null)
@@ -658,6 +746,53 @@ bool KVCacheMemoryConnector::gpuBlocksAllValid(const LayerAttnBlockIds&         
     return true;
 }
 
+bool KVCacheMemoryConnector::usePrefixTreeMemoryCache() const {
+    return use_prefix_tree_memory_cache_;
+}
+
+CacheBlockKind KVCacheMemoryConnector::kindForSlot(const LayerRegionSlot& slot) const {
+    if (slot.group_id >= 0 && slot.group_id <= 2) {
+        return CacheBlockKind::COMPRESSED_KV;
+    }
+    if (slot.group_id >= 3 && slot.group_id <= 6) {
+        return CacheBlockKind::STATE_SWA_KV;
+    }
+    return isFullOnlySlot(slot) ? CacheBlockKind::COMPRESSED_KV : CacheBlockKind::STATE_SWA_KV;
+}
+
+bool KVCacheMemoryConnector::kindRequiredAt(const LayerAttnBlockIds&            layer_attn_block_ids,
+                                            const std::vector<LayerRegionSlot>& slots,
+                                            size_t                              key_index,
+                                            CacheBlockKind                      kind) const {
+    for (const auto& slot : slots) {
+        if (kindForSlot(slot) != kind) {
+            continue;
+        }
+        const auto layer = static_cast<size_t>(slot.layer_id);
+        const auto attn  = static_cast<size_t>(slot.region_name);
+        if (layer >= layer_attn_block_ids.size() || attn >= layer_attn_block_ids[layer].size()
+            || layer_attn_block_ids[layer][attn] == nullptr) {
+            return false;
+        }
+        const auto& blocks = layer_attn_block_ids[layer][attn]->blocks();
+        if (key_index < blocks.size() && !isNullBlockIdx(blocks[key_index])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+size_t KVCacheMemoryConnector::prefixKindBlockSize(CacheBlockKind                     kind,
+                                                   const std::vector<LayerRegionSlot>& slots) const {
+    size_t bytes = 0;
+    for (const auto& slot : slots) {
+        if (kindForSlot(slot) == kind) {
+            bytes += slot.stride_bytes;
+        }
+    }
+    return bytes;
+}
+
 std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   resource,
                                                                 const std::shared_ptr<Meta>&              meta,
                                                                 const std::shared_ptr<AsyncMatchContext>& match_context,
@@ -709,8 +844,18 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         }
     }
     if (!copy_plan) {
-        copy_plan =
-            buildCopyPlanForRead(cache_keys, layer_attn_block_ids, slots, start_read_block_index, read_block_num);
+        if (usePrefixTreeMemoryCache()) {
+            resource->ensureLinearBlockDependencies();
+            copy_plan = buildPrefixCopyPlanForRead(cache_keys,
+                                                   resource->blockDependencies(),
+                                                   layer_attn_block_ids,
+                                                   slots,
+                                                   start_read_block_index,
+                                                   read_block_num);
+        } else {
+            copy_plan =
+                buildCopyPlanForRead(cache_keys, layer_attn_block_ids, slots, start_read_block_index, read_block_num);
+        }
     }
     if (!copy_plan || copy_plan->copy_infos.empty()) {
         reportReadMetrics(false, timer.done_us(), cache_keys_size, 0);
@@ -729,12 +874,24 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         if (success) {
             resource->setMemoryReuseBlockNum(read_block_num);
             for (const auto& copy_info : copy_plan->copy_infos) {
-                const auto removed_item = block_cache_->removeIfMatch(
-                    copy_info.cache_key, copy_info.backing_type, copy_info.mem_block, copy_info.disk_slot);
-                if (!removed_item.has_value()) {
-                    continue;
+                if (copy_info.kind == CacheBlockKind::COMPRESSED_KV || copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
+                    const auto removed_item = prefix_block_cache_->detachIfMatch(copy_info.cache_key,
+                                                                                 copy_info.kind,
+                                                                                 copy_info.backing_type,
+                                                                                 copy_info.mem_block,
+                                                                                 copy_info.disk_slot,
+                                                                                 copy_info.generation);
+                    if (removed_item.has_value()) {
+                        releasePrefixCacheBacking(*removed_item);
+                    }
+                } else {
+                    const auto removed_item = block_cache_->removeIfMatch(
+                        copy_info.cache_key, copy_info.backing_type, copy_info.mem_block, copy_info.disk_slot);
+                    if (!removed_item.has_value()) {
+                        continue;
+                    }
+                    releaseCacheBacking(*removed_item);
                 }
-                releaseCacheBacking(*removed_item);
             }
             RTP_LLM_LOG_INFO("memory cache read success: read_blocks=%d released_blocks=%zu total_blocks=%zu",
                              read_block_num,
@@ -827,6 +984,66 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&               
     return success ? plan : nullptr;
 }
 
+std::shared_ptr<KVCacheMemoryConnector::CopyPlan>
+KVCacheMemoryConnector::buildPrefixCopyPlanForRead(const CacheKeysType&                cache_keys,
+                                                   const BlockDependenciesType&        dependencies,
+                                                   const LayerAttnBlockIds&            layer_attn_block_ids,
+                                                   const std::vector<LayerRegionSlot>& slots,
+                                                   int                                 start_index,
+                                                   int                                 read_num) {
+    (void)dependencies;
+    std::vector<CopyInfoPerKey> copy_infos;
+    bool                        success = true;
+    for (int i = start_index; i < start_index + read_num; ++i) {
+        const auto cache_key = cache_keys.at(i);
+        for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+            if (!kindRequiredAt(layer_attn_block_ids, slots, static_cast<size_t>(i), kind)) {
+                continue;
+            }
+            const auto match_result = prefix_block_cache_->matchAndMarkInFlight(cache_key, kind);
+            if (!match_result.found || match_result.backing_type != CacheBackingType::MEMORY) {
+                success = false;
+                break;
+            }
+            PrefixTreeMemoryBlockCache::CacheItem item;
+            item.cache_key    = cache_key;
+            item.kind         = kind;
+            item.backing_type = match_result.backing_type;
+            item.block_index  = match_result.block_index;
+            item.disk_slot    = match_result.disk_slot;
+            item.block_size   = match_result.block_size;
+            item.generation   = match_result.generation;
+            auto pool = memoryPoolFor(kind);
+            if (!pool) {
+                success = false;
+                break;
+            }
+            referenceBlocksInPool(pool, {match_result.block_index}, /*cache_ref=*/false);
+
+            CopyInfoPerKey copy_info;
+            copy_info.cache_key    = cache_key;
+            copy_info.kind         = kind;
+            copy_info.backing_type = match_result.backing_type;
+            copy_info.mem_block    = match_result.block_index;
+            copy_info.disk_slot    = match_result.disk_slot;
+            copy_info.block_size   = match_result.block_size;
+            copy_info.generation   = match_result.generation;
+            copy_info.gpu_blocks.reserve(slots.size());
+            for (const auto& slot : slots) {
+                const auto layer = static_cast<size_t>(slot.layer_id);
+                const auto attn  = static_cast<size_t>(slot.region_name);
+                copy_info.gpu_blocks.push_back(layer_attn_block_ids.at(layer).at(attn)->blocks().at(i));
+            }
+            copy_infos.emplace_back(std::move(copy_info));
+        }
+        if (!success) {
+            break;
+        }
+    }
+    auto plan = createCopyPlan(copy_infos, CopyDirection::H2D);
+    return success ? plan : nullptr;
+}
+
 std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shared_ptr<KVCacheResource>& resource,
                                                                  const std::shared_ptr<Meta>&            meta) {
     RTP_LLM_PROFILE_FUNCTION();
@@ -854,6 +1071,52 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
                             cache_keys.size());
         reportWriteMetrics(false, timer.done_us(), cache_keys_size, 0);
         return nullptr;
+    }
+
+    if (usePrefixTreeMemoryCache()) {
+        resource->ensureLinearBlockDependencies();
+        bool no_need_write = false;
+        auto copy_plan     = buildPrefixCopyPlanForWrite(cache_keys,
+                                                     resource->blockDependencies(),
+                                                     layer_attn_block_ids,
+                                                     slots,
+                                                     0,
+                                                     static_cast<int>(cache_keys_size),
+                                                     no_need_write);
+        if (!copy_plan || copy_plan->copy_infos.empty()) {
+            reportWriteMetrics(no_need_write, timer.done_us(), static_cast<int64_t>(cache_keys_size), 0);
+            return nullptr;
+        }
+        auto write_done = [copy_plan,
+                           resource_copy = resource,
+                           timer,
+                           total_block_num = cache_keys_size,
+                           this](bool success) mutable {
+                if (success) {
+                    const auto& dependencies = resource_copy->blockDependencies();
+                    for (auto& copy_info : copy_plan->copy_infos) {
+                        const auto pos = static_cast<size_t>(std::find(resource_copy->cacheKeys().begin(),
+                                                                        resource_copy->cacheKeys().end(),
+                                                                        copy_info.cache_key)
+                                                             - resource_copy->cacheKeys().begin());
+                        const auto dependency =
+                            pos < dependencies.size() ? dependencies[pos] :
+                                                        BlockDependency{false, 0, static_cast<uint32_t>(pos)};
+                        putPrefixToCache(copy_info, dependency);
+                    }
+                }
+                resource_copy.reset();
+                const int64_t write_block_num = success ? static_cast<int64_t>(copy_plan->copy_infos.size()) : 0;
+                copy_plan.reset();
+                reportWriteMetrics(success, timer.done_us(), total_block_num, write_block_num);
+            };
+
+        auto context = std::make_shared<MemoryAsyncContext>(write_done);
+        if (!startCopyAsync(context, copy_plan)) {
+            write_done(false);
+            return nullptr;
+        }
+        return context;
     }
 
     size_t mem_matched_num = 0;
@@ -1006,6 +1269,55 @@ KVCacheMemoryConnector::buildCopyPlanForWrite(const CacheKeysType&              
 }
 
 std::shared_ptr<KVCacheMemoryConnector::CopyPlan>
+KVCacheMemoryConnector::buildPrefixCopyPlanForWrite(const CacheKeysType&                cache_keys,
+                                                    const BlockDependenciesType&        dependencies,
+                                                    const LayerAttnBlockIds&            layer_attn_block_ids,
+                                                    const std::vector<LayerRegionSlot>& slots,
+                                                    int                                 start_index,
+                                                    int                                 write_num,
+                                                    bool&                               no_need_write) {
+    std::vector<CopyInfoPerKey> copy_infos;
+    copy_infos.reserve(static_cast<size_t>(write_num) * 2);
+    for (int i = start_index; i < start_index + write_num; ++i) {
+        const auto cache_key = cache_keys.at(i);
+        for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+            if (!kindRequiredAt(layer_attn_block_ids, slots, static_cast<size_t>(i), kind)) {
+                continue;
+            }
+            if (prefix_block_cache_->contains(cache_key, kind)) {
+                continue;
+            }
+            CopyInfoPerKey copy_info;
+            copy_info.cache_key   = cache_key;
+            copy_info.kind        = kind;
+            copy_info.mem_block   = NULL_BLOCK_IDX;
+            copy_info.block_size  = prefixKindBlockSize(kind, slots);
+            copy_info.is_complete = true;
+            copy_info.gpu_blocks.reserve(slots.size());
+            for (const auto& slot : slots) {
+                const auto layer = static_cast<size_t>(slot.layer_id);
+                const auto attn  = static_cast<size_t>(slot.region_name);
+                copy_info.gpu_blocks.push_back(layer_attn_block_ids.at(layer).at(attn)->blocks().at(i));
+            }
+            copy_infos.emplace_back(std::move(copy_info));
+        }
+    }
+
+    no_need_write = copy_infos.empty();
+    if (no_need_write) {
+        return nullptr;
+    }
+    if (!allocatePrefixBackingsForWrite(copy_infos)) {
+        for (const auto& copy_info : copy_infos) {
+            releasePrefixRequestBacking(copy_info);
+        }
+        return nullptr;
+    }
+    (void)dependencies;
+    return createCopyPlan(copy_infos, CopyDirection::D2H);
+}
+
+std::shared_ptr<KVCacheMemoryConnector::CopyPlan>
 KVCacheMemoryConnector::createCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos, const CopyDirection& direction) {
     auto plan        = new CopyPlan();
     plan->copy_infos = copy_infos;
@@ -1013,11 +1325,24 @@ KVCacheMemoryConnector::createCopyPlan(const std::vector<CopyInfoPerKey>& copy_i
     auto deleter     = [this](CopyPlan* plan) {
         for (const auto& copy_info : plan->copy_infos) {
             if (!copy_info.request_released) {
-                releaseRequestBacking(copy_info);
+                if (copy_info.kind == CacheBlockKind::COMPRESSED_KV || copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
+                    releasePrefixRequestBacking(copy_info);
+                } else {
+                    releaseRequestBacking(copy_info);
+                }
             }
             if (plan->direction == CopyDirection::H2D) {
-                block_cache_->releaseInFlight(
-                    copy_info.cache_key, copy_info.backing_type, copy_info.mem_block, copy_info.disk_slot);
+                if (copy_info.kind == CacheBlockKind::COMPRESSED_KV || copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
+                    prefix_block_cache_->releaseInFlight(copy_info.cache_key,
+                                                         copy_info.kind,
+                                                         copy_info.backing_type,
+                                                         copy_info.mem_block,
+                                                         copy_info.disk_slot,
+                                                         copy_info.generation);
+                } else {
+                    block_cache_->releaseInFlight(
+                        copy_info.cache_key, copy_info.backing_type, copy_info.mem_block, copy_info.disk_slot);
+                }
             }
         }
         delete plan;
@@ -1055,6 +1380,11 @@ KVCacheMemoryConnector::sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan)
         item->set_is_complete(copy_info.is_complete);
         item->set_backing_type(copy_info.backing_type == CacheBackingType::MEMORY ? MemoryOperationRequestPB::MEMORY :
                                                                                     MemoryOperationRequestPB::DISK);
+        if (copy_info.kind == CacheBlockKind::COMPRESSED_KV) {
+            item->set_cache_block_kind(MemoryOperationRequestPB::COMPRESSED_KV);
+        } else if (copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
+            item->set_cache_block_kind(MemoryOperationRequestPB::STATE_SWA_KV);
+        }
         if (copy_info.backing_type == CacheBackingType::DISK) {
             item->set_disk_slot(copy_info.disk_slot);
         }
@@ -1108,9 +1438,19 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
     const bool has_typed_slots  = hasTypedLayerRegionSlots(slots);
     bool       has_disk_items   = false;
     bool       has_memory_items = false;
+    bool       has_prefix_items = false;
+
+    if (request.copy_items_size() == 0) {
+        response.set_success(false);
+        reportCopyMetrics(false, timer.done_us(), copy_direction);
+        return false;
+    }
 
     for (int i = 0; i < request.copy_items_size(); ++i) {
         const auto& item = request.copy_items(i);
+        has_prefix_items = has_prefix_items
+                           || (item.cache_block_kind() != MemoryOperationRequestPB::LEGACY_COMPLETE
+                               && item.cache_block_kind() != MemoryOperationRequestPB::LEGACY_INCOMPLETE);
         if (!validateCopyItemBacking(item)) {
             response.set_success(false);
             reportCopyMetrics(false, timer.done_us(), copy_direction);
@@ -1121,6 +1461,13 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
         } else {
             has_memory_items = true;
         }
+    }
+
+    if (has_prefix_items) {
+        const bool success = copyPrefixMemoryItems(request, copy_direction, slots);
+        response.set_success(success);
+        reportCopyMetrics(success, timer.done_us(), copy_direction);
+        return success;
     }
 
     if (has_disk_items) {
@@ -1215,6 +1562,70 @@ bool KVCacheMemoryConnector::copyMemoryItemsGeneric(const MemoryOperationRequest
         const bool      can_use_split_kv_copy = !hasTypedLayerRegionSlots(slots);
         applySplitKvMultiCopyFieldsIfEligible(
             kv_cache_config_.enable_memory_cache_sm_copy && can_use_split_kv_copy, cache_config_, mc);
+        execNoBlockCopy(mc);
+    }
+    return true;
+}
+
+bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestPB&     request,
+                                                   CopyDirection                       direction,
+                                                   const std::vector<LayerRegionSlot>& slots) {
+    std::vector<torch::Tensor> dst_buffers;
+    std::vector<torch::Tensor> src_buffers;
+    for (int i = 0; i < request.copy_items_size(); ++i) {
+        const auto& item = request.copy_items(i);
+        const bool is_prefix_kind = item.cache_block_kind() == MemoryOperationRequestPB::COMPRESSED_KV
+                                    || item.cache_block_kind() == MemoryOperationRequestPB::STATE_SWA_KV;
+        if (item.backing_type() != MemoryOperationRequestPB::MEMORY || !is_prefix_kind) {
+            return false;
+        }
+        CacheBlockKind kind;
+        if (item.cache_block_kind() == MemoryOperationRequestPB::COMPRESSED_KV) {
+            kind = CacheBlockKind::COMPRESSED_KV;
+        } else if (item.cache_block_kind() == MemoryOperationRequestPB::STATE_SWA_KV) {
+            kind = CacheBlockKind::STATE_SWA_KV;
+        } else {
+            return false;
+        }
+        auto pool = memoryPoolFor(kind);
+        if (!pool || item.gpu_blocks_size() != static_cast<int>(slots.size())) {
+            return false;
+        }
+        const auto mem_block = static_cast<BlockIdxType>(item.mem_block());
+        auto       mem_buffers = pool->convertIndexToBuffer(/*layer_id=*/0, mem_block);
+        if (mem_buffers.size() != 1u || mem_buffers[0].addr == nullptr || mem_buffers[0].size_bytes == 0) {
+            return false;
+        }
+        const auto& mem_buffer = mem_buffers[0];
+        size_t      byte_off   = 0;
+        for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
+            const auto& slot = slots[slot_idx];
+            if (kindForSlot(slot) != kind) {
+                continue;
+            }
+            const auto gpu_block = static_cast<BlockIdxType>(item.gpu_blocks(static_cast<int>(slot_idx)));
+            if (isNullBlockIdx(gpu_block)) {
+                byte_off += slot.stride_bytes;
+                continue;
+            }
+            const auto gpu_buffers      = allocator_->convertIndexToBuffer(slot.layer_id, slot.region_name, gpu_block);
+            size_t     within_layer_off = 0;
+            for (const auto& gpu_buffer : gpu_buffers) {
+                if (within_layer_off + gpu_buffer.size_bytes > slot.stride_bytes
+                    || byte_off + within_layer_off + gpu_buffer.size_bytes > mem_buffer.size_bytes) {
+                    return false;
+                }
+                if (!appendCopyBytesToBuffers(
+                        mem_buffer, gpu_buffer, byte_off + within_layer_off, direction, dst_buffers, src_buffers)) {
+                    return false;
+                }
+                within_layer_off += gpu_buffer.size_bytes;
+            }
+            byte_off += slot.stride_bytes;
+        }
+    }
+    if (!dst_buffers.empty()) {
+        MultiCopyParams mc{dst_buffers, src_buffers};
         execNoBlockCopy(mc);
     }
     return true;
@@ -1808,6 +2219,45 @@ bool KVCacheMemoryConnector::allocateBackingsForWrite(std::vector<CopyInfoPerKey
     return true;
 }
 
+bool KVCacheMemoryConnector::allocatePrefixBackingsForWrite(std::vector<CopyInfoPerKey>& copy_infos) {
+    std::unique_lock<std::mutex> lock(malloc_mutex_);
+    std::vector<size_t>          allocated_indices;
+    allocated_indices.reserve(copy_infos.size());
+    for (size_t i = 0; i < copy_infos.size(); ++i) {
+        if (!allocateOnePrefixBacking(copy_infos[i])) {
+            for (const auto idx : allocated_indices) {
+                releasePrefixRequestBacking(copy_infos[idx]);
+            }
+            return false;
+        }
+        allocated_indices.push_back(i);
+    }
+    return true;
+}
+
+bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info) {
+    BlockIdxType mem_block = NULL_BLOCK_IDX;
+    if (tryMallocMemoryBlock(copy_info.kind, mem_block)) {
+        copy_info.backing_type = CacheBackingType::MEMORY;
+        copy_info.mem_block    = mem_block;
+        copy_info.disk_slot    = -1;
+        return true;
+    }
+    while (true) {
+        auto evicted = prefix_block_cache_->popOldestEvictable(copy_info.kind);
+        if (!evicted.has_value()) {
+            return false;
+        }
+        releasePrefixCacheBacking(*evicted);
+        if (tryMallocMemoryBlock(copy_info.kind, mem_block)) {
+            copy_info.backing_type = CacheBackingType::MEMORY;
+            copy_info.mem_block    = mem_block;
+            copy_info.disk_slot    = -1;
+            return true;
+        }
+    }
+}
+
 bool KVCacheMemoryConnector::allocateOneBacking(CopyInfoPerKey& copy_info) {
     const auto   kind      = blockKindFromComplete(copy_info.is_complete);
     BlockIdxType mem_block = NULL_BLOCK_IDX;
@@ -1895,6 +2345,16 @@ void KVCacheMemoryConnector::releaseRequestBacking(const CopyInfoPerKey& copy_in
     }
 }
 
+void KVCacheMemoryConnector::releasePrefixRequestBacking(const CopyInfoPerKey& copy_info) {
+    if (copy_info.backing_type != CacheBackingType::MEMORY) {
+        return;
+    }
+    auto pool = memoryPoolFor(copy_info.kind);
+    if (pool) {
+        freeBlocksFromPool(pool, {copy_info.mem_block}, /*cache_free=*/false);
+    }
+}
+
 void KVCacheMemoryConnector::releaseCacheBacking(const MemoryDiskBlockCache::CacheItem& item) {
     if (item.backing_type == CacheBackingType::MEMORY) {
         auto pool = memoryPoolFor(blockKindFromComplete(item.is_complete));
@@ -1906,6 +2366,16 @@ void KVCacheMemoryConnector::releaseCacheBacking(const MemoryDiskBlockCache::Cac
         if (pool) {
             pool->blockCacheFree(item.disk_slot);
         }
+    }
+}
+
+void KVCacheMemoryConnector::releasePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item) {
+    if (item.backing_type != CacheBackingType::MEMORY) {
+        return;
+    }
+    auto pool = memoryPoolFor(item.kind);
+    if (pool) {
+        freeBlocksFromPool(pool, {item.block_index}, /*cache_free=*/true);
     }
 }
 
@@ -1923,7 +2393,23 @@ void KVCacheMemoryConnector::referenceCacheBacking(const MemoryDiskBlockCache::C
     }
 }
 
+void KVCacheMemoryConnector::referencePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item) {
+    if (item.backing_type != CacheBackingType::MEMORY) {
+        return;
+    }
+    auto pool = memoryPoolFor(item.kind);
+    if (pool) {
+        referenceBlocksInPool(pool, {item.block_index}, /*cache_ref=*/true);
+    }
+}
+
 std::shared_ptr<BlockPool> KVCacheMemoryConnector::memoryPoolFor(CacheBlockKind kind) const {
+    if (kind == CacheBlockKind::COMPRESSED_KV) {
+        return compressed_pool_;
+    }
+    if (kind == CacheBlockKind::STATE_SWA_KV) {
+        return state_swa_pool_;
+    }
     if (!isDualPool()) {
         return block_pool_;
     }
@@ -1969,6 +2455,15 @@ std::shared_ptr<BlockPool> KVCacheMemoryConnector::createBlockPool(size_t block_
 
 std::string KVCacheMemoryConnector::blockPoolDebugString() const {
     std::stringstream oss;
+    if (usePrefixTreeMemoryCache()) {
+        oss << "compressed pool: total=" << compressed_pool_->totalBlocksNum()
+            << " free=" << compressed_pool_->freeBlocksNum()
+            << " available=" << compressed_pool_->availableBlocksNum()
+            << " | state_swa pool: total=" << state_swa_pool_->totalBlocksNum()
+            << " free=" << state_swa_pool_->freeBlocksNum()
+            << " available=" << state_swa_pool_->availableBlocksNum();
+        return oss.str();
+    }
     if (isDualPool()) {
         oss << "complete pool: total=" << complete_pool_->totalBlocksNum()
             << " free=" << complete_pool_->freeBlocksNum() << " available=" << complete_pool_->availableBlocksNum();
@@ -2028,6 +2523,30 @@ void KVCacheMemoryConnector::putToCache(CopyInfoPerKey& copy_info) {
     }
 }
 
+void KVCacheMemoryConnector::putPrefixToCache(CopyInfoPerKey& copy_info, const BlockDependency& dependency) {
+    PrefixTreeMemoryBlockCache::CacheItem item;
+    item.cache_key    = copy_info.cache_key;
+    item.kind         = copy_info.kind;
+    item.backing_type = copy_info.backing_type;
+    item.block_index  = copy_info.mem_block;
+    item.disk_slot    = copy_info.disk_slot;
+    item.block_size   = copy_info.block_size;
+    item.is_resident  = false;
+
+    referencePrefixCacheBacking(item);
+    releasePrefixRequestBacking(copy_info);
+    copy_info.request_released = true;
+
+    auto [success, popped] = prefix_block_cache_->putCommitted(copy_info.cache_key, dependency, item);
+    if (!success) {
+        releasePrefixCacheBacking(item);
+        return;
+    }
+    if (popped.has_value()) {
+        releasePrefixCacheBacking(*popped);
+    }
+}
+
 bool KVCacheMemoryConnector::putToCache(const MemoryDiskBlockCache::CacheItem& item, bool already_has_cache_ref) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!already_has_cache_ref) {
@@ -2067,6 +2586,10 @@ int64_t KVCacheMemoryConnector::copyPlanTimeoutMs(const std::shared_ptr<CopyPlan
 }
 
 std::vector<CacheKeyType> KVCacheMemoryConnector::cacheKeys() const {
+    if (usePrefixTreeMemoryCache()) {
+        RTP_LLM_CHECK_WITH_INFO(prefix_block_cache_ != nullptr, "prefix block cache should not be null");
+        return prefix_block_cache_->cacheKeys();
+    }
     RTP_LLM_CHECK_WITH_INFO(block_cache_ != nullptr, "block cache should not be null");
     return block_cache_->cacheKeys();
 }
@@ -2197,7 +2720,22 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
     std::chrono::steady_clock::time_point last_disk_metrics_time = std::chrono::steady_clock::now();
     while (!stop_.load()) {
         if (metrics_reporter_) {
-            if (isDualPool()) {
+            if (usePrefixTreeMemoryCache()) {
+                if (!compressed_pool_ || !state_swa_pool_) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    continue;
+                }
+                const auto total = compressed_pool_->totalBlocksNum() + state_swa_pool_->totalBlocksNum();
+                const auto free  = compressed_pool_->freeBlocksNum() + state_swa_pool_->freeBlocksNum();
+                const auto avail = compressed_pool_->availableBlocksNum() + state_swa_pool_->availableBlocksNum();
+
+                RtpLLMMemoryCacheStatusMetricsCollector collector;
+                collector.total_block_num     = total;
+                collector.allocated_block_num = total - free;
+                collector.available_block_num = avail;
+                metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheStatusMetricsCollector>(
+                    nullptr, &collector);
+            } else if (isDualPool()) {
                 if (!complete_pool_) {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                     continue;

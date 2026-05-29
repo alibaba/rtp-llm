@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryDiskBlockCache.h"
+#include "rtp_llm/cpp/cache/connector/memory/PrefixTreeMemoryBlockCache.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
@@ -73,12 +74,15 @@ private:
     };
     struct CopyInfoPerKey {
         CacheKeyType              cache_key{0};
+        CacheBlockKind            kind{CacheBlockKind::COMPLETE};
         CacheBackingType          backing_type{CacheBackingType::MEMORY};
         BlockIdxType              mem_block{NULL_BLOCK_IDX};
         int32_t                   disk_slot{-1};
+        size_t                    block_size{0};
         std::vector<BlockIdxType> gpu_blocks;
         bool                      is_complete{true};
         bool                      request_released{false};
+        uint64_t                  generation{0};
     };
     enum class CopyDirection {
         H2D = 0,
@@ -152,6 +156,36 @@ private:
     bool                         gpuBlocksAllValid(const LayerAttnBlockIds&            layer_attn_block_ids,
                                                    const std::vector<LayerRegionSlot>& slots,
                                                    size_t                              key_index) const;
+    bool                         usePrefixTreeMemoryCache() const;
+    CacheBlockKind               kindForSlot(const LayerRegionSlot& slot) const;
+    bool                         kindRequiredAt(const LayerAttnBlockIds&            layer_attn_block_ids,
+                                                const std::vector<LayerRegionSlot>& slots,
+                                                size_t                              key_index,
+                                                CacheBlockKind                      kind) const;
+    size_t                       prefixKindBlockSize(CacheBlockKind kind,
+                                                     const std::vector<LayerRegionSlot>& slots) const;
+    std::shared_ptr<CopyPlan>    buildPrefixCopyPlanForRead(const CacheKeysType&                cache_keys,
+                                                             const BlockDependenciesType&        dependencies,
+                                                             const LayerAttnBlockIds&            layer_attn_block_ids,
+                                                             const std::vector<LayerRegionSlot>& slots,
+                                                             int                                 start_index,
+                                                             int                                 read_num);
+    std::shared_ptr<CopyPlan>    buildPrefixCopyPlanForWrite(const CacheKeysType&                cache_keys,
+                                                              const BlockDependenciesType&        dependencies,
+                                                              const LayerAttnBlockIds&            layer_attn_block_ids,
+                                                              const std::vector<LayerRegionSlot>& slots,
+                                                              int                                 start_index,
+                                                              int                                 write_num,
+                                                              bool&                               no_need_write);
+    bool                         allocatePrefixBackingsForWrite(std::vector<CopyInfoPerKey>& copy_infos);
+    bool                         allocateOnePrefixBacking(CopyInfoPerKey& copy_info);
+    void                         putPrefixToCache(CopyInfoPerKey& copy_info, const BlockDependency& dependency);
+    void                         releasePrefixRequestBacking(const CopyInfoPerKey& copy_info);
+    void                         releasePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item);
+    void                         referencePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item);
+    bool                         copyPrefixMemoryItems(const MemoryOperationRequestPB&     request,
+                                                       CopyDirection                       direction,
+                                                       const std::vector<LayerRegionSlot>& slots);
 
     bool freeBlocks(const std::vector<BlockIdxType>& blocks, bool cache_free = true);
     void referenceBlocks(const std::vector<BlockIdxType>& blocks, bool cache_ref = true);
@@ -219,6 +253,7 @@ private:
     mutable std::mutex                                      staged_copy_scratch_mutex_;
     std::map<int, std::unique_ptr<StagedMemoryCopyScratch>> staged_copy_scratch_by_device_;
     std::shared_ptr<MemoryDiskBlockCache>                   block_cache_;
+    std::shared_ptr<PrefixTreeMemoryBlockCache>             prefix_block_cache_;
     std::unique_ptr<DiskMountGuard>                         disk_mount_guard_;
     std::shared_ptr<DiskBlockPool>                          complete_disk_pool_;
     std::shared_ptr<DiskBlockPool>                          incomplete_disk_pool_;
@@ -229,6 +264,11 @@ private:
     std::shared_ptr<BlockPool> incomplete_pool_;
     size_t                     complete_block_size_{0};
     size_t                     incomplete_block_size_{0};
+    std::shared_ptr<BlockPool> compressed_pool_;
+    std::shared_ptr<BlockPool> state_swa_pool_;
+    size_t                     compressed_block_size_{0};
+    size_t                     state_swa_block_size_{0};
+    bool                       use_prefix_tree_memory_cache_{false};
 
     // metrics reporter
     kmonitor::MetricsReporterPtr metrics_reporter_;

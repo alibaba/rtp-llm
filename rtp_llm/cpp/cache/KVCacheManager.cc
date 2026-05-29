@@ -99,6 +99,7 @@ bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "cache specs must not be empty");
 
     auto shared_cache = std::make_shared<SharedBlockCache>();
+    shared_cache->setPrefixTreeEnabled(kv_cache_config_.enable_gpu_prefix_tree);
 
     const bool is_hybrid = config_.groupNums() > 1;
     if (config_.use_independent_block_pools) {

@@ -54,7 +54,7 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
                         cache_config.kernelBlocksPerKvBlock(),
                         group_types,
                         cache_config.layer_region_to_group_id);
-    selected.cacheKeys()        = selected_keys;
+    selected.setCacheKeys(selected_keys);
     const bool selected_aligned = selectedLastRankKeysAreAligned(source, cp_size);
     selected.setLastBlockAligned(selected_aligned);
 
@@ -65,6 +65,7 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
     // contract discards the dummy, not the usable selected key.
     if (!source.lastBlockAligned() && selected_aligned && !source.cacheKeys().empty()) {
         selected.cacheKeys().push_back(source.cacheKeys().back());
+        selected.rebuildLinearBlockDependencies();
         selected.setLastBlockAligned(false);
     }
 
