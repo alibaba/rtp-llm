@@ -394,8 +394,13 @@ std::vector<KVCacheMemoryConnector::LayerRegionSlot> KVCacheMemoryConnector::lay
                 if (gid < 0) {
                     continue;
                 }
+                const auto region_name = static_cast<KVCacheRegionName>(attn);
+                if (skipReuseCacheRegion(region_name)) {
+                    has_typed_slot = true;
+                    continue;
+                }
                 slots.push_back(LayerRegionSlot{static_cast<int>(layer),
-                                                static_cast<KVCacheRegionName>(attn),
+                                                region_name,
                                                 gid,
                                                 group_stride(gid, static_cast<int>(layer))});
                 has_typed_slot = true;

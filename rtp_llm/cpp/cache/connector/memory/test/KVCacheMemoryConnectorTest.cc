@@ -110,6 +110,63 @@ std::string joinPaths(const std::vector<std::string>& paths) {
     return joined;
 }
 
+CacheConfig createDsv4TypedConnectorConfig() {
+    constexpr size_t kDsv4PoolNum = 7;
+
+    CacheConfig config;
+    config.layer_num                    = 2;
+    config.layer_all_num                = 2;
+    config.block_num                    = 16;
+    config.seq_size_per_block           = 128;
+    config.kernel_seq_size_per_block    = 128;
+    config.linear_step                  = 4;
+    config.use_independent_block_pools  = true;
+    config.use_typed_cache_regions      = true;
+    config.use_opaque_kv_cache_store    = true;
+    config.is_sparse                    = true;
+    config.group_region_names           = {KVCacheRegionName::CSA_KV,
+                                           KVCacheRegionName::HCA_KV,
+                                           KVCacheRegionName::INDEXER_KV,
+                                           KVCacheRegionName::INDEXER_STATE,
+                                           KVCacheRegionName::CSA_STATE,
+                                           KVCacheRegionName::HCA_STATE,
+                                           KVCacheRegionName::SWA_KV};
+    config.group_types                  = {CacheGroupType::FULL,
+                                           CacheGroupType::FULL,
+                                           CacheGroupType::FULL,
+                                           CacheGroupType::SWA,
+                                           CacheGroupType::SWA,
+                                           CacheGroupType::SWA,
+                                           CacheGroupType::SWA};
+    config.group_kv_block_stride_bytes  = {16, 24, 32, 8, 12, 20, 28};
+    config.group_kv_scale_stride_bytes  = std::vector<size_t>(kDsv4PoolNum, 0);
+    config.layer_to_group_id            = {6, 6};
+    config.layer_to_group_ids           = {{1, 5, 6}, {0, 2, 3, 4, 6}};
+    config.layer_group_types            = {CacheGroupType::SWA, CacheGroupType::SWA};
+    config.layer_to_block_stride_bytes  = {72, 96};
+    config.cache_specs                  = std::vector<std::shared_ptr<KVCacheSpec>>(kDsv4PoolNum);
+    config.layer_ids                    = std::vector<std::vector<int>>(kDsv4PoolNum);
+    config.global_layer_ids             = std::vector<std::vector<int>>(kDsv4PoolNum);
+    config.layer_region_to_group_id     = std::vector<std::vector<int>>(
+        config.layer_all_num, std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
+
+    auto add_region = [&](int layer, KVCacheRegionName region_name, int gid) {
+        config.layer_region_to_group_id[static_cast<size_t>(layer)][static_cast<size_t>(region_name)] = gid;
+        config.layer_ids[static_cast<size_t>(gid)].push_back(layer);
+        config.global_layer_ids[static_cast<size_t>(gid)].push_back(layer);
+    };
+    add_region(0, KVCacheRegionName::HCA_KV, 1);
+    add_region(0, KVCacheRegionName::HCA_STATE, 5);
+    add_region(0, KVCacheRegionName::SWA_KV, 6);
+    add_region(1, KVCacheRegionName::CSA_KV, 0);
+    add_region(1, KVCacheRegionName::INDEXER_KV, 2);
+    add_region(1, KVCacheRegionName::INDEXER_STATE, 3);
+    add_region(1, KVCacheRegionName::CSA_STATE, 4);
+    add_region(1, KVCacheRegionName::SWA_KV, 6);
+
+    return config;
+}
+
 }  // namespace
 
 // Test-local helper struct. Business code no longer exposes a LayerBlock type.
@@ -991,6 +1048,52 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots
     EXPECT_EQ(plan->copy_infos[0].gpu_blocks, (std::vector<BlockIdxType>{11, 21}));
     EXPECT_EQ(plan->copy_infos[1].gpu_blocks, (std::vector<BlockIdxType>{12, NULL_BLOCK_IDX}));
     EXPECT_EQ(plan->copy_infos[2].gpu_blocks, (std::vector<BlockIdxType>{13, 23}));
+}
+
+TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_SkipsHCAStateSlots) {
+    auto cfg    = createDsv4TypedConnectorConfig();
+    auto kv_cfg = kv_cache_config_;
+    kv_cfg.memory_cache_size_mb         = 64;
+    kv_cfg.memory_cache_sync_timeout_ms = 1000;
+
+    auto conn          = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    conn->block_cache_ = std::make_shared<MemoryDiskBlockCache>();
+    ASSERT_NO_THROW(conn->initBlockPool());
+
+    auto slots = conn->layerRegionSlots();
+    ASSERT_EQ(slots.size(), 7u);
+    for (const auto& slot : slots) {
+        EXPECT_NE(slot.region_name, KVCacheRegionName::HCA_STATE);
+    }
+    EXPECT_TRUE(conn->isDsv4TypedCacheLayout(slots));
+
+    auto resource         = std::make_shared<KVCacheResource>();
+    resource->cacheKeys() = {1001, 1002};
+    resource->initGroups(/*group_num=*/7,
+                         /*layer_num=*/cfg.layer_all_num,
+                         cfg.layer_to_group_id,
+                         /*kernel_blocks_per_kv_block=*/1,
+                         cfg.group_types,
+                         cfg.layer_region_to_group_id);
+    resource->mutableBlockIds(0, KVCacheRegionName::HCA_KV).assign({11, 12});
+    resource->mutableBlockIds(0, KVCacheRegionName::HCA_STATE).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    resource->mutableBlockIds(0, KVCacheRegionName::SWA_KV).assign({61, 62});
+    resource->mutableBlockIds(1, KVCacheRegionName::CSA_KV).assign({1, 2});
+    resource->mutableBlockIds(1, KVCacheRegionName::INDEXER_KV).assign({21, 22});
+    resource->mutableBlockIds(1, KVCacheRegionName::INDEXER_STATE).assign({31, 32});
+    resource->mutableBlockIds(1, KVCacheRegionName::CSA_STATE).assign({41, 42});
+
+    bool no_need_write = true;
+    auto plan          = conn->buildCopyPlanForWrite(
+        resource->cacheKeys(), resource->layerAttnBlocks(), slots, /*start_index=*/0, /*write_num=*/2, no_need_write);
+
+    ASSERT_NE(plan, nullptr);
+    EXPECT_FALSE(no_need_write);
+    ASSERT_EQ(plan->copy_infos.size(), 2u);
+    EXPECT_TRUE(plan->copy_infos[0].is_complete);
+    EXPECT_TRUE(plan->copy_infos[1].is_complete);
+    EXPECT_EQ(plan->copy_infos[0].gpu_blocks, (std::vector<BlockIdxType>{11, 61, 1, 21, 31, 41, 61}));
+    EXPECT_EQ(plan->copy_infos[1].gpu_blocks, (std::vector<BlockIdxType>{12, 62, 2, 22, 32, 42, 62}));
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenGpuReuseLenGEKeysSize) {

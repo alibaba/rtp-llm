@@ -69,6 +69,11 @@ BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) 
 
 }  // namespace
 
+bool HybridKVCacheAllocator::skipReuseCacheGroup(int gid) const {
+    return static_cast<size_t>(gid) < config_.group_region_names.size()
+           && skipReuseCacheRegion(config_.group_region_names[static_cast<size_t>(gid)]);
+}
+
 HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&                 config,
                                                AllocationType                     allocation_type,
                                                const kmonitor::MetricsReporterPtr metrics_reporter,
@@ -119,6 +124,9 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
             const int gid       = swa_group_ids_[i];
             auto*     swa_group = dynamic_cast<SWAKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
             RTP_LLM_CHECK_WITH_INFO(swa_group != nullptr, "group %d is not SWAKVCacheGroup", gid);
+            if (skipReuseCacheGroup(gid)) {
+                continue;
+            }
             auto result = swa_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
             if (result.block_indices.empty()) {
                 all_tail_groups_matched = false;
@@ -162,6 +170,9 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         const int gid = swa_group_ids_[i];
         kv_resource.mutableBlockIds(0, gid).assign(
             BlockIndicesType(static_cast<size_t>(logical_reuse_len), NULL_BLOCK_IDX));
+        if (skipReuseCacheGroup(gid)) {
+            continue;
+        }
         const size_t tail_begin =
             static_cast<size_t>(std::max(logical_reuse_len - static_cast<int>(swa_tail_blocks[i].size()), 0));
         for (size_t j = 0; j < swa_tail_blocks[i].size(); ++j) {
@@ -374,6 +385,9 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                 std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_nums), NULL_BLOCK_IDX);
                 bool                      has_valid = false;
                 for (int gid = 0; gid < group_nums; ++gid) {
+                    if (skipReuseCacheGroup(gid)) {
+                        continue;
+                    }
                     const auto& blocks = kv_cache_resource->blocks(batch_id, gid);
                     if (i >= blocks.size()) {
                         continue;
@@ -406,6 +420,9 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         const size_t token_len = token_ids.size() - 1;
 
         for (int gid = 0; gid < group_nums; ++gid) {
+            if (skipReuseCacheGroup(gid)) {
+                continue;
+            }
             const int            raw_group_seq = kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock();
             const auto           group_type    = static_cast<size_t>(gid) < config_.group_types.size() ?
                                                      config_.group_types[static_cast<size_t>(gid)] :
