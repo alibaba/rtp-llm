@@ -146,12 +146,14 @@ struct DSV4StateSpec: public KVCacheSpec {
         return static_cast<size_t>(entries_per_block) * state_dim * getTypeSize(store_dtype);
     }
 
-    // Public block size is the physical per-block stride. SWA_KV uses this
-    // state spec but stores the FP8 KV layout, so it also needs TMA padding.
-    // Other state pools keep their natural size.
+    // Public block size is the physical per-block stride. Decode / non-CP
+    // SWA_KV uses this state spec but stores the FP8 KV layout, so it needs
+    // TMA padding. Prefill CP-sliced SWA_KV stores a contiguous intra-block
+    // slice that is transferred into the decode block at the natural entry
+    // offset, so sliced blocks deliberately keep their natural size.
     size_t block_size_bytes() const override {
         const size_t natural = natural_block_size_bytes();
-        if (state_dim == DSV4_FP8_KV_ENTRY_BYTES) {
+        if (state_dim == DSV4_FP8_KV_ENTRY_BYTES && entries_per_block == 128) {
             return alignDsv4Fp8KvBlockBytes(natural);
         }
         return natural;
