@@ -550,11 +550,11 @@ private:
         return res;
     }
 
-    // Put items into memory block cache.
-    // If `is_complete_flags` is empty, all items are treated as "complete" by default.
-    std::vector<BlockIdxType> putItemsToCache(const CacheKeysType&        keys,
-                                              size_t                      mem_block_size,
-                                              std::initializer_list<bool> is_complete_flags = {}) const {
+    std::vector<BlockIdxType>
+    putItemsToCacheForConnector(const std::shared_ptr<KVCacheMemoryConnector>& conn,
+                                const CacheKeysType&                           keys,
+                                size_t                                         mem_block_size,
+                                std::initializer_list<bool> is_complete_flags = {}) const {
         RTP_LLM_CHECK_WITH_INFO(
             is_complete_flags.size() == 0 || keys.size() == is_complete_flags.size(),
             "keys size must equal is_complete_flags size when flags are provided, keys=%zu flags=%zu",
@@ -566,8 +566,13 @@ private:
             return block_indices;
         }
 
-        auto pool = ensureBlockPool(mem_block_size);
+        auto pool = conn->block_pool_;
         if (!pool) {
+            EXPECT_NO_THROW(conn->initBlockPool());
+            pool = conn->block_pool_;
+        }
+        if (!pool) {
+            ADD_FAILURE() << "block pool is null";
             return block_indices;
         }
 
@@ -586,7 +591,7 @@ private:
             item.block_size  = mem_block_size;
             item.is_resident = false;
             item.is_complete = (is_complete_flags.size() == 0) ? true : *(is_complete_flags.begin() + i);
-            connector_->block_cache_->put(item);
+            conn->block_cache_->put(item);
 
             pool->blockCacheReference({block_idx});
 
@@ -595,6 +600,13 @@ private:
         }
 
         return block_indices;
+    }
+    // Put items into memory block cache.
+    // If `is_complete_flags` is empty, all items are treated as "complete" by default.
+    std::vector<BlockIdxType> putItemsToCache(const CacheKeysType&        keys,
+                                              size_t                      mem_block_size,
+                                              std::initializer_list<bool> is_complete_flags = {}) const {
+        return putItemsToCacheForConnector(connector_, keys, mem_block_size, is_complete_flags);
     }
     std::shared_ptr<BlockPool> ensureBlockPool(size_t block_size) const {
         // Business implementation uses a single `block_pool_` with fixed block_size_bytes
@@ -1838,6 +1850,118 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_SkipsHCAStateSlots) {
     EXPECT_TRUE(plan->copy_infos[1].is_complete);
     EXPECT_EQ(plan->copy_infos[0].gpu_blocks, (std::vector<BlockIdxType>{11, 61, 1, 21, 31, 41, 61}));
     EXPECT_EQ(plan->copy_infos[1].gpu_blocks, (std::vector<BlockIdxType>{12, 62, 2, 22, 32, 42, 62}));
+}
+
+TEST_F(KVCacheMemoryConnectorTest, ZeroSwaCachingLayerRegionSlotsSkipOnlySwaKvWithoutDefaultFallback) {
+    auto cfg                         = cache_config_;
+    cfg.layer_num                    = 2;
+    cfg.layer_all_num                = 2;
+    cfg.dsv4_zero_swa_caching        = true;
+    cfg.use_typed_cache_regions      = true;
+    cfg.layer_to_group_id            = {6, 6};
+    cfg.layer_to_group_ids           = {{0, 2, 3, 4, 6}, {6}};
+    cfg.layer_region_to_group_id     = {
+        std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1),
+        std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1)};
+    cfg.group_types                  = {CacheGroupType::FULL,
+                                        CacheGroupType::FULL,
+                                        CacheGroupType::FULL,
+                                        CacheGroupType::SWA,
+                                        CacheGroupType::SWA,
+                                        CacheGroupType::SWA,
+                                        CacheGroupType::SWA};
+    cfg.group_region_names           = {KVCacheRegionName::CSA_KV,
+                                        KVCacheRegionName::HCA_KV,
+                                        KVCacheRegionName::INDEXER_KV,
+                                        KVCacheRegionName::INDEXER_STATE,
+                                        KVCacheRegionName::CSA_STATE,
+                                        KVCacheRegionName::HCA_STATE,
+                                        KVCacheRegionName::SWA_KV};
+    cfg.group_kv_block_stride_bytes  = {10, 20, 30, 40, 50, 60, 70};
+    cfg.group_kv_scale_stride_bytes  = {0, 0, 0, 0, 0, 0, 0};
+    cfg.layer_to_block_stride_bytes  = {999, 999};
+
+    auto& row0 = cfg.layer_region_to_group_id[0];
+    row0[static_cast<size_t>(KVCacheRegionName::CSA_KV)]        = 0;
+    row0[static_cast<size_t>(KVCacheRegionName::INDEXER_KV)]    = 2;
+    row0[static_cast<size_t>(KVCacheRegionName::INDEXER_STATE)] = 3;
+    row0[static_cast<size_t>(KVCacheRegionName::CSA_STATE)]     = 4;
+    row0[static_cast<size_t>(KVCacheRegionName::SWA_KV)]        = 6;
+    cfg.layer_region_to_group_id[1][static_cast<size_t>(KVCacheRegionName::SWA_KV)] = 6;
+
+    auto kv_cfg                         = kv_cache_config_;
+    kv_cfg.memory_cache_size_mb         = 64;
+    kv_cfg.memory_cache_sync_timeout_ms = 1000;
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+
+    auto slots = conn->layerRegionSlots();
+    ASSERT_EQ(slots.size(), 4u);
+    EXPECT_EQ(slots[0].region_name, KVCacheRegionName::CSA_KV);
+    EXPECT_EQ(slots[1].region_name, KVCacheRegionName::INDEXER_KV);
+    EXPECT_EQ(slots[2].region_name, KVCacheRegionName::INDEXER_STATE);
+    EXPECT_EQ(slots[3].region_name, KVCacheRegionName::CSA_STATE);
+    for (const auto& slot : slots) {
+        EXPECT_EQ(slot.layer_id, 0);
+        EXPECT_NE(slot.region_name, KVCacheRegionName::SWA_KV);
+        EXPECT_NE(slot.region_name, KVCacheRegionName::DEFAULT);
+    }
+}
+
+TEST_F(KVCacheMemoryConnectorTest, ZeroSwaCachingMemoryCacheKeepsOriginalKeys) {
+    auto zero_cfg                  = cache_config_;
+    zero_cfg.dsv4_zero_swa_caching = true;
+    auto zero_conn = std::make_shared<KVCacheMemoryConnector>(zero_cfg, kv_cache_config_, allocator_, server_addrs_);
+    ASSERT_TRUE(zero_conn->init());
+
+    const size_t mem_size = memoryCacheBlockBytes(zero_cfg);
+    ASSERT_GT(mem_size, 0u);
+    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+
+    CacheKeysType zero_entry_keys{84001, 84999};
+    auto          zero_res = makeCacheResource(zero_entry_keys, {{1, 1}, {2, 2}, {3, 3}, {4, 4}});
+    auto          write_ctx = zero_conn->asyncWrite(zero_res, meta);
+    ASSERT_NE(write_ctx, nullptr);
+    ASSERT_TRUE(waitUntilDone(write_ctx));
+    ASSERT_TRUE(write_ctx->success());
+
+    EXPECT_TRUE(zero_conn->block_cache_->contains(zero_entry_keys[0]));
+    auto status_keys = zero_conn->cacheKeys();
+    EXPECT_NE(std::find(status_keys.begin(), status_keys.end(), zero_entry_keys[0]), status_keys.end());
+
+    auto match_ctx = zero_conn->asyncMatch(zero_res, meta);
+    ASSERT_NE(match_ctx, nullptr);
+    EXPECT_TRUE(match_ctx->success());
+    EXPECT_EQ(match_ctx->matchedBlockCount(), 1u);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, ZeroSwaCachingMemoryMatchCapsReuseWindow) {
+    auto zero_cfg                  = cache_config_;
+    zero_cfg.dsv4_zero_swa_caching = true;
+    zero_cfg.swa_window_size       = zero_cfg.seq_size_per_block;
+    auto zero_conn = std::make_shared<KVCacheMemoryConnector>(zero_cfg, kv_cache_config_, allocator_, server_addrs_);
+    ASSERT_TRUE(zero_conn->init());
+
+    CacheKeysType cache_keys{85001, 85002, 85003, 85004, 85005, 85006, 85999};
+    CacheKeysType cache_hits;
+    for (size_t i = 0; i + 1 < cache_keys.size(); ++i) {
+        cache_hits.push_back(cache_keys[i]);
+    }
+
+    const size_t mem_size = memoryCacheBlockBytes(zero_cfg);
+    ASSERT_EQ(putItemsToCacheForConnector(zero_conn, cache_hits, mem_size).size(), cache_hits.size());
+
+    auto res = makeCacheResource(cache_keys,
+                                 {{1, 1, 1, 1, 1, 1, 1},
+                                  {2, 2, 2, 2, 2, 2, 2},
+                                  {3, 3, 3, 3, 3, 3, 3},
+                                  {4, 4, 4, 4, 4, 4, 4}});
+    auto meta      = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
+    auto match_ctx = zero_conn->asyncMatch(res, meta);
+    ASSERT_NE(match_ctx, nullptr);
+    EXPECT_TRUE(match_ctx->success());
+    // cache_keys skips the dummy tail (6 blocks). restore window is layer_num * swa_window_size
+    // = 4 * 8 tokens, so 4 reuse units are kept for recomputation and only 2 blocks are matched.
+    EXPECT_EQ(match_ctx->matchedBlockCount(), 2u);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenGpuReuseLenGEKeysSize) {
