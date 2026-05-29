@@ -40,10 +40,17 @@ class PdWritebackSmokeConfigStaticTest(unittest.TestCase):
         suite = SUITE.read_text()
 
         self.assertIn('name="dense_pd_writeback_reuse"', suite)
-        self.assertIn('"prefill": ["ENABLE_PD_KV_CACHE_WRITEBACK=1"]', suite)
-        self.assertIn('"decode": ["ENABLE_PD_KV_CACHE_WRITEBACK=1"]', suite)
+        self.assertIn(
+            '"prefill": ["ENABLE_PD_KV_CACHE_WRITEBACK=1", "CACHE_STORE_RDMA_MODE=1"]',
+            suite,
+        )
+        self.assertIn(
+            '"decode": ["ENABLE_PD_KV_CACHE_WRITEBACK=1", "CACHE_STORE_RDMA_MODE=1"]',
+            suite,
+        )
         case_block = _case_block(suite, "dense_pd_writeback_reuse")
         self.assertIn("--tp_size 1 --world_size 1", case_block)
+        self.assertIn("--cache_store_rdma_mode 1", case_block)
         self.assertIn("sleep_time_qr=10", case_block)
         self.assertNotIn("--disable_flash_infer", case_block)
         self.assertNotIn("--enable_remote_cache", case_block)
@@ -54,8 +61,15 @@ class PdWritebackSmokeConfigStaticTest(unittest.TestCase):
         self.assertIn('name="dense_pd_writeback_reuse_tp2"', suite)
         case_block = _case_block(suite, "dense_pd_writeback_reuse_tp2")
         self.assertIn("--tp_size 2 --world_size 2", case_block)
-        self.assertIn('"prefill": ["ENABLE_PD_KV_CACHE_WRITEBACK=1"]', case_block)
-        self.assertIn('"decode": ["ENABLE_PD_KV_CACHE_WRITEBACK=1"]', case_block)
+        self.assertIn(
+            '"prefill": ["ENABLE_PD_KV_CACHE_WRITEBACK=1", "CACHE_STORE_RDMA_MODE=1"]',
+            case_block,
+        )
+        self.assertIn(
+            '"decode": ["ENABLE_PD_KV_CACHE_WRITEBACK=1", "CACHE_STORE_RDMA_MODE=1"]',
+            case_block,
+        )
+        self.assertIn("--cache_store_rdma_mode 1", case_block)
         self.assertNotIn("--enable_remote_cache", case_block)
 
         task = json.loads(TASK_INFO.read_text())

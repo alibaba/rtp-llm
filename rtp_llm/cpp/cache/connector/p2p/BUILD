@@ -3,6 +3,7 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//rtp_llm/cpp/cache/connector/p2p:__subpackages__"])
 
 exports_files([
+    "LayerBlockConverterImpl.h",
     "P2PConnectorWorker.cc",
     "P2PConnectorWorker.h",
     "P2PConnectorWorkerDecode.cc",

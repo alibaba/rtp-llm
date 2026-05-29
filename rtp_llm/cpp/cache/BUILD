@@ -7,6 +7,7 @@ exports_files([
     "KVCacheAllocator.h",
     "KVCacheManager.cc",
     "KVCacheManager.h",
+    "BlockPool.h",
     "SingleTypeKVCacheAllocator.cc",
     "SingleTypeKVCacheAllocator.h",
 ])

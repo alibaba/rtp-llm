@@ -74,6 +74,9 @@ public:
     size_t getTotalSizeBytes() const {
         return config_.total_size_bytes;
     }
+    const std::vector<MemoryLayoutConfig>& memoryLayouts() const {
+        return config_.memory_layouts;
+    }
 
 private:
     void initFreeBlocks();

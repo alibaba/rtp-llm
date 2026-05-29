@@ -30,6 +30,8 @@ py_test(
         "//rtp_llm/cpp/cache/connector/p2p:P2PConnectorWorkerDecode.h",
         "//rtp_llm/cpp/cache/connector/p2p:P2PConnectorWorkerPrefill.cc",
         "//rtp_llm/cpp/cache/connector/p2p:P2PConnectorWorkerPrefill.h",
+        "//rtp_llm/cpp/cache/connector/p2p:LayerBlockConverterImpl.h",
+        "//rtp_llm/cpp/cache:BlockPool.h",
         "//rtp_llm/cpp/cache/writeback:PdKvWritebackTransfer.h",
     ],
     main = "PdKvWritebackP2PStaticTest.py",
