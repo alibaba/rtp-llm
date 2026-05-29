@@ -29,12 +29,12 @@ std::vector<T> toVec(const torch::Tensor& t) {
     return std::vector<T>(c.data_ptr<T>(), c.data_ptr<T>() + c.numel());
 }
 
-void fillScoreTokenIdsWithMemcpy(torch::Tensor&                     token_ids,
-                                 const std::vector<torch::Tensor>&  complete_token_ids,
-                                 const std::vector<int64_t>&        seq_lens,
-                                 int64_t                            score_len) {
-    int64_t batch_idx = 0;
-    auto*   dst       = token_ids.data_ptr<int32_t>();
+void fillScoreTokenIdsWithMemcpy(torch::Tensor&                    token_ids,
+                                 const std::vector<torch::Tensor>& complete_token_ids,
+                                 const std::vector<int64_t>&       seq_lens,
+                                 int64_t                           score_len) {
+    int64_t    batch_idx  = 0;
+    auto*      dst        = token_ids.data_ptr<int32_t>();
     const auto dst_stride = token_ids.size(1);
     for (size_t stream_idx = 0; stream_idx < complete_token_ids.size(); ++stream_idx) {
         auto* src     = complete_token_ids[stream_idx].data_ptr<int32_t>();
@@ -46,10 +46,10 @@ void fillScoreTokenIdsWithMemcpy(torch::Tensor&                     token_ids,
     }
 }
 
-void fillScoreTokenIdsWithTorchCopy(torch::Tensor&                     token_ids,
-                                    const std::vector<torch::Tensor>&  complete_token_ids,
-                                    const std::vector<int64_t>&        seq_lens,
-                                    int64_t                            score_len) {
+void fillScoreTokenIdsWithTorchCopy(torch::Tensor&                    token_ids,
+                                    const std::vector<torch::Tensor>& complete_token_ids,
+                                    const std::vector<int64_t>&       seq_lens,
+                                    int64_t                           score_len) {
     int64_t batch_idx = 0;
     for (size_t stream_idx = 0; stream_idx < complete_token_ids.size(); ++stream_idx) {
         auto seq_len = seq_lens[stream_idx];
@@ -155,12 +155,10 @@ TEST_F(MtpBatchStreamProcessorTest, DISABLED_benchmarkScoreTokenIdsTorchCopyVsMe
     fillScoreTokenIdsWithTorchCopy(dst_torch, complete_token_ids, seq_lens, score_len);
     ASSERT_TRUE(torch::equal(dst_memcpy, dst_torch));
 
-    auto memcpy_us =
-        benchmarkUs([&]() { fillScoreTokenIdsWithMemcpy(dst_memcpy, complete_token_ids, seq_lens, score_len); },
-                    iterations);
-    auto torch_us =
-        benchmarkUs([&]() { fillScoreTokenIdsWithTorchCopy(dst_torch, complete_token_ids, seq_lens, score_len); },
-                    iterations);
+    auto memcpy_us = benchmarkUs(
+        [&]() { fillScoreTokenIdsWithMemcpy(dst_memcpy, complete_token_ids, seq_lens, score_len); }, iterations);
+    auto torch_us = benchmarkUs(
+        [&]() { fillScoreTokenIdsWithTorchCopy(dst_torch, complete_token_ids, seq_lens, score_len); }, iterations);
 
     std::cout << "[mtp-score-token-ids-copy] streams=" << stream_count << " score_len=" << score_len
               << " max_seq_len=" << max_seq_len << " iterations=" << iterations << " memcpy_us=" << memcpy_us
@@ -201,9 +199,9 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
     auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_inputs, model_output);
     ASSERT_TRUE(sampler_inputs_status.ok());
 
-    auto token_ids = sampler_inputs_status.value().token_ids;
-    auto stride    = token_ids.size(1);
-    auto* data     = token_ids.data_ptr<int32_t>();
+    auto  token_ids = sampler_inputs_status.value().token_ids;
+    auto  stride    = token_ids.size(1);
+    auto* data      = token_ids.data_ptr<int32_t>();
 
     for (int64_t row = 0; row < 4; ++row) {
         EXPECT_EQ(5, data[row * stride]);
@@ -745,6 +743,10 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     vector<int> expect_lm_output_indexes = {0, 1};
     EXPECT_TRUE(lm_output_indexes.is_cuda());
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
+
+    vector<int> expect_sequence_lengths = {2, 3};
+    EXPECT_TRUE(model_input.sequence_lengths.is_cuda());
+    EXPECT_EQ(expect_sequence_lengths, toVec<int>(model_input.sequence_lengths));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {

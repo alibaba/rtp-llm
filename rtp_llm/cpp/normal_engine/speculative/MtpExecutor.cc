@@ -132,6 +132,12 @@ void logMtpDecodeModelInput(const char* tag, const GptModelInputs& input) {
     if (!debugMtpDecodeDataEnabled()) {
         return;
     }
+    if (input.is_fake_stream) {
+        static std::atomic<int> fake_log_budget{16};
+        if (fake_log_budget.fetch_sub(1, std::memory_order_relaxed) <= 0) {
+            return;
+        }
+    }
     static std::atomic<int> debug_log_budget{512};
     if (debug_log_budget.fetch_sub(1, std::memory_order_relaxed) <= 0) {
         return;
@@ -153,19 +159,26 @@ void logMtpDecodeModelInput(const char* tag, const GptModelInputs& input) {
                      static_cast<int>(input.is_fake_stream));
 }
 
-void logMtpDecodeModelOutput(const char* tag, const GptModelOutputs& output) {
+void logMtpDecodeModelOutput(const char* tag, const GptModelOutputs& output, bool is_fake_stream = false) {
     if (!debugMtpDecodeDataEnabled()) {
         return;
+    }
+    if (is_fake_stream) {
+        static std::atomic<int> fake_log_budget{16};
+        if (fake_log_budget.fetch_sub(1, std::memory_order_relaxed) <= 0) {
+            return;
+        }
     }
     static std::atomic<int> debug_log_budget{512};
     if (debug_log_budget.fetch_sub(1, std::memory_order_relaxed) <= 0) {
         return;
     }
-    RTP_LLM_LOG_INFO("[debug-mtp-decode-data][%s] logits=%s hidden=%s all_hidden=%s",
+    RTP_LLM_LOG_INFO("[debug-mtp-decode-data][%s] logits=%s hidden=%s all_hidden=%s is_fake_stream=%d",
                      tag,
                      debugTensorSummary(output.logits, 0).c_str(),
                      debugTensorSummary(output.hidden_states, 0).c_str(),
-                     debugTensorSummary(output.all_hidden_states, 0).c_str());
+                     debugTensorSummary(output.all_hidden_states, 0).c_str(),
+                     static_cast<int>(is_fake_stream));
 }
 
 std::string debugTensorDiffSummary(const torch::Tensor& lhs, const torch::Tensor& rhs) {
@@ -425,6 +438,14 @@ void applySpecLogitsAcceptLenCap(const SamplerInputs&                   sampler_
     }
 }
 
+// REBASE CONFLICT CONTEXT(3a29591e6): source branch added this CP-context
+// helper; new base already has spec-logits accept-len cap helper above. Keep
+// both helpers in the anonymous namespace.
+bool isCpContextRequest(const ParallelismConfig& parallelism_config, const GptModelInputs& input) {
+    return parallelism_config.prefill_cp_config.is_enabled() && input.input_lengths.defined()
+           && input.sequence_lengths.defined() && input.input_lengths.size(0) != input.sequence_lengths.size(0);
+}
+
 }  // namespace
 
 bool MtpExecutor::isTpRank0() const {
@@ -440,7 +461,7 @@ void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_inp
     const auto mtp_hidden_rows = request_actual_rows ? -1 : model_input.combo_tokens.numel();
     auto       pre_hc          = source.getMtpTargetHiddenStates(mtp_hidden_rows);
     if (!pre_hc.defined() || pre_hc.numel() == 0) {
-        RTP_LLM_CHECK_WITH_INFO(!request_actual_rows,
+        RTP_LLM_CHECK_WITH_INFO(!request_actual_rows || model_input.last_hidden_states.defined(),
                                 "CP MTP hidden buffer must contain local rows before draft prefill");
         return;
     }
@@ -1086,13 +1107,15 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
-        // Under prefill CP the post-reduce hidden just copied by
-        // updatePrefillPostDraftModelInput is not the tensor consumed by
-        // DSV4 MTP.  Avoid broadcasting it; after sync each rank reloads the
-        // full pre-hc residual from the Python MTP buffer, and the CP input
-        // processor slices it with the same zigzag plan as combo_tokens.
+        // DSv4 MTP consumes a special pre-hc residual buffer instead of the
+        // normal model_output.all_hidden_states tensor. GLM MTP consumes the
+        // target model's final-norm hidden states, so keep and broadcast the
+        // post-layer hidden unless the source model exposes a special buffer.
         if (cp_enabled) {
-            model_input.last_hidden_states = torch::Tensor();
+            auto target_mtp_hidden = model_->getMtpTargetHiddenStates(-1);
+            if (target_mtp_hidden.defined() && target_mtp_hidden.numel() > 0) {
+                model_input.last_hidden_states = torch::Tensor();
+            }
         }
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
@@ -1112,11 +1135,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         return absl::OkStatus();
     }
 
-    if (cp_enabled) {
-        draft_last_hidden_states = draft_model_->getMtpLastHiddenStates(stream_groups.totalSamplerBatchSizeOut());
-        RTP_LLM_CHECK_WITH_INFO(draft_last_hidden_states.defined() && draft_last_hidden_states.numel() > 0,
-                                "CP MTP draft last-hidden buffer must contain per-request rows");
-    } else {
+    if (!cp_enabled) {
         maybeOverrideLastHiddenWithMtpBuffer(draft_model_output, *draft_model_);
     }
 
@@ -1764,7 +1783,7 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     ensureModelInputsOnCuda(model_input, "decode.target_verify_forward");
     logMtpDecodeModelInput("target_verify_forward_input", model_input);
     GptModelOutputs model_output = model_->forward(model_input);
-    logMtpDecodeModelOutput("target_verify_forward_output", model_output);
+    logMtpDecodeModelOutput("target_verify_forward_output", model_output, model_input.is_fake_stream);
     RTP_LLM_LOG_DEBUG("[MTP decode] target model verify forward end");
     model_input.is_target_verify = false;
     return model_output;
@@ -1946,11 +1965,22 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     maybePrintModelInput(model_input, "decode post draft model");
     ensureModelInputsOnCuda(model_input, "decode.draft_prefill_forward");
     logMtpDecodeModelInput("draft_prefill_forward_input", model_input);
+    const bool cp_context_request = isCpContextRequest(parallelism_config_, model_input);
     // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_.
     GptModelOutputs draft_prefill_model_output;
-    if (sp_prefill_draft_model_) {
+    const bool      use_sp_prefill_cuda_graph = sp_prefill_draft_model_ && !model_input.is_fake_stream;
+    if (sp_prefill_draft_model_ && model_input.is_fake_stream) {
+        static std::atomic<int> fake_prefill_log_budget{4};
+        if (fake_prefill_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            RTP_LLM_LOG_INFO("[MTP decode] fake stream draft prefill uses eager draft model; real streams still use "
+                             "sp_prefill CUDA graph");
+        }
+    }
+    if (use_sp_prefill_cuda_graph) {
         draft_prefill_model_output = sp_prefill_draft_model_->forward(model_input);
-        maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *sp_prefill_draft_model_);
+        if (!cp_context_request) {
+            maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *sp_prefill_draft_model_);
+        }
         if (debugCompareSpPrefillEnabled()) {
             auto clone_if_defined = [](const torch::Tensor& t) { return t.defined() ? t.clone() : torch::Tensor(); };
             auto graph_logits_snapshot     = clone_if_defined(draft_prefill_model_output.logits);
@@ -1970,7 +2000,9 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
                 debugTensorSummary(model_input.kv_cache_kernel_block_id).c_str(),
                 debugTensorSummary(model_input.kv_cache_block_id).c_str());
             auto eager_output = draft_model_->forward(model_input);
-            maybeOverrideLastHiddenWithMtpBuffer(eager_output, *draft_model_);
+            if (!cp_context_request) {
+                maybeOverrideLastHiddenWithMtpBuffer(eager_output, *draft_model_);
+            }
             auto eager_kv_snapshot =
                 debugMtpPrefillDataEnabled() ? tryGetMtpDebugKvCache(draft_model_.get(), 0, 8) : torch::Tensor();
             logMtpPrefillStageDiffs(sp_prefill_draft_model_.get(),
@@ -2001,9 +2033,11 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
         }
     } else {
         draft_prefill_model_output = draft_model_->forward(model_input);
-        maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_model_);
+        if (!cp_context_request) {
+            maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_model_);
+        }
     }
-    logMtpDecodeModelOutput("draft_prefill_forward_output", draft_prefill_model_output);
+    logMtpDecodeModelOutput("draft_prefill_forward_output", draft_prefill_model_output, model_input.is_fake_stream);
     return draft_prefill_model_output;
 }
 
@@ -2298,7 +2332,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         draft_decode_model_output = std::move(draft_model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *draft_model_);
-        logMtpDecodeModelOutput("draft_decode_loop_forward_output", draft_decode_model_output);
+        logMtpDecodeModelOutput(
+            "draft_decode_loop_forward_output", draft_decode_model_output, model_input.is_fake_stream);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d forward done", i);
 
         // sample

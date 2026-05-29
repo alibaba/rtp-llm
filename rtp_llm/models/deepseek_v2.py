@@ -952,13 +952,12 @@ class Glm5Mtp(DeepSeekV2):
         config.num_layers = num_mtp_layers
         config.moe_layer_index = [i for i in range(config.num_layers)]
         config.is_mtp = True
-        # The DSA (DeepSeek Sparse Attention) indexer in the MTP propose model
-        # needs its own kv_scale_base cache, but the propose engine does not
-        # currently allocate one — see indexer_op.quant_k_only(). Disable the
-        # indexer for the MTP layer so it falls back to standard MLA. This
-        # matches sglang/vllm where MTP runs without DSA.
-        config.attn_config.is_sparse = False
-        config.attn_config.indexer_topk = 0
+        # Keep DSA enabled on the MTP layer to match HF ckpt (layer 78 ships
+        # indexer weights) and to match sglang/vllm (both build the indexer
+        # gated on ``hasattr(config, "index_topk")`` / ``is_deepseek_dsa(config)``
+        # independent of ``is_nextn``). Disabling it here drops draft quality
+        # (acceptance ~2.0/3 vs expected ~2.7/3) because the draft attention
+        # sees full KV instead of the trained top-2048 sparse pattern.
         return config
 
     def _create_python_model(self):

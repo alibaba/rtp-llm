@@ -48,6 +48,26 @@ def get_mla_impl(
         if (attn_inputs.is_prefill and not is_target_verify)
         else DECODE_MLA_IMPS
     )
+    allow_cuda_graph_prefill_absorb = False
+    if is_cuda_graph and attn_inputs.is_prefill and not is_target_verify:
+        try:
+            input_lengths = attn_inputs.input_lengths
+            prefix_lengths = attn_inputs.prefix_lengths
+            total_q = int(input_lengths.sum().item())
+            max_q_per_req = int(input_lengths.max().item())
+            has_reuse_cache = (
+                prefix_lengths is not None
+                and prefix_lengths.numel() > 0
+                and int(prefix_lengths.max().item()) > 0
+            )
+            allow_cuda_graph_prefill_absorb = (
+                has_reuse_cache
+                and total_q > 0
+                and max_q_per_req > 0
+                and total_q <= max_q_per_req
+            )
+        except Exception:
+            allow_cuda_graph_prefill_absorb = False
     for impl in mla_impls:
         impl_name = impl.__name__
         if not impl.support(attn_configs, attn_inputs):
@@ -71,7 +91,12 @@ def get_mla_impl(
         if use_fast_path and impl.is_sparse():
             continue
 
-        if attn_configs.is_sparse and not use_fast_path and not impl.is_sparse():
+        if (
+            attn_configs.is_sparse
+            and not use_fast_path
+            and not impl.is_sparse()
+            and not allow_cuda_graph_prefill_absorb
+        ):
             continue
 
         try:
