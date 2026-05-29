@@ -255,8 +255,7 @@ public class SloBudgetBatcher {
             }
 
             // wait for new arrivals; budget shrinks each iteration -> converges
-            long remainingBudgetMs = budgetMs - marginMs;
-            long waitMs = Math.max(1, remainingBudgetMs / 4);
+            long waitMs = 1;
             arrival.awaitNanos(waitMs * 1_000_000L);
             return null;
         } finally {
