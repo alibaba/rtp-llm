@@ -12,6 +12,19 @@ public final class BatchSplitter {
     }
 
     /**
+     * Spec-aware entry point: dispatches to {@link #splitArray} for {@link SubBatchSpec.Mode#SIZE}
+     * or {@link #splitByCount} for {@link SubBatchSpec.Mode#COUNT}. The single switch lives here so
+     * callers (the real fanout handler and any inspection-style endpoints) don't each re-implement
+     * the spec→method routing.
+     */
+    public static List<ArrayNode> split(ArrayNode arr, SubBatchSpec spec, ObjectMapper mapper) {
+        return switch (spec.mode()) {
+            case SIZE -> splitArray(arr, spec.value(), mapper);
+            case COUNT -> splitByCount(arr, spec.value(), mapper);
+        };
+    }
+
+    /**
      * Split a JSON array into ordered chunks of at most {@code chunkSize}. Order is preserved;
      * the final chunk may be smaller. An empty input yields no chunks. Items are shared by
      * reference with the input array; do not mutate them after splitting.

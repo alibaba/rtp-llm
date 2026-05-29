@@ -15,13 +15,16 @@ public class DispatchRouter {
 
     private final GenericBatchHandler batchHandler;
     private final PassthroughClient passthroughClient;
+    private final DispatcherInspectionHandler inspectionHandler;
     private final List<BatchEndpointSpec> specs;
 
     public DispatchRouter(GenericBatchHandler batchHandler,
                           PassthroughClient passthroughClient,
+                          DispatcherInspectionHandler inspectionHandler,
                           List<BatchEndpointSpec> specs) {
         this.batchHandler = batchHandler;
         this.passthroughClient = passthroughClient;
+        this.inspectionHandler = inspectionHandler;
         this.specs = specs;
     }
 
@@ -30,6 +33,8 @@ public class DispatchRouter {
         for (BatchEndpointSpec spec : specs) {
             b.POST("/dispatcher" + spec.getPath(), req -> batchHandler.handle(req, spec));
         }
+        b.GET("/dispatcher/_snapshot", inspectionHandler::snapshot);
+        b.POST("/dispatcher/_dryrun/**", inspectionHandler::dryRun);
         return b.route(RequestPredicates.path("/dispatcher/**"), passthroughClient::forward)
                 .build();
     }

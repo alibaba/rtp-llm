@@ -102,4 +102,36 @@ class BatchSplitterTest {
         assertTrue(chunks.isEmpty());
     }
 
+    // ───────────────────────── split(spec) dispatcher ─────────────────────────
+
+    @Test
+    void splitDispatchesToSplitArrayOnSizeMode() {
+        ObjectMapper m = new ObjectMapper();
+        ArrayNode arr = m.createArrayNode().add("a").add("b").add("c").add("d").add("e");
+        List<ArrayNode> chunks = BatchSplitter.split(arr, SubBatchSpec.parse("size:2"), m);
+        assertEquals(3, chunks.size(), "5 items @ size 2 → ceil(5/2)=3 chunks");
+        assertEquals(2, chunks.get(0).size());
+        assertEquals(2, chunks.get(1).size());
+        assertEquals(1, chunks.get(2).size());
+    }
+
+    @Test
+    void splitDispatchesToSplitByCountOnCountMode() {
+        ObjectMapper m = new ObjectMapper();
+        ArrayNode arr = m.createArrayNode().add("a").add("b").add("c").add("d").add("e");
+        List<ArrayNode> chunks = BatchSplitter.split(arr, SubBatchSpec.parse("count:3"), m);
+        assertEquals(3, chunks.size(), "5 items @ count 3 → exactly 3 chunks");
+        // Remainder 5%3=2 goes to leading chunks: [2,2,1]
+        assertEquals(2, chunks.get(0).size());
+        assertEquals(2, chunks.get(1).size());
+        assertEquals(1, chunks.get(2).size());
+    }
+
+    @Test
+    void splitEmptyArrayReturnsEmptyRegardlessOfMode() {
+        ObjectMapper m = new ObjectMapper();
+        assertTrue(BatchSplitter.split(m.createArrayNode(), SubBatchSpec.parse("size:5"), m).isEmpty());
+        assertTrue(BatchSplitter.split(m.createArrayNode(), SubBatchSpec.parse("count:3"), m).isEmpty());
+    }
+
 }
