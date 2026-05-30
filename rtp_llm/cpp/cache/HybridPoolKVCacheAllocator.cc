@@ -422,16 +422,38 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
         batch_resource->mutableBlockIds(0, gid).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
     }
 
+    CacheKeysType         evicted_keys;
+    BlockDependenciesType evicted_dependencies;
+    evicted_keys.reserve(evict_result.evicted_keys.size());
+    evicted_dependencies.reserve(evict_result.evicted_keys.size());
     for (size_t evicted_idx = 0; evicted_idx < evict_result.evicted_keys.size(); ++evicted_idx) {
         const auto  cache_key = evict_result.evicted_keys[evicted_idx];
         const auto& slots     = evict_result.evicted_slots.at(cache_key);
-        batch_resource->pushBackCacheKey(0, cache_key);
+        evicted_keys.push_back(cache_key);
+        auto dep_it = evict_result.evicted_dependencies.find(cache_key);
+        if (dep_it != evict_result.evicted_dependencies.end()) {
+            evicted_dependencies.push_back(dep_it->second);
+        } else {
+            BlockDependency dependency;
+            dependency.ordinal = static_cast<uint32_t>(evicted_idx);
+            if (evicted_idx > 0) {
+                dependency.has_parent = true;
+                dependency.parent_key = evict_result.evicted_keys[evicted_idx - 1];
+            }
+            evicted_dependencies.push_back(dependency);
+        }
         for (int gid = 0; gid < static_cast<int>(slots.size()) && gid < config_.groupNums(); ++gid) {
             if (!isNullBlockIdx(slots[gid])) {
                 batch_resource->mutableBlockIds(0, gid).setAt(evicted_idx, slots[gid]);
             }
         }
     }
+    batch_resource->cacheResource(0).setCacheKeys(std::move(evicted_keys));
+    batch_resource->cacheResource(0).setBlockDependencies(std::move(evicted_dependencies));
+    // Evicted keys already come from the GPU cache's actual key namespace.
+    // Under CP this can be a mixed batch of canonical paged keys and logical
+    // state/SWA keys, so coordinator must not remap the whole batch again.
+    batch_resource->cacheResource(0).setCacheKeysAreCpCanonical(true);
     return batch_resource;
 }
 
