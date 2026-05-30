@@ -31,6 +31,7 @@ public:
         bool             is_resident{false};
         bool             is_complete{true};
         uint64_t         last_access_seq{0};
+        int64_t          created_time_us{0};
         uint32_t         in_flight_ref{0};
     };
 
