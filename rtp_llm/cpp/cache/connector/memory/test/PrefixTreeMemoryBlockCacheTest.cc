@@ -22,8 +22,11 @@ BlockDependency childDep(CacheKeyType parent, uint32_t ordinal) {
     return dep;
 }
 
-PrefixTreeMemoryBlockCache::CacheItem
-item(CacheKeyType key, CacheBlockKind kind, BlockIdxType block, std::vector<uint8_t> slot_valid_mask = {}) {
+PrefixTreeMemoryBlockCache::CacheItem item(CacheKeyType           key,
+                                           CacheBlockKind         kind,
+                                           BlockIdxType           block,
+                                           std::vector<uint8_t>   slot_valid_mask = {},
+                                           bool                   is_resident = false) {
     PrefixTreeMemoryBlockCache::CacheItem item;
     item.cache_key    = key;
     item.kind         = kind;
@@ -31,6 +34,7 @@ item(CacheKeyType key, CacheBlockKind kind, BlockIdxType block, std::vector<uint
     item.block_index  = block;
     item.disk_slot    = -1;
     item.block_size   = 1024;
+    item.is_resident  = is_resident;
     item.slot_valid_mask = std::move(slot_valid_mask);
     return item;
 }
@@ -134,6 +138,45 @@ TEST(PrefixTreeMemoryBlockCacheTest, NonCoveringSlotMaskDoesNotReplaceBacking) {
     EXPECT_EQ(cache.match(1, CacheBlockKind::STATE_SWA_KV, std::vector<uint8_t>{0, 1, 0}).block_index, 11);
 }
 
+TEST(PrefixTreeMemoryBlockCacheTest, SameSlotMaskDuplicateDoesNotReplaceBacking) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1,
+                                   rootDep(),
+                                   item(1,
+                                        CacheBlockKind::STATE_SWA_KV,
+                                        11,
+                                        /*slot_valid_mask=*/std::vector<uint8_t>{0, 1, 0}))
+                    .first);
+
+    auto duplicate = cache.putCommitted(1,
+                                        rootDep(),
+                                        item(1,
+                                             CacheBlockKind::STATE_SWA_KV,
+                                             12,
+                                             /*slot_valid_mask=*/std::vector<uint8_t>{0, 1, 0}));
+    EXPECT_FALSE(duplicate.first);
+    EXPECT_FALSE(duplicate.second.has_value());
+    EXPECT_EQ(cache.match(1, CacheBlockKind::STATE_SWA_KV, std::vector<uint8_t>{0, 1, 0}).block_index, 11);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, MarkInFlightRejectsNonCoveringMask) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1,
+                                   rootDep(),
+                                   item(1,
+                                        CacheBlockKind::STATE_SWA_KV,
+                                        11,
+                                        /*slot_valid_mask=*/std::vector<uint8_t>{0, 1, 0}))
+                    .first);
+
+    auto in_flight = cache.matchAndMarkInFlight(1, CacheBlockKind::STATE_SWA_KV, std::vector<uint8_t>{1, 1, 0});
+    EXPECT_FALSE(in_flight.found);
+
+    auto evicted = cache.popOldestEvictable(CacheBlockKind::STATE_SWA_KV);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->block_index, 11);
+}
+
 TEST(PrefixTreeMemoryBlockCacheTest, InFlightCanBeReplacedByCoveringBacking) {
     PrefixTreeMemoryBlockCache cache;
     ASSERT_TRUE(cache.putCommitted(1,
@@ -173,6 +216,99 @@ TEST(PrefixTreeMemoryBlockCacheTest, InFlightCanBeReplacedByCoveringBacking) {
     EXPECT_EQ(matched.block_index, 12);
 }
 
+TEST(PrefixTreeMemoryBlockCacheTest, RetiredItemRequiresAllInFlightReleases) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1,
+                                   rootDep(),
+                                   item(1,
+                                        CacheBlockKind::STATE_SWA_KV,
+                                        11,
+                                        /*slot_valid_mask=*/std::vector<uint8_t>{0, 1, 0}))
+                    .first);
+
+    auto first = cache.matchAndMarkInFlight(1, CacheBlockKind::STATE_SWA_KV, std::vector<uint8_t>{0, 1, 0});
+    auto second = cache.matchAndMarkInFlight(1, CacheBlockKind::STATE_SWA_KV, std::vector<uint8_t>{0, 1, 0});
+    ASSERT_TRUE(first.found);
+    ASSERT_TRUE(second.found);
+
+    auto replacement = cache.putCommitted(1,
+                                          rootDep(),
+                                          item(1,
+                                               CacheBlockKind::STATE_SWA_KV,
+                                               12,
+                                               /*slot_valid_mask=*/std::vector<uint8_t>{1, 1, 0}));
+    ASSERT_TRUE(replacement.first);
+    EXPECT_FALSE(replacement.second.has_value());
+
+    auto retired = cache.releaseInFlight(1,
+                                         CacheBlockKind::STATE_SWA_KV,
+                                         CacheBackingType::MEMORY,
+                                         first.block_index,
+                                         first.disk_slot,
+                                         first.generation);
+    EXPECT_FALSE(retired.has_value());
+
+    retired = cache.releaseInFlight(1,
+                                    CacheBlockKind::STATE_SWA_KV,
+                                    CacheBackingType::MEMORY,
+                                    second.block_index,
+                                    second.disk_slot,
+                                    second.generation);
+    ASSERT_TRUE(retired.has_value());
+    EXPECT_EQ(retired->block_index, 11);
+    EXPECT_EQ(cache.match(1, CacheBlockKind::STATE_SWA_KV, std::vector<uint8_t>{1, 1, 0}).block_index, 12);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, MultipleRetiredItemsReleaseOutOfOrder) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1,
+                                   rootDep(),
+                                   item(1,
+                                        CacheBlockKind::STATE_SWA_KV,
+                                        11,
+                                        /*slot_valid_mask=*/std::vector<uint8_t>{1, 0, 0}))
+                    .first);
+    auto old_in_flight = cache.matchAndMarkInFlight(1, CacheBlockKind::STATE_SWA_KV, std::vector<uint8_t>{1, 0, 0});
+    ASSERT_TRUE(old_in_flight.found);
+
+    ASSERT_TRUE(cache.putCommitted(1,
+                                   rootDep(),
+                                   item(1,
+                                        CacheBlockKind::STATE_SWA_KV,
+                                        12,
+                                        /*slot_valid_mask=*/std::vector<uint8_t>{1, 1, 0}))
+                    .first);
+    auto middle_in_flight = cache.matchAndMarkInFlight(1, CacheBlockKind::STATE_SWA_KV, std::vector<uint8_t>{1, 1, 0});
+    ASSERT_TRUE(middle_in_flight.found);
+
+    ASSERT_TRUE(cache.putCommitted(1,
+                                   rootDep(),
+                                   item(1,
+                                        CacheBlockKind::STATE_SWA_KV,
+                                        13,
+                                        /*slot_valid_mask=*/std::vector<uint8_t>{1, 1, 1}))
+                    .first);
+
+    auto retired = cache.releaseInFlight(1,
+                                         CacheBlockKind::STATE_SWA_KV,
+                                         CacheBackingType::MEMORY,
+                                         middle_in_flight.block_index,
+                                         middle_in_flight.disk_slot,
+                                         middle_in_flight.generation);
+    ASSERT_TRUE(retired.has_value());
+    EXPECT_EQ(retired->block_index, 12);
+
+    retired = cache.releaseInFlight(1,
+                                    CacheBlockKind::STATE_SWA_KV,
+                                    CacheBackingType::MEMORY,
+                                    old_in_flight.block_index,
+                                    old_in_flight.disk_slot,
+                                    old_in_flight.generation);
+    ASSERT_TRUE(retired.has_value());
+    EXPECT_EQ(retired->block_index, 11);
+    EXPECT_EQ(cache.match(1, CacheBlockKind::STATE_SWA_KV, std::vector<uint8_t>{1, 1, 1}).block_index, 13);
+}
+
 TEST(PrefixTreeMemoryBlockCacheTest, EvictionIsPerKindAndStopsAtBranchPoint) {
     PrefixTreeMemoryBlockCache cache;
     ASSERT_TRUE(cache.putCommitted(1, rootDep(0), item(1, CacheBlockKind::COMPRESSED_KV, 11)).first);
@@ -202,6 +338,105 @@ TEST(PrefixTreeMemoryBlockCacheTest, PrefixTreeLinksChildInsertedBeforeParent) {
     ASSERT_TRUE(evicted.has_value());
     EXPECT_EQ(evicted->cache_key, 1);
     EXPECT_FALSE(cache.contains(1, CacheBlockKind::COMPRESSED_KV));
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, ReparentMovesSubtreeRefFromOldToNewParent) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(0), item(1, CacheBlockKind::COMPRESSED_KV, 11)).first);
+    ASSERT_TRUE(cache.putCommitted(3, rootDep(0), item(3, CacheBlockKind::COMPRESSED_KV, 13)).first);
+    ASSERT_TRUE(cache.putCommitted(2, childDep(1, 1), item(2, CacheBlockKind::COMPRESSED_KV, 12)).first);
+
+    auto reparent = cache.putCommitted(2, childDep(3, 1), item(2, CacheBlockKind::COMPRESSED_KV, 14));
+    EXPECT_FALSE(reparent.first);
+    EXPECT_FALSE(reparent.second.has_value());
+
+    auto evicted = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 1);
+
+    evicted = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 2);
+
+    evicted = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 3);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, MultipleOrphanChildrenAttachOnParentInsert) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(2, childDep(1, 1), item(2, CacheBlockKind::COMPRESSED_KV, 12)).first);
+    ASSERT_TRUE(cache.putCommitted(3, childDep(1, 2), item(3, CacheBlockKind::COMPRESSED_KV, 13)).first);
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(0), item(1, CacheBlockKind::COMPRESSED_KV, 11)).first);
+
+    auto evicted = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 2);
+    EXPECT_TRUE(cache.contains(1, CacheBlockKind::COMPRESSED_KV));
+    EXPECT_TRUE(cache.contains(3, CacheBlockKind::COMPRESSED_KV));
+
+    evicted = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 3);
+
+    evicted = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 1);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, ReparentPendingOrphanMovesPendingEntry) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(2, childDep(1, 1), item(2, CacheBlockKind::COMPRESSED_KV, 12)).first);
+    auto reparent = cache.putCommitted(2, childDep(3, 1), item(2, CacheBlockKind::COMPRESSED_KV, 14));
+    EXPECT_FALSE(reparent.first);
+    ASSERT_TRUE(cache.putCommitted(3, rootDep(0), item(3, CacheBlockKind::COMPRESSED_KV, 13)).first);
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(0), item(1, CacheBlockKind::COMPRESSED_KV, 11)).first);
+
+    auto evicted = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 2);
+
+    evicted = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 3);
+
+    evicted = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 1);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, BranchParentBecomesEvictableAfterAllChildrenGone) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(0), item(1, CacheBlockKind::COMPRESSED_KV, 11)).first);
+    ASSERT_TRUE(cache.putCommitted(2, childDep(1, 1), item(2, CacheBlockKind::COMPRESSED_KV, 12)).first);
+    ASSERT_TRUE(cache.putCommitted(3, childDep(1, 2), item(3, CacheBlockKind::COMPRESSED_KV, 13)).first);
+
+    auto evicted = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 2);
+
+    evicted = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 3);
+
+    evicted = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(evicted.has_value());
+    EXPECT_EQ(evicted->cache_key, 1);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, ResidentItemIsMatchableButNeverEvictable) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1,
+                                   rootDep(0),
+                                   item(1,
+                                        CacheBlockKind::COMPRESSED_KV,
+                                        11,
+                                        /*slot_valid_mask=*/{},
+                                        /*is_resident=*/true))
+                    .first);
+
+    EXPECT_TRUE(cache.match(1, CacheBlockKind::COMPRESSED_KV).found);
+    EXPECT_FALSE(cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV).has_value());
 }
 
 TEST(PrefixTreeMemoryBlockCacheTest, ParentDetachPreservesChildLeafAccounting) {

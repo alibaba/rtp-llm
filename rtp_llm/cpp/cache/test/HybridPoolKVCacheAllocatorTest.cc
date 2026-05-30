@@ -1266,7 +1266,17 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResour
     canonical_source.setCacheKeys(full_keys);
     const auto expected_canonical = canonical_source.localCacheKeys(cp_mapper->cpSize() - 1, cp_mapper->cpSize());
     EXPECT_EQ(evicted->cacheKeys(0), expected_canonical);
-    ASSERT_EQ(evicted->cacheResource(0).blockDependencies().size(), expected_canonical.size());
+    const auto& dependencies = evicted->cacheResource(0).blockDependencies();
+    ASSERT_EQ(dependencies.size(), expected_canonical.size());
+    for (size_t i = 0; i < dependencies.size(); ++i) {
+        EXPECT_EQ(dependencies[i].ordinal, static_cast<uint32_t>(i));
+        if (i == 0) {
+            EXPECT_FALSE(dependencies[i].has_parent);
+        } else {
+            EXPECT_TRUE(dependencies[i].has_parent);
+            EXPECT_EQ(dependencies[i].parent_key, expected_canonical[i - 1]);
+        }
+    }
 }
 
 }  // namespace test

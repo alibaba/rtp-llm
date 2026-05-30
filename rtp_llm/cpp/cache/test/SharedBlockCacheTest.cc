@@ -75,6 +75,52 @@ TEST(SharedBlockCacheTest, PrefixTreeLinksChildInsertedBeforeParent) {
     EXPECT_TRUE(cache.empty());
 }
 
+TEST(SharedBlockCacheTest, PrefixTreeEvictsOrphanLeafWithMissingParentDependency) {
+    SharedBlockCache cache;
+    putOne(cache, 2, 102, childDep(1, 1));
+
+    auto evicted = cache.selectAndEvict(/*min_blocks=*/1);
+
+    ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{2}));
+    ASSERT_TRUE(evicted.evicted_dependencies.count(2));
+    EXPECT_TRUE(evicted.evicted_dependencies.at(2).has_parent);
+    EXPECT_EQ(evicted.evicted_dependencies.at(2).parent_key, 1);
+    EXPECT_TRUE(cache.empty());
+}
+
+TEST(SharedBlockCacheTest, PrefixTreeAttachesMultiplePendingChildrenAndStopsAtBranch) {
+    SharedBlockCache cache;
+    putOne(cache, 2, 102, childDep(1, 1));
+    putOne(cache, 3, 103, childDep(1, 2));
+    putOne(cache, 1, 101, rootDep(0));
+
+    auto evicted = cache.selectAndEvict(/*min_blocks=*/1);
+
+    ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{2}));
+    EXPECT_FALSE(cache.contains(2));
+    EXPECT_TRUE(cache.contains(1));
+    EXPECT_TRUE(cache.contains(3));
+
+    evicted = cache.selectAndEvict(/*min_blocks=*/1);
+    ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{1, 3}));
+    EXPECT_TRUE(cache.empty());
+}
+
+TEST(SharedBlockCacheTest, PrefixTreeStopsAtResidentParent) {
+    SharedBlockCache cache;
+    putOne(cache, 1, 101, rootDep(0), SharedBlockCache::kGpuLogicalNamespace, /*resident=*/true);
+    putOne(cache, 2, 102, childDep(1, 1));
+
+    auto evicted = cache.selectAndEvict(/*min_blocks=*/1);
+
+    ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{2}));
+    ASSERT_TRUE(evicted.evicted_dependencies.count(2));
+    EXPECT_TRUE(evicted.evicted_dependencies.at(2).has_parent);
+    EXPECT_EQ(evicted.evicted_dependencies.at(2).parent_key, 1);
+    EXPECT_TRUE(cache.contains(1));
+    EXPECT_FALSE(cache.contains(2));
+}
+
 TEST(SharedBlockCacheTest, MatchGroupTouchesPrefixTreeLeafLru) {
     SharedBlockCache cache;
     putOne(cache, 1, 101, rootDep(0));

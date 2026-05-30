@@ -623,6 +623,13 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedSkipsRemapForCanonic
                         cp_cache_config.group_types);
     resource.setCacheKeys(CacheKeysType{11, 13});
     resource.setCacheKeysAreCpCanonical(true);
+    BlockDependency root_dep;
+    root_dep.ordinal = 0;
+    BlockDependency child_dep;
+    child_dep.has_parent = true;
+    child_dep.parent_key = 11;
+    child_dep.ordinal    = 1;
+    resource.setBlockDependencies(BlockDependenciesType{root_dep, child_dep});
     resource.setLastBlockAligned(true);
     resource.mutableBlockIds(/*gid=*/0).assign(BlockIndicesType{100, 101});
     resource.mutableBlockIds(/*gid=*/1).assign(BlockIndicesType{201, 203});
@@ -634,6 +641,14 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedSkipsRemapForCanonic
                 EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13));
                 EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13));
                 EXPECT_TRUE(ref_resource.cacheKeysAreCpCanonical());
+                EXPECT_EQ(ref_resource.blockDependencies().size(), 2u);
+                if (ref_resource.blockDependencies().size() == 2u) {
+                    EXPECT_FALSE(ref_resource.blockDependencies()[0].has_parent);
+                    EXPECT_EQ(ref_resource.blockDependencies()[0].ordinal, 0u);
+                    EXPECT_TRUE(ref_resource.blockDependencies()[1].has_parent);
+                    EXPECT_EQ(ref_resource.blockDependencies()[1].parent_key, 11);
+                    EXPECT_EQ(ref_resource.blockDependencies()[1].ordinal, 1u);
+                }
                 EXPECT_THAT(ref_resource.blocks(/*gid=*/0), testing::ElementsAre(100, 101));
                 EXPECT_THAT(ref_resource.blocks(/*gid=*/1), testing::ElementsAre(201, 203));
                 return std::make_shared<KVCacheResource>();
