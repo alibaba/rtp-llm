@@ -858,8 +858,9 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
 }
 
 TEST(HybridPoolConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
-    // gen_num_per_cycle=2 -> CSA/INDEXER R=10, HCA R=130, SWA physical=128.
-    // Formula: R = ceil_even((1 + overlap) * ratio + gen_num_per_cycle)
+    // gen_num_per_cycle=2 -> CSA/INDEXER R=10, HCA R=130, SWA R=130.
+    // Formula: R = ceil_even((1 + overlap) * ratio + gen_num_per_cycle).
+    // SWA_KV is sized like the HCA state ring (window 128, overlap 0).
     auto              mc = makeFlashModelConfig();
     ParallelismConfig pc;
     auto              config =
@@ -878,11 +879,11 @@ TEST(HybridPoolConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
     auto* hca_state = dynamic_cast<DSV4StateSpec*>(config.cache_specs[5].get());
     ASSERT_NE(hca_state, nullptr);
     EXPECT_EQ(hca_state->entries_per_block, 130u);
-    // Pool 6: SWA_KV keeps the fixed 128-entry physical block
+    // Pool 6: SWA_KV (window=128, overlap=0) → R=130, same as HCA_STATE
     auto* swa_kv = dynamic_cast<DSV4StateSpec*>(config.cache_specs[6].get());
     ASSERT_NE(swa_kv, nullptr);
     EXPECT_EQ(swa_kv->cache_type, KVCacheRegionName::SWA_KV);
-    EXPECT_EQ(swa_kv->entries_per_block, 128u);
+    EXPECT_EQ(swa_kv->entries_per_block, 130u);
 }
 
 TEST(HybridPoolConfigCreatorTest, PrefillCp8MtpGenNum2PadsStateRingBeforeSlicing) {
@@ -904,13 +905,13 @@ TEST(HybridPoolConfigCreatorTest, PrefillCp8MtpGenNum2PadsStateRingBeforeSlicing
     ASSERT_NE(hca_state, nullptr);
     ASSERT_NE(swa_kv, nullptr);
 
-    // gen_num_per_cycle=2 gives raw INDEXER/CSA R=10 and HCA R=130.
+    // gen_num_per_cycle=2 gives raw INDEXER/CSA R=10, HCA R=130, SWA R=130.
     // CP sharding pads the full ring to a cp_size multiple before taking the
-    // per-rank physical slice: 10 -> 16 -> 2, 130 -> 136 -> 17.
+    // per-rank physical slice: 10 -> 16 -> 2, 130 -> 136 -> 17 (HCA and SWA).
     EXPECT_EQ(indexer_state->entries_per_block, 2u);
     EXPECT_EQ(csa_state->entries_per_block, 2u);
     EXPECT_EQ(hca_state->entries_per_block, 17u);
-    EXPECT_EQ(swa_kv->entries_per_block, 16u);
+    EXPECT_EQ(swa_kv->entries_per_block, 17u);
 }
 
 TEST(CacheConfigTest, DSV4NonMtpSpConfigDoesNotInflateRing) {
