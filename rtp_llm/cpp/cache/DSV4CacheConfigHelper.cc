@@ -12,9 +12,10 @@ namespace {
 // seq_size_per_block for cache-key/block-table alignment, while FULL paged
 // pools may use a larger internal physical entry count to satisfy HCA's
 // 128-token compression unit.
-constexpr uint32_t kDsv4KernelTokensPerBlock       = 256;
-constexpr uint32_t kDsv4MinKernelTokensPerBlock    = 128;
-constexpr uint32_t kDsv4SwaPhysicalEntriesPerBlock = 128;
+constexpr uint32_t kDsv4KernelTokensPerBlock    = 256;
+constexpr uint32_t kDsv4MinKernelTokensPerBlock = 128;
+// SWA sliding-window length in tokens (SWA_KV ring base size; see swa_kv_eb).
+constexpr uint32_t kDsv4SwaWindowEntries = 128;
 // BF16 pool: head_dim=512 x 2B = 1024B per KV slot, 128 x 2B = 256B per
 // indexer slot. FP8 pool packs the same logical KV into a smaller slot
 // (canonical fp8_model1_mla layout: 448B fp8 NoPE + 64B bf16 RoPE + 8B
@@ -144,8 +145,15 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
         maybeSliceFixedEntriesForPrefillCp(computeStateRing(kIndexerCompressRatio, kIndexerOverlap, gen_num_per_cycle),
                                            parallelism_config,
                                            KVCacheRegionName::INDEXER_STATE);
-    const uint32_t swa_kv_eb = maybeSliceFixedEntriesForPrefillCp(
-        kDsv4SwaPhysicalEntriesPerBlock, parallelism_config, KVCacheRegionName::SWA_KV);
+    // SWA_KV ring = window + MTP draft slack, sized like the HCA state ring.
+    // Without the +gen_num_per_cycle slack, a decode step's later draft writes
+    // wrap onto ring slots still inside earlier tokens' SWA window -> MTP garble.
+    const uint32_t swa_kv_eb =
+        maybeSliceFixedEntriesForPrefillCp(computeStateRing(/*compress_ratio=*/static_cast<int>(kDsv4SwaWindowEntries),
+                                                            /*overlap=*/0,
+                                                            gen_num_per_cycle),
+                                           parallelism_config,
+                                           KVCacheRegionName::SWA_KV);
     return {
         {KVCacheRegionName::CSA_KV,
          &sets.csa_layers,
