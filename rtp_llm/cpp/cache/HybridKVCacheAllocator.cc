@@ -183,10 +183,31 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         return 0;
     }
 
+    // Per-region reuse for zero-SWA TRIM: paged FULL groups (CSA_KV/HCA_KV/INDEXER_KV) keep
+    // the full tail-anchored match so recomputed restore-window tokens READ cached compressed/
+    // indexer KV instead of recomputing it. The returned reuse_blocks_len (-> reuse_length_ ->
+    // prefix_lengths) stays capped so the restore window is still materialized for SWA recompute
+    // + write-skipped compressed writes (Python). STATE groups (gid 3/4/5) and SWA_KV (gid 6)
+    // are NOT in full_group_ids_ and stay capped (they are ring pools recomputed-as-scratch over
+    // the restore window; the compressor raw path supplies the in-flight positions). extend_full
+    // gates on dsv4_zero_swa_trim (NOT dsv4_zero_swa_caching) so the C++ FULL extension and the
+    // Python compressor write-skip engage as ONE unit. Default path (trim off) -> restore_blocks
+    // is 0 -> full_cover == reuse_blocks_len -> byte-identical to the capped reuse below.
+    const bool extend_full    = config_.dsv4_zero_swa_trim;
+    const int  restore_blocks = extend_full ? static_cast<int>(zeroSwaRestoreWindowBlocks(
+                                                  config_, static_cast<size_t>(reuse_unit_tokens))) :
+                                               0;
+    const int full_cover = std::min(reuse_blocks_len + std::max(restore_blocks, 0), min_full_reuse_blocks);
+    if (extend_full && full_cover != reuse_blocks_len) {
+        RTP_LLM_LOG_DEBUG("zero SWA trim FULL coverage: reuse_blocks_len=%d full_cover=%d restore_blocks=%d",
+                          reuse_blocks_len,
+                          full_cover,
+                          restore_blocks);
+    }
     for (int gid : full_group_ids_) {
         BlockIndicesType full_blocks = full_matched_blocks[static_cast<size_t>(gid)];
-        if (static_cast<int>(full_blocks.size()) > reuse_blocks_len) {
-            full_blocks.resize(static_cast<size_t>(reuse_blocks_len));
+        if (static_cast<int>(full_blocks.size()) > full_cover) {
+            full_blocks.resize(static_cast<size_t>(full_cover));
         }
         kv_resource.mutableBlockIds(0, gid).assign(std::move(full_blocks));
     }
@@ -709,7 +730,19 @@ int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
     const int   raw_seq_len        = malloc_info.complete_token_ids->seqLength();
     const int   reserve_step       = malloc_info.complete_token_ids->getReserveStep();
     const bool  reuse_enabled      = malloc_info.reuse_cache;
-    const int   reuse_blocks_len   = reuse_enabled ? malloc_info.batch_kv_cache_resource->curBlocksNum() : 0;
+    int         reuse_blocks_len   = reuse_enabled ? malloc_info.batch_kv_cache_resource->curBlocksNum() : 0;
+    if (reuse_enabled && config_.dsv4_zero_swa_trim) {
+        // After reuseCache extended FULL coverage to the restore window, curBlocksNum() reflects
+        // the FULL groups (full_cover). The SWA/STATE ring pools only reused the capped tail, so
+        // size their reserve need against the capped boundary -- otherwise the precheck would
+        // under-count by restore_blocks per SWA/STATE group (the dangerous direction). Subtracting
+        // restore_blocks makes FULL over-count instead (safe; the real malloc rolls back if it
+        // exceeds the reserve). Trim-off path is untouched (byte-identical).
+        const int reuse_unit_tokens = cpVirtualBlockSize(cp_mapper, seqSizePerBlock());
+        const int restore_blocks =
+            static_cast<int>(zeroSwaRestoreWindowBlocks(config_, static_cast<size_t>(reuse_unit_tokens)));
+        reuse_blocks_len = std::max(reuse_blocks_len - restore_blocks, 0);
+    }
 
     int common_blocks_total = 0;
     int extra_blocks_total  = 0;

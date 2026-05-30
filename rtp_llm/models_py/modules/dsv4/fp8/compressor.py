@@ -403,6 +403,7 @@ class CompressorFP8(PoolBackedModule):
         is_batched: bool = False,
         seq_start_per_req: Optional[torch.Tensor] = None,
         cu_seq_per_req: Optional[torch.Tensor] = None,
+        write_skip_restore_window: int = 0,
     ) -> CompressorMeta:
         """Compute slot mappings + token_to_req from current pool context.
 
@@ -470,6 +471,13 @@ class CompressorFP8(PoolBackedModule):
                 self._state_tokens_per_block,
                 pool_rows=pool_rows,
             )
+            kv_slots = _apply_zero_swa_write_skip(
+                kv_slots,
+                positions,
+                b_idx,
+                seq_start_per_req,
+                write_skip_restore_window,
+            )
             return CompressorMeta(
                 positions=positions,
                 b_idx=b_idx,
@@ -487,6 +495,13 @@ class CompressorFP8(PoolBackedModule):
             )
         with record_function_range("dsv4.fp8.compressor.meta.kv_slots"):
             kv_slots = self._compute_kv_slot_mapping(positions, b_idx)
+            kv_slots = _apply_zero_swa_write_skip(
+                kv_slots,
+                positions,
+                b_idx,
+                seq_start_per_req,
+                write_skip_restore_window,
+            )
         with record_function_range("dsv4.fp8.compressor.meta.token_to_req"):
             token_to_req = b_idx.to(torch.int32)
         return CompressorMeta(
@@ -1157,6 +1172,50 @@ def build_prefill_metadata(
     )
 
 
+def _apply_zero_swa_write_skip(
+    kv_slots: Optional[torch.Tensor],
+    positions: torch.Tensor,
+    b_idx: torch.Tensor,
+    seq_start_per_req: Optional[torch.Tensor],
+    write_skip_restore_window: int,
+) -> Optional[torch.Tensor]:
+    """Zero-SWA inverted-triangle write-skip guardian (Stage B).
+
+    When DSV4 zero-SWA *trim* is on, the C++ allocator extends the paged FULL
+    (CSA_KV / HCA_KV / INDEXER_KV) reuse to cover the whole matched prefix
+    (``full_cover == matched``), so the recomputed restore-window tokens READ
+    cached compressed/indexer KV. Their compressor *writes* would land on those
+    shared cached blocks and corrupt sequences that share the prefix, so we set
+    their KV-pool slots to ``-1`` (skip the write).
+
+    Skipped: ``kv_slots`` only (the paged FULL/compressed pools). The STATE
+    pools stay capped and are recomputed-as-scratch over the restore window
+    (``HybridKVCacheAllocator``), so ``state_slots`` must keep writing to their
+    FRESH blocks and are left untouched here.
+
+    Per-request skip boundary = ``seq_start + write_skip_restore_window`` where
+    ``seq_start`` is the request's prefix length (already carried in
+    ``seq_start_per_req``) and ``write_skip_restore_window =
+    restore_blocks * reuse_unit_tokens`` is block-aligned to the cp-virtual
+    cache block, matching the C++ ``full_cover = reuse_blocks_len +
+    restore_blocks`` extension exactly. A fresh request (``seq_start == 0``)
+    reused nothing, so the skip is a no-op there.
+    """
+    if (
+        write_skip_restore_window <= 0
+        or kv_slots is None
+        or seq_start_per_req is None
+    ):
+        return kv_slots
+    seq_start = seq_start_per_req.to(device=positions.device, dtype=torch.long)
+    end = seq_start + int(write_skip_restore_window)
+    # Fresh requests (no prefix reuse, no shared FULL blocks) must not skip.
+    end = torch.where(seq_start > 0, end, torch.zeros_like(end))
+    end_per_token = end.index_select(0, b_idx.to(torch.long))
+    skip_mask = positions.to(torch.long) < end_per_token
+    return kv_slots.masked_fill(skip_mask, -1)
+
+
 def build_prepare_metadata_args(
     *,
     use_varlen: bool,
@@ -1167,6 +1226,7 @@ def build_prepare_metadata_args(
     req_id_per_token: Optional[torch.Tensor] = None,
     seq_start_per_req: Optional[torch.Tensor] = None,
     cu_seqlens: Optional[torch.Tensor] = None,
+    write_skip_restore_window: int = 0,
 ) -> Dict[str, Any]:
     """Return the kwargs dict for ``CompressorFP8.prepare_metadata``,
     branching on ``use_varlen``. Single source of truth for the three
@@ -1207,6 +1267,7 @@ def build_prepare_metadata_args(
             cu_seq_per_req=cu_seqlens.to(device=device, dtype=torch.int32)
             .reshape(-1)
             .contiguous(),
+            write_skip_restore_window=write_skip_restore_window,
         )
     positions, b_idx = _build_prefill_positions(sp_int, 1, seqlen, device)
     return dict(
@@ -1215,6 +1276,7 @@ def build_prepare_metadata_args(
         is_batched=False,
         seq_start_per_req=None,
         cu_seq_per_req=None,
+        write_skip_restore_window=write_skip_restore_window,
     )
 
 
