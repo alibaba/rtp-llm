@@ -1224,6 +1224,50 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
     allocator->free(hit_free);
 }
 
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResource) {
+    auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    const int spb     = static_cast<int>(config.seq_size_per_block);
+    const int seq_len = 10 * spb + 17;
+
+    CacheKeysType full_keys;
+    for (int i = 0; i < 10; ++i) {
+        full_keys.push_back(1000 + i);
+    }
+
+    auto cp_mapper = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, spb);
+
+    auto seed_res = makeBatchResource(/*batch_size=*/1, config);
+    seed_res->setBatchCacheKeys(0, full_keys);
+    auto seed_tokens = makeCompleteTokenIds(/*batch_size=*/1, seq_len, spb);
+
+    MallocInfo seed_malloc{seed_res, seed_tokens};
+    seed_malloc.reuse_cache         = true;
+    seed_malloc.enable_device_cache = false;
+    seed_malloc.cp_slot_mapper      = cp_mapper;
+    ASSERT_TRUE(allocator->malloc(seed_malloc).success);
+
+    InsertInfo insert_info{seed_res, seed_tokens, /*is_resident=*/false};
+    insert_info.cp_slot_mapper = cp_mapper;
+    allocator->insertIntoCache(insert_info);
+
+    FreeInfo seed_free{seed_res, seed_tokens};
+    allocator->free(seed_free);
+
+    auto evicted = allocator->popBlocksFromCache(/*min_blocks_to_free=*/4);
+    ASSERT_NE(evicted, nullptr);
+    ASSERT_TRUE(evicted->hasCacheKeys());
+    EXPECT_TRUE(evicted->cacheResource(0).cacheKeysAreCpCanonical());
+
+    KVCacheResource canonical_source;
+    canonical_source.setCacheKeys(full_keys);
+    const auto expected_canonical = canonical_source.localCacheKeys(cp_mapper->cpSize() - 1, cp_mapper->cpSize());
+    EXPECT_EQ(evicted->cacheKeys(0), expected_canonical);
+    ASSERT_EQ(evicted->cacheResource(0).blockDependencies().size(), expected_canonical.size());
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 
