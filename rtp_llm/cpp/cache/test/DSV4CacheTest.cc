@@ -1761,6 +1761,97 @@ TEST_F(DSV4AllocatorTest, ZeroSwaCachingSkipsSwaKvTailAndRecomputesWindow) {
     allocator->free(free_info);
 }
 
+// Stage A (inverted-triangle recompute foundation): with DSV4_ZERO_SWA_TRIM the paged FULL
+// groups (CSA_KV/HCA_KV/INDEXER_KV) extend their reuse to ALSO cover the restore-window block
+// (so the recompute reads cached compressed/indexer KV), while the RETURNED reuse_len stays
+// capped (the restore window is still materialized for SWA recompute + write-skipped writes),
+// and the STATE/SWA ring tails stay capped exactly as without trim. This is the only behavior
+// that differs from ZeroSwaCachingSkipsSwaKvTailAndRecomputesWindow: FULL groups gain the
+// extra cached block at index 2 instead of a freshly-allocated one.
+TEST_F(DSV4AllocatorTest, ZeroSwaTrimExtendsFullCoverageButCapsReturn) {
+    auto config                   = makeDSV4AllocatorConfig();
+    config.dsv4_zero_swa_caching  = true;
+    config.dsv4_zero_swa_trim     = true;
+    config.swa_window_size        = 1;
+    config.layer_num              = 1;
+    auto allocator                = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto shared_cache             = std::make_shared<SharedBlockCache>();
+    allocator->setSharedBlockCache(shared_cache);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool = allocator->getBlockPool();
+
+    constexpr int                          group_num   = 7;
+    CacheKeysType                          cached_keys = {100, 101, 102};
+    std::vector<std::vector<BlockIdxType>> cached_blocks(group_num);
+    for (int gid = 0; gid < group_num; gid++) {
+        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
+        ASSERT_EQ(blocks.size(), cached_keys.size());
+        for (size_t i = 0; i < cached_keys.size(); ++i) {
+            if (gid == 6) {
+                continue;
+            }
+            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
+            group_slots[gid] = blocks[i];
+            shared_cache->put(cached_keys[i], group_slots, true);
+        }
+        cached_blocks[gid] = blocks;
+        block_pool->requestFree(blocks);
+    }
+
+    auto batch_res = std::make_shared<BatchKVCacheResource>();
+    batch_res->resetBatchSize(1);
+    batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
+
+    const int spb       = allocator->seqSizePerBlock();
+    auto      cti       = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
+    auto      gi        = std::make_shared<GenerateInput>();
+    gi->input_ids       = torch::arange(3 * spb + 1, torch::kInt32);
+    gi->generate_config = std::make_shared<GenerateConfig>();
+    cti->init(gi);
+
+    MallocInfo info{batch_res, cti};
+    info.enable_device_cache = true;
+    info.reuse_cache         = true;
+    auto result              = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+
+    // The RETURNED reuse window stays capped at 2 blocks (restore window = swa_window*layer_num
+    // = 1 token => 1 block dropped from the 3 matched) -- identical to the non-trim case, so the
+    // restore window is still materialized for SWA recompute.
+    EXPECT_EQ(result.reuse_len, 2 * spb);
+
+    // FULL groups (CSA_KV/HCA_KV/INDEXER_KV) now reuse the 3rd cached block (the restore-window
+    // block) instead of allocating a fresh one -- this is the compute reduction (cached KV read).
+    for (int gid = 0; gid < 3; gid++) {
+        const auto& out_blocks = batch_res->blocks(0, gid);
+        ASSERT_GE(out_blocks.size(), 3u);
+        EXPECT_EQ(out_blocks[0], cached_blocks[gid][0]);
+        EXPECT_EQ(out_blocks[1], cached_blocks[gid][1]);
+        EXPECT_EQ(out_blocks[2], cached_blocks[gid][2])
+            << "trim must reuse the restore-window FULL block from cache (gid " << gid << ")";
+    }
+
+    // STATE tails stay capped exactly as without trim: INDEXER_STATE(3)/CSA_STATE(4) reuse only
+    // the capped tail block; HCA_STATE(5) is excluded from reuse; SWA_KV(6) under zero-SWA.
+    for (int gid = 3; gid < 5; gid++) {
+        const auto& out_blocks = batch_res->blocks(0, gid);
+        ASSERT_GE(out_blocks.size(), 2u);
+        EXPECT_TRUE(isNullBlockIdx(out_blocks[0]));
+        EXPECT_EQ(out_blocks[1], cached_blocks[gid][1]);
+    }
+    for (int gid = 5; gid < 7; gid++) {
+        const auto& out_blocks = batch_res->blocks(0, gid);
+        ASSERT_GE(out_blocks.size(), 2u);
+        EXPECT_TRUE(isNullBlockIdx(out_blocks[0]));
+        EXPECT_TRUE(isNullBlockIdx(out_blocks[1]));
+    }
+
+    FreeInfo free_info{batch_res};
+    allocator->free(free_info);
+}
+
 TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
     auto config       = makeDSV4AllocatorConfig();
     auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
