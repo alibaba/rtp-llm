@@ -178,6 +178,9 @@ struct KVCacheConfig {
     bool    enable_remote_cache          = false;
     bool    write_cache_sync             = false;
     bool    enable_tiered_memory_cache   = false;
+    bool    enable_gpu_prefix_tree       = true;
+    bool    enable_prefix_tree_memory_cache = true;
+    bool    enable_legacy_memory_connector_fallback = true;
     int64_t device_cache_min_free_blocks = 0;
     int     load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures
 
