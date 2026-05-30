@@ -287,12 +287,22 @@ const CacheKeysType& KVCacheResource::cacheKeys() const {
 
 void KVCacheResource::setCacheKeys(const CacheKeysType& keys) {
     cache_keys = keys;
+    cache_keys_are_cp_canonical_ = false;
     rebuildLinearBlockDependencies();
 }
 
 void KVCacheResource::setCacheKeys(CacheKeysType&& keys) {
     cache_keys = std::move(keys);
+    cache_keys_are_cp_canonical_ = false;
     rebuildLinearBlockDependencies();
+}
+
+bool KVCacheResource::cacheKeysAreCpCanonical() const {
+    return cache_keys_are_cp_canonical_;
+}
+
+void KVCacheResource::setCacheKeysAreCpCanonical(bool cache_keys_are_cp_canonical) {
+    cache_keys_are_cp_canonical_ = cache_keys_are_cp_canonical;
 }
 
 BlockDependenciesType& KVCacheResource::blockDependencies() {

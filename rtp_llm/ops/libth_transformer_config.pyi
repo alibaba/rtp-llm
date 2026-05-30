@@ -826,6 +826,7 @@ class KVCacheConfig:
     enable_gpu_prefix_tree: bool
     enable_remote_cache: bool
     dsv4_fixed_pool_blocks: int
+    dsv4_hca_state_pool_blocks: int
     dsv4_fixed_pool_use_memory: bool
     fp8_kv_cache: int
     int8_kv_cache: int

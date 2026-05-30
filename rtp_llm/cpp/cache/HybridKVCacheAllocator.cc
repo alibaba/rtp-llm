@@ -260,13 +260,6 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         }
     }
 
-    if (malloc_info.enable_remove_skipped_blocks) {
-        for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            kv_cache_groups_[static_cast<size_t>(gid)]->removeSkippedBlocks(
-                kv_resource->mutableBlockIds(0, gid), malloc_info.reuse_cache, 0);
-        }
-    }
-
     for (int b = 1; b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
             kv_cache_groups_[static_cast<size_t>(gid)]->reference(kv_resource->mutableBlockIds(b, gid),
@@ -547,7 +540,9 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
             blocks_for_key[static_cast<size_t>(gid)] = block;
             any_valid_block = any_valid_block || (!isNullBlockIdx(block) && block > 0);
         }
-        if (!any_valid_block) {
+        const bool preserve_connector_tail = is_connector && !kvcache_resource.lastBlockAligned()
+                                             && pos + 1 == resource_keys.size() && !selected_keys.empty();
+        if (!any_valid_block && !preserve_connector_tail) {
             continue;
         }
         selected_keys.push_back(key);

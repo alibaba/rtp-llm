@@ -53,6 +53,7 @@ public:
         std::vector<CacheKeyType>                                   evicted_keys;
         std::unordered_map<CacheKeyType, std::vector<BlockIdxType>> evicted_slots;
         std::unordered_map<CacheKeyType, BlockDependency>           evicted_dependencies;
+        std::unordered_map<CacheKeyType, NamespaceId>               evicted_namespaces;
     };
 
     struct MatchResult {
@@ -130,6 +131,8 @@ private:
                               NamespaceId                  namespace_id,
                               const BlockDependency&       dependency,
                               bool                         is_resident);
+    void detachPendingChildLocked(const NamespacedKey& parent, const NamespacedKey& child);
+    void attachPendingChildrenLocked(PrefixTreeNode& node);
     void touchTreeAliasesLocked(CacheKeyType cache_key);
     void touchTreeNodeLocked(PrefixTreeNode& node);
     void eraseLeafLocked(const PrefixTreeNode& node);
@@ -137,12 +140,14 @@ private:
     void refreshLeafLocked(const NamespacedKey& key);
     void removeTreeAliasLocked(const NamespacedKey& key);
     void removeAllTreeAliasesForCacheKeyLocked(CacheKeyType cache_key);
+    void markAllTreeAliasesResidentLocked(CacheKeyType cache_key);
     bool updateItemDependencyLocked(UnifiedCacheItem& item,
                                     NamespaceId       namespace_id,
                                     const BlockDependency& dependency) const;
     static bool slotMatchable(const UnifiedCacheItem& item, size_t group_id);
     std::vector<NamespacedKey> collectEvictChainLocked(const NamespacedKey& leaf_key) const;
     bool hasFlatItemLocked(CacheKeyType cache_key) const;
+    bool isFlatItemResidentLocked(CacheKeyType cache_key) const;
 
     LRUCacheType       lru_cache_;
     mutable std::mutex mu_;
@@ -154,6 +159,8 @@ private:
     std::vector<BlockPoolPtr> group_pools_;
     std::unordered_map<NamespacedKey, PrefixTreeNode, NamespacedKeyHash> tree_nodes_;
     std::unordered_map<CacheKeyType, std::unordered_set<NamespacedKey, NamespacedKeyHash>> aliases_by_cache_key_;
+    std::unordered_map<NamespacedKey, std::unordered_set<NamespacedKey, NamespacedKeyHash>, NamespacedKeyHash>
+        pending_children_by_parent_;
     std::set<LeafKey> leaf_lru_;
 };
 

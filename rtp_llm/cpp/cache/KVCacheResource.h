@@ -110,6 +110,8 @@ public:
     const CacheKeysType& cacheKeys() const;
     void                 setCacheKeys(const CacheKeysType& keys);
     void                 setCacheKeys(CacheKeysType&& keys);
+    bool                 cacheKeysAreCpCanonical() const;
+    void                 setCacheKeysAreCpCanonical(bool cache_keys_are_cp_canonical);
 
     BlockDependenciesType&       blockDependencies();
     const BlockDependenciesType& blockDependencies() const;
@@ -163,6 +165,7 @@ private:
     GroupBlockIds group_block_ids;
     CacheKeysType cache_keys;
     BlockDependenciesType block_dependencies;
+    bool cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

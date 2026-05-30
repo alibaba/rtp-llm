@@ -483,6 +483,45 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
+TEST_F(HybridTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::HOST);
+    allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool = allocator->getBlockPool();
+    ASSERT_NE(block_pool, nullptr);
+
+    const size_t free_before = allocator->freeBlocksNum();
+    auto         blocks      = block_pool->malloc(2);
+    ASSERT_EQ(blocks.size(), 2u);
+
+    KVCacheResource resource;
+    resource.initGroups(/*group_nums=*/2,
+                        /*layer_num=*/static_cast<int>(config.layer_all_num),
+                        /*layer_to_group_id=*/config.layer_to_group_id);
+    resource.cacheKeys() = CacheKeysType{101, 103, 999};
+    resource.rebuildLinearBlockDependencies();
+    resource.setLastBlockAligned(false);
+    resource.mutableBlockIds(/*gid=*/0).assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    resource.mutableBlockIds(/*gid=*/1).assign(BlockIndicesType{blocks[0], blocks[1]});
+
+    auto ref = allocator->incrKVCacheRef(resource, CacheKeysType{101, 103, 999}, /*is_connector=*/true);
+    ASSERT_NE(ref, nullptr);
+    EXPECT_FALSE(ref->lastBlockAligned());
+    EXPECT_EQ(ref->cacheKeys(), (CacheKeysType{101, 103, 999}));
+    ASSERT_EQ(ref->blocks(0).size(), 3u);
+    ASSERT_EQ(ref->blocks(1).size(), 3u);
+    EXPECT_TRUE(isNullBlockIdx(ref->blocks(0)[2]));
+    EXPECT_TRUE(isNullBlockIdx(ref->blocks(1)[2]));
+
+    block_pool->requestFree(blocks);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2);
+
+    ref.reset();
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
 TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCachePreservesLegacyNonCpAggregateSurface) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);

@@ -734,6 +734,197 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeKindRequiredUsesRuntimeNullSlots) {
     EXPECT_FALSE(connector->kindRequiredAt(layer_attn_blocks, slots, 0, CacheBlockKind::STATE_SWA_KV));
     EXPECT_FALSE(connector->kindRequiredAt(layer_attn_blocks, slots, 1, CacheBlockKind::COMPRESSED_KV));
     EXPECT_TRUE(connector->kindRequiredAt(layer_attn_blocks, slots, 1, CacheBlockKind::STATE_SWA_KV));
+
+    const auto compressed_mask =
+        connector->prefixSlotValidMask(layer_attn_blocks, slots, 0, CacheBlockKind::COMPRESSED_KV);
+    ASSERT_EQ(compressed_mask.size(), slots.size());
+    for (size_t i = 0; i < slots.size(); ++i) {
+        const bool expected = slots[i].group_id >= 0 && slots[i].group_id <= 2;
+        EXPECT_EQ(compressed_mask[i] != 0, expected) << i;
+    }
+
+    const auto state_mask = connector->prefixSlotValidMask(layer_attn_blocks, slots, 1, CacheBlockKind::STATE_SWA_KV);
+    ASSERT_EQ(state_mask.size(), slots.size());
+    for (size_t i = 0; i < slots.size(); ++i) {
+        EXPECT_EQ(state_mask[i] != 0, slots[i].group_id == 6) << i;
+    }
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRuntimeSlotMask) {
+    auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb                    = 64;
+    kv_config.memory_cache_sync_timeout_ms            = 1000;
+    kv_config.enable_prefix_tree_memory_cache         = true;
+    kv_config.enable_legacy_memory_connector_fallback = false;
+
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+    auto connector = std::make_shared<KVCacheMemoryConnector>(
+        config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    ASSERT_TRUE(connector->init());
+    ASSERT_TRUE(connector->usePrefixTreeMemoryCache());
+
+    const auto slots = connector->layerRegionSlots();
+    ASSERT_TRUE(connector->isDsv4TypedCacheLayout(slots));
+    for (const auto& slot : slots) {
+        ASSERT_NE(slot.region_name, KVCacheRegionName::HCA_STATE);
+    }
+
+    const int hca_layer = 3;
+    const auto& hca_layer_groups = config.layer_region_to_group_id[static_cast<size_t>(hca_layer)];
+    ASSERT_EQ(hca_layer_groups[static_cast<size_t>(KVCacheRegionName::HCA_KV)], 1);
+    ASSERT_EQ(hca_layer_groups[static_cast<size_t>(KVCacheRegionName::HCA_STATE)], 5);
+    ASSERT_EQ(hca_layer_groups[static_cast<size_t>(KVCacheRegionName::SWA_KV)], 6);
+
+    KVCacheResource resource;
+    resource.cacheKeys() = {901, 902};
+    resource.initGroups(static_cast<int>(config.group_types.size()),
+                        static_cast<int>(config.layer_all_num),
+                        config.layer_to_group_id,
+                        /*kernel_blocks_per_kv_block=*/1,
+                        config.group_types,
+                        config.layer_region_to_group_id);
+    resource.resizeBlocks(/*reserver_blocks=*/2, NULL_BLOCK_IDX);
+
+    resource.mutableBlockIds(hca_layer, KVCacheRegionName::HCA_KV).assign({11, 12});
+    resource.mutableBlockIds(hca_layer, KVCacheRegionName::HCA_STATE).assign({51, 52});
+    resource.mutableBlockIds(hca_layer, KVCacheRegionName::SWA_KV).assign({61, NULL_BLOCK_IDX});
+    resource.ensureLinearBlockDependencies();
+
+    const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
+    bool       no_need_write     = true;
+    auto       plan              = connector->buildPrefixCopyPlanForWrite(resource.cacheKeys(),
+                                                                          resource.blockDependencies(),
+                                                                          layer_attn_blocks,
+                                                                          slots,
+                                                                          /*start_index=*/0,
+                                                                          /*write_num=*/2,
+                                                                          no_need_write);
+    ASSERT_NE(plan, nullptr);
+    EXPECT_FALSE(no_need_write);
+    ASSERT_EQ(plan->copy_infos.size(), 3u);
+
+    EXPECT_EQ(plan->copy_infos[0].cache_key, 901);
+    EXPECT_EQ(plan->copy_infos[0].kind, CacheBlockKind::COMPRESSED_KV);
+    EXPECT_EQ(plan->copy_infos[1].cache_key, 901);
+    EXPECT_EQ(plan->copy_infos[1].kind, CacheBlockKind::STATE_SWA_KV);
+    EXPECT_EQ(plan->copy_infos[2].cache_key, 902);
+    EXPECT_EQ(plan->copy_infos[2].kind, CacheBlockKind::COMPRESSED_KV);
+
+    auto slot_index = [&](KVCacheRegionName region_name) -> size_t {
+        for (size_t i = 0; i < slots.size(); ++i) {
+            if (slots[i].layer_id == hca_layer && slots[i].region_name == region_name) {
+                return i;
+            }
+        }
+        return slots.size();
+    };
+    const size_t hca_kv_slot = slot_index(KVCacheRegionName::HCA_KV);
+    const size_t swa_slot    = slot_index(KVCacheRegionName::SWA_KV);
+    ASSERT_LT(hca_kv_slot, slots.size());
+    ASSERT_LT(swa_slot, slots.size());
+
+    EXPECT_NE(plan->copy_infos[0].slot_valid_mask[hca_kv_slot], 0);
+    EXPECT_EQ(plan->copy_infos[0].slot_valid_mask[swa_slot], 0);
+    EXPECT_EQ(plan->copy_infos[1].slot_valid_mask[hca_kv_slot], 0);
+    EXPECT_NE(plan->copy_infos[1].slot_valid_mask[swa_slot], 0);
+    EXPECT_NE(plan->copy_infos[2].slot_valid_mask[hca_kv_slot], 0);
+    EXPECT_EQ(plan->copy_infos[2].slot_valid_mask[swa_slot], 0);
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeD2HMergeSourceKeepsOldSlotsAndOverlaysNewSlots) {
+    const auto set_device_rc = cudaSetDevice(0);
+    ASSERT_EQ(set_device_rc, cudaSuccess) << cudaGetErrorString(set_device_rc);
+
+    auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb             = 64;
+    kv_config.memory_cache_sync_timeout_ms     = 1000;
+    kv_config.enable_prefix_tree_memory_cache  = true;
+    kv_config.enable_legacy_memory_connector_fallback = false;
+
+    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
+    ASSERT_TRUE(connector->init());
+    ASSERT_TRUE(connector->usePrefixTreeMemoryCache());
+
+    const auto slots = connector->layerRegionSlots();
+    std::vector<size_t> state_slots;
+    for (size_t i = 0; i < slots.size(); ++i) {
+        if (connector->kindForSlot(slots[i]) == CacheBlockKind::STATE_SWA_KV) {
+            state_slots.push_back(i);
+        }
+    }
+    ASSERT_GE(state_slots.size(), 2u);
+
+    auto blocks = connector->state_swa_pool_->malloc(2);
+    ASSERT_EQ(blocks.size(), 2u);
+    const auto old_block = blocks[0];
+    const auto new_block = blocks[1];
+
+    auto set_prefix_slot = [&](BlockIdxType block, size_t target_slot, char value) {
+        auto buffers = connector->state_swa_pool_->convertIndexToBuffer(/*layer_id=*/0, block);
+        ASSERT_EQ(buffers.size(), 1u);
+        size_t byte_off = 0;
+        for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
+            if (connector->kindForSlot(slots[slot_idx]) != CacheBlockKind::STATE_SWA_KV) {
+                continue;
+            }
+            if (slot_idx == target_slot) {
+                setBlockBytes(buffers[0], byte_off, slots[slot_idx].stride_bytes, value);
+                return;
+            }
+            byte_off += slots[slot_idx].stride_bytes;
+        }
+        FAIL() << "target slot not found";
+    };
+    auto verify_prefix_slot = [&](BlockIdxType block, size_t target_slot, char value) {
+        auto buffers = connector->state_swa_pool_->convertIndexToBuffer(/*layer_id=*/0, block);
+        ASSERT_EQ(buffers.size(), 1u);
+        size_t byte_off = 0;
+        for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
+            if (connector->kindForSlot(slots[slot_idx]) != CacheBlockKind::STATE_SWA_KV) {
+                continue;
+            }
+            if (slot_idx == target_slot) {
+                verifyBlockBytesEq(buffers[0], byte_off, slots[slot_idx].stride_bytes, value);
+                return;
+            }
+            byte_off += slots[slot_idx].stride_bytes;
+        }
+        FAIL() << "target slot not found";
+    };
+
+    setBlockInfosContent(connector->state_swa_pool_->convertIndexToBuffer(/*layer_id=*/0, old_block), 0);
+    setBlockInfosContent(connector->state_swa_pool_->convertIndexToBuffer(/*layer_id=*/0, new_block), 0);
+    set_prefix_slot(old_block, state_slots[0], 'O');
+
+    const auto& new_slot      = slots[state_slots[1]];
+    const auto  new_gpu_block = static_cast<BlockIdxType>(7);
+    setBlockInfosContent(allocator->convertIndexToBuffer(new_slot.layer_id, new_slot.region_name, new_gpu_block), 'N');
+
+    MemoryOperationRequestPB request;
+    request.set_copy_direction(MemoryOperationRequestPB::D2H);
+    auto* item = request.add_copy_items();
+    item->set_mem_block(new_block);
+    item->set_src_mem_block(old_block);
+    item->set_backing_type(MemoryOperationRequestPB::MEMORY);
+    item->set_cache_block_kind(MemoryOperationRequestPB::STATE_SWA_KV);
+    item->set_is_complete(true);
+    for (size_t i = 0; i < slots.size(); ++i) {
+        item->add_gpu_blocks(i == state_slots[1] ? new_gpu_block : NULL_BLOCK_IDX);
+        item->add_slot_valid_mask(i == state_slots[0] || i == state_slots[1] ? 1 : 0);
+    }
+
+    MemoryOperationResponsePB response;
+    ASSERT_TRUE(connector->copyCache(request, response));
+    EXPECT_TRUE(response.success());
+    verify_prefix_slot(new_block, state_slots[0], 'O');
+    verify_prefix_slot(new_block, state_slots[1], 'N');
 }
 
 TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWriteAllocationFailureDoesNotDoubleFreePartialBlocks) {

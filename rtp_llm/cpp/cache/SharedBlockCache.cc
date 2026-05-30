@@ -65,6 +65,9 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
                 lru_cache_.put(cache_key, existing_item);
                 ++version_;
             }
+            if (existing_item.is_resident) {
+                markAllTreeAliasesResidentLocked(cache_key);
+            }
             upsertTreeNodeLocked(cache_key, namespace_id, dependency, existing_item.is_resident);
         }
         return;
@@ -151,6 +154,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
                 if (result.evicted_slots.find(tree_key.cache_key) == result.evicted_slots.end()) {
                     result.evicted_keys.push_back(tree_key.cache_key);
                     result.evicted_slots[tree_key.cache_key] = removed_item.slots;
+                    result.evicted_namespaces[tree_key.cache_key] = tree_key.namespace_id;
                     if (removed_item.has_dependency) {
                         result.evicted_dependencies[tree_key.cache_key] = removed_item.dependency;
                     }
@@ -192,6 +196,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
 
         result.evicted_keys.push_back(cache_key);
         result.evicted_slots[cache_key] = removed_item.slots;
+        result.evicted_namespaces[cache_key] = kDefaultNamespace;
         if (removed_item.has_dependency) {
             result.evicted_dependencies[cache_key] = removed_item.dependency;
         }
@@ -307,12 +312,12 @@ void SharedBlockCache::upsertTreeNodeLocked(CacheKeyType               cache_key
         aliases_by_cache_key_[cache_key].insert(key);
     } else {
         eraseLeafLocked(it->second);
-        if (it->second.has_parent && tree_nodes_.find(it->second.parent) != tree_nodes_.end()
-            && (it->second.parent == parent) == false) {
-            auto parent_it = tree_nodes_.find(it->second.parent);
-            if (parent_it != tree_nodes_.end()) {
+        if (it->second.has_parent && (it->second.parent == parent) == false) {
+            if (auto parent_it = tree_nodes_.find(it->second.parent); parent_it != tree_nodes_.end()) {
                 parent_it->second.children.erase(key);
                 refreshLeafLocked(parent_it->first);
+            } else {
+                detachPendingChildLocked(it->second.parent, key);
             }
         }
         it->second.parent     = parent;
@@ -327,9 +332,38 @@ void SharedBlockCache::upsertTreeNodeLocked(CacheKeyType               cache_key
         if (parent_it != tree_nodes_.end()) {
             eraseLeafLocked(parent_it->second);
             parent_it->second.children.insert(key);
+        } else {
+            pending_children_by_parent_[parent].insert(key);
         }
     }
+    attachPendingChildrenLocked(it->second);
     insertLeafIfEligibleLocked(it->second);
+}
+
+void SharedBlockCache::detachPendingChildLocked(const NamespacedKey& parent, const NamespacedKey& child) {
+    auto pending_it = pending_children_by_parent_.find(parent);
+    if (pending_it == pending_children_by_parent_.end()) {
+        return;
+    }
+    pending_it->second.erase(child);
+    if (pending_it->second.empty()) {
+        pending_children_by_parent_.erase(pending_it);
+    }
+}
+
+void SharedBlockCache::attachPendingChildrenLocked(PrefixTreeNode& node) {
+    auto pending_it = pending_children_by_parent_.find(node.key);
+    if (pending_it == pending_children_by_parent_.end()) {
+        return;
+    }
+    for (const auto& child_key : pending_it->second) {
+        auto child_it = tree_nodes_.find(child_key);
+        if (child_it != tree_nodes_.end() && child_it->second.has_parent && child_it->second.parent == node.key) {
+            eraseLeafLocked(node);
+            node.children.insert(child_key);
+        }
+    }
+    pending_children_by_parent_.erase(pending_it);
 }
 
 void SharedBlockCache::touchTreeAliasesLocked(CacheKeyType cache_key) {
@@ -360,7 +394,8 @@ void SharedBlockCache::eraseLeafLocked(const PrefixTreeNode& node) {
 }
 
 void SharedBlockCache::insertLeafIfEligibleLocked(const PrefixTreeNode& node) {
-    if (node.resident || !node.children.empty() || !hasFlatItemLocked(node.key.cache_key)) {
+    if (node.resident || !node.children.empty() || !hasFlatItemLocked(node.key.cache_key)
+        || isFlatItemResidentLocked(node.key.cache_key)) {
         return;
     }
     leaf_lru_.insert(LeafKey{node.last_access_seq, node.key.namespace_id, node.key.cache_key});
@@ -387,6 +422,8 @@ void SharedBlockCache::removeTreeAliasLocked(const NamespacedKey& key) {
         if (parent_it != tree_nodes_.end()) {
             parent_it->second.children.erase(key);
             refreshLeafLocked(parent_it->first);
+        } else {
+            detachPendingChildLocked(node.parent, key);
         }
     }
     for (const auto& child : node.children) {
@@ -413,6 +450,21 @@ void SharedBlockCache::removeAllTreeAliasesForCacheKeyLocked(CacheKeyType cache_
     std::vector<NamespacedKey> aliases(aliases_it->second.begin(), aliases_it->second.end());
     for (const auto& key : aliases) {
         removeTreeAliasLocked(key);
+    }
+}
+
+void SharedBlockCache::markAllTreeAliasesResidentLocked(CacheKeyType cache_key) {
+    auto aliases_it = aliases_by_cache_key_.find(cache_key);
+    if (aliases_it == aliases_by_cache_key_.end()) {
+        return;
+    }
+    for (const auto& key : aliases_it->second) {
+        auto node_it = tree_nodes_.find(key);
+        if (node_it == tree_nodes_.end() || node_it->second.resident) {
+            continue;
+        }
+        eraseLeafLocked(node_it->second);
+        node_it->second.resident = true;
     }
 }
 
@@ -443,14 +495,15 @@ SharedBlockCache::collectEvictChainLocked(const NamespacedKey& leaf_key) const {
     std::vector<NamespacedKey> chain;
     auto                       it = tree_nodes_.find(leaf_key);
     if (it == tree_nodes_.end() || it->second.resident || !it->second.children.empty()
-        || !hasFlatItemLocked(it->second.key.cache_key)) {
+        || !hasFlatItemLocked(it->second.key.cache_key) || isFlatItemResidentLocked(it->second.key.cache_key)) {
         return chain;
     }
 
     NamespacedKey cur = leaf_key;
     while (true) {
         auto node_it = tree_nodes_.find(cur);
-        if (node_it == tree_nodes_.end() || node_it->second.resident || !hasFlatItemLocked(cur.cache_key)) {
+        if (node_it == tree_nodes_.end() || node_it->second.resident || !hasFlatItemLocked(cur.cache_key)
+            || isFlatItemResidentLocked(cur.cache_key)) {
             break;
         }
         chain.push_back(cur);
@@ -458,7 +511,8 @@ SharedBlockCache::collectEvictChainLocked(const NamespacedKey& leaf_key) const {
             break;
         }
         auto parent_it = tree_nodes_.find(node_it->second.parent);
-        if (parent_it == tree_nodes_.end() || parent_it->second.resident) {
+        if (parent_it == tree_nodes_.end() || parent_it->second.resident
+            || isFlatItemResidentLocked(parent_it->first.cache_key)) {
             break;
         }
         if (parent_it->second.children.size() != 1) {
@@ -471,6 +525,15 @@ SharedBlockCache::collectEvictChainLocked(const NamespacedKey& leaf_key) const {
 
 bool SharedBlockCache::hasFlatItemLocked(CacheKeyType cache_key) const {
     return lru_cache_.contains(cache_key);
+}
+
+bool SharedBlockCache::isFlatItemResidentLocked(CacheKeyType cache_key) const {
+    for (const auto& [key, item] : lru_cache_.items()) {
+        if (key == cache_key) {
+            return item.is_resident;
+        }
+    }
+    return false;
 }
 
 }  // namespace rtp_llm

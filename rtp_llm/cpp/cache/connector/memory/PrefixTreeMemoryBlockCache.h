@@ -32,6 +32,7 @@ public:
         uint64_t         last_access_seq{0};
         uint32_t         in_flight_ref{0};
         uint32_t         subtree_ref_count{0};
+        std::vector<uint8_t> slot_valid_mask;
     };
 
     struct CacheItem {
@@ -43,6 +44,7 @@ public:
         size_t           block_size{0};
         bool             is_resident{false};
         uint64_t         generation{0};
+        std::vector<uint8_t> slot_valid_mask;
     };
 
     struct MatchResult {
@@ -52,11 +54,17 @@ public:
         int32_t          disk_slot{-1};
         size_t           block_size{0};
         uint64_t         generation{0};
+        std::vector<uint8_t> slot_valid_mask;
     };
 
     bool contains(CacheKeyType cache_key, CacheBlockKind kind) const;
+    bool contains(CacheKeyType cache_key, CacheBlockKind kind, const std::vector<uint8_t>& required_slot_mask) const;
     MatchResult match(CacheKeyType cache_key, CacheBlockKind kind);
+    MatchResult match(CacheKeyType cache_key, CacheBlockKind kind, const std::vector<uint8_t>& required_slot_mask);
     MatchResult matchAndMarkInFlight(CacheKeyType cache_key, CacheBlockKind kind);
+    MatchResult matchAndMarkInFlight(CacheKeyType                 cache_key,
+                                     CacheBlockKind               kind,
+                                     const std::vector<uint8_t>& required_slot_mask);
 
     std::pair<bool, std::optional<CacheItem>>
     putCommitted(CacheKeyType cache_key, const BlockDependency& dependency, const CacheItem& item);
@@ -66,18 +74,23 @@ public:
                                            BlockIdxType     expected_block_index,
                                            int32_t          expected_disk_slot,
                                            uint64_t         expected_generation);
-    void releaseInFlight(CacheKeyType     cache_key,
-                         CacheBlockKind   kind,
-                         CacheBackingType backing_type,
-                         BlockIdxType     block_index,
-                         int32_t          disk_slot,
-                         uint64_t         generation);
+    std::optional<CacheItem> releaseInFlight(CacheKeyType     cache_key,
+                                             CacheBlockKind   kind,
+                                             CacheBackingType backing_type,
+                                             BlockIdxType     block_index,
+                                             int32_t          disk_slot,
+                                             uint64_t         generation);
 
     std::optional<CacheItem> popOldestEvictable(CacheBlockKind kind);
     std::vector<CacheKeyType> cacheKeys() const;
     size_t size() const;
 
 private:
+    struct RetiredItem {
+        CacheItem item;
+        uint32_t  in_flight_ref{0};
+    };
+
     struct Node {
         CacheKeyType cache_key{0};
         CacheKeyType parent_key{0};
@@ -85,6 +98,7 @@ private:
         uint32_t     ordinal{0};
         std::unordered_set<CacheKeyType> children;
         std::array<KindState, kKindCount> kinds;
+        std::array<std::vector<RetiredItem>, kKindCount> retired_items;
     };
 
     struct EvictKey {
@@ -105,10 +119,15 @@ private:
 
     static size_t kindIndex(CacheBlockKind kind);
     static bool   validKind(CacheBlockKind kind);
+    static bool   slotMaskCovers(const std::vector<uint8_t>& stored, const std::vector<uint8_t>& required);
 
     Node& upsertNodeLocked(CacheKeyType cache_key, const BlockDependency& dependency);
     void  incrementAncestorsLocked(CacheKeyType cache_key, CacheBlockKind kind);
     void  decrementAncestorsLocked(CacheKeyType cache_key, CacheBlockKind kind);
+    void  addSubtreeRefsToAncestorsLocked(CacheKeyType ancestor_key, const Node& child);
+    void  subtractSubtreeRefsFromAncestorsLocked(CacheKeyType ancestor_key, const Node& child);
+    void  detachPendingChildLocked(CacheKeyType parent_key, CacheKeyType child_key);
+    void  attachPendingChildrenLocked(Node& node);
     void  touchLocked(Node& node, CacheBlockKind kind);
     void  insertEvictKeyLocked(const Node& node, CacheBlockKind kind);
     void  eraseEvictKeyLocked(const Node& node, CacheBlockKind kind);
@@ -120,6 +139,7 @@ private:
 private:
     mutable std::shared_mutex mutex_;
     std::unordered_map<CacheKeyType, Node> nodes_;
+    std::unordered_map<CacheKeyType, std::unordered_set<CacheKeyType>> pending_children_by_parent_;
     std::array<std::set<EvictKey>, kKindCount> leaf_lru_;
     uint64_t access_seq_{0};
     uint64_t generation_seq_{0};

@@ -62,6 +62,19 @@ TEST(SharedBlockCacheTest, PrefixTreeStopsAtBranchPoint) {
     EXPECT_TRUE(cache.contains(3));
 }
 
+TEST(SharedBlockCacheTest, PrefixTreeLinksChildInsertedBeforeParent) {
+    SharedBlockCache cache;
+    putOne(cache, 2, 102, childDep(1, 1));
+    putOne(cache, 1, 101, rootDep(0));
+
+    ASSERT_EQ(cache.matchGroup(2, 0), 102);
+
+    auto evicted = cache.selectAndEvict(/*min_blocks=*/1);
+
+    ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{1, 2}));
+    EXPECT_TRUE(cache.empty());
+}
+
 TEST(SharedBlockCacheTest, MatchGroupTouchesPrefixTreeLeafLru) {
     SharedBlockCache cache;
     putOne(cache, 1, 101, rootDep(0));
@@ -88,6 +101,28 @@ TEST(SharedBlockCacheTest, ResidentIsStickyAcrossPuts) {
 
     EXPECT_TRUE(evicted.evicted_keys.empty());
     EXPECT_TRUE(cache.contains(1));
+}
+
+TEST(SharedBlockCacheTest, ResidentIsStickyAcrossNamespaceAliases) {
+    SharedBlockCache cache;
+    putOne(cache, 1, 101, rootDep(0), SharedBlockCache::kGpuLogicalNamespace, /*resident=*/false);
+    putOne(cache, 1, NULL_BLOCK_IDX, rootDep(0), SharedBlockCache::kGpuCpCanonicalNamespace, /*resident=*/true);
+
+    auto evicted = cache.selectAndEvict(/*min_blocks=*/1);
+
+    EXPECT_TRUE(evicted.evicted_keys.empty());
+    EXPECT_TRUE(cache.contains(1));
+}
+
+TEST(SharedBlockCacheTest, PrefixTreeEvictionReportsNamespace) {
+    SharedBlockCache cache;
+    putOne(cache, 1, 101, rootDep(0), SharedBlockCache::kGpuCpCanonicalNamespace);
+
+    auto evicted = cache.selectAndEvict(/*min_blocks=*/1);
+
+    ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{1}));
+    ASSERT_TRUE(evicted.evicted_namespaces.count(1));
+    EXPECT_EQ(evicted.evicted_namespaces.at(1), SharedBlockCache::kGpuCpCanonicalNamespace);
 }
 
 TEST(SharedBlockCacheTest, FlatFallbackKeepsCanonicalDependencyWhenLogicalAliasUpdatesSameKey) {

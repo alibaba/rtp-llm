@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -77,12 +78,15 @@ private:
         CacheBlockKind            kind{CacheBlockKind::COMPLETE};
         CacheBackingType          backing_type{CacheBackingType::MEMORY};
         BlockIdxType              mem_block{NULL_BLOCK_IDX};
+        BlockIdxType              src_mem_block{NULL_BLOCK_IDX};
         int32_t                   disk_slot{-1};
         size_t                    block_size{0};
         std::vector<BlockIdxType> gpu_blocks;
+        std::vector<uint8_t>      slot_valid_mask;
         bool                      is_complete{true};
         bool                      request_released{false};
         uint64_t                  generation{0};
+        uint64_t                  src_generation{0};
     };
     enum class CopyDirection {
         H2D = 0,
@@ -109,6 +113,8 @@ private:
     bool startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context, const std::shared_ptr<CopyPlan>& copy_plan);
     std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
          sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
+    std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>
+         sendMemoryRequest(const MemoryOperationRequestPB& mem_req, int64_t timeout_ms) const;
     void printCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
 
     bool                     prepareCopyBuffers(BlockIdxType                     mem_block,
@@ -162,6 +168,10 @@ private:
                                                 const std::vector<LayerRegionSlot>& slots,
                                                 size_t                              key_index,
                                                 CacheBlockKind                      kind) const;
+    std::vector<uint8_t>         prefixSlotValidMask(const LayerAttnBlockIds&            layer_attn_block_ids,
+                                                     const std::vector<LayerRegionSlot>& slots,
+                                                     size_t                              key_index,
+                                                     CacheBlockKind                      kind) const;
     size_t                       prefixKindBlockSize(CacheBlockKind kind,
                                                      const std::vector<LayerRegionSlot>& slots) const;
     std::shared_ptr<CopyPlan>    buildPrefixCopyPlanForRead(const CacheKeysType&                cache_keys,
@@ -179,7 +189,11 @@ private:
                                                               bool&                               no_need_write);
     bool                         allocatePrefixBackingsForWrite(std::vector<CopyInfoPerKey>& copy_infos);
     bool                         allocateOnePrefixBacking(CopyInfoPerKey& copy_info);
-    void                         putPrefixToCache(CopyInfoPerKey& copy_info, const BlockDependency& dependency);
+    bool                         preparePrefixMergeSources(std::vector<CopyInfoPerKey>& copy_infos);
+    void                         releasePrefixMergeSource(const CopyInfoPerKey& copy_info);
+    void                         putPrefixToCache(CopyInfoPerKey&                  copy_info,
+                                                  const BlockDependency&           dependency,
+                                                  const std::vector<LayerRegionSlot>& slots);
     void                         releasePrefixRequestBacking(const CopyInfoPerKey& copy_info);
     void                         releasePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item);
     void                         referencePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item);
