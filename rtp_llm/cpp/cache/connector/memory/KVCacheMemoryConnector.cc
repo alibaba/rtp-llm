@@ -626,8 +626,8 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         resource->ensureLinearBlockDependencies();
         size_t matched_num = already_reuse_num;
         for (size_t i = already_reuse_num; i < cache_keys_size; ++i) {
-            bool ok           = true;
-            bool required_any = false;
+            bool ok          = true;
+            bool matched_any = false;
             for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
                 const auto required_mask = prefixSlotValidMask(layer_attn_block_ids, slots, i, kind);
                 const bool kind_required = std::any_of(required_mask.begin(), required_mask.end(), [](uint8_t valid) {
@@ -636,15 +636,18 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
                 if (!kind_required) {
                     continue;
                 }
-                required_any = true;
                 auto match_result =
                     prefix_block_cache_->match(static_cast<CacheKeyType>(cache_keys.at(i)), kind, required_mask);
                 if (!match_result.found) {
-                    ok = false;
-                    break;
+                    if (kind == CacheBlockKind::COMPRESSED_KV) {
+                        ok = false;
+                        break;
+                    }
+                    continue;
                 }
+                matched_any = true;
             }
-            if (!ok || !required_any) {
+            if (!ok || !matched_any) {
                 break;
             }
             matched_num = i + 1;
@@ -1014,6 +1017,7 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForRead(const CacheKeysType&         
     bool                        success = true;
     for (int i = start_index; i < start_index + read_num; ++i) {
         const auto cache_key = cache_keys.at(i);
+        const auto copy_info_count_before_key = copy_infos.size();
         for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
             const auto required_mask = prefixSlotValidMask(layer_attn_block_ids, slots, static_cast<size_t>(i), kind);
             const bool kind_required = std::any_of(required_mask.begin(), required_mask.end(), [](uint8_t valid) {
@@ -1024,7 +1028,9 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForRead(const CacheKeysType&         
             }
             const auto match_result = prefix_block_cache_->matchAndMarkInFlight(cache_key, kind, required_mask);
             if (!match_result.found || match_result.backing_type != CacheBackingType::MEMORY) {
-                success = false;
+                if (kind == CacheBlockKind::COMPRESSED_KV) {
+                    success = false;
+                }
                 break;
             }
             PrefixTreeMemoryBlockCache::CacheItem item;
@@ -1058,6 +1064,9 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForRead(const CacheKeysType&         
                 copy_info.gpu_blocks.push_back(layer_attn_block_ids.at(layer).at(attn)->blocks().at(i));
             }
             copy_infos.emplace_back(std::move(copy_info));
+        }
+        if (copy_infos.size() == copy_info_count_before_key) {
+            success = false;
         }
         if (!success) {
             break;

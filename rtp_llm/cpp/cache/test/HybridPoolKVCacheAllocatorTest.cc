@@ -607,6 +607,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PopBlocksFromCacheReturnsEvictedBatchAcro
     ASSERT_NE(evicted, nullptr);
     EXPECT_EQ(evicted->batchSize(), 1);
     EXPECT_EQ(evicted->groupNums(), 2);
+    EXPECT_TRUE(evicted->cacheResource(0).cacheKeysAreCpCanonical());
     const auto& keys = evicted->cacheKeys(0);
     EXPECT_EQ(keys.size(), 2u);  // 100 (shared) + 200 (g1 only)
 

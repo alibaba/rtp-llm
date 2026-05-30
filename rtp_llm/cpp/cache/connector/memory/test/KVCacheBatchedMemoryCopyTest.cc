@@ -833,6 +833,70 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRunti
     EXPECT_EQ(plan->copy_infos[2].slot_valid_mask[swa_slot], 0);
 }
 
+TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadAllowsCompressedOnlyWhenStateSwaMissing) {
+    auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb                    = 64;
+    kv_config.memory_cache_sync_timeout_ms            = 1000;
+    kv_config.enable_prefix_tree_memory_cache         = true;
+    kv_config.enable_legacy_memory_connector_fallback = false;
+
+    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
+    ASSERT_TRUE(connector->init());
+    ASSERT_TRUE(connector->usePrefixTreeMemoryCache());
+
+    const auto slots = connector->layerRegionSlots();
+    ASSERT_TRUE(connector->isDsv4TypedCacheLayout(slots));
+
+    const int hca_layer = 3;
+    KVCacheResource resource;
+    resource.cacheKeys() = {901, 902};
+    resource.initGroups(static_cast<int>(config.group_types.size()),
+                        static_cast<int>(config.layer_all_num),
+                        config.layer_to_group_id,
+                        /*kernel_blocks_per_kv_block=*/1,
+                        config.group_types,
+                        config.layer_region_to_group_id);
+    resource.resizeBlocks(/*reserver_blocks=*/2, NULL_BLOCK_IDX);
+    resource.mutableBlockIds(hca_layer, KVCacheRegionName::HCA_KV).assign({11, 12});
+    resource.mutableBlockIds(hca_layer, KVCacheRegionName::SWA_KV).assign({61, 62});
+    resource.ensureLinearBlockDependencies();
+
+    const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
+    const auto compressed_mask =
+        connector->prefixSlotValidMask(layer_attn_blocks, slots, 0, CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(std::any_of(compressed_mask.begin(), compressed_mask.end(), [](uint8_t valid) { return valid != 0; }));
+    const auto state_mask = connector->prefixSlotValidMask(layer_attn_blocks, slots, 0, CacheBlockKind::STATE_SWA_KV);
+    ASSERT_TRUE(std::any_of(state_mask.begin(), state_mask.end(), [](uint8_t valid) { return valid != 0; }));
+
+    auto mem_blocks = connector->compressed_pool_->malloc(1);
+    ASSERT_EQ(mem_blocks.size(), 1u);
+
+    KVCacheMemoryConnector::CopyInfoPerKey copy_info;
+    copy_info.cache_key       = 901;
+    copy_info.kind            = CacheBlockKind::COMPRESSED_KV;
+    copy_info.backing_type    = CacheBackingType::MEMORY;
+    copy_info.mem_block       = mem_blocks[0];
+    copy_info.block_size      = connector->prefixKindBlockSize(CacheBlockKind::COMPRESSED_KV, slots);
+    copy_info.slot_valid_mask = compressed_mask;
+    connector->putPrefixToCache(copy_info, resource.blockDependencies()[0], slots);
+
+    auto read_plan = connector->buildPrefixCopyPlanForRead(resource.cacheKeys(),
+                                                           resource.blockDependencies(),
+                                                           layer_attn_blocks,
+                                                           slots,
+                                                           /*start_index=*/0,
+                                                           /*read_num=*/1);
+    ASSERT_NE(read_plan, nullptr);
+    ASSERT_EQ(read_plan->copy_infos.size(), 1u);
+    EXPECT_EQ(read_plan->copy_infos[0].cache_key, 901);
+    EXPECT_EQ(read_plan->copy_infos[0].kind, CacheBlockKind::COMPRESSED_KV);
+}
+
 TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeD2HMergeSourceKeepsOldSlotsAndOverlaysNewSlots) {
     const auto set_device_rc = cudaSetDevice(0);
     ASSERT_EQ(set_device_rc, cudaSuccess) << cudaGetErrorString(set_device_rc);

@@ -154,7 +154,8 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
                 if (result.evicted_slots.find(tree_key.cache_key) == result.evicted_slots.end()) {
                     result.evicted_keys.push_back(tree_key.cache_key);
                     result.evicted_slots[tree_key.cache_key] = removed_item.slots;
-                    result.evicted_namespaces[tree_key.cache_key] = tree_key.namespace_id;
+                    result.evicted_namespaces[tree_key.cache_key] =
+                        removed_item.has_dependency ? removed_item.dependency_namespace : tree_key.namespace_id;
                     if (removed_item.has_dependency) {
                         result.evicted_dependencies[tree_key.cache_key] = removed_item.dependency;
                     }
@@ -196,7 +197,8 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
 
         result.evicted_keys.push_back(cache_key);
         result.evicted_slots[cache_key] = removed_item.slots;
-        result.evicted_namespaces[cache_key] = kDefaultNamespace;
+        result.evicted_namespaces[cache_key] =
+            removed_item.has_dependency ? removed_item.dependency_namespace : kDefaultNamespace;
         if (removed_item.has_dependency) {
             result.evicted_dependencies[cache_key] = removed_item.dependency;
         }

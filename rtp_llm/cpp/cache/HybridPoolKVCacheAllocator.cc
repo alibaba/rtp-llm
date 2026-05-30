@@ -426,15 +426,9 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
     BlockDependenciesType evicted_dependencies;
     evicted_keys.reserve(evict_result.evicted_keys.size());
     evicted_dependencies.reserve(evict_result.evicted_keys.size());
-    bool all_evicted_keys_are_cp_canonical = !evict_result.evicted_keys.empty();
-
     for (size_t evicted_idx = 0; evicted_idx < evict_result.evicted_keys.size(); ++evicted_idx) {
         const auto  cache_key = evict_result.evicted_keys[evicted_idx];
         const auto& slots     = evict_result.evicted_slots.at(cache_key);
-        auto ns_it = evict_result.evicted_namespaces.find(cache_key);
-        all_evicted_keys_are_cp_canonical =
-            all_evicted_keys_are_cp_canonical && ns_it != evict_result.evicted_namespaces.end()
-            && ns_it->second == SharedBlockCache::kGpuCpCanonicalNamespace;
         evicted_keys.push_back(cache_key);
         auto dep_it = evict_result.evicted_dependencies.find(cache_key);
         if (dep_it != evict_result.evicted_dependencies.end()) {
@@ -456,7 +450,10 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
     }
     batch_resource->cacheResource(0).setCacheKeys(std::move(evicted_keys));
     batch_resource->cacheResource(0).setBlockDependencies(std::move(evicted_dependencies));
-    batch_resource->cacheResource(0).setCacheKeysAreCpCanonical(all_evicted_keys_are_cp_canonical);
+    // Evicted keys already come from the GPU cache's actual key namespace.
+    // Under CP this can be a mixed batch of canonical paged keys and logical
+    // state/SWA keys, so coordinator must not remap the whole batch again.
+    batch_resource->cacheResource(0).setCacheKeysAreCpCanonical(true);
     return batch_resource;
 }
 
