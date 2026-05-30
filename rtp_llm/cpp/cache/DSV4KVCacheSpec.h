@@ -15,6 +15,9 @@ namespace rtp_llm {
 inline constexpr uint32_t DSV4_FP8_KV_ENTRY_BYTES            = 584;
 inline constexpr uint32_t DSV4_FP8_INDEXER_ENTRY_BYTES       = 132;
 inline constexpr size_t   DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES = 576;
+// SWA window in tokens. A full SWA_KV ring has >= this many entries; a CP slice
+// has fewer. Used to tell them apart in DSV4StateSpec::block_size_bytes().
+inline constexpr uint32_t DSV4_SWA_WINDOW_ENTRIES = 128;
 
 inline size_t alignDsv4Fp8KvBlockBytes(size_t natural) {
     constexpr size_t align = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES;
@@ -146,14 +149,12 @@ struct DSV4StateSpec: public KVCacheSpec {
         return static_cast<size_t>(entries_per_block) * state_dim * getTypeSize(store_dtype);
     }
 
-    // Public block size is the physical per-block stride. Decode / non-CP
-    // SWA_KV uses this state spec but stores the FP8 KV layout, so it needs
-    // TMA padding. Prefill CP-sliced SWA_KV stores a contiguous intra-block
-    // slice that is transferred into the decode block at the natural entry
-    // offset, so sliced blocks deliberately keep their natural size.
+    // Public block size is the physical per-block stride. The full (unsliced)
+    // SWA_KV ring stores the FP8 KV layout and needs TMA padding; a prefill
+    // CP-sliced sub-block (< window) keeps its natural size.
     size_t block_size_bytes() const override {
         const size_t natural = natural_block_size_bytes();
-        if (state_dim == DSV4_FP8_KV_ENTRY_BYTES && entries_per_block == 128) {
+        if (state_dim == DSV4_FP8_KV_ENTRY_BYTES && entries_per_block >= DSV4_SWA_WINDOW_ENTRIES) {
             return alignDsv4Fp8KvBlockBytes(natural);
         }
         return natural;
