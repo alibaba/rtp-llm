@@ -29,9 +29,13 @@ const int EXTRA_TIMEOUT_MS        = 100;
 const int RDMA_CONNECT_RETRY_TIME = 3;
 
 namespace {
-bool pdDebugEnabled() {
+const bool kPdDebugEnabled = []() {
     const char* env = std::getenv("RTP_LLM_PD_DEBUG");
     return env != nullptr && std::string(env) == "1";
+}();
+
+bool pdDebugEnabled() {
+    return kPdDebugEnabled;
 }
 }  // namespace
 
@@ -144,6 +148,26 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     decode_context.time_info.updateLoadBeginTime();
     auto error_info = loadCacheForAllRank(decode_context);
     decode_context.time_info.updateLoadEndTime();
+    if (error_info.ok()) {
+        auto& generate_stream = decode_context.getStream();
+        if (generate_stream) {
+            const int loaded_reuse_len = generate_stream->seqLength();
+            if (loaded_reuse_len > 0) {
+                if (generate_stream->initialReuseLength() < loaded_reuse_len) {
+                    generate_stream->setInitialReuseLength(loaded_reuse_len);
+                }
+                if (generate_stream->reuseLength() < loaded_reuse_len) {
+                    generate_stream->setReuseLength(loaded_reuse_len);
+                }
+                if (generate_stream->localReuseLength() < loaded_reuse_len) {
+                    generate_stream->setLocalReuseLength(loaded_reuse_len);
+                }
+                RTP_LLM_LOG_DEBUG("request [%s] mark decode prefill cache loaded, reuse_len=%d",
+                                  decode_context.request_key.c_str(),
+                                  loaded_reuse_len);
+            }
+        }
+    }
     if (!error_info.ok()) {
         RTP_LLM_LOG_WARNING("request [%s] load kv cache failed, error code [%s], cost time [%ld] ms",
                             decode_context.request_key.c_str(),

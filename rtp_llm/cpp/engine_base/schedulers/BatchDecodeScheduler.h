@@ -40,6 +40,11 @@ public:
     absl::Status enqueue(const GenerateStreamPtr& stream) override {
         {
             std::lock_guard<std::mutex> lock(lock_);
+            if (stop_) {
+                stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+                stream->moveToNext();
+                return absl::CancelledError("scheduler stopped");
+            }
             waiting_streams_.emplace_back(stream);
             if (waiting_streams_.size() % 16 == 0) {
                 RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::enqueue: waiting_streams_.size() = %d",
@@ -101,6 +106,14 @@ public:
         }
     }
 
+    void cancelStreams(std::list<GenerateStreamPtr>& streams) {
+        for (auto& stream : streams) {
+            stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+            stream->moveToNext();
+        }
+        streams.clear();
+    }
+
     void evaluateWaitingStreams() {
         // 清理 waiting_streams_ 中有错误的 stream
         waiting_streams_.remove_if([](const auto& s) { return s->hasError(); });
@@ -155,9 +168,12 @@ public:
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
         cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-            return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
+            return stop_ || waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
                    || !loading_cache_streams_.empty();
         });
+        if (stop_) {
+            return std::list<GenerateStreamPtr>{};
+        }
 
         // 统一通过状态机驱动各队列中 stream 的状态转移
         // LOADING_CACHE -> DONE/WAITING: error / load cache done
@@ -177,8 +193,15 @@ public:
     }
 
     absl::Status stop() override {
-        // Not implemented
-        return absl::UnimplementedError("BatchDecodeScheduler::stop not implemented");
+        {
+            std::lock_guard<std::mutex> lock(lock_);
+            stop_ = true;
+            cancelStreams(waiting_streams_);
+            cancelStreams(loading_cache_streams_);
+            cancelStreams(running_streams_);
+        }
+        cond_.notify_all();
+        return absl::OkStatus();
     }
 
     bool empty() override {
@@ -201,6 +224,7 @@ private:
     std::list<GenerateStreamPtr> waiting_streams_;
     std::list<GenerateStreamPtr> loading_cache_streams_;
     std::list<GenerateStreamPtr> running_streams_;
+    bool                         stop_ = false;
     uint32_t                     batch_size_;
     bool                         reorder_request_;
     uint32_t                     current_step_ = 0;

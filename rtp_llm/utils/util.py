@@ -341,6 +341,7 @@ def wait_sever_done(server_process, port: int, timeout: int = 1600):
         if not psutil.pid_exists(server_process.pid) or rc is not None:
             if rc is not None and rc < 0:
                 import signal as signal_mod
+
                 sig = -rc
                 try:
                     sig_name = signal_mod.Signals(sig).name
@@ -354,9 +355,7 @@ def wait_sever_done(server_process, port: int, timeout: int = 1600):
                     f"Server pid={server_process.pid} exited with code {rc}"
                 )
             else:
-                logging.warning(
-                    f"Server pid={server_process.pid} no longer exists"
-                )
+                logging.warning(f"Server pid={server_process.pid} no longer exists")
             return False
         # 如果等待时间超过预设的超时时间，则放弃等待
         if time.time() - start_time > timeout:
@@ -369,19 +368,26 @@ def stop_server(
 ):
     if server_process is not None and server_process.pid is not None:
         try:
-            # 如果只kill start_server，会残留 backend/frontend 占用显存。
-            # 部署时容器整体会回收，但测试时需要自己递归 kill
-            # 不适用 setsid/killpg 是因为 setsid 可能会在 test 父进程意外退出的情况遗留 start_server 占用测试资源
             logging.info("stop server and children: %d", server_process.pid)
             parent = psutil.Process(server_process.pid)
             children = list(parent.children(recursive=True))  # 获取所有子进程（递归）
-            for child in children:
-                child.terminate()  # 先尝试优雅终止
-            _, alive = psutil.wait_procs(children, timeout=5)
-            for child in alive:
-                child.kill()  # 强制终止未退出的进程
+
+            # Let start_server's ProcessManager coordinate its own shutdown first.
+            # Recursive child cleanup is only a fallback for leaked descendants.
             parent.terminate()
-            parent.wait()
+            try:
+                parent.wait(timeout=60)
+            except psutil.TimeoutExpired:
+                logging.warning("Parent process did not exit gracefully, force killing")
+                parent.kill()
+                parent.wait(timeout=5)
+
+            _, alive = psutil.wait_procs(children, timeout=10)
+            for child in alive:
+                child.terminate()
+            _, alive = psutil.wait_procs(alive, timeout=5)
+            for child in alive:
+                child.kill()
             server_process = None
         except Exception as e:
             logging.warning("failed to get process with: " + str(e))

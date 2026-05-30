@@ -82,7 +82,9 @@ public:
     virtual size_t onflightRequestNum();
 
     void stop() {
-        (void)engine_->stop();
+        if (engine_) {
+            (void)engine_->stop();
+        }
     }
 
     virtual EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finised_version);

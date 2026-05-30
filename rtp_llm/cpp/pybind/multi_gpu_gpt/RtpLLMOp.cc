@@ -130,7 +130,6 @@ void RtpLLMOp::init(py::object model,
                                       std::move(mm_process_engine),
                                       std::move(propose_params),
                                       std::move(token_processor));
-    grpc_server_thread_.detach();
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
     }
@@ -355,7 +354,8 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
 
 void RtpLLMOp::stop() {
     int64_t STOP_TIMEOUT_MS = 60 * 1000;
-    if (!is_server_shutdown_) {
+    bool    expected        = false;
+    if (is_server_shutdown_.compare_exchange_strong(expected, true)) {
         if (grpc_server_) {
             auto begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
             while (auto onflight_request = model_rpc_service_->onflightRequestNum()) {
@@ -368,6 +368,11 @@ void RtpLLMOp::stop() {
             }
             RTP_LLM_LOG_INFO("Server shutdowning");
             grpc_server_->Shutdown();
+        }
+        if (grpc_server_thread_.joinable()) {
+            grpc_server_thread_.join();
+        }
+        if (grpc_server_) {
             grpc_server_.reset();
         }
         if (model_rpc_service_) {
@@ -380,7 +385,6 @@ void RtpLLMOp::stop() {
             http_server_->stop();
             http_server_.reset();
         }
-        is_server_shutdown_ = true;
         stopKmonitorFactory();
     }
 }

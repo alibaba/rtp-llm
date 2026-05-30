@@ -12,9 +12,13 @@ namespace rtp_llm {
 
 namespace {
 
-bool pdDebugEnabled() {
+const bool kPdDebugEnabled = []() {
     const char* env = std::getenv("RTP_LLM_PD_DEBUG");
     return env != nullptr && std::string(env) == "1";
+}();
+
+bool pdDebugEnabled() {
+    return kPdDebugEnabled;
 }
 
 std::string summarizeBlocks(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer, size_t limit = 3) {

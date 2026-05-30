@@ -229,29 +229,30 @@ class MagaServerManager(object):
     def stop_server(self):
         if self._server_process is not None and self._server_process.pid is not None:
             try:
-                # 如果只kill start_server，会残留 backend/frontend 占用显存。
-                # 部署时容器整体会回收，但测试时需要自己递归 kill
-                # 不适用 setsid/killpg 是因为 setsid 可能会在 test 父进程意外退出的情况遗留 start_server 占用测试资源
                 logging.info("stop server and children: %d", self._server_process.pid)
                 parent = psutil.Process(self._server_process.pid)
                 children = list(
                     parent.children(recursive=True)
                 )  # 获取所有子进程（递归）
-                for child in children:
-                    child.terminate()  # 先尝试优雅终止
-                _, alive = psutil.wait_procs(children, timeout=5)
-                for child in alive:
-                    child.kill()  # 强制终止未退出的进程
+
+                # Let start_server's ProcessManager perform its staged shutdown first.
+                # Recursive child cleanup remains as a fallback for leaked descendants.
                 parent.terminate()
-                # 添加超时机制，避免永久阻塞
                 try:
-                    parent.wait(timeout=10)
+                    parent.wait(timeout=60)
                 except psutil.TimeoutExpired:
                     logging.warning(
                         "Parent process did not exit gracefully, force killing"
                     )
                     parent.kill()
                     parent.wait(timeout=5)
+
+                _, alive = psutil.wait_procs(children, timeout=10)
+                for child in alive:
+                    child.terminate()
+                _, alive = psutil.wait_procs(alive, timeout=5)
+                for child in alive:
+                    child.kill()
                 self._server_process = None
             except Exception as e:
                 logging.warning("failed to get process with: " + str(e))

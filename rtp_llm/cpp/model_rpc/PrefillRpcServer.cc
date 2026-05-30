@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <unistd.h>
@@ -17,6 +18,15 @@ using grpc::Status;
 using grpc::ClientContext;
 
 namespace rtp_llm {
+
+namespace {
+
+const bool kHasRemoteRpcServerIp = []() {
+    const char* env = std::getenv("REMOTE_RPC_SERVER_IP");
+    return env != nullptr && std::strlen(env) > 0;
+}();
+
+}  // namespace
 
 #define CLIENT_GRPC_RET_IF_ERROR(prefill_context, state, error_code_value)                                             \
     if (!(state)) {                                                                                                    \
@@ -138,8 +148,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     }
 
     // If no host specified in request, check if there's a master role
-    char* remote_rpc_server_ip_env = std::getenv("REMOTE_RPC_SERVER_IP");
-    bool  has_master_role          = (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0);
+    bool has_master_role = kHasRemoteRpcServerIp;
 
     // If no host specified in request and no master role, this is a direct prefill request
     // In this case, we still need to select decode machines as specified in the requirements

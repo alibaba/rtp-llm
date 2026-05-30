@@ -182,6 +182,13 @@ class MegaMoeFusedWrapper(nn.Module):
 
         self.expert_num = n_routed_experts
 
+    def clone_for_cuda_graph(self) -> "MegaMoeFusedWrapper":
+        clone = object.__new__(type(self))
+        nn.Module.__init__(clone)
+        clone.mega_moe = self.mega_moe.clone_for_cuda_graph()
+        clone.expert_num = self.expert_num
+        return clone
+
     @property
     def topk_ids_dtype(self) -> torch.dtype:
         return torch.int64

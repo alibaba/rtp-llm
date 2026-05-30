@@ -35,60 +35,93 @@ namespace rtp_llm {
 
 namespace {
 
-bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
+struct CachedEnvFlag {
+    const char* env_name;
+    const char* log_tag;
+    const char* label;
+    bool        on;
+    std::string value;
+};
+
+CachedEnvFlag cacheEnvFlag(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
-    const bool  on  = (env != nullptr && std::string(env) == "1");
-    RTP_LLM_LOG_INFO("[%s] %s=%s -> %s=%d", log_tag, env_name, env ? env : "(unset)", label, static_cast<int>(on));
-    return on;
+    return CachedEnvFlag{env_name, log_tag, label, env != nullptr && std::string(env) == "1", env ? env : "(unset)"};
 }
 
+void logCachedEnvFlag(const CachedEnvFlag& flag) {
+    RTP_LLM_LOG_INFO(
+        "[%s] %s=%s -> %s=%d", flag.log_tag, flag.env_name, flag.value.c_str(), flag.label, static_cast<int>(flag.on));
+}
+
+bool cacheDebugFlag(const char* env_name) {
+    const char* env = std::getenv(env_name);
+    return env != nullptr && std::string(env) != "0";
+}
+
+const CachedEnvFlag kMtpDeviceInputFlag = cacheEnvFlag("RTP_LLM_DEVICE_INPUT", "mtp-device-input", "enabled");
+const CachedEnvFlag kMtpDeviceInputCheckFlag =
+    cacheEnvFlag("RTP_LLM_DEVICE_INPUT_CHECK", "mtp-device-input", "enabled");
+const CachedEnvFlag kStreamAsyncFlag = cacheEnvFlag("RTP_LLM_STREAM_ASYNC", "stream-async", "useStreamAsync");
+const CachedEnvFlag kAsyncDeviceStateFlag =
+    cacheEnvFlag("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "async-device-state", "enabled");
+const CachedEnvFlag kDropBroadSyncFlag = cacheEnvFlag("RTP_LLM_DROP_BROAD_SYNC", "drop-broad-sync", "enabled");
+const CachedEnvFlag kAsyncPrepareFlag  = cacheEnvFlag("RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "enabled");
+const bool          kDebugTargetVerifyInputEnabled  = cacheDebugFlag("RTP_LLM_DEBUG_TARGET_VERIFY_INPUT");
+const bool          kDebugCompareSpPrefillEnabled   = cacheDebugFlag("RTP_LLM_COMPARE_SP_PREFILL");
+const bool          kDebugMtpPrefillDataEnabled     = cacheDebugFlag("RTP_LLM_DEBUG_MTP_PREFILL_DATA");
+const bool          kDebugMtpDecodeDataEnabled      = cacheDebugFlag("RTP_LLM_DEBUG_MTP_DECODE_DATA");
+const bool          kDisableSpPrefillCudaGraphByEnv = []() {
+    const char* env = std::getenv("DISABLE_SP_PREFILL_CUDA_GRAPH");
+    return env != nullptr && std::string(env) == "1";
+}();
+const bool kForceSpPrefillCudaGraphByEnv = []() {
+    const char* env = std::getenv("RTP_LLM_FORCE_SP_PREFILL_CUDA_GRAPH");
+    return env != nullptr && std::string(env) == "1";
+}();
+
 bool debugTargetVerifyInputEnabled() {
-    static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_DEBUG_TARGET_VERIFY_INPUT");
-        const bool  on  = env != nullptr && std::string(env) != "0";
-        if (on) {
+    static const bool logged = []() {
+        if (kDebugTargetVerifyInputEnabled) {
             RTP_LLM_LOG_WARNING("[debug-target-verify] enabled; this performs D2H copies and serializes the hot path");
         }
-        return on;
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kDebugTargetVerifyInputEnabled;
 }
 
 bool debugCompareSpPrefillEnabled() {
-    static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_COMPARE_SP_PREFILL");
-        const bool  on  = env != nullptr && std::string(env) != "0";
-        if (on) {
+    static const bool logged = []() {
+        if (kDebugCompareSpPrefillEnabled) {
             RTP_LLM_LOG_WARNING("[debug-sp-prefill] enabled; this runs an extra eager draft-prefill forward");
         }
-        return on;
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kDebugCompareSpPrefillEnabled;
 }
 
 bool debugMtpPrefillDataEnabled() {
-    static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_DEBUG_MTP_PREFILL_DATA");
-        const bool  on  = env != nullptr && std::string(env) != "0";
-        if (on) {
+    static const bool logged = []() {
+        if (kDebugMtpPrefillDataEnabled) {
             RTP_LLM_LOG_WARNING("[debug-mtp-prefill-data] enabled; this records stage tensors for graph/eager diff");
         }
-        return on;
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kDebugMtpPrefillDataEnabled;
 }
 
 bool debugMtpDecodeDataEnabled() {
-    static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_DEBUG_MTP_DECODE_DATA");
-        const bool  on  = env != nullptr && std::string(env) != "0";
-        if (on) {
+    static const bool logged = []() {
+        if (kDebugMtpDecodeDataEnabled) {
             RTP_LLM_LOG_WARNING(
                 "[debug-mtp-decode-data] enabled; tensor summaries may perform D2H copies and serialize debugging runs");
         }
-        return on;
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kDebugMtpDecodeDataEnabled;
 }
 
 std::string debugTensorSummary(const torch::Tensor& tensor, int64_t limit = 8) {
@@ -347,6 +380,18 @@ bool isCpContextRequest(const ParallelismConfig& parallelism_config, const GptMo
 
 }  // namespace
 
+void MtpExecutor::notifyStop() {
+    stop_requested_.store(true, std::memory_order_release);
+}
+
+bool MtpExecutor::shouldSkipFakeStreamForStop(const GptModelInputs& model_input, const char* phase) const {
+    if (!stop_requested_.load(std::memory_order_acquire) || !model_input.is_fake_stream) {
+        return false;
+    }
+    RTP_LLM_LOG_INFO("[MTP decode] skip fake stream during shutdown before %s", phase);
+    return true;
+}
+
 bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
 }
@@ -379,17 +424,21 @@ void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_ou
 }
 
 bool MtpExecutor::useDeviceInput() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_DEVICE_INPUT", "mtp-device-input", "enabled");
+    static const bool logged = []() {
+        logCachedEnvFlag(kMtpDeviceInputFlag);
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kMtpDeviceInputFlag.on;
 }
 
 bool MtpExecutor::checkDeviceInput() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_DEVICE_INPUT_CHECK", "mtp-device-input", "enabled");
+    static const bool logged = []() {
+        logCachedEnvFlag(kMtpDeviceInputCheckFlag);
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kMtpDeviceInputCheckFlag.on;
 }
 
 void MtpExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const char* tag) {
@@ -752,14 +801,29 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             draft_model_.reset(new PyWrappedModel(
                 model_params, params.py_sp_model, false, false, draft_cache_layer_layout.layer_to_groups));
             // Create separate model for speculative prefill with CUDA graph if enabled (from params)
-            const bool  enable_cuda_graph      = params.hw_kernel_config.enable_cuda_graph;
-            const char* disable_sp_prefill_env = std::getenv("DISABLE_SP_PREFILL_CUDA_GRAPH");
-            const bool  disable_sp_prefill_cuda_graph =
-                disable_sp_prefill_env != nullptr && std::string(disable_sp_prefill_env) == "1";
-            RTP_LLM_LOG_INFO(
-                "[speculative decoding] enable_cuda_graph=%d disable_sp_prefill_cuda_graph=%d (set ENABLE_CUDA_GRAPH=1 when starting server to enable sp_prefill_draft_model_; set DISABLE_SP_PREFILL_CUDA_GRAPH=1 to skip the draft prefill CUDA graph capture only)",
-                static_cast<int>(enable_cuda_graph),
-                static_cast<int>(disable_sp_prefill_cuda_graph));
+            const bool enable_cuda_graph           = params.hw_kernel_config.enable_cuda_graph;
+            const bool disable_sp_prefill_by_env   = kDisableSpPrefillCudaGraphByEnv;
+            const bool force_sp_prefill_cuda_graph = kForceSpPrefillCudaGraphByEnv;
+            const bool draft_uses_mega_moe =
+                params.moe_config.moe_strategy == "mega_moe" || mtp_params->moe_config.moe_strategy == "mega_moe";
+            const bool draft_uses_ep_collective =
+                params.parallelism_config.ep_size > 1 || mtp_params->parallelism_config.ep_size > 1;
+            const bool disable_sp_prefill_for_mega_moe =
+                draft_uses_mega_moe && draft_uses_ep_collective && !force_sp_prefill_cuda_graph;
+            const bool disable_sp_prefill_cuda_graph = disable_sp_prefill_by_env || disable_sp_prefill_for_mega_moe;
+            RTP_LLM_LOG_INFO("[speculative decoding] enable_cuda_graph=%d disable_sp_prefill_cuda_graph=%d "
+                             "disable_by_env=%d disable_for_mega_moe=%d force_sp_prefill_cuda_graph=%d "
+                             "draft_uses_mega_moe=%d draft_uses_ep_collective=%d "
+                             "(set ENABLE_CUDA_GRAPH=1 when starting server to enable sp_prefill_draft_model_; "
+                             "set DISABLE_SP_PREFILL_CUDA_GRAPH=1 to skip the draft prefill CUDA graph capture only; "
+                             "set RTP_LLM_FORCE_SP_PREFILL_CUDA_GRAPH=1 for diagnostic replay on GLM5 MegaMoE)",
+                             static_cast<int>(enable_cuda_graph),
+                             static_cast<int>(disable_sp_prefill_cuda_graph),
+                             static_cast<int>(disable_sp_prefill_by_env),
+                             static_cast<int>(disable_sp_prefill_for_mega_moe),
+                             static_cast<int>(force_sp_prefill_cuda_graph),
+                             static_cast<int>(draft_uses_mega_moe),
+                             static_cast<int>(draft_uses_ep_collective));
             if (enable_cuda_graph && !disable_sp_prefill_cuda_graph) {
                 RTP_LLM_LOG_INFO(
                     "[speculative decoding] creating separate prefill draft model with CUDA graph support");
@@ -1166,9 +1230,17 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // release hold buffers before draft model forward
     releaseAllModelBuffers();
 
+    if (shouldSkipFakeStreamForStop(model_input, "target/draft forward")) {
+        return absl::OkStatus();
+    }
+
     launchTargetVerifyPrepareAsync(model_input, batch_size);
 
     if (propose_step_ > 1) {
+        if (shouldSkipFakeStreamForStop(model_input, "draftModelDecode")) {
+            releaseAllModelBuffers();
+            return absl::OkStatus();
+        }
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
@@ -1181,6 +1253,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     launchDraftPrefillPrepareAsync(model_input);
 
     {
+        if (shouldSkipFakeStreamForStop(model_input, "target verify forward")) {
+            releaseAllModelBuffers();
+            return absl::OkStatus();
+        }
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output          = runTargetVerifyForward(model_input, stream_groups);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -1271,6 +1347,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
 
     {
+        if (shouldSkipFakeStreamForStop(model_input, "draft prefill forward")) {
+            releaseAllModelBuffers();
+            return absl::OkStatus();
+        }
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         draft_prefill_model_output = runDraftPrefillForward(model_input);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -1895,6 +1975,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    torch::Tensor&              draft_token_ids_t,
                                    int64_t&                    model_forward_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(batch_size=%zu)", model_input.combo_tokens.size(0));
+    if (shouldSkipFakeStreamForStop(model_input, "draft decode loop")) {
+        return;
+    }
 
     const auto& mtp_cache_cfg         = cache_manager_->getMTPModuleCacheConfig(0);
     model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
@@ -1997,6 +2080,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     // n-1 steps draft model decode
     for (int i = 0; i < propose_step_ - 1; i++) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(loop_iter=%d)", i);
+        if (shouldSkipFakeStreamForStop(model_input, "draft decode loop forward")) {
+            return;
+        }
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d/%d start, batch_size %zu", i, propose_step_ - 1, batch_size);
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         ensureModelInputsOnCuda(model_input, "draft_decode.loop_forward");
@@ -2095,31 +2181,39 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 }
 
 bool MtpExecutor::useStreamAsync() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_STREAM_ASYNC", "stream-async", "useStreamAsync");
+    static const bool logged = []() {
+        logCachedEnvFlag(kStreamAsyncFlag);
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kStreamAsyncFlag.on;
 }
 
 bool MtpExecutor::useAsyncDeviceState() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "async-device-state", "enabled");
+    static const bool logged = []() {
+        logCachedEnvFlag(kAsyncDeviceStateFlag);
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kAsyncDeviceStateFlag.on;
 }
 
 bool MtpExecutor::useDropBroadSync() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_DROP_BROAD_SYNC", "drop-broad-sync", "enabled");
+    static const bool logged = []() {
+        logCachedEnvFlag(kDropBroadSyncFlag);
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kDropBroadSyncFlag.on;
 }
 
 bool MtpExecutor::useAsyncPrepare() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_MTP_ASYNC_PREPARE", "async-prepare", "enabled");
+    static const bool logged = []() {
+        logCachedEnvFlag(kAsyncPrepareFlag);
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kAsyncPrepareFlag.on;
 }
 
 void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                          stream_groups,

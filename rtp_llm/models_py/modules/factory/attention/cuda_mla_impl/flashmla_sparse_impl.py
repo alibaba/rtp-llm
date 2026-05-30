@@ -294,6 +294,14 @@ class SparseMlaFp8Op(SparseMlaOp):
                 f"captured={self._sched_meta_key}, current={key}"
             )
 
+        if (
+            self.use_cuda_graph
+            and self._sched_meta_key == key
+            and getattr(self._sched_meta, "tile_scheduler_metadata", None) is not None
+            and getattr(self._sched_meta, "num_splits", None) is not None
+        ):
+            return
+
         self._sched_meta.tile_scheduler_metadata = None
         self._sched_meta.num_splits = None
 
@@ -314,6 +322,7 @@ class SparseMlaFp8Op(SparseMlaOp):
             os.environ.get("USE_GATHER_PATH", "0") == "1"
             and attn_inputs is not None
             and getattr(attn_inputs, "is_prefill", False)
+            and not self.use_cuda_graph
         )
         self._gather = self._build_gather_workspace() if gather_enabled else None
 
@@ -531,7 +540,7 @@ class SparseMlaImpl(MlaImplBase):
                 f"Unsupported kv_cache_dtype: {attn_configs.kv_cache_dtype}"
             )
         op_kwargs = {"parallelism_config": parallelism_config}
-        if op_cls is SparseMlaFp8Op:
+        if issubclass(op_cls, SparseMlaFp8Op):
             op_kwargs["use_cuda_graph"] = is_cuda_graph
         self.fmha_impl: SparseMlaOp = op_cls(
             attn_configs.head_num,

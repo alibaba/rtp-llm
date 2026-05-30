@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -37,6 +38,7 @@ public:
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
+    void         notifyStop() override;
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {
         model_ = std::move(model);
@@ -156,6 +158,8 @@ protected:
     // correctness while bookkeeping overlaps the next step.
     bool useDropBroadSync() const;
 
+    bool shouldSkipFakeStreamForStop(const GptModelInputs& model_input, const char* phase) const;
+
     // Attach next-step device state, then fork a worker that waits on caller-
     // recorded rejection/draft events and runs D2H/specUpdate/KV release off
     // the main thread.
@@ -227,5 +231,7 @@ private:
     // Bookkeeping worker for stream-async decode dispatch. It owns a CUDA
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;
+
+    std::atomic<bool> stop_requested_{false};
 };
 };  // namespace rtp_llm

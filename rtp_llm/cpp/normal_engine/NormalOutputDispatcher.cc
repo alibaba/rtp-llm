@@ -14,9 +14,13 @@
 namespace rtp_llm {
 namespace {
 
-bool asyncDebugEnabled() {
+const bool kAsyncDebugEnabled = []() {
     const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
     return env != nullptr && std::string(env) == "1";
+}();
+
+bool asyncDebugEnabled() {
+    return kAsyncDebugEnabled;
 }
 
 torch::Tensor copyToPinnedCpuAsync(const torch::Tensor& tensor, bool& need_sync) {

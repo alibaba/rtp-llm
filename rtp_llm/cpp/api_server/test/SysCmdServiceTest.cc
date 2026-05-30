@@ -95,7 +95,8 @@ TEST_F(SysCmdServiceTest, SetLogLevelSuccess) {
         request._request              = CreateHttpPacket(body);
 
         cmd_service_->setLogLevel(writer_ptr, request);
-        EXPECT_EQ(logger.getLevelfromstr("FAKE_ENV_NAME"), alog::LOG_LEVEL_INFO);
+        EXPECT_FALSE(logger.isDebugMode());
+        EXPECT_FALSE(logger.isTraceMode());
     }
 
     // set log level to DEBUG
@@ -108,7 +109,8 @@ TEST_F(SysCmdServiceTest, SetLogLevelSuccess) {
         request._request              = CreateHttpPacket(body);
 
         cmd_service_->setLogLevel(writer_ptr, request);
-        EXPECT_EQ(logger.getLevelfromstr("FAKE_ENV_NAME"), alog::LOG_LEVEL_DEBUG);
+        EXPECT_TRUE(logger.isDebugMode());
+        EXPECT_FALSE(logger.isTraceMode());
     }
 
     // set log level to TRACE
@@ -121,7 +123,7 @@ TEST_F(SysCmdServiceTest, SetLogLevelSuccess) {
         request._request              = CreateHttpPacket(body);
 
         cmd_service_->setLogLevel(writer_ptr, request);
-        EXPECT_EQ(logger.getLevelfromstr("FAKE_ENV_NAME"), alog::LOG_LEVEL_TRACE1);
+        EXPECT_TRUE(logger.isTraceMode());
     }
 
     EXPECT_EQ(writer_ptr->_type, http_server::HttpResponseWriter::WriteType::Normal);

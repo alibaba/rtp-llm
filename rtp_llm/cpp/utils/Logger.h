@@ -132,7 +132,7 @@ private:
         }
     }
 
-    uint32_t getLevelfromstr(const char* s);
+    uint32_t getLevelfromstr(const std::string& level_name);
 
     inline const std::string getPrefix(const std::string& file, int line, const std::string& func) {
         return "[RANK " + std::to_string(rank_) + "][" + ip_ + "][" + file + ":" + std::to_string(line) + "][" + func

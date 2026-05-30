@@ -16,30 +16,38 @@ namespace rtp_llm {
 
 namespace {
 
-class ScopedEnvFlag {
+const bool kDebugSyncCudaGraphReplayEnabled = std::getenv("RTP_LLM_DEBUG_SYNC_CUDA_GRAPH_REPLAY") != nullptr;
+
+class ScopedCudaGraphForwardFlag {
 public:
-    ScopedEnvFlag(const char* name, const char* value): name_(name) {
-        const char* old_value = std::getenv(name_);
-        if (old_value != nullptr) {
-            had_old_value_ = true;
-            old_value_     = old_value;
+    enum class Type {
+        Warmup,
+        Capture,
+    };
+
+    explicit ScopedCudaGraphForwardFlag(Type type): type_(type) {
+        if (type_ == Type::Warmup) {
+            pushCudaGraphWarmupForwardFlag();
+        } else {
+            pushCudaGraphCaptureForwardFlag();
         }
-        setenv(name_, value, 1);
     }
 
-    ~ScopedEnvFlag() {
-        if (had_old_value_) {
-            setenv(name_, old_value_.c_str(), 1);
+    ~ScopedCudaGraphForwardFlag() {
+        if (type_ == Type::Warmup) {
+            popCudaGraphWarmupForwardFlag();
         } else {
-            unsetenv(name_);
+            popCudaGraphCaptureForwardFlag();
         }
     }
 
 private:
-    const char* name_;
-    bool        had_old_value_ = false;
-    std::string old_value_;
+    Type type_;
 };
+
+bool debugSyncCudaGraphReplayEnabled() {
+    return kDebugSyncCudaGraphReplayEnabled;
+}
 
 }  // namespace
 
@@ -64,6 +72,11 @@ void optimizedCopyAsync(const torch::Tensor& src, torch::Tensor& dst, size_t siz
     if (!src.defined() || !dst.defined() || src.numel() <= 0) {
         return;
     }
+    RTP_LLM_CHECK_WITH_INFO(size <= static_cast<size_t>(src.nbytes()) && size <= static_cast<size_t>(dst.nbytes()),
+                            "optimizedCopyAsync overflow: bytes=%zu src_nbytes=%zu dst_nbytes=%zu",
+                            size,
+                            static_cast<size_t>(src.nbytes()),
+                            static_cast<size_t>(dst.nbytes()));
 
     RTP_LLM_PROFILE_SCOPE("optimizedCopyAsync");
 
@@ -136,9 +149,19 @@ int inferTotalTokensNoSync(const PyModelInputs& inputs) {
 }
 
 void addD2DCopy(FusedD2DCopyParams& copies, const torch::Tensor& src, torch::Tensor& dst, size_t bytes) {
-    if (src.defined() && src.numel() > 0) {
-        copies.add(src.data_ptr(), dst.data_ptr(), bytes);
+    if (!src.defined() || src.numel() <= 0 || bytes == 0) {
+        return;
     }
+    if (!dst.defined() || dst.numel() <= 0) {
+        RTP_LLM_LOG_WARNING("skip D2D copy: destination tensor is undefined or empty");
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(bytes <= static_cast<size_t>(src.nbytes()) && bytes <= static_cast<size_t>(dst.nbytes()),
+                            "D2D copy overflow: bytes=%zu src_nbytes=%zu dst_nbytes=%zu",
+                            bytes,
+                            static_cast<size_t>(src.nbytes()),
+                            static_cast<size_t>(dst.nbytes()));
+    copies.add(src.data_ptr(), dst.data_ptr(), bytes);
 }
 
 size_t rowElementCount(const torch::Tensor& tensor) {
@@ -584,10 +607,30 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
     }
 
     if (is_prefill_cuda_graph_mode_) {
+        static std::atomic<int> prefill_replay_log_budget{64};
+        if (prefill_replay_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            const auto input_ids_rows = inputs.input_ids.defined() ? inputs.input_ids.size(0) : -1;
+            const auto input_hidden_rows =
+                inputs.input_hiddens.defined() && inputs.input_hiddens.dim() > 0 ? inputs.input_hiddens.size(0) : -1;
+            const auto input_lengths_rows =
+                inputs.attention_inputs.input_lengths.defined() ? inputs.attention_inputs.input_lengths.size(0) : -1;
+            const auto prefix_lengths_rows =
+                inputs.attention_inputs.prefix_lengths.defined() ? inputs.attention_inputs.prefix_lengths.size(0) : -1;
+            RTP_LLM_LOG_INFO("[CudaGraphRunner] prefill replay key=%d seq_len=%d batch=%d "
+                             "input_ids_rows=%ld input_hidden_rows=%ld input_lengths_rows=%ld "
+                             "prefix_lengths_rows=%ld",
+                             state.current_real_graph_seq_len,
+                             state.current_seq_len,
+                             state.current_batch_size,
+                             input_ids_rows,
+                             input_hidden_rows,
+                             input_lengths_rows,
+                             prefix_lengths_rows);
+        }
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
             replayPrefill(state.current_real_graph_seq_len);
-            if (std::getenv("RTP_LLM_DEBUG_SYNC_CUDA_GRAPH_REPLAY") != nullptr) {
+            if (debugSyncCudaGraphReplayEnabled()) {
                 RTP_LLM_LOG_INFO("[CudaGraphRunner] debug sync after prefill replay key=%d seq_len=%d",
                                  state.current_real_graph_seq_len,
                                  state.current_seq_len);
@@ -601,7 +644,7 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
             replayDecode(state.current_real_graph_bs);
-            if (std::getenv("RTP_LLM_DEBUG_SYNC_CUDA_GRAPH_REPLAY") != nullptr) {
+            if (debugSyncCudaGraphReplayEnabled()) {
                 RTP_LLM_LOG_INFO("[CudaGraphRunner] debug sync after decode replay key=%d seq_len_sum=%d",
                                  state.current_real_graph_bs,
                                  state.seq_len_sum);
@@ -918,7 +961,7 @@ void CudaGraphRunner::initCapture() {
         auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
         {
-            ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+            ScopedCudaGraphForwardFlag cuda_graph_warmup(ScopedCudaGraphForwardFlag::Type::Warmup);
             py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
         }
         RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
@@ -967,7 +1010,7 @@ void CudaGraphRunner::initCapture() {
                     capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_block_id_host.slice(0, 0, 1);
             }
             try {
-                ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+                ScopedCudaGraphForwardFlag cuda_graph_warmup(ScopedCudaGraphForwardFlag::Type::Warmup);
                 py_forward_method_(inputs);
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("initCapture prefill post-check forward failed: %s", e.what());
@@ -998,7 +1041,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
     try {
-        ScopedEnvFlag cuda_graph_capture_forward("RTP_LLM_CUDA_GRAPH_CAPTURE_FORWARD", "1");
+        ScopedCudaGraphForwardFlag cuda_graph_capture_forward(ScopedCudaGraphForwardFlag::Type::Capture);
         py_forward_method_(inputs, attn_pyobj);
         py_forward_method_(inputs, attn_pyobj);
     } catch (const py::error_already_set& e) {
@@ -1028,9 +1071,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             cuda_graph::graphCaptureBegin(graph, shared_graph_pool_);
             CudaGraphCaptureGuard capture_guard;
             try {
-                ScopedEnvFlag cuda_graph_capture_forward("RTP_LLM_CUDA_GRAPH_CAPTURE_FORWARD", "1");
-                auto          py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
-                outputs                      = py_outputs_obj.cast<PyModelOutputs>();
+                ScopedCudaGraphForwardFlag cuda_graph_capture_forward(ScopedCudaGraphForwardFlag::Type::Capture);
+                auto                       py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
+                outputs                                   = py_outputs_obj.cast<PyModelOutputs>();
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
                 try {

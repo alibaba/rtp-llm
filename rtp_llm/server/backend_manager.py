@@ -41,6 +41,7 @@ class BackendManager(object):
             kmonitor.init()
         self.engine: Optional[BaseEngine] = None
         self._shutdown_requested = threading.Event()
+        self._stopped = threading.Event()
 
     def start(self):
         """Initialize backend server without entering service loop"""
@@ -143,10 +144,20 @@ class BackendManager(object):
 
     def stop(self) -> None:
         """Stop the backend manager and cleanup resources"""
+        if self._stopped.is_set():
+            logging.info("BackendManager already stopped")
+            return
+        self._stopped.set()
         if isinstance(self.engine, BaseEngine):
-            _nfs_manager.unmount_all()
-            logging.info("all nfs paths unmounted")
-            self.engine.stop()
+            engine = self.engine
+            self.engine = None
+            try:
+                logging.info("stopping backend engine before unmounting nfs paths")
+                engine.stop()
+                logging.info("backend engine stopped")
+            finally:
+                _nfs_manager.unmount_all()
+                logging.info("all nfs paths unmounted")
 
     def ready(self):
         if isinstance(self.engine, BaseEngine):

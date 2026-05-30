@@ -12,7 +12,7 @@
 
 namespace rtp_llm {
 
-inline int getGrpcEnvInt(const char* env_name, int default_value) {
+inline int readGrpcEnvIntAtLoad(const char* env_name, int default_value) {
     const char* env_value = std::getenv(env_name);
     if (env_value == nullptr || env_value[0] == '\0') {
         return default_value;
@@ -25,6 +25,20 @@ inline int getGrpcEnvInt(const char* env_name, int default_value) {
         return default_value;
     }
     return static_cast<int>(parsed);
+}
+
+inline const int kGrpcKeepAliveTimeMs    = readGrpcEnvIntAtLoad("RTP_LLM_GRPC_KEEPALIVE_TIME_MS", 10000);
+inline const int kGrpcKeepAliveTimeoutMs = readGrpcEnvIntAtLoad("RTP_LLM_GRPC_KEEPALIVE_TIMEOUT_MS", 5000);
+
+inline int getGrpcEnvInt(const char* env_name, int default_value) {
+    const std::string name(env_name);
+    if (name == "RTP_LLM_GRPC_KEEPALIVE_TIME_MS") {
+        return kGrpcKeepAliveTimeMs;
+    }
+    if (name == "RTP_LLM_GRPC_KEEPALIVE_TIMEOUT_MS") {
+        return kGrpcKeepAliveTimeoutMs;
+    }
+    return default_value;
 }
 
 template<typename T>

@@ -67,6 +67,7 @@ private:
 private:
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
+    std::atomic<bool>                             stop_started_{false};
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     ParallelismConfig                             parallelism_config;

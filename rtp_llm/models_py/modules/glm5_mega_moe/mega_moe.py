@@ -23,6 +23,8 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.ops.compute_ops import cuda_graph_warmup_forward_enabled
+
 from .input_packer import get_mega_moe_input_packer
 from .jit_warmup import (
     clamp_token_counts,
@@ -41,6 +43,7 @@ from .quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 logger = logging.getLogger(__name__)
 
 _MEGA_MOE_JIT_WARMED_KEYS: set[tuple] = set()
+_CUDA_GRAPH_CLONE_BUF_CACHE: Dict[tuple, object] = {}
 _PRE_KERNEL_BARRIER_ENV = "GLM5_MEGA_MOE_PRE_KERNEL_BARRIER"
 _PRE_KERNEL_BARRIER_VERBOSE_ENV = "GLM5_MEGA_MOE_PRE_KERNEL_BARRIER_VERBOSE"
 _PRE_KERNEL_BARRIER_LOGGED_KEYS: set[tuple[int, int]] = set()
@@ -53,6 +56,45 @@ def _mega_output_capacity(buf, requested_capacity: int) -> int:
     if aligned_capacity is not None:
         capacity = max(capacity, int(aligned_capacity))
     return capacity
+
+
+def _get_or_create_cuda_graph_clone_buf(src_buf, group, cfg: GLM5MegaMoeCfg):
+    if src_buf is None or group is None:
+        return src_buf
+    key = (
+        id(src_buf),
+        id(group),
+        cfg.n_routed_experts,
+        cfg.max_tokens_per_rank,
+        cfg.n_activated_experts,
+        cfg.dim,
+        cfg.moe_inter_dim,
+    )
+    cached = _CUDA_GRAPH_CLONE_BUF_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    import deep_gemm
+
+    cached = deep_gemm.get_symm_buffer_for_mega_moe(
+        group=group,
+        num_experts=cfg.n_routed_experts,
+        num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
+        num_topk=cfg.n_activated_experts,
+        hidden=cfg.dim,
+        intermediate_hidden=cfg.moe_inter_dim,
+        use_fp8_dispatch=True,
+        activation="swiglu",
+    )
+    _CUDA_GRAPH_CLONE_BUF_CACHE[key] = cached
+    logging.info(
+        "[GLM5 MegaMoE] allocated CUDA graph clone symm buffer: layer=%d "
+        "max_tokens_per_rank=%d hidden=%d",
+        cfg.layer_id,
+        cfg.max_tokens_per_rank,
+        cfg.dim,
+    )
+    return cached
 
 
 def _pre_kernel_barrier_enabled() -> bool:
@@ -105,7 +147,7 @@ def _log_pre_kernel_barrier(
 def _sync_cuda_graph_warmup_ranks(
     _phase: str, device: torch.device | None = None
 ) -> None:
-    if os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "0") != "1":
+    if not cuda_graph_warmup_forward_enabled():
         return
     if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
         return
@@ -173,6 +215,24 @@ class GLM5MegaMoE(nn.Module):
         self._mega_y: Optional[torch.Tensor] = None
         self._input_packer = None
         self._mega_group = None
+
+    def clone_for_cuda_graph(self) -> "GLM5MegaMoE":
+        clone = object.__new__(type(self))
+        nn.Module.__init__(clone)
+        clone.cfg = self.cfg
+        clone._mega_l1_w = self._mega_l1_w
+        clone._mega_l1_sf = self._mega_l1_sf
+        clone._mega_l2_w = self._mega_l2_w
+        clone._mega_l2_sf = self._mega_l2_sf
+        clone._mega_buf = _get_or_create_cuda_graph_clone_buf(
+            self._mega_buf, self._mega_group, self.cfg
+        )
+        clone._mega_y = (
+            torch.empty_like(self._mega_y) if self._mega_y is not None else None
+        )
+        clone._input_packer = get_mega_moe_input_packer()
+        clone._mega_group = self._mega_group
+        return clone
 
     @classmethod
     def from_params(

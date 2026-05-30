@@ -78,9 +78,15 @@ def local_rank_start(
             except Exception as e:
                 logging.error(f"Error during backend manager shutdown: {e}")
 
-    # Setup signal handlers for graceful shutdown
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
+    def install_signal_handlers(stage: str):
+        # Some native runtimes install their own SIGTERM/SIGINT handlers during
+        # model/distributed initialization. Reinstall our handler after startup so
+        # ProcessManager SIGTERM still reaches BackendManager.stop().
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+        logging.info("Installed local rank signal handlers at %s", stage)
+
+    install_signal_handlers("process start")
 
     copy_gemm_config()
 
@@ -100,6 +106,7 @@ def local_rank_start(
         set_global_controller(global_controller)
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
+        install_signal_handlers("after backend start")
         logging.info("Backend server initialized successfully, sending ready status")
 
         # Send startup success message
