@@ -30,6 +30,7 @@ public:
         bool             detached{false};
         uint64_t         generation{0};
         uint64_t         last_access_seq{0};
+        int64_t          created_time_us{0};
         uint32_t         in_flight_ref{0};
         uint32_t         subtree_ref_count{0};
         std::vector<uint8_t> slot_valid_mask;
@@ -44,6 +45,7 @@ public:
         size_t           block_size{0};
         bool             is_resident{false};
         uint64_t         generation{0};
+        int64_t          created_time_us{0};
         std::vector<uint8_t> slot_valid_mask;
     };
 
@@ -54,6 +56,7 @@ public:
         int32_t          disk_slot{-1};
         size_t           block_size{0};
         uint64_t         generation{0};
+        int64_t          created_time_us{0};
         std::vector<uint8_t> slot_valid_mask;
     };
 
@@ -82,6 +85,8 @@ public:
                                              uint64_t         generation);
 
     std::optional<CacheItem> popOldestEvictable(CacheBlockKind kind);
+    std::optional<CacheItem> popOldestEvictable(CacheBlockKind kind, CacheBackingType backing_type);
+    std::vector<CacheItem>   popOldestStateOrChainEvictable(CacheBackingType backing_type);
     std::vector<CacheKeyType> cacheKeys() const;
     size_t size() const;
 
@@ -135,6 +140,8 @@ private:
     void  pruneLocked(CacheKeyType cache_key);
     std::optional<CacheItem> toItemLocked(const Node& node, CacheBlockKind kind) const;
     bool isKindLeafLocked(const Node& node, CacheBlockKind kind) const;
+    std::optional<CacheItem> popStateOnlyFromChainLocked(const CacheKeyType& leaf_key, CacheBackingType backing_type);
+    std::vector<CacheItem>   popChainLocked(const CacheKeyType& leaf_key, CacheBackingType backing_type);
 
 private:
     mutable std::shared_mutex mutex_;

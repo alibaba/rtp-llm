@@ -1,6 +1,10 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
+
+#include <algorithm>
+
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
@@ -31,6 +35,7 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
     if (lru_cache_.contains(cache_key)) {
         auto [success, existing_item] = lru_cache_.get(cache_key);
         if (success) {
+            const auto now_us   = currentTimeUs();
             const bool resident = existing_item.is_resident || is_resident;
             if (resident != existing_item.is_resident) {
                 existing_item.is_resident = resident;
@@ -47,8 +52,12 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
                 if (gid >= existing_item.matchable_slots.size()) {
                     existing_item.matchable_slots.resize(gid + 1, true);
                 }
+                if (gid >= existing_item.slot_created_time_us.size()) {
+                    existing_item.slot_created_time_us.resize(gid + 1, 0);
+                }
                 if (isNullBlockIdx(existing_item.slots[gid])) {
                     existing_item.slots[gid] = group_slots[gid];
+                    existing_item.slot_created_time_us[gid] = now_us;
                     existing_item.matchable_slots[gid] =
                         matchable_slots.empty() || gid >= matchable_slots.size() ? true : matchable_slots[gid];
                     updated                  = true;
@@ -75,12 +84,20 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
     }
 
     UnifiedCacheItem item;
-    item.cache_key   = cache_key;
-    item.is_resident = is_resident;
-    item.slots       = group_slots;
+    const auto       now_us = currentTimeUs();
+    item.cache_key          = cache_key;
+    item.is_resident        = is_resident;
+    item.slots              = group_slots;
+    item.created_time_us    = now_us;
     item.matchable_slots.resize(group_slots.size(), true);
+    item.slot_created_time_us.resize(group_slots.size(), 0);
     for (size_t gid = 0; gid < group_slots.size() && gid < matchable_slots.size(); ++gid) {
         item.matchable_slots[gid] = matchable_slots[gid];
+    }
+    for (size_t gid = 0; gid < group_slots.size(); ++gid) {
+        if (!isNullBlockIdx(group_slots[gid])) {
+            item.slot_created_time_us[gid] = now_us;
+        }
     }
     updateItemDependencyLocked(item, namespace_id, dependency);
 
@@ -156,6 +173,8 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
                 if (result.evicted_slots.find(tree_key.cache_key) == result.evicted_slots.end()) {
                     result.evicted_keys.push_back(tree_key.cache_key);
                     result.evicted_slots[tree_key.cache_key] = removed_item.slots;
+                    result.evicted_lifetime_ms[tree_key.cache_key] =
+                        std::max<int64_t>(0, (currentTimeUs() - removed_item.created_time_us) / 1000);
                     result.evicted_namespaces[tree_key.cache_key] =
                         removed_item.has_dependency ? removed_item.dependency_namespace : tree_key.namespace_id;
                     if (removed_item.has_dependency) {
@@ -199,6 +218,8 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
 
         result.evicted_keys.push_back(cache_key);
         result.evicted_slots[cache_key] = removed_item.slots;
+        result.evicted_lifetime_ms[cache_key] =
+            std::max<int64_t>(0, (currentTimeUs() - removed_item.created_time_us) / 1000);
         result.evicted_namespaces[cache_key] =
             removed_item.has_dependency ? removed_item.dependency_namespace : kDefaultNamespace;
         if (removed_item.has_dependency) {
@@ -209,6 +230,125 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
             if (!isNullBlockIdx(slot)) {
                 selected_blocks++;
             }
+        }
+        if (selected_blocks >= min_blocks) {
+            break;
+        }
+    }
+
+    return result;
+}
+
+SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group_id, size_t min_blocks) {
+    RTP_LLM_PROFILE_FUNCTION();
+    if (min_blocks == 0) {
+        return {};
+    }
+
+    std::lock_guard<std::mutex> lock(mu_);
+    EvictResult                 result;
+    if (state_block_independent_eviction_enabled_ && prefix_tree_enabled_ && isStateEvictionGroupLocked(group_id)) {
+        if (selectStateOnlyEvictionsLocked(group_id, min_blocks, result)) {
+            return result;
+        }
+    }
+    if (!result.evicted_keys.empty()) {
+        return result;
+    }
+
+    // Re-enter the normal selection path without taking the mutex twice.
+    if (lru_cache_.empty()) {
+        return result;
+    }
+    if (prefix_tree_enabled_ && !leaf_lru_.empty()) {
+        size_t selected_blocks = 0;
+        std::vector<LeafKey> leaves(leaf_lru_.begin(), leaf_lru_.end());
+        for (const auto& leaf : leaves) {
+            if (selected_blocks >= min_blocks) {
+                break;
+            }
+            const auto leaf_key = NamespacedKey{leaf.namespace_id, leaf.cache_key};
+            auto       chain    = collectEvictChainLocked(leaf_key);
+            if (chain.empty()) {
+                removeTreeAliasLocked(leaf_key);
+                continue;
+            }
+            if (!chainHasUsableSlotLocked(chain, group_id)) {
+                continue;
+            }
+            std::vector<NamespacedKey> ordered_chain(chain.rbegin(), chain.rend());
+            for (const auto& tree_key : ordered_chain) {
+                UnifiedCacheItem removed_item;
+                if (!lru_cache_.remove(tree_key.cache_key, &removed_item)) {
+                    removeAllTreeAliasesForCacheKeyLocked(tree_key.cache_key);
+                    continue;
+                }
+                if (result.evicted_slots.find(tree_key.cache_key) == result.evicted_slots.end()) {
+                    result.evicted_keys.push_back(tree_key.cache_key);
+                    result.evicted_slots[tree_key.cache_key] = removed_item.slots;
+                    result.evicted_lifetime_ms[tree_key.cache_key] =
+                        std::max<int64_t>(0, (currentTimeUs() - removed_item.created_time_us) / 1000);
+                    result.evicted_namespaces[tree_key.cache_key] =
+                        removed_item.has_dependency ? removed_item.dependency_namespace : tree_key.namespace_id;
+                    if (removed_item.has_dependency) {
+                        result.evicted_dependencies[tree_key.cache_key] = removed_item.dependency;
+                    }
+                    if (hasUsableSlot(removed_item, group_id)) {
+                        selected_blocks++;
+                    }
+                }
+                removeAllTreeAliasesForCacheKeyLocked(tree_key.cache_key);
+            }
+        }
+        return result;
+    }
+
+    std::unordered_set<CacheKeyType> resident_keys;
+    for (const auto& [key, item] : lru_cache_.items()) {
+        if (item.is_resident) {
+            resident_keys.insert(item.cache_key);
+        }
+    }
+
+    std::vector<CacheKeyType> lru_keys;
+    for (auto it = lru_cache_.items().rbegin(); it != lru_cache_.items().rend(); ++it) {
+        const auto& item = it->second;
+        if (item.is_resident || resident_keys.count(item.cache_key)) {
+            continue;
+        }
+        lru_keys.push_back(item.cache_key);
+    }
+
+    size_t selected_blocks = 0;
+    for (const auto cache_key : lru_keys) {
+        UnifiedCacheItem removed_item;
+        bool has_target_slot = false;
+        for (const auto& [key, item] : lru_cache_.items()) {
+            if (key == cache_key) {
+                has_target_slot = hasUsableSlot(item, group_id);
+                break;
+            }
+        }
+        if (!has_target_slot) {
+            continue;
+        }
+        if (!lru_cache_.remove(cache_key, &removed_item)) {
+            continue;
+        }
+        removeAllTreeAliasesForCacheKeyLocked(cache_key);
+
+        result.evicted_keys.push_back(cache_key);
+        result.evicted_slots[cache_key] = removed_item.slots;
+        result.evicted_lifetime_ms[cache_key] =
+            std::max<int64_t>(0, (currentTimeUs() - removed_item.created_time_us) / 1000);
+        result.evicted_namespaces[cache_key] =
+            removed_item.has_dependency ? removed_item.dependency_namespace : kDefaultNamespace;
+        if (removed_item.has_dependency) {
+            result.evicted_dependencies[cache_key] = removed_item.dependency;
+        }
+
+        if (hasUsableSlot(removed_item, group_id)) {
+            selected_blocks++;
         }
         if (selected_blocks >= min_blocks) {
             break;
@@ -237,6 +377,37 @@ size_t SharedBlockCache::evictAndFree(size_t min_blocks) {
                 freed++;
             }
         }
+    }
+    return freed;
+}
+
+size_t SharedBlockCache::evictAndFreeForGroup(int group_id, size_t min_blocks, EvictResult* evict_result_out) {
+    RTP_LLM_PROFILE_FUNCTION();
+
+    auto evict_result = selectAndEvictForGroup(group_id, min_blocks);
+    if (evict_result.evicted_keys.empty()) {
+        if (evict_result_out) {
+            *evict_result_out = std::move(evict_result);
+        }
+        return 0;
+    }
+
+    size_t freed = 0;
+    for (size_t i = 0; i < evict_result.evicted_keys.size(); ++i) {
+        const auto  cache_key = evict_result.evicted_keys[i];
+        const auto& slots     = evict_result.evicted_slots.at(cache_key);
+
+        for (int gid = 0; gid < static_cast<int>(slots.size()) && gid < group_num_; ++gid) {
+            if (!isNullBlockIdx(slots[gid])) {
+                group_pools_[gid]->blockCacheFree(slots[gid]);
+                if (gid == group_id) {
+                    freed++;
+                }
+            }
+        }
+    }
+    if (evict_result_out) {
+        *evict_result_out = std::move(evict_result);
     }
     return freed;
 }
@@ -290,6 +461,17 @@ void SharedBlockCache::setPrefixTreeEnabled(bool enabled) {
 bool SharedBlockCache::prefixTreeEnabled() const {
     std::lock_guard<std::mutex> lock(mu_);
     return prefix_tree_enabled_;
+}
+
+void SharedBlockCache::setStateBlockIndependentEviction(bool enabled, const std::vector<int>& state_group_ids) {
+    std::lock_guard<std::mutex> lock(mu_);
+    state_block_independent_eviction_enabled_ = enabled;
+    state_eviction_group_ids_.clear();
+    for (const auto gid : state_group_ids) {
+        if (gid >= 0) {
+            state_eviction_group_ids_.insert(gid);
+        }
+    }
 }
 
 void SharedBlockCache::upsertTreeNodeLocked(CacheKeyType               cache_key,
@@ -517,6 +699,11 @@ bool SharedBlockCache::slotMatchable(const UnifiedCacheItem& item, size_t group_
     return group_id >= item.matchable_slots.size() || item.matchable_slots[group_id];
 }
 
+bool SharedBlockCache::hasUsableSlot(const UnifiedCacheItem& item, int group_id) {
+    return group_id >= 0 && static_cast<size_t>(group_id) < item.slots.size()
+           && !isNullBlockIdx(item.slots[static_cast<size_t>(group_id)]);
+}
+
 std::vector<SharedBlockCache::NamespacedKey>
 SharedBlockCache::collectEvictChainLocked(const NamespacedKey& leaf_key) const {
     std::vector<NamespacedKey> chain;
@@ -550,6 +737,96 @@ SharedBlockCache::collectEvictChainLocked(const NamespacedKey& leaf_key) const {
     return chain;
 }
 
+bool SharedBlockCache::chainHasUsableSlotLocked(const std::vector<NamespacedKey>& chain, int group_id) const {
+    for (const auto& key : chain) {
+        for (const auto& [cache_key, item] : lru_cache_.items()) {
+            if (cache_key == key.cache_key && hasUsableSlot(item, group_id)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool SharedBlockCache::selectStateOnlyEvictionsLocked(int group_id, size_t min_blocks, EvictResult& result) {
+    if (group_id < 0 || (group_num_ > 0 && group_id >= group_num_) || min_blocks == 0) {
+        return false;
+    }
+    size_t selected_blocks = 0;
+    std::vector<LeafKey> leaves(leaf_lru_.begin(), leaf_lru_.end());
+    for (const auto& leaf : leaves) {
+        if (selected_blocks >= min_blocks) {
+            break;
+        }
+        const auto leaf_key = NamespacedKey{leaf.namespace_id, leaf.cache_key};
+        auto       chain    = collectEvictChainLocked(leaf_key);
+        if (chain.size() <= 1) {
+            continue;
+        }
+        // Keep the leaf state's tail block when possible. Scan from leaf-parent
+        // upward and drop the deepest non-tail state slot first.
+        for (size_t chain_idx = 1; chain_idx < chain.size(); ++chain_idx) {
+            const auto& key = chain[chain_idx];
+            auto [success, item] = lru_cache_.get(key.cache_key);
+            if (!success || item.is_resident || static_cast<size_t>(group_id) >= item.slots.size()
+                || isNullBlockIdx(item.slots[static_cast<size_t>(group_id)])) {
+                continue;
+            }
+            removeSlotFromItemLocked(key.cache_key, group_id, result);
+            ++selected_blocks;
+            break;
+        }
+    }
+    return selected_blocks >= min_blocks;
+}
+
+void SharedBlockCache::removeSlotFromItemLocked(CacheKeyType cache_key, int group_id, EvictResult& result) {
+    UnifiedCacheItem item;
+    if (!lru_cache_.remove(cache_key, &item)) {
+        return;
+    }
+    if (group_id < 0 || static_cast<size_t>(group_id) >= item.slots.size()
+        || isNullBlockIdx(item.slots[static_cast<size_t>(group_id)])) {
+        lru_cache_.put(cache_key, item);
+        return;
+    }
+
+    std::vector<BlockIdxType> evicted_slots(item.slots.size(), NULL_BLOCK_IDX);
+    evicted_slots[static_cast<size_t>(group_id)] = item.slots[static_cast<size_t>(group_id)];
+    result.evicted_keys.push_back(cache_key);
+    result.evicted_slots[cache_key] = std::move(evicted_slots);
+    result.evicted_namespaces[cache_key] =
+        item.has_dependency ? item.dependency_namespace : SharedBlockCache::kGpuLogicalNamespace;
+    if (item.has_dependency) {
+        result.evicted_dependencies[cache_key] = item.dependency;
+    }
+    const int64_t created_time_us =
+        static_cast<size_t>(group_id) < item.slot_created_time_us.size() ?
+            item.slot_created_time_us[static_cast<size_t>(group_id)] :
+            item.created_time_us;
+    result.evicted_lifetime_ms[cache_key] = std::max<int64_t>(0, (currentTimeUs() - created_time_us) / 1000);
+    result.evicted_state_only_group[cache_key] = group_id;
+
+    item.slots[static_cast<size_t>(group_id)] = NULL_BLOCK_IDX;
+    if (static_cast<size_t>(group_id) < item.matchable_slots.size()) {
+        item.matchable_slots[static_cast<size_t>(group_id)] = false;
+    }
+    if (static_cast<size_t>(group_id) < item.slot_created_time_us.size()) {
+        item.slot_created_time_us[static_cast<size_t>(group_id)] = 0;
+    }
+
+    const bool has_any_slot = std::any_of(item.slots.begin(), item.slots.end(), [](BlockIdxType slot) {
+        return !isNullBlockIdx(slot);
+    });
+    if (has_any_slot) {
+        lru_cache_.put(cache_key, item);
+        refreshAllTreeAliasesLocked(cache_key);
+    } else {
+        removeAllTreeAliasesForCacheKeyLocked(cache_key);
+    }
+    ++version_;
+}
+
 bool SharedBlockCache::hasFlatItemLocked(CacheKeyType cache_key) const {
     return lru_cache_.contains(cache_key);
 }
@@ -561,6 +838,10 @@ bool SharedBlockCache::isFlatItemResidentLocked(CacheKeyType cache_key) const {
         }
     }
     return false;
+}
+
+bool SharedBlockCache::isStateEvictionGroupLocked(int group_id) const {
+    return state_eviction_group_ids_.find(group_id) != state_eviction_group_ids_.end();
 }
 
 }  // namespace rtp_llm

@@ -10,6 +10,7 @@
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
@@ -127,18 +128,18 @@ bool HybridPoolKVCacheAllocator::doInit() {
         auto        spec = config_.cache_specs[static_cast<size_t>(gid)];
 
         KVCacheGroupPtr group;
-        if (group_type == CacheGroupType::LINEAR) {
-            group =
-                std::make_shared<LinearKVCacheGroup>(ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw);
-            linear_group_ids_.push_back(gid);
-        } else if (group_type == CacheGroupType::SWA) {
-            group =
-                std::make_shared<SWAKVCacheGroup>(ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw);
-            swa_group_ids_.push_back(gid);
-        } else {
-            group = std::make_shared<FullKVCacheGroup>(ids, spec, group_pool, gid, shared_cache_raw);
-            full_group_ids_.push_back(gid);
-        }
+	        if (group_type == CacheGroupType::LINEAR) {
+	            group = std::make_shared<LinearKVCacheGroup>(
+	                ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw, metrics_reporter_);
+	            linear_group_ids_.push_back(gid);
+	        } else if (group_type == CacheGroupType::SWA) {
+	            group = std::make_shared<SWAKVCacheGroup>(
+	                ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw, metrics_reporter_);
+	            swa_group_ids_.push_back(gid);
+	        } else {
+	            group = std::make_shared<FullKVCacheGroup>(ids, spec, group_pool, gid, shared_cache_raw, metrics_reporter_);
+	            full_group_ids_.push_back(gid);
+	        }
 
         RTP_LLM_CHECK_WITH_INFO(group->init(), "Failed to initialize KVCacheGroup gid %d", gid);
         group_block_pools_.push_back(group_pool);
@@ -406,6 +407,17 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
     auto evict_result = shared_block_cache_->selectAndEvict(min_blocks_to_free);
     if (evict_result.evicted_keys.empty()) {
         return nullptr;
+    }
+    if (metrics_reporter_) {
+        for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
+            RtpLLMCacheEvictionMetricsCollector collector;
+            collector.lifetime_ms = lifetime_ms;
+            kmonitor::MetricsTags tags("scope", "gpu");
+            tags.AddTag("kind", evict_result.evicted_state_only_group.count(cache_key) ? "state_swa_kv" : "chain");
+            tags.AddTag("backing", "device");
+            metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
+                                                                                                       &collector);
+        }
     }
 
     auto batch_resource = std::make_shared<BatchKVCacheResource>();

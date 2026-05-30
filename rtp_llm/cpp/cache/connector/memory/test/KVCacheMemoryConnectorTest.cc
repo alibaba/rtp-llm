@@ -3,6 +3,8 @@
 #include <csignal>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <dirent.h>
 #include <execinfo.h>
 #include <string>
@@ -937,6 +939,19 @@ TEST_F(KVCacheMemoryConnectorTest, validateCopyItemBacking_AcceptsUnsetDiskSlotF
         cache_config_, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
     ASSERT_TRUE(disk_conn->init());
     EXPECT_TRUE(disk_conn->validateCopyItemBacking(disk_item));
+
+    disk_item.set_src_backing_type(MemoryOperationRequestPB::DISK);
+    EXPECT_FALSE(disk_conn->validateCopyItemBacking(disk_item));
+    disk_item.set_src_disk_slot(0);
+    EXPECT_TRUE(disk_conn->validateCopyItemBacking(disk_item));
+    disk_item.set_src_mem_block(1);
+    EXPECT_FALSE(disk_conn->validateCopyItemBacking(disk_item));
+    disk_item.clear_src_mem_block();
+    disk_item.set_src_backing_type(MemoryOperationRequestPB::MEMORY);
+    EXPECT_FALSE(disk_conn->validateCopyItemBacking(disk_item));
+    disk_item.clear_src_disk_slot();
+    disk_item.set_src_mem_block(1);
+    EXPECT_TRUE(disk_conn->validateCopyItemBacking(disk_item));
 }
 
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero) {
@@ -990,6 +1005,368 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_ReturnTrue_AndRegistersPool) {
     EXPECT_NO_THROW(conn->initBlockPool());
     auto pool = conn->block_pool_;
     ASSERT_NE(pool, nullptr);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, initBlockPool_PrefixPoolsDefaultKeepEqualKeyCapacity) {
+    auto cfg    = createDsv4TypedConnectorConfig();
+    auto kv_cfg = kv_cache_config_;
+    kv_cfg.memory_cache_size_mb             = 1;
+    kv_cfg.memory_cache_sync_timeout_ms     = 1000;
+    kv_cfg.enable_prefix_tree_memory_cache  = true;
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    ASSERT_NO_THROW(conn->initBlockPool());
+    ASSERT_TRUE(conn->usePrefixTreeMemoryCache());
+    ASSERT_NE(conn->compressed_pool_, nullptr);
+    ASSERT_NE(conn->state_swa_pool_, nullptr);
+    EXPECT_EQ(conn->compressed_pool_->totalBlocksNum(), conn->state_swa_pool_->totalBlocksNum());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, initBlockPool_PrefixPoolRatioChangesStateCapacity) {
+    auto cfg    = createDsv4TypedConnectorConfig();
+    auto kv_cfg = kv_cache_config_;
+    kv_cfg.memory_cache_size_mb                      = 1;
+    kv_cfg.memory_cache_sync_timeout_ms              = 1000;
+    kv_cfg.enable_prefix_tree_memory_cache           = true;
+    kv_cfg.prefix_tree_memory_state_swa_pool_ratio   = 25;
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    ASSERT_NO_THROW(conn->initBlockPool());
+    ASSERT_TRUE(conn->usePrefixTreeMemoryCache());
+    ASSERT_NE(conn->compressed_pool_, nullptr);
+    ASSERT_NE(conn->state_swa_pool_, nullptr);
+    EXPECT_GT(conn->compressed_pool_->totalBlocksNum(), conn->state_swa_pool_->totalBlocksNum());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, initDiskBlockPool_PrefixTreeCreatesTypedDiskPools) {
+    auto cfg    = createDsv4TypedConnectorConfig();
+    DiskTempDir disk0;
+    auto        kv_cfg = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/1);
+    kv_cfg.enable_prefix_tree_memory_cache = true;
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(
+        cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+    ASSERT_TRUE(conn->usePrefixTreeMemoryCache());
+    ASSERT_NE(conn->diskPoolFor(CacheBlockKind::COMPRESSED_KV), nullptr);
+    ASSERT_NE(conn->diskPoolFor(CacheBlockKind::STATE_SWA_KV), nullptr);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, allocateOnePrefixBacking_FallsBackToDiskWhenMemoryPoolFull) {
+    auto cfg    = createDsv4TypedConnectorConfig();
+    DiskTempDir disk0;
+    auto        kv_cfg = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/1);
+    kv_cfg.memory_cache_size_mb           = 1;
+    kv_cfg.enable_prefix_tree_memory_cache = true;
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(
+        cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+    ASSERT_TRUE(conn->usePrefixTreeMemoryCache());
+
+    const auto free_blocks = conn->compressed_pool_->freeBlocksNum();
+    auto held = conn->compressed_pool_->malloc(static_cast<int>(free_blocks));
+    ASSERT_EQ(held.size(), free_blocks);
+
+    KVCacheMemoryConnector::CopyInfoPerKey copy_info;
+    copy_info.cache_key  = 123;
+    copy_info.kind       = CacheBlockKind::COMPRESSED_KV;
+    copy_info.block_size = conn->compressed_block_size_;
+    ASSERT_TRUE(conn->allocateOnePrefixBacking(copy_info));
+    EXPECT_EQ(copy_info.backing_type, CacheBackingType::DISK);
+    EXPECT_TRUE(isNullBlockIdx(copy_info.mem_block));
+    EXPECT_GE(copy_info.disk_slot, 0);
+
+    conn->releasePrefixRequestBacking(copy_info);
+    conn->compressed_pool_->requestFree(held);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, mergePrefixExistingSlots_SupportsMixedMemoryAndDiskBackings) {
+    auto cfg = createDsv4TypedConnectorConfig();
+    DiskTempDir disk0;
+    auto kv_cfg = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/1);
+    kv_cfg.memory_cache_size_mb             = 1;
+    kv_cfg.enable_prefix_tree_memory_cache  = true;
+    kv_cfg.memory_cache_disk_buffered_io    = false;
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(
+        cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+    auto slots = conn->layerRegionSlots();
+
+    auto run_case = [&](bool dst_disk, bool src_disk) {
+        SCOPED_TRACE(std::string("dst_disk=") + (dst_disk ? "true" : "false") + " src_disk="
+                     + (src_disk ? "true" : "false"));
+        constexpr auto kind = CacheBlockKind::COMPRESSED_KV;
+        auto memory_pool = conn->memoryPoolFor(kind);
+        auto disk_pool   = conn->diskPoolFor(kind);
+        ASSERT_NE(memory_pool, nullptr);
+        ASSERT_NE(disk_pool, nullptr);
+
+        size_t copy_slot_idx = slots.size();
+        size_t copy_off      = 0;
+        size_t byte_off      = 0;
+        for (size_t i = 0; i < slots.size(); ++i) {
+            if (conn->kindForSlot(slots[i]) != kind) {
+                continue;
+            }
+            if (copy_slot_idx == slots.size()) {
+                copy_slot_idx = i;
+                copy_off      = byte_off;
+            }
+            byte_off += slots[i].stride_bytes;
+        }
+        ASSERT_LT(copy_slot_idx, slots.size());
+        const size_t copy_len = slots[copy_slot_idx].stride_bytes;
+        ASSERT_GT(copy_len, 0u);
+
+        auto make_aligned = [](size_t bytes, unsigned char fill) {
+            void* raw = nullptr;
+            EXPECT_EQ(::posix_memalign(&raw, 4096, bytes), 0);
+            EXPECT_NE(raw, nullptr);
+            std::unique_ptr<void, decltype(&std::free)> ptr(raw, &std::free);
+            if (raw != nullptr) {
+                std::memset(raw, fill, bytes);
+            }
+            return ptr;
+        };
+
+        auto alloc_memory = [&](unsigned char fill) -> BlockIdxType {
+            auto blocks = memory_pool->malloc(1);
+            EXPECT_EQ(blocks.size(), 1u);
+            if (blocks.size() != 1u) {
+                return NULL_BLOCK_IDX;
+            }
+            auto buffers = memory_pool->convertIndexToBuffer(0, static_cast<BlockIdxType>(blocks[0]));
+            EXPECT_EQ(buffers.size(), 1u);
+            if (buffers.size() == 1u && buffers[0].addr != nullptr) {
+                std::memset(buffers[0].addr, fill, buffers[0].size_bytes);
+            }
+            return static_cast<BlockIdxType>(blocks[0]);
+        };
+
+        auto alloc_disk = [&](unsigned char fill) -> int32_t {
+            auto slot = disk_pool->malloc();
+            EXPECT_TRUE(slot.has_value());
+            if (!slot.has_value()) {
+                return -1;
+            }
+            auto data = make_aligned(disk_pool->slotStrideBytes(), fill);
+            EXPECT_TRUE(disk_pool->write(*slot, data.get(), disk_pool->slotStrideBytes()));
+            return *slot;
+        };
+
+        const unsigned char dst_fill = 0x11;
+        const unsigned char src_fill = 0x7b;
+        PrefixTreeMemoryBlockCache::CacheItem dst_item;
+        dst_item.cache_key       = 80001;
+        dst_item.kind            = kind;
+        dst_item.backing_type    = dst_disk ? CacheBackingType::DISK : CacheBackingType::MEMORY;
+        dst_item.block_index     = dst_disk ? NULL_BLOCK_IDX : alloc_memory(dst_fill);
+        dst_item.disk_slot       = dst_disk ? alloc_disk(dst_fill) : -1;
+        dst_item.block_size      = conn->prefixKindBlockSize(kind, slots);
+        dst_item.slot_valid_mask = std::vector<uint8_t>(slots.size(), 0);
+
+        PrefixTreeMemoryBlockCache::MatchResult existing;
+        existing.found           = true;
+        existing.backing_type    = src_disk ? CacheBackingType::DISK : CacheBackingType::MEMORY;
+        existing.block_index     = src_disk ? NULL_BLOCK_IDX : alloc_memory(src_fill);
+        existing.disk_slot       = src_disk ? alloc_disk(src_fill) : -1;
+        existing.block_size      = dst_item.block_size;
+        existing.slot_valid_mask = std::vector<uint8_t>(slots.size(), 0);
+        existing.slot_valid_mask[copy_slot_idx] = 1;
+
+        ASSERT_TRUE(conn->mergePrefixExistingSlots(dst_item, existing, slots));
+        ASSERT_LT(copy_slot_idx, dst_item.slot_valid_mask.size());
+        EXPECT_EQ(dst_item.slot_valid_mask[copy_slot_idx], 1);
+
+        std::vector<unsigned char> merged(dst_item.block_size, 0);
+        if (dst_disk) {
+            auto data = make_aligned(disk_pool->slotStrideBytes(), 0);
+            ASSERT_TRUE(disk_pool->read(dst_item.disk_slot, data.get(), disk_pool->slotStrideBytes()));
+            std::memcpy(merged.data(), data.get(), merged.size());
+        } else {
+            auto buffers = memory_pool->convertIndexToBuffer(0, dst_item.block_index);
+            ASSERT_EQ(buffers.size(), 1u);
+            std::memcpy(merged.data(), buffers[0].addr, merged.size());
+        }
+        for (size_t i = 0; i < merged.size(); ++i) {
+            const bool copied = i >= copy_off && i < copy_off + copy_len;
+            EXPECT_EQ(merged[i], copied ? src_fill : dst_fill) << "byte offset " << i;
+        }
+
+        if (!isNullBlockIdx(dst_item.block_index)) {
+            memory_pool->requestFree({dst_item.block_index});
+        }
+        if (!isNullBlockIdx(existing.block_index)) {
+            memory_pool->requestFree({existing.block_index});
+        }
+        if (dst_item.disk_slot >= 0) {
+            disk_pool->requestFree(dst_item.disk_slot);
+        }
+        if (existing.disk_slot >= 0) {
+            disk_pool->requestFree(existing.disk_slot);
+        }
+    };
+
+    run_case(/*dst_disk=*/false, /*src_disk=*/true);
+    run_case(/*dst_disk=*/true, /*src_disk=*/false);
+    run_case(/*dst_disk=*/true, /*src_disk=*/true);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForRead_HandlesDiskPartialMasks) {
+    auto cfg = createDsv4TypedConnectorConfig();
+    DiskTempDir disk0;
+    auto kv_cfg = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/1);
+    kv_cfg.memory_cache_size_mb            = 1;
+    kv_cfg.enable_prefix_tree_memory_cache = true;
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(
+        cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
+    ASSERT_TRUE(conn->init());
+    auto slots = conn->layerRegionSlots();
+
+    auto make_resource = [&](CacheKeyType key, bool compressed_required, bool state_required) {
+        auto res = std::make_shared<KVCacheResource>();
+        res->cacheKeys() = {key};
+        res->initGroups(/*group_num=*/7,
+                        /*layer_num=*/cfg.layer_all_num,
+                        cfg.layer_to_group_id,
+                        /*kernel_blocks_per_kv_block=*/1,
+                        cfg.group_types,
+                        cfg.layer_region_to_group_id);
+        for (int layer = 0; layer < cfg.layer_all_num; ++layer) {
+            for (int region = 0; region < static_cast<int>(KVCacheRegionName::REGION_COUNT); ++region) {
+                if (cfg.layer_region_to_group_id[static_cast<size_t>(layer)][static_cast<size_t>(region)] >= 0) {
+                    res->mutableBlockIds(layer, static_cast<KVCacheRegionName>(region)).assign({NULL_BLOCK_IDX});
+                }
+            }
+        }
+        auto set_if = [&](bool enabled, int layer, KVCacheRegionName region, BlockIdxType block) {
+            if (enabled) {
+                res->mutableBlockIds(layer, region).assign({block});
+            }
+        };
+        set_if(compressed_required, 0, KVCacheRegionName::HCA_KV, 11);
+        set_if(compressed_required, 1, KVCacheRegionName::CSA_KV, 21);
+        set_if(compressed_required, 1, KVCacheRegionName::INDEXER_KV, 22);
+        set_if(state_required, 0, KVCacheRegionName::SWA_KV, 31);
+        set_if(state_required, 1, KVCacheRegionName::INDEXER_STATE, 32);
+        set_if(state_required, 1, KVCacheRegionName::CSA_STATE, 33);
+        set_if(state_required, 1, KVCacheRegionName::SWA_KV, 34);
+        res->ensureLinearBlockDependencies();
+        res->setLastBlockAligned(true);
+        return res;
+    };
+
+    auto put_disk_item = [&](CacheKeyType key, CacheBlockKind kind, const std::vector<uint8_t>& mask) {
+        auto pool = conn->diskPoolFor(kind);
+        ASSERT_NE(pool, nullptr);
+        auto slot = pool->malloc();
+        ASSERT_TRUE(slot.has_value());
+        auto data = std::unique_ptr<void, decltype(&std::free)>(nullptr, &std::free);
+        void* raw = nullptr;
+        ASSERT_EQ(::posix_memalign(&raw, 4096, pool->slotStrideBytes()), 0);
+        data.reset(raw);
+        std::memset(data.get(), 0x5a, pool->slotStrideBytes());
+        ASSERT_TRUE(pool->write(*slot, data.get(), pool->slotStrideBytes()));
+
+        PrefixTreeMemoryBlockCache::CacheItem item;
+        item.cache_key       = key;
+        item.kind            = kind;
+        item.backing_type    = CacheBackingType::DISK;
+        item.block_index     = NULL_BLOCK_IDX;
+        item.disk_slot       = *slot;
+        item.block_size      = pool->blockSizeBytes();
+        item.is_resident     = false;
+        item.slot_valid_mask = mask;
+        BlockDependency dep;
+        ASSERT_TRUE(conn->prefix_block_cache_->putCommitted(key, dep, item).first);
+        conn->referencePrefixCacheBacking(item);
+        pool->requestFree(*slot);
+    };
+
+    {
+        auto res = make_resource(/*key=*/81001, /*compressed_required=*/true, /*state_required=*/true);
+        auto layer_blocks = conn->resourceLayerRegionBlocks(*res, slots);
+        auto compressed_mask = conn->prefixSlotValidMask(layer_blocks, slots, 0, CacheBlockKind::COMPRESSED_KV);
+        put_disk_item(81001, CacheBlockKind::COMPRESSED_KV, compressed_mask);
+
+        auto plan = conn->buildPrefixCopyPlanForRead(
+            res->cacheKeys(), res->blockDependencies(), layer_blocks, slots, /*start_index=*/0, /*read_num=*/1);
+        ASSERT_NE(plan, nullptr);
+        ASSERT_EQ(plan->copy_infos.size(), 1u);
+        EXPECT_EQ(plan->copy_infos[0].kind, CacheBlockKind::COMPRESSED_KV);
+        EXPECT_EQ(plan->copy_infos[0].backing_type, CacheBackingType::DISK);
+    }
+    {
+        auto res = make_resource(/*key=*/81002, /*compressed_required=*/false, /*state_required=*/true);
+        auto layer_blocks = conn->resourceLayerRegionBlocks(*res, slots);
+        auto state_mask = conn->prefixSlotValidMask(layer_blocks, slots, 0, CacheBlockKind::STATE_SWA_KV);
+        put_disk_item(81002, CacheBlockKind::STATE_SWA_KV, state_mask);
+
+        auto plan = conn->buildPrefixCopyPlanForRead(
+            res->cacheKeys(), res->blockDependencies(), layer_blocks, slots, /*start_index=*/0, /*read_num=*/1);
+        ASSERT_NE(plan, nullptr);
+        ASSERT_EQ(plan->copy_infos.size(), 1u);
+        EXPECT_EQ(plan->copy_infos[0].kind, CacheBlockKind::STATE_SWA_KV);
+        EXPECT_EQ(plan->copy_infos[0].backing_type, CacheBackingType::DISK);
+    }
+    {
+        auto res = make_resource(/*key=*/81003, /*compressed_required=*/true, /*state_required=*/true);
+        auto layer_blocks = conn->resourceLayerRegionBlocks(*res, slots);
+        auto state_mask = conn->prefixSlotValidMask(layer_blocks, slots, 0, CacheBlockKind::STATE_SWA_KV);
+        put_disk_item(81003, CacheBlockKind::STATE_SWA_KV, state_mask);
+
+        auto plan = conn->buildPrefixCopyPlanForRead(
+            res->cacheKeys(), res->blockDependencies(), layer_blocks, slots, /*start_index=*/0, /*read_num=*/1);
+        EXPECT_EQ(plan, nullptr);
+    }
+    {
+        auto res = make_resource(/*key=*/81004, /*compressed_required=*/true, /*state_required=*/false);
+        auto layer_blocks = conn->resourceLayerRegionBlocks(*res, slots);
+        auto compressed_mask = conn->prefixSlotValidMask(layer_blocks, slots, 0, CacheBlockKind::COMPRESSED_KV);
+        ASSERT_FALSE(compressed_mask.empty());
+        compressed_mask[0] = 0;
+        put_disk_item(81004, CacheBlockKind::COMPRESSED_KV, compressed_mask);
+
+        auto plan = conn->buildPrefixCopyPlanForRead(
+            res->cacheKeys(), res->blockDependencies(), layer_blocks, slots, /*start_index=*/0, /*read_num=*/1);
+        EXPECT_EQ(plan, nullptr);
+    }
+    {
+        while (auto old = conn->prefix_block_cache_->popOldestEvictable(CacheBlockKind::COMPRESSED_KV,
+                                                                        CacheBackingType::DISK)) {
+            conn->releasePrefixCacheBacking(*old);
+        }
+        auto res = make_resource(/*key=*/81005, /*compressed_required=*/true, /*state_required=*/false);
+        auto layer_blocks = conn->resourceLayerRegionBlocks(*res, slots);
+        auto compressed_mask = conn->prefixSlotValidMask(layer_blocks, slots, 0, CacheBlockKind::COMPRESSED_KV);
+        auto pool = conn->diskPoolFor(CacheBlockKind::COMPRESSED_KV);
+        ASSERT_NE(pool, nullptr);
+
+        PrefixTreeMemoryBlockCache::CacheItem item;
+        item.cache_key       = 81005;
+        item.kind            = CacheBlockKind::COMPRESSED_KV;
+        item.backing_type    = CacheBackingType::DISK;
+        item.block_index     = NULL_BLOCK_IDX;
+        item.disk_slot       = static_cast<int32_t>(pool->totalSlots() + 1);
+        item.block_size      = pool->blockSizeBytes();
+        item.is_resident     = false;
+        item.slot_valid_mask = compressed_mask;
+        BlockDependency dep;
+        ASSERT_TRUE(conn->prefix_block_cache_->putCommitted(81005, dep, item).first);
+
+        auto plan = conn->buildPrefixCopyPlanForRead(
+            res->cacheKeys(), res->blockDependencies(), layer_blocks, slots, /*start_index=*/0, /*read_num=*/1);
+        EXPECT_EQ(plan, nullptr);
+
+        auto evicted = conn->prefix_block_cache_->popOldestEvictable(CacheBlockKind::COMPRESSED_KV,
+                                                                     CacheBackingType::DISK);
+        ASSERT_TRUE(evicted.has_value());
+        EXPECT_EQ(evicted->cache_key, 81005);
+        EXPECT_EQ(evicted->disk_slot, item.disk_slot);
+    }
 }
 
 TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndRegionSlots) {
@@ -1055,6 +1432,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_SkipsHCAStateSlots) {
     auto kv_cfg = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 64;
     kv_cfg.memory_cache_sync_timeout_ms = 1000;
+    kv_cfg.enable_prefix_tree_memory_cache = false;
 
     auto conn          = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
     conn->block_cache_ = std::make_shared<MemoryDiskBlockCache>();

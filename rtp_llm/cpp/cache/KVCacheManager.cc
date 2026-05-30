@@ -6,6 +6,7 @@
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
@@ -100,6 +101,19 @@ bool KVCacheManager::init() {
 
     auto shared_cache = std::make_shared<SharedBlockCache>();
     shared_cache->setPrefixTreeEnabled(kv_cache_config_.enable_gpu_prefix_tree);
+    std::vector<int> dsv4_state_group_ids;
+    if (kv_cache_config_.enable_prefix_tree_memory_cache) {
+        for (size_t gid = 0; gid < config_.group_region_names.size(); ++gid) {
+	            if (isDsv4FixedRegion(config_.group_region_names[gid])
+	                && !skipReuseCacheRegion(config_.group_region_names[gid])) {
+	                dsv4_state_group_ids.push_back(static_cast<int>(gid));
+	            }
+        }
+    }
+    shared_cache->setStateBlockIndependentEviction(
+        kv_cache_config_.enable_prefix_tree_memory_cache
+            && kv_cache_config_.enable_dsv4_state_block_independent_eviction,
+        dsv4_state_group_ids);
 
     const bool is_hybrid = config_.groupNums() > 1;
     if (config_.use_independent_block_pools) {

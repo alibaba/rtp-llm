@@ -159,6 +159,22 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="新 memory connector 初始化不适用时是否允许回退旧 memory connector。",
     )
     kv_cache_group.add_argument(
+        "--prefix_tree_memory_state_swa_pool_ratio",
+        env_name="PREFIX_TREE_MEMORY_STATE_SWA_POOL_RATIO",
+        bind_to=(kv_cache_config, "prefix_tree_memory_state_swa_pool_ratio"),
+        type=int,
+        default=0,
+        help="新 prefix-tree memory cache 中 state/SWA pool 占总 memory cache 字节数的百分比。0 表示沿用按 key 等容量切分。",
+    )
+    kv_cache_group.add_argument(
+        "--enable_dsv4_state_block_independent_eviction",
+        env_name="ENABLE_DSV4_STATE_BLOCK_INDEPENDENT_EVICTION",
+        bind_to=(kv_cache_config, "enable_dsv4_state_block_independent_eviction"),
+        type=str2bool,
+        default=False,
+        help="DSV4 新 tree memory reuse 下启用 state/SWA block 独立淘汰。默认关闭。",
+    )
+    kv_cache_group.add_argument(
         "--memory_cache_size_mb",
         env_name="MEMORY_CACHE_SIZE_MB",
         bind_to=(kv_cache_config, "memory_cache_size_mb"),
