@@ -291,6 +291,42 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
                          config.layer_num);
     }
 
+    // Inverted-triangle recompute (DSV4_ZERO_SWA_TRIM). Trim requires zero-SWA caching to be
+    // enabled: it extends the cached FULL reuse and pairs with the Python compressor write-skip,
+    // and both share this single env flag (implementation plan GT-3 -- without write-skip the
+    // restore-window recompute would overwrite shared cached blocks). No separate layer_num gate
+    // is needed here: caching is itself gated to multi-layer models, and the SWA-only one-layer
+    // MTP propose config owns no FULL group so every trim stage is a structural no-op there
+    // regardless. Default off => restore_blocks contributes 0 in reuseCache => byte-identical.
+    const bool trim_requested = envFlagEnabled("DSV4_ZERO_SWA_TRIM");
+    config.dsv4_zero_swa_trim = trim_requested && config.dsv4_zero_swa_caching;
+    if (config.dsv4_zero_swa_trim) {
+        // FULL extension is correct iff the restore window is block-aligned to the STATE pool
+        // block granularity (= seq_size_per_block today, so trivially true). State it loudly so
+        // a future config that breaks the alignment fails here instead of silently corrupting
+        // the recomputed-as-scratch STATE stream.
+        const size_t restore_window_blocks =
+            zeroSwaRestoreWindowBlocks(config, static_cast<size_t>(config.seq_size_per_block));
+        RTP_LLM_CHECK_WITH_INFO(
+            config.seq_size_per_block > 0
+                && (restore_window_blocks * static_cast<size_t>(config.seq_size_per_block))
+                       % static_cast<size_t>(config.seq_size_per_block)
+                       == 0,
+            "DSV4 zero SWA trim requires the restore window (%zu blocks * %zu tokens) to be a multiple of the "
+            "STATE pool block tokens (%zu); refusing to enable trim",
+            restore_window_blocks,
+            static_cast<size_t>(config.seq_size_per_block),
+            static_cast<size_t>(config.seq_size_per_block));
+        RTP_LLM_LOG_INFO("DSV4 zero SWA trim enabled: swa_window=%u layer_num=%u restore_window_blocks=%zu",
+                         config.swa_window_size,
+                         config.layer_num,
+                         restore_window_blocks);
+    } else if (trim_requested) {
+        RTP_LLM_LOG_INFO("DSV4 zero SWA trim requested but gated off: zero_swa_caching=%d layer_num=%u",
+                         static_cast<int>(config.dsv4_zero_swa_caching),
+                         config.layer_num);
+    }
+
     config.cache_specs.clear();
     config.global_layer_ids.clear();
     config.layer_ids.clear();
