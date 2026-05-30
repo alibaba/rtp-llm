@@ -142,6 +142,35 @@ class GenericMoeLayer(nn.Module):
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
 
+    def clone_for_cuda_graph(self) -> "GenericMoeLayer":
+        clone = object.__new__(type(self))
+        nn.Module.__init__(clone)
+
+        clone.config = self.config
+        clone.parallelism_config = self.parallelism_config
+        clone.hidden_dim = self.hidden_dim
+        clone.ffn_dim = self.ffn_dim
+        clone.num_experts = self.num_experts
+        clone.top_k = self.top_k
+        clone.gate = self.gate
+        clone.select_topk = self.select_topk
+        clone.fake_balance_expert = self.fake_balance_expert
+        if hasattr(self.fused_moe, "clone_for_cuda_graph"):
+            clone.fused_moe = self.fused_moe.clone_for_cuda_graph()
+        else:
+            clone.fused_moe = self.fused_moe
+        clone.w1 = self.w1
+        clone.w2 = self.w2
+        clone.num_local_experts = self.num_local_experts
+        clone.add_shared_expert = self.add_shared_expert
+        clone.ffn_tp_size = self.ffn_tp_size
+        clone.ep_size = self.ep_size
+        clone.shared_expert = self.shared_expert
+        clone.shared_expert_gate = self.shared_expert_gate
+        clone.sigmoid_gate_scale_add = self.sigmoid_gate_scale_add
+        clone.correction_bias = self.correction_bias
+        return clone
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -356,6 +385,23 @@ class GenericMoeDecoderLayer(nn.Module):
             and self.mlp.shared_expert is not None
             and self.mlp.shared_expert.accepts_fp8_input
         )
+
+    def clone_for_cuda_graph(self) -> "GenericMoeDecoderLayer":
+        clone = object.__new__(type(self))
+        nn.Module.__init__(clone)
+        clone.layer_idx = self.layer_idx
+        clone.self_attn = self.self_attn
+        if hasattr(self.mlp, "clone_for_cuda_graph"):
+            clone.mlp = self.mlp.clone_for_cuda_graph()
+        else:
+            clone.mlp = self.mlp
+        clone.input_layernorm = self.input_layernorm
+        clone.post_attention_layernorm = self.post_attention_layernorm
+        clone._fuse_input_norm_quant = self._fuse_input_norm_quant
+        clone._fuse_input_scale_ue8m0 = self._fuse_input_scale_ue8m0
+        clone._fuse_post_norm_quant = self._fuse_post_norm_quant
+        clone._fuse_post_norm_quant_moe = self._fuse_post_norm_quant_moe
+        return clone
 
     def forward(
         self,

@@ -57,30 +57,39 @@ static torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayo
 
 namespace {
 
-bool pdDebugEnabled() {
+const bool kPdDebugEnabled = []() {
     const char* env = std::getenv("RTP_LLM_PD_DEBUG");
     return env != nullptr && std::string(env) == "1";
+}();
+
+const bool kMtpPrefillDebugEnabled = []() {
+    const char* env = std::getenv("RTP_LLM_DEBUG_MTP_PREFILL_DATA");
+    return env != nullptr && std::string(env) != "0";
+}();
+
+const bool kMtpDecodeDebugEnabled = []() {
+    const char* env = std::getenv("RTP_LLM_DEBUG_MTP_DECODE_DATA");
+    return env != nullptr && std::string(env) != "0";
+}();
+
+bool pdDebugEnabled() {
+    return kPdDebugEnabled;
 }
 
 bool mtpPrefillDebugEnabled() {
-    static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_DEBUG_MTP_PREFILL_DATA");
-        return env != nullptr && std::string(env) != "0";
-    }();
-    return enabled;
+    return kMtpPrefillDebugEnabled;
 }
 
 bool mtpDecodeDebugEnabled() {
-    static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_DEBUG_MTP_DECODE_DATA");
-        const bool  on  = env != nullptr && std::string(env) != "0";
-        if (on) {
+    static const bool logged = []() {
+        if (kMtpDecodeDebugEnabled) {
             RTP_LLM_LOG_WARNING(
                 "[debug-mtp-decode-data] enabled; tensor summaries may perform D2H copies and serialize debugging runs");
         }
-        return on;
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kMtpDecodeDebugEnabled;
 }
 
 std::string tensorSummary(const torch::Tensor& tensor, int64_t limit = 4) {

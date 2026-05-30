@@ -2,6 +2,7 @@
 #pragma once
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <atomic>
@@ -26,6 +27,20 @@
 namespace py = pybind11;
 
 namespace rtp_llm {
+
+inline const std::string kPythonUnbufferedEnvForLog = []() -> std::string {
+    const char* env = std::getenv("PYTHONUNBUFFERED");
+    return env != nullptr ? env : "(unset)";
+}();
+
+inline void logPythonUnbufferedEnvOnce() {
+    static const bool logged = []() {
+        RTP_LLM_LOG_INFO("PYTHONUNBUFFERED=%s; skip runtime environment mutation in PyWrappedModel",
+                         kPythonUnbufferedEnvForLog.c_str());
+        return true;
+    }();
+    (void)logged;
+}
 
 inline void syncCudaGraphCaptureRanks(const ParallelismConfig& parallelism_config, const char* phase) {
     if (parallelism_config.world_size <= 1) {
@@ -181,11 +196,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
             {layer_num_, moe_conf.ep_size, moe_conf.expert_num, moe_conf.expert_num + moe_conf.extra_expert_num});
     }
 
-    if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
-        RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
-    } else {
-        RTP_LLM_LOG_INFO("Set PYTHONUNBUFFERED=TRUE for Python interpreter.");
-    }
+    logPythonUnbufferedEnvOnce();
 
     py::gil_scoped_acquire          gil;
     torch_ext::PyModelInitResources init_resources;

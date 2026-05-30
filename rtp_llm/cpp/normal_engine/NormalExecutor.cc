@@ -20,13 +20,21 @@ namespace rtp_llm {
 
 namespace {
 
-bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
+struct CachedEnvFlag {
+    const char* env_name;
+    const char* log_tag;
+    const char* label;
+    bool        on;
+    std::string value;
+};
+
+CachedEnvFlag cacheEnvFlag(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
-    const bool  on  = (env != nullptr && std::string(env) == "1");
-    RTP_LLM_LOG_INFO("[%s] %s=%s -> %s=%d", log_tag, env_name, env ? env : "(unset)", label, static_cast<int>(on));
-    return on;
+    return CachedEnvFlag{env_name, log_tag, label, env != nullptr && std::string(env) == "1", env ? env : "(unset)"};
 }
 
+// REBASE CONFLICT CONTEXT(cdc1b18b6): keep the new base broadcast timeout helper
+// and the source branch cached env flags for GLM5 MTP/device-input paths.
 int readEnvIntOnce(const char* env_name, int default_value, const char* log_tag) {
     const char* env   = std::getenv(env_name);
     int         value = default_value;
@@ -39,6 +47,17 @@ int readEnvIntOnce(const char* env_name, int default_value, const char* log_tag)
     RTP_LLM_LOG_INFO("[%s] %s=%s -> %d", log_tag, env_name, env ? env : "(unset)", value);
     return value;
 }
+
+void logCachedEnvFlag(const CachedEnvFlag& flag) {
+    RTP_LLM_LOG_INFO(
+        "[%s] %s=%s -> %s=%d", flag.log_tag, flag.env_name, flag.value.c_str(), flag.label, static_cast<int>(flag.on));
+}
+
+const CachedEnvFlag kStreamAsyncFlag   = cacheEnvFlag("RTP_LLM_STREAM_ASYNC", "normal-stream-async", "useStreamAsync");
+const CachedEnvFlag kDropBroadSyncFlag = cacheEnvFlag("RTP_LLM_DROP_BROAD_SYNC", "normal-drop-broad-sync", "enabled");
+const CachedEnvFlag kDeviceInputFlag   = cacheEnvFlag("RTP_LLM_DEVICE_INPUT", "normal-device-input", "enabled");
+const CachedEnvFlag kDeviceInputCheckFlag =
+    cacheEnvFlag("RTP_LLM_DEVICE_INPUT_CHECK", "normal-device-input", "enabled");
 
 void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inputs) {
     holder.hold_host(inputs.token_ids);
@@ -425,31 +444,39 @@ bool NormalExecutor::updateEplbConfig(const EPLBConfig& config) {
 }
 
 bool NormalExecutor::useStreamAsync() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_STREAM_ASYNC", "normal-stream-async", "useStreamAsync");
+    static const bool logged = []() {
+        logCachedEnvFlag(kStreamAsyncFlag);
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kStreamAsyncFlag.on;
 }
 
 bool NormalExecutor::useDropBroadSync() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_DROP_BROAD_SYNC", "normal-drop-broad-sync", "enabled");
+    static const bool logged = []() {
+        logCachedEnvFlag(kDropBroadSyncFlag);
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kDropBroadSyncFlag.on;
 }
 
 bool NormalExecutor::useDeviceInput() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_DEVICE_INPUT", "normal-device-input", "enabled");
+    static const bool logged = []() {
+        logCachedEnvFlag(kDeviceInputFlag);
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kDeviceInputFlag.on;
 }
 
 bool NormalExecutor::checkDeviceInput() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_DEVICE_INPUT_CHECK", "normal-device-input", "enabled");
+    static const bool logged = []() {
+        logCachedEnvFlag(kDeviceInputCheckFlag);
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kDeviceInputCheckFlag.on;
 }
 
 void NormalExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const char* tag) {

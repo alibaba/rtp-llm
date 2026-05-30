@@ -14,8 +14,11 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <algorithm>
 #include <chrono>
+#include <csignal>
+#include <exception>
 #include <memory>
 #include <thread>
 #include <random>
@@ -26,6 +29,7 @@
 
 #ifdef __linux__
 #include <malloc.h>
+#include <pthread.h>
 #endif
 
 using namespace std;
@@ -55,6 +59,16 @@ bool shouldUseCudaMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const C
                                         || pd_sep_config.remote_rpc_server_port > 0;
     return pd_role && pd_sep_config.cache_store_rdma_mode
            && (cache_store_config.cache_store_rdma_mode || has_cache_store_server);
+}
+
+void blockTerminationSignalsInEngineThread() {
+#ifdef __linux__
+    sigset_t signal_set;
+    sigemptyset(&signal_set);
+    sigaddset(&signal_set, SIGTERM);
+    sigaddset(&signal_set, SIGINT);
+    pthread_sigmask(SIG_BLOCK, &signal_set, nullptr);
+#endif
 }
 }  // anonymous namespace
 
@@ -476,24 +490,76 @@ absl::Status NormalEngine::startLoop() {
 }
 
 absl::Status NormalEngine::stop() {
+    bool expected = false;
+    if (!stop_started_.compare_exchange_strong(expected, true)) {
+        RTP_LLM_LOG_INFO("normal engine already stopping/stopped");
+        return absl::OkStatus();
+    }
+
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
-    RETURN_IF_STATUS_ERROR(scheduler_->stop());
-    loop_thread_->join();
-    return absl::OkStatus();
+    if (executor_) {
+        executor_->notifyStop();
+    }
+    auto status = absl::OkStatus();
+    if (scheduler_) {
+        auto scheduler_status = scheduler_->stop();
+        if (!scheduler_status.ok()) {
+            RTP_LLM_LOG_WARNING("scheduler stop failed: %s", scheduler_status.ToString().c_str());
+            status = scheduler_status;
+        }
+    }
+    if (loop_thread_) {
+        loop_thread_->join();
+        loop_thread_.reset();
+    }
+#if USING_CUDA || USING_ROCM
+    try {
+        cudaPreRun(getDeviceId());
+        cudaSyncAndCheck();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("cuda sync during normal engine shutdown failed: %s", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("cuda sync during normal engine shutdown failed with unknown exception");
+    }
+#endif
+    return status;
 }
 
 void NormalEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
+    blockTerminationSignalsInEngineThread();
     cudaPreRun(getDeviceId());
     while (running_) {
-        auto status = step();
+        absl::Status status;
+        try {
+            status = step();
+        } catch (const std::exception& e) {
+            if (!running_) {
+                RTP_LLM_LOG_WARNING("normal engine loop ignored exception during shutdown: %s", e.what());
+                break;
+            }
+            RTP_LLM_LOG_ERROR("normal engine loop exception: %s", e.what());
+            throw;
+        } catch (...) {
+            if (!running_) {
+                RTP_LLM_LOG_WARNING("normal engine loop ignored unknown exception during shutdown");
+                break;
+            }
+            RTP_LLM_LOG_ERROR("normal engine loop unknown exception");
+            throw;
+        }
         if (!status.ok()) {
+            if (!running_) {
+                RTP_LLM_LOG_WARNING("normal engine loop ignored status during shutdown: %s", status.ToString().c_str());
+                break;
+            }
             RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
     }
+    RTP_LLM_LOG_INFO("loop end");
 }
 
 absl::Status NormalEngine::trySaveStepError() const {
@@ -534,7 +600,13 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
 
 absl::Status NormalEngine::step() {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
+    if (!running_ || stop_started_) {
+        return absl::OkStatus();
+    }
     while (pause_) {
+        if (!running_ || stop_started_) {
+            return absl::OkStatus();
+        }
         // wait 50ms if system paused.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
@@ -545,6 +617,9 @@ absl::Status NormalEngine::step() {
         {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(streams, scheduler_->schedule());
+        }
+        if (!running_ || stop_started_) {
+            return absl::OkStatus();
         }
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
@@ -611,6 +686,9 @@ bool NormalEngine::isEagle() {
 }
 
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
+    if (!running_ || stop_started_) {
+        return;
+    }
     if (isMTPEagle()) {
         int propose_step   = sp_config.gen_num_per_cycle;
         int mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
