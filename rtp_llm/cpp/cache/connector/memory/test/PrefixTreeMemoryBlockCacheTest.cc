@@ -39,6 +39,17 @@ PrefixTreeMemoryBlockCache::CacheItem item(CacheKeyType           key,
     return item;
 }
 
+PrefixTreeMemoryBlockCache::CacheItem diskItem(CacheKeyType         key,
+                                               CacheBlockKind       kind,
+                                               int32_t              disk_slot,
+                                               std::vector<uint8_t> slot_valid_mask = {}) {
+    auto result          = item(key, kind, NULL_BLOCK_IDX, std::move(slot_valid_mask));
+    result.backing_type  = CacheBackingType::DISK;
+    result.block_index   = NULL_BLOCK_IDX;
+    result.disk_slot     = disk_slot;
+    return result;
+}
+
 }  // namespace
 
 TEST(PrefixTreeMemoryBlockCacheTest, ContainsAndMatchAreKindAware) {
@@ -590,6 +601,74 @@ TEST(PrefixTreeMemoryBlockCacheTest, InFlightReleaseRestoresEvictability) {
     auto evicted = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV);
     ASSERT_TRUE(evicted.has_value());
     EXPECT_EQ(evicted->cache_key, 1);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, DiskBackingMatchesAndEvictsByBacking) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), diskItem(1, CacheBlockKind::COMPRESSED_KV, 7)).first);
+    ASSERT_TRUE(cache.putCommitted(2, rootDep(), item(2, CacheBlockKind::COMPRESSED_KV, 22)).first);
+
+    auto matched = cache.matchAndMarkInFlight(1, CacheBlockKind::COMPRESSED_KV);
+    ASSERT_TRUE(matched.found);
+    EXPECT_EQ(matched.backing_type, CacheBackingType::DISK);
+    EXPECT_EQ(matched.disk_slot, 7);
+    EXPECT_FALSE(cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::DISK).has_value());
+
+    auto released = cache.releaseInFlight(1,
+                                          CacheBlockKind::COMPRESSED_KV,
+                                          CacheBackingType::DISK,
+                                          matched.block_index,
+                                          matched.disk_slot,
+                                          matched.generation);
+    EXPECT_FALSE(released.has_value());
+
+    auto evicted_disk = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::DISK);
+    ASSERT_TRUE(evicted_disk.has_value());
+    EXPECT_EQ(evicted_disk->cache_key, 1);
+    EXPECT_EQ(evicted_disk->disk_slot, 7);
+
+    auto evicted_mem = cache.popOldestEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::MEMORY);
+    ASSERT_TRUE(evicted_mem.has_value());
+    EXPECT_EQ(evicted_mem->cache_key, 2);
+    EXPECT_EQ(evicted_mem->block_index, 22);
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, StateIndependentEvictionDropsDeepestNonTailState) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), item(1, CacheBlockKind::COMPRESSED_KV, 11)).first);
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), item(1, CacheBlockKind::STATE_SWA_KV, 101)).first);
+    ASSERT_TRUE(cache.putCommitted(2, childDep(1, 1), item(2, CacheBlockKind::COMPRESSED_KV, 12)).first);
+    ASSERT_TRUE(cache.putCommitted(2, childDep(1, 1), item(2, CacheBlockKind::STATE_SWA_KV, 102)).first);
+    ASSERT_TRUE(cache.putCommitted(3, childDep(2, 2), item(3, CacheBlockKind::COMPRESSED_KV, 13)).first);
+    ASSERT_TRUE(cache.putCommitted(3, childDep(2, 2), item(3, CacheBlockKind::STATE_SWA_KV, 103)).first);
+
+    auto evicted = cache.popOldestStateOrChainEvictable(CacheBackingType::MEMORY);
+
+    ASSERT_EQ(evicted.size(), 1u);
+    EXPECT_EQ(evicted[0].cache_key, 2);
+    EXPECT_EQ(evicted[0].kind, CacheBlockKind::STATE_SWA_KV);
+    EXPECT_EQ(evicted[0].block_index, 102);
+    EXPECT_TRUE(cache.contains(2, CacheBlockKind::COMPRESSED_KV));
+    EXPECT_FALSE(cache.contains(2, CacheBlockKind::STATE_SWA_KV));
+    EXPECT_TRUE(cache.contains(3, CacheBlockKind::STATE_SWA_KV));
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, StateIndependentEvictionFallsBackToWholeChain) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(), item(1, CacheBlockKind::COMPRESSED_KV, 11)).first);
+    ASSERT_TRUE(cache.putCommitted(2, childDep(1, 1), item(2, CacheBlockKind::COMPRESSED_KV, 12)).first);
+    ASSERT_TRUE(cache.putCommitted(2, childDep(1, 1), item(2, CacheBlockKind::STATE_SWA_KV, 102)).first);
+
+    auto evicted = cache.popOldestStateOrChainEvictable(CacheBackingType::MEMORY);
+
+    ASSERT_EQ(evicted.size(), 3u);
+    EXPECT_EQ(evicted[0].cache_key, 2);
+    EXPECT_EQ(evicted[0].kind, CacheBlockKind::COMPRESSED_KV);
+    EXPECT_EQ(evicted[1].cache_key, 2);
+    EXPECT_EQ(evicted[1].kind, CacheBlockKind::STATE_SWA_KV);
+    EXPECT_EQ(evicted[2].cache_key, 1);
+    EXPECT_EQ(evicted[2].kind, CacheBlockKind::COMPRESSED_KV);
+    EXPECT_EQ(cache.size(), 0u);
 }
 
 }  // namespace rtp_llm::test

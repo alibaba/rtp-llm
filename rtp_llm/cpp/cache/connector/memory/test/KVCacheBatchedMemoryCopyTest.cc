@@ -840,7 +840,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRunti
     EXPECT_EQ(plan->copy_infos[2].slot_valid_mask[swa_slot], 0);
 }
 
-TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadAllowsCompressedOnlyWhenStateSwaMissing) {
+TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadRejectsCompressedOnlyWhenStateSwaRequired) {
     auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
 
     KVCacheConfig kv_config;
@@ -898,10 +898,8 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadAllowsCompressedOnlyWhenStateSw
                                                            slots,
                                                            /*start_index=*/0,
                                                            /*read_num=*/1);
-    ASSERT_NE(read_plan, nullptr);
-    ASSERT_EQ(read_plan->copy_infos.size(), 1u);
-    EXPECT_EQ(read_plan->copy_infos[0].cache_key, 901);
-    EXPECT_EQ(read_plan->copy_infos[0].kind, CacheBlockKind::COMPRESSED_KV);
+    EXPECT_EQ(read_plan, nullptr);
+    EXPECT_TRUE(connector->prefix_block_cache_->match(901, CacheBlockKind::COMPRESSED_KV, compressed_mask).found);
 }
 
 TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadAllowsStateOnlyWhenCompressedNotRequired) {
