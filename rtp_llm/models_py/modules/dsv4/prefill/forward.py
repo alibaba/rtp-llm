@@ -93,6 +93,7 @@ Padding-token slots are nulled via ``cp_info.prefill_qkv_padding_mask``.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
@@ -106,6 +107,8 @@ from rtp_llm.models_py.modules.dsv4.cp import (
 from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     build_and_propagate_prefill_meta_fp8,
     clear_prefill_meta_shared_fp8,
+    _shift_cu_seqlens,
+    _slice_meta,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import build_block_tables_batched
 from rtp_llm.models_py.modules.factory.attention.common import (
@@ -124,6 +127,132 @@ if TYPE_CHECKING:
     # doesn't depend on ``prefill`` today but this guard makes that
     # non-load-bearing (module loads fine even if the cycle reappears).
     from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
+
+
+def _dsv4_env_flag(name: str) -> bool:
+    """Mirror C++ ``DSV4CacheConfigHelper::envFlagEnabled`` truthiness so the
+    Python write-skip gate engages on exactly the env values C++ does."""
+    value = os.environ.get(name)
+    if not value:
+        return False
+    return value not in ("0", "false", "FALSE", "off", "OFF")
+
+
+def _dsv4_zero_swa_write_skip_window(
+    v4: "V4Transformer",
+    kv_cache: Optional[KVCache],
+    cp_ctx: Optional[Any],
+) -> int:
+    """Block-aligned restore-window (in global tokens) for the zero-SWA trim
+    compressor write-skip, or 0 when trim is off.
+
+    Returns ``restore_blocks * reuse_unit_tokens`` where
+    ``reuse_unit_tokens = seq_size_per_block * cp_size`` (the cp-virtual cache
+    block) and ``restore_blocks = ceil(swa_window * n_layers / reuse_unit)``.
+    This exactly matches the C++ ``full_cover = reuse_blocks_len +
+    restore_blocks`` extension in ``HybridKVCacheAllocator::reuseCache`` (the
+    min-cap never bites — see work_log Correction 1), so a compressor write at
+    token ``p`` with prefix ``sp`` is skipped iff ``p < sp + window``, i.e. iff
+    its paged FULL block was reused from the shared prefix cache.
+
+    Gate mirrors C++ ``DSV4CacheConfigHelper`` trim gating: both env flags +
+    ``fp8_kv_cache`` + main ``n_layers > 1``. The active-tail invariant is
+    CHECK-enforced in C++ (the process crashes at config time if it is
+    violated while caching is on), so a running process whose gate is satisfied
+    has trim genuinely on. The 1-layer SWA-only MTP draft fails ``n_layers>1``
+    (and builds no compressor meta), so this is a no-op there — the draft needs
+    no special handling.
+    """
+    if not getattr(v4, "fp8_kv_cache", False):
+        return 0
+    if not (
+        _dsv4_env_flag("DSV4_ZERO_SWA_CACHING") and _dsv4_env_flag("DSV4_ZERO_SWA_TRIM")
+    ):
+        return 0
+    args = getattr(v4, "args", None)
+    n_layers = int(getattr(args, "n_layers", 0) or 0)
+    if n_layers <= 1:
+        return 0
+    # Mirror C++: swa_window_size = sliding_window>0 ? sliding_window : 128.
+    swa_window = int(getattr(args, "window_size", 0) or 0)
+    if swa_window <= 0:
+        swa_window = 128
+    restore_tokens = swa_window * n_layers
+    spb_phys = int(getattr(kv_cache, "seq_size_per_block", 0) or 0)
+    if spb_phys <= 0:
+        return 0
+    cp_size = 1
+    if cp_ctx is not None:
+        cp_size = int(getattr(cp_ctx, "cp_size", 1) or 1)
+    if cp_size < 1:
+        cp_size = 1
+    reuse_unit = spb_phys * cp_size
+    restore_blocks = (restore_tokens + reuse_unit - 1) // reuse_unit
+    return restore_blocks * reuse_unit
+
+
+def _dsv4_zero_swa_trim_offsets(
+    n_layers: int,
+    nwin: int,
+    restore_window: int,
+    total_tokens: int,
+    kernel_block: int,
+    device: torch.device,
+):
+    """Per-layer front-trim offsets for the zero-SWA inverted triangle (Stage C).
+
+    Returns ``(k_start_t, tail)`` where ``k_start_t`` is a host int list of
+    length ``n_layers`` (the per-layer K-span front-trim count, monotone
+    non-decreasing in layer index) and ``tail`` is the token index from which
+    the final hidden is bit-correct, or ``(None, None)`` when no layer trims.
+
+    Layer ``j`` (0 = bottom / widest) runs+writes back the K span ``h[k_j:]``;
+    higher layers trim more. The monotone offsets make each layer's K span a
+    SUFFIX of the previous layer's, so layer ``j+1`` only ever reads rows layer
+    ``j`` just wrote (no stale read).
+
+    Correctness (derived + pinned by ``test_zero_swa_trim``): with the SWA
+    window ``[r-nwin+1, r]`` the cascade's first-correct row after layer ``j``
+    obeys ``c_j = max(k_j, c_{j-1}) + (nwin-1)``. Choosing
+    ``k_j = tail - (L-j)*nwin`` gives ``k_j = c_{j-1} + 1`` so ``c_{L-1} =
+    tail - 1`` — i.e. ``[tail, T)`` is correct with exactly one row of slack,
+    in BOTH the linear and the floored region. (An earlier formulation that
+    front-trimmed Q with a separate ``-nwin`` margin under-covered the tail by
+    one ``nwin`` once the active-tail floor flattened the top ``k_start`` —
+    that bug is what this exact form fixes.)
+
+    ``tail = min(restore_eff, total_tokens - t_active)`` makes the correct
+    region cover BOTH the genuinely-new tokens ``[restore_eff, T)`` (their KV
+    writes / logits must be exact) AND the runtime SWA active tail
+    (last ``t_active = 2 * kernel_seq_size_per_block`` tokens decode / PD read),
+    even when there are fewer than ``t_active`` new tokens.
+
+    ``restore_window`` MUST be the block-aligned write-skip window
+    (:func:`_dsv4_zero_swa_write_skip_window`) so ``restore_eff`` matches the
+    C++ ``prefix_lengths`` cap (the new-token boundary).
+
+    NOTE (perf, not correctness): this is the conservative linear triangle the
+    paper's all-SWA-layers theory implies. DSV4-Flash has only 2 SWA-only
+    layers at the bottom, so the linear triangle keeps a SUPERSET of the true
+    receptive field — correct, ~0.34x the uniform recompute. The minimal
+    per-SWA-layer trim (~0.03x) is a documented follow-up; see
+    ``zero_swa_less_compute/investigation/02_receptive_field.md``. The width
+    formula is isolated here so that swap is a one-function change.
+    """
+    if n_layers <= 1 or nwin <= 0 or restore_window <= 0 or total_tokens <= 0:
+        return None, None
+    restore_eff = min(restore_window, total_tokens)
+    # Active tail (decode / PD read the last 2 kernel blocks of SWA pool).
+    t_active = min(total_tokens, 2 * max(kernel_block, 1))
+    # Final correct region [tail, T): cover the new tokens AND the active tail.
+    tail = max(0, min(restore_eff, total_tokens - t_active))
+    if tail <= 0:
+        return None, None
+    j = torch.arange(n_layers, dtype=torch.int64, device=device)
+    k_start = (tail - (n_layers - j) * nwin).clamp_(0, total_tokens)
+    if int(k_start.max().item()) <= 0:
+        return None, None  # nothing trims (e.g. restore window <= nwin)
+    return k_start.tolist(), int(tail)
 
 
 def _build_positions_from_lengths(
@@ -315,6 +444,12 @@ def forward_layers(
     if _rt_on:
         _rt.record("prefill_embed_hc_expanded", h)
 
+    # Zero-SWA inverted-triangle trim state (Stage C). Stays None/unset on the
+    # BF16 path and whenever the trim gate fails, so the layer loop runs the
+    # uniform body unchanged.
+    meta_by_ratio: Optional[Dict[int, Any]] = None
+    trim_k_start = None
+
     # FP8 KV-cache: hoist host-side prefill metadata once per ratio bucket
     # and broadcast to every layer's ``AttentionFP8._prefill_meta_shared``.
     # BF16 path doesn't need this; ``Attention`` rebuilds meta inside its
@@ -369,7 +504,10 @@ def forward_layers(
                 prefix_lengths = pl.to(
                     device=positions.device, dtype=torch.int32
                 ).contiguous()
-        build_and_propagate_prefill_meta_fp8(
+        write_skip_restore_window = _dsv4_zero_swa_write_skip_window(
+            v4, kv_cache, cp_ctx
+        )
+        meta_by_ratio = build_and_propagate_prefill_meta_fp8(
             v4,
             h,
             sp_int_for_meta,
@@ -383,17 +521,74 @@ def forward_layers(
             position_ids=positions,
             req_id_per_token=req_id_per_token,
             max_seqlen_q=max_seqlen_q,
+            write_skip_restore_window=write_skip_restore_window,
         )
 
+        # Stage C: inverted-triangle trim. Gate mirrors the write-skip gate
+        # (write_skip_restore_window > 0 already implies both env flags + fp8 +
+        # n_layers > 1) plus the trim-only guards: CP off (zigzag breaks the
+        # suffix-slice invariant), B == 1 (front-trim must not straddle request
+        # boundaries), a genuine prefix hit, and no record-tensor / forward
+        # debug (which need full per-layer hidden dumps; trim leaves stale
+        # front rows). When any guard fails, trim_k_start stays None and the
+        # loop runs the existing uniform body — byte-identical to before.
+        trim_on = (
+            write_skip_restore_window > 0
+            and cp_ctx is None
+            and batch_size == 1
+            and not _rt_on
+            and not _fwd_dbg.enabled()
+            and prefix_lengths is not None
+            and prefix_lengths.numel() == 1
+            and int(prefix_lengths[0].item()) > 0
+            and len(v4.layers) > 1
+        )
+        if trim_on:
+            nwin = int(getattr(v4.args, "window_size", 0) or 0) or 128
+            kernel_block = int(
+                getattr(kv_cache, "kernel_seq_size_per_block", 0) or 0
+            )
+            trim_k_start, _trim_tail = _dsv4_zero_swa_trim_offsets(
+                n_layers=len(v4.layers),
+                nwin=nwin,
+                restore_window=write_skip_restore_window,
+                total_tokens=int(input_ids.size(0)),
+                kernel_block=kernel_block if kernel_block > 0 else 128,
+                device=positions.device,
+            )
+
+    # ``_orig_h`` lets the trim de-alias the embed buffer on its first partial
+    # write-back (``h[ks:] = out``) without cloning on the uniform path.
+    _orig_h = h
     for layer_idx, layer in enumerate(v4.layers):
-        h = layer(
-            h,  # [T, hc, dim]
-            input_ids,  # [T]
-            positions,  # [T]
-            cu_seqlens,  # [B+1]
-            kv_cache=kv_cache,
-            block_tables_by_type=block_tables_by_type,
-        )  # [T, hc, dim]
+        ks = trim_k_start[layer_idx] if trim_k_start is not None else 0
+        if ks > 0:
+            # Trimmed layer: run attention over the K-span suffix h[ks:] with a
+            # per-layer SUFFIX SLICE of the shared meta, then write back the
+            # FULL K-span output (the K-only prefix rows [ks, qs) are this
+            # layer's correct output and feed the next layer's K span).
+            ratio = int(layer.attn.compress_ratio)
+            layer.attn._set_prefill_meta_shared(_slice_meta(meta_by_ratio[ratio], ks))
+            out = layer(
+                h[ks:],  # [T-ks, hc, dim]
+                input_ids[ks:],  # [T-ks]
+                positions[ks:],  # [T-ks]
+                _shift_cu_seqlens(cu_seqlens, ks),  # [B+1] -> [0, T-ks]
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )  # [T-ks, hc, dim]
+            if h is _orig_h:
+                h = h.clone()  # de-alias before first partial write
+            h[ks:] = out
+        else:
+            h = layer(
+                h,  # [T, hc, dim]
+                input_ids,  # [T]
+                positions,  # [T]
+                cu_seqlens,  # [B+1]
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )  # [T, hc, dim]
         if _rt_on:
             _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
         if write_cache_store_impl is not None:

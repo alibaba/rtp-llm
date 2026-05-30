@@ -644,6 +644,7 @@ class IndexerFP8(PoolBackedModule):
         position_ids: Optional[torch.Tensor] = None,
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
+        write_skip_restore_window: int = 0,
     ) -> _IndexerFP8PrefillMeta:
         """Build per-call FP8 prefill metadata.
 
@@ -880,6 +881,7 @@ class IndexerFP8(PoolBackedModule):
                                 is_batched=True,
                                 seq_start_per_req=cp_seq_start_per_req,
                                 cu_seq_per_req=cp_cu_seq_per_req,
+                                write_skip_restore_window=write_skip_restore_window,
                             )
                     else:
                         compressor_meta = None
@@ -896,6 +898,7 @@ class IndexerFP8(PoolBackedModule):
                             req_id_per_token=req_id_per_token,
                             seq_start_per_req=prefix_lengths,
                             cu_seqlens=cu_seqlens,
+                            write_skip_restore_window=write_skip_restore_window,
                         )
                         compressor_meta = compressor.prepare_metadata(**cmp_args)
             finally:

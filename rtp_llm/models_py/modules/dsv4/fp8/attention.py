@@ -3535,6 +3535,7 @@ class AttentionFP8(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
+        write_skip_restore_window: int = 0,
     ) -> "PrefillMeta":
         """Build the layer-invariant (within compress_ratio bucket) part
         of per-call prefill metadata. All host-side prep work that
@@ -3686,6 +3687,7 @@ class AttentionFP8(nn.Module):
                     position_ids=position_ids,
                     req_id_per_token=req_id_per_token,
                     max_seqlen_q=max_seqlen_q,
+                    write_skip_restore_window=write_skip_restore_window,
                 )
         elif self.compress_ratio == 128:
             with record_function_range("dsv4.fp8.meta.hca"):
@@ -3702,6 +3704,7 @@ class AttentionFP8(nn.Module):
                     position_ids=position_ids,
                     req_id_per_token=req_id_per_token,
                     max_seqlen_q=max_seqlen_q,
+                    write_skip_restore_window=write_skip_restore_window,
                 )
 
         return PrefillMeta(
@@ -3748,6 +3751,7 @@ class AttentionFP8(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
+        write_skip_restore_window: int = 0,
     ) -> CsaPrefillMeta:
         """Build CSA-layer per-call metadata: indexer prepare + main CSA
         compressor prepare_metadata.
@@ -3803,6 +3807,7 @@ class AttentionFP8(nn.Module):
                 position_ids=position_ids,
                 req_id_per_token=req_id_per_token,
                 max_seqlen_q=max_seqlen_q,
+                write_skip_restore_window=write_skip_restore_window,
             )
         cp_ctx_local = getattr(self, "_cp_ctx", None)
         cp_active = cp_ctx_local is not None and cp_ctx_local.cp_size > 1
@@ -3826,6 +3831,7 @@ class AttentionFP8(nn.Module):
                     is_batched=True,
                     seq_start_per_req=cp_seq_start_per_req,
                     cu_seq_per_req=cp_cu_seq_per_req,
+                    write_skip_restore_window=write_skip_restore_window,
                 )
         else:
             # Inline (vs. calling ``_build_compressor_meta``) is load-bearing:
@@ -3841,6 +3847,7 @@ class AttentionFP8(nn.Module):
                     req_id_per_token=req_id_per_token,
                     seq_start_per_req=sp_per_req,
                     cu_seqlens=cu_seqlens,
+                    write_skip_restore_window=write_skip_restore_window,
                 )
                 compressor_meta = self.compressor.prepare_metadata(**cmp_args)
         with record_function_range("dsv4.fp8.meta.csa.clear_pool"):
@@ -3883,6 +3890,7 @@ class AttentionFP8(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
+        write_skip_restore_window: int = 0,
     ) -> HcaPrefillMeta:
         """Build HCA-layer per-call metadata: main HCA compressor
         prepare_metadata."""
@@ -3907,6 +3915,7 @@ class AttentionFP8(nn.Module):
                         is_batched=True,
                         seq_start_per_req=cp_seq_start_per_req,
                         cu_seq_per_req=cp_cu_seq_per_req,
+                        write_skip_restore_window=write_skip_restore_window,
                     )
                 finally:
                     self._clear_compressor_pool_context()
@@ -3925,6 +3934,7 @@ class AttentionFP8(nn.Module):
                     position_ids=position_ids,
                     req_id_per_token=req_id_per_token,
                     max_seqlen_q=max_seqlen_q,
+                    write_skip_restore_window=write_skip_restore_window,
                 )
         with record_function_range("dsv4.fp8.meta.hca.workspace"):
             workspace_meta = self._build_workspace_meta(
@@ -4347,6 +4357,7 @@ class AttentionFP8(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
+        write_skip_restore_window: int = 0,
     ):
         """Run the main compressor's ``prepare_metadata`` with its pool
         context temporarily bound. Returns ``CompressorMeta``. The pool
@@ -4373,6 +4384,7 @@ class AttentionFP8(nn.Module):
             req_id_per_token=req_id_per_token,
             seq_start_per_req=sp_per_req,
             cu_seqlens=cu_seqlens,
+            write_skip_restore_window=write_skip_restore_window,
         )
         self._set_compressor_pool_context()
         try:
