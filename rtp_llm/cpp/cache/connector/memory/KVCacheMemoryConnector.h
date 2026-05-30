@@ -191,6 +191,12 @@ private:
     bool                         allocateOnePrefixBacking(CopyInfoPerKey& copy_info);
     bool                         preparePrefixMergeSources(std::vector<CopyInfoPerKey>& copy_infos);
     void                         releasePrefixMergeSource(const CopyInfoPerKey& copy_info);
+    bool                         mergePrefixExistingSlots(PrefixTreeMemoryBlockCache::CacheItem& item,
+                                                          const PrefixTreeMemoryBlockCache::MatchResult& existing,
+                                                          const std::vector<LayerRegionSlot>& slots);
+    bool                         mergePrefixConflictForCommit(CopyInfoPerKey& copy_info,
+                                                              PrefixTreeMemoryBlockCache::CacheItem& item,
+                                                              const std::vector<LayerRegionSlot>& slots);
     void                         putPrefixToCache(CopyInfoPerKey&                  copy_info,
                                                   const BlockDependency&           dependency,
                                                   const std::vector<LayerRegionSlot>& slots);

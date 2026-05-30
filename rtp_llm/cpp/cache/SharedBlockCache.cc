@@ -69,6 +69,7 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
                 markAllTreeAliasesResidentLocked(cache_key);
             }
             upsertTreeNodeLocked(cache_key, namespace_id, dependency, existing_item.is_resident);
+            refreshAllTreeAliasesLocked(cache_key);
         }
         return;
     }
@@ -86,6 +87,7 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
     lru_cache_.put(cache_key, item);
     ++version_;
     upsertTreeNodeLocked(cache_key, namespace_id, dependency, item.is_resident);
+    refreshAllTreeAliasesLocked(cache_key);
 
     for (int gid = 0; gid < static_cast<int>(group_slots.size()) && gid < group_num_; ++gid) {
         if (!isNullBlockIdx(group_slots[gid])) {
@@ -400,6 +402,9 @@ void SharedBlockCache::insertLeafIfEligibleLocked(const PrefixTreeNode& node) {
         || isFlatItemResidentLocked(node.key.cache_key)) {
         return;
     }
+    if (node.key.namespace_id != kGpuCpCanonicalNamespace && flatItemHasCanonicalDependencyLocked(node.key.cache_key)) {
+        return;
+    }
     leaf_lru_.insert(LeafKey{node.last_access_seq, node.key.namespace_id, node.key.cache_key});
 }
 
@@ -468,6 +473,26 @@ void SharedBlockCache::markAllTreeAliasesResidentLocked(CacheKeyType cache_key) 
         eraseLeafLocked(node_it->second);
         node_it->second.resident = true;
     }
+}
+
+void SharedBlockCache::refreshAllTreeAliasesLocked(CacheKeyType cache_key) {
+    auto aliases_it = aliases_by_cache_key_.find(cache_key);
+    if (aliases_it == aliases_by_cache_key_.end()) {
+        return;
+    }
+    std::vector<NamespacedKey> aliases(aliases_it->second.begin(), aliases_it->second.end());
+    for (const auto& key : aliases) {
+        refreshLeafLocked(key);
+    }
+}
+
+bool SharedBlockCache::flatItemHasCanonicalDependencyLocked(CacheKeyType cache_key) const {
+    for (const auto& [key, item] : lru_cache_.items()) {
+        if (key == cache_key) {
+            return item.has_dependency && item.dependency_namespace == kGpuCpCanonicalNamespace;
+        }
+    }
+    return false;
 }
 
 bool SharedBlockCache::updateItemDependencyLocked(UnifiedCacheItem&      item,

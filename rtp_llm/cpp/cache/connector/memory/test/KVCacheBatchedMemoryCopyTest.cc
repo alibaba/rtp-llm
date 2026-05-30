@@ -108,6 +108,12 @@ uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t, int local_layer_id) co
 namespace rtp_llm::test {
 namespace {
 
+BlockDependency rootDep(uint32_t ordinal = 0) {
+    BlockDependency dep;
+    dep.ordinal = ordinal;
+    return dep;
+}
+
 ModelConfig makeDsv4ProModelConfig() {
     ModelConfig mc;
     mc.num_layers                   = 61;
@@ -726,6 +732,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeKindRequiredUsesRuntimeNullSlots) {
     for (int gid = 0; gid <= 2; ++gid) {
         resource.mutableBlockIds(gid).setAt(0, static_cast<BlockIdxType>(10 + gid));
     }
+    resource.mutableBlockIds(0).setAt(1, 0);
     resource.mutableBlockIds(6).setAt(1, 66);
 
     const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
@@ -987,6 +994,108 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeD2HMergeSourceKeepsOldSlotsAndOverl
     MemoryOperationResponsePB response;
     ASSERT_TRUE(connector->copyCache(request, response));
     EXPECT_TRUE(response.success());
+    verify_prefix_slot(new_block, state_slots[0], 'O');
+    verify_prefix_slot(new_block, state_slots[1], 'N');
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeCommitConflictMergesDisjointSlotMasks) {
+    auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb                    = 64;
+    kv_config.memory_cache_sync_timeout_ms            = 1000;
+    kv_config.enable_prefix_tree_memory_cache         = true;
+    kv_config.enable_legacy_memory_connector_fallback = false;
+
+    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
+
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
+    ASSERT_TRUE(connector->init());
+    ASSERT_TRUE(connector->usePrefixTreeMemoryCache());
+
+    const auto slots = connector->layerRegionSlots();
+    std::vector<size_t> state_slots;
+    for (size_t i = 0; i < slots.size(); ++i) {
+        if (connector->kindForSlot(slots[i]) == CacheBlockKind::STATE_SWA_KV) {
+            state_slots.push_back(i);
+        }
+    }
+    ASSERT_GE(state_slots.size(), 2u);
+
+    auto blocks = connector->state_swa_pool_->malloc(2);
+    ASSERT_EQ(blocks.size(), 2u);
+    const auto old_block = blocks[0];
+    const auto new_block = blocks[1];
+
+    auto set_prefix_slot = [&](BlockIdxType block, size_t target_slot, char value) {
+        auto buffers = connector->state_swa_pool_->convertIndexToBuffer(/*layer_id=*/0, block);
+        ASSERT_EQ(buffers.size(), 1u);
+        size_t byte_off = 0;
+        for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
+            if (connector->kindForSlot(slots[slot_idx]) != CacheBlockKind::STATE_SWA_KV) {
+                continue;
+            }
+            if (slot_idx == target_slot) {
+                setBlockBytes(buffers[0], byte_off, slots[slot_idx].stride_bytes, value);
+                return;
+            }
+            byte_off += slots[slot_idx].stride_bytes;
+        }
+        FAIL() << "target slot not found";
+    };
+    auto verify_prefix_slot = [&](BlockIdxType block, size_t target_slot, char value) {
+        auto buffers = connector->state_swa_pool_->convertIndexToBuffer(/*layer_id=*/0, block);
+        ASSERT_EQ(buffers.size(), 1u);
+        size_t byte_off = 0;
+        for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
+            if (connector->kindForSlot(slots[slot_idx]) != CacheBlockKind::STATE_SWA_KV) {
+                continue;
+            }
+            if (slot_idx == target_slot) {
+                verifyBlockBytesEq(buffers[0], byte_off, slots[slot_idx].stride_bytes, value);
+                return;
+            }
+            byte_off += slots[slot_idx].stride_bytes;
+        }
+        FAIL() << "target slot not found";
+    };
+
+    setBlockInfosContent(connector->state_swa_pool_->convertIndexToBuffer(/*layer_id=*/0, old_block), 0);
+    setBlockInfosContent(connector->state_swa_pool_->convertIndexToBuffer(/*layer_id=*/0, new_block), 0);
+    set_prefix_slot(old_block, state_slots[0], 'O');
+    set_prefix_slot(new_block, state_slots[1], 'N');
+
+    auto make_mask = [&](size_t target_slot) {
+        std::vector<uint8_t> mask(slots.size(), 0);
+        mask[target_slot] = 1;
+        return mask;
+    };
+
+    KVCacheMemoryConnector::CopyInfoPerKey old_info;
+    old_info.cache_key       = 901;
+    old_info.kind            = CacheBlockKind::STATE_SWA_KV;
+    old_info.backing_type    = CacheBackingType::MEMORY;
+    old_info.mem_block       = old_block;
+    old_info.block_size      = connector->prefixKindBlockSize(CacheBlockKind::STATE_SWA_KV, slots);
+    old_info.slot_valid_mask = make_mask(state_slots[0]);
+    connector->putPrefixToCache(old_info, rootDep(0), slots);
+
+    KVCacheMemoryConnector::CopyInfoPerKey new_info;
+    new_info.cache_key       = 901;
+    new_info.kind            = CacheBlockKind::STATE_SWA_KV;
+    new_info.backing_type    = CacheBackingType::MEMORY;
+    new_info.mem_block       = new_block;
+    new_info.block_size      = connector->prefixKindBlockSize(CacheBlockKind::STATE_SWA_KV, slots);
+    new_info.slot_valid_mask = make_mask(state_slots[1]);
+    connector->putPrefixToCache(new_info, rootDep(0), slots);
+
+    std::vector<uint8_t> required(slots.size(), 0);
+    required[state_slots[0]] = 1;
+    required[state_slots[1]] = 1;
+    auto match = connector->prefix_block_cache_->match(901, CacheBlockKind::STATE_SWA_KV, required);
+    ASSERT_TRUE(match.found);
+    EXPECT_EQ(match.block_index, new_block);
     verify_prefix_slot(new_block, state_slots[0], 'O');
     verify_prefix_slot(new_block, state_slots[1], 'N');
 }

@@ -140,6 +140,30 @@ TEST(SharedBlockCacheTest, PrefixTreeEvictionKeepsCanonicalDependencyWhenLogical
     EXPECT_EQ(evicted.evicted_namespaces.at(8), SharedBlockCache::kGpuCpCanonicalNamespace);
 }
 
+TEST(SharedBlockCacheTest, CanonicalAliasOwnsEvictionWhenLogicalAliasIsOlder) {
+    SharedBlockCache cache;
+    putOne(cache, 100, 1000, rootDep(0), SharedBlockCache::kGpuLogicalNamespace);
+    putOne(cache, 101, 1010, childDep(100, 1), SharedBlockCache::kGpuLogicalNamespace);
+    putOne(cache, 102, 1020, childDep(101, 2), SharedBlockCache::kGpuLogicalNamespace);
+    putOne(cache, 103, 1030, childDep(102, 3), SharedBlockCache::kGpuLogicalNamespace);
+
+    putOne(cache, 101, NULL_BLOCK_IDX, rootDep(0), SharedBlockCache::kGpuCpCanonicalNamespace);
+    putOne(cache, 103, NULL_BLOCK_IDX, childDep(101, 1), SharedBlockCache::kGpuCpCanonicalNamespace);
+
+    auto evicted = cache.selectAndEvict(/*min_blocks=*/1);
+
+    ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{101, 103}));
+    ASSERT_TRUE(evicted.evicted_dependencies.count(101));
+    EXPECT_FALSE(evicted.evicted_dependencies.at(101).has_parent);
+    ASSERT_TRUE(evicted.evicted_dependencies.count(103));
+    EXPECT_TRUE(evicted.evicted_dependencies.at(103).has_parent);
+    EXPECT_EQ(evicted.evicted_dependencies.at(103).parent_key, 101);
+    EXPECT_EQ(evicted.evicted_namespaces.at(101), SharedBlockCache::kGpuCpCanonicalNamespace);
+    EXPECT_EQ(evicted.evicted_namespaces.at(103), SharedBlockCache::kGpuCpCanonicalNamespace);
+    EXPECT_TRUE(cache.contains(100));
+    EXPECT_TRUE(cache.contains(102));
+}
+
 TEST(SharedBlockCacheTest, FlatFallbackKeepsCanonicalDependencyWhenLogicalAliasUpdatesSameKey) {
     SharedBlockCache cache;
     cache.setPrefixTreeEnabled(false);

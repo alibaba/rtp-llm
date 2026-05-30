@@ -80,6 +80,10 @@ static size_t regionIndex(KVCacheRegionName region_name) {
     return static_cast<size_t>(region_name);
 }
 
+static bool isUsableBlockIdx(BlockIdxType block_idx) {
+    return block_idx > 0 && !isNullBlockIdx(block_idx);
+}
+
 KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
                                                const KVCacheConfig&                     kv_cache_config,
                                                const ParallelismConfig&                 parallelism_config,
@@ -796,7 +800,7 @@ KVCacheMemoryConnector::prefixSlotValidMask(const LayerAttnBlockIds&            
             return {};
         }
         const auto& blocks = layer_attn_block_ids[layer][attn]->blocks();
-        if (key_index < blocks.size() && !isNullBlockIdx(blocks[key_index])) {
+        if (key_index < blocks.size() && isUsableBlockIdx(blocks[key_index])) {
             mask[slot_idx] = 1;
         }
     }
@@ -1677,7 +1681,7 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestP
                 continue;
             }
             const auto gpu_block = static_cast<BlockIdxType>(item.gpu_blocks(static_cast<int>(slot_idx)));
-            if (isNullBlockIdx(gpu_block)) {
+            if (!isUsableBlockIdx(gpu_block)) {
                 byte_off += slot.stride_bytes;
                 continue;
             }
@@ -2699,10 +2703,85 @@ void KVCacheMemoryConnector::releasePrefixMergeSource(const CopyInfoPerKey& copy
     }
 }
 
+bool KVCacheMemoryConnector::mergePrefixExistingSlots(PrefixTreeMemoryBlockCache::CacheItem&       item,
+                                                      const PrefixTreeMemoryBlockCache::MatchResult& existing,
+                                                      const std::vector<LayerRegionSlot>&           slots) {
+    if (item.backing_type != CacheBackingType::MEMORY || existing.backing_type != CacheBackingType::MEMORY) {
+        return false;
+    }
+    auto pool = memoryPoolFor(item.kind);
+    if (!pool) {
+        return false;
+    }
+    auto dst_buffers = pool->convertIndexToBuffer(/*layer_id=*/0, item.block_index);
+    auto src_buffers = pool->convertIndexToBuffer(/*layer_id=*/0, existing.block_index);
+    if (dst_buffers.size() != 1u || src_buffers.size() != 1u || dst_buffers[0].addr == nullptr
+        || src_buffers[0].addr == nullptr || dst_buffers[0].size_bytes != src_buffers[0].size_bytes
+        || dst_buffers[0].is_cuda || src_buffers[0].is_cuda) {
+        return false;
+    }
+
+    if (item.slot_valid_mask.size() < existing.slot_valid_mask.size()) {
+        item.slot_valid_mask.resize(existing.slot_valid_mask.size(), 0);
+    }
+
+    size_t byte_off = 0;
+    for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
+        const auto& slot = slots[slot_idx];
+        if (kindForSlot(slot) != item.kind) {
+            continue;
+        }
+        const bool existing_valid =
+            slot_idx < existing.slot_valid_mask.size() && existing.slot_valid_mask[slot_idx] != 0;
+        const bool item_valid = slot_idx < item.slot_valid_mask.size() && item.slot_valid_mask[slot_idx] != 0;
+        if (existing_valid && !item_valid) {
+            if (byte_off + slot.stride_bytes > dst_buffers[0].size_bytes) {
+                return false;
+            }
+            std::memcpy(static_cast<char*>(dst_buffers[0].addr) + byte_off,
+                        static_cast<const char*>(src_buffers[0].addr) + byte_off,
+                        slot.stride_bytes);
+            item.slot_valid_mask[slot_idx] = 1;
+        }
+        byte_off += slot.stride_bytes;
+    }
+    return true;
+}
+
+bool KVCacheMemoryConnector::mergePrefixConflictForCommit(CopyInfoPerKey&                    copy_info,
+                                                          PrefixTreeMemoryBlockCache::CacheItem& item,
+                                                          const std::vector<LayerRegionSlot>& slots) {
+    const auto existing = prefix_block_cache_->matchAndMarkInFlight(copy_info.cache_key, copy_info.kind);
+    if (!existing.found) {
+        return true;
+    }
+
+    auto release_existing = [&]() {
+        auto retired_item = prefix_block_cache_->releaseInFlight(copy_info.cache_key,
+                                                                 copy_info.kind,
+                                                                 existing.backing_type,
+                                                                 existing.block_index,
+                                                                 existing.disk_slot,
+                                                                 existing.generation);
+        if (retired_item.has_value()) {
+            releasePrefixCacheBacking(*retired_item);
+        }
+    };
+
+    if (!slotMaskCoversLocal(item.slot_valid_mask, existing.slot_valid_mask)) {
+        if (!mergePrefixExistingSlots(item, existing, slots)) {
+            release_existing();
+            return false;
+        }
+        copy_info.slot_valid_mask = item.slot_valid_mask;
+    }
+    release_existing();
+    return true;
+}
+
 void KVCacheMemoryConnector::putPrefixToCache(CopyInfoPerKey&                  copy_info,
                                               const BlockDependency&           dependency,
                                               const std::vector<LayerRegionSlot>& slots) {
-    (void)slots;
     PrefixTreeMemoryBlockCache::CacheItem item;
     item.cache_key    = copy_info.cache_key;
     item.kind         = copy_info.kind;
@@ -2726,6 +2805,9 @@ void KVCacheMemoryConnector::putPrefixToCache(CopyInfoPerKey&                  c
             return;
         }
         if (prefix_block_cache_->contains(copy_info.cache_key, copy_info.kind, copy_info.slot_valid_mask)) {
+            break;
+        }
+        if (!mergePrefixConflictForCommit(copy_info, item, slots)) {
             break;
         }
     }

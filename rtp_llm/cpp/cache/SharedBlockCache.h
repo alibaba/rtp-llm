@@ -141,6 +141,8 @@ private:
     void removeTreeAliasLocked(const NamespacedKey& key);
     void removeAllTreeAliasesForCacheKeyLocked(CacheKeyType cache_key);
     void markAllTreeAliasesResidentLocked(CacheKeyType cache_key);
+    void refreshAllTreeAliasesLocked(CacheKeyType cache_key);
+    bool flatItemHasCanonicalDependencyLocked(CacheKeyType cache_key) const;
     bool updateItemDependencyLocked(UnifiedCacheItem& item,
                                     NamespaceId       namespace_id,
                                     const BlockDependency& dependency) const;
