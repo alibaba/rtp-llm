@@ -11,7 +11,11 @@ from rtp_llm.models_py.model_desc.generic_moe import GenericMoeDecoderLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import Embedding, LinearFactory, RMSNorm, RMSResNorm
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import (
+    PyModelInputs,
+    PyModelOutputs,
+    cuda_graph_capture_forward_enabled,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -121,7 +125,16 @@ class GenericMoeMTPModel(GptModelBase):
         clone.pre_fc_norm_embedding = self.pre_fc_norm_embedding
         clone.pre_fc_norm_hidden = self.pre_fc_norm_hidden
         clone.fc = self.fc
-        clone.layers = self.layers
+        clone.layers = nn.ModuleList(
+            [
+                (
+                    layer.clone_for_cuda_graph()
+                    if hasattr(layer, "clone_for_cuda_graph")
+                    else layer
+                )
+                for layer in self.layers
+            ]
+        )
         clone.norm = self.norm
 
         clone.register_buffer("_mtp_hidden_buffer", None, persistent=False)
@@ -187,9 +200,7 @@ class GenericMoeMTPModel(GptModelBase):
             and inputs.attention_inputs.is_s_padded
             and inputs.attention_inputs.is_prefill
         )
-        is_cuda_graph_capture_forward = (
-            os.environ.get("RTP_LLM_CUDA_GRAPH_CAPTURE_FORWARD", "0") != "0"
-        )
+        is_cuda_graph_capture_forward = cuda_graph_capture_forward_enabled()
         is_sp_prefill_cuda_graph = (
             is_sp_prefill_cuda_graph_shape and is_cuda_graph_capture_forward
         )

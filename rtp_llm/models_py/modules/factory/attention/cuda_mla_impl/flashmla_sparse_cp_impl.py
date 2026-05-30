@@ -25,11 +25,11 @@ except (ImportError, AttributeError, ValueError) as _e:
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.factory.attention import common
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.triton_kv_scatter import (
-    triton_kv_scatter,
-)
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_q_indices,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.triton_kv_scatter import (
+    triton_kv_scatter,
 )
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
@@ -120,15 +120,37 @@ def _total_local_ids_are_identity(
 
     valid_restore = (kv_restore_cpu >= 0) & (kv_restore_cpu < padded_total)
     inv_restore = torch.full((padded_total,), -1, dtype=torch.long, device=cpu_device)
-    restore_positions = torch.arange(
-        padded_total, dtype=torch.long, device=cpu_device
-    )
+    restore_positions = torch.arange(padded_total, dtype=torch.long, device=cpu_device)
     inv_restore[kv_restore_cpu[valid_restore]] = restore_positions[valid_restore]
 
     global_padded = inv_restore[source_flat]
     if bool(torch.any((global_padded < 0) | (global_padded >= padded_total)).item()):
         return False
     return bool(torch.all(padding_mask_cpu[global_padded] == 1).item())
+
+
+def _copy_or_replace_graph_tensor(
+    current: Optional[torch.Tensor],
+    new_tensor: Optional[torch.Tensor],
+    name: str,
+    use_cuda_graph: bool,
+) -> Optional[torch.Tensor]:
+    if not use_cuda_graph or current is None:
+        return new_tensor
+    if new_tensor is None:
+        raise RuntimeError(f"{name} became None during CUDA graph replay")
+    if (
+        tuple(current.shape) != tuple(new_tensor.shape)
+        or current.dtype != new_tensor.dtype
+        or current.device != new_tensor.device
+    ):
+        raise RuntimeError(
+            f"{name} shape/dtype/device changed during CUDA graph replay: "
+            f"captured={(tuple(current.shape), current.dtype, current.device)} "
+            f"current={(tuple(new_tensor.shape), new_tensor.dtype, new_tensor.device)}"
+        )
+    current.copy_(new_tensor)
+    return current
 
 
 class SparseMlaFp8CPOp(SparseMlaFp8Op):
@@ -145,6 +167,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         softmax_extra_scale: float,
         top_k: int,
         parallelism_config: Optional[ParallelismConfig] = None,
+        use_cuda_graph: bool = False,
     ):
         super().__init__(
             num_heads=num_heads,
@@ -154,6 +177,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             page_size=page_size,
             softmax_extra_scale=softmax_extra_scale,
             top_k=top_k,
+            use_cuda_graph=use_cuda_graph,
         )
         self.attn_inputs = None
         self.cp_info = None
@@ -170,9 +194,55 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.total_kv_len: int = 0
         self.precomputed_req_ids: Optional[torch.Tensor] = None
         self.full_rope_pos_ids: Optional[torch.Tensor] = None
+        self._fp8_kernel_metadata_q0: Optional[SparseMlaFp8DecodeParams] = None
+        self._fp8_kernel_metadata_q0_key = None
         # Wired up by SparseMlaCpImpl post-construction
         self.kv_cache_write_op = None
         self.write_cache_store_impl = None
+
+    def _refresh_fp8_kernel_metadata(self, n_q: int) -> None:
+        key = (
+            int(n_q) * int(self.num_heads),
+            int(self.top_k),
+            int(self.num_heads),
+            1,
+            True,
+        )
+        if self._fp8_kernel_metadata_q0 is None:
+            tile_sched_q0, num_splits_q0 = get_mla_metadata(  # type: ignore
+                cache_seqlens=None,
+                num_q_tokens_per_head_k=key[0],
+                topk=self.top_k,
+                num_heads_q=self.num_heads,
+                num_heads_k=1,
+                is_fp8_kvcache=True,
+            )
+            self._fp8_kernel_metadata_q0 = SparseMlaFp8DecodeParams(
+                tile_sched_q0, num_splits_q0
+            )
+            self._fp8_kernel_metadata_q0_key = key
+            return
+
+        if self.use_cuda_graph:
+            if self._fp8_kernel_metadata_q0_key != key:
+                raise RuntimeError(
+                    "CP sparse MLA CUDA graph replay changed scheduler shape: "
+                    f"captured={self._fp8_kernel_metadata_q0_key}, current={key}"
+                )
+            return
+
+        tile_sched_q0, num_splits_q0 = get_mla_metadata(  # type: ignore
+            cache_seqlens=None,
+            num_q_tokens_per_head_k=key[0],
+            topk=self.top_k,
+            num_heads_q=self.num_heads,
+            num_heads_k=1,
+            is_fp8_kvcache=True,
+        )
+        self._fp8_kernel_metadata_q0 = SparseMlaFp8DecodeParams(
+            tile_sched_q0, num_splits_q0
+        )
+        self._fp8_kernel_metadata_q0_key = key
 
     def plan(
         self,
@@ -228,33 +298,46 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.total_kv_len = mla_params.cp_total_kv_len
 
         n_q = self.total_global_ids.size(0)
-        tile_sched_q0, num_splits_q0 = get_mla_metadata(  # type: ignore
-            cache_seqlens=None,
-            num_q_tokens_per_head_k=n_q * self.num_heads,
-            topk=self.top_k,
-            num_heads_q=self.num_heads,
-            num_heads_k=1,
-            is_fp8_kvcache=True,
-        )
-        self._fp8_kernel_metadata_q0 = SparseMlaFp8DecodeParams(
-            tile_sched_q0, num_splits_q0
-        )
-        self.precomputed_req_ids = (
+        self._refresh_fp8_kernel_metadata(n_q)
+        new_req_ids = (
             mla_params.batch_indice_d[self.total_global_ids] if n_q > 0 else None
+        )
+        self.precomputed_req_ids = _copy_or_replace_graph_tensor(
+            self.precomputed_req_ids,
+            new_req_ids,
+            "CP sparse MLA precomputed_req_ids",
+            self.use_cuda_graph,
         )
 
         # Pack rope positions for the local q tokens into the full buffer; the
         # rope path consumes this as precomputed_pos_ids.
         if n_q > 0:
             positions_d = mla_params.positions_d
-            full_rope = torch.zeros(
-                positions_d.size(0),
-                dtype=positions_d.dtype,
-                device=positions_d.device,
-            )
+            if self.use_cuda_graph and self.full_rope_pos_ids is not None:
+                if (
+                    self.full_rope_pos_ids.size(0) != positions_d.size(0)
+                    or self.full_rope_pos_ids.dtype != positions_d.dtype
+                    or self.full_rope_pos_ids.device != positions_d.device
+                ):
+                    raise RuntimeError(
+                        "CP sparse MLA full_rope_pos_ids shape/dtype/device changed "
+                        "during CUDA graph replay"
+                    )
+                full_rope = self.full_rope_pos_ids
+                full_rope.zero_()
+            else:
+                full_rope = torch.zeros(
+                    positions_d.size(0),
+                    dtype=positions_d.dtype,
+                    device=positions_d.device,
+                )
             full_rope[self.total_local_ids] = positions_d[self.total_global_ids]
             self.full_rope_pos_ids = full_rope
         else:
+            if self.use_cuda_graph and self.full_rope_pos_ids is not None:
+                raise RuntimeError(
+                    "CP sparse MLA full_rope_pos_ids became None during CUDA graph replay"
+                )
             self.full_rope_pos_ids = None
 
         # Gather path: prefill-only, gated by USE_GATHER_PATH (mirrors non-CP).
@@ -262,6 +345,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             os.environ.get("USE_GATHER_PATH", "0") == "1"
             and attn_inputs is not None
             and getattr(attn_inputs, "is_prefill", False)
+            and not self.use_cuda_graph
         )
         self._gather = self._build_gather_workspace() if gather_enabled else None
 
@@ -507,6 +591,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
         attn_for_prepare = copy.copy(attn_inputs)
         attn_for_prepare.input_lengths = cp_info.prefill_actual_input_lengths_cpu
         super().prepare(attn_for_prepare, forbid_realloc=forbid_realloc)
+        self._refresh_cp_params(use_cuda_graph=forbid_realloc)
 
     @staticmethod
     def fmha_type() -> FMHAType:
@@ -527,13 +612,17 @@ class SparseMlaCpImpl(SparseMlaImpl):
         self.rope_params = self.fmha_params
         self.prepare(attn_inputs)
 
+    def _refresh_cp_params(self, use_cuda_graph: bool = False):
+        if self.fmha_params is None:
+            return
+
         gid = self.fmha_impl.total_global_ids
         has_tokens = gid is not None and gid.size(0) > 0
 
         def _pick(t):
             return t[gid] if has_tokens else None
 
-        self.cp_params = SimpleNamespace(
+        new_params = dict(
             kv_restore_unpad_indices=self.fmha_impl.kv_restore_unpad_indices,
             total_global_ids=gid,
             total_local_ids=self.fmha_impl.total_local_ids,
@@ -546,6 +635,35 @@ class SparseMlaCpImpl(SparseMlaImpl):
             precomputed_topk_off=_pick(self.fmha_params.topk_indices_offset),
             precomputed_req_ids=self.fmha_impl.precomputed_req_ids,
         )
+
+        if self.cp_params is None or not use_cuda_graph:
+            self.cp_params = SimpleNamespace(**new_params)
+            return
+
+        tensor_fields = (
+            "kv_restore_unpad_indices",
+            "total_global_ids",
+            "total_local_ids",
+            "cu_kv_seqlens_global",
+            "full_rope_pos_ids",
+            "precomputed_ks",
+            "precomputed_ke",
+            "precomputed_lengths",
+            "precomputed_topk_off",
+            "precomputed_req_ids",
+        )
+        for name in tensor_fields:
+            setattr(
+                self.cp_params,
+                name,
+                _copy_or_replace_graph_tensor(
+                    getattr(self.cp_params, name, None),
+                    new_params[name],
+                    f"CP sparse MLA cp_params.{name}",
+                    True,
+                ),
+            )
+        self.cp_params.total_kv_len = new_params["total_kv_len"]
 
     def forward(
         self,

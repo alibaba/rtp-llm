@@ -16,14 +16,22 @@ namespace rtp_llm {
 
 namespace {
 
-bool asyncDebugEnabled() {
+const bool kAsyncDebugEnabled = []() {
     const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
-    return env != nullptr && std::string(env) == "1";
+    return env != nullptr && std::strcmp(env, "1") == 0;
+}();
+
+const bool kPdDebugEnabled = []() {
+    const char* env = std::getenv("RTP_LLM_PD_DEBUG");
+    return env != nullptr && std::strcmp(env, "1") == 0;
+}();
+
+bool asyncDebugEnabled() {
+    return kAsyncDebugEnabled;
 }
 
 bool pdDebugEnabled() {
-    const char* env = std::getenv("RTP_LLM_PD_DEBUG");
-    return env != nullptr && std::string(env) == "1";
+    return kPdDebugEnabled;
 }
 
 std::string tensorSummary(const torch::Tensor& tensor, int64_t limit = 4) {
@@ -72,6 +80,7 @@ struct GatherModelInputContext {
     int*         mm_features_locs;
     int          token_idx;
     int          mm_feature_index;
+    BlockIdPair* kv_cache_update_mapping_end;
 };
 
 enum class GatherContextMode {
@@ -108,10 +117,23 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
         ctx.mm_feature_index        = 0;
         kv_cache_mapping_offset     = stream_groups.decodeBlockUpdateCopyNum();
     }
-    ctx.kv_cache_update_mapping =
-        model_input.kv_cache_update_mapping.defined() ?
-            reinterpret_cast<BlockIdPair*>(model_input.kv_cache_update_mapping.data_ptr()) + kv_cache_mapping_offset :
-            nullptr;
+    if (model_input.kv_cache_update_mapping.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_update_mapping.dim() == 2
+                                    && model_input.kv_cache_update_mapping.size(1) == 2,
+                                "kv_cache_update_mapping must be [N,2], got dim=%ld",
+                                model_input.kv_cache_update_mapping.dim());
+        const size_t total_pairs = static_cast<size_t>(model_input.kv_cache_update_mapping.size(0));
+        RTP_LLM_CHECK_WITH_INFO(kv_cache_mapping_offset <= total_pairs,
+                                "kv_cache_update_mapping offset overflow: offset=%zu total_pairs=%zu",
+                                kv_cache_mapping_offset,
+                                total_pairs);
+        auto* base                  = reinterpret_cast<BlockIdPair*>(model_input.kv_cache_update_mapping.data_ptr());
+        ctx.kv_cache_update_mapping = base + kv_cache_mapping_offset;
+        ctx.kv_cache_update_mapping_end = base + total_pairs;
+    } else {
+        ctx.kv_cache_update_mapping     = nullptr;
+        ctx.kv_cache_update_mapping_end = nullptr;
+    }
 
     if (ctx.merged_text_mask) {
         size_t current_tokens_size = stream_groups.modelExecuteTokenSize();
@@ -134,20 +156,61 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
                             "hybrid kv_cache_kernel_block_id must be 3-D");
     RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_block_id.dim() == 3, "hybrid kv_cache_block_id must be 3-D");
 
+    const size_t group           = model_input.kv_cache_kernel_block_id.size(0);
     const size_t batch           = model_input.kv_cache_kernel_block_id.size(1);
+    const size_t kernel_capacity = model_input.kv_cache_kernel_block_id.size(2);
+    const size_t store_capacity  = model_input.kv_cache_block_id.size(2);
     int32_t*     kernel_dst_base = model_input.kv_cache_kernel_block_id.data_ptr<int32_t>();
     int32_t*     store_dst_base  = model_input.kv_cache_block_id.data_ptr<int32_t>();
 
+    RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_block_id.size(0) == static_cast<int64_t>(group)
+                                && model_input.kv_cache_block_id.size(1) == static_cast<int64_t>(batch),
+                            "kv cache block tensors shape mismatch: kernel=[%ld,%ld,%ld] physical=[%ld,%ld,%ld]",
+                            model_input.kv_cache_kernel_block_id.size(0),
+                            model_input.kv_cache_kernel_block_id.size(1),
+                            model_input.kv_cache_kernel_block_id.size(2),
+                            model_input.kv_cache_block_id.size(0),
+                            model_input.kv_cache_block_id.size(1),
+                            model_input.kv_cache_block_id.size(2));
+    RTP_LLM_CHECK_WITH_INFO(model_batch_idx >= 0 && static_cast<size_t>(model_batch_idx) < batch,
+                            "model_batch_idx overflow: model_batch_idx=%d batch=%zu",
+                            model_batch_idx,
+                            batch);
+    RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(kv_cache.groupNums()) <= group,
+                            "kv_cache group overflow: kv_cache.groupNums=%d dst_group=%zu",
+                            kv_cache.groupNums(),
+                            group);
+    RTP_LLM_CHECK_WITH_INFO(kernel_capacity >= max_blocks_num * kernel_blocks_per_kv_block,
+                            "kv_cache_kernel_block_id capacity too small: capacity=%zu required=%zu",
+                            kernel_capacity,
+                            max_blocks_num * kernel_blocks_per_kv_block);
+    RTP_LLM_CHECK_WITH_INFO(store_capacity >= max_blocks_num,
+                            "kv_cache_block_id capacity too small: capacity=%zu required=%zu",
+                            store_capacity,
+                            max_blocks_num);
+
     for (int gid = 0; gid < kv_cache.groupNums(); ++gid) {
-        auto&    kernel_blocks = kv_cache.kernelBlocks(stream_batch_idx, gid);
-        int32_t* kernel_dst    = kernel_dst_base
-                              + (static_cast<size_t>(gid) * batch + static_cast<size_t>(model_batch_idx))
-                                    * max_blocks_num * kernel_blocks_per_kv_block;
+        auto& kernel_blocks = kv_cache.kernelBlocks(stream_batch_idx, gid);
+        RTP_LLM_CHECK_WITH_INFO(kernel_blocks.size() <= kernel_capacity,
+                                "kernel block copy overflow: gid=%d stream_batch_idx=%d size=%zu capacity=%zu",
+                                gid,
+                                stream_batch_idx,
+                                kernel_blocks.size(),
+                                kernel_capacity);
+        int32_t* kernel_dst =
+            kernel_dst_base
+            + (static_cast<size_t>(gid) * batch + static_cast<size_t>(model_batch_idx)) * kernel_capacity;
         std::memcpy(kernel_dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
 
-        auto&    physical_blocks = kv_cache.blocks(stream_batch_idx, gid);
+        auto& physical_blocks = kv_cache.blocks(stream_batch_idx, gid);
+        RTP_LLM_CHECK_WITH_INFO(physical_blocks.size() <= store_capacity,
+                                "physical block copy overflow: gid=%d stream_batch_idx=%d size=%zu capacity=%zu",
+                                gid,
+                                stream_batch_idx,
+                                physical_blocks.size(),
+                                store_capacity);
         int32_t* store_dst =
-            store_dst_base + (static_cast<size_t>(gid) * batch + static_cast<size_t>(model_batch_idx)) * max_blocks_num;
+            store_dst_base + (static_cast<size_t>(gid) * batch + static_cast<size_t>(model_batch_idx)) * store_capacity;
         std::memcpy(store_dst, physical_blocks.data(), physical_blocks.size() * sizeof(int32_t));
     }
 }
@@ -186,6 +249,10 @@ void addCacheUpdateCopy(GatherModelInputContext& ctx, const std::vector<BlockIdP
         return;
     }
     size_t update_copy_num = update_mapping.size();
+    RTP_LLM_CHECK_WITH_INFO(ctx.kv_cache_update_mapping + update_copy_num <= ctx.kv_cache_update_mapping_end,
+                            "kv_cache_update_mapping overflow: update_copy_num=%zu remaining=%zu",
+                            update_copy_num,
+                            static_cast<size_t>(ctx.kv_cache_update_mapping_end - ctx.kv_cache_update_mapping));
     std::memcpy(ctx.kv_cache_update_mapping, update_mapping.data(), update_copy_num * sizeof(BlockIdPair));
     ctx.kv_cache_update_mapping += update_copy_num;
 }
@@ -329,14 +396,24 @@ void NormalModelInputGatherer::initializeKvCacheMetadata(GptModelInputs& model_i
                                 dst_numel,
                                 src_numel,
                                 config_.num_layers);
-        std::memcpy(model_input.kv_cache_layer_to_group.data_ptr(),
-                    config_.layer_to_kv_cache_group_id.data(),
-                    src_numel * sizeof(int32_t));
+        auto* dst = model_input.kv_cache_layer_to_group.data_ptr<int32_t>();
+        std::fill(dst, dst + dst_numel, 0);
+        if (src_numel > 0) {
+            std::memcpy(dst, config_.layer_to_kv_cache_group_id.data(), src_numel * sizeof(int32_t));
+        }
     }
     if (model_input.kv_cache_group_types.defined()) {
         auto* dst = model_input.kv_cache_group_types.data_ptr<int32_t>();
-        for (size_t g = 0; g < config_.kv_cache_group_nums; ++g) {
-            dst[g] = static_cast<int32_t>(config_.kv_cache_group_types[g]);
+        if (config_.kv_cache_group_types.empty()) {
+            std::fill(dst, dst + config_.kv_cache_group_nums, static_cast<int32_t>(CacheGroupType::FULL));
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(config_.kv_cache_group_types.size() >= config_.kv_cache_group_nums,
+                                    "kv_cache_group_types overflow: group_types=%zu kv_cache_group_nums=%zu",
+                                    config_.kv_cache_group_types.size(),
+                                    config_.kv_cache_group_nums);
+            for (size_t g = 0; g < config_.kv_cache_group_nums; ++g) {
+                dst[g] = static_cast<int32_t>(config_.kv_cache_group_types[g]);
+            }
         }
     }
 }

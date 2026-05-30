@@ -16,6 +16,7 @@ class Executor {
 public:
     Executor() {};
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) = 0;
+    virtual void         notifyStop() {}
 
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,

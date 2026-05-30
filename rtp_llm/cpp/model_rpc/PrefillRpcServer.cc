@@ -10,10 +10,10 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <cstring>
 #include <strings.h>
-#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -111,13 +111,13 @@ struct TheoryHitWindowSnapshot {
 };
 
 struct TheoryHitStatsSnapshot {
-    int64_t now_ms              = 0;
-    int64_t request_hit_count   = 0;
-    int64_t request_total_count = 0;
-    double  request_hit_ratio   = 0.0;
-    int64_t all_hit_count       = 0;
-    int64_t all_total_count     = 0;
-    double  all_hit_ratio       = 0.0;
+    int64_t                 now_ms              = 0;
+    int64_t                 request_hit_count   = 0;
+    int64_t                 request_total_count = 0;
+    double                  request_hit_ratio   = 0.0;
+    int64_t                 all_hit_count       = 0;
+    int64_t                 all_total_count     = 0;
+    double                  all_hit_ratio       = 0.0;
     TheoryHitWindowSnapshot window_1m;
     TheoryHitWindowSnapshot window_5m;
     TheoryHitWindowSnapshot window_10m;
@@ -134,10 +134,10 @@ public:
 
     TheoryHitStatsSnapshot record(int64_t hit_count, int64_t total_count) {
         std::lock_guard<std::mutex> lock(mutex_);
-        const int64_t now_ms         = autil::TimeUtility::currentTimeInMilliSeconds();
-        const int64_t current_second = now_ms / 1000;
-        const int64_t safe_hit       = std::max<int64_t>(0, hit_count);
-        const int64_t safe_total     = std::max<int64_t>(0, total_count);
+        const int64_t               now_ms         = autil::TimeUtility::currentTimeInMilliSeconds();
+        const int64_t               current_second = now_ms / 1000;
+        const int64_t               safe_hit       = std::max<int64_t>(0, hit_count);
+        const int64_t               safe_total     = std::max<int64_t>(0, total_count);
 
         if (safe_total > 0) {
             const size_t index = static_cast<size_t>(current_second % kBucketCount);
@@ -172,8 +172,8 @@ private:
 
     TheoryHitWindowSnapshot windowSnapshot(const char* label, int64_t window_ms, int64_t current_second) const {
         TheoryHitWindowSnapshot snapshot;
-        snapshot.label     = label;
-        snapshot.window_ms = window_ms;
+        snapshot.label               = label;
+        snapshot.window_ms           = window_ms;
         const int64_t window_seconds = window_ms / 1000;
         for (size_t i = 0; i < kBucketCount; ++i) {
             const int64_t age_seconds = current_second - bucket_seconds_[i];
@@ -213,12 +213,7 @@ std::string formatTheoryTimestampMs(int64_t timestamp_ms) {
     }
 
     char output[96];
-    snprintf(output,
-             sizeof(output),
-             "%s.%03ld%s",
-             date_buffer,
-             static_cast<long>(timestamp_ms % 1000),
-             offset_buffer);
+    snprintf(output, sizeof(output), "%s.%03ld%s", date_buffer, static_cast<long>(timestamp_ms % 1000), offset_buffer);
     return output;
 }
 
@@ -248,37 +243,24 @@ void appendPrefillTheoryHitLogLine(const std::string& line) {
     log_file.flush();
 }
 
-std::string formatPrefillTheoryHitLogLine(PrefillGenerateContext& prefill_context,
-                                          int64_t                 token_num,
-                                          int                     seq_size_per_block,
+std::string formatPrefillTheoryHitLogLine(PrefillGenerateContext&       prefill_context,
+                                          int64_t                       token_num,
+                                          int                           seq_size_per_block,
                                           const TheoryHitStatsSnapshot& snapshot) {
     std::ostringstream oss;
-    oss << std::fixed << std::setprecision(6)
-        << "time=" << formatTheoryTimestampMs(snapshot.now_ms)
-        << " ts_ms=" << snapshot.now_ms
-        << " source=prefill"
-        << " request_id=" << prefill_context.request_id
-        << " request_key=" << prefill_context.request_key
-        << " token_num=" << token_num
-        << " seq_size_per_block=" << seq_size_per_block
-        << " request_hit=" << snapshot.request_hit_count
-        << " request_total=" << snapshot.request_total_count
-        << " request_ratio=" << snapshot.request_hit_ratio
-        << " all_hit=" << snapshot.all_hit_count
-        << " all_total=" << snapshot.all_total_count
-        << " all_ratio=" << snapshot.all_hit_ratio
-        << " win1m_hit=" << snapshot.window_1m.hit_count
-        << " win1m_total=" << snapshot.window_1m.total_count
-        << " win1m_ratio=" << snapshot.window_1m.hit_ratio
-        << " win5m_hit=" << snapshot.window_5m.hit_count
-        << " win5m_total=" << snapshot.window_5m.total_count
-        << " win5m_ratio=" << snapshot.window_5m.hit_ratio
-        << " win10m_hit=" << snapshot.window_10m.hit_count
-        << " win10m_total=" << snapshot.window_10m.total_count
-        << " win10m_ratio=" << snapshot.window_10m.hit_ratio
-        << " win15m_hit=" << snapshot.window_15m.hit_count
-        << " win15m_total=" << snapshot.window_15m.total_count
-        << " win15m_ratio=" << snapshot.window_15m.hit_ratio;
+    oss << std::fixed << std::setprecision(6) << "time=" << formatTheoryTimestampMs(snapshot.now_ms)
+        << " ts_ms=" << snapshot.now_ms << " source=prefill"
+        << " request_id=" << prefill_context.request_id << " request_key=" << prefill_context.request_key
+        << " token_num=" << token_num << " seq_size_per_block=" << seq_size_per_block
+        << " request_hit=" << snapshot.request_hit_count << " request_total=" << snapshot.request_total_count
+        << " request_ratio=" << snapshot.request_hit_ratio << " all_hit=" << snapshot.all_hit_count
+        << " all_total=" << snapshot.all_total_count << " all_ratio=" << snapshot.all_hit_ratio
+        << " win1m_hit=" << snapshot.window_1m.hit_count << " win1m_total=" << snapshot.window_1m.total_count
+        << " win1m_ratio=" << snapshot.window_1m.hit_ratio << " win5m_hit=" << snapshot.window_5m.hit_count
+        << " win5m_total=" << snapshot.window_5m.total_count << " win5m_ratio=" << snapshot.window_5m.hit_ratio
+        << " win10m_hit=" << snapshot.window_10m.hit_count << " win10m_total=" << snapshot.window_10m.total_count
+        << " win10m_ratio=" << snapshot.window_10m.hit_ratio << " win15m_hit=" << snapshot.window_15m.hit_count
+        << " win15m_total=" << snapshot.window_15m.total_count << " win15m_ratio=" << snapshot.window_15m.hit_ratio;
     return oss.str();
 }
 
@@ -421,7 +403,7 @@ void fillPrefillRecentCacheKeyMetricsCollector(PrefillRecentCacheKeyMetricsColle
 }
 
 void fillPrefillTheoryHitMetricsCollector(PrefillRecentCacheKeyMetricsCollector& collector,
-                                          const TheoryHitStatsSnapshot& snapshot) {
+                                          const TheoryHitStatsSnapshot&          snapshot) {
     if (snapshot.all_total_count <= 0) {
         return;
     }
@@ -442,6 +424,14 @@ void fillPrefillTheoryHitMetricsCollector(PrefillRecentCacheKeyMetricsCollector&
     collector.theory_15m_total_count = snapshot.window_15m.total_count;
     collector.theory_15m_hit_ratio   = snapshot.window_15m.hit_ratio;
 }
+
+// REBASE CONFLICT CONTEXT(cdc1b18b6): keep the new base prefill cache-hit
+// metric helpers above and also retain the source branch remote-RPC role check
+// used by GLM5 MTP prefill.
+const bool kHasRemoteRpcServerIp = []() {
+    const char* env = std::getenv("REMOTE_RPC_SERVER_IP");
+    return env != nullptr && std::strlen(env) > 0;
+}();
 
 }  // namespace
 
@@ -497,7 +487,7 @@ void fillPrefillTheoryHitMetricsCollector(PrefillRecentCacheKeyMetricsCollector&
         if (prefill_context.getStream()) {                                                                             \
             prefill_context.getStream()->reportEvent(StreamEvents::Error, new_error_code, new_error_msg);              \
         }                                                                                                              \
-        prefill_context.error_info   = ErrorInfo(new_error_code, new_error_msg);                                       \
+        prefill_context.error_info = ErrorInfo(new_error_code, new_error_msg);                                         \
         prefill_context.error_status =                                                                                 \
             serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);  \
         logPrefillFailureTrace("client_grpc_error", prefill_context);                                                  \
@@ -543,7 +533,7 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
-    auto input = QueryConverter::transQuery(prefill_context.rpc_context.request);
+    auto input                   = QueryConverter::transQuery(prefill_context.rpc_context.request);
     prefill_context.request_info = input->request_info;
     if (applyTimelineGate(prefill_context.request_key,
                           input->generate_config->gen_timeline,
@@ -573,8 +563,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     }
 
     // If no host specified in request, check if there's a master role
-    char* remote_rpc_server_ip_env = std::getenv("REMOTE_RPC_SERVER_IP");
-    bool  has_master_role          = (remote_rpc_server_ip_env != nullptr && strlen(remote_rpc_server_ip_env) > 0);
+    bool has_master_role = kHasRemoteRpcServerIp;
 
     // If no host specified in request and no master role, this is a direct prefill request
     // In this case, we still need to select decode machines as specified in the requirements
@@ -597,11 +586,11 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     auto decode_addr    = host->ip + ":" + std::to_string(host->rpc_port);
     auto connect_status = resource_.rpc_pool.getConnection(decode_addr);
     if (!connect_status.ok()) {
-        prefill_context.error_info   = ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
+        prefill_context.error_info = ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
                                                "get grpc connection for decode addr " + decode_addr + " failed");
         prefill_context.error_status =
             serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
-        prefill_context.decode_addr  = decode_addr;
+        prefill_context.decode_addr = decode_addr;
         logPrefillFailureTrace("get_rpc_connection_failed", prefill_context);
         return;
     }
@@ -899,10 +888,8 @@ void PrefillRpcServer::reportPrefillRecentCacheKeyMetricsOnce(PrefillGenerateCon
     static TheoryHitStats theory_stats;
     auto theory_snapshot = theory_stats.record(snapshot.request_hit_occurrences, snapshot.request_occurrences);
     if (theory_snapshot.request_total_count > 0) {
-        appendPrefillTheoryHitLogLine(formatPrefillTheoryHitLogLine(prefill_context,
-                                                                    prefill_context.generate_input->input_ids.numel(),
-                                                                    seq_size_per_block,
-                                                                    theory_snapshot));
+        appendPrefillTheoryHitLogLine(formatPrefillTheoryHitLogLine(
+            prefill_context, prefill_context.generate_input->input_ids.numel(), seq_size_per_block, theory_snapshot));
     }
 
     if (metrics_reporter_) {
@@ -949,21 +936,23 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                          && request->generate_config().num_return_sequences() <= 1
                          && request->generate_config().can_use_pd_separation();
     if (prefillTraceLogEnabled()) {
-        RTP_LLM_LOG_INFO("Prefill request trace: event=recv request_id=%ld pd_separation=%d token_ids=%d "
-                         "max_new_tokens=%d num_beams=%d num_return_sequences=%d can_use_pd_separation=%d timeout_ms=%ld",
-                         request->request_id(),
-                         pd_separation,
-                         request->token_ids_size(),
-                         request->generate_config().max_new_tokens(),
-                         request->generate_config().num_beams(),
-                         request->generate_config().num_return_sequences(),
-                         request->generate_config().can_use_pd_separation(),
-                         request->generate_config().timeout_ms());
+        RTP_LLM_LOG_INFO(
+            "Prefill request trace: event=recv request_id=%ld pd_separation=%d token_ids=%d "
+            "max_new_tokens=%d num_beams=%d num_return_sequences=%d can_use_pd_separation=%d timeout_ms=%ld",
+            request->request_id(),
+            pd_separation,
+            request->token_ids_size(),
+            request->generate_config().max_new_tokens(),
+            request->generate_config().num_beams(),
+            request->generate_config().num_return_sequences(),
+            request->generate_config().can_use_pd_separation(),
+            request->generate_config().timeout_ms());
     }
     if (!pd_separation) {
         if (prefillTraceLogEnabled()) {
             RTP_LLM_LOG_INFO("Prefill request trace: event=bypass_local request_id=%ld token_ids=%d",
-                             request->request_id(), request->token_ids_size());
+                             request->request_id(),
+                             request->token_ids_size());
         }
         return LocalRpcServer::GenerateStreamCall(server_context, request, writer);
     }

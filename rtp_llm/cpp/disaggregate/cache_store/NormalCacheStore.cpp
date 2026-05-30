@@ -15,9 +15,27 @@ namespace rtp_llm {
 
 namespace {
 
-bool pdDebugEnabled() {
+const bool kPdDebugEnabled = []() {
     const char* env = std::getenv("RTP_LLM_PD_DEBUG");
     return env != nullptr && std::string(env) == "1";
+}();
+
+const size_t kTcpLoadMaxInflightChunks = []() {
+    constexpr size_t kDefaultMaxInflightChunks = 1;
+    const char*      env                       = std::getenv("CACHE_STORE_TCP_LOAD_MAX_INFLIGHT_CHUNKS");
+    if (env == nullptr || std::strlen(env) == 0) {
+        return kDefaultMaxInflightChunks;
+    }
+    char* end = nullptr;
+    auto  val = std::strtoull(env, &end, 10);
+    if (end == env || val == 0) {
+        return kDefaultMaxInflightChunks;
+    }
+    return static_cast<size_t>(val);
+}();
+
+bool pdDebugEnabled() {
+    return kPdDebugEnabled;
 }
 
 std::string summarizeBlocks(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer, size_t limit = 3) {
@@ -124,17 +142,7 @@ size_t tcpLoadMaxInflightChunks() {
     // load fanout is dp_size * request_concurrency * this value per prefill
     // rank. Keep the default at one rolling chunk per context so large
     // 20-40MiB TCP responses do not overrun the prefill RPC worker pool.
-    constexpr size_t kDefaultMaxInflightChunks = 1;
-    const char*      env                       = std::getenv("CACHE_STORE_TCP_LOAD_MAX_INFLIGHT_CHUNKS");
-    if (env == nullptr || std::strlen(env) == 0) {
-        return kDefaultMaxInflightChunks;
-    }
-    char* end = nullptr;
-    auto  val = std::strtoull(env, &end, 10);
-    if (end == env || val == 0) {
-        return kDefaultMaxInflightChunks;
-    }
-    return static_cast<size_t>(val);
+    return kTcpLoadMaxInflightChunks;
 }
 
 }  // namespace

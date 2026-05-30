@@ -14,16 +14,20 @@ namespace speculative {
 
 namespace {
 
+const bool kDebugMtpAcceptEnabled = []() {
+    const char* env = std::getenv("RTP_LLM_DEBUG_MTP_ACCEPT");
+    return env != nullptr && std::string(env) != "0";
+}();
+
 bool debugMtpAcceptEnabled() {
-    static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_DEBUG_MTP_ACCEPT");
-        const bool  on  = env != nullptr && std::string(env) != "0";
-        if (on) {
+    static const bool logged = []() {
+        if (kDebugMtpAcceptEnabled) {
             RTP_LLM_LOG_WARNING("[debug-mtp-accept] enabled; this copies small sampler tensors to host");
         }
-        return on;
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kDebugMtpAcceptEnabled;
 }
 
 std::string debugTensorSummary(const torch::Tensor& tensor, int64_t limit = 24) {

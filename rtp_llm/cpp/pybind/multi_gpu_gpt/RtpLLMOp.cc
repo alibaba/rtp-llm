@@ -131,7 +131,6 @@ void RtpLLMOp::init(py::object model,
                                       std::move(mm_process_engine),
                                       std::move(propose_params),
                                       std::move(token_processor));
-    grpc_server_thread_.detach();
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
     }
@@ -288,18 +287,17 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                              py::object                                    token_processor) {
     std::string server_address;
-    int64_t     http_port                 = 0;
-    int64_t     model_rpc_port            = 0;
-    bool        start_grpc_before_init    = false;
+    int64_t     http_port              = 0;
+    int64_t     model_rpc_port         = 0;
+    bool        start_grpc_before_init = false;
     {
         pybind11::gil_scoped_acquire acquire;
-        http_port                          = maga_init_params.server_config.attr("http_port").cast<int64_t>();
-        model_rpc_port                     = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
-        auto role_type                     = maga_init_params.pd_sep_config.role_type;
-        start_grpc_before_init             = model_rpc_port >= 0
-                                 && autil::EnvUtil::getEnv("RTP_LLM_CROSS_NODE_CPU_TP_BROADCAST", false)
-                                 && maga_init_params.parallelism_config.tp_size
-                                        > maga_init_params.parallelism_config.local_world_size;
+        http_port      = maga_init_params.server_config.attr("http_port").cast<int64_t>();
+        model_rpc_port = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
+        auto role_type = maga_init_params.pd_sep_config.role_type;
+        start_grpc_before_init =
+            model_rpc_port >= 0 && autil::EnvUtil::getEnv("RTP_LLM_CROSS_NODE_CPU_TP_BROADCAST", false)
+            && maga_init_params.parallelism_config.tp_size > maga_init_params.parallelism_config.local_world_size;
         // NOTE: ip/ip段可自定义为所需范围。
         server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
         if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
@@ -349,7 +347,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     RTP_LLM_LOG_INFO("Server listening on %s", server_address.c_str());
     if (start_grpc_before_init) {
         pybind11::gil_scoped_acquire acquire;
-        grpc::Status grpc_status =
+        grpc::Status                 grpc_status =
             model_rpc_service_->init(maga_init_params, std::move(mm_process_engine), std::move(propose_params));
         if (!grpc_status.ok()) {
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
@@ -384,7 +382,8 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
 
 void RtpLLMOp::stop() {
     int64_t STOP_TIMEOUT_MS = 60 * 1000;
-    if (!is_server_shutdown_) {
+    bool    expected        = false;
+    if (is_server_shutdown_.compare_exchange_strong(expected, true)) {
         if (grpc_server_) {
             auto begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
             while (auto onflight_request = model_rpc_service_->onflightRequestNum()) {
@@ -397,6 +396,11 @@ void RtpLLMOp::stop() {
             }
             RTP_LLM_LOG_INFO("Server shutdowning");
             grpc_server_->Shutdown();
+        }
+        if (grpc_server_thread_.joinable()) {
+            grpc_server_thread_.join();
+        }
+        if (grpc_server_) {
             grpc_server_.reset();
         }
         if (model_rpc_service_) {
@@ -409,7 +413,6 @@ void RtpLLMOp::stop() {
             http_server_->stop();
             http_server_.reset();
         }
-        is_server_shutdown_ = true;
         stopKmonitorFactory();
     }
 }

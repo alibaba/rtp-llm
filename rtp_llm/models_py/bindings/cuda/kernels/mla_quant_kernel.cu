@@ -155,8 +155,10 @@ cp_gather_indexer_k_quant_cache_kernel(const char* __restrict__ kv_cache,  // [n
     const int     token_idx = blockIdx.x * blockDim.y + threadIdx.y;
     const int     head_idx  = (blockIdx.y * blockDim.x + threadIdx.x) * VEC_SIZE;
 
-    // Find batch index within a block
+    // CUDA graph replay may reuse a graph captured with a larger dst_k capacity
+    // than the current cu_seq_lens. Leave unmatched capacity rows idle.
     __shared__ int batch_idx[BLOCK_Y_SIZE];
+    batch_idx[threadIdx.y] = -1;
     for (int iter = 0; iter < (batch_size + blockDim.x - 1) / blockDim.x; iter++) {
         int tid = iter * blockDim.x + threadIdx.x;
         if (tid < batch_size) {
@@ -170,7 +172,7 @@ cp_gather_indexer_k_quant_cache_kernel(const char* __restrict__ kv_cache,  // [n
 
     __syncwarp();
 
-    if (head_idx >= head_dim || token_idx >= num_tokens) {
+    if (head_idx >= head_dim || token_idx >= num_tokens || batch_idx[threadIdx.y] < 0) {
         return;
     }
     const int     inbatch_seq_idx = token_idx - cu_seq_lens[batch_idx[threadIdx.y]];

@@ -78,9 +78,17 @@ static bool g_enable_comm_overlap = true;
 
 static int64_t g_device_id = 0;
 
+thread_local int g_cuda_graph_warmup_forward_depth  = 0;
+thread_local int g_cuda_graph_capture_forward_depth = 0;
+
+bool envFlagEnabledOnce(const char* name) {
+    const char* env = std::getenv(name);
+    return env != nullptr && std::strcmp(env, "0") != 0 && std::strcmp(env, "") != 0;
+}
+
 static bool pdDebugEnabled() {
-    const char* env = std::getenv("RTP_LLM_PD_DEBUG");
-    return env != nullptr && std::string(env) == "1";
+    static const bool enabled = envFlagEnabledOnce("RTP_LLM_PD_DEBUG");
+    return enabled;
 }
 }  // anonymous namespace
 
@@ -98,6 +106,40 @@ bool isRuntimeInitialized() {
 
 bool getEnableCommOverlap() {
     return g_enable_comm_overlap;
+}
+
+// ============================================================
+// CUDA graph forward phase flags
+// ============================================================
+
+void pushCudaGraphWarmupForwardFlag() {
+    ++g_cuda_graph_warmup_forward_depth;
+}
+
+void popCudaGraphWarmupForwardFlag() {
+    if (g_cuda_graph_warmup_forward_depth > 0) {
+        --g_cuda_graph_warmup_forward_depth;
+    }
+}
+
+bool cudaGraphWarmupForwardEnabled() {
+    static const bool env_enabled = envFlagEnabledOnce("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD");
+    return env_enabled || g_cuda_graph_warmup_forward_depth > 0;
+}
+
+void pushCudaGraphCaptureForwardFlag() {
+    ++g_cuda_graph_capture_forward_depth;
+}
+
+void popCudaGraphCaptureForwardFlag() {
+    if (g_cuda_graph_capture_forward_depth > 0) {
+        --g_cuda_graph_capture_forward_depth;
+    }
+}
+
+bool cudaGraphCaptureForwardEnabled() {
+    static const bool env_enabled = envFlagEnabledOnce("RTP_LLM_CUDA_GRAPH_CAPTURE_FORWARD");
+    return env_enabled || g_cuda_graph_capture_forward_depth > 0;
 }
 
 int64_t getDeviceId() {
@@ -614,11 +656,6 @@ void setTraceMemory(bool trace_memory) {
 
 namespace {
 #if USING_CUDA
-at::cuda::CUDAStream& getNoBlockCopyStream() {
-    static thread_local auto stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
-    return stream;
-}
-
 int getDevicePointerDevice(const void* ptr) {
     cudaPointerAttributes attr;
     auto                  status = cudaPointerGetAttributes(&attr, ptr);
@@ -677,9 +714,11 @@ void execNoBlockCopy(const CopyParams& params) {
     }
 
     auto copy_device = resolveNoBlockCopyDevice(dst, src);
-    RTP_LLM_CHECK_WITH_INFO(copy_device >= 0, "execNoBlockCopy failed to resolve CUDA copy device.");
+    if (copy_device < 0) {
+        copy_device = static_cast<int>(getDeviceId());
+    }
     DeviceGuard guard(copy_device);
-    auto        stream = getNoBlockCopyStream().stream();
+    auto        stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false).stream();
     check_cuda_value(cudaMemcpyAsync(dst.data_ptr(), src.data_ptr(), src.nbytes(), cudaMemcpyDefault, stream));
     check_cuda_value(cudaStreamSynchronize(stream));
     check_cuda_error();
@@ -945,6 +984,8 @@ MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_ove
 
 void registerExecCtxOps(pybind11::module& m) {
     m.def("get_device_id", &getDeviceId);
+    m.def("cuda_graph_warmup_forward_enabled", &cudaGraphWarmupForwardEnabled);
+    m.def("cuda_graph_capture_forward_enabled", &cudaGraphCaptureForwardEnabled);
     m.def("preprocess_gemm_weight_by_key",
           &preprocessGemmWeightByKey,
           py::arg("key"),

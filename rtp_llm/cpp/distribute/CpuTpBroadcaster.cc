@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <stdexcept>
 #include <thread>
 
 #include <errno.h>
@@ -129,6 +130,7 @@ ssize_t writeAll(int fd, const void* buf, std::size_t nbytes) {
             return -1;
         }
         if (n == 0) {
+            errno = EPIPE;
             return -1;
         }
         p += n;
@@ -200,6 +202,7 @@ ssize_t readAll(int fd, void* buf, std::size_t nbytes) {
         }
         if (n == 0) {
             // peer closed prematurely
+            errno = ECONNRESET;
             return -1;
         }
         p += n;
@@ -410,18 +413,19 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
     if (tp_rank_ == 0) {
         for (int k = 1; k < tp_size_; ++k) {
             ssize_t n = writeAll(peer_fds_[k], buf, nbytes);
-            RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
-                                    "CpuTpBroadcaster write to rank %d (%zu bytes) failed: %s",
-                                    k,
-                                    nbytes,
-                                    std::strerror(errno));
+            if (n != static_cast<ssize_t>(nbytes)) {
+                const int err = errno;
+                throw std::runtime_error(
+                    fmtstr("CpuTpBroadcaster write to rank %d (%zu bytes) failed: %s", k, nbytes, std::strerror(err)));
+            }
         }
     } else {
         ssize_t n = readAll(peer_fds_[0], buf, nbytes);
-        RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
-                                "CpuTpBroadcaster read from rank 0 (%zu bytes) failed: %s",
-                                nbytes,
-                                std::strerror(errno));
+        if (n != static_cast<ssize_t>(nbytes)) {
+            const int err = errno;
+            throw std::runtime_error(
+                fmtstr("CpuTpBroadcaster read from rank 0 (%zu bytes) failed: %s", nbytes, std::strerror(err)));
+        }
     }
 }
 

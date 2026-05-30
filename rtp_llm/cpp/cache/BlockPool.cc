@@ -28,6 +28,15 @@ namespace {
 
 bool shouldPinHostBlockPool();
 
+const bool kShouldPinHostBlockPool = []() {
+    const char* value = std::getenv("RTP_LLM_PIN_HOST_BLOCK_POOL");
+    if (value == nullptr) {
+        return true;
+    }
+    const std::string flag(value);
+    return flag != "0" && flag != "false" && flag != "FALSE" && flag != "off" && flag != "OFF";
+}();
+
 const char* allocationTypeName(AllocationType allocation_type) {
     switch (allocation_type) {
         case AllocationType::HOST:
@@ -62,12 +71,7 @@ requestedBackingName(AllocationType allocation_type, bool use_pinned_cpu_backing
 }
 
 bool shouldPinHostBlockPool() {
-    const char* value = std::getenv("RTP_LLM_PIN_HOST_BLOCK_POOL");
-    if (value == nullptr) {
-        return true;
-    }
-    const std::string flag(value);
-    return flag != "0" && flag != "false" && flag != "FALSE" && flag != "off" && flag != "OFF";
+    return kShouldPinHostBlockPool;
 }
 
 void markHostBlockPoolDontDump(void* ptr, size_t size) {

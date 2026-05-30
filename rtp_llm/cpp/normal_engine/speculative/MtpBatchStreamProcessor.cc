@@ -43,6 +43,17 @@ namespace {
 std::atomic<uint64_t> g_mtp_device_state_fallback_count{0};
 std::atomic<uint64_t> g_mtp_device_state_success_count{0};
 
+struct CachedMtpDeviceInputFlag {
+    bool        on;
+    std::string value;
+};
+
+const CachedMtpDeviceInputFlag kUseMtpDeviceInput = []() {
+    const char* env = std::getenv("RTP_LLM_DEVICE_INPUT");
+    bool        on  = env != nullptr && std::string(env) == "1";
+    return CachedMtpDeviceInputFlag{on, env ? env : "(unset)"};
+}();
+
 // Rate-limited log emitter — first 5 fallbacks logged in full, then every
 // 1000th hit. Avoids drowning the log when a config keeps hitting the
 // fallback path. Returns true when the caller should emit the log line.
@@ -54,15 +65,14 @@ bool shouldLogFallback(uint64_t count) {
 }
 
 bool useMtpDeviceInput() {
-    static const bool enabled = []() {
-        const char* env = std::getenv("RTP_LLM_DEVICE_INPUT");
-        bool        on  = (env != nullptr && std::string(env) == "1");
+    static const bool logged = []() {
         RTP_LLM_LOG_INFO("[mtp-device-input] RTP_LLM_DEVICE_INPUT=%s -> processor enabled=%d",
-                         env ? env : "(unset)",
-                         static_cast<int>(on));
-        return on;
+                         kUseMtpDeviceInput.value.c_str(),
+                         static_cast<int>(kUseMtpDeviceInput.on));
+        return true;
     }();
-    return enabled;
+    (void)logged;
+    return kUseMtpDeviceInput.on;
 }
 
 torch::Tensor emptyInt32OnPreferredDevice(std::initializer_list<int64_t> shape) {

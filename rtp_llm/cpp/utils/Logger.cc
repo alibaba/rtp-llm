@@ -23,6 +23,29 @@
 
 namespace rtp_llm {
 
+namespace {
+
+struct CachedLogLevelEnv {
+    bool        has_value;
+    std::string value;
+};
+
+const bool kUseConsoleAppender = autil::EnvUtil::getEnv("FT_SERVER_TEST", 0) == 1;
+
+const CachedLogLevelEnv kLogLevelEnv = []() {
+    const char* env = std::getenv("LOG_LEVEL");
+    return CachedLogLevelEnv{env != nullptr, env ? env : ""};
+}();
+
+void warmupLoggers() {
+    Logger::getEngineLogger();
+    Logger::getAccessLogger();
+    Logger::getQueryAccessLogger();
+    Logger::getStackTraceLogger();
+}
+
+}  // namespace
+
 bool initLogger(std::string log_file_path) {
     std::cerr << "initLogger log_file_path: " << log_file_path << std::endl;
     if (log_file_path == "") {
@@ -31,6 +54,7 @@ bool initLogger(std::string log_file_path) {
         if (!exist) {
             AUTIL_ROOT_LOG_CONFIG();
             AUTIL_ROOT_LOG_SETLEVEL(INFO);
+            warmupLoggers();
             return true;
         }
         log_file_path = alog_conf_full_path;
@@ -51,12 +75,12 @@ bool initLogger(std::string log_file_path) {
         return false;
     }
 
+    warmupLoggers();
     return true;
 }
 
 Logger::Logger(const std::string& submodule_name) {
-    int use_console_append = autil::EnvUtil::getEnv("FT_SERVER_TEST", 0) == 1;
-    if (use_console_append) {
+    if (kUseConsoleAppender) {
         logger_ = alog::Logger::getLogger("console");
     } else {
         logger_ = alog::Logger::getLogger(submodule_name.c_str());
@@ -64,8 +88,8 @@ Logger::Logger(const std::string& submodule_name) {
     if (logger_ == nullptr) {
         throw std::runtime_error("getLogger should not be nullptr");
     }
-    if (std::getenv("LOG_LEVEL") != nullptr) {
-        uint32_t log_level = getLevelfromstr("LOG_LEVEL");
+    if (kLogLevelEnv.has_value) {
+        uint32_t log_level = getLevelfromstr(kLogLevelEnv.value);
         logger_->setLevel(log_level);
         base_log_level_ = logger_->getLevel();
     }
@@ -86,26 +110,19 @@ void Logger::setBaseLevel(const uint32_t base_level) {
         getLevelName(base_level).c_str());
 }
 
-uint32_t Logger::getLevelfromstr(const char* s) {
-    char* level_name = std::getenv(s);
-    if (level_name != nullptr) {
-        std::map<std::string, uint32_t> name_to_level = {
-            {"TRACE", alog::LOG_LEVEL_TRACE1},
-            {"DEBUG", alog::LOG_LEVEL_DEBUG},
-            {"INFO", alog::LOG_LEVEL_INFO},
-            {"WARNING", alog::LOG_LEVEL_WARN},
-            {"ERROR", alog::LOG_LEVEL_ERROR},
-        };
-        auto level = name_to_level.find(level_name);
-        if (level != name_to_level.end()) {
-            return level->second;
-        } else {
-            throw std::runtime_error("[WARNING] Invalid logger level for env: " + std::string(s)
-                                     + " with value: " + std::string(level_name));
-            level_name = nullptr;
-        }
+uint32_t Logger::getLevelfromstr(const std::string& level_name) {
+    std::map<std::string, uint32_t> name_to_level = {
+        {"TRACE", alog::LOG_LEVEL_TRACE1},
+        {"DEBUG", alog::LOG_LEVEL_DEBUG},
+        {"INFO", alog::LOG_LEVEL_INFO},
+        {"WARNING", alog::LOG_LEVEL_WARN},
+        {"ERROR", alog::LOG_LEVEL_ERROR},
+    };
+    auto level = name_to_level.find(level_name);
+    if (level != name_to_level.end()) {
+        return level->second;
     }
-    return base_log_level_;
+    throw std::runtime_error("[WARNING] Invalid logger level for env: LOG_LEVEL with value: " + level_name);
 }
 
 }  // namespace rtp_llm

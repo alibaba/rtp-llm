@@ -10,9 +10,13 @@ using namespace std;
 namespace rtp_llm {
 namespace {
 
-bool asyncDebugEnabled() {
+const bool kAsyncDebugEnabled = []() {
     const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
     return env != nullptr && std::string(env) == "1";
+}();
+
+bool asyncDebugEnabled() {
+    return kAsyncDebugEnabled;
 }
 
 }  // namespace
@@ -129,7 +133,7 @@ void GenerateStateMachine::handleRunning() {
         if (normal_override > 0) {
             seq_len_override = normal_override;
         } else {
-            const auto& mtp_state = stream->getMtpAsyncDeviceState();
+            const auto& mtp_state    = stream->getMtpAsyncDeviceState();
             const int   mtp_override = mtp_state.next_real_seq_len;
             if (mtp_override > 0) {
                 seq_len_override = mtp_override;
