@@ -369,6 +369,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_prefix_tree_memory_cache", &KVCacheConfig::enable_prefix_tree_memory_cache)
         .def_readwrite("enable_legacy_memory_connector_fallback",
                        &KVCacheConfig::enable_legacy_memory_connector_fallback)
+        .def_readwrite("prefix_tree_memory_state_swa_pool_ratio",
+                       &KVCacheConfig::prefix_tree_memory_state_swa_pool_ratio)
+        .def_readwrite("enable_dsv4_state_block_independent_eviction",
+                       &KVCacheConfig::enable_dsv4_state_block_independent_eviction)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
@@ -453,7 +457,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.dsv4_hca_state_pool_blocks,
                                       self.enable_gpu_prefix_tree,
                                       self.enable_prefix_tree_memory_cache,
-                                      self.enable_legacy_memory_connector_fallback);
+                                      self.enable_legacy_memory_connector_fallback,
+                                      self.prefix_tree_memory_state_swa_pool_ratio,
+                                      self.enable_dsv4_state_block_independent_eviction);
             },
             [](py::tuple t) {
                 const bool has_disk_fields =
@@ -535,6 +541,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                             c.enable_gpu_prefix_tree                  = t[extra_start + 1].cast<bool>();
                             c.enable_prefix_tree_memory_cache         = t[extra_start + 2].cast<bool>();
                             c.enable_legacy_memory_connector_fallback = t[extra_start + 3].cast<bool>();
+                            if (extra_count >= 6) {
+                                c.prefix_tree_memory_state_swa_pool_ratio = t[extra_start + 4].cast<int64_t>();
+                                c.enable_dsv4_state_block_independent_eviction =
+                                    t[extra_start + 5].cast<bool>();
+                            }
                         }
                     }
                 } catch (const std::exception& e) {

@@ -79,6 +79,8 @@ private:
         CacheBackingType          backing_type{CacheBackingType::MEMORY};
         BlockIdxType              mem_block{NULL_BLOCK_IDX};
         BlockIdxType              src_mem_block{NULL_BLOCK_IDX};
+        CacheBackingType          src_backing_type{CacheBackingType::MEMORY};
+        int32_t                   src_disk_slot{-1};
         int32_t                   disk_slot{-1};
         size_t                    block_size{0};
         std::vector<BlockIdxType> gpu_blocks;
@@ -259,6 +261,7 @@ private:
     void reportDiskReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
     void reportDiskWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
     void reportDiskCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
+    void reportEvictionLifetime(CacheBlockKind kind, CacheBackingType backing_type, int64_t created_time_us);
     void reportMetricsLoop();
 
 private:

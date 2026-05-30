@@ -4,6 +4,7 @@
 #include <mutex>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
@@ -72,6 +73,7 @@ PrefixTreeMemoryBlockCache::match(CacheKeyType                 cache_key,
             state.disk_slot,
             state.block_size,
             state.generation,
+            state.created_time_us,
             state.slot_valid_mask};
 }
 
@@ -103,6 +105,7 @@ PrefixTreeMemoryBlockCache::matchAndMarkInFlight(CacheKeyType                 ca
             state.disk_slot,
             state.block_size,
             state.generation,
+            state.created_time_us,
             state.slot_valid_mask};
 }
 
@@ -142,6 +145,7 @@ PrefixTreeMemoryBlockCache::putCommitted(CacheKeyType            cache_key,
     state.is_resident     = input_item.is_resident;
     state.generation      = ++generation_seq_;
     state.last_access_seq = ++access_seq_;
+    state.created_time_us = input_item.created_time_us > 0 ? input_item.created_time_us : currentTimeUs();
     state.in_flight_ref   = 0;
     state.slot_valid_mask = input_item.slot_valid_mask;
     insertEvictKeyLocked(node, input_item.kind);
@@ -282,6 +286,65 @@ PrefixTreeMemoryBlockCache::popOldestEvictable(CacheBlockKind kind) {
         return item;
     }
     return std::nullopt;
+}
+
+std::optional<PrefixTreeMemoryBlockCache::CacheItem>
+PrefixTreeMemoryBlockCache::popOldestEvictable(CacheBlockKind kind, CacheBackingType backing_type) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (!validKind(kind)) {
+        return std::nullopt;
+    }
+    auto& lru = leaf_lru_[kindIndex(kind)];
+    for (auto it = lru.begin(); it != lru.end();) {
+        auto node_it = nodes_.find(it->cache_key);
+        if (node_it == nodes_.end()) {
+            it = lru.erase(it);
+            continue;
+        }
+        auto& state = node_it->second.kinds[kindIndex(kind)];
+        if (!state.has_value || state.detached || state.last_access_seq != it->last_access_seq
+            || state.generation != it->generation) {
+            it = lru.erase(it);
+            continue;
+        }
+        if (state.backing_type != backing_type || state.is_resident || state.in_flight_ref > 0
+            || !isKindLeafLocked(node_it->second, kind)) {
+            ++it;
+            continue;
+        }
+        auto item = toItemLocked(node_it->second, kind);
+        it        = lru.erase(it);
+        state     = KindState{};
+        decrementAncestorsLocked(item->cache_key, kind);
+        pruneLocked(item->cache_key);
+        return item;
+    }
+    return std::nullopt;
+}
+
+std::vector<PrefixTreeMemoryBlockCache::CacheItem>
+PrefixTreeMemoryBlockCache::popOldestStateOrChainEvictable(CacheBackingType backing_type) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    std::vector<CacheKeyType>           leaf_keys;
+    const auto&                         state_lru = leaf_lru_[kindIndex(CacheBlockKind::STATE_SWA_KV)];
+    leaf_keys.reserve(state_lru.size());
+    for (const auto& evict_key : state_lru) {
+        leaf_keys.push_back(evict_key.cache_key);
+    }
+
+    for (const auto leaf_key : leaf_keys) {
+        auto item = popStateOnlyFromChainLocked(leaf_key, backing_type);
+        if (item.has_value()) {
+            return {*item};
+        }
+    }
+    for (const auto leaf_key : leaf_keys) {
+        auto items = popChainLocked(leaf_key, backing_type);
+        if (!items.empty()) {
+            return items;
+        }
+    }
+    return {};
 }
 
 std::vector<CacheKeyType> PrefixTreeMemoryBlockCache::cacheKeys() const {
@@ -557,7 +620,7 @@ PrefixTreeMemoryBlockCache::toItemLocked(const Node& node, CacheBlockKind kind) 
     }
     return CacheItem{
         node.cache_key, kind, state.backing_type, state.block_index, state.disk_slot, state.block_size,
-        state.is_resident, state.generation, state.slot_valid_mask};
+        state.is_resident, state.generation, state.created_time_us, state.slot_valid_mask};
 }
 
 bool PrefixTreeMemoryBlockCache::isKindLeafLocked(const Node& node, CacheBlockKind kind) const {
@@ -566,6 +629,125 @@ bool PrefixTreeMemoryBlockCache::isKindLeafLocked(const Node& node, CacheBlockKi
         return false;
     }
     return state.subtree_ref_count <= 1;
+}
+
+std::optional<PrefixTreeMemoryBlockCache::CacheItem>
+PrefixTreeMemoryBlockCache::popStateOnlyFromChainLocked(const CacheKeyType& leaf_key, CacheBackingType backing_type) {
+    auto leaf_it = nodes_.find(leaf_key);
+    if (leaf_it == nodes_.end()) {
+        return std::nullopt;
+    }
+    std::vector<CacheKeyType> chain;
+    CacheKeyType              cur = leaf_key;
+    while (true) {
+        auto node_it = nodes_.find(cur);
+        if (node_it == nodes_.end()) {
+            break;
+        }
+        chain.push_back(cur);
+        if (!node_it->second.has_parent) {
+            break;
+        }
+        auto parent_it = nodes_.find(node_it->second.parent_key);
+        if (parent_it == nodes_.end() || parent_it->second.children.size() != 1) {
+            break;
+        }
+        cur = parent_it->first;
+    }
+    if (chain.size() <= 1) {
+        return std::nullopt;
+    }
+    for (size_t idx = 1; idx < chain.size(); ++idx) {
+        auto node_it = nodes_.find(chain[idx]);
+        if (node_it == nodes_.end()) {
+            continue;
+        }
+        auto& state = node_it->second.kinds[kindIndex(CacheBlockKind::STATE_SWA_KV)];
+        if (!state.has_value || state.detached || state.backing_type != backing_type || state.is_resident
+            || state.in_flight_ref > 0) {
+            continue;
+	        }
+	        auto item = toItemLocked(node_it->second, CacheBlockKind::STATE_SWA_KV);
+	        eraseEvictKeyLocked(node_it->second, CacheBlockKind::STATE_SWA_KV);
+	        state.detached = true;
+	        decrementAncestorsLocked(item->cache_key, CacheBlockKind::STATE_SWA_KV);
+	        const auto descendant_ref_count = state.subtree_ref_count;
+	        state                           = KindState{};
+	        state.subtree_ref_count         = descendant_ref_count;
+        pruneLocked(item->cache_key);
+        return item;
+    }
+    return std::nullopt;
+}
+
+std::vector<PrefixTreeMemoryBlockCache::CacheItem>
+PrefixTreeMemoryBlockCache::popChainLocked(const CacheKeyType& leaf_key, CacheBackingType backing_type) {
+    std::vector<CacheItem> items;
+    auto                  leaf_it = nodes_.find(leaf_key);
+    if (leaf_it == nodes_.end()) {
+        return items;
+    }
+    std::vector<CacheKeyType> chain;
+    CacheKeyType              cur = leaf_key;
+    while (true) {
+        auto node_it = nodes_.find(cur);
+        if (node_it == nodes_.end()) {
+            break;
+        }
+        chain.push_back(cur);
+        if (!node_it->second.has_parent) {
+            break;
+        }
+        auto parent_it = nodes_.find(node_it->second.parent_key);
+        if (parent_it == nodes_.end() || parent_it->second.children.size() != 1) {
+            break;
+        }
+        cur = parent_it->first;
+    }
+
+    bool has_target_state = false;
+    for (const auto key : chain) {
+        auto node_it = nodes_.find(key);
+        if (node_it == nodes_.end()) {
+            continue;
+        }
+        const auto& state = node_it->second.kinds[kindIndex(CacheBlockKind::STATE_SWA_KV)];
+        if (state.has_value && !state.detached && state.backing_type == backing_type && !state.is_resident
+            && state.in_flight_ref == 0) {
+            has_target_state = true;
+            break;
+        }
+    }
+    if (!has_target_state) {
+        return items;
+    }
+
+    for (auto chain_it = chain.begin(); chain_it != chain.end(); ++chain_it) {
+        auto node_it = nodes_.find(*chain_it);
+        if (node_it == nodes_.end()) {
+            continue;
+        }
+        for (auto kind : {CacheBlockKind::COMPRESSED_KV, CacheBlockKind::STATE_SWA_KV}) {
+            auto& state = node_it->second.kinds[kindIndex(kind)];
+            if (!state.has_value || state.detached || state.backing_type != backing_type || state.is_resident
+                || state.in_flight_ref > 0) {
+                continue;
+	            }
+	            auto item = toItemLocked(node_it->second, kind);
+	            if (!item.has_value()) {
+	                continue;
+	            }
+	            eraseEvictKeyLocked(node_it->second, kind);
+	            state.detached = true;
+	            decrementAncestorsLocked(item->cache_key, kind);
+	            const auto descendant_ref_count = state.subtree_ref_count;
+	            state                           = KindState{};
+	            state.subtree_ref_count         = descendant_ref_count;
+            items.push_back(*item);
+        }
+        pruneLocked(*chain_it);
+    }
+    return items;
 }
 
 }  // namespace rtp_llm
