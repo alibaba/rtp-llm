@@ -804,12 +804,17 @@ class IndexerOp(nn.Module):
         ), "ks must be on the same device as logits"
 
         # ks is all-zero when batch_size == 1 (single request → k_offset stays 0
-        # in fillParamsInternal).  Passing None lets flashinfer's fast path run
-        # and avoids the CUDA fallback kernel overhead.
+        # in fillParamsInternal).  Passing None avoids row_starts.any() GPU sync
+        # and lets flashinfer's fast path run.
         # cu_kv_seqlens is [B+1], so shape[0] > 2 ↔ batch_size > 1.
+        # During CUDA graph capture always pass ks (flashinfer not graph-safe).
+        from rtp_llm.models_py.kernels.cuda.fast_topk.fast_topk import (
+            _cuda_graph_capturing,
+        )
         ks_row_starts = (
             fmha_params.ks
             if attention_inputs.cu_kv_seqlens.shape[0] > 2
+            or _cuda_graph_capturing()
             else None
         )
 
@@ -924,8 +929,14 @@ class IndexerOp(nn.Module):
         )
         kv_fp8_full = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
 
-        # Same batch-size gate as _get_topk_ragged: pass None when batch==1.
-        has_ks_offset = cu_kv_seqlens_global.shape[0] > 2
+        # Same batch-size gate as _get_topk_ragged: pass None when batch==1,
+        # but always pass ks during CUDA graph capture.
+        from rtp_llm.models_py.kernels.cuda.fast_topk.fast_topk import (
+            _cuda_graph_capturing,
+        )
+        has_ks_offset = (
+            cu_kv_seqlens_global.shape[0] > 2 or _cuda_graph_capturing()
+        )
 
         def run_part_logits_topk(
             q_part: torch.Tensor,
