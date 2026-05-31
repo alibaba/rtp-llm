@@ -44,7 +44,8 @@ std::string PrefillCPConfig::to_string() const {
             break;
     }
     oss << "\n comm_buffer_size: " << comm_buffer_size
-        << "\n kv_cache_sharded: " << (kv_cache_sharded ? "true" : "false") << "\n";
+        << "\n kv_cache_sharded: " << (kv_cache_sharded ? "true" : "false") << "\n prefill_cp_size: " << prefill_cp_size
+        << "\n";
     return oss.str();
 }
 
