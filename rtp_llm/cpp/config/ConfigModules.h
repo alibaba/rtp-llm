@@ -32,8 +32,9 @@ struct PrefillCPConfig {
     // When true + tp_size > 1, KV cache uses page-level round-robin sharding
     // across the CP (== TP) group. Each rank physically holds only owned blocks
     // (block_idx % cp_size == cp_rank); see rtp_llm/cpp/cache/CPSlotMapper.h.
-    bool kv_cache_sharded = false;
-    bool is_enabled() const {
+    bool    kv_cache_sharded = false;
+    int64_t prefill_cp_size  = 0;  // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
+    bool    is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
     }
