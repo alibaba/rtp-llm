@@ -291,6 +291,9 @@ def set_parallelism_config(
         parallelism_config.prefill_cp_config.kv_cache_sharded = (
             py_prefill_cp_config.kv_cache_sharded
         )
+        parallelism_config.prefill_cp_config.prefill_cp_size = (
+            py_prefill_cp_config.prefill_cp_size
+        )
     logging.info(
         f"set_parallelism_config: rank {world_rank}\nparallelism_config={parallelism_config.to_string()}world_rank={world_rank}\n"
     )

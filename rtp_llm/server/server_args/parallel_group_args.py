@@ -101,6 +101,14 @@ def init_parallel_group_args(
         help="开启后 prefill 节点的 paged KV pool（CSA_KV/HCA_KV/INDEXER_KV）按 logical block round-robin 切到各 CP rank，每卡只存 1/cp_size。需 PD 分离 + reuse cache。",
     )
     parallel_group.add_argument(
+        "--prefill_cp_size",
+        env_name="PREFILL_CP_SIZE",
+        bind_to=(prefill_cp_config, "prefill_cp_size"),
+        type=int,
+        default=0,
+        help="显式指定 prefill CP size，供 decode 侧 fixed/SWA cache ring sizing 使用；decode 开启 PREFILL_CP 且 prefill_cp_kv_cache_sharded 时必须设置。",
+    )
+    parallel_group.add_argument(
         "--use_ub_comm",
         env_name="USE_UB_COMM",
         bind_to=(parallelism_config, "use_ub_comm"),

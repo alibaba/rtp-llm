@@ -80,6 +80,24 @@ def _cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
     return padded_seq_len // cp_size
 
 
+def _compute_state_ring_entries(
+    compress_ratio: int,
+    overlap: bool,
+    gen_num_per_cycle: int,
+    cp_size: int = 1,
+    prefill_sliced: bool = False,
+) -> int:
+    window = (1 + int(bool(overlap))) * int(compress_ratio)
+    min_entries = max((window + int(gen_num_per_cycle) + 1) & ~1, 1)
+    cp_size = max(int(cp_size or 1), 1)
+    if cp_size <= 1:
+        return min_entries
+    ring_capacity_entries = ((min_entries + cp_size - 1) // cp_size) * cp_size
+    if bool(prefill_sliced):
+        return max(ring_capacity_entries // cp_size, 1)
+    return ring_capacity_entries
+
+
 def resolve_dense_gemm_warmup_max_m(
     *,
     max_seq_len: int,
@@ -325,6 +343,8 @@ def warmup_compressor_combine_branch_kernels(
     topk: Optional[int] = None,
     overlap: Optional[bool] = None,
     gen_num_per_cycle: int,
+    fixed_region_cp_size: int = 1,
+    fixed_region_prefill_sliced: bool = False,
 ) -> None:
     """Compile batched/varlen Triton branches that B=1 gRPC warmup misses."""
 
@@ -355,6 +375,8 @@ def warmup_compressor_combine_branch_kernels(
         configs["combine"],
         configs["compressor"],
         int(gen_num_per_cycle),
+        int(fixed_region_cp_size or 1),
+        bool(fixed_region_prefill_sliced),
         str(device),
     )
     if warmup_key in _BRANCH_KERNEL_JIT_WARMED_KEYS:
@@ -386,6 +408,8 @@ def warmup_compressor_combine_branch_kernels(
             overlap=cfg_overlap,
             device=device,
             gen_num_per_cycle=gen_num_per_cycle,
+            fixed_region_cp_size=fixed_region_cp_size,
+            fixed_region_prefill_sliced=fixed_region_prefill_sliced,
         )
     _sync_cuda(device)
     _dist_barrier()
@@ -451,6 +475,8 @@ def _warmup_fused_kv_compress_norm_rope_insert(
     overlap: bool,
     device: torch.device,
     gen_num_per_cycle: int,
+    fixed_region_cp_size: int,
+    fixed_region_prefill_sliced: bool,
 ) -> None:
     from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
         DSV4_KERNEL_TOKENS_PER_BLOCK,
@@ -481,8 +507,13 @@ def _warmup_fused_kv_compress_norm_rope_insert(
     assert (
         gen_num_per_cycle >= 0
     ), f"gen_num_per_cycle must be >= 0, got {gen_num_per_cycle}"
-    window = coff * compress_ratio
-    state_ring_entries = (window + gen_num_per_cycle + 1) & ~1
+    state_ring_entries = _compute_state_ring_entries(
+        compress_ratio=compress_ratio,
+        overlap=overlap,
+        gen_num_per_cycle=gen_num_per_cycle,
+        cp_size=fixed_region_cp_size,
+        prefill_sliced=fixed_region_prefill_sliced,
+    )
     state_blocks = max(max_position // state_block_size + 1, 1)
     block_table = torch.zeros((1, state_blocks), dtype=torch.int32, device=device)
     state_cache = torch.zeros(
