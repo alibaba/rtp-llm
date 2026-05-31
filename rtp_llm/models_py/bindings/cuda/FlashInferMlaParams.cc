@@ -474,9 +474,15 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
         }
         page_num += (seq_len + seq_size_per_block - 1) / seq_size_per_block;
     }
+    const int  requested_input_token_num = input_token_num;
+    const bool pad_cuda_graph_tokens     = forbid_realloc && prefix_lengths_ptr != nullptr && batch_indice_h.defined()
+                                       && batch_indice_h.numel() > requested_input_token_num;
+    const int cuda_graph_token_capacity =
+        pad_cuda_graph_tokens ? static_cast<int>(batch_indice_h.numel()) : requested_input_token_num;
 
     // Ensure tensors are allocated with sufficient size
-    ensureTensorSize(batch_size, input_token_num, page_num, reuse_page_num, batch_reuse_info_size, forbid_realloc);
+    ensureTensorSize(
+        batch_size, cuda_graph_token_capacity, page_num, reuse_page_num, batch_reuse_info_size, forbid_realloc);
 
     // Fill params directly into HOST tensors
     fillParamsInternal(t_prefix_lengths_host,
@@ -489,6 +495,13 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
                        page_num,
                        reuse_page_num,
                        batch_reuse_info_size);
+    if (pad_cuda_graph_tokens && input_token_num < cuda_graph_token_capacity) {
+        auto batch_indice_ptr = batch_indice_h.data_ptr<int32_t>();
+        auto positions_ptr    = positions_h.data_ptr<int32_t>();
+        std::fill(batch_indice_ptr + input_token_num, batch_indice_ptr + cuda_graph_token_capacity, 0);
+        std::fill(positions_ptr + input_token_num, positions_ptr + cuda_graph_token_capacity, 0);
+        input_token_num = cuda_graph_token_capacity;
+    }
 
     // Refresh buffer (copy to DEVICE and update shapes)
     refreshBuffer(batch_size, input_token_num, page_num, reuse_page_num, batch_reuse_info_size);
@@ -515,6 +528,10 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
         auto slot_mapping_ptr = slot_mapping_h_.data_ptr<int64_t>();
 
         for (int64_t i = 0; i < input_token_num; ++i) {
+            if (pad_cuda_graph_tokens && i >= requested_input_token_num) {
+                slot_mapping_ptr[i] = -1;
+                continue;
+            }
             const int32_t batch_id     = batch_indice_ptr[i];
             const int32_t position     = positions_ptr[i];
             const int32_t block_index  = position / seq_size_per_block;

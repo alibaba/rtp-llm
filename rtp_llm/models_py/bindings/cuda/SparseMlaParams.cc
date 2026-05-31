@@ -448,9 +448,13 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
         for (int i = 0; i < batch_size; ++i) {
             total_tokens += input_lengths_ptr[i];
         }
+        int64_t graph_token_capacity = total_tokens;
+        if (forbid_realloc && batch_indice_h.defined()) {
+            graph_token_capacity = std::max<int64_t>(graph_token_capacity, batch_indice_h.size(0));
+        }
 
-        if (total_tokens > 0) {
-            ensureTensorSize(batch_size, static_cast<int>(total_tokens), forbid_realloc);
+        if (graph_token_capacity > 0) {
+            ensureTensorSize(batch_size, static_cast<int>(graph_token_capacity), forbid_realloc);
 
             // Use base class positions_h (no need to pass from parameter)
             fillParamsInternal(true,
@@ -461,7 +465,19 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
                                seq_size_per_block,
                                total_tokens,
                                positions_h);
-            refreshBuffer(batch_size, static_cast<int>(total_tokens), true);
+            if (graph_token_capacity > total_tokens) {
+                auto zero_tail = [&](torch::Tensor& tensor) {
+                    if (tensor.defined() && tensor.numel() >= graph_token_capacity) {
+                        auto* ptr = tensor.data_ptr<int32_t>();
+                        std::fill(ptr + total_tokens, ptr + graph_token_capacity, 0);
+                    }
+                };
+                zero_tail(expanded_seq_lens_h_);
+                zero_tail(topk_indices_offset_h_);
+                zero_tail(ks_h_);
+                zero_tail(ke_h_);
+            }
+            refreshBuffer(batch_size, static_cast<int>(graph_token_capacity), true);
 
             expanded_seq_lens   = expanded_seq_lens_d_;
             topk_indices_offset = topk_indices_offset_d_;
