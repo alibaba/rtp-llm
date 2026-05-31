@@ -115,6 +115,22 @@ void zeroHostInt32(torch::Tensor& tensor) {
     std::memset(tensor.data_ptr<int32_t>(), 0, tensor.numel() * tensor.element_size());
 }
 
+void zeroHostInt32Rows(torch::Tensor& tensor, int64_t start_row, int64_t end_row) {
+    if (!tensor.defined() || tensor.is_cuda() || tensor.numel() <= 0 || end_row <= start_row) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(tensor.scalar_type() == torch::kInt32, "zeroHostInt32Rows expects int32 CPU tensor");
+    RTP_LLM_CHECK_WITH_INFO(tensor.is_contiguous(), "zeroHostInt32Rows expects contiguous tensor");
+    RTP_LLM_CHECK_WITH_INFO(tensor.dim() >= 2, "zeroHostInt32Rows expects a 2-D or higher tensor");
+    RTP_LLM_CHECK_WITH_INFO(start_row >= 0 && end_row <= tensor.size(0),
+                            "zeroHostInt32Rows range [%ld, %ld) exceeds rows %ld",
+                            start_row,
+                            end_row,
+                            tensor.size(0));
+    const int64_t row_elems = tensor.numel() / tensor.size(0);
+    fillHostInt32(tensor, start_row * row_elems, end_row * row_elems, 0);
+}
+
 #if USING_CUDA
 void addCudaGraphPrepareFillRegion(
     CudaGraphPrepareFillParams& params, torch::Tensor& tensor, int64_t start, int64_t end, int32_t value) {
@@ -282,6 +298,18 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
 
     optimizedCopyAsync(inputs.input_ids, py_model_inputs_.input_ids, token_num * sizeof(int));
 
+#if USING_CUDA
+    if (!is_prefill_cuda_graph_mode_ && py_model_inputs_.input_ids.defined()) {
+        const int64_t captured_token_capacity = py_model_inputs_.input_ids.numel();
+        if (token_num < captured_token_capacity) {
+            CudaGraphPrepareFillParams fill_params;
+            addCudaGraphPrepareFillRegion(
+                fill_params, py_model_inputs_.input_ids, token_num, captured_token_capacity, 0);
+            invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
+        }
+    }
+#endif
+
     // check size and dtype
     if (inputs.input_hiddens.defined() && inputs.input_hiddens.numel() > 0) {
         RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.numel() <= py_model_inputs_.input_hiddens.numel(),
@@ -403,6 +431,39 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                           state.current_batch_size + 1,
                                           captured_batch_capacity + 1,
                                           last_valid);
+        } else if (state.current_batch_size < captured_batch_capacity) {
+            const int last_valid =
+                state.seq_len_sum > 0 ? state.seq_len_sum : state.current_batch_size * num_tokens_per_bs_;
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.input_lengths,
+                                          state.current_batch_size,
+                                          captured_batch_capacity,
+                                          0);
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.prefix_lengths,
+                                          state.current_batch_size,
+                                          captured_batch_capacity,
+                                          0);
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.sequence_lengths,
+                                          state.current_batch_size,
+                                          captured_batch_capacity,
+                                          0);
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d,
+                                          state.current_batch_size,
+                                          captured_batch_capacity,
+                                          0);
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.cu_seqlens,
+                                          state.current_batch_size + 1,
+                                          captured_batch_capacity + 1,
+                                          last_valid);
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
+                                          state.current_batch_size + 1,
+                                          captured_batch_capacity + 1,
+                                          last_valid);
         }
         invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
     }
@@ -498,6 +559,14 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host);
         copyStridedHost(inputs.attention_inputs.kv_cache_block_id_host,
                         py_model_inputs_.attention_inputs.kv_cache_block_id_host);
+        if (!is_prefill_cuda_graph_mode_ && state.current_batch_size < captured_batch_capacity) {
+            zeroHostInt32Rows(py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host,
+                              state.current_batch_size,
+                              captured_batch_capacity);
+            zeroHostInt32Rows(py_model_inputs_.attention_inputs.kv_cache_block_id_host,
+                              state.current_batch_size,
+                              captured_batch_capacity);
+        }
 
         optimizedCopyAsync(inputs.attention_inputs.kv_cache_layer_to_group,
                            py_model_inputs_.attention_inputs.kv_cache_layer_to_group,
@@ -527,6 +596,13 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         // prepare-fill kernel above.
         if (is_prefill_cuda_graph_mode_) {
             int last_valid = state.current_seq_len;
+            fillHostInt32(py_model_inputs_.attention_inputs.cu_seqlens_host,
+                          state.current_batch_size + 1,
+                          captured_batch_capacity + 1,
+                          last_valid);
+        } else if (state.current_batch_size < captured_batch_capacity) {
+            const int last_valid =
+                state.seq_len_sum > 0 ? state.seq_len_sum : state.current_batch_size * num_tokens_per_bs_;
             fillHostInt32(py_model_inputs_.attention_inputs.cu_seqlens_host,
                           state.current_batch_size + 1,
                           captured_batch_capacity + 1,
