@@ -356,7 +356,7 @@ class RocmExpertsMXFp4Test(_MXFp4MoeBaseTest):
         self.assertEqual(weights[W.moe_s1].dtype, torch.uint8)
         self.assertEqual(weights[W.moe_s2].dtype, torch.uint8)
         self.assertTrue(torch.isfinite(out).all().item(), "kernel produced non-finite")
-        torch.testing.assert_close(out, ref_out, atol=2e-1, rtol=2e-1)
+        torch.testing.assert_close(out, ref_out, atol=5e-2, rtol=5e-2)
 
     def test_basic_forward(self):
         self._run(apply_router_weight_on_input=False)
