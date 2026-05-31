@@ -39,6 +39,9 @@ class Embedding(nn.Module):
         token_types: Optional[torch.Tensor] = None,
         text_tokens_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert (
+            input.dtype == torch.int32
+        ), f"the dtype of token ids must be torch.int32, got {input.dtype}"
         tokens = input.size(0)
         hidden_size = self.weight.size(-1)
         output = torch.empty(

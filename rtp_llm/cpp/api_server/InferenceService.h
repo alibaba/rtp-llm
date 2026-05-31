@@ -31,7 +31,7 @@ struct InferenceParsedRequest {
 
     bool                                         batch_infer;
     bool                                         is_streaming;
-    bool                                         private_request;
+    std::optional<bool>                          private_request;
     std::string                                  source;
     std::vector<std::vector<std::string>>        input_urls;
     std::vector<std::string>                     input_texts;

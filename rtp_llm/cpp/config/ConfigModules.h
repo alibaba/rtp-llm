@@ -251,11 +251,12 @@ struct HWKernelConfig {
 };
 
 struct DeviceResourceConfig {
-    int         overlap_math_sm_count    = 0;
-    int         overlap_comm_type        = 0;
-    int         m_split                  = 0;
-    bool        enable_comm_overlap      = true;
-    int         enable_layer_micro_batch = 0;
+    int         overlap_math_sm_count     = 0;
+    int         overlap_comm_type         = 0;
+    int         m_split                   = 0;
+    bool        enable_comm_overlap       = true;
+    int         enable_layer_micro_batch  = 0;
+    int         engine_async_worker_count = 0;
     std::string to_string() const;
 };
 
@@ -368,7 +369,7 @@ struct FIFOSchedulerConfig {
     //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
-    std::string decode_prefill_ratio = "1";
+    std::string decode_prefill_ratio        = "1";
     bool        cp_force_single_prefill     = true;
     int64_t     max_inited_kv_cache_streams = 0;
     std::string to_string() const;
@@ -377,9 +378,9 @@ struct FIFOSchedulerConfig {
 struct GrammarConfig {
     bool constrained_json_disable_any_whitespace = false;
     // Service-level xgrammar matcher policy. Requests cannot override it.
-    bool                 terminate_without_stop_token = false;
-    int                  num_workers                  = 8;
-    std::string          tokenizer_info_json;
+    bool        terminate_without_stop_token = false;
+    int         num_workers                  = 8;
+    std::string tokenizer_info_json;
     // Byte cap on xgrammar's internal compiled-grammar cache; <=0 = unlimited.
     int64_t     compiler_cache_bytes = 512 * 1024 * 1024;
     std::string to_string() const;
@@ -435,8 +436,9 @@ struct PDSepConfig {
 };
 
 struct MiscellaneousConfig {
-    bool        disable_pdl = true;
-    std::string aux_string  = "";
+    bool        disable_pdl        = true;
+    bool        disable_access_log = false;
+    std::string aux_string         = "";
     std::string to_string() const;
 };
 

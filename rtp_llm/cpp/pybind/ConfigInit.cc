@@ -793,6 +793,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("m_split", &DeviceResourceConfig::m_split)
         .def_readwrite("enable_comm_overlap", &DeviceResourceConfig::enable_comm_overlap)
         .def_readwrite("enable_layer_micro_batch", &DeviceResourceConfig::enable_layer_micro_batch)
+        .def_readwrite("engine_async_worker_count", &DeviceResourceConfig::engine_async_worker_count)
         .def("to_string", &DeviceResourceConfig::to_string)
         .def(py::pickle(
             [](const DeviceResourceConfig& self) {
@@ -800,18 +801,20 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.overlap_comm_type,
                                       self.m_split,
                                       self.enable_comm_overlap,
-                                      self.enable_layer_micro_batch);
+                                      self.enable_layer_micro_batch,
+                                      self.engine_async_worker_count);
             },
             [](py::tuple t) {
-                if (t.size() != 5)
+                if (t.size() != 6)
                     throw std::runtime_error("Invalid state!");
                 DeviceResourceConfig c;
                 try {
-                    c.overlap_math_sm_count    = t[0].cast<int>();
-                    c.overlap_comm_type        = t[1].cast<int>();
-                    c.m_split                  = t[2].cast<int>();
-                    c.enable_comm_overlap      = t[3].cast<bool>();
-                    c.enable_layer_micro_batch = t[4].cast<int>();
+                    c.overlap_math_sm_count     = t[0].cast<int>();
+                    c.overlap_comm_type         = t[1].cast<int>();
+                    c.m_split                   = t[2].cast<int>();
+                    c.enable_comm_overlap       = t[3].cast<bool>();
+                    c.enable_layer_micro_batch  = t[4].cast<int>();
+                    c.engine_async_worker_count = t[5].cast<int>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("DeviceResourceConfig unpickle error: ") + e.what());
                 }
@@ -1053,20 +1056,24 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<MiscellaneousConfig>(m, "MiscellaneousConfig")
         .def(py::init<>())
         .def_readwrite("disable_pdl", &MiscellaneousConfig::disable_pdl)
+        .def_readwrite("disable_access_log", &MiscellaneousConfig::disable_access_log)
         .def_property(
             "aux_string",
             [](const MiscellaneousConfig& self) { return self.aux_string; },
             [](MiscellaneousConfig& self, const std::string& value) { self.aux_string = value; })
         .def("to_string", &MiscellaneousConfig::to_string)
         .def(py::pickle(
-            [](const MiscellaneousConfig& self) { return py::make_tuple(self.disable_pdl, self.aux_string); },
+            [](const MiscellaneousConfig& self) {
+                return py::make_tuple(self.disable_pdl, self.disable_access_log, self.aux_string);
+            },
             [](py::tuple t) {
-                if (t.size() != 2)
+                if (t.size() != 3)
                     throw std::runtime_error("Invalid state!");
                 MiscellaneousConfig c;
                 try {
-                    c.disable_pdl = t[0].cast<bool>();
-                    c.aux_string  = t[1].cast<std::string>();
+                    c.disable_pdl        = t[0].cast<bool>();
+                    c.disable_access_log = t[1].cast<bool>();
+                    c.aux_string         = t[2].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("MiscellaneousConfig unpickle error: ") + e.what());
                 }
@@ -1631,7 +1638,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("indexer_topk", &AttentionConfigs::indexer_topk)
         .def_readwrite("dtype", &AttentionConfigs::dtype)
         .def_readwrite("max_seq_len", &AttentionConfigs::max_seq_len)
-        .def_readwrite("gen_num_per_cycle", &AttentionConfigs::gen_num_per_cycle);
+        .def_readwrite("gen_num_per_cycle", &AttentionConfigs::gen_num_per_cycle)
+        .def_readwrite("is_cross_attention", &AttentionConfigs::is_cross_attention);
 
     py::class_<EPLBConfig>(m, "EPLBConfig")
         .def(py::init<>())

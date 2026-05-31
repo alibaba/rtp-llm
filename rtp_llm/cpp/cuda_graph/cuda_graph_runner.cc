@@ -664,17 +664,27 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
             replayPrefill(state.current_real_graph_seq_len);
         }
-        outputs.hidden_states =
-            graph_instances_[state.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
-                0, 0, state.current_seq_len);
+        auto& mem_hold        = graph_instances_[state.current_real_graph_seq_len].mem_hold_;
+        outputs.hidden_states = mem_hold.decoder_layer_hidden_states_.slice(0, 0, state.current_seq_len);
+        if (mem_hold.last_hidden_states_.defined() && mem_hold.last_hidden_states_.numel() > 0) {
+            outputs.last_hidden_states = mem_hold.last_hidden_states_.slice(0, 0, state.current_seq_len);
+        }
+        if (mem_hold.logits_.defined() && mem_hold.logits_.numel() > 0) {
+            outputs.logits = mem_hold.logits_.slice(0, 0, state.current_seq_len);
+        }
     } else {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
             replayDecode(state.current_real_graph_bs);
         }
-        outputs.hidden_states =
-            graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
-                0, 0, state.seq_len_sum);
+        auto& mem_hold        = graph_instances_[state.current_real_graph_bs].mem_hold_;
+        outputs.hidden_states = mem_hold.decoder_layer_hidden_states_.slice(0, 0, state.seq_len_sum);
+        if (mem_hold.last_hidden_states_.defined() && mem_hold.last_hidden_states_.numel() > 0) {
+            outputs.last_hidden_states = mem_hold.last_hidden_states_.slice(0, 0, state.seq_len_sum);
+        }
+        if (mem_hold.logits_.defined() && mem_hold.logits_.numel() > 0) {
+            outputs.logits = mem_hold.logits_.slice(0, 0, state.seq_len_sum);
+        }
     }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());
@@ -1121,12 +1131,14 @@ void CudaGraphRunner::initCapture() {
             throw;
         }
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
+        PyModelOutputs dummy_outputs;
         try {
             // Distributed model implementations may rendezvous during this
             // eager warmup forward. The flag is scoped so real graph capture
             // and replay never contain that synchronization.
             ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
-            py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+            auto          dummy_outputs_obj = py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+            dummy_outputs                   = dummy_outputs_obj.cast<PyModelOutputs>();
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("initCapture forward for output datatype failed with Python exception: %s", e.what());
             throw;
@@ -1137,6 +1149,22 @@ void CudaGraphRunner::initCapture() {
         RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);
+
+        // Some models compute final logits inside the
+        // model forward and return them via PyModelOutputs.last_hidden_states /
+        // logits. Allocate stable buffers sized to max_num_token_ so each
+        // captured graph instance can copy its result into a sliced view, and
+        // replay can hand the slice back as the model's output.
+        if (dummy_outputs.last_hidden_states.defined() && dummy_outputs.last_hidden_states.numel() > 0) {
+            auto sizes = dummy_outputs.last_hidden_states.sizes().vec();
+            sizes[0]   = max_num_token_;
+            capture_mem_hold_.setLastHiddenStates(torch::zeros(sizes, dummy_outputs.last_hidden_states.options()));
+        }
+        if (dummy_outputs.logits.defined() && dummy_outputs.logits.numel() > 0) {
+            auto sizes = dummy_outputs.logits.sizes().vec();
+            sizes[0]   = max_num_token_;
+            capture_mem_hold_.setLogits(torch::zeros(sizes, dummy_outputs.logits.options()));
+        }
         initCaptureAttentionInputsPost();
         logCudaGraphPoolMemory("before_capture");
 
@@ -1204,6 +1232,18 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 throw;
             }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
+            // For models that compute final logits / last_hidden_states inside
+            // the captured forward (e.g. ALGR TA head), persist them into the
+            // per-instance stable buffers so replay can recover them.
+            if (graph_instances_[key].mem_hold_.last_hidden_states_.defined()
+                && graph_instances_[key].mem_hold_.last_hidden_states_.numel() > 0
+                && outputs.last_hidden_states.defined() && outputs.last_hidden_states.numel() > 0) {
+                graph_instances_[key].mem_hold_.last_hidden_states_.copy_(outputs.last_hidden_states);
+            }
+            if (graph_instances_[key].mem_hold_.logits_.defined() && graph_instances_[key].mem_hold_.logits_.numel() > 0
+                && outputs.logits.defined() && outputs.logits.numel() > 0) {
+                graph_instances_[key].mem_hold_.logits_.copy_(outputs.logits);
+            }
             graph.capture_end();
         }
 
@@ -1320,9 +1360,16 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
 
 CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count) {
     // only when prefill or target model score phase, the num_tokens_per_bs_ > 1
-    return CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, tokens_count),
-                             inputs,
-                             is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1);
+    CaptureMemoryHold mem_hold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, tokens_count),
+                               inputs,
+                               is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1);
+    if (capture_mem_hold_.last_hidden_states_.defined() && capture_mem_hold_.last_hidden_states_.numel() > 0) {
+        mem_hold.setLastHiddenStates(capture_mem_hold_.last_hidden_states_.slice(0, 0, tokens_count));
+    }
+    if (capture_mem_hold_.logits_.defined() && capture_mem_hold_.logits_.numel() > 0) {
+        mem_hold.setLogits(capture_mem_hold_.logits_.slice(0, 0, tokens_count));
+    }
+    return mem_hold;
 }
 
 CudaGraphRunner* CudaGraphRunner::createForPrefill(py::object                   py_instance,

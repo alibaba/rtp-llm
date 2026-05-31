@@ -33,6 +33,7 @@ struct CKAttn {
     int           prefill_runtime_max_prefix_len      = -1;
     int           prefill_runtime_seq_len_with_prefix = -1;
     int           max_seq_len;
+    int           max_prefix_length = 0;
     bool          decode_plan;
 
     DataType attn_type;

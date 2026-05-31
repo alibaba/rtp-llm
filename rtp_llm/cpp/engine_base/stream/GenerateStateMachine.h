@@ -53,17 +53,22 @@ public:
     // 保证当相应事件发生时，即使状态转移还没有被 moveToNext() 触发，也能获取最新的 FINISHED 状态
     // 注意：此方法非线程安全，外部应当仅通过GenerateStream在持锁路径下调用
     bool checkFinished() const {
+        return getLatestStatus() == StreamState::FINISHED;
+    }
+
+    // 返回事件触发后的"最新状态"：在 status 之上应用尚未被 moveToNext() 消费的事件。
+    StreamState getLatestStatus() const {
         const auto committed = status.load(std::memory_order_acquire);
         if (committed == StreamState::FINISHED) {
-            return true;
+            return committed;
         }
         if (events_.has(StreamEvents::Error)) {
-            return true;
+            return StreamState::FINISHED;
         }
         if (committed == StreamState::RUNNING && events_.has(StreamEvents::GenerateDone)) {
-            return true;
+            return StreamState::FINISHED;
         }
-        return false;
+        return committed;
     }
 
     void setReserveStep(size_t reserve_step) {

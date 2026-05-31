@@ -12,7 +12,11 @@ from rtp_llm.ops.compute_ops import (
     preprocess_weight_scale,
 )
 from rtp_llm.utils.model_weight import W
-from rtp_llm.utils.swizzle_utils import swizzle_tensor
+from rtp_llm.utils.swizzle_utils import (
+    can_swizzle_tensor,
+    mark_swizzled,
+    swizzle_tensor,
+)
 
 
 def is_gfx950(arch_fallback: Optional[str] = None) -> bool:
@@ -694,6 +698,12 @@ class PpuImpl(CudaImpl):
 
 
 class RocmImpl(GpuImpl):
+    _extra_swizzle_weight_keys: List[str] = []
+
+    @classmethod
+    def register_swizzle_weight_keys(cls, keys: List[str]):
+        cls._extra_swizzle_weight_keys.extend(keys)
+
     def __init__(self):
         super().__init__()
         # arch / mem-info paths read self.rocml unconditionally, so the
@@ -917,6 +927,7 @@ class RocmImpl(GpuImpl):
                     "Quark MXFP4 MoE scale shuffle requires gfx950 (MI355)."
                 )
             from aiter.utility.fp4_utils import e8m0_shuffle
+
             if x_.dim() == 3:
                 s0, s1, _ = x_.shape
                 x_ = e8m0_shuffle(x_.contiguous().view(s0 * s1, -1)).view(s0, s1, -1)
@@ -953,12 +964,18 @@ class RocmImpl(GpuImpl):
             W.linear_attn_qkvz_w,
             W.linear_attn_ba_w,
             W.linear_attn_out_w,
+            *self._extra_swizzle_weight_keys,
         ]:
             if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
                 if weight.dtype != torch.float8_e4m3fn:
-                    weight = swizzle_tensor(weight.t(), False).t()
+                    if can_swizzle_tensor(weight.t(), False):
+                        weight = swizzle_tensor(weight.t(), False).t()
+                        mark_swizzled(weight)
                 else:
-                    weight = swizzle_tensor(weight, weight.dtype != torch.float8_e4m3fn)
+                    col_maj = weight.dtype != torch.float8_e4m3fn
+                    if can_swizzle_tensor(weight, col_maj):
+                        weight = swizzle_tensor(weight, col_maj)
+                        mark_swizzled(weight)
             elif weight.dtype == torch.float8_e4m3fn:
                 weight = self.shuffle_gemm_weight(weight)
 

@@ -151,7 +151,11 @@ torch::Tensor XQAAttnOp::forward(const torch::Tensor&                   input,
            kv_cache.value().kv_cache_base.data_ptr(),  // params->kv_block_array.mPrimaryPoolPtr,
            reinterpret_cast<int32_t*>((KVCacheIndex*)(params->kv_cache_offset.data_ptr())),
            kv_block_array.cache_type == KvCacheDataType::FP8,
-           reinterpret_cast<uint32_t*>(params->sequence_lengths.data_ptr()));
+           reinterpret_cast<uint32_t*>(params->sequence_lengths.data_ptr()),
+           /* rcp_out_scale  = */ nullptr,
+           /* max_q_len      = */ 2,
+           /* q_cu_seqlens   = */ nullptr,
+           /* max_batch_size = */ std::max((size_t)4096, params->batch_size));
     return output;
 }
 

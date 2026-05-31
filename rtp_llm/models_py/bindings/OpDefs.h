@@ -366,10 +366,17 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor hidden_states;
+    torch::Tensor last_hidden_states;
+    torch::Tensor logits;
 
     PyModelOutputs() = default;
 
     PyModelOutputs(torch::Tensor hidden_states): hidden_states(std::move(hidden_states)) {}
+
+    PyModelOutputs(torch::Tensor hidden_states, torch::Tensor last_hidden_states, torch::Tensor logits):
+        hidden_states(std::move(hidden_states)),
+        last_hidden_states(std::move(last_hidden_states)),
+        logits(std::move(logits)) {}
 };
 
 void registerPyOpDefs(pybind11::module& m);

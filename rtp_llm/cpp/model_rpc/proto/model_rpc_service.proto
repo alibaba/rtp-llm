@@ -136,6 +136,7 @@ message GenerateConfigPB {
     google.protobuf.StringValue regex = 70;
     google.protobuf.StringValue ebnf = 71;
     google.protobuf.StringValue structural_tag = 72;
+    bool aux_info = 73;
 }
 
 message MMPreprocessConfigPB {

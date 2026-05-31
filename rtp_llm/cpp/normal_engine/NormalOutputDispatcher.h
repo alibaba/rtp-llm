@@ -4,6 +4,7 @@
 
 #include <torch/all.h>
 #include "absl/status/status.h"
+#include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 
@@ -17,6 +18,8 @@ std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_
 class NormalOutputDispatcher {
 public:
     NormalOutputDispatcher() = default;
+    NormalOutputDispatcher(std::shared_ptr<autil::LockFreeThreadPool> thread_pool):
+        thread_pool_(std::move(thread_pool)) {}
 
     absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
 
@@ -30,6 +33,8 @@ private:
                               const torch::Tensor& new_tokens_all,
                               const torch::Tensor& token_ids_cpu,
                               const torch::Tensor& success_cpu) const;
+
+    std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
 };
 
 }  // namespace rtp_llm

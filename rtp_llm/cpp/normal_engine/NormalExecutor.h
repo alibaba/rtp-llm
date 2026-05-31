@@ -3,6 +3,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include "autil/LockFreeThreadPool.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
@@ -23,14 +24,15 @@ struct GptModelInitParams;
 
 class NormalExecutor: public Executor {
 public:
-    explicit NormalExecutor(const EngineInitParams&                params,
-                            const std::shared_ptr<KVCacheManager>& cache_manager,
-                            bool                                   warm_up             = false,
-                            bool                                   is_propose          = false,
-                            int                                    propose_model_index = 0,
-                            MlaOpsType                             mla_ops_type        = MlaOpsType::AUTO,
-                            std::function<void()>                  profile_step_start  = nullptr,
-                            std::function<void()>                  profile_step_finish = nullptr);
+    explicit NormalExecutor(std::shared_ptr<autil::LockFreeThreadPool> thread_pool,
+                            const EngineInitParams&                    params,
+                            const std::shared_ptr<KVCacheManager>&     cache_manager,
+                            bool                                       warm_up             = false,
+                            bool                                       is_propose          = false,
+                            int                                        propose_model_index = 0,
+                            MlaOpsType                                 mla_ops_type        = MlaOpsType::AUTO,
+                            std::function<void()>                      profile_step_start  = nullptr,
+                            std::function<void()>                      profile_step_finish = nullptr);
     ~NormalExecutor();
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     void         reportMetrics(const StreamGroups&             stream_groups,
@@ -95,20 +97,20 @@ private:
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
     std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
     std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
+    std::shared_ptr<autil::LockFreeThreadPool>                               thread_pool_;
     bool                                                                     warm_up_;
     bool                                                                     use_all_gather_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
-    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>
-        wall_tps_reporter_;
-    bool                                                                     enable_ffn_disaggregate_ = false;
-    bool                                                                     enable_detail_log_       = false;
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
+    bool enable_ffn_disaggregate_ = false;
+    bool enable_detail_log_       = false;
 
     bool                  is_propose_          = false;
     int                   propose_model_index_ = 0;
     int                   tp_rank_             = 0;
     ParallelismConfig     parallelism_config_;
-    RoleType              role_type_           = RoleType::PDFUSION;
+    RoleType              role_type_ = RoleType::PDFUSION;
     std::function<void()> profile_step_start_;
     std::function<void()> profile_step_finish_;
 

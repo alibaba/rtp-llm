@@ -632,20 +632,20 @@ __launch_bounds__(128 * 3, 1)
                          void* __restrict__ const scratch = nullptr) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 900 && defined(__CUDA_ARCH_FEAT_SM90_ALL)                               \
     && (IS_SUPPORTED_F16_CASE || CACHE_ELEM_ENUM == 2) && BEAM_WIDTH == 1
-    uint32_t const idxReq = blockIdx.z / nbKHeads;
+    uint32_t const idxReq = blockIdx.x / nbKHeads;
 #if SPEC_DEC
     uint32_t const reqInputTokBeg  = getInputTokOffset(specDecParams, idxReq);
     uint32_t const reqInputTokEnd  = getInputTokOffset(specDecParams, idxReq + 1);
-    uint32_t const nbInputSeqSplit = gridDim.x;
+    uint32_t const nbInputSeqSplit = gridDim.z;
     assert(nbInputSeqSplit == divUp(specDecParams.qSeqLen, inputTokensPerCta));
 #else
     uint32_t const            reqInputTokBeg  = idxReq;
     uint32_t const            reqInputTokEnd  = idxReq + 1;
     constexpr uint32_t        nbInputSeqSplit = 1;
-    assert(gridDim.x == nbInputSeqSplit);
+    assert(gridDim.z == nbInputSeqSplit);
 #endif
-    uint32_t const idxHeadGrp = blockIdx.z % nbKHeads;  // inside one request
-    assert(gridDim.z == nbKHeads * batchSize);
+    uint32_t const idxHeadGrp = blockIdx.x % nbKHeads;  // inside one request
+    assert(gridDim.x == nbKHeads * batchSize);
     uint32_t const cacheSeqLen_past = getCacheSeqLen<usePagedKVCache>(cacheList, idxReq);
 #if SPEC_DEC
     uint32_t const cacheSeqLen = cacheSeqLen_past;
@@ -690,7 +690,7 @@ __launch_bounds__(128 * 3, 1)
         return;
     }
 #if SPEC_DEC
-    uint32_t const idxInputSubSeq   = blockIdx.x;
+    uint32_t const idxInputSubSeq   = blockIdx.z;
     uint32_t const inputSeqLen      = reqInputTokEnd - reqInputTokBeg;
     uint32_t const ctaTokOffset     = inputTokensPerCta * idxInputSubSeq;
     uint32_t const ctaNbValidTokens = mha::min(uint32_t{inputTokensPerCta}, inputSeqLen - ctaTokOffset);
@@ -2990,8 +2990,8 @@ void XQA_FUNC_SM90(cudaDeviceProp const& prop,
             divUp(maxSeqLen, gemm0CtaTileNbTokens));
 #endif
     }();
-    // gridDim.z == nbKHeads * batchSize && gridDim.y == nbSubSeqPerSeq && gridDim.x == nbInputSeqSplit
-    dim3 const dimGrid{divUp(qSeqLen, inputTokensPerCta), nbSubSeqPerSeq, nbKHeads * batchSize};
+    // gridDim.x == nbKHeads * batchSize && gridDim.y == nbSubSeqPerSeq && gridDim.x == nbInputSeqSplit
+    dim3 const dimGrid{nbKHeads * batchSize, nbSubSeqPerSeq, divUp(qSeqLen, inputTokensPerCta)};
     dim3 const dimCta{warp_size * gmmaWarpsPerGrp, 1, 3};
     auto const launchCfg = makeLaunchConfig(dimGrid, dimCta, hostSmemSize, stream, ENABLE_FDL != 0);
 #if USE_PAGED_KV_CACHE

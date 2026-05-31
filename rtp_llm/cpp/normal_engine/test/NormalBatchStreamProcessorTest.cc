@@ -177,7 +177,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
 
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        nullptr, model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = hostIntBuffer({1, 2});
@@ -263,7 +263,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         MMModelConfig mm_model_config;
         model_config.mm_model_config = mm_model_config;
         NormalBatchStreamProcessor processor(
-            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+            nullptr, model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
         StreamGroups stream_groups(streams);
         TensorHolder holder;
@@ -386,7 +386,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
         stream->generate_status_->status = StreamState::RUNNING;
     }
     NormalBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        nullptr, model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
     StreamGroups stream_groups(streams);
     TensorHolder holder;
@@ -466,7 +466,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
         stream->generate_status_->status = StreamState::RUNNING;
     }
     NormalBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        nullptr, model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
     StreamGroups stream_groups(streams);
     TensorHolder holder;
@@ -515,7 +515,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     initFullCacheConfig(cache_config, model_config.num_layers);
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        nullptr, model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = hostIntBuffer({1, -1, -1, -1, 2});

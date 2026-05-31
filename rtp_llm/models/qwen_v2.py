@@ -369,7 +369,7 @@ class QWenV2(QWen):
         with open(config_path) as reader:
             content = reader.read()
             config_json = json.loads(content)
-        QWenV2._from_config_json(config, config_json)
+        cls._from_config_json(config, config_json)
         return config
 
     @staticmethod

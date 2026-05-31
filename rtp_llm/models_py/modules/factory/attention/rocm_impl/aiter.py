@@ -7,6 +7,7 @@ import torch
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.modules.factory.attention.rocm_impl._attn_utils import (
+    compute_kv_unpad_indices,
     split_qkv_fp8,
     split_raw_qkv,
     unpad_kv_vectorized,
@@ -109,6 +110,8 @@ class FMHAParams(ParamsBase):
         enable_cuda_graph: bool = True,
         graph_max_seq_len: Optional[int] = None,
         alloc_scale: bool = False,
+        v1_kv_layout: bool = False,
+        is_cross_attention: bool = False,
     ):
         super().__init__()
         self.enable_cuda_graph = enable_cuda_graph
@@ -141,7 +144,11 @@ class FMHAParams(ParamsBase):
             # Create cu_seqlens_k for key/value (includes prefix_lengths)
             if prefix_lengths is not None and prefix_lengths.numel() > 0:
                 prefix_lengths_gpu = prefix_lengths.to(gpu_device, non_blocking=True)
-                kv_lengths_gpu = input_lengths_gpu + prefix_lengths_gpu
+                if is_cross_attention:
+                    # Cross-attention: KV = prefix only (cached states)
+                    kv_lengths_gpu = prefix_lengths_gpu
+                else:
+                    kv_lengths_gpu = input_lengths_gpu + prefix_lengths_gpu
                 self.cu_seqlens_k = torch.zeros(
                     batch_size + 1, dtype=torch.int32, device=gpu_device
                 )
@@ -150,8 +157,12 @@ class FMHAParams(ParamsBase):
                 max_prefix_length = (
                     prefix_lengths.max().item() if prefix_lengths.numel() > 0 else 0
                 )
-                self.max_seqlen_k = self.max_seq_len + max_prefix_length
-                kv_lengths = input_lengths + prefix_lengths
+                if is_cross_attention:
+                    self.max_seqlen_k = max_prefix_length
+                    kv_lengths = prefix_lengths
+                else:
+                    self.max_seqlen_k = self.max_seq_len + max_prefix_length
+                    kv_lengths = input_lengths + prefix_lengths
                 # Hoist FMHA-setup tensor out of the per-layer hot path: with prefix,
                 # seqlen_k = input_lengths + prefix_lengths (int32, on GPU).
                 self.prefill_seqlen_k_int32 = kv_lengths_gpu.to(torch.int32)
@@ -204,13 +215,26 @@ class FMHAParams(ParamsBase):
 
             # Create seq_lens on CUDA
             if sequence_lengths is not None:
-                self.seq_lens = (sequence_lengths + 1).to(torch.device("cuda"))
+                self.seq_lens = (sequence_lengths + 1).to(
+                    torch.device("cuda"), non_blocking=True
+                )
             else:
                 self.seq_lens = None
 
             bid = self.kv_cache_block_id_device
             if bid is not None and alloc_scale:
                 self.kv_scale = torch.ones(1, dtype=torch.float32, device=bid.device)
+
+        self.cu_seqlens_k_device = self.cu_seqlens_k
+        if self.cu_seqlens_k is not None:
+            self.cu_seqlens_k_device = self.cu_seqlens_k_device.to(
+                torch.device("cuda"), non_blocking=True
+            )
+        self.cu_seqlens_q_device = self.cu_seqlens_q
+        if self.cu_seqlens_q is not None:
+            self.cu_seqlens_q_device = self.cu_seqlens_q_device.to(
+                torch.device("cuda"), non_blocking=True
+            )
 
     def fillParams(
         self,
@@ -225,7 +249,10 @@ class FMHAParams(ParamsBase):
         if kv_cache_block_id_device is not None:
             self.kv_cache_block_id_device = kv_cache_block_id_device
         if self.seq_lens is not None and self.sequence_lengths is not None:
-            self.seq_lens.copy_((self.sequence_lengths + 1).to(torch.device("cuda")))
+            self.seq_lens.copy_(
+                (self.sequence_lengths + 1).to(torch.device("cuda"), non_blocking=True),
+                non_blocking=True,
+            )
             if (
                 self.enable_cuda_graph
                 and self.graph_max_seq_len is not None
@@ -251,6 +278,7 @@ class AiterPrefillAttnOp:
         self.kv_cache_torch_dtype = self._get_kv_cache_torch_dtype(
             attn_configs.kv_cache_dtype, attn_configs.dtype
         )
+        self.is_cross_attention = attn_configs.is_cross_attention
         self.v1_kv_layout = v1_kv_layout
         self.use_compact = (
             self.v1_kv_layout and attn_configs.kv_cache_dtype != KvCacheDataType.FP8
@@ -271,9 +299,27 @@ class AiterPrefillAttnOp:
         self.fmha_params = FMHAParams(
             attn_inputs=attn_inputs,
             is_prefill=True,
+            v1_kv_layout=self.v1_kv_layout,
+            is_cross_attention=self.is_cross_attention,
         )
         self._prepare_block_table_indices(self.fmha_params)
 
+        # Precompute the (batch_idx, pos_idx) gather indices used by
+        # unpad_kv_vectorized. They depend only on cu_seqlens_k, so doing the
+        # arange + searchsorted once here lets every attention layer in the
+        # request reuse the same indices instead of recomputing them in each
+        # forward() call.
+        if self.fmha_params.cu_seqlens_k_device is not None:
+            (
+                self.fmha_params.kv_unpad_batch_idx,
+                self.fmha_params.kv_unpad_pos_idx,
+            ) = compute_kv_unpad_indices(
+                self.fmha_params.cu_seqlens_k_device,
+                self.fmha_params.token_kv_num,
+            )
+        else:
+            self.fmha_params.kv_unpad_batch_idx = None
+            self.fmha_params.kv_unpad_pos_idx = None
         return self.fmha_params
 
     def _prepare_block_table_indices(self, fmha_params):
@@ -507,7 +553,16 @@ class AiterPrefillAttnOp:
             # [B, H_kv, max_seqlen, D]. Unpad on device via vectorized gather to
             # avoid per-layer D2H sync and Python batch loop on the hot path.
             if key.dim() == 4 and value.dim() == 4:
-                key, value = unpad_kv_vectorized(key, value, fmha_params.cu_seqlens_k)
+                # Vectorized unpad from [batch_size, num_kv_heads, max_seqlen_k, head_dim]
+                # to packed [total_kv_tokens, num_kv_heads, head_dim] via advanced
+                # indexing. The (batch_idx, pos_idx) gather indices were materialised
+                # once on fmha_params in prepare() and are reused across every layer.
+                key, value = unpad_kv_vectorized(
+                    key,
+                    value,
+                    fmha_params.kv_unpad_batch_idx,
+                    fmha_params.kv_unpad_pos_idx,
+                )
             else:
                 if key.dim() == 2:
                     key = key.view(-1, self.head_num_kv, self.head_dim)
@@ -775,6 +830,8 @@ class AiterPrefillAttnOpPaged:
         self.kv_page_indices_buf: Optional[torch.Tensor] = None
         self.descale_buf: Optional[torch.Tensor] = None
         self._block_positions: Optional[torch.Tensor] = None
+        self.is_causal = attn_configs.is_causal
+        self.is_cross_attention = attn_configs.is_cross_attention
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         has_prefix = (
@@ -788,6 +845,7 @@ class AiterPrefillAttnOpPaged:
         fmha_params = FMHAParams(
             attn_inputs=attn_inputs,
             is_prefill=True,
+            is_cross_attention=self.is_cross_attention,
         )
         self.enable_cuda_graph = bool(getattr(attn_inputs, "is_cuda_graph", False))
         self.cuda_graph_prepared = False
@@ -850,7 +908,10 @@ class AiterPrefillAttnOpPaged:
         # capture only happens in the decode stage (AiterDecodeAttnOp), so the
         # graph_ready path here is never triggered and does not require dedicated
         # regression tests.
-        q_tensor = qkv[0][: fmha_params.token_q_num]
+        if self.is_cross_attention:
+            q_tensor = qkv
+        else:
+            q_tensor = qkv[0][: fmha_params.token_q_num]
         device = q_tensor.device
 
         key_cache = kv_cache.kv_cache_base.select(1, 0)
@@ -870,21 +931,23 @@ class AiterPrefillAttnOpPaged:
             cu_seqlens_q = fmha_params.cu_seqlens_q
             cu_seqlens_k = fmha_params.cu_seqlens_k
         else:
-            cu_seqlens_q = fmha_params.cu_seqlens_q.to(device)
-            cu_seqlens_k = fmha_params.cu_seqlens_k.to(device)
+            cu_seqlens_q = fmha_params.cu_seqlens_q.to(device, non_blocking=True)
+            cu_seqlens_k = fmha_params.cu_seqlens_k.to(device, non_blocking=True)
         batch_size = cu_seqlens_q.shape[0] - 1
 
         if graph_ready:
             torch.sub(cu_seqlens_k[1:], cu_seqlens_k[:-1], out=self.seqlen_k_buf)
             seqlen_k = self.seqlen_k_buf
         else:
-            seqlen_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).to(torch.int32)
+            seqlen_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).to(
+                torch.int32, non_blocking=True
+            )
 
         if graph_ready:
             block_table = fmha_params.kv_cache_block_id_device
         else:
             block_table = fmha_params.kv_cache_block_id_device.to(
-                dtype=torch.int32, device=device
+                dtype=torch.int32, device=device, non_blocking=True
             )
 
         max_seqlen_q = fmha_params.max_seqlen_q
@@ -937,7 +1000,7 @@ class AiterPrefillAttnOpPaged:
             kv_page_indices,
             max_seqlen_q,
             max_seqlen_k,
-            causal=True,
+            causal=self.is_causal,
             block_table=block_table,
             seqlen_k=seqlen_k,
             q_descale=q_descale,

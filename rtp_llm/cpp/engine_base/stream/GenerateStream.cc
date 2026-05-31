@@ -116,15 +116,15 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 }
 
 void GenerateStream::resetBeginTime(int64_t begin_time_us) {
-    begin_time_us_ = begin_time_us;
-    wait_time_us_ = 0;
-    scheduler_enqueue_time_us_ = 0;
-    can_run_time_us_ = 0;
+    begin_time_us_               = begin_time_us;
+    wait_time_us_                = 0;
+    scheduler_enqueue_time_us_   = 0;
+    can_run_time_us_             = 0;
     loading_cache_start_time_us_ = 0;
-    loading_cache_done_time_us_ = 0;
-    first_running_time_us_ = 0;
-    loading_cache_latency_us_ = 0;
-    load_done_to_running_us_ = 0;
+    loading_cache_done_time_us_  = 0;
+    first_running_time_us_       = 0;
+    loading_cache_latency_us_    = 0;
+    load_done_to_running_us_     = 0;
 }
 
 bool GenerateStream::hasCacheKeys() const {
@@ -252,7 +252,7 @@ int64_t GenerateStream::streamId() const {
 
 std::string GenerateStream::streamLogTag() const {
     const auto& request_info = generate_input_->request_info;
-    std::string tag = std::string("request_id=") + std::to_string(streamId()) + " trace_id=" + traceId();
+    std::string tag          = std::string("request_id=") + std::to_string(streamId()) + " trace_id=" + traceId();
     if (!request_info.request_id.empty()) {
         tag += " source_request_id=" + request_info.request_id;
     }
@@ -683,6 +683,11 @@ StreamState GenerateStream::getStatus() const {
     return generate_status_->getStatus();
 }
 
+StreamState GenerateStream::getLatestStatus() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return generate_status_->getLatestStatus();
+}
+
 bool GenerateStream::isFinished() const {
     return getStatus() == StreamState::FINISHED;
 }
@@ -907,8 +912,8 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
         const_cast<torch::Tensor&>(new_tokens).zero_();
     }
 
-    auto      num_new_tokens = update_info.num_new_tokens;
-    int       cur_cached_len = seqLength() - 1;
+    auto num_new_tokens = update_info.num_new_tokens;
+    int  cur_cached_len = seqLength() - 1;
 
     int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,
@@ -991,7 +996,6 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   torch::Tensor(),
                   update_info.update_remote_generate,
                   update_info.force_update_info});
-
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
@@ -1043,10 +1047,9 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
 
-    // checkFinished() 已将本轮 updateOutput 中上报的 GenerateDone/Error 事件应用到状态上，
+    // getLatestStatus() 已将本轮 updateOutput 中上报的 GenerateDone/Error 应用到状态上，
     // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。
-    bool is_done = generate_status_->checkFinished();
-
+    bool is_done = generate_status_->getLatestStatus() == StreamState::FINISHED;
 
     if (!is_done || stream_cache_resource_->reuseCache()) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
@@ -1099,8 +1102,6 @@ std::optional<ErrorInfo> GenerateStream::updateLogitProcessorStatus(const torch:
     return validateLogitsProcessorState();
 }
 
-
-
 void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!src_batch_indices.defined() || !hasNumBeams()) {
@@ -1115,8 +1116,6 @@ void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src
         logit_processor_ptr->updateMultiSeqStatus(src_batch_indices_vec);
     }
 }
-
-
 
 std::optional<ErrorInfo> GenerateStream::validateLogitsProcessorState() {
     if (hasErrorWithoutLock()) {
@@ -1137,7 +1136,6 @@ std::optional<ErrorInfo> GenerateStream::validateLogitsProcessorState() {
     }
     return std::nullopt;
 }
-
 
 void GenerateStream::setLoss(const torch::Tensor& loss) {
     RTP_LLM_PROFILE_FUNCTION();
@@ -1202,9 +1200,10 @@ void GenerateStream::reportStreamMetrics() {
         collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
         collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
-            collector.reuse_length           = initial_reuse_length_;
-            collector.input_token_length     = inputLength();
-            collector.effective_context_length = std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
+            collector.reuse_length       = initial_reuse_length_;
+            collector.input_token_length = inputLength();
+            collector.effective_context_length =
+                std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
             collector.output_token_length    = outputTokenLen();
             collector.iterate_count          = iter_count_;
             collector.query_batch_size       = maxBatchSize();
@@ -1212,7 +1211,7 @@ void GenerateStream::reportStreamMetrics() {
             collector.first_token_latency_us = complete_token_ids_->firstTokenLatencyUs();
             RTP_LLM_LOG_DEBUG(
                 "stream [%ld] report first latency us = %ld", streamId(), collector.first_token_latency_us);
-            collector.wait_latency_us          = wait_time_us_;
+            collector.wait_latency_us = wait_time_us_;
             if (scheduler_enqueue_time_us_ > 0 && can_run_time_us_ > scheduler_enqueue_time_us_) {
                 collector.enqueue_to_canrun_us = can_run_time_us_ - scheduler_enqueue_time_us_;
             }
@@ -1237,9 +1236,9 @@ void GenerateStream::reportStreamMetrics() {
 
 void GenerateStream::reportCacheReuseMetrics() const {
     if (metrics_reporter_ && stream_cache_resource_->reuseCache()) {
-        const int64_t input_length        = inputLength();
+        const int64_t input_length       = inputLength();
         const int64_t total_reuse_length = initialReuseLength();
-        auto hit_ratio = [input_length](int64_t reuse_length) {
+        auto          hit_ratio          = [input_length](int64_t reuse_length) {
             return input_length > 0 ? static_cast<float>(reuse_length * 100.0 / input_length) : 0.0f;
         };
         RtpLLMCacheReuseMetricsCollector collector;
@@ -1318,7 +1317,7 @@ void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_l
     complete_token_ids_ = make_shared<CompleteTokenIds>(*other_stream.complete_token_ids_, share);
     grpc_normal_device_state_pending_ =
         std::make_shared<std::atomic<bool>>(other_stream.hasGrpcNormalDeviceStatePending());
-    cum_log_probs_      = other_stream.cum_log_probs_.clone();
+    cum_log_probs_ = other_stream.cum_log_probs_.clone();
     if (other_stream.calculateLoss() && copy_loss) {
         loss_ = other_stream.loss_.clone();
     } else {

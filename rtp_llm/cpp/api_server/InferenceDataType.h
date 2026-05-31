@@ -11,26 +11,29 @@ using namespace autil::legacy::json;
 namespace rtp_llm {
 
 // used for de-serialization
-#define JSONIZE_OPTIONAL(field)                                                                                        \
+#define JSONIZE_OPTIONAL_WITH_EXCEPTION(field, exception)                                                              \
     try {                                                                                                              \
         using Type = decltype(field)::value_type;                                                                      \
         Type field##Tmp;                                                                                               \
         json.Jsonize(#field, field##Tmp);                                                                              \
         field = field##Tmp;                                                                                            \
-    } catch (autil::legacy::ExceptionBase & e) {                                                                       \
+    } catch (exception & e) {                                                                                          \
         if (field.has_value() == false) {                                                                              \
             field = std::nullopt;                                                                                      \
         }                                                                                                              \
     }
 
+#define JSONIZE_OPTIONAL(field) JSONIZE_OPTIONAL_WITH_EXCEPTION(field, autil::legacy::ExceptionBase)
+#define JSONIZE_OPTIONAL_RESTRICT(field) JSONIZE_OPTIONAL_WITH_EXCEPTION(field, autil::legacy::NotJsonizableException)
+
 class EmbeddingRequest: public autil::legacy::Jsonizable {
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("source", source, "unknown");
-        json.Jsonize("private_request", private_request, false);
+        JSONIZE_OPTIONAL_RESTRICT(private_request);
     }
-    std::string source;
-    bool        private_request;
+    std::string         source;
+    std::optional<bool> private_request;
 };
 
 class RawRequest: public autil::legacy::Jsonizable {
@@ -38,7 +41,7 @@ public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("source", source, "unknown");
         json.Jsonize("yield_generator", yield_generator, false);
-        json.Jsonize("private_request", private_request, false);
+        JSONIZE_OPTIONAL_RESTRICT(private_request);
         JSONIZE_OPTIONAL(prompt);
         try {
             std::string text;
@@ -69,7 +72,7 @@ public:
         JSONIZE_OPTIONAL(generate_config);
     }
     std::string                                          source;
-    bool                                                 private_request;
+    std::optional<bool>                                  private_request;
     bool                                                 yield_generator;
     std::optional<std::string>                           prompt;
     std::optional<std::vector<std::string>>              prompt_batch;

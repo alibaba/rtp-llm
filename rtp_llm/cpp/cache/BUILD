@@ -184,6 +184,9 @@ cc_library(
     deps = [
         ":cache_types",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/utils:stl_utils",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:lru_cache",
         "//rtp_llm/cpp/utils:profiling_scope",

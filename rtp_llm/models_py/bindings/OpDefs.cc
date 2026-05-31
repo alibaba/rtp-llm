@@ -1,4 +1,5 @@
 #include "OpDefs.h"
+#include "OpDefsUtils.h"
 
 namespace torch_ext {
 namespace {
@@ -269,7 +270,17 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
         .def(pybind11::init<torch::Tensor>(), pybind11::arg("hidden_states"), "Initialize with hidden states tensor")
-        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor");
+        .def(pybind11::init<torch::Tensor, torch::Tensor, torch::Tensor>(),
+             pybind11::arg("hidden_states"),
+             pybind11::arg("last_hidden_states"),
+             pybind11::arg("logits"),
+             "Initialize with hidden states, last hidden state, and logits tensor")
+        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
+        .def_readwrite("last_hidden_states", &PyModelOutputs::last_hidden_states, "Last hidden states output tensor")
+        .def_readwrite("logits", &PyModelOutputs::logits, "Logits output tensor");
+
+    m.def(
+        "calculate_padding_offset", rtp_llm::calculatePaddingOffset, "calculate padding offset for PyAttentionInputs");
 }
 
 }  // namespace torch_ext
