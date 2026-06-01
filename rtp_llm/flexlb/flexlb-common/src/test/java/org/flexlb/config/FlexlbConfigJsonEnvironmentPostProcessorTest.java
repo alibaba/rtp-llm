@@ -53,7 +53,7 @@ class FlexlbConfigJsonEnvironmentPostProcessorTest {
         String json = "{\"enableQueueing\":true,"
                 + "\"maxQueueSize\":7,"
                 + "\"dpBalanceEnabled\":true,"
-                + "\"dpAssignStrategy\":\"RR\"}";
+                + "\"dpBatcherType\":\"SLO\"}";
         StandardEnvironment env = envWith(Map.of("FLEXLB_CONFIG", json));
 
         processor.postProcessEnvironment(env, new SpringApplication());
@@ -61,7 +61,7 @@ class FlexlbConfigJsonEnvironmentPostProcessorTest {
         assertEquals("true", env.getProperty("flexlb.enableQueueing"));
         assertEquals("7", env.getProperty("flexlb.maxQueueSize"));
         assertEquals("true", env.getProperty("flexlb.dpBalanceEnabled"));
-        assertEquals("RR", env.getProperty("flexlb.dpAssignStrategy"));
+        assertEquals("SLO", env.getProperty("flexlb.dpBatcherType"));
     }
 
     @Test

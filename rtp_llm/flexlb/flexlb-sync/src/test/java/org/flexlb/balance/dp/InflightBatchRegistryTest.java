@@ -33,7 +33,7 @@ class InflightBatchRegistryTest {
 
     @Test
     void register_then_lookup_byRequest_and_byBatch() {
-        PrefillBatch batch = makeBatch(4, prefill, decode);
+        DispatchBatch batch = makeBatch(4, prefill, decode);
         long batchId = 100L;
         reg.register(batchId, batch);
 
@@ -57,7 +57,7 @@ class InflightBatchRegistryTest {
 
     @Test
     void removeRequest_keeps_batch_entry_until_last_request_gone() {
-        PrefillBatch batch = makeBatch(4, prefill, decode);
+        DispatchBatch batch = makeBatch(4, prefill, decode);
         reg.register(1L, batch);
 
         // Remove the first 3 → batch should still exist (one request still alive)
@@ -76,7 +76,7 @@ class InflightBatchRegistryTest {
 
     @Test
     void remove_batch_clears_all_request_entries() {
-        PrefillBatch batch = makeBatch(3, prefill, decode);
+        DispatchBatch batch = makeBatch(3, prefill, decode);
         reg.register(7L, batch);
         assertEquals(3, reg.sizeRequests());
 
@@ -98,7 +98,7 @@ class InflightBatchRegistryTest {
     @Test
     void evict_stale_drops_old_entries_and_increments_counter() throws Exception {
         // Inject a "long-ago" batch
-        PrefillBatch batch = makeBatch(2, prefill, decode);
+        DispatchBatch batch = makeBatch(2, prefill, decode);
         reg.register(42L, batch);
 
         // Reflectively backdate createdAtMs to simulate staleness
@@ -116,7 +116,7 @@ class InflightBatchRegistryTest {
 
     @Test
     void evict_stale_keeps_fresh_entries() {
-        PrefillBatch batch = makeBatch(2, prefill, decode);
+        DispatchBatch batch = makeBatch(2, prefill, decode);
         reg.register(99L, batch);
         reg.evictStale();
         assertEquals(1, reg.sizeBatches(), "fresh entries must not be evicted");
@@ -138,7 +138,7 @@ class InflightBatchRegistryTest {
 
     @Test
     void newly_registered_request_is_PENDING_ACK() {
-        PrefillBatch batch = makeBatch(4, prefill, decode);
+        DispatchBatch batch = makeBatch(4, prefill, decode);
         reg.register(1L, batch);
         for (PendingRequest r : batch.requests()) {
             assertEquals(InflightBatchRegistry.RequestState.PENDING_ACK, reg.getState(r.requestId()));
@@ -147,7 +147,7 @@ class InflightBatchRegistryTest {
 
     @Test
     void markActive_succeeds_from_PENDING_ACK() {
-        PrefillBatch batch = makeBatch(2, prefill, decode);
+        DispatchBatch batch = makeBatch(2, prefill, decode);
         reg.register(1L, batch);
         long reqId = batch.requests().get(0).requestId();
 
@@ -159,7 +159,7 @@ class InflightBatchRegistryTest {
     void markActive_fails_after_cancel_tombstone() {
         // The whole point of the tombstone: if Cancel beats the Enqueue ack,
         // markActive (called from handleAck) must NOT undo the cancellation.
-        PrefillBatch batch = makeBatch(2, prefill, decode);
+        DispatchBatch batch = makeBatch(2, prefill, decode);
         reg.register(1L, batch);
         long reqId = batch.requests().get(0).requestId();
 
@@ -175,7 +175,7 @@ class InflightBatchRegistryTest {
 
     @Test
     void markCancelled_returns_previous_state() {
-        PrefillBatch batch = makeBatch(2, prefill, decode);
+        DispatchBatch batch = makeBatch(2, prefill, decode);
         reg.register(1L, batch);
         long reqId = batch.requests().get(0).requestId();
 
@@ -187,7 +187,7 @@ class InflightBatchRegistryTest {
 
     @Test
     void markCancelled_after_active_returns_active() {
-        PrefillBatch batch = makeBatch(2, prefill, decode);
+        DispatchBatch batch = makeBatch(2, prefill, decode);
         reg.register(1L, batch);
         long reqId = batch.requests().get(0).requestId();
 
@@ -203,7 +203,7 @@ class InflightBatchRegistryTest {
 
     @Test
     void state_is_cleared_when_request_removed() {
-        PrefillBatch batch = makeBatch(2, prefill, decode);
+        DispatchBatch batch = makeBatch(2, prefill, decode);
         reg.register(1L, batch);
         long reqId = batch.requests().get(0).requestId();
 
@@ -213,7 +213,7 @@ class InflightBatchRegistryTest {
 
     @Test
     void state_is_cleared_when_batch_removed() {
-        PrefillBatch batch = makeBatch(3, prefill, decode);
+        DispatchBatch batch = makeBatch(3, prefill, decode);
         reg.register(7L, batch);
         reg.remove(7L);
         for (PendingRequest r : batch.requests()) {
@@ -232,7 +232,7 @@ class InflightBatchRegistryTest {
             final long batchId = b;
             pool.submit(() -> {
                 try { start.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                PrefillBatch batch = makeBatch(4, prefill, decode);
+                DispatchBatch batch = makeBatch(4, prefill, decode);
                 reg.register(batchId, batch);
                 for (PendingRequest r : batch.requests()) {
                     reg.removeRequest(r.requestId());
@@ -259,7 +259,7 @@ class InflightBatchRegistryTest {
 
     private static final java.util.concurrent.atomic.AtomicLong REQ_ID_GEN = new java.util.concurrent.atomic.AtomicLong(0);
 
-    private static PrefillBatch makeBatch(int size, ServerStatus prefill, ServerStatus decode) {
+    private static DispatchBatch makeBatch(int size, ServerStatus prefill, ServerStatus decode) {
         List<PendingRequest> reqs = IntStream.range(0, size)
                 .mapToObj(i -> {
                     org.flexlb.dao.BalanceContext ctx = new org.flexlb.dao.BalanceContext();
@@ -269,7 +269,7 @@ class InflightBatchRegistryTest {
                     return PendingRequest.of(ctx, prefill, decode, new CompletableFuture<Response>());
                 })
                 .toList();
-        return new PrefillBatch(prefill, new ArrayList<>(reqs), 4);
+        return new DispatchBatch(prefill, List.of(new ArrayList<>(reqs)), 4, 1);
     }
 
     /** Reflectively force createdAtMs on the registered batch + its requests for eviction tests. */

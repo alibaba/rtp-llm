@@ -3,7 +3,9 @@ package org.flexlb.balance.dp;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.DpBatchReporter;
 import org.flexlb.util.Logger;
 
@@ -40,14 +42,16 @@ import java.util.function.Consumer;
  *      fillRatio rises naturally until dispatch or EDF_URGENT
  * </pre>
  */
-public class SloBudgetBatcher {
+public class SloBudgetBatcher implements DispatchBatcher {
 
     private final String model;
     private final ConfigService configService;
     private final DispatchPlanner planner;
-    private final Consumer<PrefillBatch> dispatchCallback;
+    private final Consumer<DispatchBatch> dispatchCallback;
     private final PrefillTimePredictor predictor;
     private final DpBatchReporter dpBatchReporter;
+    private final WorkerStatus targetGroup;
+    private final int dpSize;
 
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition arrival = lock.newCondition();
@@ -60,18 +64,32 @@ public class SloBudgetBatcher {
     public SloBudgetBatcher(String model,
                             ConfigService configService,
                             DispatchPlanner planner,
-                            Consumer<PrefillBatch> dispatchCallback,
+                            Consumer<DispatchBatch> dispatchCallback,
                             PrefillTimePredictor predictor,
-                            DpBatchReporter dpBatchReporter) {
+                            DpBatchReporter dpBatchReporter,
+                            WorkerStatus targetGroup,
+                            int dpSize) {
+        if (dpSize != 1) {
+            throw new IllegalArgumentException(
+                    "SloBudgetBatcher requires dpSize=1, got " + dpSize);
+        }
         this.model = model;
         this.configService = configService;
         this.planner = planner;
         this.dispatchCallback = dispatchCallback;
         this.predictor = predictor;
         this.dpBatchReporter = dpBatchReporter;
+        this.targetGroup = targetGroup;
+        this.dpSize = dpSize;
 
-        this.worker = new Thread(this::runLoop, "slo-batcher-" + (model == null ? "default" : model));
+        String suffix = model == null ? "default" : model;
+        if (targetGroup != null) {
+            suffix += "-" + targetGroup.getGroup();
+        }
+        this.worker = new Thread(this::runLoop, "slo-batcher-" + suffix);
         this.worker.setDaemon(true);
+        this.worker.setUncaughtExceptionHandler((t, e) ->
+                Logger.error("SloBudgetBatcher[{}] thread died unexpectedly", model, e));
     }
 
     public void start() {
@@ -81,6 +99,12 @@ public class SloBudgetBatcher {
     // ============== public API ==============
 
     public void offer(QueuedRequest req) {
+        int maxSize = configService.loadBalanceConfig().getMaxBatcherQueueSize();
+        if (maxSize > 0 && queueSize() >= maxSize) {
+            req.future().complete(failureResponse(StrategyErrorType.QUEUE_FULL,
+                    "batcher queue full (size=" + maxSize + ")"));
+            return;
+        }
         QueuedRequest enriched = enrichRequest(req);
         lock.lock();
         try {
@@ -119,9 +143,33 @@ public class SloBudgetBatcher {
         }
     }
 
+    public boolean isAlive() {
+        return worker.isAlive();
+    }
+
+    public WorkerStatus getTargetGroup() {
+        return targetGroup;
+    }
+
     public void shutdown() {
         shutdown = true;
         worker.interrupt();
+        drainOnShutdown();
+    }
+
+    private void drainOnShutdown() {
+        lock.lock();
+        try {
+            for (QueuedRequest qr : queue) {
+                if (!qr.future().isDone()) {
+                    qr.future().completeExceptionally(
+                            new CancellationException("Batcher shutting down"));
+                }
+            }
+            queue.clear();
+        } finally {
+            lock.unlock();
+        }
     }
 
     // ============== main loop ==============
@@ -190,6 +238,12 @@ public class SloBudgetBatcher {
 
             reportQueueSnapshotLocked();
 
+            // 0. verify target group is still alive
+            if (targetGroup == null || !targetGroup.isAlive()) {
+                QueuedRequest head = queue.poll();
+                return StepResult.fail(head, cfg);
+            }
+
             QueuedRequest head = queue.peek();
             long nowMicros = System.nanoTime() / 1000;
             long budgetMs = (head.sloDeadlineMicros() - nowMicros) / 1000;
@@ -203,7 +257,7 @@ public class SloBudgetBatcher {
             // 2. urgent — no time to batch -> send head alone
             if (budgetMs < marginMs) {
                 queue.poll();
-                return StepResult.dispatch(List.of(head), DpBatchReporter.FlushReason.EDF_URGENT, cfg, computeTokens(head));
+                return StepResult.dispatch(List.of(head), DpBatchReporter.FlushReason.EDF_URGENT, cfg, computeTokens(head), targetGroup);
             }
 
             // 3. binary search for max batch tokens within budget
@@ -247,7 +301,7 @@ public class SloBudgetBatcher {
                 for (QueuedRequest qr : picked) {
                     queue.remove(qr);
                 }
-                return StepResult.dispatch(picked, DpBatchReporter.FlushReason.BATCH_READY, cfg, batchMaxTokens);
+                return StepResult.dispatch(picked, DpBatchReporter.FlushReason.BATCH_READY, cfg, batchMaxTokens, targetGroup);
             }
 
             // wait for new arrivals; budget shrinks each iteration -> converges
@@ -271,7 +325,7 @@ public class SloBudgetBatcher {
             return;
         }
         if (result.drained != null && !result.drained.isEmpty()) {
-            planAndDispatch(result.drained, result.cfg, result.reason, result.batchMaxTokens);
+            planAndDispatch(result.drained, result.cfg, result.reason, result.batchMaxTokens, result.targetGroup);
         }
     }
 
@@ -319,7 +373,8 @@ public class SloBudgetBatcher {
     private void planAndDispatch(List<QueuedRequest> drained,
                                   FlexlbConfig cfg,
                                   DpBatchReporter.FlushReason reason,
-                                  long batchMaxTokens) {
+                                  long batchMaxTokens,
+                                  WorkerStatus prefillWorker) {
         long actualTokens = 0;
         for (QueuedRequest qr : drained) {
             actualTokens += computeTokens(qr);
@@ -334,11 +389,33 @@ public class SloBudgetBatcher {
             }
         }
 
-        DispatchPlan plan;
         try {
-            plan = planner.plan(drained, new DispatchContext(model, 1, cfg, drained));
+            ServerStatus prefill = DefaultDispatchPlanner.toPrefillServerStatus(prefillWorker);
+            List<PendingRequest> placed = new ArrayList<>(drained.size());
+
+            for (QueuedRequest qr : drained) {
+                qr.ctx().setConfig(cfg);
+                ServerStatus decode = planner.selectDecodeWorker(qr.ctx(), prefill.getGroup());
+                if (decode == null || !decode.isSuccess()) {
+                    if (dpBatchReporter != null) {
+                        dpBatchReporter.reportSloFailure(model, DpBatchReporter.FailureCause.DISPATCH_ERROR);
+                    }
+                    qr.future().complete(failureResponse(StrategyErrorType.NO_DECODE_WORKER,
+                            decode == null ? "decode selector returned null" : decode.getMessage()));
+                    continue;
+                }
+                placed.add(new PendingRequest(qr.ctx(), prefill, decode, qr.future(), qr.enqueuedAtMicros()));
+            }
+
+            if (placed.isEmpty()) {
+                return;
+            }
+
+            long blockSize = DefaultDispatchPlanner.getBlockSize(prefillWorker);
+            DispatchBatch batch = new DispatchBatch(prefill, List.of(placed), dpSize, blockSize);
+            dispatchCallback.accept(batch);
         } catch (Throwable t) {
-            Logger.error("SloBudgetBatcher[{}] planner threw on {} requests; failing all",
+            Logger.error("SloBudgetBatcher[{}] planAndDispatch threw on {} requests; failing all",
                     model, drained.size(), t);
             if (dpBatchReporter != null) {
                 for (int i = 0; i < drained.size(); i++) {
@@ -346,30 +423,8 @@ public class SloBudgetBatcher {
                 }
             }
             for (QueuedRequest qr : drained) {
-                qr.future().completeExceptionally(t);
-            }
-            return;
-        }
-
-        for (FailedRequest fr : plan.failures()) {
-            if (dpBatchReporter != null) {
-                dpBatchReporter.reportSloFailure(model, DpBatchReporter.FailureCause.DISPATCH_ERROR);
-            }
-            fr.request().future().complete(failureResponse(fr.reason(), fr.message()));
-        }
-        for (PrefillBatch batch : plan.batches()) {
-            try {
-                dispatchCallback.accept(batch);
-            } catch (Throwable t) {
-                Logger.error("SloBudgetBatcher[{}] dispatch callback threw on batch of {}; failing all in batch",
-                        model, batch.size(), t);
-                if (dpBatchReporter != null) {
-                    for (int i = 0; i < batch.size(); i++) {
-                        dpBatchReporter.reportSloFailure(model, DpBatchReporter.FailureCause.DISPATCH_ERROR);
-                    }
-                }
-                for (PendingRequest pr : batch.requests()) {
-                    pr.future().completeExceptionally(t);
+                if (!qr.future().isDone()) {
+                    qr.future().completeExceptionally(t);
                 }
             }
         }
@@ -398,28 +453,32 @@ public class SloBudgetBatcher {
         final QueuedRequest failOne;
         final FlexlbConfig cfg;
         final long batchMaxTokens;
+        final WorkerStatus targetGroup;
 
         private StepResult(List<QueuedRequest> drained,
                            DpBatchReporter.FlushReason reason,
                            QueuedRequest failOne,
                            FlexlbConfig cfg,
-                           long batchMaxTokens) {
+                           long batchMaxTokens,
+                           WorkerStatus targetGroup) {
             this.drained = drained;
             this.reason = reason;
             this.failOne = failOne;
             this.cfg = cfg;
             this.batchMaxTokens = batchMaxTokens;
+            this.targetGroup = targetGroup;
         }
 
         static StepResult dispatch(List<QueuedRequest> drained,
                                    DpBatchReporter.FlushReason reason,
                                    FlexlbConfig cfg,
-                                   long batchMaxTokens) {
-            return new StepResult(drained, reason, null, cfg, batchMaxTokens);
+                                   long batchMaxTokens,
+                                   WorkerStatus targetGroup) {
+            return new StepResult(drained, reason, null, cfg, batchMaxTokens, targetGroup);
         }
 
         static StepResult fail(QueuedRequest one, FlexlbConfig cfg) {
-            return new StepResult(null, null, one, cfg, 0);
+            return new StepResult(null, null, one, cfg, 0, null);
         }
     }
 }

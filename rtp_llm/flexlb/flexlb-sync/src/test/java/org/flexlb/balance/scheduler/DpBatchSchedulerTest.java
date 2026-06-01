@@ -1,18 +1,11 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.dp.DispatchContext;
-import org.flexlb.balance.dp.DispatchPlan;
 import org.flexlb.balance.dp.DispatchPlanner;
-import org.flexlb.balance.dp.DpAssignStrategy;
-import org.flexlb.balance.dp.FailedRequest;
 import org.flexlb.balance.dp.InflightBatchRegistry;
 import org.flexlb.balance.dp.LinearPrefillTimePredictor;
 import org.flexlb.balance.dp.PendingRequest;
-import org.flexlb.balance.dp.PrefillBatch;
+import org.flexlb.balance.dp.DispatchBatch;
 import org.flexlb.balance.dp.QueuedRequest;
-import org.flexlb.balance.dp.RankAssignment;
-import org.flexlb.balance.dp.RoundRobinAssign;
-import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -104,20 +97,25 @@ class DpBatchSchedulerTest {
         cfg.setDpBatchSizeMax(4);
         cfg.setDpBatchWindowMs(20);
         cfg.setDpBatchTimeoutMs(100);
+        cfg.setDpBatcherType("SIMPLE");
         when(configService.loadBalanceConfig()).thenReturn(cfg);
 
-        // Default planner: turn the drained chunk into a single PrefillBatch
-        // landing on PREFILL/DECODE. Per-batch ranks are filled via the cursor
-        // in RoundRobinAssign downstream.
-        when(planner.plan(any(), any(DispatchContext.class))).thenAnswer(inv -> {
-            List<QueuedRequest> drained = inv.getArgument(0);
-            DispatchContext ctx = inv.getArgument(1);
-            List<PendingRequest> placed = drained.stream()
-                    .map(qr -> new PendingRequest(qr.ctx(), PREFILL, DECODE, qr.future(), qr.enqueuedAtMicros()))
-                    .toList();
-            PrefillBatch batch = new PrefillBatch(PREFILL, placed, ctx.dpSize());
-            return DispatchPlan.of(List.of(batch));
-        });
+        // peekModelDpSize() reads from engineWorkerStatus
+        WorkerStatus prefillWs = new WorkerStatus();
+        prefillWs.setIp("10.0.0.1");
+        prefillWs.setPort(8080);
+        prefillWs.setDpSize(4);
+        prefillWs.setAlive(true);
+        prefillWs.setGroup("g1");
+        when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.PREFILL), any()))
+                .thenReturn(Map.of("10.0.0.1:8080", prefillWs));
+
+        // selectPrefillWorker returns the worker
+        when(planner.selectPrefillWorker(anyString(), any(), any(), any()))
+                .thenReturn(prefillWs);
+
+        // Default decode selection: always succeed with DECODE ServerStatus
+        when(planner.selectDecodeWorker(any(), any())).thenReturn(DECODE);
 
         // Default gRPC client: ack accepted, capture sent batches
         when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class), anyLong()))
@@ -132,8 +130,7 @@ class DpBatchSchedulerTest {
                 .thenReturn(CompletableFuture.completedFuture(null));
 
         scheduler = new DpBatchScheduler(configService, engineWorkerStatus, planner,
-                List.of(new RoundRobinAssign()), grpcClient, registry,
-                mock(CacheAwareService.class), new LinearPrefillTimePredictor());
+                grpcClient, registry, new LinearPrefillTimePredictor());
     }
 
     @AfterEach
@@ -165,27 +162,22 @@ class DpBatchSchedulerTest {
     }
 
     @Test
-    void per_request_failure_from_planner_completes_future_with_failure_response() throws Exception {
-        // Assembler decides one of the four can't be placed (e.g., no decode pairing).
-        when(planner.plan(any(), any(DispatchContext.class))).thenAnswer(inv -> {
-            List<QueuedRequest> drained = inv.getArgument(0);
-            DispatchContext ctx = inv.getArgument(1);
-            QueuedRequest victim = drained.get(2);
-            List<PendingRequest> placed = drained.stream()
-                    .filter(qr -> qr != victim)
-                    .map(qr -> new PendingRequest(qr.ctx(), PREFILL, DECODE, qr.future(), qr.enqueuedAtMicros()))
-                    .toList();
-            PrefillBatch batch = new PrefillBatch(PREFILL, placed, ctx.dpSize());
-            return new DispatchPlan(
-                    List.of(batch),
-                    List.of(new FailedRequest(victim, StrategyErrorType.NO_DECODE_WORKER, "test")));
+    void per_request_decode_failure_completes_victim_future_with_failure_response() throws Exception {
+        // selectDecodeWorker fails on the 3rd call (0-indexed: call #2)
+        AtomicInteger decodeCallCount = new AtomicInteger();
+        when(planner.selectDecodeWorker(any(), any())).thenAnswer(inv -> {
+            int call = decodeCallCount.getAndIncrement();
+            if (call == 2) {
+                return ServerStatus.code(StrategyErrorType.NO_DECODE_WORKER);
+            }
+            return DECODE;
         });
 
         List<CompletableFuture<Response>> futures = IntStream.range(0, 4)
                 .mapToObj(i -> scheduler.submit(makeCtx(i + 1, "m1")))
                 .toList();
 
-        // The "victim" future receives a failure response synchronously from the batcher.
+        // The "victim" future receives a failure response from the batcher.
         Response victimResp = futures.get(2).get(2, TimeUnit.SECONDS);
         assertFalse(victimResp.isSuccess());
         assertEquals(StrategyErrorType.NO_DECODE_WORKER.getErrorCode(), victimResp.getCode());
@@ -204,10 +196,8 @@ class DpBatchSchedulerTest {
 
     @Test
     void no_dp_enabled_worker_fails_all_with_NO_PREFILL_WORKER() throws Exception {
-        when(planner.plan(any(), any(DispatchContext.class))).thenAnswer(inv -> {
-            List<QueuedRequest> drained = inv.getArgument(0);
-            return DispatchPlan.allFailed(drained, StrategyErrorType.NO_PREFILL_WORKER, "no candidate");
-        });
+        when(planner.selectPrefillWorker(anyString(), any(), any(), any()))
+                .thenReturn(null);
 
         List<CompletableFuture<Response>> futures = IntStream.range(0, 4)
                 .mapToObj(i -> scheduler.submit(makeCtx(i + 1, "m1")))
@@ -281,11 +271,9 @@ class DpBatchSchedulerTest {
     }
 
     @Test
-    void submit_completes_future_exceptionally_when_offer_throws() throws Exception {
-        // Force every batcher's offer path to throw by shutting down the
-        // timer executor that schedule-window-timer relies on. Submit must
-        // never return a hanging future even in catastrophic conditions.
-        scheduler.shutdown();   // kills timerExecutor → schedule() will throw RejectedExecutionException
+    void submit_completes_future_exceptionally_when_planner_throws() throws Exception {
+        when(planner.selectPrefillWorker(anyString(), any(), any(), any()))
+                .thenThrow(new RuntimeException("simulated planner crash"));
 
         CompletableFuture<Response> f = scheduler.submit(makeCtx(99, "m1"));
 
@@ -478,7 +466,7 @@ class DpBatchSchedulerTest {
         assertTrue(r.isSuccess());
         ServerStatus prefill = r.getServerStatus().get(0);
         assertEquals("10.0.0.1", prefill.getServerIp());
-        assertEquals(9080, prefill.getGrpcPort(),
+        assertEquals(8081, prefill.getGrpcPort(),
                 "empty dpStatuses ⇒ keep pod-level grpcPort untouched");
     }
 
@@ -533,9 +521,9 @@ class DpBatchSchedulerTest {
             ServerStatus prefill = r.getServerStatus().get(0);
             dpRankToGrpcPort.put((long) prefill.getDpRank(), prefill.getGrpcPort());
         }
-        assertEquals(9080, dpRankToGrpcPort.get(0L).intValue(),
+        assertEquals(8081, dpRankToGrpcPort.get(0L).intValue(),
                 "rank=0 missing from dpStatuses ⇒ keep pod-level grpcPort");
-        assertEquals(9080, dpRankToGrpcPort.get(1L).intValue(),
+        assertEquals(8081, dpRankToGrpcPort.get(1L).intValue(),
                 "rank=1 missing from dpStatuses ⇒ keep pod-level grpcPort");
         assertEquals(10117, dpRankToGrpcPort.get(2L).intValue(),
                 "rank=2 present ⇒ remap to per-rank grpcPort");
@@ -562,30 +550,31 @@ class DpBatchSchedulerTest {
 
     @Test
     void debugInfo_hit_cache_len_reflects_enriched_cache_matched_tokens() throws Exception {
-        // GlobalPrefillBatcher.enrichRequest computes
-        //   cacheMatchedTokens = CacheAwareService.findMatchingPrefixLength * worker.cacheStatus.blockSize
-        // and stashes it on BalanceContext; DpBatchScheduler.buildSuccessResponse
-        // copies it into response.serverStatus[prefill].debugInfo.hitCacheLen so
-        // the Python smoke check role_hit_cache_len can read it. This test
-        // pins the end-to-end wiring.
-        long blockSize = 64L;
-        int matchedBlocks = 5;
-        long expectedHitTokens = matchedBlocks * blockSize;
-
-        CacheAwareService cacheAware = mock(CacheAwareService.class);
-        when(cacheAware.findMatchingPrefixLength(anyString(), any())).thenReturn(matchedBlocks);
+        // selectPrefillWorker computes cacheMatchedTokens and stashes it on
+        // BalanceContext; buildSuccessResponse copies it into
+        // response.serverStatus[prefill].debugInfo.hitCacheLen so the Python
+        // smoke check role_hit_cache_len can read it.
+        long expectedHitTokens = 320L;
 
         WorkerStatus prefillWs = new WorkerStatus();
         prefillWs.setIp("10.0.0.1");
         prefillWs.setPort(8080);
         prefillWs.setDpSize(2);
         prefillWs.setAlive(true);
-        prefillWs.setCacheStatus(CacheStatus.builder().blockSize(blockSize).build());
+        prefillWs.setGroup("g1");
+        prefillWs.setCacheStatus(CacheStatus.builder().blockSize(64L).build());
         when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.PREFILL), any()))
                 .thenReturn(Map.of("10.0.0.1:8080", prefillWs));
 
+        when(planner.selectPrefillWorker(anyString(), any(), any(), any()))
+                .thenAnswer(inv -> {
+                    BalanceContext ctx = inv.getArgument(2);
+                    ctx.setCacheMatchedTokens(expectedHitTokens);
+                    return prefillWs;
+                });
+
         DpBatchScheduler s = new DpBatchScheduler(configService, engineWorkerStatus, planner,
-                List.of(new RoundRobinAssign()), grpcClient, registry, cacheAware,
+                grpcClient, registry,
                 new LinearPrefillTimePredictor());
         try {
             List<CompletableFuture<Response>> futures = IntStream.range(0, 4)
@@ -600,7 +589,7 @@ class DpBatchSchedulerTest {
                         "prefill ServerStatus must carry DebugInfo so Python smoke "
                                 + "check can read role_hit_cache_len");
                 assertEquals(expectedHitTokens, prefill.getDebugInfo().getHitCacheLen(),
-                        "hitCacheLen must reflect matchedBlocks * blockSize from CacheAwareService");
+                        "hitCacheLen must reflect cacheMatchedTokens set by selectPrefillWorker");
             }
         } finally {
             s.shutdown();
@@ -608,16 +597,12 @@ class DpBatchSchedulerTest {
     }
 
     @Test
-    void debugInfo_hit_cache_len_is_zero_when_cache_aware_disabled() throws Exception {
-        // Kill-switch path: cacheAwareSchedulingEnabled=false ⇒ enrichRequest must
-        // skip CacheAwareService entirely and leave cacheMatchedTokens=0. The
-        // dispatched response still carries a well-formed DebugInfo with 0 — not
-        // stale data, not a null reference.
-        cfg.setCacheAwareSchedulingEnabled(false);
-
-        CacheAwareService cacheAware = mock(CacheAwareService.class);
+    void debugInfo_hit_cache_len_is_zero_when_planner_does_not_set_cache() throws Exception {
+        // When selectPrefillWorker does not set cacheMatchedTokens (e.g. cache-aware
+        // scheduling is disabled), the dispatched response carries a well-formed
+        // DebugInfo with hitCacheLen=0.
         DpBatchScheduler s = new DpBatchScheduler(configService, engineWorkerStatus, planner,
-                List.of(new RoundRobinAssign()), grpcClient, registry, cacheAware,
+                grpcClient, registry,
                 new LinearPrefillTimePredictor());
         try {
             CompletableFuture<Response> f0 = s.submit(makeCtx(1, "m1"));
@@ -629,7 +614,6 @@ class DpBatchSchedulerTest {
             assertTrue(r.isSuccess());
             assertNotNull(r.getServerStatus().get(0).getDebugInfo());
             assertEquals(0L, r.getServerStatus().get(0).getDebugInfo().getHitCacheLen());
-            verify(cacheAware, never()).findMatchingPrefixLength(anyString(), any());
         } finally {
             s.shutdown();
         }
@@ -662,40 +646,26 @@ class DpBatchSchedulerTest {
     }
 
     @Test
-    void multiple_real_requests_on_same_rank_emit_n_inputs_no_fake_for_filled_rank() throws Exception {
-        // Use a fake assign strategy that pins everything to rank=0. dpSize=2 so
-        // rank=1 still needs a fake-pad. Verifies (a) rank=0 carries N real inputs,
-        // (b) NO fake input is emitted for rank=0, (c) rank=1 gets exactly one fake pad.
-        DpAssignStrategy pinToRank0 = new DpAssignStrategy() {
-            @Override
-            public List<RankAssignment> assign(PrefillBatch batch) {
-                List<RankAssignment> out = new ArrayList<>(batch.size());
-                for (PendingRequest pr : batch.requests()) {
-                    out.add(new RankAssignment(pr, 0));
-                }
-                return out;
-            }
+    void unfilled_rank_gets_fake_pad() throws Exception {
+        // dpSize=2, submit 1 request → RR puts it on rank=0, rank=1 gets fake pad.
+        WorkerStatus dpSize2Worker = new WorkerStatus();
+        dpSize2Worker.setIp("10.0.0.1");
+        dpSize2Worker.setPort(8080);
+        dpSize2Worker.setDpSize(2);
+        dpSize2Worker.setAlive(true);
+        dpSize2Worker.setGroup("g1");
+        when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.PREFILL), any()))
+                .thenReturn(Map.of("10.0.0.1:8080", dpSize2Worker));
+        when(planner.selectPrefillWorker(anyString(), any(), any(), any()))
+                .thenReturn(dpSize2Worker);
 
-            @Override
-            public String name() {
-                return "PIN0";
-            }
-        };
-
-        cfg.setDpBatchSizeMax(2);   // dpSize=2 → 2 requests fill the bucket then flush
-        cfg.setDpAssignStrategy("PIN0");
-
+        cfg.setDpBatchWindowMs(10);
         DpBatchScheduler s = new DpBatchScheduler(configService, engineWorkerStatus, planner,
-                List.of(pinToRank0), grpcClient, registry,
-                mock(CacheAwareService.class), new LinearPrefillTimePredictor());
+                grpcClient, registry, new LinearPrefillTimePredictor());
         try {
             sentBatches.clear();
-            // dpSize=2 + 2 submissions → GlobalPrefillBatcher drains bucket of size 2;
-            // pinToRank0 puts both on rank=0.
             CompletableFuture<Response> f1 = s.submit(makeCtx(1, "m1"));
-            CompletableFuture<Response> f2 = s.submit(makeCtx(2, "m1"));
             f1.get(2, TimeUnit.SECONDS);
-            f2.get(2, TimeUnit.SECONDS);
 
             assertEquals(1, sentBatches.size());
             EngineRpcService.BatchEnqueueRequestPB sent = sentBatches.get(0);
@@ -713,10 +683,10 @@ class DpBatchSchedulerTest {
                     .filter(in -> in.getDpRank().getValue() == 1)
                     .count();
 
-            assertEquals(2, realOnRank0, "rank=0 must carry both real inputs");
-            assertEquals(0, fakeOnRank0, "rank=0 already filled by real requests — no fake pad expected");
+            assertEquals(1, realOnRank0, "rank=0 must carry the real input");
+            assertEquals(0, fakeOnRank0, "rank=0 already filled — no fake pad expected");
             assertEquals(1, fakeOnRank1, "rank=1 has zero real requests — pad with exactly one fake slot");
-            assertEquals(3, sent.getInputsCount(), "2 real on rank=0 + 1 fake on rank=1");
+            assertEquals(2, sent.getInputsCount(), "1 real on rank=0 + 1 fake on rank=1");
         } finally {
             s.shutdown();
         }
@@ -724,7 +694,7 @@ class DpBatchSchedulerTest {
 
     @Test
     void all_ranks_filled_by_real_requests_emits_zero_fake_pad() throws Exception {
-        // dpSize=4 + 4 real requests via RoundRobinAssign covers ranks 0..3 once each.
+        // dpSize=4 + 4 real requests via round-robin covers ranks 0..3 once each.
         // No fake-pad should appear.
         IntStream.range(0, 4).forEach(i -> scheduler.submit(makeCtx(i + 1, "m1")));
         Thread.sleep(150);

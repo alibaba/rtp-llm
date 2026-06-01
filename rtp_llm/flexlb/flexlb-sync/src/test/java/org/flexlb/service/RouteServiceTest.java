@@ -203,18 +203,22 @@ class RouteServiceTest {
     }
 
     @Test
-    void dpBalance_on_but_no_prefill_worker_falls_through_to_legacy() {
+    void dpBalance_on_but_no_prefill_worker_returns_failure_from_scheduler() {
         cfg.setDpBalanceEnabled(true);
         cfg.setEnableQueueing(false);
         when(engineWorkerStatus.selectModelWorkerStatus(any(RoleType.class), any()))
                 .thenReturn(new HashMap<>());
-        when(defaultRouter.route(any())).thenReturn(okResponse());
+        Response failResp = new Response();
+        failResp.setSuccess(false);
+        failResp.setErrorMessage("no prefill worker available");
+        when(dpBatchScheduler.submit(any())).thenReturn(CompletableFuture.completedFuture(failResp));
 
         BalanceContext ctx = ctxWith(maxNewTokens(128));
-        routeService.route(ctx).block();
+        Response r = routeService.route(ctx).block();
 
-        verify(defaultRouter).route(any());
-        verify(dpBatchScheduler, never()).submit(any());
+        assertFalse(r.isSuccess());
+        verify(dpBatchScheduler).submit(any());
+        verify(defaultRouter, never()).route(any());
     }
 
     // ============== gate function direct ==============

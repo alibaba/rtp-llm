@@ -132,9 +132,7 @@ public class RouteService {
      *   <li>request will produce more than one token AND not use beam search AND
      *       hasn't disabled SP — the same precondition under which pd_separation
      *       activates in the engine; SP/beam paths still take the legacy router,</li>
-     *   <li>at least one alive Prefill worker exists. Multi-rank workers route
-     *       to {@code GlobalPrefillBatcher}; single-rank ({@code dp_size == 1})
-     *       workers route to {@code SloBudgetBatcher} (FIFO + SLO-budget batching).</li>
+     *   <li>at least one alive Prefill worker exists.</li>
      * </ul>
      */
     boolean shouldUseDpBatch(BalanceContext ctx, FlexlbConfig cfg) {

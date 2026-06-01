@@ -1,17 +1,14 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.dp.DispatchPlanner;
-import org.flexlb.balance.dp.DpAssignStrategy;
-import org.flexlb.balance.dp.GlobalPrefillBatcher;
 import org.flexlb.balance.dp.InflightBatchRegistry;
 import org.flexlb.balance.dp.PendingRequest;
-import org.flexlb.balance.dp.PrefillBatch;
+import org.flexlb.balance.dp.DispatchBatch;
+import org.flexlb.balance.dp.DispatchBatcher;
 import org.flexlb.balance.dp.PrefillTimePredictor;
 import org.flexlb.balance.dp.QueuedRequest;
-import org.flexlb.balance.dp.RankAssignment;
-import org.flexlb.balance.dp.RoundRobinAssign;
+import org.flexlb.balance.dp.SimpleDpBatcher;
 import org.flexlb.balance.dp.SloBudgetBatcher;
-import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
@@ -37,11 +34,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 @Component
 @DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy"})
@@ -50,40 +43,26 @@ public class DpBatchScheduler {
     private final ConfigService configService;
     private final EngineWorkerStatus engineWorkerStatus;
     private final DispatchPlanner planner;
-    private final Map<String, DpAssignStrategy> assignStrategies;
     private final DpGrpcClient grpcClient;
     private final InflightBatchRegistry inflightRegistry;
-    private final CacheAwareService cacheAwareService;
     private final PrefillTimePredictor prefillTimePredictor;
     private DpBatchReporter dpBatchReporter;
 
-    private final Map<String, GlobalPrefillBatcher> batchers = new ConcurrentHashMap<>();
-    private final Map<String, SloBudgetBatcher> sloBatchers = new ConcurrentHashMap<>();
-
-    private final ScheduledExecutorService timerExecutor = Executors.newScheduledThreadPool(2, r -> {
-        Thread t = new Thread(r, "dp-batch-timer");
-        t.setDaemon(true);
-        return t;
-    });
+    private final Map<String, ConcurrentHashMap<String, DispatchBatcher>> batchers = new ConcurrentHashMap<>();
 
     private final AtomicLong batchIdGen = new AtomicLong(0);
 
     public DpBatchScheduler(ConfigService configService,
                             EngineWorkerStatus engineWorkerStatus,
                             DispatchPlanner planner,
-                            List<DpAssignStrategy> allAssignStrategies,
                             DpGrpcClient grpcClient,
                             InflightBatchRegistry inflightRegistry,
-                            CacheAwareService cacheAwareService,
                             PrefillTimePredictor prefillTimePredictor) {
         this.configService = configService;
         this.engineWorkerStatus = engineWorkerStatus;
         this.planner = planner;
-        this.assignStrategies = allAssignStrategies.stream()
-                .collect(Collectors.toMap(DpAssignStrategy::name, Function.identity()));
         this.grpcClient = grpcClient;
         this.inflightRegistry = inflightRegistry;
-        this.cacheAwareService = cacheAwareService;
         this.prefillTimePredictor = prefillTimePredictor;
     }
 
@@ -98,13 +77,33 @@ public class DpBatchScheduler {
         CompletableFuture<Response> future = new CompletableFuture<>();
         try {
             String key = modelKey(ctx);
-            int dpSize = peekModelDpSize();
             QueuedRequest qr = QueuedRequest.of(ctx, future);
-            if (dpSize == 1) {
-                sloBatchers.computeIfAbsent(key, this::newSloBatcher).offer(qr);
-            } else {
-                batchers.computeIfAbsent(key, this::newBatcher).offer(qr);
+
+            ConcurrentHashMap<String, DispatchBatcher> modelBatchers =
+                    batchers.computeIfAbsent(key, k -> new ConcurrentHashMap<>());
+
+            WorkerStatus prefillWorker = planner.selectPrefillWorker(
+                    key, configService.loadBalanceConfig(), ctx,
+                    ipPort -> {
+                        DispatchBatcher b = modelBatchers.get(ipPort);
+                        return b != null ? b.queueSize() : 0;
+                    });
+            if (prefillWorker == null) {
+                future.complete(failResponse("no available prefill worker"));
+                return future;
             }
+
+            String batcherKey = prefillWorker.getIpPort();
+            DispatchBatcher batcher = modelBatchers.compute(batcherKey, (k, existing) -> {
+                if (existing == null || !existing.isAlive()) {
+                    if (existing != null) {
+                        Logger.warn("Batcher thread dead for {}, recreating", k);
+                    }
+                    return createBatcher(key, prefillWorker);
+                }
+                return existing;
+            });
+            batcher.offer(qr);
         } catch (Throwable t) {
             Logger.error("DpBatchScheduler.submit threw before request was queued; "
                     + "failing future to avoid leaking a hung Mono", t);
@@ -113,78 +112,56 @@ public class DpBatchScheduler {
         return future;
     }
 
-    private int peekModelDpSize() {
-        Map<String, WorkerStatus> workers =
-                engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
-        if (workers == null || workers.isEmpty()) {
-            return 0;
-        }
-        for (WorkerStatus w : workers.values()) {
-            if (w != null && w.isAlive()) {
-                return (int) w.getDpSize();
-            }
-        }
-        return 0;
-    }
 
-    private GlobalPrefillBatcher newBatcher(String model) {
-        return new GlobalPrefillBatcher(model, configService, engineWorkerStatus,
-                planner, this::dispatchBatch, timerExecutor, cacheAwareService, dpBatchReporter);
-    }
-
-    private SloBudgetBatcher newSloBatcher(String model) {
+    private DispatchBatcher createBatcher(String model, WorkerStatus prefillWorker) {
+        int dpSize = (int) prefillWorker.getDpSize();
+        String type = configService.loadBalanceConfig().getDpBatcherType();
+        if ("SIMPLE".equalsIgnoreCase(type)) {
+            SimpleDpBatcher b = new SimpleDpBatcher(model, dpSize, configService, planner,
+                    this::dispatchBatch, dpBatchReporter, prefillWorker);
+            b.start();
+            return b;
+        }
         SloBudgetBatcher b = new SloBudgetBatcher(model, configService, planner,
-                this::dispatchBatch, prefillTimePredictor, dpBatchReporter);
+                this::dispatchBatch, prefillTimePredictor, dpBatchReporter,
+                prefillWorker, dpSize);
         b.start();
         return b;
     }
 
-    // ============== Dispatch (called by GlobalPrefillBatcher) ==============
+    private static Response failResponse(String message) {
+        Response r = new Response();
+        r.setSuccess(false);
+        r.setCode(org.flexlb.dao.loadbalance.StrategyErrorType.NO_PREFILL_WORKER.getErrorCode());
+        r.setErrorMessage(message);
+        return r;
+    }
 
-    void dispatchBatch(PrefillBatch batch) {
+    // ============== Dispatch (called by batchers via callback) ==============
+
+    void dispatchBatch(DispatchBatch batch) {
         long batchId = batchIdGen.incrementAndGet();
+        List<List<PendingRequest>> ranked = batch.rankedRequests();
 
-        String strategyName = configService.loadBalanceConfig().getDpAssignStrategy();
-        DpAssignStrategy strategy = assignStrategies.getOrDefault(strategyName,
-                assignStrategies.get(RoundRobinAssign.NAME));
-        if (strategy == null) {
-            strategy = assignStrategies.values().iterator().next();
-        }
-
-        List<RankAssignment> assignments;
-        try {
-            assignments = strategy.assign(batch);
-        } catch (RuntimeException e) {
-            Logger.error("DP rank assignment failed for batch of {} requests", batch.size(), e);
-            failAll(batch, e);
-            return;
-        }
-
-        EngineRpcService.BatchEnqueueRequestPB pb = buildPb(batchId, assignments, batch.dpSize());
-        reportBatchComposition(assignments, batch.dpSize());
+        EngineRpcService.BatchEnqueueRequestPB pb = buildPb(batchId, ranked, batch.dpSize());
+        reportBatchComposition(ranked, batch.dpSize());
         inflightRegistry.register(batchId, batch);
 
         Logger.info("BatchDispatch batchId={} dpSize={} realRequests={} totalInputs={}",
-                batchId, batch.dpSize(), assignments.size(), pb.getInputsCount());
+                batchId, batch.dpSize(), batch.size(), pb.getInputsCount());
 
         long deadlineMs = configService.loadBalanceConfig().getDpBatchEnqueueDeadlineMs();
         grpcClient.enqueue(batch.prefillIp(), batch.prefillGrpcPort(), pb, deadlineMs)
-                .whenComplete((ack, err) -> handleAck(batch, batchId, assignments, ack, err));
+                .whenComplete((ack, err) -> handleAck(batch, batchId, ranked, ack, err));
     }
 
-    private void reportBatchComposition(List<RankAssignment> assignments, int dpSize) {
+    private void reportBatchComposition(List<List<PendingRequest>> ranked, int dpSize) {
         if (dpBatchReporter == null || dpSize <= 0) {
             return;
         }
-        int[] requestsPerRank = new int[dpSize];
-        for (RankAssignment ra : assignments) {
-            if (ra.dpRank() >= 0 && ra.dpRank() < dpSize) {
-                requestsPerRank[ra.dpRank()]++;
-            }
-        }
         int filledRanks = 0;
-        for (int rank = 0; rank < dpSize; rank++) {
-            if (requestsPerRank[rank] > 0) {
+        for (int rank = 0; rank < ranked.size(); rank++) {
+            if (!ranked.get(rank).isEmpty()) {
                 dpBatchReporter.reportDpRankHit(rank);
                 filledRanks++;
             }
@@ -192,11 +169,6 @@ public class DpBatchScheduler {
         dpBatchReporter.reportFakePadSlots(dpSize - filledRanks, dpSize);
     }
 
-    /**
-     * Periodic gauge scrape for InflightBatchRegistry health + active batcher counts.
-     * Decoupled from inline reporting because these are steady-state observables
-     * rather than per-event signals.
-     */
     @Scheduled(fixedRate = 1000L)
     public void reportSchedulerStats() {
         if (dpBatchReporter == null) {
@@ -208,7 +180,7 @@ public class DpBatchScheduler {
                 inflightRegistry.getEvictedCount());
     }
 
-    private void handleAck(PrefillBatch batch, long batchId, List<RankAssignment> assignments,
+    private void handleAck(DispatchBatch batch, long batchId, List<List<PendingRequest>> ranked,
                            EngineRpcService.BatchEnqueueResponsePB ack, Throwable err) {
         if (err != null || ack == null) {
             String msg = err != null ? err.getMessage() : "no ack";
@@ -231,50 +203,50 @@ public class DpBatchScheduler {
             ackByReqId.put(slot.getRequestId(), slot);
         }
 
-        for (RankAssignment ra : assignments) {
-            PendingRequest req = ra.request();
-            long reqId = req.requestId();
-            EngineRpcService.EnqueueResponsePB slotAck = ackByReqId.get(reqId);
-
-            if (slotAck == null) {
-                Logger.warn("Master.BatchEnqueue returned no ack for request {} in batch {} on {}:{}",
-                        reqId, batchId, batch.prefillIp(), batch.prefillGrpcPort());
-                if (inflightRegistry.getState(reqId) == InflightBatchRegistry.RequestState.CANCELLED) {
-                    cascadeEngineCancel(req);
+        for (int rank = 0; rank < ranked.size(); rank++) {
+            for (PendingRequest req : ranked.get(rank)) {
+                try {
+                    processSlotAck(req, rank, batchId, batch, ackByReqId);
+                } catch (Throwable t) {
+                    Logger.error("handleAck failed for request {} in batch {}",
+                            req.requestId(), batchId, t);
+                    if (!req.future().isDone()) {
+                        req.future().completeExceptionally(t);
+                    }
+                    inflightRegistry.removeRequest(req.requestId());
                 }
-                req.future().completeExceptionally(
-                        new RuntimeException("Master.BatchEnqueue missing per-slot ack for request " + reqId));
-                inflightRegistry.removeRequest(reqId);
-                continue;
             }
-
-            long errorCode = slotAck.getErrorInfo().getErrorCode();
-            if (errorCode != 0L) {
-                String slotMsg = slotAck.getErrorInfo().getErrorMessage();
-                Logger.warn("Master.Enqueue rejected slot req={} batch={} on {}:{} code={} msg={}",
-                        reqId, batchId, batch.prefillIp(), batch.prefillGrpcPort(), errorCode, slotMsg);
-                if (inflightRegistry.getState(reqId) == InflightBatchRegistry.RequestState.CANCELLED) {
-                    cascadeEngineCancel(req);
-                }
-                req.future().completeExceptionally(
-                        new RuntimeException("Master.Enqueue rejected slot: " + slotMsg));
-                inflightRegistry.removeRequest(reqId);
-                continue;
-            }
-
-            boolean activated = inflightRegistry.markActive(reqId);
-            if (!activated) {
-                Logger.info("request {} cancelled before Enqueue ack (batch {}); "
-                        + "cascading Cancel to engine after-the-fact", reqId, batchId);
-                cascadeEngineCancel(req);
-                req.future().completeExceptionally(
-                        new java.util.concurrent.CancellationException(
-                                "Cancelled before Master.Enqueue ack"));
-                inflightRegistry.removeRequest(reqId);
-                continue;
-            }
-            req.future().complete(buildSuccessResponse(req, ra.dpRank()));
         }
+    }
+
+    private void processSlotAck(PendingRequest req, int rank, long batchId,
+                                DispatchBatch batch,
+                                Map<Long, EngineRpcService.EnqueueResponsePB> ackByReqId) {
+        long reqId = req.requestId();
+        EngineRpcService.EnqueueResponsePB slotAck = ackByReqId.get(reqId);
+        if (slotAck == null) {
+            req.future().completeExceptionally(
+                    new RuntimeException("No ack slot for request " + reqId + " in batch " + batchId));
+            inflightRegistry.removeRequest(reqId);
+            return;
+        }
+        long errorCode = slotAck.getErrorInfo().getErrorCode();
+        if (errorCode != 0L) {
+            req.future().completeExceptionally(
+                    new RuntimeException("Engine rejected request " + reqId
+                            + " errorCode=" + errorCode + " msg=" + slotAck.getErrorInfo().getErrorMessage()));
+            inflightRegistry.removeRequest(reqId);
+            return;
+        }
+        boolean activated = inflightRegistry.markActive(reqId);
+        if (!activated) {
+            cascadeEngineCancel(req);
+            req.future().completeExceptionally(new java.util.concurrent.CancellationException(
+                    "Request " + reqId + " cancelled during PENDING_ACK"));
+            inflightRegistry.removeRequest(reqId);
+            return;
+        }
+        req.future().complete(buildSuccessResponse(req, rank));
     }
 
     private void cascadeEngineCancel(PendingRequest req) {
@@ -300,11 +272,6 @@ public class DpBatchScheduler {
         prefill.setDpRank(dpRank);
         prefill.setRequestId(req.requestId());
         prefill.setDebugInfo(buildDebugInfo(req));
-        // Frontend's FetchResponse uses prefill.serverIp + prefill.grpcPort. The
-        // request's response_registry entry lives on the DP that received the
-        // real (non-fake) Enqueue slot — for any dpRank > 0 that is a peer DP,
-        // not the BatchEnqueue receiver. Without this remap, frontend would
-        // always hit DP0's registry and get NOT_FOUND for cross-DP requests.
         applyDpRankAddress(prefill, dpRank);
 
         ServerStatus decode = copyOf(req.decode());
@@ -320,14 +287,11 @@ public class DpBatchScheduler {
     // ============== Cancel ==============
 
     public void cancel(long requestId) {
-        for (GlobalPrefillBatcher b : batchers.values()) {
-            if (b.cancelInQueue(requestId)) {
-                return;
-            }
-        }
-        for (SloBudgetBatcher b : sloBatchers.values()) {
-            if (b.cancelInQueue(requestId)) {
-                return;
+        for (ConcurrentHashMap<String, DispatchBatcher> modelMap : batchers.values()) {
+            for (DispatchBatcher b : modelMap.values()) {
+                if (b.cancelInQueue(requestId)) {
+                    return;
+                }
             }
         }
         InflightBatchRegistry.RequestEntry entry = inflightRegistry.lookupByRequest(requestId);
@@ -357,7 +321,7 @@ public class DpBatchScheduler {
 
     // ============== helpers ==============
 
-    private void failAll(PrefillBatch batch, Throwable cause) {
+    private void failAll(DispatchBatch batch, Throwable cause) {
         for (PendingRequest r : batch.requests()) {
             r.future().completeExceptionally(cause);
         }
@@ -371,82 +335,66 @@ public class DpBatchScheduler {
     }
 
     private EngineRpcService.BatchEnqueueRequestPB buildPb(long batchId,
-                                                            List<RankAssignment> assignments,
+                                                            List<List<PendingRequest>> ranked,
                                                             int dpSize) {
         EngineRpcService.BatchEnqueueRequestPB.Builder b = EngineRpcService.BatchEnqueueRequestPB.newBuilder()
                 .setBatchId(batchId);
 
-        int[] requestsPerRank = dpSize > 0 ? new int[dpSize] : null;
-        if (requestsPerRank != null) {
-            for (RankAssignment ra : assignments) {
-                int rank = ra.dpRank();
-                if (rank >= 0 && rank < dpSize) {
-                    requestsPerRank[rank]++;
-                }
+        for (int rank = 0; rank < ranked.size(); rank++) {
+            List<PendingRequest> rankReqs = ranked.get(rank);
+            if (rankReqs.isEmpty()) {
+                b.addInputs(buildFakeInputPb(batchId, rank));
+                continue;
             }
-        }
+            for (PendingRequest req : rankReqs) {
+                Request reqDto = req.ctx() != null ? req.ctx().getRequest() : null;
+                String b64 = reqDto != null ? reqDto.getGenerateInputPbB64() : null;
 
-        for (RankAssignment ra : assignments) {
-            PendingRequest req = ra.request();
-            Request reqDto = req.ctx() != null ? req.ctx().getRequest() : null;
-            String b64 = reqDto != null ? reqDto.getGenerateInputPbB64() : null;
-
-            EngineRpcService.GenerateInputPB.Builder ib;
-            if (b64 != null && !b64.isEmpty()) {
-                try {
-                    byte[] bytes = java.util.Base64.getDecoder().decode(b64);
-                    ib = EngineRpcService.GenerateInputPB.parseFrom(bytes).toBuilder();
-                } catch (com.google.protobuf.InvalidProtocolBufferException
-                         | IllegalArgumentException e) {
-                    Logger.error("Bad generate_input_pb_b64 for request {}; falling back to bare PB",
-                            req.requestId(), e);
+                EngineRpcService.GenerateInputPB.Builder ib;
+                if (b64 != null && !b64.isEmpty()) {
+                    try {
+                        byte[] bytes = java.util.Base64.getDecoder().decode(b64);
+                        ib = EngineRpcService.GenerateInputPB.parseFrom(bytes).toBuilder();
+                    } catch (com.google.protobuf.InvalidProtocolBufferException
+                             | IllegalArgumentException e) {
+                        Logger.error("Bad generate_input_pb_b64 for request {}; falling back to bare PB",
+                                req.requestId(), e);
+                        ib = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(req.requestId());
+                    }
+                } else {
                     ib = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(req.requestId());
                 }
-            } else {
-                ib = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(req.requestId());
-            }
 
-            int localGroupSize = (requestsPerRank != null && ra.dpRank() >= 0 && ra.dpRank() < dpSize)
-                    ? requestsPerRank[ra.dpRank()] : assignments.size();
-
-            ib.setDpRank(com.google.protobuf.Int32Value.of(ra.dpRank()));
-            ib.setBatchGroupId(com.google.protobuf.Int64Value.of(batchId));
-            ib.setBatchGroupSize(localGroupSize);
-            if (reqDto != null && reqDto.getBlockCacheKeys() != null) {
-                ib.clearCacheHashKey().addAllCacheHashKey(reqDto.getBlockCacheKeys());
-            }
-
-            EngineRpcService.GenerateConfigPB.Builder gcb = ib.getGenerateConfigBuilder();
-            gcb.setForceBatch(com.google.protobuf.Int32Value.of(1));
-            gcb.setBatchGroupTimeout(com.google.protobuf.Int32Value.of(100));
-            gcb.clearRoleAddrs();
-            ServerStatus prefillSs = req.prefill();
-            if (prefillSs != null) {
-                gcb.addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
-                        .setRole(EngineRpcService.RoleAddrPB.RoleType.PREFILL)
-                        .setIp(prefillSs.getServerIp())
-                        .setHttpPort(prefillSs.getHttpPort())
-                        .setGrpcPort(prefillSs.getGrpcPort())
-                        .build());
-            }
-            ServerStatus decodeSs = req.decode();
-            if (decodeSs != null) {
-                gcb.addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
-                        .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
-                        .setIp(decodeSs.getServerIp())
-                        .setHttpPort(decodeSs.getHttpPort())
-                        .setGrpcPort(decodeSs.getGrpcPort())
-                        .build());
-            }
-            b.addInputs(ib.build());
-        }
-
-        if (requestsPerRank != null) {
-            for (int rank = 0; rank < dpSize; rank++) {
-                if (requestsPerRank[rank] > 0) {
-                    continue;
+                ib.setDpRank(com.google.protobuf.Int32Value.of(rank));
+                ib.setBatchGroupId(com.google.protobuf.Int64Value.of(batchId));
+                ib.setBatchGroupSize(rankReqs.size());
+                if (reqDto != null && reqDto.getBlockCacheKeys() != null) {
+                    ib.clearCacheHashKey().addAllCacheHashKey(reqDto.getBlockCacheKeys());
                 }
-                b.addInputs(buildFakeInputPb(batchId, rank));
+
+                EngineRpcService.GenerateConfigPB.Builder gcb = ib.getGenerateConfigBuilder();
+                gcb.setForceBatch(com.google.protobuf.Int32Value.of(1));
+                gcb.setBatchGroupTimeout(com.google.protobuf.Int32Value.of(100));
+                gcb.clearRoleAddrs();
+                ServerStatus prefillSs = req.prefill();
+                if (prefillSs != null) {
+                    gcb.addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
+                            .setRole(EngineRpcService.RoleAddrPB.RoleType.PREFILL)
+                            .setIp(prefillSs.getServerIp())
+                            .setHttpPort(prefillSs.getHttpPort())
+                            .setGrpcPort(prefillSs.getGrpcPort())
+                            .build());
+                }
+                ServerStatus decodeSs = req.decode();
+                if (decodeSs != null) {
+                    gcb.addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
+                            .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
+                            .setIp(decodeSs.getServerIp())
+                            .setHttpPort(decodeSs.getHttpPort())
+                            .setGrpcPort(decodeSs.getGrpcPort())
+                            .build());
+                }
+                b.addInputs(ib.build());
             }
         }
 
@@ -514,10 +462,10 @@ public class DpBatchScheduler {
 
     @PreDestroy
     public void shutdown() {
-        for (SloBudgetBatcher b : sloBatchers.values()) {
-            b.shutdown();
+        for (ConcurrentHashMap<String, DispatchBatcher> modelMap : batchers.values()) {
+            for (DispatchBatcher b : modelMap.values()) {
+                b.shutdown();
+            }
         }
-        timerExecutor.shutdownNow();
     }
-
 }

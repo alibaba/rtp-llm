@@ -7,6 +7,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.DpBatchReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -40,7 +41,7 @@ class SloBudgetBatcherTest {
     private DispatchPlanner planner;
     private PrefillTimePredictor predictor;
     private DpBatchReporter reporter;
-    private final List<PrefillBatch> dispatched = new CopyOnWriteArrayList<>();
+    private final List<DispatchBatch> dispatched = new CopyOnWriteArrayList<>();
     private SloBudgetBatcher batcher;
 
     private static final ServerStatus PREFILL = serverStatus("10.0.0.1", 8080, 9080);
@@ -61,17 +62,13 @@ class SloBudgetBatcherTest {
         cfg.setBatchMaxCapacity(1_000_000);
         when(configService.loadBalanceConfig()).thenReturn(cfg);
 
-        when(planner.plan(any(), any())).thenAnswer(inv -> {
-            List<QueuedRequest> drained = inv.getArgument(0);
-            if (drained == null || drained.isEmpty()) {
-                return DispatchPlan.empty();
-            }
-            List<PendingRequest> placed = new ArrayList<>();
-            for (QueuedRequest qr : drained) {
-                placed.add(new PendingRequest(qr.ctx(), PREFILL, DECODE, qr.future(), qr.enqueuedAtMicros()));
-            }
-            return DispatchPlan.of(List.of(new PrefillBatch(PREFILL, placed, 1)));
-        });
+        WorkerStatus prefillWorker = new WorkerStatus();
+        prefillWorker.setIp("10.0.0.1");
+        prefillWorker.setPort(8080);
+        prefillWorker.setGroup("g1");
+        prefillWorker.setAlive(true);
+        prefillWorker.setDpSize(1);
+        when(planner.selectDecodeWorker(any(), any())).thenReturn(DECODE);
 
         // predictor: linear, 1 token = 0.1ms
         when(predictor.estimateMs(anyLong(), anyLong())).thenAnswer(inv -> {
@@ -80,7 +77,7 @@ class SloBudgetBatcherTest {
         });
 
         reporter = mock(DpBatchReporter.class);
-        batcher = new SloBudgetBatcher("m1", configService, planner, dispatched::add, predictor, reporter);
+        batcher = new SloBudgetBatcher("m1", configService, planner, dispatched::add, predictor, reporter, prefillWorker, 1);
     }
 
     @AfterEach
@@ -103,7 +100,7 @@ class SloBudgetBatcherTest {
         batcher.start();
         waitUntilDispatched(1, 1000);
         assertTrue(dispatched.size() >= 1);
-        PrefillBatch first = dispatched.get(0);
+        DispatchBatch first = dispatched.get(0);
         long firstSeqLen = first.requests().get(0).ctx().getRequest().getSeqLen();
         assertEquals(2000, firstSeqLen);
     }
@@ -171,7 +168,7 @@ class SloBudgetBatcherTest {
         batcher.start();
 
         waitUntilAllRequestsDispatched(3, 1000);
-        int totalRequests = dispatched.stream().mapToInt(PrefillBatch::size).sum();
+        int totalRequests = dispatched.stream().mapToInt(DispatchBatch::size).sum();
         assertEquals(3, totalRequests);
     }
 
@@ -256,7 +253,7 @@ class SloBudgetBatcherTest {
         cfg.setDpTtftSloMs(80);
         cfg.setSloSafetyMargin(0);
         cfg.setBatchFillThreshold(0.0);
-        when(planner.plan(any(), any())).thenThrow(new RuntimeException("boom"));
+        when(planner.selectDecodeWorker(any(), any())).thenThrow(new RuntimeException("boom"));
         List<CompletableFuture<Response>> futures = offerN(3, 100);
         batcher.start();
 
@@ -270,14 +267,12 @@ class SloBudgetBatcherTest {
     }
 
     @Test
-    void per_request_failures_from_planner_complete_with_failure_response() throws Exception {
+    void per_request_decode_failure_completes_with_failure_response() throws Exception {
         cfg.setDpTtftSloMs(80);
         cfg.setSloSafetyMargin(0);
         cfg.setBatchFillThreshold(0.0);
-        when(planner.plan(any(), any())).thenAnswer(inv -> {
-            List<QueuedRequest> drained = inv.getArgument(0);
-            return DispatchPlan.allFailed(drained, StrategyErrorType.NO_DECODE_WORKER, "no decode");
-        });
+        when(planner.selectDecodeWorker(any(), any()))
+                .thenReturn(ServerStatus.code(StrategyErrorType.NO_DECODE_WORKER));
         List<CompletableFuture<Response>> futures = offerN(2, 100);
         batcher.start();
 
@@ -314,7 +309,7 @@ class SloBudgetBatcherTest {
         cfg.setDpTtftSloMs(80);
         cfg.setSloSafetyMargin(0);
         cfg.setBatchFillThreshold(0.0);
-        when(planner.plan(any(), any())).thenThrow(new RuntimeException("boom"));
+        when(planner.selectDecodeWorker(any(), any())).thenThrow(new RuntimeException("boom"));
         offerN(2, 100);
         batcher.start();
         Thread.sleep(500);
@@ -345,7 +340,7 @@ class SloBudgetBatcherTest {
     private void waitUntilAllRequestsDispatched(int totalRequests, long timeoutMs) throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
-            int sum = dispatched.stream().mapToInt(PrefillBatch::size).sum();
+            int sum = dispatched.stream().mapToInt(DispatchBatch::size).sum();
             if (sum >= totalRequests) {
                 return;
             }

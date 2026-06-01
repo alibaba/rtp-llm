@@ -101,7 +101,7 @@ public class InflightBatchRegistry {
     }
 
     /** Register a freshly-Enqueued batch. All requests start in PENDING_ACK. */
-    public void register(long batchId, PrefillBatch batch) {
+    public void register(long batchId, DispatchBatch batch) {
         long now = System.currentTimeMillis();
         List<Long> requestIds = new ArrayList<>(batch.size());
         for (PendingRequest req : batch.requests()) {

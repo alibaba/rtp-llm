@@ -4,9 +4,10 @@ import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
+import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
@@ -18,7 +19,7 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Function;
+import java.util.function.ToIntFunction;
 import java.util.stream.Collectors;
 
 @Component
@@ -27,75 +28,122 @@ public class DefaultDispatchPlanner implements DispatchPlanner {
 
     private final EngineWorkerStatus engineWorkerStatus;
     private final ResourceMeasureFactory resourceMeasureFactory;
-    private final Map<String, GroupSelector> groupSelectors;
+    private final CacheAwareService cacheAwareService;
+    private final PrefillTimePredictor prefillTimePredictor;
 
     public DefaultDispatchPlanner(EngineWorkerStatus engineWorkerStatus,
                                   ResourceMeasureFactory resourceMeasureFactory,
-                                  List<GroupSelector> allSelectors) {
+                                  CacheAwareService cacheAwareService,
+                                  PrefillTimePredictor prefillTimePredictor) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.resourceMeasureFactory = resourceMeasureFactory;
-        this.groupSelectors = allSelectors.stream()
-                .collect(Collectors.toMap(GroupSelector::name, Function.identity()));
+        this.cacheAwareService = cacheAwareService;
+        this.prefillTimePredictor = prefillTimePredictor;
     }
 
     @Override
-    public DispatchPlan plan(List<QueuedRequest> drained, DispatchContext context) {
-        if (drained == null || drained.isEmpty()) {
-            return DispatchPlan.empty();
-        }
-
-        FlexlbConfig cfg = context.config();
-        List<WorkerStatus> candidates = dpEnabledPrefillCandidates(cfg, context.dpSize());
+    public WorkerStatus selectPrefillWorker(String model, FlexlbConfig cfg,
+                                            BalanceContext ctx,
+                                            ToIntFunction<String> queueSizeByWorker) {
+        List<WorkerStatus> candidates = dpEnabledPrefillCandidates(cfg);
         if (candidates.isEmpty()) {
-            return DispatchPlan.allFailed(drained, StrategyErrorType.NO_PREFILL_WORKER,
-                    "no DP-enabled prefill worker available");
+            return null;
         }
 
-        String selectorName = cfg.isCacheAwareSchedulingEnabled()
-                ? cfg.getDpGroupSelector()
-                : FirstAliveGroupSelector.NAME;
-        GroupSelector groupSelector = groupSelectors.getOrDefault(selectorName,
-                groupSelectors.get(CacheAwareGroupSelector.NAME));
-        if (groupSelector == null) {
-            groupSelector = groupSelectors.values().iterator().next();
-        }
+        Map<String, WorkerStatus> decodeWorkers =
+                engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, null);
 
-        WorkerStatus group = groupSelector.select(candidates, context);
-        if (group == null) {
-            return DispatchPlan.allFailed(drained, StrategyErrorType.NO_PREFILL_WORKER,
-                    "GroupSelector(" + groupSelector.name() + ") returned no candidate");
-        }
-
-        ServerStatus prefill = toPrefillServerStatus(group);
-        LoadBalancer decodeSelector = LoadBalanceStrategyFactory.getLoadBalancer(
-                cfg.getStrategyForRoleType(RoleType.DECODE));
-
-        List<PendingRequest> placed = new ArrayList<>(drained.size());
-        List<FailedRequest> failures = new ArrayList<>();
-        for (QueuedRequest qr : drained) {
-            qr.ctx().setConfig(cfg);
-            ServerStatus decode = decodeSelector.select(qr.ctx(), RoleType.DECODE, prefill.getGroup());
-            if (decode == null || !decode.isSuccess()) {
-                String msg = decode == null ? "decode selector returned null" : decode.getMessage();
-                failures.add(new FailedRequest(qr, StrategyErrorType.NO_DECODE_WORKER, msg));
+        int maxQueueSize = cfg.getMaxGroupQueueSize();
+        List<WorkerStatus> eligible = new ArrayList<>(candidates.size());
+        for (WorkerStatus w : candidates) {
+            if (!hasAliveDecodeInGroup(decodeWorkers, w.getGroup())) {
                 continue;
             }
-            placed.add(new PendingRequest(qr.ctx(), prefill, decode, qr.future(), qr.enqueuedAtMicros()));
+            if (maxQueueSize > 0 && queueSizeByWorker.applyAsInt(w.getIpPort()) > maxQueueSize) {
+                continue;
+            }
+            eligible.add(w);
         }
 
-        if (placed.isEmpty()) {
-            return new DispatchPlan(List.of(), failures);
+        if (eligible.isEmpty()) {
+            eligible = candidates.stream()
+                    .filter(w -> hasAliveDecodeInGroup(decodeWorkers, w.getGroup()))
+                    .collect(Collectors.toCollection(ArrayList::new));
+            if (eligible.isEmpty()) {
+                return null;
+            }
         }
 
-        long blockSize = group.getCacheStatus() != null ? group.getCacheStatus().getBlockSize() : 1;
-        PrefillBatch batch = new PrefillBatch(prefill, placed, context.dpSize(), blockSize);
-        Logger.debug("DefaultDispatchPlanner placed {}/{} requests on group {}:{} (drain={}, dpSize={})",
-                placed.size(), drained.size(), prefill.getServerIp(), prefill.getGrpcPort(),
-                drained.size(), context.dpSize());
-        return new DispatchPlan(List.of(batch), failures);
+        if (eligible.size() == 1) {
+            return eligible.get(0);
+        }
+
+        List<Long> cacheKeys = ctx != null && ctx.getRequest() != null
+                ? ctx.getRequest().getBlockCacheKeys() : null;
+        boolean hasCacheKeys = cacheKeys != null && !cacheKeys.isEmpty();
+        long seqLen = ctx != null && ctx.getRequest() != null ? ctx.getRequest().getSeqLen() : 0;
+        double alpha = cfg.getGroupQueueWeight();
+
+        WorkerStatus best = null;
+        long bestScore = Long.MAX_VALUE;
+        long bestCacheMatchedTokens = 0;
+
+        for (WorkerStatus w : eligible) {
+            long cacheMatchedTokens = 0;
+            if (hasCacheKeys && cfg.isCacheAwareSchedulingEnabled()) {
+                long blockSize = getBlockSize(w);
+                int prefixBlocks = cacheAwareService.findMatchingPrefixLength(w.getIpPort(), cacheKeys);
+                cacheMatchedTokens = prefixBlocks * blockSize;
+            }
+
+            long prefillCost = prefillTimePredictor.estimateMs(seqLen, cacheMatchedTokens);
+            long queueWait = w.getRunningQueueTime().get();
+            long score = prefillCost + (long) (alpha * queueWait);
+
+            if (score < bestScore) {
+                bestScore = score;
+                best = w;
+                bestCacheMatchedTokens = cacheMatchedTokens;
+            }
+        }
+
+        if (best != null && ctx != null) {
+            ctx.setCacheMatchedTokens(bestCacheMatchedTokens);
+        }
+
+        return best;
     }
 
-    private List<WorkerStatus> dpEnabledPrefillCandidates(FlexlbConfig cfg, int targetDpSize) {
+    @Override
+    public ServerStatus selectDecodeWorker(BalanceContext ctx, String group) {
+        FlexlbConfig cfg = ctx.getConfig();
+        if (cfg == null) {
+            cfg = new FlexlbConfig();
+        }
+        LoadBalancer decodeSelector = LoadBalanceStrategyFactory.getLoadBalancer(
+                cfg.getStrategyForRoleType(RoleType.DECODE));
+        return decodeSelector.select(ctx, RoleType.DECODE, group);
+    }
+
+    private static boolean hasAliveDecodeInGroup(Map<String, WorkerStatus> allDecode, String group) {
+        if (group == null) {
+            return false;
+        }
+        if (allDecode == null || allDecode.isEmpty()) {
+            return false;
+        }
+        return allDecode.values().stream()
+                .anyMatch(w -> w.isAlive() && group.equals(w.getGroup()));
+    }
+
+    static long getBlockSize(WorkerStatus w) {
+        if (w.getCacheStatus() != null && w.getCacheStatus().getBlockSize() > 0) {
+            return w.getCacheStatus().getBlockSize();
+        }
+        return 1;
+    }
+
+    private List<WorkerStatus> dpEnabledPrefillCandidates(FlexlbConfig cfg) {
         Map<String, WorkerStatus> all = engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
         if (all == null || all.isEmpty()) {
             Logger.warn("dpEnabledPrefillCandidates: workers={}", all == null ? "null" : "empty");
@@ -105,7 +153,6 @@ public class DefaultDispatchPlanner implements DispatchPlanner {
         ResourceMeasure measure = resourceMeasureFactory.getMeasure(indicator);
         List<WorkerStatus> result = all.values().stream()
                 .filter(WorkerStatus::isAlive)
-                .filter(w -> targetDpSize <= 0 || w.getDpSize() == targetDpSize)
                 .filter(w -> measure == null || measure.isResourceAvailable(w))
                 .toList();
         if (result.isEmpty()) {
@@ -113,23 +160,19 @@ public class DefaultDispatchPlanner implements DispatchPlanner {
             for (Map.Entry<String, WorkerStatus> e : all.entrySet()) {
                 WorkerStatus w = e.getValue();
                 boolean alive = w != null && w.isAlive();
-                long dpSize = w == null ? -1L : w.getDpSize();
-                boolean dpOk = targetDpSize <= 0 || dpSize == targetDpSize;
                 boolean resOk = measure == null || (w != null && measure.isResourceAvailable(w));
                 sb.append("[").append(e.getKey())
                   .append(":alive=").append(alive)
-                  .append(",dpSize=").append(dpSize)
-                  .append(",dpOk=").append(dpOk)
                   .append(",resOk=").append(resOk)
                   .append("]");
             }
-            Logger.warn("dpEnabledPrefillCandidates: 0 candidates, targetDpSize={}, indicator={}, measure={}, workers={}",
-                    targetDpSize, indicator, measure == null ? "null" : measure.getClass().getSimpleName(), sb);
+            Logger.warn("dpEnabledPrefillCandidates: 0 candidates, indicator={}, measure={}, workers={}",
+                    indicator, measure == null ? "null" : measure.getClass().getSimpleName(), sb);
         }
         return result;
     }
 
-    private static ServerStatus toPrefillServerStatus(WorkerStatus w) {
+    public static ServerStatus toPrefillServerStatus(WorkerStatus w) {
         ServerStatus s = new ServerStatus();
         s.setSuccess(true);
         s.setRole(RoleType.PREFILL);

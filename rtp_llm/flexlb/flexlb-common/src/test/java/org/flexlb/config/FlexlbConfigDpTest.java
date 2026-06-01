@@ -23,7 +23,7 @@ class FlexlbConfigDpTest {
         assertEquals(0, cfg.getDpBatchSizeMax(), "0 means auto-derive from worker.dpSize");
         assertEquals(30, cfg.getDpBatchWindowMs());
         assertEquals(100, cfg.getDpBatchTimeoutMs());
-        assertEquals("RR", cfg.getDpAssignStrategy());
+        assertEquals("SLO", cfg.getDpBatcherType());
     }
 
     @Test
@@ -53,12 +53,12 @@ class FlexlbConfigDpTest {
                 + "\"dpBatchSizeMax\":4,"
                 + "\"dpBatchWindowMs\":50,"
                 + "\"dpBatchTimeoutMs\":200,"
-                + "\"dpAssignStrategy\":\"RR\"}";
+                + "\"dpBatcherType\":\"SLO\"}";
         FlexlbConfig cfg = mapper.readValue(json, FlexlbConfig.class);
         assertTrue(cfg.isDpBalanceEnabled());
         assertEquals(4, cfg.getDpBatchSizeMax());
         assertEquals(50, cfg.getDpBatchWindowMs());
         assertEquals(200, cfg.getDpBatchTimeoutMs());
-        assertEquals("RR", cfg.getDpAssignStrategy());
+        assertEquals("SLO", cfg.getDpBatcherType());
     }
 }

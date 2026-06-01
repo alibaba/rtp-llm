@@ -6,10 +6,8 @@ import org.flexlb.dao.loadbalance.Response;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * One request waiting in {@link GlobalPrefillBatcher}'s queue.
+ * One request waiting in a {@link DispatchBatcher}'s queue.
  * <p>
- * At queue time the prefill / decode workers have NOT yet been picked — group
- * selection is a per-batch decision deferred to {@link DispatchPlanner#plan}.
  * The future is the same one returned to {@link org.flexlb.service.RouteService};
  * completion happens either from the planner (per-request failure), the dispatcher
  * (Master.Enqueue ack), or RouteService (cancel).

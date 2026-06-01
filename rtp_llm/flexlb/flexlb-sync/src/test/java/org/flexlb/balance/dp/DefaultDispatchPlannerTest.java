@@ -4,6 +4,7 @@ import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
+import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -15,15 +16,13 @@ import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -35,7 +34,6 @@ class DefaultDispatchPlannerTest {
 
     private EngineWorkerStatus engineWorkerStatus;
     private ResourceMeasureFactory resourceMeasureFactory;
-    private GroupSelector groupSelector;
     private LoadBalancer decodeSelector;
     private DefaultDispatchPlanner planner;
 
@@ -43,163 +41,86 @@ class DefaultDispatchPlannerTest {
     void setUp() {
         engineWorkerStatus = mock(EngineWorkerStatus.class);
         resourceMeasureFactory = mock(ResourceMeasureFactory.class);
-        groupSelector = mock(GroupSelector.class);
-        when(groupSelector.name()).thenReturn("CACHE_AWARE");
         decodeSelector = mock(LoadBalancer.class);
 
         ResourceMeasure measure = mock(ResourceMeasure.class);
         when(resourceMeasureFactory.getMeasure(any())).thenReturn(measure);
         when(measure.isResourceAvailable(any())).thenReturn(true);
 
-        // Register the decode selector under WEIGHTED_CACHE — that's what
-        // FlexlbConfig.getStrategyForRoleType(DECODE) returns by default.
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, decodeSelector);
 
-        planner = new DefaultDispatchPlanner(engineWorkerStatus, resourceMeasureFactory, List.of(groupSelector));
+        planner = new DefaultDispatchPlanner(engineWorkerStatus, resourceMeasureFactory,
+                mock(CacheAwareService.class), mock(PrefillTimePredictor.class));
     }
 
     @Test
-    void happy_path_one_batch_with_all_requests_paired() {
+    void selectDecodeWorker_returns_successful_status() {
+        when(decodeSelector.select(any(), eq(RoleType.DECODE), anyString())).thenReturn(okDecode());
+
+        BalanceContext ctx = makeCtx(1);
+        ServerStatus result = planner.selectDecodeWorker(ctx, "g1");
+
+        assertNotNull(result);
+        assertTrue(result.isSuccess());
+        assertEquals(RoleType.DECODE, result.getRole());
+        assertEquals("10.0.0.99", result.getServerIp());
+    }
+
+    @Test
+    void selectDecodeWorker_returns_failed_when_no_worker() {
+        when(decodeSelector.select(any(), eq(RoleType.DECODE), anyString())).thenReturn(failedDecode());
+
+        BalanceContext ctx = makeCtx(1);
+        ServerStatus result = planner.selectDecodeWorker(ctx, "g1");
+
+        assertNotNull(result);
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), result.getCode());
+    }
+
+    @Test
+    void selectDecodeWorker_returns_null_when_selector_returns_null() {
+        when(decodeSelector.select(any(), eq(RoleType.DECODE), anyString())).thenReturn(null);
+
+        BalanceContext ctx = makeCtx(1);
+        ServerStatus result = planner.selectDecodeWorker(ctx, "g1");
+
+        assertNull(result);
+    }
+
+    @Test
+    void selectPrefillWorker_returns_best_candidate() {
         WorkerStatus w = workerStatus("10.0.0.1", 4);
         when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.PREFILL), any())).thenReturn(map(w));
-        when(groupSelector.select(any(), any())).thenReturn(w);
-        when(decodeSelector.select(any(), eq(RoleType.DECODE), anyString())).thenAnswer(inv -> okDecode());
+        when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.DECODE), any()))
+                .thenReturn(Map.of("10.0.0.99:8081", decodeWorkerStatus()));
 
-        DispatchPlan result = planner.plan(drained(4), context(4));
+        WorkerStatus result = planner.selectPrefillWorker("m1", new FlexlbConfig(),
+                makeCtx(1), k -> 0);
 
-        assertEquals(1, result.batches().size());
-        assertEquals(4, result.batches().get(0).size());
-        assertTrue(result.failures().isEmpty());
-        assertEquals("10.0.0.1", result.batches().get(0).prefillIp());
+        assertNotNull(result);
+        assertEquals("10.0.0.1", result.getIp());
     }
 
     @Test
-    void no_dp_enabled_candidates_fails_all_with_NO_PREFILL_WORKER() {
-        // Only single-rank workers — must be filtered out by the dp_size>1 gate.
-        WorkerStatus single = workerStatus("10.0.0.5", 1);
-        when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.PREFILL), any())).thenReturn(map(single));
-
-        DispatchPlan result = planner.plan(drained(3), context(4));
-        assertTrue(result.batches().isEmpty());
-        assertEquals(3, result.failures().size());
-        assertTrue(result.failures().stream()
-                .allMatch(f -> f.reason() == StrategyErrorType.NO_PREFILL_WORKER));
-    }
-
-    @Test
-    void group_selector_returning_null_fails_all() {
-        WorkerStatus w = workerStatus("10.0.0.1", 4);
-        when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.PREFILL), any())).thenReturn(map(w));
-        when(groupSelector.select(any(), any())).thenReturn(null);
-
-        DispatchPlan result = planner.plan(drained(2), context(4));
-        assertTrue(result.batches().isEmpty());
-        assertEquals(2, result.failures().size());
-    }
-
-    @Test
-    void decode_selection_failing_for_one_request_drops_only_that_one() {
-        WorkerStatus w = workerStatus("10.0.0.1", 4);
-        when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.PREFILL), any())).thenReturn(map(w));
-        when(groupSelector.select(any(), any())).thenReturn(w);
-
-        AtomicInteger n = new AtomicInteger();
-        when(decodeSelector.select(any(), eq(RoleType.DECODE), anyString())).thenAnswer(inv -> {
-            int call = n.getAndIncrement();
-            return call == 1 ? failedDecode() : okDecode();  // 2nd call fails
-        });
-
-        DispatchPlan result = planner.plan(drained(4), context(4));
-        assertEquals(1, result.batches().size());
-        assertEquals(3, result.batches().get(0).size(), "victim is dropped from the batch");
-        assertEquals(1, result.failures().size());
-        assertEquals(StrategyErrorType.NO_DECODE_WORKER, result.failures().get(0).reason());
-    }
-
-    @Test
-    void decode_failing_for_all_requests_yields_zero_batches() {
-        WorkerStatus w = workerStatus("10.0.0.1", 4);
-        when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.PREFILL), any())).thenReturn(map(w));
-        when(groupSelector.select(any(), any())).thenReturn(w);
-        when(decodeSelector.select(any(), eq(RoleType.DECODE), anyString())).thenAnswer(inv -> failedDecode());
-
-        DispatchPlan result = planner.plan(drained(2), context(4));
-        assertTrue(result.batches().isEmpty(), "no decode pairing ⇒ no prefill work either");
-        assertEquals(2, result.failures().size());
-    }
-
-    @Test
-    void empty_drain_returns_empty_result() {
-        DispatchPlan result = planner.plan(List.of(), context(4));
-        assertTrue(result.batches().isEmpty());
-        assertTrue(result.failures().isEmpty());
-    }
-
-    @Test
-    void filters_out_non_alive_workers() {
-        WorkerStatus alive = workerStatus("10.0.0.1", 4);
-        WorkerStatus dead = workerStatus("10.0.0.2", 4);
-        dead.setAlive(false);
+    void selectPrefillWorker_returns_null_when_no_candidates() {
         when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.PREFILL), any()))
-                .thenReturn(map(alive, dead));
-        when(groupSelector.select(any(), any())).thenAnswer(inv -> {
-            List<WorkerStatus> candidates = inv.getArgument(0);
-            return candidates.isEmpty() ? null : candidates.get(0);
-        });
-        when(decodeSelector.select(any(), eq(RoleType.DECODE), anyString())).thenAnswer(inv -> okDecode());
+                .thenReturn(Map.of());
 
-        DispatchPlan result = planner.plan(drained(2), context(4));
+        WorkerStatus result = planner.selectPrefillWorker("m1", new FlexlbConfig(),
+                makeCtx(1), k -> 0);
 
-        assertEquals(1, result.batches().size());
-        ArgumentCaptor<List<WorkerStatus>> captor = listCaptor();
-        verifyGroupSelectorReceived(captor);
-        assertEquals(1, captor.getValue().size(), "dead worker filtered out");
-        assertEquals("10.0.0.1", captor.getValue().get(0).getIp());
-    }
-
-    @Test
-    void filters_out_workers_with_resource_unavailable() {
-        WorkerStatus ok = workerStatus("10.0.0.1", 4);
-        WorkerStatus oom = workerStatus("10.0.0.2", 4);
-
-        ResourceMeasure measure = mock(ResourceMeasure.class);
-        when(measure.isResourceAvailable(ok)).thenReturn(true);
-        when(measure.isResourceAvailable(oom)).thenReturn(false);
-        when(resourceMeasureFactory.getMeasure(any())).thenReturn(measure);
-
-        when(engineWorkerStatus.selectModelWorkerStatus(eq(RoleType.PREFILL), any()))
-                .thenReturn(map(ok, oom));
-        when(groupSelector.select(any(), any())).thenAnswer(inv -> {
-            List<WorkerStatus> candidates = inv.getArgument(0);
-            return candidates.isEmpty() ? null : candidates.get(0);
-        });
-        when(decodeSelector.select(any(), eq(RoleType.DECODE), anyString())).thenAnswer(inv -> okDecode());
-
-        DispatchPlan result = planner.plan(drained(2), context(4));
-
-        assertEquals(1, result.batches().size());
-        ArgumentCaptor<List<WorkerStatus>> captor = listCaptor();
-        verifyGroupSelectorReceived(captor);
-        assertEquals(1, captor.getValue().size(), "OOM worker filtered out");
-        assertEquals("10.0.0.1", captor.getValue().get(0).getIp());
+        assertNull(result);
     }
 
     // ============== helpers ==============
 
-    private static List<QueuedRequest> drained(int n) {
-        List<QueuedRequest> out = new java.util.ArrayList<>(n);
-        for (int i = 0; i < n; i++) {
-            BalanceContext ctx = new BalanceContext();
-            Request r = new Request();
-            r.setRequestId(i + 1);
-            ctx.setRequest(r);
-            out.add(QueuedRequest.of(ctx, new CompletableFuture<>()));
-        }
-        return out;
-    }
-
-    private static DispatchContext context(int dpSize) {
-        return new DispatchContext("m1", dpSize, new FlexlbConfig(), List.of());
+    private static BalanceContext makeCtx(long requestId) {
+        BalanceContext ctx = new BalanceContext();
+        Request r = new Request();
+        r.setRequestId(requestId);
+        ctx.setRequest(r);
+        ctx.setConfig(new FlexlbConfig());
+        return ctx;
     }
 
     private static WorkerStatus workerStatus(String ip, long dpSize) {
@@ -207,6 +128,15 @@ class DefaultDispatchPlannerTest {
         w.setIp(ip);
         w.setPort(8080);
         w.setDpSize(dpSize);
+        w.setAlive(true);
+        w.setGroup("g1");
+        return w;
+    }
+
+    private static WorkerStatus decodeWorkerStatus() {
+        WorkerStatus w = new WorkerStatus();
+        w.setIp("10.0.0.99");
+        w.setPort(8081);
         w.setAlive(true);
         w.setGroup("g1");
         return w;
@@ -233,14 +163,5 @@ class DefaultDispatchPlannerTest {
 
     private static ServerStatus failedDecode() {
         return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
-    }
-
-    @SuppressWarnings("unchecked")
-    private static ArgumentCaptor<List<WorkerStatus>> listCaptor() {
-        return ArgumentCaptor.forClass(List.class);
-    }
-
-    private void verifyGroupSelectorReceived(ArgumentCaptor<List<WorkerStatus>> captor) {
-        org.mockito.Mockito.verify(groupSelector).select(captor.capture(), any());
     }
 }

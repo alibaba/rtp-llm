@@ -2,7 +2,7 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.dp.InflightBatchRegistry;
 import org.flexlb.balance.dp.PendingRequest;
-import org.flexlb.balance.dp.PrefillBatch;
+import org.flexlb.balance.dp.DispatchBatch;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -80,9 +80,9 @@ class GrpcWorkerStatusCheckRunnerTest {
         InflightBatchRegistry registry = new InflightBatchRegistry();
         ServerStatus prefill = serverStatus("10.0.0.1", 8080, 9080);
         ServerStatus decode = serverStatus("10.0.0.2", 8081, 9081);
-        PrefillBatch batch = new PrefillBatch(prefill, List.of(
+        DispatchBatch batch = new DispatchBatch(prefill, List.of(List.of(
                 pending(1L, prefill, decode),
-                pending(2L, prefill, decode)), 2);
+                pending(2L, prefill, decode))), 2, 1);
         registry.register(7L, batch);
         assertTrue(registry.markActive(1L));
         assertTrue(registry.markActive(2L));
@@ -123,8 +123,8 @@ class GrpcWorkerStatusCheckRunnerTest {
         InflightBatchRegistry registry = new InflightBatchRegistry();
         ServerStatus prefill = serverStatus("10.0.0.1", 8080, 9080);
         ServerStatus decode = serverStatus("10.0.0.2", 8081, 9081);
-        PrefillBatch batch = new PrefillBatch(prefill, List.of(
-                pending(1L, prefill, decode)), 1);
+        DispatchBatch batch = new DispatchBatch(prefill, List.of(List.of(
+                pending(1L, prefill, decode))), 1, 1);
         registry.register(7L, batch);
         assertEquals(InflightBatchRegistry.RequestState.PENDING_ACK, registry.getState(1L));
 

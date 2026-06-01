@@ -7,7 +7,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * One placed request inside a {@link PrefillBatch} (prefill + decode workers
+ * One placed request inside a {@link DispatchBatch} (prefill + decode workers
  * already chosen by {@link DispatchPlanner}). Once Master.Enqueue is acked, the
  * scheduler completes {@link #future()} so the upstream {@code Mono} created
  * in {@link org.flexlb.service.RouteService} resumes and the HTTP caller

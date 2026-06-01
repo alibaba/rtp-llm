@@ -193,13 +193,13 @@ public class FlexlbConfig {
     private long dpBatchTimeoutMs = 100;
 
     /**
-     * dp_rank assignment strategy within a single batch. V1 only supports "RR"
-     * (positional, the i-th request goes to slot {@code i % dpSize}). Cross-batch
-     * fairness lives one level up in {@link #dpGroupSelector}, since each batch
-     * is dispatched as a unit to one DP group.
-     * V2 plans to add "LPT" / "CACHE_AWARE_LPT" for length-aware bin packing.
+     * Per-group batcher implementation type. "SLO" uses the EDF SLO-budget
+     * batcher (requires dpSize=1). "SIMPLE" uses the FIFO drain batcher
+     * (requires dpSize>1).
      */
-    private String dpAssignStrategy = "RR";
+    private String dpBatcherType = "SLO";
+
+    private int maxBatcherQueueSize = 1024;
 
     /**
      * Ordered traffic policy rules. A matched rule forces the whole request to a worker group.
@@ -289,6 +289,18 @@ public class FlexlbConfig {
      * single prefill step could handle.
      */
     private int batchMaxCapacity = 1_000_000;
+
+    /**
+     * Hard gate: groups whose SloBudgetBatcher queue exceeds this size are
+     * excluded from group selection. 0 = disable queue gating.
+     */
+    private int maxGroupQueueSize = 0;
+
+    /**
+     * Weight factor (α) for the queue-wait penalty in group scoring.
+     * score(G) = T_prefill(seqLen, cacheHit) + α * queueWait(G).
+     */
+    private double groupQueueWeight = 1.0;
 
     // ========== Prefill Profiling Configuration ==========
 
