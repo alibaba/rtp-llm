@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import os
 from typing import AsyncGenerator
 
 import grpc
@@ -456,6 +457,11 @@ class ModelRpcClient(object):
                 for role_addr in input_py.generate_config.role_addrs
                 if role_addr.role == RoleType.PREFILL and role_addr.ip
             ]
+            if os.environ.get("FLEXLB_EXPECT_FETCH_RESPONSE") == "1":
+                logging.info(
+                    "FLEXLB_EXPECT_FETCH_RESPONSE request_id=%s using FetchResponse",
+                    input_pb.request_id,
+                )
         else:
             address_list = self._addresses
             for role_addr in input_py.generate_config.role_addrs:
