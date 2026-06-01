@@ -65,6 +65,7 @@ cc_library(
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "//rtp_llm/cpp/disaggregate/cache_store",
+        "//rtp_llm/cpp/distribute:rpc_cpu_tp_broadcaster_hdr",
         "//rtp_llm/cpp/engine_base:profiler",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/metrics",
