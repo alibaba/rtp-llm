@@ -11,15 +11,16 @@ import java.util.List;
 
 /**
  * Pure-function helpers for chunk assembly on the dispatcher batch path. Splits the request
- * array per {@link SubBatchSpec}, builds the per-chunk request body (deep-copy of the envelope
- * with the chunk slice swapped in), stamps {@code generate_config.force_batch} and any
- * pre-resolved BE targets. The mirror of {@code BatchSplitter} + {@code BatchChunkBuilder} on
- * the Jackson side; behavior is intentionally identical so the equivalence test holds.
+ * array per {@link SubBatchSpec}, builds the per-chunk request body (shallow copy of the
+ * envelope with the chunk slice swapped in and a fresh {@code generate_config} per chunk),
+ * stamps {@code generate_config.force_batch} and any pre-resolved BE targets.
  *
- * <p>Deep copy uses {@code JSON.parseObject(JSON.toJSONBytes(envelope))} — fastjson2's
- * {@link JSONObject#clone()} is shallow and would let chunks share a single
- * {@code generate_config}, which the per-chunk {@code force_batch} / {@code role_addrs} writes
- * would mutate across siblings. Reparse cost on a typical envelope is microseconds.
+ * <p>Per-chunk isolation strategy: every chunk gets a shallow-copy of the top-level envelope
+ * (so {@code model} and other non-mutated fields share references) but a deep-cloned
+ * {@code generate_config} (so the per-chunk {@code force_batch} / {@code role_addrs} writes
+ * land on private objects). Deep-cloning only {@code generate_config} — typically a handful
+ * of scalar fields — keeps assembly O(chunk_count) on the small sub-object instead of
+ * O(envelope_size × chunk_count) on the whole tree.
  */
 public final class BatchChunkAssembler {
 
@@ -89,16 +90,28 @@ public final class BatchChunkAssembler {
     }
 
     /**
-     * Builds per-chunk request bodies. Each is a deep copy of {@code envelope} with the
-     * {@code requestArrayField} replaced by the chunk slice and {@code generate_config.force_batch}
-     * stamped per {@link #injectForceBatch} contract.
+     * Builds per-chunk request bodies. Each is a <em>shallow</em> copy of {@code envelope} with
+     * the {@code requestArrayField} replaced by the chunk slice and {@code generate_config}
+     * replaced by a fresh deep clone of the source {@code generate_config}, then
+     * {@code force_batch} stamped per {@link #injectForceBatch} contract.
+     *
+     * <p>Only {@code generate_config} is deep-cloned because it's the one sub-tree that
+     * per-chunk writes ({@code force_batch}, {@code role_addrs} append) mutate; every other
+     * top-level field is either replaced wholesale ({@code requestArrayField}) or never written
+     * to per chunk ({@code model}, etc.), so sharing references is safe and cheap. Reparsing
+     * the entire envelope per chunk — the prior implementation — was O(envelope_size ×
+     * chunk_count) and blew up to ~500ms CPU on a 730KB envelope at 100 chunks.
      */
     public static List<JSONObject> buildChunkBodies(JSONObject envelope, List<JSONArray> chunks,
                                                     String requestArrayField) {
+        JSONObject sourceGc = envelope.getJSONObject("generate_config");
         List<JSONObject> chunkBodies = new ArrayList<>(chunks.size());
         for (JSONArray chunk : chunks) {
-            JSONObject copy = deepCopy(envelope);
+            JSONObject copy = new JSONObject(envelope);
             copy.put(requestArrayField, chunk);
+            if (sourceGc != null) {
+                copy.put("generate_config", deepCopy(sourceGc));
+            }
             injectForceBatch(copy);
             chunkBodies.add(copy);
         }
