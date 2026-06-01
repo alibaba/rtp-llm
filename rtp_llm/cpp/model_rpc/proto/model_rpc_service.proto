@@ -467,11 +467,6 @@ message MemoryOperationRequestPB {
         oneof disk_slot_presence {
             int32 disk_slot = 5;
         }
-        CacheBlockKind cache_block_kind = 6;
-        oneof src_mem_block_presence {
-            int32 src_mem_block = 7;
-        }
-        repeated uint32 slot_valid_mask = 8;
     }
     enum CopyDirection {
         H2D = 0;
@@ -480,12 +475,6 @@ message MemoryOperationRequestPB {
     enum BackingType {
         MEMORY = 0;
         DISK = 1;
-    }
-    enum CacheBlockKind {
-        LEGACY_COMPLETE = 0;
-        LEGACY_INCOMPLETE = 1;
-        COMPRESSED_KV = 2;
-        STATE_SWA_KV = 3;
     }
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;

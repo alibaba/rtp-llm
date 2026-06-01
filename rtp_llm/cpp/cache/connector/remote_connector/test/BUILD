@@ -5,18 +5,6 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
-cc_import(
-    name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
-)
-
-cuda13_torch_link_deps = select({
-    "@//:using_cuda13_x86": [
-        ":cuda13_torch_nvshmem",
-    ],
-    "//conditions:default": [],
-})
-
 test_deps = [
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
@@ -25,7 +13,7 @@ test_deps = [
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
-] + torch_deps() + cuda13_torch_link_deps
+] + torch_deps()
 
 test_copts = [
     "-fno-access-control",

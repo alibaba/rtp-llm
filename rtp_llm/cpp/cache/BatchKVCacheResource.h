@@ -147,7 +147,6 @@ public:
         auto& keys = batch_resource[batch_id].cacheKeys();
         if (!keys.empty()) {
             keys.pop_back();
-            batch_resource[batch_id].rebuildLinearBlockDependencies();
         }
     }
 
@@ -156,7 +155,6 @@ public:
             auto& keys = resource.cacheKeys();
             if (!keys.empty()) {
                 keys.pop_back();
-                resource.rebuildLinearBlockDependencies();
             }
         }
     }
@@ -164,22 +162,11 @@ public:
     void clearCacheKeys(int batch_id = 0) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         batch_resource[batch_id].cacheKeys().clear();
-        batch_resource[batch_id].blockDependencies().clear();
     }
 
     void pushBackCacheKey(int batch_id, CacheKeyType key) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        auto& resource = batch_resource[batch_id];
-        auto& keys     = resource.cacheKeys();
-        auto& deps     = resource.blockDependencies();
-        BlockDependency dependency;
-        dependency.ordinal = static_cast<uint32_t>(keys.size());
-        if (!keys.empty()) {
-            dependency.has_parent = true;
-            dependency.parent_key = keys.back();
-        }
-        keys.push_back(key);
-        deps.push_back(dependency);
+        batch_resource[batch_id].cacheKeys().push_back(key);
     }
 
     void initBatchGroups(int                                  batch_id,
@@ -205,7 +192,7 @@ public:
 
     void setBatchCacheKeys(int batch_id, const CacheKeysType& keys) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        batch_resource[batch_id].setCacheKeys(keys);
+        batch_resource[batch_id].cacheKeys() = keys;
     }
 
     void check() const {
