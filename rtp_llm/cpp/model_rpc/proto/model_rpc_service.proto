@@ -608,6 +608,21 @@ message FunctionResponsePB {
     }
 }
 
+message CpuTpBroadcastRequestPB {
+    string group_key = 1;
+    uint64 seq = 2;
+    int32 root = 3;
+    int32 src_tp_rank = 4;
+    int32 dst_tp_rank = 5;
+    uint64 nbytes = 6;
+    bytes payload = 7;
+}
+
+message CpuTpBroadcastResponsePB {
+    bool success = 1;
+    string error_message = 2;
+}
+
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
@@ -631,6 +646,7 @@ service RpcService {
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
+    rpc CpuTpBroadcast(CpuTpBroadcastRequestPB) returns (CpuTpBroadcastResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
 }
