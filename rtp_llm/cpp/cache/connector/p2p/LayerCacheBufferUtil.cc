@@ -104,10 +104,16 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheReso
             break;
         }
         int     block_id = block_ids[local_idx];
+        if (isNullBlockIdx(block_id)) {
+            continue;
+        }
         int64_t key      = cache_keys[logical_idx];
         layer_cache_buffer->addBlockId(key, block_id);
     }
 
+    if (layer_cache_buffer->blockIdMap().empty()) {
+        return nullptr;
+    }
     return layer_cache_buffer;
 }
 
@@ -137,7 +143,13 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayerRegion(KVCac
 
     auto buf = std::make_shared<LayerCacheBuffer>(layer_id, region_name);
     for (int i = 0; i < size; ++i) {
+        if (isNullBlockIdx(block_indices[start_block_idx + i])) {
+            continue;
+        }
         buf->addBlockId(cache_keys[start_block_idx + i], block_indices[start_block_idx + i]);
+    }
+    if (buf->blockIdMap().empty()) {
+        return nullptr;
     }
     return buf;
 }

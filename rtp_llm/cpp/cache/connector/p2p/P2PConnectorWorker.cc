@@ -55,8 +55,10 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
 bool P2PConnectorWorker::writeByLayer(int                           layer_id,
                                       const KVCacheResourcePtr&     resource,
                                       int64_t                       request_id,
-                                      std::shared_ptr<torch::Event> event) {
-    return prefill_->writeByLayer(layer_id, resource, request_id, std::move(event));
+                                      std::shared_ptr<torch::Event> event,
+                                      KVCacheRegionName             region_name,
+                                      int                           gid) {
+    return prefill_->writeByLayer(layer_id, resource, request_id, std::move(event), region_name, gid);
 }
 
 ErrorInfo

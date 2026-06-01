@@ -136,7 +136,6 @@ cc_library(
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
-        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",

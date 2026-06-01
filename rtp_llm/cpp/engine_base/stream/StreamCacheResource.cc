@@ -107,11 +107,6 @@ private:
 
 // Extract P2P side-channel payload from FusedAsyncReadContext and apply to GenerateStream.
 // Returns true if P2P payload was found and applied, false otherwise.
-static bool tensorPbHasPayload(const TensorPB& tensor_pb) {
-    return !tensor_pb.fp32_data().empty() || !tensor_pb.fp16_data().empty() || !tensor_pb.bf16_data().empty()
-           || !tensor_pb.int32_data().empty();
-}
-
 static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadContext>& read_context,
                                         GenerateStream*                               stream) {
     if (!read_context || !stream) {

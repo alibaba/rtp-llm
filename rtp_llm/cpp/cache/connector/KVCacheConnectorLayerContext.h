@@ -3,6 +3,7 @@
 #include <memory>
 #include <torch/extension.h>
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 
 namespace rtp_llm {
 
@@ -18,6 +19,8 @@ public:
     virtual KVCacheResourcePtr            heldKVCacheResource() const = 0;
     virtual int64_t                       requestId() const           = 0;
     virtual std::shared_ptr<torch::Event> attentionEvent() const      = 0;
+    virtual KVCacheRegionName             regionName() const { return KVCacheRegionName::DEFAULT; }
+    virtual int                           groupId() const { return -1; }
 };
 
 }  // namespace rtp_llm

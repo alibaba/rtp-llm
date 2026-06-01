@@ -50,17 +50,35 @@ bool P2PConnectorWorkerPrefill::init(int64_t store_wait_timeout_ms) {
 bool P2PConnectorWorkerPrefill::writeByLayer(int                           layer_id,
                                              const KVCacheResourcePtr&     resource,
                                              int64_t                       request_id,
-                                             std::shared_ptr<torch::Event> event) {
+                                             std::shared_ptr<torch::Event> event,
+                                             KVCacheRegionName             region_name,
+                                             int                           gid) {
     auto collector = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
     if (!config_.layer_region_to_group_id.empty()
-        && static_cast<size_t>(layer_id) < config_.layer_region_to_group_id.size()) {
+        && static_cast<size_t>(layer_id) < config_.layer_region_to_group_id.size()
+        && gid >= 0) {
+        // gid here carries the region_name from param.region_name (set by Python model forward).
+        // Use convertLayer to get blocks from the held resource (single group),
+        // then stamp with the correct region.
+        auto actual_region = static_cast<KVCacheRegionName>(gid);
+        auto buf = LayerCacheBufferUtil::convertLayer(*resource, 0, layer_id, 0, -1, config_.cp_rank, config_.cp_size);
+        if (buf) {
+            auto region_buf = std::make_shared<LayerCacheBuffer>(layer_id, actual_region);
+            for (const auto& [key, block_id] : buf->blockIdMap()) {
+                region_buf->addBlockId(key, block_id);
+            }
+            layer_cache_buffers.push_back(region_buf);
+        }
+    } else if (!config_.layer_region_to_group_id.empty()
+               && static_cast<size_t>(layer_id) < config_.layer_region_to_group_id.size()) {
+        // Fallback: no gid hint, try all regions (original behavior)
         const auto& regions = config_.layer_region_to_group_id[layer_id];
         for (size_t r = 0; r < regions.size(); ++r) {
             if (regions[r] >= 0) {
-                auto region_name = static_cast<KVCacheRegionName>(r);
-                auto buf = LayerCacheBufferUtil::convertLayerRegion(*resource, 0, layer_id, region_name, 0, -1);
+                auto rn = static_cast<KVCacheRegionName>(r);
+                auto buf = LayerCacheBufferUtil::convertLayerRegion(*resource, 0, layer_id, rn, 0, -1);
                 if (buf) {
                     layer_cache_buffers.push_back(buf);
                 }
@@ -83,14 +101,18 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                           layer
         }
         return false;
     }
-    layer_cache_buffer->setKVCacheResource(resource);
-    collector->total_block_count = layer_cache_buffer->blockIdMap().size();
+    size_t total_block_count = 0;
+    for (auto& buf : layer_cache_buffers) {
+        buf->setKVCacheResource(resource);
+        total_block_count += buf->blockIdMap().size();
+    }
+    collector->total_block_count = total_block_count;
 
     int64_t deadline_ms = currentTimeMs() + store_wait_timeout_ms_;
     for (size_t i = 0; i < layer_cache_buffers.size(); ++i) {
         store_wait_context_checker_->addContext(StoreWaitContext(
             request_id,
-            (i == 0) ? std::move(event) : std::optional<c10::Event>(std::nullopt),
+            (i == 0) ? std::move(event) : std::shared_ptr<torch::Event>(nullptr),
             layer_cache_buffers[i],
             deadline_ms,
             collector));
@@ -157,6 +179,8 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
         }
 
         auto [total_layer_num, ready_layer_buffers] = computed_buffer->getBuffers(need_layer_ids);
+        if (sent_count == 0 && !ready_layer_buffers.empty()) {
+        }
         for (const auto& layer_cache_buffer : ready_layer_buffers) {
             int vid = layer_cache_buffer->virtualLayerId();
             if (sent_layer_ids.count(vid)) {
@@ -190,6 +214,9 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
 
         std::string partition_layer_key =
             P2PKeyUtil::makePartitionLayerKey(unique_key, layer_id, layer_cache_buffer->getRegionName(), partition_ctx.remote_partition_id);
+
+        if (layer_id <= 1) {
+        }
 
         transfer::SendRequest send_req;
         send_req.ip          = partition_ctx.decode_ip;

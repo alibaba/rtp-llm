@@ -31,7 +31,9 @@ public:
     bool writeByLayer(int                           layer_id,
                       const KVCacheResourcePtr&     resource,
                       int64_t                       request_id,
-                      std::shared_ptr<torch::Event> event);
+                      std::shared_ptr<torch::Event> event,
+                      KVCacheRegionName             region_name = KVCacheRegionName::DEFAULT,
+                      int                           gid = -1);
 
     ErrorInfo sendKVCache(int64_t                                              request_id,
                           const std::string&                                   unique_key,

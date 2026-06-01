@@ -484,6 +484,10 @@ message LayerCacheBlockPB {
     uint32 layer_id = 1;
     repeated int64 cache_keys = 2;
     repeated uint32 block_ids = 3;
+    // KVCacheRegionName of this layer buffer. Needed so the decode receiver can
+    // rebuild per-region recv keys that match the prefill sender (Attention
+    // Region support). Defaults to 0 (DEFAULT) for the non-region path.
+    uint32 region = 4;
 }
 
 enum P2PConnectorBroadcastType {

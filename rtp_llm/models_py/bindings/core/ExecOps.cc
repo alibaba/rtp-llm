@@ -150,29 +150,22 @@ class WriteCacheLayerContext: public KVCacheConnectorLayerContext {
 public:
     WriteCacheLayerContext(std::shared_ptr<KVCacheResource> resource,
                            int64_t                          request_id,
-                           std::shared_ptr<torch::Event>    attention_event):
-        resource_(std::move(resource)), request_id_(request_id), attention_event_(std::move(attention_event)) {}
+                           std::shared_ptr<torch::Event>    attention_event,
+                           int                              gid = -1):
+        resource_(std::move(resource)), request_id_(request_id),
+        attention_event_(std::move(attention_event)), gid_(gid) {}
 
-    const KVCacheResource& kvCacheResource() const override {
-        return *resource_;
-    }
-
-    KVCacheResourcePtr heldKVCacheResource() const override {
-        return resource_;
-    }
-
-    int64_t requestId() const override {
-        return request_id_;
-    }
-
-    std::shared_ptr<torch::Event> attentionEvent() const override {
-        return attention_event_;
-    }
+    const KVCacheResource& kvCacheResource() const override { return *resource_; }
+    KVCacheResourcePtr heldKVCacheResource() const override { return resource_; }
+    int64_t requestId() const override { return request_id_; }
+    std::shared_ptr<torch::Event> attentionEvent() const override { return attention_event_; }
+    int groupId() const override { return gid_; }
 
 private:
     std::shared_ptr<KVCacheResource> resource_;
     int64_t                          request_id_;
     std::shared_ptr<torch::Event>    attention_event_;
+    int                              gid_;
 };
 
 std::shared_ptr<torch::Event> makeConnectorEvent(const std::shared_ptr<torch::Event>& event) {
@@ -325,7 +318,8 @@ void writeCacheToConnector(const CacheStoreInputs& param, IKVCacheConnectorCoord
 
         auto event = param.pre_created_event ? param.pre_created_event : runtimeCreateEvent();
         auto layer_context =
-            std::make_shared<WriteCacheLayerContext>(held_resource, request_id, makeConnectorEvent(event));
+            std::make_shared<WriteCacheLayerContext>(held_resource, request_id, makeConnectorEvent(event),
+                                                     static_cast<int>(param.region_name));
         connector_coordinator->asyncWriteByLayer(global_layer_id, layer_context);
     }
 }

@@ -122,7 +122,8 @@ P2PConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConne
                             layer_context->requestId());
         return nullptr;
     }
-    worker_->writeByLayer(layer_id, resource, layer_context->requestId(), layer_context->attentionEvent());
+    worker_->writeByLayer(layer_id, resource, layer_context->requestId(), layer_context->attentionEvent(),
+                          KVCacheRegionName::DEFAULT, layer_context->groupId());
     return std::make_shared<P2PConnectorAsyncWriteByLayerContext>(resource);
 }
 
@@ -299,7 +300,8 @@ bool P2PConnector::executeRead(int64_t                                 request_i
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
     for (const auto& layer_block_pb : p2p_request.layer_blocks()) {
         auto layer_id           = layer_block_pb.layer_id();
-        auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id);
+        auto region_name        = static_cast<KVCacheRegionName>(layer_block_pb.region());
+        auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, region_name);
         auto cache_keys         = layer_block_pb.cache_keys();
         auto block_ids          = layer_block_pb.block_ids();
         for (size_t i = 0; i < cache_keys.size(); i++) {
