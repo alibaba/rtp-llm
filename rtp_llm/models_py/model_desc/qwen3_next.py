@@ -1222,9 +1222,6 @@ class Qwen35Model(Qwen3NextModel):
         )
         self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
 
-    def need_combo_position_ids(self) -> bool:
-        return True
-
     def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
         input_ids: torch.Tensor = inputs.input_ids
 

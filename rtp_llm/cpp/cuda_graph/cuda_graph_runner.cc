@@ -157,15 +157,12 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
                       py_model_inputs_.attention_inputs.decode_cu_seqlens_d,
                       (state.current_batch_size + 1) * sizeof(int));
 
-        if (need_combo_position_ids_ && inputs.combo_position_ids.defined() && inputs.combo_position_ids.numel() > 0
+        if (inputs.combo_position_ids.defined() && inputs.combo_position_ids.numel() > 0
             && inputs.combo_position_ids.has_storage()) {
             if (!py_model_inputs_.combo_position_ids.defined()) {
                 RTP_LLM_LOG_WARNING("combo_position_ids not defined in graph but present in input, skipping copy");
             } else {
-                size_t needed_size =
-                    state.current_batch_size * num_tokens_per_bs_ * position_id_len_factor_ * sizeof(int);
-                size_t source_size = inputs.combo_position_ids.numel() * sizeof(int);
-                size_t copy_size   = std::min(needed_size, source_size);
+                size_t copy_size = inputs.combo_position_ids.numel() * sizeof(int);
                 if (py_model_inputs_.combo_position_ids.numel() * sizeof(int) >= copy_size) {
                     optimizedCopyAsync(inputs.combo_position_ids, py_model_inputs_.combo_position_ids, copy_size);
                 } else {
@@ -455,7 +452,11 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     const int64_t max_kv_blocks =
         static_cast<int64_t>(((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_) + sp_steps_);
 
-    if (need_combo_position_ids_) {
+    // Allocate combo_position_ids capture buffer only when the model actually uses
+    // combo position ids (Mrope etc.). The factor is sourced from the C++ rope_config
+    // by PyWrappedModel — 0 means "no combo_position_ids" and the buffer stays unset
+    // (non-Mrope models pay zero memory and the captured graph never references it).
+    if (position_id_len_factor_ > 0) {
         inputs.combo_position_ids =
             torch::ones({int(max_bs_) * num_tokens_per_bs_ * position_id_len_factor_}, options_cpu_int32_);
         inputs.combo_position_ids                  = inputs.combo_position_ids.pin_memory();
@@ -554,17 +555,6 @@ void CudaGraphRunner::setTokenTypeEmbedding(torch::Tensor token_type_embedding) 
 
 void CudaGraphRunner::setInputEmbeddingScalar(float input_embedding_scalar) {
     input_embedding_scalar_ = input_embedding_scalar;
-}
-
-void CudaGraphRunner::setPositionIdLenFactor(int position_id_len_factor) {
-    position_id_len_factor_ = position_id_len_factor;
-    RTP_LLM_LOG_INFO("Set position_id_len_factor_ to %d (negative means no combo_position_ids)",
-                     position_id_len_factor_);
-}
-
-void CudaGraphRunner::setNeedComboPositionIds(bool need_combo_position_ids) {
-    need_combo_position_ids_ = need_combo_position_ids;
-    RTP_LLM_LOG_INFO("Set need_combo_position_ids_ to %d", need_combo_position_ids_);
 }
 
 void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token) {
@@ -763,7 +753,9 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     }
     inputs.attention_inputs.sequence_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, batch_size);
-    if (need_combo_position_ids_ && capture_mem_hold_.py_model_inputs_.combo_position_ids.defined()) {
+    if (capture_mem_hold_.py_model_inputs_.combo_position_ids.defined()) {
+        // Buffer was allocated as max_bs_ * num_tokens_per_bs_ * position_id_len_factor_;
+        // slice proportionally with current batch_size using the same factor.
         inputs.combo_position_ids = capture_mem_hold_.py_model_inputs_.combo_position_ids.slice(
             0, 0, batch_size * num_tokens_per_bs_ * position_id_len_factor_);
         inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
