@@ -140,9 +140,9 @@ protected:
         kv_res->cache_keys = keys;
     }
 
-    // Generate URIs matching genDsv4FullSwaLocations (F0..F2 for all, L3..L6 at other_pos_vec).
+    // Generate URIs matching genDsv4FullSwaLocations (F0..F2 for all, L3..L6 at linear_pos_vec).
     UriStrVec genDsv4Uris(const CacheKeysType&       cache_keys,
-                          const std::vector<size_t>& other_pos_vec = {},
+                          const std::vector<size_t>& linear_pos_vec = {},
                           const std::string&         uri_prefix    = "") {
         UriStrVec res;
         size_t    pos_idx = 0;
@@ -154,11 +154,11 @@ protected:
                                   + std::to_string(cache_keys[i]));
                 }
             }
-            if (!other_pos_vec.empty() && pos_idx < other_pos_vec.size() && i == other_pos_vec[pos_idx]) {
+            if (!linear_pos_vec.empty() && pos_idx < linear_pos_vec.size() && i == linear_pos_vec[pos_idx]) {
                 for (int g = kDsv4FullPoolNum; g < kDsv4PoolNum; g++) {
-                    std::string other_group_name = "L" + std::to_string(g);
+                    std::string linear_group_name = "L" + std::to_string(g);
                     for (int r = 0; r < tp_size_; r++) {
-                        res.push_back(uri_prefix + "uri_" + other_group_name + "_" + std::to_string(r) + "_"
+                        res.push_back(uri_prefix + "uri_" + linear_group_name + "_" + std::to_string(r) + "_"
                                       + std::to_string(cache_keys[i]));
                     }
                 }
@@ -169,7 +169,7 @@ protected:
     }
 
     kv_cache_manager::Locations genDsv4FullSwaLocations(const CacheKeysType&       cache_keys,
-                                                        const std::vector<size_t>& other_pos_vec = {},
+                                                        const std::vector<size_t>& linear_pos_vec = {},
                                                         const std::string&         uri_prefix    = "") {
         kv_cache_manager::Locations locations;
         locations.resize(cache_keys.size(), {});
@@ -184,14 +184,14 @@ protected:
                 }
             }
         }
-        for (auto pos : other_pos_vec) {
+        for (auto pos : linear_pos_vec) {
             for (int g = kDsv4FullPoolNum; g < kDsv4PoolNum; g++) {
-                std::string other_group_name = "L" + std::to_string(g);
+                std::string linear_group_name = "L" + std::to_string(g);
                 for (int r = 0; r < tp_size_; r++) {
-                    std::string uri = uri_prefix + "uri_" + other_group_name + "_" + std::to_string(r) + "_"
+                    std::string uri = uri_prefix + "uri_" + linear_group_name + "_" + std::to_string(r) + "_"
                                       + std::to_string(cache_keys[pos]);
                     locations[pos].push_back(
-                        kv_cache_manager::LocationSpecUnit({genLocationSpecName(r, other_group_name), uri}));
+                        kv_cache_manager::LocationSpecUnit({genLocationSpecName(r, linear_group_name), uri}));
                 }
             }
         }
@@ -500,11 +500,11 @@ TEST_F(RemoteConnectorMockDsv4Test, dsv4_read_partial_linear_at_last_block_fails
     Locations expected_locations = genDsv4FullSwaLocations({101, 102, 103}, {0, 1});
     // Append partial linear specs (L3, L4 only) to position 2 (key=103)
     for (int g = kDsv4FullPoolNum; g < kDsv4FullPoolNum + 2; g++) {
-        std::string other_group_name = "L" + std::to_string(g);
+        std::string linear_group_name = "L" + std::to_string(g);
         for (int r = 0; r < tp_size_; r++) {
-            std::string uri = "uri_" + other_group_name + "_" + std::to_string(r) + "_103";
+            std::string uri = "uri_" + linear_group_name + "_" + std::to_string(r) + "_103";
             expected_locations[2].push_back(
-                kv_cache_manager::LocationSpecUnit({genLocationSpecName(r, other_group_name), uri}));
+                kv_cache_manager::LocationSpecUnit({genLocationSpecName(r, linear_group_name), uri}));
         }
     }
     // Now location[2].size() = 3 (full) + 2 (partial linear) = 5, which is neither 3 nor 7
@@ -520,7 +520,7 @@ TEST_F(RemoteConnectorMockDsv4Test, dsv4_read_partial_linear_at_last_block_fails
                               _))
         .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, expected_locations})));
 
-    // filterNeedLoadLocations sees location[2].size()=5, doesn't match full(3) or full_other(7) → return false
+    // filterNeedLoadLocations sees location[2].size()=5, doesn't match full(3) or full_linear(7) → return false
     EXPECT_CALL(*transfer_client_, LoadKvCaches(_, _, _)).Times(0);
 
     auto match_ctx = remote_connectors_[tp_rank]->asyncMatch(kv_res, meta);
@@ -541,29 +541,23 @@ TEST_F(RemoteConnectorMockDsv4Test, dsv4_read_partial_linear_at_last_block_fails
     ASSERT_EQ(RemoteConnectorState::State::RCS_ERROR, rctx->state());
 }
 
-// Regression for the linear_step refactor (commit 8a1652ab9) which dropped the
-// NULL_BLOCK_IDX guard from genReadRequest. With sparse SWA layout (linear_step > 1
-// or enable_reuse_cache=false), the local SWA group carries NULL_BLOCK_IDX at
-// non-step / non-active-tail positions; the remote SDK does not know this and may
-// hand back full_other Locations at those positions. FullLinearLayerGroupPolicy's
-// backward-iter only strips L* from non-latest full_other positions, so the LATEST
-// full_other (which becomes view[i] with all 7 specs) can still land on a NULL
-// local SWA block. Without the connector-side null filter, block_indices[L][i] = -1
-// is sent across the broadcast RPC and trips the MemoryLayoutStrategy block-id
-// range check on the receiving worker. The filter installed in genReadRequest must
-// drop those L* spec units before the request leaves rank 0.
+// With null checks inside each helper, CheckInvalidFullLinearLocationAndSetView
+// rejects a full_linear anchor whose L specs have NULL local blocks. The backward
+// iter then falls back to a lower key where L specs are valid and anchors there.
+//
+// Scenario: SDK returns full_linear at positions 0 and 1, full_only at position 2.
+// SWA valid only at position 0 → pos 1 anchor rejected → pos 0 becomes anchor.
 TEST_F(RemoteConnectorMockDsv4Test, dsv4_read_drops_l_specs_when_local_swa_is_null) {
     auto kv_res = std::make_shared<KVCacheResource>();
-    // SWA valid only at positions {2, 3} → tail invariant satisfied; positions 0 and 1
-    // carry NULL_BLOCK_IDX in every SWA group (gid 3..6).
-    fillDsv4GroupBlocks(kv_res, {101, 102, 103, 104}, std::optional<std::vector<size_t>>({2, 3}));
+    // SWA valid only at position 0; positions 1..3 carry NULL_BLOCK_IDX.
+    fillDsv4GroupBlocks(kv_res, {101, 102, 103, 104}, std::optional<std::vector<size_t>>(std::vector<size_t>{0}));
 
     const size_t tp_rank = 0;
-    // SDK pretends it has L data at key 102 (pos 1) — i.e. full_other at pos 1, full_only
-    // at pos 0 and pos 2. After backward iter, view[1] gets all 7 specs (the latest
-    // full_other from the end going backward); without the null filter L3..L6 at view[1]
-    // would carry block_id=-1 and crash the worker.
-    Locations expected_locations = genDsv4FullSwaLocations({101, 102, 103}, {1});
+    // SDK sees L data at pos 0 and pos 1.  Backward iter:
+    //   i=2: full-only → IsValidFullLocation, OK.
+    //   i=1: full_linear, SWA NULL → anchor rejected (view cleared, exist_linear stays false).
+    //   i=0: full_linear, SWA valid → anchor accepted (view[0] = all 7 specs).
+    Locations expected_locations = genDsv4FullSwaLocations({101, 102, 103}, {0, 1});
     auto      meta               = std::make_shared<Dsv4Meta>("ut_dsv4_read_swa_null");
 
     EXPECT_CALL(*meta_clients_[tp_rank],
@@ -581,10 +575,9 @@ TEST_F(RemoteConnectorMockDsv4Test, dsv4_read_drops_l_specs_when_local_swa_is_nu
     ASSERT_TRUE(match_ctx->success());
     ASSERT_EQ(match_ctx->matchedBlockCount(), 3u);
 
-    // Expect F-only transfer at pos 0 and pos 1 (L specs at pos 1 dropped by the null
-    // filter); pos 2 is full_only and not added to view by the FullLinear backward iter.
-    UriStrVec                expected_uris = genDsv4Uris({101, 102}, {});
-    std::vector<std::string> expect_block_ids({"1", "11", "21", "2", "12", "22"});
+    // Only pos 0 loaded (all 7 groups); pos 1 anchor rejected, pos 2 full-only not in view.
+    UriStrVec                expected_uris = genDsv4Uris({101}, {0});
+    std::vector<std::string> expect_block_ids({"1", "11", "21", "31", "41", "51", "61"});
     EXPECT_CALL(*transfer_client_, LoadKvCaches(Eq(expected_uris), _, TransferTraceInfoMatcher(expect_block_ids)))
         .WillOnce(Return(ClientErrorCode::ER_OK));
 
@@ -596,9 +589,7 @@ TEST_F(RemoteConnectorMockDsv4Test, dsv4_read_drops_l_specs_when_local_swa_is_nu
         remote_connectors_[tp_rank]->asyncRead(kv_res, meta, match_ctx, start_read_block_index, read_block_num);
     waitDsv4AsyncContextDone(std::static_pointer_cast<AsyncContext>(read_context));
     ASSERT_TRUE(read_context->success());
-    // 2 view entries (view[0], view[1]) were non-empty after filter — view[2] was full_only
-    // and not added (exist_linear_location was still false at i=2 going backwards).
-    ASSERT_EQ(kv_res->remoteReuseBlockNum(), 2);
+    ASSERT_EQ(kv_res->remoteReuseBlockNum(), 1);
 }
 
 // ==================== Write tests ====================
@@ -751,12 +742,12 @@ TEST_F(RemoteConnectorMockDsv4Test, dsv4_write_start_write_fail) {
 //
 // SWAKVCacheGroup (post 60004e2fa) keeps block_indices.size() == valid_keys_size with
 // NULL_BLOCK_IDX at non-step-hit positions. Each cache_key that has SWA blocks valid is
-// written as full_other (all 7 specs); each cache_key whose SWA slots are NULL is
+// written as full_linear (all 7 specs); each cache_key whose SWA slots are NULL is
 // written as full_only (just F0/F1/F2). The mocks below pin the exact spec-group-name
 // vector handed to StartWrite, the URI + block_id transfer order for SaveKvCaches, and
 // the FinishWrite block_mask. These exercise the path the prior tests missed because
 // fillDsv4GroupBlocks used to mark every position SWA-valid (which collapsed to the
-// is_all_full_other → clear() shortcut and matched Eq(vector<string>())).
+// is_all_full_linear → clear() shortcut and matched Eq(vector<string>())).
 // =====================================================================================
 
 TEST_F(RemoteConnectorMockDsv4Test, dsv4_write_sparse_swa_full_only_at_swa_null_positions) {
@@ -771,8 +762,8 @@ TEST_F(RemoteConnectorMockDsv4Test, dsv4_write_sparse_swa_full_only_at_swa_null_
     Locations     expected_write_locations = genDsv4FullSwaLocations({101, 102, 103, 104}, {1, 3});
     WriteLocation write_location({write_session_id, static_cast<size_t>(0), expected_write_locations});
 
-    // FullOtherGroupPolicy::getNeedWriteGroups emits per-key names; not cleared because
-    // is_all_full_other == false (positions 0 and 2 are full_only).
+    // FullLinearLayerGroupPolicy::getNeedWriteGroups emits per-key names; not cleared
+    // because is_all_full_linear == false (positions 0 and 2 are full_only).
     std::vector<std::string> expected_spec_group_names = {
         "F0F1F2", "F0F1F2L3L4L5L6", "F0F1F2", "F0F1F2L3L4L5L6"};
 
@@ -821,7 +812,7 @@ TEST_F(RemoteConnectorMockDsv4Test, dsv4_write_all_swa_null_writes_full_only_eve
     const size_t  tp_rank = 0;
     auto          meta    = std::make_shared<Dsv4Meta>("ut_dsv4_write_all_null");
     std::string   write_session_id("dsv4_write_session_all_null");
-    // Empty other_pos_vec → no L specs at any position.
+    // Empty linear_pos_vec → no L specs at any position.
     Locations     expected_write_locations = genDsv4FullSwaLocations({101, 102, 103}, {});
     WriteLocation write_location({write_session_id, static_cast<size_t>(0), expected_write_locations});
 
@@ -868,12 +859,12 @@ TEST_F(RemoteConnectorMockDsv4Test, dsv4_write_sparse_swa_at_active_tail_only) {
     Locations     expected_write_locations = genDsv4FullSwaLocations({101, 102, 103, 104}, {2, 3});
     WriteLocation write_location({write_session_id, static_cast<size_t>(0), expected_write_locations});
 
-    // Backward iter with write_interval=1, count starts at 1:
-    //   i=3: count=2 ≥1, SWA valid → full_other, reset.
-    //   i=2: count=1 ≥1, SWA valid → full_other, reset.
-    //   i=1: count=1 ≥1, SWA NULL → full_only.
-    //   i=0: count=1 ≥1, SWA NULL → full_only.
-    // is_all_full_other = false → vector kept.
+    // Per-key (forward) with the simplified write logic:
+    //   i=0: SWA NULL → full_only.
+    //   i=1: SWA NULL → full_only.
+    //   i=2: SWA valid → full_linear.
+    //   i=3: SWA valid → full_linear.
+    // is_all_full_linear = false → vector kept.
     std::vector<std::string> expected_spec_group_names = {
         "F0F1F2", "F0F1F2", "F0F1F2L3L4L5L6", "F0F1F2L3L4L5L6"};
 

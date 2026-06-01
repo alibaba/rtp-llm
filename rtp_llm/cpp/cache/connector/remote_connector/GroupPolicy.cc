@@ -29,44 +29,26 @@ bool GroupPolicy::addSpecInfo(const std::string& spec_name, int32_t group_id, in
     return true;
 }
 
-void GroupPolicy::filterNullBlockUnitsFromView(LocationsView&                          locations_view,
-                                               const std::shared_ptr<KVCacheResource>& resource) const {
+bool GroupPolicy::isUnitNullAtKey(const kv_cache_manager::LocationSpecUnit& unit,
+                                  size_t                                    key_idx,
+                                  const std::shared_ptr<KVCacheResource>&   resource) const {
     if (!resource) {
-        return;
+        return false;
     }
-    const auto& group_blocks = resource->groupBlocks();
-    for (size_t key_idx = 0; key_idx < locations_view.size(); ++key_idx) {
-        auto& view = locations_view[key_idx];
-        if (view.empty()) {
-            continue;
-        }
-        view.erase(std::remove_if(view.begin(),
-                                  view.end(),
-                                  [&](const LocationSpecUnitView& unit) {
-                                      const auto it = spec_name_to_info_.find(unit.spec_name);
-                                      if (it == spec_name_to_info_.end()) {
-                                          return false;
-                                      }
-                                      const int32_t gid = it->second.group_id;
-                                      if (gid < 0 || static_cast<size_t>(gid) >= group_blocks.size()) {
-                                          return false;
-                                      }
-                                      const auto& blocks = group_blocks.at(gid)->blocks();
-                                      if (key_idx >= blocks.size()) {
-                                          return false;
-                                      }
-                                      if (rtp_llm::isNullBlockIdx(blocks[key_idx])) {
-                                          RTP_LLM_LOG_DEBUG(
-                                              "filterNullBlockUnitsFromView drop spec_name [%s] group_id [%d] key_idx [%zu]",
-                                              std::string(unit.spec_name).c_str(),
-                                              gid,
-                                              key_idx);
-                                          return true;
-                                      }
-                                      return false;
-                                  }),
-                   view.end());
+    const auto it = spec_name_to_info_.find(unit.spec_name);
+    if (it == spec_name_to_info_.end()) {
+        return false;
     }
+    const int32_t gid          = it->second.group_id;
+    const auto&   group_blocks = resource->groupBlocks();
+    if (gid < 0 || static_cast<size_t>(gid) >= group_blocks.size()) {
+        return false;
+    }
+    const auto& blocks = group_blocks.at(gid)->blocks();
+    if (key_idx >= blocks.size()) {
+        return false;
+    }
+    return rtp_llm::isNullBlockIdx(blocks[key_idx]);
 }
 
 std::string GroupPolicy::debugString() const {
@@ -196,14 +178,20 @@ bool DefaultLayerGroupPolicy::init() {
     return true;
 }
 
-bool DefaultLayerGroupPolicy::filterNeedLoadLocations(const kv_cache_manager::Locations& locations,
-                                                      LocationsView&                     locations_view,
-                                                      kv_cache_manager::BlockMaskOffset  block_mask) const {
-    //  just copy
+bool DefaultLayerGroupPolicy::filterNeedLoadLocations(const kv_cache_manager::Locations&      locations,
+                                                      LocationsView&                          locations_view,
+                                                      const std::shared_ptr<KVCacheResource>& resource,
+                                                      kv_cache_manager::BlockMaskOffset       block_mask) const {
     locations_view.resize(locations.size(), {});
     for (size_t i = block_mask; i < locations.size(); i++) {
         locations_view[i].reserve(locations[i].size());
         for (const auto& unit : locations[i]) {
+            if (isUnitNullAtKey(unit, i, resource)) {
+                RTP_LLM_LOG_DEBUG("filterNeedLoadLocations drop null-block spec_name [%s] key_idx [%zu]",
+                                  unit.spec_name.c_str(),
+                                  i);
+                continue;
+            }
             locations_view[i].emplace_back(unit);
         }
     }
@@ -310,13 +298,13 @@ bool FullLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResou
     return true;
 }
 
-bool FullOtherGroupPolicy::init() {
+bool FullLinearLayerGroupPolicy::init() {
     if (full_group_ids_.empty()) {
-        RTP_LLM_LOG_ERROR("FullOtherLayerGroupPolicy: not support empty full groups");
+        RTP_LLM_LOG_ERROR("FullLinearLayerGroupPolicy: not support empty full groups");
         return false;
     }
     if (other_group_ids_.empty()) {
-        RTP_LLM_LOG_ERROR("FullOtherLayerGroupPolicy: not support empty other groups");
+        RTP_LLM_LOG_ERROR("FullLinearLayerGroupPolicy: not support empty linear groups");
         return false;
     }
     if (!DefaultLayerGroupPolicy::init()) {
@@ -329,25 +317,25 @@ bool FullOtherGroupPolicy::init() {
             return false;
         }
         valid_full_bithash_ |= it->second.group_name_bithash;
-        valid_full_other_bithash_ |= it->second.group_name_bithash;
+        valid_full_linear_bithash_ |= it->second.group_name_bithash;
     }
-    for (int other_id : other_group_ids_) {
-        const auto it = groups_.find(other_id);
+    for (int linear_id : other_group_ids_) {
+        const auto it = groups_.find(linear_id);
         if (it == groups_.end()) {
-            RTP_LLM_LOG_ERROR("not find other group id [%d]", other_id);
+            RTP_LLM_LOG_ERROR("not find linear group id [%d]", linear_id);
             return false;
         }
-        valid_full_other_bithash_ |= it->second.group_name_bithash;
+        valid_full_linear_bithash_ |= it->second.group_name_bithash;
     }
     if (groups_.size() < 2) {
-        RTP_LLM_LOG_ERROR("FullOtherLayerGroupPolicy: invalid group size [%lu]", groups_.size());
+        RTP_LLM_LOG_ERROR("FullLinearLayerGroupPolicy: invalid group size [%lu]", groups_.size());
         return false;
     }
     return true;
 }
 
-bool FullOtherGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
-                                              std::vector<std::string>&               location_spec_group_names) const {
+bool FullLinearLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
+                                                    std::vector<std::string>& location_spec_group_names) const {
     const auto& group_block_ids = resource->groupBlocks();
     if (group_block_ids.size() != groups_.size()) {
         RTP_LLM_LOG_WARNING("group size not equal, expect [%lu], real [%lu]", groups_.size(), group_block_ids.size());
@@ -360,10 +348,10 @@ bool FullOtherGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResou
         valid_keys_size--;
     }
     location_spec_group_names.resize(valid_keys_size, {});
-    bool   exist_full_other  = false;
-    size_t count             = write_interval_;
-    bool   is_all_full_other = true;
-    for (size_t key_idx = valid_keys_size; key_idx-- > 0;) {
+    bool is_all_full_linear = true;
+    // Per-key: full-only → "F*", full+linear → "F*L*". Partial linear is invalid.
+    // If every key has full+linear, drop the vector (default = write all).
+    for (size_t key_idx = 0; key_idx < valid_keys_size; key_idx++) {
         uint64_t groups_name_bithash = 0;
         for (const auto& [group_idx, group] : groups_) {
             const auto gpu_block_idx = group_block_ids.at(group_idx)->blocks().at(key_idx);
@@ -371,39 +359,23 @@ bool FullOtherGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResou
                 groups_name_bithash |= group.group_name_bithash;
             }
         }
-        if (groups_name_bithash != valid_full_bithash_ && groups_name_bithash != valid_full_other_bithash_) {
+        if (groups_name_bithash != valid_full_bithash_ && groups_name_bithash != valid_full_linear_bithash_) {
             RTP_LLM_LOG_WARNING("invalid groups_name_bithash [%lu]", groups_name_bithash);
             return false;
         }
-        if (write_interval_ > 0) {
-            count++;
-            bool need_full_other = (groups_name_bithash == valid_full_other_bithash_) && (count >= write_interval_);
-            if (need_full_other) {
-                groups_name_bithash = valid_full_other_bithash_;
-                count               = 0;
-            } else {
-                groups_name_bithash = valid_full_bithash_;
-                is_all_full_other   = false;
-            }
-            location_spec_group_names[key_idx] = location_spec_group_map_.at(groups_name_bithash);
-        } else {
-            if (!exist_full_other && groups_name_bithash == valid_full_other_bithash_) {
-                location_spec_group_names[key_idx] = location_spec_group_map_.at(valid_full_other_bithash_);
-                exist_full_other                   = true;
-            } else {
-                location_spec_group_names[key_idx] = location_spec_group_map_.at(valid_full_bithash_);
-                is_all_full_other                  = false;
-            }
+        location_spec_group_names[key_idx] = location_spec_group_map_.at(groups_name_bithash);
+        if (groups_name_bithash != valid_full_linear_bithash_) {
+            is_all_full_linear = false;
         }
     }
-    if (is_all_full_other) {
-        RTP_LLM_LOG_DEBUG("all full_other, not need spec group names");
+    if (is_all_full_linear) {
+        RTP_LLM_LOG_DEBUG("all full_linear, not need spec group names");
         location_spec_group_names.clear();
     }
     return true;
 }
 
-bool FullOtherGroupPolicy::addSpecInfo(const std::string& spec_name, int32_t group_id, int32_t tp_rank) {
+bool FullLinearLayerGroupPolicy::addSpecInfo(const std::string& spec_name, int32_t group_id, int32_t tp_rank) {
     if (!GroupPolicy::addSpecInfo(spec_name, group_id, tp_rank)) {
         return false;
     }
@@ -416,135 +388,199 @@ bool FullOtherGroupPolicy::addSpecInfo(const std::string& spec_name, int32_t gro
     if (group.is_full) {
         full_spec_name_bithash_[spec_name] = group.group_name_bithash;
     }
-    full_other_spec_name_bithash_[spec_name] = group.group_name_bithash;
+    full_linear_spec_name_bithash_[spec_name] = group.group_name_bithash;
     return true;
 }
 
-std::string FullOtherGroupPolicy::debugString() const {
+std::string FullLinearLayerGroupPolicy::debugString() const {
     size_t            gs = groups_.size();
     std::stringstream debug_ss;
     debug_ss << DefaultLayerGroupPolicy::debugString();
-    debug_ss << "write_interval : " << write_interval_ << '\n';
     debug_ss << "valid_full_bithash : " << getBitHashStr(valid_full_bithash_, gs) << '\n';
-    debug_ss << "valid_full_other_bithash : " << getBitHashStr(valid_full_other_bithash_, gs) << '\n';
+    debug_ss << "valid_full_linear_bithash : " << getBitHashStr(valid_full_linear_bithash_, gs) << '\n';
     debug_ss << "full_spec_name_bithash : ";
     for (const auto& entry : full_spec_name_bithash_) {
         debug_ss << '[' << entry.first << ":" << getBitHashStr(entry.second, gs) << ']';
     }
     debug_ss << '\n';
-    debug_ss << "full_other_spec_name_bithash : ";
-    for (const auto& entry : full_other_spec_name_bithash_) {
+    debug_ss << "full_linear_spec_name_bithash : ";
+    for (const auto& entry : full_linear_spec_name_bithash_) {
         debug_ss << '[' << entry.first << ":" << getBitHashStr(entry.second, gs) << ']';
     }
     debug_ss << '\n';
     return debug_ss.str();
 }
 
-bool FullOtherGroupPolicy::IsValidFullLocation(const kv_cache_manager::Location& location) const {
+bool FullLinearLayerGroupPolicy::IsValidFullLocation(const kv_cache_manager::Location&       location,
+                                                     size_t                                  key_idx,
+                                                     const std::shared_ptr<KVCacheResource>& resource,
+                                                     bool& exist_linear_location) const {
     uint64_t full_bithash = 0;
+    bool     any_dropped  = false;
     for (const auto& unit : location) {
         const auto iter = full_spec_name_bithash_.find(unit.spec_name);
         if (iter == full_spec_name_bithash_.end()) {
             RTP_LLM_LOG_WARNING("not find full spec name [%s]", unit.spec_name.c_str());
             return false;
         }
+        if (isUnitNullAtKey(unit, key_idx, resource)) {
+            RTP_LLM_LOG_DEBUG("IsValidFullLocation drop null-block spec_name [%s] key_idx [%zu]",
+                              unit.spec_name.c_str(),
+                              key_idx);
+            any_dropped           = true;
+            exist_linear_location = false;
+            continue;
+        }
         full_bithash |= iter->second;
     }
-    if (full_bithash != valid_full_bithash_) {
+    if (!any_dropped && full_bithash != valid_full_bithash_) {
         RTP_LLM_LOG_WARNING("invalid full bithash [%lu], expect [%lu]", full_bithash, valid_full_bithash_);
         return false;
     }
     return true;
 }
 
-#define CEHCK_AND_SET_LOCATIONS_VIEW(attention_name)                                                                   \
+// Macro shared by CheckInvalidFullLocationAndSetView and CheckInvalidFullLinearLocationAndSetView.
+// Iterates units, validates each unit's spec_name belongs to the expected bithash map, and
+// drops units whose local block at `key_idx` is NULL_BLOCK_IDX (setting `any_dropped` and
+// resetting `exist_linear_location`). After the loop, the macro skips the bithash equality
+// check if any unit was dropped (the partial bithash will naturally not match `valid_*`).
+#define CHECK_AND_SET_LOCATIONS_VIEW(attention_name)                                                                   \
     location_view.reserve(location.size());                                                                            \
     uint64_t attention_name##_bithash = 0;                                                                             \
+    bool     any_dropped              = false;                                                                         \
     for (const auto& unit : location) {                                                                                \
         const auto iter = attention_name##_spec_name_bithash_.find(unit.spec_name);                                    \
         if (iter == attention_name##_spec_name_bithash_.end()) {                                                       \
             RTP_LLM_LOG_WARNING("not find " #attention_name " spec name [%s]", unit.spec_name.c_str());                \
             return false;                                                                                              \
         }                                                                                                              \
+        if (isUnitNullAtKey(unit, key_idx, resource)) {                                                                \
+            RTP_LLM_LOG_DEBUG(#attention_name " drop null-block spec_name [%s] key_idx [%zu]",                         \
+                              unit.spec_name.c_str(),                                                                  \
+                              key_idx);                                                                                \
+            any_dropped           = true;                                                                              \
+            exist_linear_location = false;                                                                             \
+            continue;                                                                                                  \
+        }                                                                                                              \
         attention_name##_bithash |= iter->second;                                                                      \
         location_view.emplace_back(unit);                                                                              \
     }                                                                                                                  \
-    if (attention_name##_bithash != valid_##attention_name##_bithash_) {                                               \
+    if (!any_dropped && attention_name##_bithash != valid_##attention_name##_bithash_) {                               \
         RTP_LLM_LOG_WARNING("invalid " #attention_name " bithash [%lu], expect [%lu]",                                 \
                             attention_name##_bithash,                                                                  \
                             valid_##attention_name##_bithash_);                                                        \
         return false;                                                                                                  \
     }
 
-bool FullOtherGroupPolicy::CheckInvalidFullLocationAndSetView(const kv_cache_manager::Location& location,
-                                                              LocationView&                     location_view) const {
-    CEHCK_AND_SET_LOCATIONS_VIEW(full);
+bool FullLinearLayerGroupPolicy::CheckInvalidFullLocationAndSetView(
+    const kv_cache_manager::Location&       location,
+    size_t                                  key_idx,
+    const std::shared_ptr<KVCacheResource>& resource,
+    LocationView&                           location_view,
+    bool&                                   exist_linear_location) const {
+    CHECK_AND_SET_LOCATIONS_VIEW(full);
     return true;
 }
 
-bool FullOtherGroupPolicy::CheckInvalidFullOtherLocationAndSetView(const kv_cache_manager::Location& location,
-                                                                   LocationView& location_view) const {
-    CEHCK_AND_SET_LOCATIONS_VIEW(full_other);
+bool FullLinearLayerGroupPolicy::CheckInvalidFullLinearLocationAndSetView(
+    const kv_cache_manager::Location&       location,
+    size_t                                  key_idx,
+    const std::shared_ptr<KVCacheResource>& resource,
+    LocationView&                           location_view,
+    bool&                                   exist_linear_location) const {
+    CHECK_AND_SET_LOCATIONS_VIEW(full_linear);
+    if (any_dropped) {
+        // Any null drop disqualifies this position from being the full_linear anchor —
+        // clear the partial view so the position is not loaded at all, and let the
+        // backward iter keep searching for a clean anchor at a lower key index. This
+        // preserves the invariant that the last loaded location is a clean full_linear.
+        location_view.clear();
+        return true;
+    }
+    exist_linear_location = true;
     return true;
 }
 
-#undef CEHCK_AND_SET_LOCATIONS_VIEW
+#undef CHECK_AND_SET_LOCATIONS_VIEW
 
-bool FullOtherGroupPolicy::SkipOtherSpecAndSetView(const kv_cache_manager::Location& location,
-                                                   LocationView&                     location_view) const {
+bool FullLinearLayerGroupPolicy::SkipLinearSpecAndSetView(const kv_cache_manager::Location&       location,
+                                                          size_t                                  key_idx,
+                                                          const std::shared_ptr<KVCacheResource>& resource,
+                                                          LocationView&                           location_view,
+                                                          bool& exist_linear_location) const {
     location_view.reserve(full_spec_name_bithash_.size());
     uint64_t full_bithash = 0;
+    bool     any_dropped  = false;
     for (const auto& unit : location) {
         const auto iter = full_spec_name_bithash_.find(unit.spec_name);
         if (iter == full_spec_name_bithash_.end()) {
+            // Linear spec — dropped by design (this helper's purpose is to keep only full
+            // specs in the view for non-anchor positions).
             RTP_LLM_LOG_DEBUG("skip spec_name [%s]", unit.spec_name.c_str());
+            continue;
+        }
+        if (isUnitNullAtKey(unit, key_idx, resource)) {
+            RTP_LLM_LOG_DEBUG("SkipLinearSpecAndSetView drop null-block spec_name [%s] key_idx [%zu]",
+                              unit.spec_name.c_str(),
+                              key_idx);
+            any_dropped           = true;
+            exist_linear_location = false;
             continue;
         }
         full_bithash |= iter->second;
         location_view.emplace_back(unit);
     }
-    if (full_bithash != valid_full_bithash_) {
+    if (!any_dropped && full_bithash != valid_full_bithash_) {
         RTP_LLM_LOG_WARNING("invalid full bithash [%lu], expect [%lu]", full_bithash, valid_full_bithash_);
         return false;
     }
     return true;
 }
 
-bool FullLinearLayerGroupPolicy::filterNeedLoadLocations(const kv_cache_manager::Locations& locations,
-                                                         LocationsView&                     locations_view,
-                                                         kv_cache_manager::BlockMaskOffset  block_mask) const {
+bool FullLinearLayerGroupPolicy::filterNeedLoadLocations(const kv_cache_manager::Locations&      locations,
+                                                         LocationsView&                          locations_view,
+                                                         const std::shared_ptr<KVCacheResource>& resource,
+                                                         kv_cache_manager::BlockMaskOffset       block_mask) const {
     bool exist_linear_location = false;
     for (size_t i = locations.size(); i-- > block_mask;) {
         const auto& location = locations[i];
         if (location.size() == full_spec_name_bithash_.size()) {
             if (exist_linear_location) {
-                if (!CheckInvalidFullLocationAndSetView(location, locations_view[i])) {
+                if (!CheckInvalidFullLocationAndSetView(
+                        location, i, resource, locations_view[i], exist_linear_location)) {
                     return false;
                 }
             } else {
                 // only do check
-                if (!IsValidFullLocation(location)) {
+                if (!IsValidFullLocation(location, i, resource, exist_linear_location)) {
                     return false;
                 }
             }
-        } else if (location.size() == full_other_spec_name_bithash_.size()) {
+        } else if (location.size() == full_linear_spec_name_bithash_.size()) {
             if (!exist_linear_location) {
                 locations_view.resize(i + 1, {});
-                if (!CheckInvalidFullOtherLocationAndSetView(location, locations_view[i])) {
+                if (!CheckInvalidFullLinearLocationAndSetView(
+                        location, i, resource, locations_view[i], exist_linear_location)) {
                     return false;
                 }
-                exist_linear_location = true;
+                // exist_linear_location is set inside the helper: true if this position
+                // anchored cleanly; false if any unit was dropped (try a lower index).
             } else {
-                if (!SkipOtherSpecAndSetView(location, locations_view[i])) {
+                if (!SkipLinearSpecAndSetView(
+                        location, i, resource, locations_view[i], exist_linear_location)) {
                     return false;
                 }
             }
         } else {
             RTP_LLM_LOG_WARNING("invalid spec size, full [%lu], linear [%lu], real [%lu]",
                                 full_spec_name_bithash_.size(),
-                                full_other_spec_name_bithash_.size(),
+                                full_linear_spec_name_bithash_.size(),
                                 location.size());
             return false;
+        }
+        if (!exist_linear_location && !locations_view.empty()) {
+            locations_view.clear();
         }
     }
     return true;

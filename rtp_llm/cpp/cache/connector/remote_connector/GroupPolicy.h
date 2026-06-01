@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <vector>
 #include <set>
 #include <string>
@@ -47,9 +48,14 @@ public:
 
     virtual bool init() = 0;
 
-    virtual bool filterNeedLoadLocations(const kv_cache_manager::Locations& locations,
-                                         LocationsView&                     locations_view,
-                                         kv_cache_manager::BlockMaskOffset  block_mask = 0) const = 0;
+    // Build the filtered Locations view used for remote loads. When `resource` is non-null,
+    // spec units whose owning group has NULL_BLOCK_IDX at the corresponding cache_key index
+    // are dropped (required for DSV4 + linear_step where SWA / state ring-buffer groups
+    // carry NULL_BLOCK_IDX padding at non-step positions).
+    virtual bool filterNeedLoadLocations(const kv_cache_manager::Locations&      locations,
+                                         LocationsView&                          locations_view,
+                                         const std::shared_ptr<KVCacheResource>& resource   = nullptr,
+                                         kv_cache_manager::BlockMaskOffset       block_mask = 0) const = 0;
 
     virtual bool getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                     std::vector<std::string>&               location_spec_group_names) const = 0;
@@ -71,13 +77,13 @@ public:
     }
     virtual std::string debugString() const;
 
-    // Drop spec units whose owning group has NULL_BLOCK_IDX at the corresponding cache_key
-    // index. Required for DSV4 + linear_step where SWA / state ring-buffer groups carry
-    // NULL_BLOCK_IDX padding at non-step positions; without this filter -1 leaks into
-    // genReadRequest -> genBlockBuffers -> convertIndexToBuffer and trips the
-    // MemoryLayoutStrategy block-id range check on the receiving worker.
-    void filterNullBlockUnitsFromView(LocationsView&                          locations_view,
-                                      const std::shared_ptr<KVCacheResource>& resource) const;
+protected:
+    // Return true when `unit`'s owning group has NULL_BLOCK_IDX at cache_key index `key_idx`.
+    // Used by filterNeedLoadLocations subclasses to skip spec units that have no local block
+    // to load into. Returns false when `resource` is null (no local state to compare against).
+    bool isUnitNullAtKey(const kv_cache_manager::LocationSpecUnit& unit,
+                         size_t                                    key_idx,
+                         const std::shared_ptr<KVCacheResource>&   resource) const;
 
 protected:
     std::shared_ptr<KVCacheAllocator> allocator_;
@@ -101,9 +107,10 @@ public:
 
     virtual bool init() override;
 
-    virtual bool filterNeedLoadLocations(const kv_cache_manager::Locations& locations,
-                                         LocationsView&                     locations_view,
-                                         kv_cache_manager::BlockMaskOffset  block_mask = 0) const override;
+    virtual bool filterNeedLoadLocations(const kv_cache_manager::Locations&      locations,
+                                         LocationsView&                          locations_view,
+                                         const std::shared_ptr<KVCacheResource>& resource   = nullptr,
+                                         kv_cache_manager::BlockMaskOffset       block_mask = 0) const override;
 
     virtual bool getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                     std::vector<std::string>&               location_spec_group_names) const override;
@@ -136,11 +143,35 @@ public:
                             std::vector<std::string>&               location_spec_group_names) const override;
 };
 
-class FullOtherGroupPolicy: public DefaultLayerGroupPolicy {
+// Policy for hybrid full + linear (e.g. SWA / state ring-buffer) layouts. Each cache key
+// is either "full only" or "full + every linear group" (full_linear); partial linear is
+// an error. Writes are emitted unconditionally for whichever shape the upper layer
+// provides (was previously gated by write_interval_, which was always 1 in production).
+//
+// filterNeedLoadLocations walks the locations backward and treats the LAST full_linear
+// position as the anchor. The 4 per-position helpers (IsValidFullLocation /
+// CheckInvalidFullLocationAndSetView / CheckInvalidFullLinearLocationAndSetView /
+// SkipLinearSpecAndSetView) each drop spec units whose owning group has NULL_BLOCK_IDX
+// at this cache_key (sparse SWA / state ring-buffer locally), and reset
+// exist_linear_location on any such drop — this enforces the invariant that the last
+// loaded location must be a clean full_linear (no null drops). CheckInvalidFullLinear
+// additionally clears its view on drops so the position cannot serve as the anchor and
+// is not partially loaded.
+class FullLinearLayerGroupPolicy: public DefaultLayerGroupPolicy {
 public:
+    FullLinearLayerGroupPolicy(std::shared_ptr<KVCacheAllocator> allocator,
+                               const std::vector<int32_t>&       full_group_ids,
+                               const std::vector<int32_t>&       linear_group_ids):
+        DefaultLayerGroupPolicy(allocator, full_group_ids, linear_group_ids) {}
+
     bool init() override;
 
     bool addSpecInfo(const std::string& spec_name, int32_t group_id, int32_t tp_rank) override;
+
+    bool filterNeedLoadLocations(const kv_cache_manager::Locations&      locations,
+                                 LocationsView&                          locations_view,
+                                 const std::shared_ptr<KVCacheResource>& resource   = nullptr,
+                                 kv_cache_manager::BlockMaskOffset       block_mask = 0) const override;
 
     bool getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                             std::vector<std::string>&               location_spec_group_names) const override;
@@ -148,46 +179,35 @@ public:
     std::string debugString() const override;
 
 protected:
-    FullOtherGroupPolicy(std::shared_ptr<KVCacheAllocator> allocator,
-                         const std::vector<int32_t>&       full_group_ids,
-                         const std::vector<int32_t>&       other_group_ids,
-                         uint32_t                          write_interval):
-        DefaultLayerGroupPolicy(allocator, full_group_ids, other_group_ids), write_interval_(write_interval) {}
-    bool IsValidFullLocation(const kv_cache_manager::Location& location) const;
-    bool CheckInvalidFullLocationAndSetView(const kv_cache_manager::Location& location,
-                                            LocationView&                     location_view) const;
-    bool CheckInvalidFullOtherLocationAndSetView(const kv_cache_manager::Location& location,
-                                                 LocationView&                     location_view) const;
-    bool SkipOtherSpecAndSetView(const kv_cache_manager::Location& location, LocationView& location_view) const;
-
-protected:
-    uint64_t                        valid_full_bithash_       = 0;
-    uint64_t                        valid_full_other_bithash_ = 0;
-    std::map<std::string, uint64_t> full_spec_name_bithash_;
-    std::map<std::string, uint64_t> full_other_spec_name_bithash_;
-    /*
-        interval == 0 :         only write last key's other attention
-        interval == n (n > 0) : every n keys, write a other attention
-    */
-    uint32_t write_interval_ = 0;
-};
-
-class FullLinearLayerGroupPolicy: public FullOtherGroupPolicy {
-public:
-    FullLinearLayerGroupPolicy(std::shared_ptr<KVCacheAllocator> allocator,
-                               const std::vector<int32_t>&       full_group_ids,
-                               const std::vector<int32_t>&       other_group_ids,
-                               uint32_t                          linear_attention_write_interval):
-        FullOtherGroupPolicy(allocator, full_group_ids, other_group_ids, linear_attention_write_interval) {}
-
-    bool filterNeedLoadLocations(const kv_cache_manager::Locations& locations,
-                                 LocationsView&                     locations_view,
-                                 kv_cache_manager::BlockMaskOffset  block_mask = 0) const override;
-
-private:
     std::string GetOtherGroupPrefixName() const override {
         return "L";
     }
+
+    bool IsValidFullLocation(const kv_cache_manager::Location&       location,
+                             size_t                                  key_idx,
+                             const std::shared_ptr<KVCacheResource>& resource,
+                             bool&                                   exist_linear_location) const;
+    bool CheckInvalidFullLocationAndSetView(const kv_cache_manager::Location&       location,
+                                            size_t                                  key_idx,
+                                            const std::shared_ptr<KVCacheResource>& resource,
+                                            LocationView&                           location_view,
+                                            bool&                                   exist_linear_location) const;
+    bool CheckInvalidFullLinearLocationAndSetView(const kv_cache_manager::Location&       location,
+                                                  size_t                                  key_idx,
+                                                  const std::shared_ptr<KVCacheResource>& resource,
+                                                  LocationView&                           location_view,
+                                                  bool&                                   exist_linear_location) const;
+    bool SkipLinearSpecAndSetView(const kv_cache_manager::Location&       location,
+                                  size_t                                  key_idx,
+                                  const std::shared_ptr<KVCacheResource>& resource,
+                                  LocationView&                           location_view,
+                                  bool&                                   exist_linear_location) const;
+
+protected:
+    uint64_t                        valid_full_bithash_        = 0;
+    uint64_t                        valid_full_linear_bithash_ = 0;
+    std::map<std::string, uint64_t> full_spec_name_bithash_;
+    std::map<std::string, uint64_t> full_linear_spec_name_bithash_;
 };
 
 }  // namespace remote_connector

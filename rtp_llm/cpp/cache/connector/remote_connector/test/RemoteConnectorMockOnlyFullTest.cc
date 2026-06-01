@@ -129,7 +129,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
     auto      meta               = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t    tp_rank            = 0;
-    Locations expected_locations = genFullotherLocations({1, 2, 3});
+    Locations expected_locations = genFullLinearLocations({1, 2, 3});
     EXPECT_CALL(*meta_clients_[tp_rank],
                 MatchLocation(Eq("match_trace_1"),                    // trace_id
                               _,                                      // query_type
@@ -220,7 +220,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
     kv_cache_resouce->setDeviceReuseBlockNum(1);
     auto      meta               = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t    tp_rank            = 0;
-    Locations expected_locations = genFullotherLocations({2, 3});
+    Locations expected_locations = genFullLinearLocations({2, 3});
     EXPECT_CALL(*meta_clients_[tp_rank],
                 MatchLocation(Eq("match_trace_1"),                    // trace_id
                               _,                                      // query_type
@@ -310,7 +310,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_act
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_1");
-    Locations     expected_write_locations = genFullotherLocations({1, 2, 3});
+    Locations     expected_write_locations = genFullLinearLocations({1, 2, 3});
     WriteLocation write_location({write_session_id, static_cast<size_t>(0), expected_write_locations});
     EXPECT_CALL(*meta_clients_[tp_rank],
                 StartWrite(Eq("start_write_trace_1"),        // trace_id
@@ -332,7 +332,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_act
                              TransferTraceInfoMatcher(expect_block_ids)))
         .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
 
-    Locations expected_actual_locations = genFullotherLocations({1, 2, 3}, {}, "actual_");
+    Locations expected_actual_locations = genFullLinearLocations({1, 2, 3}, {}, "actual_");
     EXPECT_CALL(*meta_clients_[tp_rank],
                 FinishWrite(Eq("finish_write_trace_1"),             // trace_id
                             write_session_id,                       // write_session_id
@@ -356,7 +356,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_1");
-    Locations     expected_write_locations = genFullotherLocations({2, 3});
+    Locations     expected_write_locations = genFullLinearLocations({2, 3});
     WriteLocation write_location({write_session_id, static_cast<size_t>(1), expected_write_locations});
     EXPECT_CALL(*meta_clients_[tp_rank],
                 StartWrite(Eq("start_write_trace_1"),        // trace_id
@@ -378,7 +378,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
                              TransferTraceInfoMatcher(expect_block_ids)))
         .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
 
-    Locations expected_actual_locations = genFullotherLocations({2, 3}, {}, "actual_");
+    Locations expected_actual_locations = genFullLinearLocations({2, 3}, {}, "actual_");
     EXPECT_CALL(*meta_clients_[tp_rank],
                 FinishWrite(Eq("finish_write_trace_1"),             // trace_id
                             write_session_id,                       // write_session_id
@@ -402,7 +402,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_1");
-    Locations     expected_write_locations = genFullotherLocations({2, 4});
+    Locations     expected_write_locations = genFullLinearLocations({2, 4});
     WriteLocation write_location(
         {write_session_id, std::vector<bool>({true, false, true, false}), expected_write_locations});
     EXPECT_CALL(*meta_clients_[tp_rank],
@@ -425,7 +425,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
                              TransferTraceInfoMatcher(expect_block_ids)))
         .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
 
-    Locations expected_actual_locations = genFullotherLocations({2, 4}, {}, "actual_");
+    Locations expected_actual_locations = genFullLinearLocations({2, 4}, {}, "actual_");
     EXPECT_CALL(*meta_clients_[tp_rank],
                 FinishWrite(Eq("finish_write_trace_1"),             // trace_id
                             write_session_id,                       // write_session_id
@@ -449,7 +449,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_1");
-    Locations     expected_write_locations = genFullotherLocations({}, {});
+    Locations     expected_write_locations = genFullLinearLocations({}, {});
     WriteLocation write_location({write_session_id, static_cast<size_t>(3), expected_write_locations});
     EXPECT_CALL(*meta_clients_[tp_rank],
                 StartWrite(Eq("start_write_trace_1"),        // trace_id
@@ -476,7 +476,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_act
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_2");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_2");
-    Locations     expected_locations = genFullotherLocations({1, 2, 3});
+    Locations     expected_locations = genFullLinearLocations({1, 2, 3});
     WriteLocation write_location({write_session_id, static_cast<size_t>(0), expected_locations});
     EXPECT_CALL(*meta_clients_[tp_rank],
                 StartWrite(Eq("start_write_trace_2"),        // trace_id
