@@ -2947,6 +2947,12 @@ class AttentionFP8(nn.Module):
                     gather_lens=wm.swa_cache_gather_lens,
                     offset=wm.N,
                 )
+                self._merge_cp_sliced_swa_prefix(
+                    workspace,
+                    offset=wm.N,
+                    width=int(wm.swa_cache_slot_mapping.shape[1]),
+                    common=common,
+                )
 
         # BF16 overlay of freshly computed new K — single ``index_copy_``
         # using the meta-precomputed ``new_k_slot_in_flat``. Avoids the FP8
@@ -3248,6 +3254,30 @@ class AttentionFP8(nn.Module):
         factor = torch.sigmoid(lse.float() - sink)
         factor = torch.where(torch.isfinite(lse), factor, torch.zeros_like(factor))
         return (out.float() * factor.unsqueeze(-1)).to(out.dtype)
+
+    @staticmethod
+    def _merge_cp_sliced_swa_prefix(
+        workspace: torch.Tensor,
+        *,
+        offset: int,
+        width: int,
+        common: PrefillMeta,
+    ) -> None:
+        cp_ctx = common.cp_ctx
+        if (
+            width <= 0
+            or not common.cp_on
+            or cp_ctx is None
+            or cp_ctx.cp_size <= 1
+            or not bool(getattr(cp_ctx, "kv_cache_sharded", False))
+        ):
+            return
+
+        from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+
+        prefix = workspace[:, offset : offset + width, :].contiguous()
+        all_reduce(prefix, Group.TP)
+        workspace[:, offset : offset + width, :].copy_(prefix)
 
     def _attn_via_workspace_cp_raw_q_merge(
         self,
@@ -5116,6 +5146,12 @@ class AttentionFP8(nn.Module):
                     slot_mapping=meta.cache_slot_mapping,
                     gather_lens=meta.cache_gather_lens,
                     offset=0,
+                )
+                self._merge_cp_sliced_swa_prefix(
+                    workspace,
+                    offset=0,
+                    width=int(meta.cache_slot_mapping.shape[1]),
+                    common=common,
                 )
 
         # 2. New K BF16 overlay.

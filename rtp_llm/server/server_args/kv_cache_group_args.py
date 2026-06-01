@@ -143,38 +143,6 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="内存 Cache 拷贝是否启用 split-KV SM scatter/gather（CUDA 上满足布局条件时）。默认 False；True 时满足条件可走 SM copy。",
     )
     kv_cache_group.add_argument(
-        "--enable_prefix_tree_memory_cache",
-        env_name="ENABLE_PREFIX_TREE_MEMORY_CACHE",
-        bind_to=(kv_cache_config, "enable_prefix_tree_memory_cache"),
-        type=str2bool,
-        default=True,
-        help="Memory cache 是否启用新的 prefix-tree connector。非 DSV4 typed layout 会回退旧 connector 行为。",
-    )
-    kv_cache_group.add_argument(
-        "--enable_legacy_memory_connector_fallback",
-        env_name="ENABLE_LEGACY_MEMORY_CONNECTOR_FALLBACK",
-        bind_to=(kv_cache_config, "enable_legacy_memory_connector_fallback"),
-        type=str2bool,
-        default=True,
-        help="新 memory connector 初始化不适用时是否允许回退旧 memory connector。",
-    )
-    kv_cache_group.add_argument(
-        "--prefix_tree_memory_state_swa_pool_ratio",
-        env_name="PREFIX_TREE_MEMORY_STATE_SWA_POOL_RATIO",
-        bind_to=(kv_cache_config, "prefix_tree_memory_state_swa_pool_ratio"),
-        type=int,
-        default=0,
-        help="新 prefix-tree memory cache 中 state/SWA pool 占总 memory cache 字节数的百分比。0 表示沿用按 key 等容量切分。",
-    )
-    kv_cache_group.add_argument(
-        "--enable_dsv4_state_block_independent_eviction",
-        env_name="ENABLE_DSV4_STATE_BLOCK_INDEPENDENT_EVICTION",
-        bind_to=(kv_cache_config, "enable_dsv4_state_block_independent_eviction"),
-        type=str2bool,
-        default=False,
-        help="DSV4 新 tree memory reuse 下启用 state/SWA block 独立淘汰。默认关闭。",
-    )
-    kv_cache_group.add_argument(
         "--memory_cache_size_mb",
         env_name="MEMORY_CACHE_SIZE_MB",
         bind_to=(kv_cache_config, "memory_cache_size_mb"),
@@ -406,14 +374,6 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=str2bool,
         default=False,
         help="分层 cache 开关。开启后，stream 释放时只全量写 remote，再按 GPU 空闲 block 阈值将冷 block 淘汰到 memory。",
-    )
-    kv_cache_group.add_argument(
-        "--enable_gpu_prefix_tree",
-        env_name="ENABLE_GPU_PREFIX_TREE",
-        bind_to=(kv_cache_config, "enable_gpu_prefix_tree"),
-        type=str2bool,
-        default=True,
-        help="GPU device cache 是否启用 prefix tree 标记和 leaf-LRU eviction；关闭时回退旧 flat LRU。",
     )
     kv_cache_group.add_argument(
         "--device_cache_min_free_blocks",

@@ -82,38 +82,6 @@ TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
     ASSERT_EQ(resource.kernelBlocks(1), (BlockIndicesType{1}));
 }
 
-TEST(KVCacheResourceTest, CacheKeysMaintainLinearDependencies) {
-    KVCacheResource resource;
-    resource.setCacheKeys(CacheKeysType{10, 20, 30});
-
-    ASSERT_EQ(resource.blockDependencies().size(), 3u);
-    EXPECT_FALSE(resource.blockDependencies()[0].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[0].ordinal, 0u);
-    EXPECT_TRUE(resource.blockDependencies()[1].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[1].parent_key, 10);
-    EXPECT_EQ(resource.blockDependencies()[1].ordinal, 1u);
-    EXPECT_TRUE(resource.blockDependencies()[2].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[2].parent_key, 20);
-    EXPECT_EQ(resource.blockDependencies()[2].ordinal, 2u);
-
-    BlockDependenciesType custom = {
-        BlockDependency{false, 0, 7},
-        BlockDependency{true, 100, 8},
-    };
-    resource.setCacheKeys(CacheKeysType{100, 200});
-    resource.setBlockDependencies(custom);
-    resource.ensureLinearBlockDependencies();
-    ASSERT_EQ(resource.blockDependencies().size(), 2u);
-    EXPECT_EQ(resource.blockDependencies()[0].ordinal, 7u);
-    EXPECT_EQ(resource.blockDependencies()[1].parent_key, 100);
-
-    resource.cacheKeys().push_back(300);
-    resource.ensureLinearBlockDependencies();
-    ASSERT_EQ(resource.blockDependencies().size(), 3u);
-    EXPECT_EQ(resource.blockDependencies()[2].parent_key, 200);
-    EXPECT_EQ(resource.blockDependencies()[2].ordinal, 2u);
-}
-
 TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {
     CacheConfig config;
     config.seq_size_per_block        = 1;

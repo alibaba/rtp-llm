@@ -267,7 +267,7 @@ TEST(HybridPoolConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGrou
     EXPECT_EQ(swa_pool.memory_layouts[0].kernel_blocks_per_kv_block, 1u);
 }
 
-TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlocks) {
+TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesOnlySwaPhysicalBlocks) {
     ParallelismConfig pc;
     pc.role_type                          = RoleType::PREFILL;
     pc.tp_size                            = 4;
@@ -283,9 +283,9 @@ TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlock
     EXPECT_EQ(config.cache_specs[0]->block_size_bytes(), 19008u);
     EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), 1152u);
     EXPECT_EQ(config.cache_specs[2]->block_size_bytes(), 32u * 132u);
-    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 2u * 512u * 4u);
-    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 2u * 2048u * 4u);
-    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 32u * 1024u * 4u);
+    EXPECT_EQ(config.cache_specs[3]->block_size_bytes(), 8u * 512u * 4u);
+    EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 8u * 2048u * 4u);
+    EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 128u * 1024u * 4u);
 
     EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), 32u * 584u);  // contiguous natural CP slice
     EXPECT_EQ(config.group_kv_block_stride_bytes[3], config.cache_specs[3]->block_size_bytes());
@@ -906,15 +906,14 @@ TEST(HybridPoolConfigCreatorTest, PrefillCp8MtpGenNum2PadsStateRingBeforeSlicing
     ASSERT_NE(swa_kv, nullptr);
 
     // gen_num_per_cycle=2 gives raw INDEXER/CSA R=10, HCA R=130, SWA R=130.
-    // CP sharding pads the full ring to a cp_size multiple before taking the
-    // per-rank physical slice: 10 -> 16 -> 2, 130 -> 136 -> 17 (HCA and SWA).
-    EXPECT_EQ(indexer_state->entries_per_block, 2u);
-    EXPECT_EQ(csa_state->entries_per_block, 2u);
-    EXPECT_EQ(hca_state->entries_per_block, 17u);
+    // Only SWA_KV is CP-sliced. State rings keep their full local layout.
+    EXPECT_EQ(indexer_state->entries_per_block, 10u);
+    EXPECT_EQ(csa_state->entries_per_block, 10u);
+    EXPECT_EQ(hca_state->entries_per_block, 130u);
     EXPECT_EQ(swa_kv->entries_per_block, 17u);
 }
 
-TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2MatchesPrefillSliceTimesCpSize) {
+TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2ExpandsOnlySwaSlice) {
     constexpr uint32_t cp_size = 8;
     auto               mc      = makeFlashModelConfig();
 
@@ -944,7 +943,10 @@ TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2MatchesPrefillSliceT
         ASSERT_NE(prefill_spec, nullptr) << "gid=" << gid;
         ASSERT_NE(decode_spec, nullptr) << "gid=" << gid;
         EXPECT_EQ(decode_spec->cache_type, prefill_spec->cache_type) << "gid=" << gid;
-        EXPECT_EQ(decode_spec->entries_per_block, prefill_spec->entries_per_block * cp_size)
+        const auto expected_entries =
+            decode_spec->cache_type == KVCacheRegionName::SWA_KV ? prefill_spec->entries_per_block * cp_size :
+                                                                   prefill_spec->entries_per_block;
+        EXPECT_EQ(decode_spec->entries_per_block, expected_entries)
             << "gid=" << gid << " region=" << static_cast<int>(decode_spec->cache_type);
     }
 
@@ -957,9 +959,9 @@ TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2MatchesPrefillSliceT
     ASSERT_NE(hca_state, nullptr);
     ASSERT_NE(swa_kv, nullptr);
 
-    EXPECT_EQ(indexer_state->entries_per_block, 16u);
-    EXPECT_EQ(csa_state->entries_per_block, 16u);
-    EXPECT_EQ(hca_state->entries_per_block, 136u);
+    EXPECT_EQ(indexer_state->entries_per_block, 10u);
+    EXPECT_EQ(csa_state->entries_per_block, 10u);
+    EXPECT_EQ(hca_state->entries_per_block, 130u);
     EXPECT_EQ(swa_kv->entries_per_block, 136u);
 }
 
@@ -989,7 +991,10 @@ TEST(HybridPoolConfigCreatorTest, DecodeExplicitPrefillCpSizeHandlesDp16) {
         auto* decode_spec  = dynamic_cast<DSV4StateSpec*>(decode_config.cache_specs[gid].get());
         ASSERT_NE(prefill_spec, nullptr) << "gid=" << gid;
         ASSERT_NE(decode_spec, nullptr) << "gid=" << gid;
-        EXPECT_EQ(decode_spec->entries_per_block, prefill_spec->entries_per_block * cp_size)
+        const auto expected_entries =
+            decode_spec->cache_type == KVCacheRegionName::SWA_KV ? prefill_spec->entries_per_block * cp_size :
+                                                                   prefill_spec->entries_per_block;
+        EXPECT_EQ(decode_spec->entries_per_block, expected_entries)
             << "gid=" << gid << " region=" << static_cast<int>(decode_spec->cache_type);
     }
 }

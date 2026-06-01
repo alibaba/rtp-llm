@@ -102,20 +102,6 @@ cc_test(
 )
 
 cc_test(
-    name = "prefix_tree_memory_block_cache_test",
-    srcs = [
-        "PrefixTreeMemoryBlockCacheTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
-    ],
-    env = {},
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
     name = "disk_block_pool_test",
     srcs = [
         "DiskBlockPoolTest.cc",
