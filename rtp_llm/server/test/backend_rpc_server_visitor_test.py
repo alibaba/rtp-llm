@@ -1,6 +1,32 @@
 import unittest
+from unittest.mock import patch
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
+from rtp_llm.server.master_client import FlexlbResponse
+
+
+class _FakeTokenIds:
+    shape = (3,)
+
+
+class _FakeGenerateConfig:
+    def __init__(self):
+        self.role_addrs = []
+
+
+class _FakeInput:
+    request_id = 123
+    token_ids = _FakeTokenIds()
+
+    def __init__(self):
+        self.generate_config = _FakeGenerateConfig()
+
+
+class _FakeHostService:
+    def get_master_addr(self):
+        return "master:1234"
 
 
 class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
@@ -20,6 +46,31 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
 
     def test_route_cache_keys_short_prompt_has_no_complete_virtual_block(self):
         self.assertEqual(route_cache_keys_for_page_rr([10, 11, 12], True, 4), [])
+
+
+class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_route_ips_preserves_master_route_error_code_on_route_error(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.master_config = None
+        visitor.host_service = _FakeHostService()
+        visitor.backend_role_list = ["PREFILL"]
+
+        async def get_master_route_addrs(_input):
+            return FlexlbResponse.error_response(
+                int(ExceptionType.MASTER_NO_AVAILABLE_WORKER), "no worker"
+            )
+
+        visitor.get_master_route_addrs = get_master_route_addrs
+
+        with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
+            with self.assertRaises(FtRuntimeException) as ctx:
+                await visitor.route_ips(_FakeInput())
+
+        self.assertEqual(ctx.exception.exception_type, ExceptionType.ROUTE_ERROR)
+        self.assertEqual(
+            ctx.exception.rtp_error_code,
+            int(ExceptionType.MASTER_NO_AVAILABLE_WORKER),
+        )
 
 
 if __name__ == "__main__":

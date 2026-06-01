@@ -15,12 +15,16 @@ from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.misc import format_exception
+from rtp_llm.server.recent_cache_key_window import RecentCacheKeyWindow
 from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
     extract_trace_id,
 )
-from rtp_llm.server.recent_cache_key_window import RecentCacheKeyWindow
-from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs, RequestInfo
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateInput,
+    GenerateOutputs,
+    RequestInfo,
+)
 from rtp_llm.utils.time_util import Timer
 
 if TYPE_CHECKING:
@@ -324,11 +328,18 @@ class BackendRPCServerVisitor:
 
         kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
         if not input.generate_config.role_addrs:
-            raise FtRuntimeException(
+            route_error = FtRuntimeException(
                 ExceptionType.ROUTE_ERROR,
                 "request_id=%s no backend role addresses found after routing"
                 % input.request_id,
             )
+            if (
+                master_route_result is not None
+                and not master_route_result.is_ok
+                and master_route_result.error_code is not None
+            ):
+                route_error.rtp_error_code = master_route_result.error_code
+            raise route_error
 
     def check_sp_supported(self, input: GenerateInput):
         if not self.sp_config or not self.sp_config.model_type:

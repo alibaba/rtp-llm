@@ -463,12 +463,20 @@ def _proto_to_jsonable(msg: Any) -> dict:
     message cannot drop an entire RPC's log line.
     """
     try:
-        d = MessageToDict(
-            msg,
-            preserving_proto_field_name=True,
-            including_default_value_fields=False,
-            use_integers_for_enums=False,
-        )
+        try:
+            d = MessageToDict(
+                msg,
+                preserving_proto_field_name=True,
+                including_default_value_fields=False,
+                use_integers_for_enums=False,
+            )
+        except TypeError:
+            d = MessageToDict(
+                msg,
+                preserving_proto_field_name=True,
+                always_print_fields_with_no_presence=False,
+                use_integers_for_enums=False,
+            )
     except Exception as e:
         return {"_convert_error": repr(e)}
     _rewrite_raw_contents(d, "inputs", "raw_input_contents")
@@ -515,6 +523,11 @@ class _RpcAggregate:
     # Populated from the *first* non-empty frame so a late error beats a silent
     # empty frame but can't get overwritten by a stale follow-up chunk.
     error_message: Optional[str] = None
+    # Optional structured backend code propagated by the real dash-sc servicer.
+    # When present it keeps framework ERROR_QPS aligned with HTTP frontend tags
+    # such as "8400_MASTER_NO_AVAILABLE_WORKER"; otherwise we fall back to the
+    # bounded protocol/transport buckets below.
+    backend_error_code: Optional[str] = None
     # Raw-mode content (forward path): full proto dumps of every request / response
     # message, with ``raw_*_contents`` decoded back from base64. Kept capped so an
     # extreme stream cannot blow up a single log line.
@@ -677,6 +690,7 @@ class _RpcAggregate:
             "status": self.status,
             "status_detail": self.status_detail,
             "error_message": self.error_message,
+            "backend_error_code": self.backend_error_code,
             "exc_type": self.exc_type,
             "context_code": self.context_code,
             "context_active": self.context_active,
@@ -786,10 +800,11 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         elif status == "CANCELLED":
             kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1, tags)
         else:
+            error_code = agg.backend_error_code or status
             kmonitor.report(
                 AccMetrics.ERROR_QPS_METRIC,
                 1,
-                self._tags(agg.method, error_code=status),
+                self._tags(agg.method, error_code=error_code),
             )
 
     def intercept_service(self, continuation, handler_call_details):
@@ -909,7 +924,9 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
             # (``BACKEND_RuntimeError`` / ``BACKEND_OutOfMemoryError`` /
             # ``BACKEND_EMPTY_OUTPUTS`` / …). Transport-level outcomes still
             # use their gRPC code names (``CANCELLED`` / ``UNAVAILABLE`` / …).
-            agg.status = _classify_error_message(agg.error_message)
+            agg.status = agg.backend_error_code or _classify_error_message(
+                agg.error_message
+            )
             agg.status_detail = agg.error_message
         elif exc is not None:
             if agg.finish_reason is not None:
