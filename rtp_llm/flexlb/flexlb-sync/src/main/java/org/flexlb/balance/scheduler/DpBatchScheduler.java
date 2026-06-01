@@ -10,6 +10,7 @@ import org.flexlb.balance.dp.QueuedRequest;
 import org.flexlb.balance.dp.SimpleDpBatcher;
 import org.flexlb.balance.dp.SloBudgetBatcher;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
@@ -210,10 +211,8 @@ public class DpBatchScheduler {
                 } catch (Throwable t) {
                     Logger.error("handleAck failed for request {} in batch {}",
                             req.requestId(), batchId, t);
-                    if (!req.future().isDone()) {
-                        req.future().completeExceptionally(t);
-                    }
                     inflightRegistry.removeRequest(req.requestId());
+                    retryOrFail(req, t);
                 }
             }
         }
@@ -225,17 +224,16 @@ public class DpBatchScheduler {
         long reqId = req.requestId();
         EngineRpcService.EnqueueResponsePB slotAck = ackByReqId.get(reqId);
         if (slotAck == null) {
-            req.future().completeExceptionally(
-                    new RuntimeException("No ack slot for request " + reqId + " in batch " + batchId));
             inflightRegistry.removeRequest(reqId);
+            retryOrFail(req, new RuntimeException(
+                    "No ack slot for request " + reqId + " in batch " + batchId));
             return;
         }
         long errorCode = slotAck.getErrorInfo().getErrorCode();
         if (errorCode != 0L) {
-            req.future().completeExceptionally(
-                    new RuntimeException("Engine rejected request " + reqId
-                            + " errorCode=" + errorCode + " msg=" + slotAck.getErrorInfo().getErrorMessage()));
             inflightRegistry.removeRequest(reqId);
+            retryOrFail(req, new RuntimeException("Engine rejected request " + reqId
+                    + " errorCode=" + errorCode + " msg=" + slotAck.getErrorInfo().getErrorMessage()));
             return;
         }
         boolean activated = inflightRegistry.markActive(reqId);
@@ -321,9 +319,56 @@ public class DpBatchScheduler {
 
     // ============== helpers ==============
 
+    private void retryOrFail(PendingRequest req, Throwable cause) {
+        if (req.future().isDone()) {
+            return;
+        }
+        BalanceContext ctx = req.ctx();
+        FlexlbConfig cfg = configService.loadBalanceConfig();
+
+        int maxRetry = cfg.getMaxDpBatchRetryCount();
+        long minBudget = cfg.getMinRetryBudgetMs();
+        long elapsedMs = req.waitMicros() / 1000;
+        long sloMs = cfg.getDpTtftSloMs();
+        long remaining = sloMs - elapsedMs;
+
+        if (ctx.getRetryCount() >= maxRetry || remaining < minBudget) {
+            req.future().completeExceptionally(cause);
+            return;
+        }
+
+        ctx.incrementRetryCount();
+        String key = modelKey(ctx);
+        ConcurrentHashMap<String, DispatchBatcher> modelBatchers =
+                batchers.computeIfAbsent(key, k -> new ConcurrentHashMap<>());
+
+        WorkerStatus prefillWorker = planner.selectPrefillWorker(
+                key, cfg, ctx,
+                ipPort -> {
+                    DispatchBatcher b = modelBatchers.get(ipPort);
+                    return b != null ? b.queueSize() : 0;
+                });
+        if (prefillWorker == null) {
+            req.future().completeExceptionally(cause);
+            return;
+        }
+
+        Logger.info("Retrying request {} (attempt {}), remaining budget {}ms",
+                req.requestId(), ctx.getRetryCount(), remaining);
+
+        QueuedRequest qr = QueuedRequest.forRetry(ctx, req.future(), req.enqueuedAtMicros());
+        String batcherKey = prefillWorker.getIpPort();
+        modelBatchers.compute(batcherKey, (k, existing) -> {
+            if (existing == null || !existing.isAlive()) {
+                return createBatcher(key, prefillWorker);
+            }
+            return existing;
+        }).offer(qr);
+    }
+
     private void failAll(DispatchBatch batch, Throwable cause) {
         for (PendingRequest r : batch.requests()) {
-            r.future().completeExceptionally(cause);
+            retryOrFail(r, cause);
         }
     }
 

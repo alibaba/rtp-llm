@@ -201,6 +201,10 @@ public class FlexlbConfig {
 
     private int maxBatcherQueueSize = 1024;
 
+    private int maxDpBatchRetryCount = 2;
+
+    private long minRetryBudgetMs = 200;
+
     /**
      * Ordered traffic policy rules. A matched rule forces the whole request to a worker group.
      */

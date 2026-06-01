@@ -212,6 +212,7 @@ class DpBatchSchedulerTest {
 
     @Test
     void enqueue_rejection_fails_all_batched_futures() throws Exception {
+        cfg.setMaxDpBatchRetryCount(0);
         AtomicInteger callCount = new AtomicInteger();
         when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
@@ -232,6 +233,7 @@ class DpBatchSchedulerTest {
 
     @Test
     void enqueue_rpc_failure_fails_futures() throws Exception {
+        cfg.setMaxDpBatchRetryCount(0);
         when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class), anyLong()))
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("UNAVAILABLE")));
         List<CompletableFuture<Response>> futures = IntStream.range(0, 4)
@@ -241,6 +243,27 @@ class DpBatchSchedulerTest {
             assertThrows(java.util.concurrent.ExecutionException.class,
                     () -> f.get(2, TimeUnit.SECONDS));
         }
+    }
+
+    @Test
+    void enqueue_rejection_retries_then_succeeds() throws Exception {
+        AtomicInteger callCount = new AtomicInteger();
+        when(grpcClient.enqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class), anyLong()))
+                .thenAnswer(inv -> {
+                    int n = callCount.incrementAndGet();
+                    EngineRpcService.BatchEnqueueRequestPB b = inv.getArgument(2);
+                    // First call rejects, second call accepts
+                    return CompletableFuture.completedFuture(buildAck(b, n > 1, "queue full"));
+                });
+
+        List<CompletableFuture<Response>> futures = IntStream.range(0, 4)
+                .mapToObj(i -> scheduler.submit(makeCtx(i + 1, "m1")))
+                .toList();
+        for (CompletableFuture<Response> f : futures) {
+            Response resp = f.get(3, TimeUnit.SECONDS);
+            assertTrue(resp.isSuccess());
+        }
+        assertEquals(2, callCount.get());
     }
 
     @Test

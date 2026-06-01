@@ -24,6 +24,11 @@ public record QueuedRequest(
         return new QueuedRequest(ctx, future, System.nanoTime() / 1000, 0, Long.MAX_VALUE, 0);
     }
 
+    public static QueuedRequest forRetry(BalanceContext ctx, CompletableFuture<Response> future,
+                                         long originalEnqueuedAtMicros) {
+        return new QueuedRequest(ctx, future, originalEnqueuedAtMicros, 0, Long.MAX_VALUE, 0);
+    }
+
     public static QueuedRequest of(BalanceContext ctx, CompletableFuture<Response> future,
                                    int computeTokenLength, long sloDeadlineMicros, int bucketIndex) {
         return new QueuedRequest(ctx, future, System.nanoTime() / 1000,
