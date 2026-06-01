@@ -87,3 +87,4 @@ class ScheduleMeta(BaseModel):
     error_message: Optional[str] = None
     success: Optional[bool] = True
     real_master_host: Optional[str] = None
+    enqueued_by_master: bool = False

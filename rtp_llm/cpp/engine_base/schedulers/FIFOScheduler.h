@@ -51,7 +51,9 @@ public:
 
 private:
     int64_t lastScheduleTime() override;
-    bool evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
+    bool evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams,
+                              const GenerateStreamPtr&            new_stream,
+                              bool                                force_batch) const;
     size_t countInitedKVCacheStreams() const;
     void accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool waitPredicate();

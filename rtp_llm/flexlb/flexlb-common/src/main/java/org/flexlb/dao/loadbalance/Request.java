@@ -34,4 +34,20 @@ public class Request {
     @JsonAlias({"apikey", "apiKey"})
     @ToString.Exclude
     private String apiKey;
+
+    @JsonProperty("max_new_tokens")
+    private int maxNewTokens = 1;
+
+    @JsonProperty("num_beams")
+    private int numBeams = 1;
+
+    @JsonProperty("force_disable_sp_run")
+    private boolean forceDisableSpRun = false;
+
+    @JsonProperty("model")
+    private String model = "";
+
+    @ToString.Exclude
+    @JsonProperty("generate_input_pb_b64")
+    private String generateInputPbB64 = "";
 }

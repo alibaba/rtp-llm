@@ -85,18 +85,12 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
             int httpPort = Integer.parseInt(parts[1]);
             int grpcPort = CommonUtils.toGrpcPort(httpPort);
 
-            String workerStatusKey = createKey(ip, grpcPort, ServiceType.WORKER_STATUS);
-            String cacheStatusKey = createKey(ip, grpcPort, ServiceType.CACHE_STATUS);
-            String multimodalWorkerStatusKey = createKey(ip, grpcPort, ServiceType.MULTIMODAL_WORKER_STATUS);
-            String multimodalCacheStatusKey = createKey(ip, grpcPort, ServiceType.MULTIMODAL_CACHE_STATUS);
-            boolean contained = currentKeys.remove(workerStatusKey) && currentKeys.remove(cacheStatusKey)
-                && currentKeys.remove(multimodalWorkerStatusKey) && currentKeys.remove(multimodalCacheStatusKey);
-
-            if (!contained) {
-                addedKeys.add(workerStatusKey);
-                addedKeys.add(cacheStatusKey);
-                addedKeys.add(multimodalWorkerStatusKey);
-                addedKeys.add(multimodalCacheStatusKey);
+            for (ServiceType serviceType : ServiceType.values()) {
+                String serviceKey = createKey(ip, grpcPort, serviceType);
+                boolean contained = currentKeys.remove(serviceKey);
+                if (!contained) {
+                    addedKeys.add(serviceKey);
+                }
             }
         }
 
@@ -327,7 +321,9 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
         WORKER_STATUS("worker", "GetWorkerStatus"),
         CACHE_STATUS("cache", "GetCacheStatus"),
         MULTIMODAL_WORKER_STATUS("multimodal_worker", "GetWorkerStatus"),
-        MULTIMODAL_CACHE_STATUS("multimodal_cache", "GetCacheStatus");
+        MULTIMODAL_CACHE_STATUS("multimodal_cache", "GetCacheStatus"),
+        BATCH_ENQUEUE("batch_enqueue", "BatchEnqueue"),
+        CANCEL("cancel", "Cancel");
 
         @Getter
         private final String suffix;

@@ -9,7 +9,9 @@ from grpc import StatusCode
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    CancelRequestPB,
     ErrorDetailsPB,
+    FetchRequestPB,
     GenerateInputPB,
     GenerateOutputsPB,
     MultimodalInputPB,
@@ -34,6 +36,11 @@ from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tenso
 class StreamState:
     def __init__(self):
         self.cached_logits_dict = {}
+
+
+def _is_finished_response(outputs_pb: GenerateOutputsPB) -> bool:
+    finished = outputs_pb.flatten_output.finished
+    return bool(finished) and all(finished)
 
 
 def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
@@ -441,24 +448,37 @@ class ModelRpcClient(object):
         input_pb = trans_input(input_py)
         response_iterator = None
         stream_state = StreamState()
+        use_fetch_response = bool(getattr(input_py, "enqueued_by_master", False))
 
-        address_list = self._addresses
-
-        for role_addr in input_py.generate_config.role_addrs:
-            if (
-                (self._decode_entrance and role_addr.role == RoleType.DECODE)
-                or role_addr.role == RoleType.PDFUSION
-                or (not self._decode_entrance and role_addr.role == RoleType.PREFILL)
-            ):
-                if role_addr.ip != "":
-                    address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
-                    break
+        if use_fetch_response:
+            address_list = [
+                role_addr.ip + ":" + str(role_addr.grpc_port)
+                for role_addr in input_py.generate_config.role_addrs
+                if role_addr.role == RoleType.PREFILL and role_addr.ip
+            ]
+        else:
+            address_list = self._addresses
+            for role_addr in input_py.generate_config.role_addrs:
+                if (
+                    (self._decode_entrance and role_addr.role == RoleType.DECODE)
+                    or role_addr.role == RoleType.PDFUSION
+                    or (
+                        not self._decode_entrance
+                        and role_addr.role == RoleType.PREFILL
+                    )
+                ):
+                    if role_addr.ip != "":
+                        address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
+                        break
 
         if not address_list:
             raise ValueError(f"No address found for request: {input_pb.request_id}")
         logging.debug(
             f"request: [{input_pb.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
         )
+        stub = None
+        stream_done = False
+        terminal_seen = False
         try:
             # Select target address
             target_address = address_list[input_py.request_id % len(address_list)]
@@ -468,10 +488,19 @@ class ModelRpcClient(object):
             stub = RpcServiceStub(channel)
 
             grpc_kwargs = {"timeout": effective_ms / 1000.0} if effective_ms > 0 else {}
-            response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
+            if use_fetch_response:
+                response_iterator = stub.FetchResponse(
+                    FetchRequestPB(request_id=input_pb.request_id), **grpc_kwargs
+                )
+            else:
+                response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
-                yield trans_output(input_py, response, stream_state)
+                output = trans_output(input_py, response, stream_state)
+                if use_fetch_response and _is_finished_response(response):
+                    terminal_seen = True
+                yield output
+            stream_done = True
         except grpc.RpcError as e:
             # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:
@@ -506,5 +535,20 @@ class ModelRpcClient(object):
             logging.error(f"rpc unknown error:{str(e)}")
             raise e
         finally:
-            if response_iterator:
+            should_cancel = not stream_done and not (
+                use_fetch_response and terminal_seen
+            )
+            if response_iterator and should_cancel:
                 response_iterator.cancel()
+            if use_fetch_response and stub is not None and should_cancel:
+                try:
+                    await stub.Cancel(
+                        CancelRequestPB(request_id=input_pb.request_id),
+                        timeout=5.0,
+                    )
+                except Exception:
+                    logging.debug(
+                        "request: [%s] best-effort Cancel failed",
+                        input_pb.request_id,
+                        exc_info=True,
+                    )
