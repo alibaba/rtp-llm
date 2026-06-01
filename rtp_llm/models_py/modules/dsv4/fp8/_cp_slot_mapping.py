@@ -101,6 +101,7 @@ def cp_kv_slot_mapping(
     ratio: int,
     cp_size: int,
     cp_rank: int,
+    owner_tokens_per_block: int | None = None,
 ) -> torch.Tensor:
     """CP-aware KV-pool slot mapping for compressor write path.
 
@@ -112,13 +113,51 @@ def cp_kv_slot_mapping(
 
     With CP sharding additionally:
       * Non-owned logical blocks → slot = -1.
+
+    ``tokens_per_block`` is the KV pool's kernel row size.  For DSV4 FP8
+    FULL pools the framework block table is expanded to kernel-block ids, but
+    cache keys / cache-store FULL blocks are physical blocks.  In that case
+    ``owner_tokens_per_block`` is the physical block size: ownership is decided
+    by the physical block, while the final slot still indexes the kernel block
+    row from ``block_table_local``.
     """
     if ratio <= 0 or kv_eb <= 0:
         return torch.full_like(positions, -1, dtype=torch.int64)
-    block_id, owned_mask = cp_global_block_to_local(
-        positions, block_table_local, b_idx, tokens_per_block, cp_size, cp_rank
-    )
-    in_block_compressed = (positions % tokens_per_block) // ratio
+    owner_tpb = int(owner_tokens_per_block or tokens_per_block)
+    if owner_tpb <= 0 or owner_tpb % int(tokens_per_block) != 0:
+        return torch.full_like(positions, -1, dtype=torch.int64)
+
+    if owner_tpb == int(tokens_per_block):
+        block_id, owned_mask = cp_global_block_to_local(
+            positions, block_table_local, b_idx, tokens_per_block, cp_size, cp_rank
+        )
+        in_block_compressed = (positions % tokens_per_block) // ratio
+    else:
+        if positions.dtype != torch.int64:
+            positions = positions.to(torch.int64)
+        if b_idx.dtype != torch.int64:
+            b_idx = b_idx.to(torch.int64)
+        bt_long = block_table_local.to(torch.int64)
+        max_local_kernel_blocks = int(bt_long.shape[1])
+        if max_local_kernel_blocks <= 0:
+            return torch.full_like(positions, -1, dtype=torch.int64)
+
+        kernel_blocks_per_owner_block = owner_tpb // int(tokens_per_block)
+        owner_block = positions // owner_tpb
+        owner = owner_block % int(cp_size)
+        owned_by_rank = owner == int(cp_rank)
+        local_owner_block = owner_block // int(cp_size)
+        kernel_in_owner_block = (positions % owner_tpb) // int(tokens_per_block)
+        local_kernel_block = (
+            local_owner_block * kernel_blocks_per_owner_block + kernel_in_owner_block
+        )
+        in_capacity = local_kernel_block < max_local_kernel_blocks
+        owned_mask = owned_by_rank & in_capacity
+        local_kernel_block_safe = torch.where(
+            owned_mask, local_kernel_block, torch.zeros_like(local_kernel_block)
+        )
+        block_id = bt_long[b_idx, local_kernel_block_safe]
+        in_block_compressed = (positions % int(tokens_per_block)) // ratio
     slot = block_id * kv_eb + in_block_compressed
     boundary = ((positions + 1) % ratio) == 0
     # CP path uses ``block_id > 0`` (stricter than the non-CP path which uses

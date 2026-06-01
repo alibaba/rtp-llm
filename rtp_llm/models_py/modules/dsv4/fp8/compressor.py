@@ -637,6 +637,7 @@ class CompressorFP8(PoolBackedModule):
                 ratio,
                 self._cp_ctx.cp_size,
                 self._cp_ctx.cp_rank,
+                owner_tokens_per_block=self._state_tokens_per_block,
             )
             if self._kv_pool_view is not None:
                 pool_rows = int(

@@ -118,6 +118,69 @@ def test_kv_slot_mapping_other_rank():
     assert torch.equal(slot, expected)
 
 
+def test_kv_slot_mapping_physical_owner_with_kernel_blocks_rank0():
+    cp_size, cp_rank = 2, 0
+    tokens_per_block = 128
+    owner_tokens_per_block = 256
+    ratio = 64
+    kv_eb = tokens_per_block // ratio
+    bt = torch.tensor([[10, 11]], dtype=torch.int64)
+    positions = torch.arange(512, dtype=torch.int64)
+    b_idx = torch.zeros(512, dtype=torch.int64)
+
+    slot = M.cp_kv_slot_mapping(
+        positions,
+        bt,
+        b_idx,
+        tokens_per_block,
+        kv_eb,
+        ratio,
+        cp_size,
+        cp_rank,
+        owner_tokens_per_block=owner_tokens_per_block,
+    )
+
+    expected = torch.full((512,), -1, dtype=torch.int64)
+    # Rank0 owns physical block0, so both kernel rows inside tokens 0..255
+    # must be written locally. Physical block1 (tokens 256..511) is rank1.
+    expected[63] = 10 * kv_eb + 0
+    expected[127] = 10 * kv_eb + 1
+    expected[191] = 11 * kv_eb + 0
+    expected[255] = 11 * kv_eb + 1
+    assert torch.equal(slot, expected), f"got {slot.tolist()}, want {expected.tolist()}"
+
+
+def test_kv_slot_mapping_physical_owner_with_kernel_blocks_rank1():
+    cp_size, cp_rank = 2, 1
+    tokens_per_block = 128
+    owner_tokens_per_block = 256
+    ratio = 64
+    kv_eb = tokens_per_block // ratio
+    bt = torch.tensor([[20, 21]], dtype=torch.int64)
+    positions = torch.arange(512, dtype=torch.int64)
+    b_idx = torch.zeros(512, dtype=torch.int64)
+
+    slot = M.cp_kv_slot_mapping(
+        positions,
+        bt,
+        b_idx,
+        tokens_per_block,
+        kv_eb,
+        ratio,
+        cp_size,
+        cp_rank,
+        owner_tokens_per_block=owner_tokens_per_block,
+    )
+
+    expected = torch.full((512,), -1, dtype=torch.int64)
+    # Rank1 owns physical block1, represented by its two local kernel rows.
+    expected[319] = 20 * kv_eb + 0
+    expected[383] = 20 * kv_eb + 1
+    expected[447] = 21 * kv_eb + 0
+    expected[511] = 21 * kv_eb + 1
+    assert torch.equal(slot, expected), f"got {slot.tolist()}, want {expected.tolist()}"
+
+
 def test_state_slot_mapping_intrablock_slice():
     cp_size, cp_rank = 2, 0
     local_eb = 4
