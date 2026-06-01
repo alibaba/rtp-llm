@@ -1,7 +1,6 @@
 package org.flexlb.dispatcher;
 
 import com.alibaba.fastjson2.JSONArray;
-import com.alibaba.fastjson2.JSONException;
 import com.alibaba.fastjson2.JSONObject;
 import org.junit.jupiter.api.Test;
 
@@ -10,7 +9,6 @@ import java.nio.charset.StandardCharsets;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class BatchBodyParserTest {
 
@@ -36,9 +34,12 @@ class BatchBodyParserTest {
     }
 
     @Test
-    void parseObjectThrowsOnMalformedJson() {
+    void parseObjectReturnsNullOnMalformedJson() {
+        // Malformed input and "valid JSON but not an object" both map to 400 at the handler with
+        // the same envelope, so parser collapses both into null rather than throw a JSONException
+        // that the handler would have to catch separately.
         byte[] body = "{not json".getBytes(StandardCharsets.UTF_8);
-        assertThrows(JSONException.class, () -> BatchBodyParser.parseObject(body));
+        assertNull(BatchBodyParser.parseObject(body));
     }
 
     @Test

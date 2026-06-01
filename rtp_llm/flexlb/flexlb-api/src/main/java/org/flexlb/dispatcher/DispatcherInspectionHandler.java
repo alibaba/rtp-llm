@@ -2,7 +2,6 @@ package org.flexlb.dispatcher;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
-import com.alibaba.fastjson2.JSONException;
 import com.alibaba.fastjson2.JSONObject;
 import com.alibaba.fastjson2.JSONWriter;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
@@ -91,12 +90,7 @@ public class DispatcherInspectionHandler {
         }
         boolean effectivePreAssign = resolvePreAssign(request);
         return request.bodyToMono(byte[].class).flatMap(bytes -> {
-            JSONObject body;
-            try {
-                body = BatchBodyParser.parseObject(bytes);
-            } catch (JSONException e) {
-                return badRequest("malformed JSON: " + e.getMessage());
-            }
+            JSONObject body = BatchBodyParser.parseObject(bytes);
             if (body == null) {
                 return badRequest("expected a JSON object body");
             }
