@@ -319,20 +319,6 @@ int GenerateStream::initialReuseLength() const {
 
 void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
-    if (generate_input_->mm_locs && generate_input_->multimodal_features) {
-        auto& locs      = generate_input_->mm_locs.value();
-        auto* locs_data = locs.data_ptr<int32_t>();
-        auto& features  = generate_input_->multimodal_features.value();
-        // Only count an image as reused when the reuse boundary covers its full
-        // token span [loc, loc + feature_len). Partially-cached images must be recomputed.
-        for (int i = locs.numel() - 1; i >= 0; --i) {
-            const int mm_end = locs_data[i] + static_cast<int>(features[i].size(0));
-            if (reuse_length_ >= mm_end) {
-                reuse_mm_length_ = i + 1;
-                break;
-            }
-        }
-    }
 }
 
 void GenerateStream::setLocalReuseLength(int length) {
@@ -413,8 +399,7 @@ int GenerateStream::currentExecuteTokenSize() {
 
 std::vector<torch::Tensor> GenerateStream::multimodalFeatures() const {
     if (generate_input_->multimodal_features) {
-        auto& features = generate_input_->multimodal_features.value();
-        return std::vector<torch::Tensor>(features.begin() + reuse_mm_length_, features.end());
+        return generate_input_->multimodal_features.value();
     } else {
         return std::vector<torch::Tensor>();
     }
@@ -422,26 +407,21 @@ std::vector<torch::Tensor> GenerateStream::multimodalFeatures() const {
 
 std::vector<torch::Tensor> GenerateStream::multimodalExtraInput() const {
     if (generate_input_->mm_extra_input) {
-        auto& embeds = generate_input_->mm_extra_input.value();
-        if (embeds.size() > 0) {
-            return std::vector<torch::Tensor>(embeds.begin() + reuse_mm_length_, embeds.end());
-        }
+        return generate_input_->mm_extra_input.value();
     }
     return std::vector<torch::Tensor>();
 }
 
 bool GenerateStream::hasMultimodalExtraInput() const {
     if (generate_input_->mm_extra_input) {
-        auto& embeds = generate_input_->mm_extra_input.value();
-        return embeds.size() > reuse_mm_length_;
+        return generate_input_->mm_extra_input.value().size() > 0;
     }
     return false;
 }
 
 int GenerateStream::multimodalFeaturesLength() const {
     if (generate_input_->multimodal_features) {
-        auto& features = generate_input_->multimodal_features.value();
-        return (features.size() - reuse_mm_length_) * currentBatchSize();
+        return generate_input_->multimodal_features.value().size() * currentBatchSize();
     } else {
         return 0;
     }
@@ -451,8 +431,7 @@ torch::Tensor GenerateStream::multimodalLocations() const {
     if (!generate_input_->mm_locs) {
         return torch::Tensor();
     }
-    auto& mm_locs = generate_input_->mm_locs.value();
-    return mm_locs.slice(0, reuse_mm_length_, mm_locs.numel());
+    return generate_input_->mm_locs.value();
 }
 
 vector<int> GenerateStream::textTokensMask() const {
