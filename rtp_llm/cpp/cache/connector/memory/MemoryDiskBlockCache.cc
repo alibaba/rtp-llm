@@ -6,7 +6,6 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
@@ -59,7 +58,6 @@ MemoryDiskBlockCache::putCommitted(const CacheItem& input_item) {
             auto old_item = existing->second;
             eraseEvictKeyLocked(existing->second);
             item.last_access_seq = ++access_seq_;
-            item.created_time_us = item.created_time_us > 0 ? item.created_time_us : currentTimeUs();
             existing->second     = item;
             insertEvictKeyLocked(existing->second);
             return {true, old_item};
@@ -68,7 +66,6 @@ MemoryDiskBlockCache::putCommitted(const CacheItem& input_item) {
     }
 
     item.last_access_seq = ++access_seq_;
-    item.created_time_us = item.created_time_us > 0 ? item.created_time_us : currentTimeUs();
     auto [it, inserted]  = items_.emplace(item.cache_key, item);
     (void)inserted;
     insertEvictKeyLocked(it->second);
