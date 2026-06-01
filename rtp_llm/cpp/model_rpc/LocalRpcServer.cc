@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/distribute/RpcCpuTpBroadcaster.h"
 
 using namespace std;
 
@@ -538,6 +539,18 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         const std::string error_msg = "execute function failed, request: [" + request->DebugString() + "]";
         return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
     }
+    return grpc::Status::OK;
+}
+
+::grpc::Status LocalRpcServer::CpuTpBroadcast(::grpc::ServerContext*              context,
+                                              const ::CpuTpBroadcastRequestPB*    request,
+                                              ::CpuTpBroadcastResponsePB*         response) {
+    if (context->IsCancelled()) {
+        response->set_success(false);
+        response->set_error_message("request is cancelled");
+        return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
+    }
+    (void)RpcCpuTpBroadcaster::instance().handleBroadcastRequest(*request, response);
     return grpc::Status::OK;
 }
 

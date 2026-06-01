@@ -28,6 +28,7 @@ void EngineBase::initRuntime(const EngineInitParams& params) {
     Logger::getEngineLogger().setRank(rank);
     Logger::getEngineLogger().flush();
     size_t device_id = params.parallelism_config.world_rank % params.parallelism_config.local_world_size;
+    device_id += autil::EnvUtil::getEnv("RTP_LLM_LOCAL_DEVICE_OFFSET", 0);
     mla_ops_type_    = rtp_llm::initRuntime(device_id,
                                          params.profiling_debug_logging_config.trace_memory,
                                          params.device_resource_config.enable_comm_overlap,
