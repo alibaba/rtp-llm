@@ -142,8 +142,6 @@ std::string KVCacheConfig::to_string() const {
         << "enable_gpu_prefix_tree: " << enable_gpu_prefix_tree << "\n"
         << "enable_prefix_tree_memory_cache: " << enable_prefix_tree_memory_cache << "\n"
         << "enable_legacy_memory_connector_fallback: " << enable_legacy_memory_connector_fallback << "\n"
-        << "prefix_tree_memory_state_swa_pool_ratio: " << prefix_tree_memory_state_swa_pool_ratio << "\n"
-        << "enable_dsv4_state_block_independent_eviction: " << enable_dsv4_state_block_independent_eviction << "\n"
         << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
         << "load_cache_retry_times: " << load_cache_retry_times << "\n"
         << "dsv4_fixed_pool_blocks: " << dsv4_fixed_pool_blocks << "\n"

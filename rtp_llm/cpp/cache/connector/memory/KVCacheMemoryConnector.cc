@@ -15,7 +15,6 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
-#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 // When set on MultiCopyParams, execNoBlockCopy may try CUDA split scatter/gather (SplitKvCacheCopy; not on PPU).
@@ -153,10 +152,8 @@ bool KVCacheMemoryConnector::init() {
                             memory_cache_sync_timeout_ms);
     RTP_LLM_CHECK_WITH_INFO(!kv_cache_config_.enable_memory_cache_disk || kv_cache_config_.enable_memory_cache,
                             "init failed, disk memory cache requires enable_memory_cache");
-    RTP_LLM_CHECK_WITH_INFO(!(kv_cache_config_.enable_memory_cache_disk && kv_cache_config_.enable_tiered_memory_cache
-                              && !kv_cache_config_.enable_prefix_tree_memory_cache),
-                            "init failed, enable_memory_cache_disk with tiered memory cache requires prefix-tree "
-                            "memory cache");
+    RTP_LLM_CHECK_WITH_INFO(!(kv_cache_config_.enable_memory_cache_disk && kv_cache_config_.enable_tiered_memory_cache),
+                            "init failed, enable_memory_cache_disk cannot be used with enable_tiered_memory_cache");
     RTP_LLM_CHECK_WITH_INFO(!kv_cache_config_.enable_memory_cache_disk
                                 || kv_cache_config_.memory_cache_disk_sync_timeout_ms > 0,
                             "init failed, disk sync timeout is invalid, sync timeout: %ld ms",
@@ -165,10 +162,6 @@ bool KVCacheMemoryConnector::init() {
     checkLayerBlockStrideBytes();
 
     initBlockPool();
-    RTP_LLM_CHECK_WITH_INFO(!(kv_cache_config_.enable_memory_cache_disk && kv_cache_config_.enable_tiered_memory_cache
-                              && !usePrefixTreeMemoryCache()),
-                            "init failed, enable_memory_cache_disk with tiered memory cache requires prefix-tree "
-                            "memory cache");
     if (diskCacheEnabled()) {
         initDiskBlockPools();
     }
@@ -219,7 +212,7 @@ void KVCacheMemoryConnector::initBlockPool() {
 
     const auto slots = layerRegionSlots();
     const bool prefix_tree_requested = kv_cache_config_.enable_prefix_tree_memory_cache;
-    const bool prefix_tree_supported = isDsv4TypedCacheLayout(slots);
+    const bool prefix_tree_supported = isDsv4TypedCacheLayout(slots) && !kv_cache_config_.enable_memory_cache_disk;
     use_prefix_tree_memory_cache_    = prefix_tree_requested && prefix_tree_supported;
     RTP_LLM_CHECK_WITH_INFO(use_prefix_tree_memory_cache_ || !prefix_tree_requested
                                 || kv_cache_config_.enable_legacy_memory_connector_fallback,
@@ -250,36 +243,14 @@ void KVCacheMemoryConnector::initBlockPool() {
                                 "prefix-tree memory pool size invalid, compressed=%zu state_swa=%zu",
                                 compressed_block_size_,
                                 state_swa_block_size_);
-        RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio >= 0,
-                                "prefix_tree_memory_state_swa_pool_ratio must be non-negative, got %ld",
-                                kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio);
-        const size_t total_bytes = static_cast<size_t>(memory_cache_size_mb) * 1024ULL * 1024ULL;
-        size_t       compressed_capacity = 0;
-        size_t       state_swa_capacity  = 0;
-        if (kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio > 0) {
-            RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio < 100,
-                                    "prefix_tree_memory_state_swa_pool_ratio must be in [1, 99], got %ld",
-                                    kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio);
-            const size_t state_bytes =
-                total_bytes * static_cast<size_t>(kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio) / 100ULL;
-            const size_t compressed_bytes = total_bytes - state_bytes;
-            compressed_capacity           = compressed_bytes / compressed_block_size_;
-            state_swa_capacity            = state_bytes / state_swa_block_size_;
-        } else {
-            const size_t bytes_per_key = compressed_block_size_ + state_swa_block_size_;
-            const size_t key_capacity  = total_bytes / bytes_per_key;
-            compressed_capacity        = key_capacity;
-            state_swa_capacity         = key_capacity;
-        }
-        RTP_LLM_CHECK_WITH_INFO(compressed_capacity > 1 && state_swa_capacity > 1,
-                                "pool_size_mb=%ld too small for prefix memory pools, compressed=%zu state_swa=%zu "
-                                "compressed_capacity=%zu state_swa_capacity=%zu ratio=%ld",
+        const size_t total_bytes       = static_cast<size_t>(memory_cache_size_mb) * 1024ULL * 1024ULL;
+        const size_t bytes_per_key     = compressed_block_size_ + state_swa_block_size_;
+        const size_t key_capacity      = total_bytes / bytes_per_key;
+        RTP_LLM_CHECK_WITH_INFO(key_capacity > 0,
+                                "pool_size_mb=%ld too small for prefix memory pools, compressed=%zu state_swa=%zu",
                                 memory_cache_size_mb,
                                 compressed_block_size_,
-                                state_swa_block_size_,
-                                compressed_capacity,
-                                state_swa_capacity,
-                                kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio);
+                                state_swa_block_size_);
         auto make_pool = [](size_t block_size, size_t block_num) -> std::shared_ptr<BlockPool> {
             const auto pool_config = BlockPoolConfigHelper::createConfig(
                 /*layer_num=*/1, static_cast<uint32_t>(block_num), static_cast<uint32_t>(block_size), TYPE_INT8);
@@ -287,15 +258,12 @@ void KVCacheMemoryConnector::initBlockPool() {
             RTP_LLM_CHECK_WITH_INFO(pool->init(), "memory block pool init failed, block size: %zu", block_size);
             return pool;
         };
-        compressed_pool_ = make_pool(compressed_block_size_, compressed_capacity);
-        state_swa_pool_  = make_pool(state_swa_block_size_, state_swa_capacity);
-        RTP_LLM_LOG_INFO("prefix-tree memory pool init: compressed_size=%zu state_swa_size=%zu "
-                         "compressed_capacity=%zu state_swa_capacity=%zu ratio=%ld",
+        compressed_pool_ = make_pool(compressed_block_size_, key_capacity);
+        state_swa_pool_  = make_pool(state_swa_block_size_, key_capacity);
+        RTP_LLM_LOG_INFO("prefix-tree memory pool init: compressed_size=%zu state_swa_size=%zu key_capacity=%zu",
                          compressed_block_size_,
                          state_swa_block_size_,
-                         compressed_capacity,
-                         state_swa_capacity,
-                         kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio);
+                         key_capacity);
         return;
     }
 
@@ -410,46 +378,6 @@ void KVCacheMemoryConnector::initDiskBlockPools() {
         RTP_LLM_CHECK_WITH_INFO(pool->init(), "init %s disk block pool failed", cacheBlockKindName(kind));
         return pool;
     };
-
-    if (usePrefixTreeMemoryCache()) {
-        RTP_LLM_CHECK_WITH_INFO(compressed_block_size_ > 0 && state_swa_block_size_ > 0,
-                                "init prefix disk pool failed, prefix block sizes are invalid");
-        const size_t compressed_stride = DiskBlockPool::alignUp(compressed_block_size_, 4096);
-        const size_t state_swa_stride  = DiskBlockPool::alignUp(state_swa_block_size_, 4096);
-        size_t       compressed_slots  = 0;
-        size_t       state_swa_slots   = 0;
-        if (kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio > 0) {
-            const size_t state_bytes =
-                total_disk_bytes * static_cast<size_t>(kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio)
-                / 100ULL;
-            const size_t compressed_bytes = total_disk_bytes - state_bytes;
-            compressed_slots              = compressed_bytes / compressed_stride;
-            state_swa_slots               = state_bytes / state_swa_stride;
-        } else {
-            const size_t unit_bytes = compressed_stride + state_swa_stride;
-            const size_t key_slots  = total_disk_bytes / unit_bytes;
-            compressed_slots        = key_slots;
-            state_swa_slots         = key_slots;
-        }
-        RTP_LLM_CHECK_WITH_INFO(compressed_slots > 0 && state_swa_slots > 0,
-                                "init prefix disk pool failed, disk too small, disk=%zu compressed_stride=%zu "
-                                "state_swa_stride=%zu compressed_slots=%zu state_swa_slots=%zu ratio=%ld",
-                                total_disk_bytes,
-                                compressed_stride,
-                                state_swa_stride,
-                                compressed_slots,
-                                state_swa_slots,
-                                kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio);
-        complete_disk_pool_ = make_disk_pool(
-            CacheBlockKind::COMPRESSED_KV, compressed_slots * compressed_stride, compressed_block_size_);
-        incomplete_disk_pool_ =
-            make_disk_pool(CacheBlockKind::STATE_SWA_KV, state_swa_slots * state_swa_stride, state_swa_block_size_);
-        RTP_LLM_LOG_INFO("prefix disk pool init: compressed_slots=%zu state_swa_slots=%zu ratio=%ld",
-                         compressed_slots,
-                         state_swa_slots,
-                         kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio);
-        return;
-    }
 
     if (!use_disk_dual_pool) {
         complete_disk_pool_ = make_disk_pool(CacheBlockKind::COMPLETE, total_disk_bytes, complete_block_size);
@@ -714,7 +642,6 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
     if (usePrefixTreeMemoryCache()) {
         resource->ensureLinearBlockDependencies();
         size_t matched_num = already_reuse_num;
-        bool   matched_disk = false;
         for (size_t i = already_reuse_num; i < cache_keys_size; ++i) {
             bool ok          = true;
             bool matched_any = false;
@@ -729,11 +656,13 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
                 auto match_result =
                     prefix_block_cache_->match(static_cast<CacheKeyType>(cache_keys.at(i)), kind, required_mask);
                 if (!match_result.found) {
-                    ok = false;
-                    break;
+                    if (kind == CacheBlockKind::COMPRESSED_KV) {
+                        ok = false;
+                        break;
+                    }
+                    continue;
                 }
                 matched_any = true;
-                matched_disk = matched_disk || match_result.backing_type == CacheBackingType::DISK;
             }
             if (!ok || !matched_any) {
                 break;
@@ -757,7 +686,6 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
             return nullptr;
         }
         reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
-        reportDiskMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_disk ? matched_num : 0);
         return std::make_shared<MemoryAsyncMatchContext>(matched_num, start_read_block_index, read_block_num, copy_plan);
     }
 
@@ -1116,38 +1044,26 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForRead(const CacheKeysType&         
                 continue;
             }
             const auto match_result = prefix_block_cache_->matchAndMarkInFlight(cache_key, kind, required_mask);
-            if (!match_result.found) {
+            if (!match_result.found || match_result.backing_type != CacheBackingType::MEMORY) {
+                if (kind == CacheBlockKind::COMPRESSED_KV) {
+                    success = false;
+                }
+                break;
+            }
+            PrefixTreeMemoryBlockCache::CacheItem item;
+            item.cache_key    = cache_key;
+            item.kind         = kind;
+            item.backing_type = match_result.backing_type;
+            item.block_index  = match_result.block_index;
+            item.disk_slot    = match_result.disk_slot;
+            item.block_size   = match_result.block_size;
+            item.generation   = match_result.generation;
+            auto pool = memoryPoolFor(kind);
+            if (!pool) {
                 success = false;
                 break;
             }
-            auto release_match = [&]() {
-                auto retired_item = prefix_block_cache_->releaseInFlight(cache_key,
-                                                                         kind,
-                                                                         match_result.backing_type,
-                                                                         match_result.block_index,
-                                                                         match_result.disk_slot,
-                                                                         match_result.generation);
-                if (retired_item.has_value()) {
-                    releasePrefixCacheBacking(*retired_item);
-                }
-            };
-            if (match_result.backing_type == CacheBackingType::MEMORY) {
-                auto pool = memoryPoolFor(kind);
-                if (!pool) {
-                    release_match();
-                    success = false;
-                    break;
-                }
-                referenceBlocksInPool(pool, {match_result.block_index}, /*cache_ref=*/false);
-            } else {
-                auto pool = diskPoolFor(kind);
-                if (!pool || !pool->validSlot(match_result.disk_slot)) {
-                    release_match();
-                    success = false;
-                    break;
-                }
-                pool->requestReference(match_result.disk_slot);
-            }
+            referenceBlocksInPool(pool, {match_result.block_index}, /*cache_ref=*/false);
 
             CopyInfoPerKey copy_info;
             copy_info.cache_key    = cache_key;
@@ -1220,18 +1136,16 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
             reportWriteMetrics(no_need_write, timer.done_us(), static_cast<int64_t>(cache_keys_size), 0);
             return nullptr;
         }
+        if (!preparePrefixMergeSources(copy_plan->copy_infos)) {
+            reportWriteMetrics(false, timer.done_us(), static_cast<int64_t>(cache_keys_size), 0);
+            return nullptr;
+        }
         auto write_done = [copy_plan,
                            resource_copy = resource,
                            slots,
                            timer,
                            total_block_num = cache_keys_size,
                            this](bool success) mutable {
-                int64_t disk_write_block_num = 0;
-                for (const auto& copy_info : copy_plan->copy_infos) {
-                    if (copy_info.backing_type == CacheBackingType::DISK) {
-                        ++disk_write_block_num;
-                    }
-                }
                 if (success) {
                     const auto& dependencies = resource_copy->blockDependencies();
                     for (auto& copy_info : copy_plan->copy_infos) {
@@ -1249,9 +1163,6 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
                 const int64_t write_block_num = success ? static_cast<int64_t>(copy_plan->copy_infos.size()) : 0;
                 copy_plan.reset();
                 reportWriteMetrics(success, timer.done_us(), total_block_num, write_block_num);
-                if (disk_write_block_num > 0) {
-                    reportDiskWriteMetrics(success, timer.done_us(), total_block_num, success ? disk_write_block_num : 0);
-                }
             };
 
         auto context = std::make_shared<MemoryAsyncContext>(write_done);
@@ -1455,15 +1366,9 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForWrite(const CacheKeysType&        
     if (no_need_write) {
         return nullptr;
     }
-    if (!preparePrefixMergeSources(copy_infos)) {
-        return nullptr;
-    }
     if (!allocatePrefixBackingsForWrite(copy_infos)) {
         // allocatePrefixBackingsForWrite releases any partially allocated
         // request refs before returning false.
-        for (const auto& copy_info : copy_infos) {
-            releasePrefixMergeSource(copy_info);
-        }
         return nullptr;
     }
     (void)dependencies;
@@ -1539,12 +1444,6 @@ KVCacheMemoryConnector::sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan)
         item->set_mem_block(copy_info.mem_block);
         if (!isNullBlockIdx(copy_info.src_mem_block)) {
             item->set_src_mem_block(copy_info.src_mem_block);
-        }
-        item->set_src_backing_type(copy_info.src_backing_type == CacheBackingType::MEMORY ?
-                                       MemoryOperationRequestPB::MEMORY :
-                                       MemoryOperationRequestPB::DISK);
-        if (copy_info.src_disk_slot >= 0) {
-            item->set_src_disk_slot(copy_info.src_disk_slot);
         }
         item->set_is_complete(copy_info.is_complete);
         item->set_backing_type(copy_info.backing_type == CacheBackingType::MEMORY ? MemoryOperationRequestPB::MEMORY :
@@ -1644,9 +1543,6 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
         const bool success = copyPrefixMemoryItems(request, copy_direction, slots);
         response.set_success(success);
         reportCopyMetrics(success, timer.done_us(), copy_direction);
-        if (has_disk_items) {
-            reportDiskCopyMetrics(success, timer.done_us(), copy_direction);
-        }
         return success;
     }
 
@@ -1688,16 +1584,14 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
 
 bool KVCacheMemoryConnector::validateCopyItemBacking(const MemoryOperationRequestPB::CopyItem& item) const {
     const bool has_disk_slot = item.disk_slot_presence_case() == MemoryOperationRequestPB::CopyItem::kDiskSlot;
-    const bool has_src_mem_block =
-        item.src_mem_block_presence_case() == MemoryOperationRequestPB::CopyItem::kSrcMemBlock;
-    const bool has_src_disk_slot =
-        item.src_disk_slot_presence_case() == MemoryOperationRequestPB::CopyItem::kSrcDiskSlot;
     if (item.backing_type() == MemoryOperationRequestPB::MEMORY) {
         if (has_disk_slot && item.disk_slot() != -1) {
             RTP_LLM_LOG_WARNING("memory copy item has invalid disk_slot=%d", item.disk_slot());
             return false;
         }
-    } else if (item.backing_type() == MemoryOperationRequestPB::DISK) {
+        return true;
+    }
+    if (item.backing_type() == MemoryOperationRequestPB::DISK) {
         if (!isNullBlockIdx(static_cast<BlockIdxType>(item.mem_block()))) {
             RTP_LLM_LOG_WARNING("disk copy item has non-null mem_block=%d", item.mem_block());
             return false;
@@ -1706,45 +1600,16 @@ bool KVCacheMemoryConnector::validateCopyItemBacking(const MemoryOperationReques
             RTP_LLM_LOG_WARNING("disk copy item has invalid disk_slot");
             return false;
         }
-    } else {
-        RTP_LLM_LOG_WARNING("copy item has unknown backing_type=%d", static_cast<int>(item.backing_type()));
-        return false;
-    }
-
-    CacheBlockKind kind = blockKindFromComplete(item.is_complete());
-    if (item.cache_block_kind() == MemoryOperationRequestPB::COMPRESSED_KV) {
-        kind = CacheBlockKind::COMPRESSED_KV;
-    } else if (item.cache_block_kind() == MemoryOperationRequestPB::STATE_SWA_KV) {
-        kind = CacheBlockKind::STATE_SWA_KV;
-    }
-    if (item.backing_type() == MemoryOperationRequestPB::DISK) {
-        auto disk_pool = diskPoolFor(kind);
+        auto disk_pool = diskPoolFor(blockKindFromComplete(item.is_complete()));
         if (!disk_pool || !disk_pool->validSlot(item.disk_slot())) {
             RTP_LLM_LOG_WARNING(
                 "disk copy item slot is out of range, slot=%d, is_complete=%d", item.disk_slot(), item.is_complete());
             return false;
         }
+        return true;
     }
-
-    if (has_src_disk_slot || item.src_backing_type() == MemoryOperationRequestPB::DISK) {
-        if (item.src_backing_type() != MemoryOperationRequestPB::DISK || !has_src_disk_slot
-            || item.src_disk_slot() < 0 || has_src_mem_block) {
-            RTP_LLM_LOG_WARNING("disk source copy item has invalid source backing fields");
-            return false;
-        }
-        auto disk_pool = diskPoolFor(kind);
-        if (!disk_pool || !disk_pool->validSlot(item.src_disk_slot())) {
-            RTP_LLM_LOG_WARNING("disk source copy item slot is out of range, slot=%d", item.src_disk_slot());
-            return false;
-        }
-    } else if (has_src_mem_block) {
-        if (item.src_backing_type() != MemoryOperationRequestPB::MEMORY
-            || isNullBlockIdx(static_cast<BlockIdxType>(item.src_mem_block()))) {
-            RTP_LLM_LOG_WARNING("memory source copy item has null src_mem_block");
-            return false;
-        }
-    }
-    return true;
+    RTP_LLM_LOG_WARNING("copy item has unknown backing_type=%d", static_cast<int>(item.backing_type()));
+    return false;
 }
 
 bool KVCacheMemoryConnector::copyMemoryItemsGeneric(const MemoryOperationRequestPB&     request,
@@ -1781,31 +1646,13 @@ bool KVCacheMemoryConnector::copyMemoryItemsGeneric(const MemoryOperationRequest
 bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestPB&     request,
                                                    CopyDirection                       direction,
                                                    const std::vector<LayerRegionSlot>& slots) {
-    bool has_disk_item = false;
-    for (int i = 0; i < request.copy_items_size(); ++i) {
-        const auto& item = request.copy_items(i);
-        if (item.backing_type() == MemoryOperationRequestPB::DISK
-            || item.src_backing_type() == MemoryOperationRequestPB::DISK
-            || item.src_disk_slot_presence_case() == MemoryOperationRequestPB::CopyItem::kSrcDiskSlot) {
-            has_disk_item = true;
-            break;
-        }
-    }
-    void* raw_buffer = nullptr;
-    if (has_disk_item) {
-        const size_t stride_bytes = maxDiskSlotStrideBytes();
-        if (stride_bytes == 0 || ::posix_memalign(&raw_buffer, 4096, stride_bytes) != 0 || raw_buffer == nullptr) {
-            RTP_LLM_LOG_WARNING("allocate prefix disk staging buffer failed, bytes=%zu", stride_bytes);
-            return false;
-        }
-    }
-    std::unique_ptr<void, decltype(&std::free)> staging(raw_buffer, &std::free);
-
+    std::vector<torch::Tensor> dst_buffers;
+    std::vector<torch::Tensor> src_buffers;
     for (int i = 0; i < request.copy_items_size(); ++i) {
         const auto& item = request.copy_items(i);
         const bool is_prefix_kind = item.cache_block_kind() == MemoryOperationRequestPB::COMPRESSED_KV
                                     || item.cache_block_kind() == MemoryOperationRequestPB::STATE_SWA_KV;
-        if (!is_prefix_kind) {
+        if (item.backing_type() != MemoryOperationRequestPB::MEMORY || !is_prefix_kind) {
             return false;
         }
         CacheBlockKind kind;
@@ -1817,79 +1664,30 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestP
             return false;
         }
         auto pool = memoryPoolFor(kind);
-        auto disk_pool = diskPoolFor(kind);
-        if (item.gpu_blocks_size() != static_cast<int>(slots.size())) {
+        if (!pool || item.gpu_blocks_size() != static_cast<int>(slots.size())) {
             return false;
         }
-        BlockInfo backing_buffer;
-        if (item.backing_type() == MemoryOperationRequestPB::MEMORY) {
-            if (!pool) {
-                return false;
-            }
-            const auto mem_block = static_cast<BlockIdxType>(item.mem_block());
-            auto       mem_buffers = pool->convertIndexToBuffer(/*layer_id=*/0, mem_block);
-            if (mem_buffers.size() != 1u || mem_buffers[0].addr == nullptr || mem_buffers[0].size_bytes == 0) {
-                return false;
-            }
-            backing_buffer = mem_buffers[0];
-        } else if (item.backing_type() == MemoryOperationRequestPB::DISK) {
-            if (!disk_pool || raw_buffer == nullptr || !disk_pool->validSlot(item.disk_slot())) {
-                return false;
-            }
-            if (direction == CopyDirection::H2D) {
-                if (!disk_pool->read(item.disk_slot(), raw_buffer, disk_pool->slotStrideBytes())) {
-                    return false;
-                }
-            } else {
-                std::memset(raw_buffer, 0, disk_pool->slotStrideBytes());
-            }
-            backing_buffer.is_cuda    = false;
-            backing_buffer.addr       = raw_buffer;
-            backing_buffer.size_bytes = disk_pool->blockSizeBytes();
-        } else {
+        const auto mem_block = static_cast<BlockIdxType>(item.mem_block());
+        auto       mem_buffers = pool->convertIndexToBuffer(/*layer_id=*/0, mem_block);
+        if (mem_buffers.size() != 1u || mem_buffers[0].addr == nullptr || mem_buffers[0].size_bytes == 0) {
             return false;
         }
-
+        const auto& mem_buffer = mem_buffers[0];
         if (direction == CopyDirection::D2H
-            && (item.src_mem_block_presence_case() == MemoryOperationRequestPB::CopyItem::kSrcMemBlock
-                || item.src_disk_slot_presence_case() == MemoryOperationRequestPB::CopyItem::kSrcDiskSlot)) {
-            const bool src_is_disk = item.src_backing_type() == MemoryOperationRequestPB::DISK
-                                     || item.src_disk_slot_presence_case()
-                                            == MemoryOperationRequestPB::CopyItem::kSrcDiskSlot;
-            if (src_is_disk) {
-                if (!disk_pool || raw_buffer == nullptr
-                    || item.src_disk_slot_presence_case() != MemoryOperationRequestPB::CopyItem::kSrcDiskSlot
-                    || !disk_pool->validSlot(item.src_disk_slot())
-                    || disk_pool->blockSizeBytes() > backing_buffer.size_bytes) {
-                    return false;
-                }
-                if (!disk_pool->read(item.src_disk_slot(), raw_buffer, disk_pool->slotStrideBytes())) {
-                    return false;
-                }
-                if (backing_buffer.addr != raw_buffer) {
-                    std::memcpy(backing_buffer.addr, raw_buffer, disk_pool->blockSizeBytes());
-                }
-            } else {
-                if (!pool) {
-                    return false;
-                }
-                const auto src_mem_block = static_cast<BlockIdxType>(item.src_mem_block());
-                if (isNullBlockIdx(src_mem_block)) {
-                    return false;
-                }
-                const auto src_mem_buffers = pool->convertIndexToBuffer(/*layer_id=*/0, src_mem_block);
-                if (src_mem_buffers.size() != 1u || src_mem_buffers[0].addr == nullptr
-                    || src_mem_buffers[0].size_bytes != backing_buffer.size_bytes || src_mem_buffers[0].is_cuda
-                    || backing_buffer.is_cuda) {
-                    return false;
-                }
-                std::memcpy(backing_buffer.addr, src_mem_buffers[0].addr, backing_buffer.size_bytes);
+            && item.src_mem_block_presence_case() == MemoryOperationRequestPB::CopyItem::kSrcMemBlock) {
+            const auto src_mem_block = static_cast<BlockIdxType>(item.src_mem_block());
+            if (isNullBlockIdx(src_mem_block)) {
+                return false;
             }
+            const auto src_mem_buffers = pool->convertIndexToBuffer(/*layer_id=*/0, src_mem_block);
+            if (src_mem_buffers.size() != 1u || src_mem_buffers[0].addr == nullptr
+                || src_mem_buffers[0].size_bytes != mem_buffer.size_bytes || src_mem_buffers[0].is_cuda
+                || mem_buffer.is_cuda) {
+                return false;
+            }
+            std::memcpy(mem_buffer.addr, src_mem_buffers[0].addr, mem_buffer.size_bytes);
         }
-
-        std::vector<torch::Tensor> dst_buffers;
-        std::vector<torch::Tensor> src_buffers;
-        size_t                     byte_off = 0;
+        size_t      byte_off   = 0;
         for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
             const auto& slot = slots[slot_idx];
             if (kindForSlot(slot) != kind) {
@@ -1904,25 +1702,21 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestP
             size_t     within_layer_off = 0;
             for (const auto& gpu_buffer : gpu_buffers) {
                 if (within_layer_off + gpu_buffer.size_bytes > slot.stride_bytes
-                    || byte_off + within_layer_off + gpu_buffer.size_bytes > backing_buffer.size_bytes) {
+                    || byte_off + within_layer_off + gpu_buffer.size_bytes > mem_buffer.size_bytes) {
                     return false;
                 }
                 if (!appendCopyBytesToBuffers(
-                        backing_buffer, gpu_buffer, byte_off + within_layer_off, direction, dst_buffers, src_buffers)) {
+                        mem_buffer, gpu_buffer, byte_off + within_layer_off, direction, dst_buffers, src_buffers)) {
                     return false;
                 }
                 within_layer_off += gpu_buffer.size_bytes;
             }
             byte_off += slot.stride_bytes;
         }
-        if (!dst_buffers.empty()) {
-            MultiCopyParams mc{dst_buffers, src_buffers};
-            execNoBlockCopy(mc);
-        }
-        if (direction == CopyDirection::D2H && item.backing_type() == MemoryOperationRequestPB::DISK
-            && !disk_pool->write(item.disk_slot(), raw_buffer, disk_pool->slotStrideBytes())) {
-            return false;
-        }
+    }
+    if (!dst_buffers.empty()) {
+        MultiCopyParams mc{dst_buffers, src_buffers};
+        execNoBlockCopy(mc);
     }
     return true;
 }
@@ -2539,46 +2333,16 @@ bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info)
         copy_info.disk_slot    = -1;
         return true;
     }
-
-    int32_t disk_slot = -1;
-    if (diskCacheEnabled() && tryMallocDiskSlot(copy_info.kind, disk_slot)) {
-        copy_info.backing_type = CacheBackingType::DISK;
-        copy_info.mem_block    = NULL_BLOCK_IDX;
-        copy_info.disk_slot    = disk_slot;
-        return true;
-    }
-
     while (true) {
-        std::vector<PrefixTreeMemoryBlockCache::CacheItem> evicted_items;
-        if (kv_cache_config_.enable_dsv4_state_block_independent_eviction
-            && copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
-            evicted_items = prefix_block_cache_->popOldestStateOrChainEvictable(CacheBackingType::MEMORY);
-            if (evicted_items.empty() && diskCacheEnabled()) {
-                evicted_items = prefix_block_cache_->popOldestStateOrChainEvictable(CacheBackingType::DISK);
-            }
-        } else {
-            auto evicted = prefix_block_cache_->popOldestEvictable(copy_info.kind);
-            if (evicted.has_value()) {
-                evicted_items.push_back(*evicted);
-            }
-        }
-        if (evicted_items.empty()) {
+        auto evicted = prefix_block_cache_->popOldestEvictable(copy_info.kind);
+        if (!evicted.has_value()) {
             return false;
         }
-        for (const auto& evicted : evicted_items) {
-            reportEvictionLifetime(evicted.kind, evicted.backing_type, evicted.created_time_us);
-            releasePrefixCacheBacking(evicted);
-        }
+        releasePrefixCacheBacking(*evicted);
         if (tryMallocMemoryBlock(copy_info.kind, mem_block)) {
             copy_info.backing_type = CacheBackingType::MEMORY;
             copy_info.mem_block    = mem_block;
             copy_info.disk_slot    = -1;
-            return true;
-        }
-        if (diskCacheEnabled() && tryMallocDiskSlot(copy_info.kind, disk_slot)) {
-            copy_info.backing_type = CacheBackingType::DISK;
-            copy_info.mem_block    = NULL_BLOCK_IDX;
-            copy_info.disk_slot    = disk_slot;
             return true;
         }
     }
@@ -2608,7 +2372,6 @@ bool KVCacheMemoryConnector::allocateOneBacking(CopyInfoPerKey& copy_info) {
             return false;
         }
         const auto target_backing = evicted->backing_type;
-        reportEvictionLifetime(kind, evicted->backing_type, evicted->created_time_us);
         releaseCacheBacking(*evicted);
         if (target_backing == CacheBackingType::MEMORY) {
             if (tryMallocMemoryBlock(kind, mem_block)) {
@@ -2673,16 +2436,12 @@ void KVCacheMemoryConnector::releaseRequestBacking(const CopyInfoPerKey& copy_in
 }
 
 void KVCacheMemoryConnector::releasePrefixRequestBacking(const CopyInfoPerKey& copy_info) {
-    if (copy_info.backing_type == CacheBackingType::MEMORY) {
-        auto pool = memoryPoolFor(copy_info.kind);
-        if (pool) {
-            freeBlocksFromPool(pool, {copy_info.mem_block}, /*cache_free=*/false);
-        }
-    } else if (copy_info.backing_type == CacheBackingType::DISK) {
-        auto pool = diskPoolFor(copy_info.kind);
-        if (pool) {
-            pool->requestFree(copy_info.disk_slot);
-        }
+    if (copy_info.backing_type != CacheBackingType::MEMORY) {
+        return;
+    }
+    auto pool = memoryPoolFor(copy_info.kind);
+    if (pool) {
+        freeBlocksFromPool(pool, {copy_info.mem_block}, /*cache_free=*/false);
     }
 }
 
@@ -2701,16 +2460,12 @@ void KVCacheMemoryConnector::releaseCacheBacking(const MemoryDiskBlockCache::Cac
 }
 
 void KVCacheMemoryConnector::releasePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item) {
-    if (item.backing_type == CacheBackingType::MEMORY) {
-        auto pool = memoryPoolFor(item.kind);
-        if (pool) {
-            freeBlocksFromPool(pool, {item.block_index}, /*cache_free=*/true);
-        }
-    } else if (item.backing_type == CacheBackingType::DISK) {
-        auto pool = diskPoolFor(item.kind);
-        if (pool) {
-            pool->blockCacheFree(item.disk_slot);
-        }
+    if (item.backing_type != CacheBackingType::MEMORY) {
+        return;
+    }
+    auto pool = memoryPoolFor(item.kind);
+    if (pool) {
+        freeBlocksFromPool(pool, {item.block_index}, /*cache_free=*/true);
     }
 }
 
@@ -2729,16 +2484,12 @@ void KVCacheMemoryConnector::referenceCacheBacking(const MemoryDiskBlockCache::C
 }
 
 void KVCacheMemoryConnector::referencePrefixCacheBacking(const PrefixTreeMemoryBlockCache::CacheItem& item) {
-    if (item.backing_type == CacheBackingType::MEMORY) {
-        auto pool = memoryPoolFor(item.kind);
-        if (pool) {
-            referenceBlocksInPool(pool, {item.block_index}, /*cache_ref=*/true);
-        }
-    } else if (item.backing_type == CacheBackingType::DISK) {
-        auto pool = diskPoolFor(item.kind);
-        if (pool) {
-            pool->blockCacheReference(item.disk_slot);
-        }
+    if (item.backing_type != CacheBackingType::MEMORY) {
+        return;
+    }
+    auto pool = memoryPoolFor(item.kind);
+    if (pool) {
+        referenceBlocksInPool(pool, {item.block_index}, /*cache_ref=*/true);
     }
 }
 
@@ -2756,12 +2507,6 @@ std::shared_ptr<BlockPool> KVCacheMemoryConnector::memoryPoolFor(CacheBlockKind 
 }
 
 DiskBlockPoolPtr KVCacheMemoryConnector::diskPoolFor(CacheBlockKind kind) const {
-    if (kind == CacheBlockKind::COMPRESSED_KV) {
-        return complete_disk_pool_;
-    }
-    if (kind == CacheBlockKind::STATE_SWA_KV) {
-        return incomplete_disk_pool_;
-    }
     if (kind == CacheBlockKind::COMPLETE) {
         return complete_disk_pool_;
     }
@@ -2891,7 +2636,6 @@ bool KVCacheMemoryConnector::preparePrefixMergeSources(std::vector<CopyInfoPerKe
         for (auto* copy_info : prepared) {
             releasePrefixMergeSource(*copy_info);
             copy_info->src_mem_block  = NULL_BLOCK_IDX;
-            copy_info->src_disk_slot  = -1;
             copy_info->src_generation = 0;
         }
     };
@@ -2919,6 +2663,21 @@ bool KVCacheMemoryConnector::preparePrefixMergeSources(std::vector<CopyInfoPerKe
             release_existing();
             continue;
         }
+        if (existing.backing_type != CacheBackingType::MEMORY) {
+            RTP_LLM_LOG_WARNING("prefix memory merge failed, existing backing is not memory, key=%ld kind=%d",
+                                copy_info.cache_key,
+                                static_cast<int>(copy_info.kind));
+            release_existing();
+            rollback();
+            return false;
+        }
+        auto pool = memoryPoolFor(copy_info.kind);
+        if (!pool) {
+            release_existing();
+            rollback();
+            return false;
+        }
+
         auto union_mask = copy_info.slot_valid_mask;
         if (union_mask.size() < existing.slot_valid_mask.size()) {
             union_mask.resize(existing.slot_valid_mask.size(), 0);
@@ -2929,55 +2688,28 @@ bool KVCacheMemoryConnector::preparePrefixMergeSources(std::vector<CopyInfoPerKe
             }
         }
 
-        if (existing.backing_type == CacheBackingType::MEMORY) {
-            auto pool = memoryPoolFor(copy_info.kind);
-            if (!pool) {
-                release_existing();
-                rollback();
-                return false;
-            }
-            referenceBlocksInPool(pool, {existing.block_index}, /*cache_ref=*/false);
-            copy_info.src_mem_block = existing.block_index;
-            copy_info.src_disk_slot = -1;
-        } else {
-            auto pool = diskPoolFor(copy_info.kind);
-            if (!pool || !pool->validSlot(existing.disk_slot)) {
-                release_existing();
-                rollback();
-                return false;
-            }
-            pool->requestReference(existing.disk_slot);
-            copy_info.src_mem_block = NULL_BLOCK_IDX;
-            copy_info.src_disk_slot = existing.disk_slot;
-        }
-        copy_info.src_backing_type = existing.backing_type;
-        copy_info.src_generation   = existing.generation;
-        copy_info.slot_valid_mask  = std::move(union_mask);
+        referenceBlocksInPool(pool, {existing.block_index}, /*cache_ref=*/false);
+        copy_info.src_mem_block   = existing.block_index;
+        copy_info.src_generation  = existing.generation;
+        copy_info.slot_valid_mask = std::move(union_mask);
         prepared.push_back(&copy_info);
     }
     return true;
 }
 
 void KVCacheMemoryConnector::releasePrefixMergeSource(const CopyInfoPerKey& copy_info) {
-    if (isNullBlockIdx(copy_info.src_mem_block) && copy_info.src_disk_slot < 0) {
+    if (isNullBlockIdx(copy_info.src_mem_block)) {
         return;
     }
-    if (copy_info.src_backing_type == CacheBackingType::MEMORY) {
-        auto pool = memoryPoolFor(copy_info.kind);
-        if (pool) {
-            freeBlocksFromPool(pool, {copy_info.src_mem_block}, /*cache_free=*/false);
-        }
-    } else {
-        auto pool = diskPoolFor(copy_info.kind);
-        if (pool) {
-            pool->requestFree(copy_info.src_disk_slot);
-        }
+    auto pool = memoryPoolFor(copy_info.kind);
+    if (pool) {
+        freeBlocksFromPool(pool, {copy_info.src_mem_block}, /*cache_free=*/false);
     }
     auto retired_item = prefix_block_cache_->releaseInFlight(copy_info.cache_key,
                                                              copy_info.kind,
-                                                             copy_info.src_backing_type,
+                                                             CacheBackingType::MEMORY,
                                                              copy_info.src_mem_block,
-                                                             copy_info.src_disk_slot,
+                                                             /*disk_slot=*/-1,
                                                              copy_info.src_generation);
     if (retired_item.has_value()) {
         releasePrefixCacheBacking(*retired_item);
@@ -2987,70 +2719,21 @@ void KVCacheMemoryConnector::releasePrefixMergeSource(const CopyInfoPerKey& copy
 bool KVCacheMemoryConnector::mergePrefixExistingSlots(PrefixTreeMemoryBlockCache::CacheItem&       item,
                                                       const PrefixTreeMemoryBlockCache::MatchResult& existing,
                                                       const std::vector<LayerRegionSlot>&           slots) {
-    auto memory_pool = memoryPoolFor(item.kind);
-    auto disk_pool   = diskPoolFor(item.kind);
-    if ((item.backing_type == CacheBackingType::MEMORY && !memory_pool)
-        || (existing.backing_type == CacheBackingType::MEMORY && !memory_pool)
-        || (item.backing_type == CacheBackingType::DISK && !disk_pool)
-        || (existing.backing_type == CacheBackingType::DISK && !disk_pool)) {
+    if (item.backing_type != CacheBackingType::MEMORY || existing.backing_type != CacheBackingType::MEMORY) {
+        return false;
+    }
+    auto pool = memoryPoolFor(item.kind);
+    if (!pool) {
+        return false;
+    }
+    auto dst_buffers = pool->convertIndexToBuffer(/*layer_id=*/0, item.block_index);
+    auto src_buffers = pool->convertIndexToBuffer(/*layer_id=*/0, existing.block_index);
+    if (dst_buffers.size() != 1u || src_buffers.size() != 1u || dst_buffers[0].addr == nullptr
+        || src_buffers[0].addr == nullptr || dst_buffers[0].size_bytes != src_buffers[0].size_bytes
+        || dst_buffers[0].is_cuda || src_buffers[0].is_cuda) {
         return false;
     }
 
-    auto make_staging = [](size_t bytes) -> std::unique_ptr<void, decltype(&std::free)> {
-        void* raw = nullptr;
-        if (bytes == 0 || ::posix_memalign(&raw, 4096, bytes) != 0 || raw == nullptr) {
-            return {nullptr, &std::free};
-        }
-        return {raw, &std::free};
-    };
-
-    std::unique_ptr<void, decltype(&std::free)> dst_staging(nullptr, &std::free);
-    std::unique_ptr<void, decltype(&std::free)> src_staging(nullptr, &std::free);
-    BlockInfo dst_buffer;
-    BlockInfo src_buffer;
-
-    if (item.backing_type == CacheBackingType::MEMORY) {
-        auto buffers = memory_pool->convertIndexToBuffer(/*layer_id=*/0, item.block_index);
-        if (buffers.size() != 1u || buffers[0].addr == nullptr || buffers[0].is_cuda) {
-            return false;
-        }
-        dst_buffer = buffers[0];
-    } else {
-        if (!disk_pool->validSlot(item.disk_slot)) {
-            return false;
-        }
-        dst_staging = make_staging(disk_pool->slotStrideBytes());
-        if (!dst_staging || !disk_pool->read(item.disk_slot, dst_staging.get(), disk_pool->slotStrideBytes())) {
-            return false;
-        }
-        dst_buffer.is_cuda    = false;
-        dst_buffer.addr       = dst_staging.get();
-        dst_buffer.size_bytes = disk_pool->blockSizeBytes();
-    }
-
-    if (existing.backing_type == CacheBackingType::MEMORY) {
-        auto buffers = memory_pool->convertIndexToBuffer(/*layer_id=*/0, existing.block_index);
-        if (buffers.size() != 1u || buffers[0].addr == nullptr || buffers[0].is_cuda) {
-            return false;
-        }
-        src_buffer = buffers[0];
-    } else {
-        if (!disk_pool->validSlot(existing.disk_slot)) {
-            return false;
-        }
-        src_staging = make_staging(disk_pool->slotStrideBytes());
-        if (!src_staging || !disk_pool->read(existing.disk_slot, src_staging.get(), disk_pool->slotStrideBytes())) {
-            return false;
-        }
-        src_buffer.is_cuda    = false;
-        src_buffer.addr       = src_staging.get();
-        src_buffer.size_bytes = disk_pool->blockSizeBytes();
-    }
-
-    if (dst_buffer.addr == nullptr || src_buffer.addr == nullptr || dst_buffer.size_bytes != src_buffer.size_bytes
-        || dst_buffer.is_cuda || src_buffer.is_cuda) {
-        return false;
-    }
     if (item.slot_valid_mask.size() < existing.slot_valid_mask.size()) {
         item.slot_valid_mask.resize(existing.slot_valid_mask.size(), 0);
     }
@@ -3065,20 +2748,15 @@ bool KVCacheMemoryConnector::mergePrefixExistingSlots(PrefixTreeMemoryBlockCache
             slot_idx < existing.slot_valid_mask.size() && existing.slot_valid_mask[slot_idx] != 0;
         const bool item_valid = slot_idx < item.slot_valid_mask.size() && item.slot_valid_mask[slot_idx] != 0;
         if (existing_valid && !item_valid) {
-            if (byte_off + slot.stride_bytes > dst_buffer.size_bytes
-                || byte_off + slot.stride_bytes > src_buffer.size_bytes) {
+            if (byte_off + slot.stride_bytes > dst_buffers[0].size_bytes) {
                 return false;
             }
-            std::memcpy(static_cast<char*>(dst_buffer.addr) + byte_off,
-                        static_cast<const char*>(src_buffer.addr) + byte_off,
+            std::memcpy(static_cast<char*>(dst_buffers[0].addr) + byte_off,
+                        static_cast<const char*>(src_buffers[0].addr) + byte_off,
                         slot.stride_bytes);
             item.slot_valid_mask[slot_idx] = 1;
         }
         byte_off += slot.stride_bytes;
-    }
-    if (item.backing_type == CacheBackingType::DISK
-        && !disk_pool->write(item.disk_slot, dst_staging.get(), disk_pool->slotStrideBytes())) {
-        return false;
     }
     return true;
 }
@@ -3176,8 +2854,7 @@ bool KVCacheMemoryConnector::putToCache(const MemoryDiskBlockCache::CacheItem& i
 int64_t KVCacheMemoryConnector::copyPlanTimeoutMs(const std::shared_ptr<CopyPlan>& copy_plan) const {
     bool has_disk_item = false;
     for (const auto& copy_info : copy_plan->copy_infos) {
-        if (copy_info.backing_type == CacheBackingType::DISK || copy_info.src_backing_type == CacheBackingType::DISK
-            || copy_info.src_disk_slot >= 0) {
+        if (copy_info.backing_type == CacheBackingType::DISK) {
             has_disk_item = true;
             break;
         }
@@ -3317,20 +2994,6 @@ void KVCacheMemoryConnector::reportDiskCopyMetrics(bool success, int64_t latency
     metrics_reporter_->report<RtpLLMDiskCacheMetrics, RtpLLMDiskCacheCopyMetricsCollector>(nullptr, &collector);
 }
 
-void KVCacheMemoryConnector::reportEvictionLifetime(CacheBlockKind kind,
-                                                    CacheBackingType backing_type,
-                                                    int64_t          created_time_us) {
-    if (!metrics_reporter_ || created_time_us <= 0) {
-        return;
-    }
-    RtpLLMCacheEvictionMetricsCollector collector;
-    collector.lifetime_ms = std::max<int64_t>(0, (currentTimeUs() - created_time_us) / 1000);
-    kmonitor::MetricsTags tags("scope", "memory");
-    tags.AddTag("kind", cacheBlockKindName(kind));
-    tags.AddTag("backing", backing_type == CacheBackingType::MEMORY ? "memory" : "disk");
-    metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags, &collector);
-}
-
 void KVCacheMemoryConnector::reportMetricsLoop() {
     size_t                                last_disk_read_bytes   = 0;
     size_t                                last_disk_write_bytes  = 0;
@@ -3350,29 +3013,8 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
                 collector.total_block_num     = total;
                 collector.allocated_block_num = total - free;
                 collector.available_block_num = avail;
-                collector.used_ratio =
-                    total == 0 ? 0.0f : static_cast<float>(100.0 * (total - avail) / static_cast<double>(total));
                 metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheStatusMetricsCollector>(
                     nullptr, &collector);
-                auto report_prefix_pool = [this](const char* name, const std::shared_ptr<BlockPool>& pool) {
-                    const auto pool_total = pool->totalBlocksNum();
-                    const auto pool_free  = pool->freeBlocksNum();
-                    const auto pool_avail = pool->availableBlocksNum();
-                    RtpLLMMemoryCacheStatusMetricsCollector pool_collector;
-                    pool_collector.total_block_num     = pool_total;
-                    pool_collector.allocated_block_num = pool_total - pool_free;
-                    pool_collector.available_block_num = pool_avail;
-                    pool_collector.used_ratio =
-                        pool_total == 0 ?
-                            0.0f :
-                            static_cast<float>(100.0 * (pool_total - pool_avail) / static_cast<double>(pool_total));
-                    kmonitor::MetricsTags tags("pool", name);
-                    tags.AddTag("kind", name);
-                    metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheStatusMetricsCollector>(
-                        &tags, &pool_collector);
-                };
-                report_prefix_pool(cacheBlockKindName(CacheBlockKind::COMPRESSED_KV), compressed_pool_);
-                report_prefix_pool(cacheBlockKindName(CacheBlockKind::STATE_SWA_KV), state_swa_pool_);
             } else if (isDualPool()) {
                 if (!complete_pool_) {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -3389,8 +3031,6 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
                 collector.total_block_num     = total;
                 collector.allocated_block_num = total - free;
                 collector.available_block_num = avail;
-                collector.used_ratio =
-                    total == 0 ? 0.0f : static_cast<float>(100.0 * (total - avail) / static_cast<double>(total));
                 metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheStatusMetricsCollector>(
                     nullptr, &collector);
             } else {
@@ -3406,10 +3046,6 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
                 collector.total_block_num     = total_blocks;
                 collector.allocated_block_num = total_blocks - free_blocks;
                 collector.available_block_num = available_blocks;
-                collector.used_ratio          = total_blocks == 0 ?
-                                                    0.0f :
-                                                    static_cast<float>(100.0 * (total_blocks - available_blocks)
-                                                                       / static_cast<double>(total_blocks));
                 metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheStatusMetricsCollector>(
                     nullptr, &collector);
             }
@@ -3436,11 +3072,6 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
                 disk_collector.allocated_block_num = total_disk_slots - free_disk_slots;
                 disk_collector.available_block_num = available_disk_slots;
                 disk_collector.in_flight_block_num = static_cast<int64_t>(total_disk_slots - available_disk_slots);
-                disk_collector.used_ratio =
-                    total_disk_slots == 0 ?
-                        0.0f :
-                        static_cast<float>(100.0 * (total_disk_slots - available_disk_slots)
-                                           / static_cast<double>(total_disk_slots));
                 disk_collector.read_bytes          = read_bytes;
                 disk_collector.write_bytes         = write_bytes;
                 const auto read_delta =
@@ -3455,31 +3086,6 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
 
                 metrics_reporter_->report<RtpLLMDiskCacheMetrics, RtpLLMDiskCacheStatusMetricsCollector>(
                     nullptr, &disk_collector);
-                if (usePrefixTreeMemoryCache() && incomplete_disk_pool_) {
-                    auto report_prefix_disk_pool = [this](const char* name, const DiskBlockPoolPtr& pool) {
-                        const auto pool_total = pool->totalSlots();
-                        const auto pool_free  = pool->freeSlots();
-                        const auto pool_avail = pool->availableSlots();
-                        RtpLLMDiskCacheStatusMetricsCollector pool_collector;
-                        pool_collector.total_block_num     = pool_total;
-                        pool_collector.allocated_block_num = pool_total - pool_free;
-                        pool_collector.available_block_num = pool_avail;
-                        pool_collector.in_flight_block_num = static_cast<int64_t>(pool_total - pool_avail);
-                        pool_collector.read_bytes          = pool->readBytes();
-                        pool_collector.write_bytes         = pool->writeBytes();
-                        pool_collector.used_ratio =
-                            pool_total == 0 ?
-                                0.0f :
-                                static_cast<float>(100.0 * (pool_total - pool_avail)
-                                                   / static_cast<double>(pool_total));
-                        kmonitor::MetricsTags tags("pool", name);
-                        tags.AddTag("kind", name);
-                        metrics_reporter_->report<RtpLLMDiskCacheMetrics, RtpLLMDiskCacheStatusMetricsCollector>(
-                            &tags, &pool_collector);
-                    };
-                    report_prefix_disk_pool(cacheBlockKindName(CacheBlockKind::COMPRESSED_KV), complete_disk_pool_);
-                    report_prefix_disk_pool(cacheBlockKindName(CacheBlockKind::STATE_SWA_KV), incomplete_disk_pool_);
-                }
             }
         }
         std::this_thread::sleep_for(std::chrono::seconds(1));
