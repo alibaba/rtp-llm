@@ -93,6 +93,9 @@ public:
 
     ::grpc::Status
     ExecuteFunction(::grpc::ServerContext* context, const ::FunctionRequestPB* request, ::FunctionResponsePB* response);
+    ::grpc::Status CpuTpBroadcast(::grpc::ServerContext*           context,
+                                  const ::CpuTpBroadcastRequestPB* request,
+                                  ::CpuTpBroadcastResponsePB*      response);
 
 public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
