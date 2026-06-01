@@ -18,6 +18,10 @@ class RequestTest {
                   "block_cache_keys": [1, 2, 3],
                   "cache_key_block_size": 1024,
                   "seq_len": 8192,
+                  "max_new_tokens": 64,
+                  "num_beams": 1,
+                  "force_disable_sp_run": false,
+                  "generate_input_pb_b64": "AQID",
                   "debug": false,
                   "request_priority": 100,
                   "generate_timeout": 5000,
@@ -31,6 +35,10 @@ class RequestTest {
         assertEquals(1024L, request.getCacheKeyBlockSize());
         assertEquals(3, request.getBlockCacheKeys().size());
         assertEquals(5000L, request.getGenerateTimeout());
+        assertEquals(64, request.getMaxNewTokens());
+        assertEquals(1, request.getNumBeams());
+        assertEquals("engine_service", request.getModel());
+        assertEquals("AQID", request.getGenerateInputPbB64());
     }
 
     @Test

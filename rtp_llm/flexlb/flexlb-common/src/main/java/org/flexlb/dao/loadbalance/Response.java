@@ -28,6 +28,9 @@ public class Response {
     @JsonProperty("queue_length")
     private Integer queueLength;
 
+    @JsonProperty("enqueued_by_master")
+    private boolean enqueuedByMaster = false;
+
     public static Response error(StrategyErrorType strategyErrorType) {
         Response result = new Response();
         result.setSuccess(false);

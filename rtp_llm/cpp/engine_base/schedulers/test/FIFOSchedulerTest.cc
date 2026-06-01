@@ -898,6 +898,50 @@ TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
     ASSERT_EQ(scheduler.runningStreamsSize(), 3);
 }
 
+TEST_F(FIFOSchedulerTest, testForceBatchCompleteGroupSkipsTokenCapAfterTimeout) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 2;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    int64_t group_id   = 101;
+    int     group_size = 3;
+    int     timeout_ms = 10;
+    int64_t past_time  = autil::TimeUtility::currentTimeInMicroSeconds() - (timeout_ms + 100) * 1000;
+
+    for (int i = 0; i < group_size; ++i) {
+        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+        query->input_ids                            = torch::tensor({1}, torch::kInt32);
+        query->generate_config                      = make_shared<GenerateConfig>();
+        query->generate_config->force_batch         = true;
+        query->generate_config->batch_group_timeout = timeout_ms;
+        query->batch_group_id                       = group_id;
+        query->batch_group_size                     = group_size;
+        query->begin_time_us                        = past_time;
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
+
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.value().size(), 3);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 3);
+}
+
 TEST_F(FIFOSchedulerTest, testForceBatchTimeout) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
@@ -954,6 +998,50 @@ TEST_F(FIFOSchedulerTest, testForceBatchTimeout) {
     ASSERT_TRUE(result1.ok());
     ASSERT_EQ(result1.value().size(), 2);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerTest, testIncompleteForceBatchTimeoutUsesNormalTokenCap) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 2;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    int64_t group_id   = 201;
+    int     group_size = 3;
+    int     timeout_ms = 10;
+    int64_t past_time  = autil::TimeUtility::currentTimeInMicroSeconds() - (timeout_ms + 100) * 1000;
+
+    for (int i = 0; i < 2; ++i) {
+        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
+        query->input_ids                            = torch::tensor({1}, torch::kInt32);
+        query->generate_config                      = make_shared<GenerateConfig>();
+        query->generate_config->force_batch         = true;
+        query->generate_config->batch_group_timeout = timeout_ms;
+        query->batch_group_id                       = group_id;
+        query->batch_group_size                     = group_size;
+        query->begin_time_us                        = past_time;
+        shared_ptr<GenerateStream> stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
+
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.value().size(), 1);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
 }
 
 TEST_F(FIFOSchedulerTest, testForceBatchIsolation) {

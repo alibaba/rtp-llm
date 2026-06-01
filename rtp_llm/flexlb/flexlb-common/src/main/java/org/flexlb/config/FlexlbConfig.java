@@ -176,6 +176,35 @@ public class FlexlbConfig {
      */
     private volatile TrafficPolicyConfig trafficPolicy = new TrafficPolicyConfig();
 
+    // ========== FlexLB Batch Configuration ==========
+
+    /**
+     * Enables master-side request coalescing. Requests that carry a full
+     * generate_input_pb_b64 payload can be routed once, grouped by Prefill worker,
+     * and submitted through BatchEnqueue.
+     */
+    private boolean flexlbBatchEnabled = true;
+
+    /**
+     * Maximum real requests in one BatchEnqueue request.
+     */
+    private int flexlbBatchSizeMax = 8;
+
+    /**
+     * Maximum time in milliseconds to wait for more requests before flushing a batch.
+     */
+    private long flexlbBatchWindowMs = 30;
+
+    /**
+     * Deadline in milliseconds for BatchEnqueue.
+     */
+    private long flexlbBatchEnqueueDeadlineMs = 5000;
+
+    /**
+     * How long completed enqueued entries remain cancellable through the master endpoint.
+     */
+    private long flexlbBatchInflightTtlMs = 3600L * 1000L;
+
     /**
      * Get load balancing strategy for a role type
      * This method handles the logic of selecting the appropriate strategy based on role type and configuration

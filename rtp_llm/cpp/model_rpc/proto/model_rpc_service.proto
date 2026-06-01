@@ -638,6 +638,29 @@ message CpuTpBroadcastResponsePB {
     string error_message = 2;
 }
 
+message BatchEnqueueRequestPB {
+    repeated GenerateInputPB inputs = 1;
+    int64 batch_id = 2;
+}
+
+message BatchEnqueueAckPB {
+    int64 request_id = 1;
+    ErrorDetailsPB error_info = 2;
+}
+
+message BatchEnqueueResponsePB {
+    repeated BatchEnqueueAckPB acks = 1;
+    int64 batch_id = 2;
+}
+
+message FetchRequestPB {
+    int64 request_id = 1;
+}
+
+message CancelRequestPB {
+    int64 request_id = 1;
+}
+
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
@@ -664,6 +687,9 @@ service RpcService {
     rpc CpuTpBroadcast(CpuTpBroadcastRequestPB) returns (CpuTpBroadcastResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
+    rpc BatchEnqueue(BatchEnqueueRequestPB) returns (BatchEnqueueResponsePB);
+    rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
+    rpc Cancel(CancelRequestPB) returns (EmptyPB);
 }
 
 service MultimodalRpcService {
