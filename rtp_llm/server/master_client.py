@@ -1,5 +1,6 @@
 """FlexLB schedule client: request role addrs from master/slave and parse response."""
 
+import base64
 import json
 import logging
 import time
@@ -42,6 +43,7 @@ class FlexlbResponse:
     error_code: Optional[int] = None
     error_message: Optional[str] = None
     result: Optional[Dict[str, Any]] = None  # internal: raw JSON from scheduler
+    enqueued_by_master: bool = False
 
     @property
     def is_ok(self) -> bool:
@@ -56,10 +58,13 @@ class FlexlbResponse:
             error_code=None,
             error_message=None,
             result=result,
+            enqueued_by_master=False,
         )
 
     @classmethod
-    def ok(cls, role_addrs: List[RoleAddr]) -> "FlexlbResponse":
+    def ok(
+        cls, role_addrs: List[RoleAddr], enqueued_by_master: bool = False
+    ) -> "FlexlbResponse":
         """Business success: parsed role addrs."""
         return cls(
             role_addrs=role_addrs,
@@ -67,6 +72,7 @@ class FlexlbResponse:
             error_code=None,
             error_message=None,
             result=None,
+            enqueued_by_master=enqueued_by_master,
         )
 
     @classmethod
@@ -82,6 +88,7 @@ class FlexlbResponse:
             error_code=error_code,
             error_message=error_message,
             result=None,
+            enqueued_by_master=False,
         )
 
     @classmethod
@@ -93,6 +100,7 @@ class FlexlbResponse:
             error_code=None,
             error_message=None,
             result=None,
+            enqueued_by_master=False,
         )
 
 
@@ -230,6 +238,7 @@ class MasterClient:
         block_cache_keys: list[int],
         input: GenerateInput,
         request_id: int,
+        input_pb_bytes: Optional[bytes] = None,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
@@ -259,6 +268,7 @@ class MasterClient:
         )
         start = time.time()
 
+        gc = input.generate_config
         payload: Dict[str, Any] = {
             "model": "engine_service",
             "block_cache_keys": block_cache_keys,
@@ -268,7 +278,14 @@ class MasterClient:
             "generate_timeout": ttft_timeout_ms,
             "request_id": request_id,
             "request_time_ms": int(start * 1000),
+            "max_new_tokens": gc.max_new_tokens,
+            "num_beams": gc.num_beams,
+            "force_disable_sp_run": gc.force_disable_sp_run,
         }
+        if input_pb_bytes is not None:
+            payload["generate_input_pb_b64"] = base64.b64encode(
+                input_pb_bytes
+            ).decode("ascii")
 
         request_headers = getattr(input, "headers", None)
         resp = await self._send_schedule_request(
@@ -292,6 +309,7 @@ class MasterClient:
                 error_code=resp.error_code,
                 error_message=resp.error_message,
                 result=None,
+                enqueued_by_master=False,
             )
 
         if resp.result.get("code", SUCCESS_CODE) != SUCCESS_CODE:
@@ -323,4 +341,6 @@ class MasterClient:
             )
             for s in schedule_meta.server_status
         ]
-        return FlexlbResponse.ok(role_addrs)
+        return FlexlbResponse.ok(
+            role_addrs, enqueued_by_master=schedule_meta.enqueued_by_master
+        )
