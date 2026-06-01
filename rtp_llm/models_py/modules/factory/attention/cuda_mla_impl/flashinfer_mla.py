@@ -910,7 +910,7 @@ class MlaFlashInferDecodeOp(object):
         max_q_len = self._cached_max_q_len
         q_lens_d = self._cached_q_lens_d
 
-        kvlen_d = fmha_params.kvlen_d[:B].to(dtype=torch.int32)
+        kvlen_d = fmha_params.kvlen_d[:B]
         self._fp8_prefill_topk_length[:B].copy_(kvlen_d)
 
         page_indice_d = fmha_params.page_indice_d
@@ -924,20 +924,39 @@ class MlaFlashInferDecodeOp(object):
             max_blocks * self.token_per_block,
         )
 
-        pos = torch.arange(topk_cap, device=device, dtype=torch.long)
-        block_ids = (pos // self.token_per_block).clamp(max=max_blocks - 1)
-        offsets = (pos % self.token_per_block).to(torch.int32)
+        # Cache static tensors to avoid per-call CUDA allocations that may sync.
+        cache_key = (topk_cap, max_blocks, B, device)
+        if (
+            not hasattr(self, "_replay_cache_key")
+            or self._replay_cache_key != cache_key
+        ):
+            self._replay_pos = torch.arange(topk_cap, device=device, dtype=torch.long)
+            self._replay_block_ids = (self._replay_pos // self.token_per_block).clamp(
+                max=max_blocks - 1
+            )
+            self._replay_offsets = (self._replay_pos % self.token_per_block).to(
+                torch.int32
+            )
+            self._replay_block_ids_2d = self._replay_block_ids.unsqueeze(0).expand(
+                B, -1
+            )
+            self._replay_j_range = torch.arange(max_q_len, device=device).view(
+                1, max_q_len, 1
+            )
+            self._replay_pos_3d = self._replay_pos.view(1, 1, topk_cap)
+            self._replay_cache_key = cache_key
 
-        block_ids_2d = block_ids.unsqueeze(0).expand(B, -1)
-        phys_blocks = torch.gather(block_table.to(torch.long), 1, block_ids_2d)
-        dense = (phys_blocks * self.token_per_block + offsets.unsqueeze(0)).to(
-            torch.int32
+        phys_blocks = torch.gather(
+            block_table.to(torch.long), 1, self._replay_block_ids_2d
         )
+        dense = (
+            phys_blocks * self.token_per_block + self._replay_offsets.unsqueeze(0)
+        ).to(torch.int32)
 
         kvlen_3d = kvlen_d.view(B, 1, 1).long()
         q_lens_3d = q_lens_d.view(B, 1, 1).long()
-        j_range = torch.arange(max_q_len, device=device).view(1, max_q_len, 1)
-        pos_3d = pos.view(1, 1, topk_cap)
+        j_range = self._replay_j_range
+        pos_3d = self._replay_pos_3d
 
         causal_limit = torch.minimum(kvlen_3d - q_lens_3d + j_range + 1, kvlen_3d)
         valid = pos_3d < causal_limit
@@ -1171,9 +1190,16 @@ class MlaFlashInferDecodeOp(object):
         return attn_bmm_output
 
     def _pack_fp8_prefill_q(self, q_absorbed: torch.Tensor) -> torch.Tensor:
+        if self._fp8_prefill_max_q_len > 1 and self._fp8_prefill_indices is not None:
+            B = self._fp8_prefill_indices.shape[0]
+            return q_absorbed.view(
+                B, self._fp8_prefill_max_q_len, *q_absorbed.shape[1:]
+            )
         return q_absorbed.unsqueeze(1)
 
     def _unpack_fp8_prefill_out(self, attn_out: torch.Tensor) -> torch.Tensor:
+        if self._fp8_prefill_max_q_len > 1:
+            return attn_out.reshape(-1, *attn_out.shape[2:])
         return attn_out.squeeze(1)
 
     def _forward_fp8_prefill_absorb(
