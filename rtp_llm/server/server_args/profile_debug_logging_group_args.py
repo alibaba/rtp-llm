@@ -29,7 +29,7 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         env_name="FT_CORE_DUMP_ON_EXCEPTION",
         bind_to=(profiling_debug_config, "ft_core_dump_on_exception"),
         type=str2bool,
-        default=False,
+        default=True,
         help="控制在发生特定异常或断言失败时是否强制执行core dump (程序中止并生成核心转储文件)。可选值: True (启用), False (禁用)。",
     )
     profile_debug_logging_group.add_argument(
