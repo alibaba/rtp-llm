@@ -3,6 +3,7 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
+#include "rtp_llm/cpp/distribute/RpcCpuTpBroadcaster.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -677,6 +678,21 @@ void execBroadcastCpu(const BroadcastParams& params) {
         }
         return;
     }
+    auto& rpc_bcast = RpcCpuTpBroadcaster::instance();
+    if (rpc_bcast.isInitialized()) {
+        for (auto& t : params.buffers) {
+            RTP_LLM_CHECK_WITH_INFO(
+                t.is_cpu(), "execBroadcastCpu requires CPU tensors (got device=%s)", t.device().str().c_str());
+            auto contig = t.contiguous();
+            rpc_bcast.broadcast(contig.data_ptr(), contig.nbytes(), params.root);
+            if (!contig.is_same(t)) {
+                t.copy_(contig);
+            }
+        }
+        return;
+    }
+    // Fallback to NCCL via Python callback, typically for cross-node TP.
+    // Preserve immediate-read semantics with the original sync sequence.
     execBroadcast(params);
     execSyncCommunication(false);
     cudaSyncAndCheck();
@@ -853,7 +869,9 @@ void registerExecCtxOps(pybind11::module& m) {
         []() {
             py::gil_scoped_release release;
             CpuTpBroadcaster::instance().reset();
-        });
+            RpcCpuTpBroadcaster::instance().reset();
+        },
+        "Tear down CPU TP broadcasters and clear singleton state.");
 }
 
 }  // namespace rtp_llm
