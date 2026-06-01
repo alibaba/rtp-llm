@@ -30,7 +30,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     KV_ENTRY_BYTES,
     KV_HEAD_DIM,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
+    CompressorFP8,
+    build_prefill_metadata,
+)
 
 DEVICE = "cuda"
 TOKENS_PER_STATE_BLOCK = 256
@@ -155,7 +158,10 @@ class CompressorFP8FlatInputParityTest(unittest.TestCase):
             coff=coff,
             compress_ratio=compress_ratio,
         )
-        cmp.forward(x, sp)
+        meta = build_prefill_metadata(
+            cmp, sp=sp, bsz=1, seqlen=seqlen, device=x.device
+        )
+        cmp.forward(x, sp, meta=meta)
         torch.cuda.synchronize()
         return state_view.clone(), kv_pool.clone()
 

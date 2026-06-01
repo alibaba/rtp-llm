@@ -258,10 +258,9 @@ class _IndexerFP8PrefillMeta(NamedTuple):
     cu_kv_per_token: Optional[torch.Tensor]
 
     # ── Nested CompressorFP8 metadata, hoisted out of the per-call hot
-    # path. Without this, ``CompressorFP8.forward(meta=None)`` rebuilds
-    # ~30 small kernels (state/kv slot mapping) per layer between the
-    # F.linear SGEMM and ``run_save_partial_states``. ``None`` during
-    # warmup (pool not bound); forward then falls back to in-band rebuild.
+    # path. Without this, each CSA layer would need to rebuild ~30 small
+    # kernels (state/kv slot mapping) between the F.linear SGEMM and
+    # ``run_save_partial_states``. ``None`` only on warmup / stub paths.
     compressor_meta: Optional[CompressorMeta]
 
 
@@ -825,12 +824,12 @@ class IndexerFP8(PoolBackedModule):
         # IndexerFP8's pool context is bound by Attention's
         # ``_set_compressor_pool_context`` BEFORE ``_build_csa_prefill_meta``
         # runs, so ``_propagate_pool_to_nested`` is safe here. Without
-        # this, ``CompressorFP8.forward(meta=None)`` rebuilds the slot
+        # this, every nested compressor write would need to rebuild slot
         # mappings each call (~30 small kernels per layer between the
         # F.linear SGEMM and ``run_save_partial_states``). ``getattr``
         # defaults keep the stub-based UTs (which expose only the four
         # attrs ``prepare`` historically read) working — they fall through
-        # to ``compressor_meta=None`` and the in-band rebuild path.
+        # to ``compressor_meta=None`` only on warmup / stub paths.
         compressor_meta: Optional[CompressorMeta] = None
         state_bt = getattr(self, "_state_block_table", None)
         state_eb = getattr(self, "_state_eb", 0)

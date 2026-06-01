@@ -28,7 +28,7 @@ Public API:
     state_eb, state_tokens_per_block, kv_tokens_per_block)`` — shared with
     ``PoolBackedModule``.
   * ``forward(x, start_pos, sequence_lengths=None)`` for prefill.
-  * ``forward_decode_vectorized(x, start_pos)`` for batched decode.
+  * ``forward_decode_vectorized(x, start_pos, meta)`` for batched decode.
 """
 
 from __future__ import annotations
@@ -225,9 +225,9 @@ class _CompressorPending:
     * ``sp / bsz / seqlen`` — pre-resolved scalars mirroring what
       ``forward`` derives from ``start_pos`` / input shape, so
       ``finish_prefill`` does not need to re-inspect ``x``.
-    * ``meta`` — caller-provided ``CompressorMeta`` (CP requires it; non-CP
-      may pass ``None`` and let ``finish_prefill`` rebuild positions/b_idx
-      from ``sp``/``bsz``/``seqlen``, matching ``forward``'s fallback).
+    * ``meta`` — caller-provided ``CompressorMeta``. The attention layer
+      builds it before the compressor write so slot mapping is not rebuilt
+      inside the hot path.
     * ``out_dim`` — ``(1 + overlap) * head_dim``. Captured at start_prefill
       time so finish_prefill stays pure (no self peek).
     * ``restored_buf`` — optional full-sequence destination used by the
@@ -244,7 +244,7 @@ class _CompressorPending:
     sp: int
     bsz: int
     seqlen: int
-    meta: Optional[CompressorMeta]
+    meta: CompressorMeta
     out_dim: int
     profile_label: Optional[str] = None
     restored_buf: Optional[torch.Tensor] = None
@@ -776,7 +776,7 @@ class CompressorFP8(PoolBackedModule):
         x: torch.Tensor,
         start_pos,
         *,
-        meta: Optional[CompressorMeta] = None,
+        meta: CompressorMeta,
         cp_gather_stream: Optional[Any] = None,
         profile_label: Optional[str] = None,
     ) -> Optional[_CompressorPending]:
@@ -809,6 +809,7 @@ class CompressorFP8(PoolBackedModule):
             or self._kv_eb <= 0
         ):
             return None
+        assert meta is not None, "CompressorFP8.start_prefill requires CompressorMeta"
 
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
@@ -821,10 +822,6 @@ class CompressorFP8(PoolBackedModule):
         fused_gather_handle = None
         if cp_gather:
             assert cp_ctx is not None
-            assert meta is not None, (
-                "CompressorFP8 CP start_prefill requires hoisted "
-                "CompressorMeta; non-CP path may pass meta=None"
-            )
             N_full = int(cp_ctx.seq_len_full)
             assert int(meta.positions.numel()) == N_full, (
                 f"CP compressor meta/token length mismatch: "
@@ -900,6 +897,7 @@ class CompressorFP8(PoolBackedModule):
         fused_flat = pending.fused_flat
         out_dim = pending.out_dim
         meta = pending.meta
+        assert meta is not None, "CompressorFP8.finish_prefill requires CompressorMeta"
 
         with record_function_range("dsv4.fp8.compressor.prefill.split_kv_score"):
             assert fused_flat.dim() == 2, (
@@ -912,15 +910,6 @@ class CompressorFP8(PoolBackedModule):
             )
             kv_flat = fused_flat[:, :out_dim]
             score_flat = fused_flat[:, out_dim:]
-
-        if meta is None:
-            # Non-CP fallback: rebuild positions/b_idx from sp/bsz/seqlen.
-            device = fused_flat.device
-            with record_function_range("dsv4.fp8.compressor.prefill.build_meta"):
-                positions, b_idx = _build_prefill_positions(
-                    pending.sp, pending.bsz, pending.seqlen, device
-                )
-                meta = self.prepare_metadata(positions, b_idx)
 
         seq_start = None if meta.is_batched else pending.sp
         with record_function_range("dsv4.fp8.compressor.prefill.launch"):
@@ -944,8 +933,8 @@ class CompressorFP8(PoolBackedModule):
         ``meta`` lets the caller (typically ``attention.py``) hoist the
         slot-mapping compute out of the per-layer hot path and amortize it
         across the host compressor and any nested indexer compressor that
-        share the same positions/b_idx. When ``None`` the compressor falls
-        back to the in-body compute path (warmup / standalone / UT).
+        share the same positions/b_idx. Once pools are bound, callers must
+        provide this metadata; warmup still exits before metadata is used.
         """
         del sequence_lengths  # not needed: positions derived from start_pos+arange
         # Phase-3a: accept either flat ``[T_total, dim]`` (vLLM-native /
@@ -969,8 +958,8 @@ class CompressorFP8(PoolBackedModule):
             or self._kv_eb <= 0
         ):
             return None
+        assert meta is not None, "CompressorFP8.forward requires CompressorMeta"
 
-        device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
             fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
@@ -1025,19 +1014,6 @@ class CompressorFP8(PoolBackedModule):
             )
             kv_flat = fused_flat[:, :out_dim]
             score_flat = fused_flat[:, out_dim:]
-        if meta is None:
-            with record_function_range("dsv4.fp8.compressor.prefill.build_meta"):
-                positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
-                meta = self.prepare_metadata(
-                    positions,
-                    b_idx,
-                    seq_start_per_req=torch.tensor(
-                        [sp], dtype=torch.int32, device=device
-                    ),
-                    cu_seq_per_req=torch.tensor(
-                        [0, seqlen], dtype=torch.int32, device=device
-                    ),
-                )
         # Varlen prefill carries per-request raw arrays, so ``_launch`` routes
         # through the kernel's BATCHED branch even when CP has only one
         # request. Legacy scalar metadata keeps the old ``seq_start`` path.
@@ -1067,8 +1043,10 @@ class CompressorFP8(PoolBackedModule):
             or self._kv_eb <= 0
         ):
             return None
+        assert (
+            meta is not None
+        ), "CompressorFP8.forward_decode_vectorized requires CompressorMeta"
 
-        device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
         fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
@@ -1078,44 +1056,6 @@ class CompressorFP8(PoolBackedModule):
         # kernels; the Triton writer consumes row stride explicitly.
         kv_flat = kv.view(T, -1)
         score_flat = score.view(T, -1)
-        if meta is None:
-            if position_ids is None:
-                positions = start_pos.to(device=device, dtype=torch.long).reshape(bsz)
-                b_idx = torch.arange(bsz, device=device, dtype=torch.long)
-                cu_seq_per_req = torch.arange(
-                    0, bsz + 1, device=device, dtype=torch.int64
-                )
-                meta = self.prepare_metadata(
-                    positions,
-                    b_idx,
-                    seq_start_per_req=positions,
-                    cu_seq_per_req=cu_seq_per_req,
-                )
-            else:
-                positions = (
-                    position_ids.to(device=device, dtype=torch.long)
-                    .reshape(T)
-                    .contiguous()
-                )
-                b_idx = torch.arange(bsz, device=device, dtype=torch.long)
-                b_idx = b_idx.repeat_interleave(q_len).contiguous()
-                position_ids_2d = positions.view(bsz, q_len)
-                cu_seq_per_req = torch.arange(
-                    0,
-                    (bsz + 1) * q_len,
-                    q_len,
-                    device=device,
-                    dtype=torch.int32,
-                )
-                meta = self.prepare_metadata(
-                    positions,
-                    b_idx,
-                    is_batched=q_len > 1,
-                    seq_start_per_req=position_ids_2d[:, 0]
-                    .to(torch.int32)
-                    .contiguous(),
-                    cu_seq_per_req=cu_seq_per_req,
-                )
         self._launch(kv_flat, score_flat, meta)
         return None
 

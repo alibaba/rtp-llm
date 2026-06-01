@@ -294,7 +294,7 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
             sp=0,
             bsz=1,
             seqlen=2,
-            meta=None,
+            meta=meta.compressor_meta,
             out_dim=2,
         )
 

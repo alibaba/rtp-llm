@@ -222,7 +222,8 @@ def test_csa_per_token(seqlen: int = 64) -> None:
     )
     sp = 0
     x = torch.randn(1, seqlen, dim, dtype=torch.bfloat16, device=DEVICE) * 0.1
-    cmp.forward(x, sp)
+    meta = build_prefill_metadata(cmp, sp=sp, bsz=1, seqlen=seqlen, device=x.device)
+    cmp.forward(x, sp, meta=meta)
     torch.cuda.synchronize()
     _state_write_check(
         cmp,
@@ -261,7 +262,8 @@ def test_indexer_per_token(seqlen: int = 32) -> None:
     )
     sp = 0
     x = torch.randn(1, seqlen, dim, dtype=torch.bfloat16, device=DEVICE) * 0.1
-    cmp.forward(x, sp)
+    meta = build_prefill_metadata(cmp, sp=sp, bsz=1, seqlen=seqlen, device=x.device)
+    cmp.forward(x, sp, meta=meta)
     torch.cuda.synchronize()
     _state_write_check(
         cmp,
@@ -304,7 +306,8 @@ def test_decode_vectorized() -> None:
     for pos in [8, 9, 10, 11]:
         x = torch.randn(bsz, 1, dim, dtype=torch.bfloat16, device=DEVICE) * 0.1
         sp = torch.tensor([pos], dtype=torch.int64, device=DEVICE)
-        cmp.forward_decode_vectorized(x, sp)
+        meta = build_decode_metadata(cmp, sp, bsz)
+        cmp.forward_decode_vectorized(x, sp, meta=meta)
     torch.cuda.synchronize()
     # cp=2 corresponds to pos in [8..11]; the boundary token at pos=11 should
     # have written kv slot 2 (block 1, in-block 2).
@@ -366,7 +369,8 @@ def _run_decode_long_position_cyclic_state_blocks(head_dim: int, label: str) -> 
     x = torch.randn(1, 1, dim, dtype=torch.bfloat16, device=DEVICE) * 0.1
     sp = torch.tensor([pos], dtype=torch.int64, device=DEVICE)
     position_ids = torch.tensor([[pos]], dtype=torch.int64, device=DEVICE)
-    cmp.forward_decode_vectorized(x, sp, position_ids=position_ids)
+    meta = build_decode_metadata(cmp, sp, bsz=1)
+    cmp.forward_decode_vectorized(x, sp, meta=meta, position_ids=position_ids)
     torch.cuda.synchronize()
 
     kv_eb = TOKENS_PER_STATE_BLOCK // ratio
@@ -388,8 +392,8 @@ def test_csa_decode_long_position_uses_cyclic_state_blocks() -> None:
 
 
 def test_prepared_metadata_path() -> None:
-    """Caller-prepared CompressorMeta must produce identical pool state to
-    the in-body fallback path."""
+    """Caller-prepared CompressorMeta must produce identical pool state on
+    synchronous and split-phase prefill paths."""
     torch.manual_seed(3)
     head_dim, rope_head_dim, ratio = KV_HEAD_DIM, 64, 4
     coff = 1 + (ratio == 4)
@@ -397,7 +401,7 @@ def test_prepared_metadata_path() -> None:
     seqlen = 32
     sp = 0
 
-    # Path A — fallback (meta=None)
+    # Path A — split-phase with prepared metadata.
     cmp_a = _build_compressor(
         dim=dim,
         head_dim=head_dim,
@@ -408,10 +412,14 @@ def test_prepared_metadata_path() -> None:
         cmp_a, seqlen=seqlen, head_dim=head_dim, coff=coff, compress_ratio=ratio
     )
     x = torch.randn(1, seqlen, dim, dtype=torch.bfloat16, device=DEVICE) * 0.1
-    cmp_a.forward(x, sp)
+    meta_a = build_prefill_metadata(
+        cmp_a, sp=sp, bsz=1, seqlen=seqlen, device=x.device
+    )
+    pending = cmp_a.start_prefill(x, sp, meta=meta_a)
+    cmp_a.finish_prefill(pending)
     torch.cuda.synchronize()
 
-    # Path B — prepared meta (slot mapping computed BEFORE forward)
+    # Path B — synchronous forward with prepared metadata.
     cmp_b = _build_compressor(
         dim=dim,
         head_dim=head_dim,
@@ -430,9 +438,11 @@ def test_prepared_metadata_path() -> None:
     cmp_b.forward(x, sp, meta=meta)
     torch.cuda.synchronize()
 
-    assert torch.equal(state_a, state_b), "prepared meta diverged from fallback (state)"
-    assert torch.equal(kv_a, kv_b), "prepared meta diverged from fallback (kv)"
-    print("  [prepared meta] prefill matches fallback byte-for-byte")
+    assert torch.equal(
+        state_a, state_b
+    ), "split prefill diverged from sync forward (state)"
+    assert torch.equal(kv_a, kv_b), "split prefill diverged from sync forward (kv)"
+    print("  [prepared meta] split prefill matches sync forward byte-for-byte")
 
     # Decode path with prepared meta — single token, boundary position.
     cmp_c = _build_compressor(
