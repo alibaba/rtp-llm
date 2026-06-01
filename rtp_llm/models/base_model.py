@@ -143,7 +143,8 @@ class BaseModel(object):
 
     def _get_device_str(self) -> str:
         """Get device string from parallelism_config."""
-        return f"cuda:{self.parallelism_config.local_rank}"
+        local_device_offset = int(os.environ.get("RTP_LLM_LOCAL_DEVICE_OFFSET", "0"))
+        return f"cuda:{self.parallelism_config.local_rank + local_device_offset}"
 
     @timer_wrapper(description="load model")
     def load(self, skip_python_model: bool = False):
