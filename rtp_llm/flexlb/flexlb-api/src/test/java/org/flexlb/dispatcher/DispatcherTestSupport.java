@@ -1,6 +1,5 @@
 package org.flexlb.dispatcher;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
@@ -66,24 +65,6 @@ final class DispatcherTestSupport {
         DispatchConfig cfg = new DispatchConfig();
         cfg.setFePoolServiceId(serviceId);
         return new DispatcherFePoolRefresher(sd, cfg);
-    }
-
-    /** GenericBatchHandler with no pre-assignment — most common test setup. */
-    static GenericBatchHandler genericBatchHandler(FanoutService fanout, ObjectMapper mapper,
-                                                   String subBatchDsl) {
-        return genericBatchHandler(fanout, mapper, subBatchDsl, null, false);
-    }
-
-    /** GenericBatchHandler with full control over pre-assignment wiring. */
-    static GenericBatchHandler genericBatchHandler(FanoutService fanout, ObjectMapper mapper,
-                                                   String subBatchDsl,
-                                                   BatchScheduleClient batchScheduleClient,
-                                                   boolean preAssignBe) {
-        DispatchConfig cfg = new DispatchConfig();
-        cfg.setSubBatch(subBatchDsl);
-        cfg.setSubBatchSpec(SubBatchSpec.parse(subBatchDsl));
-        cfg.setPreAssignBe(preAssignBe);
-        return new GenericBatchHandler(fanout, mapper, cfg, batchScheduleClient);
     }
 
     /**

@@ -1,7 +1,5 @@
 package org.flexlb.dispatcher;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.netty.channel.ChannelOption;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -52,12 +50,17 @@ public class FeClient {
                 .build();
     }
 
-    public Mono<JsonNode> post(String feBaseUrl, String fePath, ObjectNode body) {
+    /**
+     * Caller serializes the chunk body with {@code JSON.toJSONBytes} and gets the FE response
+     * as raw bytes to parse with {@code JSON.parseObject(byte[])} — no intermediate {@code String}
+     * allocation on either edge.
+     */
+    public Mono<byte[]> postBytes(String feBaseUrl, String fePath, byte[] body) {
         return webClient.post()
                 .uri(feBaseUrl + fePath)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(body)
                 .retrieve()
-                .bodyToMono(JsonNode.class);
+                .bodyToMono(byte[].class);
     }
 }

@@ -9,16 +9,24 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 
 import java.util.List;
 
+/**
+ * Reactive {@code RouterFunction} for {@code /dispatcher/**}. Each registered batch endpoint
+ * (see {@link org.flexlb.dispatcher.BatchEndpointSpec#SPECS}) gets a POST
+ * route that delegates to {@link org.flexlb.dispatcher.BatchHandler};
+ * {@code GET /dispatcher/_snapshot} and {@code POST /dispatcher/_dryrun/**} go to
+ * {@link DispatcherInspectionHandler}; everything else under {@code /dispatcher/**} is
+ * forwarded to one FE via {@link PassthroughClient#forward}.
+ */
 @Component
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
 public class DispatchRouter {
 
-    private final GenericBatchHandler batchHandler;
+    private final BatchHandler batchHandler;
     private final PassthroughClient passthroughClient;
     private final DispatcherInspectionHandler inspectionHandler;
     private final List<BatchEndpointSpec> specs;
 
-    public DispatchRouter(GenericBatchHandler batchHandler,
+    public DispatchRouter(BatchHandler batchHandler,
                           PassthroughClient passthroughClient,
                           DispatcherInspectionHandler inspectionHandler,
                           List<BatchEndpointSpec> specs) {

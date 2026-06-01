@@ -16,6 +16,7 @@ import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.function.Consumer;
 
@@ -37,10 +38,10 @@ import static org.mockito.Mockito.when;
  * {@link DispatcherFePoolRefresher}, and {@link BatchScheduleClient} directly so each case can
  * inject a known fixture and assert on the JSON response.
  *
- * <p>Chunk-shape correctness (force_batch, role_addrs wire format) lives in
- * {@link BatchChunkBuilderTest}; spec-aware splitting lives in {@link BatchSplitterTest}. These
- * tests assert <em>that</em> the handler invoked the utilities and surfaced their output, not
- * <em>how</em> the utilities shape it.
+ * <p>The handler emits its response as raw bytes (fastjson2 serialization). Tests parse those
+ * bytes back into Jackson trees so the existing assertion idioms ({@code body.get("...").asText()})
+ * stay readable — Jackson is no longer the production codec but it's still the most ergonomic
+ * tree API for test assertions.
  */
 class DispatcherInspectionHandlerTest {
 
@@ -77,9 +78,6 @@ class DispatcherInspectionHandlerTest {
 
         @Test
         void mixedAliveAndDeadReportsPerHostStateFaithfully() {
-            // Three hosts, varying failure counts: warming-up (1 fail, still alive), dead (2 fails),
-            // healthy (0 fails). Snapshot must distinguish all three so operators can spot a host
-            // that's *about* to die vs one that just did.
             List<String> urls = List.of(
                     "http://10.0.0.1:23840", "http://10.0.0.2:23840", "http://10.0.0.3:23840");
             FeHealthChecker hc = mock(FeHealthChecker.class);
@@ -93,14 +91,10 @@ class DispatcherInspectionHandlerTest {
             ObjectNode body = invokeSnapshot(urls, hc);
             ArrayNode hosts = (ArrayNode) body.get("fePool").get("hosts");
 
-            assertTrue(hosts.get(0).get("alive").asBoolean(),
-                    "consecFails=1 still under threshold → alive=true (flap tolerance)");
+            assertTrue(hosts.get(0).get("alive").asBoolean());
             assertEquals(1, hosts.get(0).get("consecFails").asInt());
-
-            assertFalse(hosts.get(1).get("alive").asBoolean(),
-                    "consecFails=2 crosses FAIL_THRESHOLD → alive=false");
+            assertFalse(hosts.get(1).get("alive").asBoolean());
             assertEquals(2, hosts.get(1).get("consecFails").asInt());
-
             assertTrue(hosts.get(2).get("alive").asBoolean());
             assertEquals(0, hosts.get(2).get("consecFails").asInt());
         }
@@ -113,14 +107,11 @@ class DispatcherInspectionHandlerTest {
             assertEquals(0, fePool.get("size").asInt());
             assertEquals(0, fePool.get("hosts").size());
             assertTrue(fePool.get("hosts").isArray(),
-                    "even an empty hosts list must be a JSON array — never null or absent, so callers can iterate unconditionally");
+                    "even an empty hosts list must be a JSON array — never null or absent");
         }
 
         @Test
         void serviceIdEchoesConfigVerbatim() {
-            // Snapshot's serviceId field is the documented way to cross-check that dispatcher is
-            // wired to the FE pool an operator expects, vs the boot WARN line which can scroll out
-            // of log retention. Echo it verbatim so a typo'd config is immediately obvious.
             DispatchConfig cfg = new DispatchConfig();
             cfg.setFePoolServiceId("very.specific.weird.name.publish");
             cfg.setSubBatch("size:5");
@@ -130,7 +121,7 @@ class DispatcherInspectionHandlerTest {
             FeHealthChecker hc = mock(FeHealthChecker.class);
             BatchScheduleClient client = mock(BatchScheduleClient.class);
             DispatcherInspectionHandler handler =
-                    new DispatcherInspectionHandler(cfg, refresher, hc, client, mapper);
+                    new DispatcherInspectionHandler(cfg, refresher, hc, client);
 
             MockServerRequest req = MockServerRequest.builder()
                     .method(HttpMethod.GET)
@@ -140,8 +131,7 @@ class DispatcherInspectionHandlerTest {
             StepVerifier.create(handler.snapshot(req))
                     .assertNext(resp -> {
                         assertEquals(HttpStatus.OK, resp.statusCode());
-                        EntityResponse<?> entity = (EntityResponse<?>) resp;
-                        ObjectNode body = (ObjectNode) entity.entity();
+                        ObjectNode body = parseBody(resp);
                         assertEquals("very.specific.weird.name.publish",
                                 body.get("fePool").get("serviceId").asText());
                     })
@@ -156,16 +146,13 @@ class DispatcherInspectionHandlerTest {
 
         @Test
         void unknownPathReturns400WithRegistryContents() {
-            // 400 message must list registered paths so a typo'd caller can self-correct without
-            // having to grep the source. Counterfactual: if this fell through to passthrough, the
-            // caller would get FE's 404 with no hint that the dispatcher even has a registry.
             BatchScheduleClient client = mock(BatchScheduleClient.class);
             DispatcherInspectionHandler handler = handlerWith(false, client);
 
             MockServerRequest req = MockServerRequest.builder()
                     .method(HttpMethod.POST)
                     .uri(URI.create("http://x/dispatcher/_dryrun/totally_made_up"))
-                    .body(Mono.just(mapper.createObjectNode()));
+                    .body(Mono.just("{}".getBytes(StandardCharsets.UTF_8)));
 
             assertResponse(handler.dryRun(req), HttpStatus.BAD_REQUEST, body -> {
                 assertEquals("invalid_inspection_request", body.get("error").asText());
@@ -178,15 +165,10 @@ class DispatcherInspectionHandlerTest {
 
         @Test
         void emptyArrayShortCircuitsWithoutCallingBatchScheduleClient() {
-            // Critical: empty batch must NOT call batchScheduleClient.requestTargets(0) even when
-            // pre_assign=true. Hitting the coordinator with batchCount=0 is at best wasted RTT and
-            // at worst undefined behavior, and would advance master's batch RR cursor on a request
-            // that the real handler would have served entirely locally.
             BatchScheduleClient client = mock(BatchScheduleClient.class);
             DispatcherInspectionHandler handler = handlerWith(true, client);
 
-            ObjectNode body = mapper.createObjectNode();
-            body.putArray("prompt_batch");
+            byte[] body = "{\"prompt_batch\":[]}".getBytes(StandardCharsets.UTF_8);
 
             MockServerRequest req = MockServerRequest.builder()
                     .method(HttpMethod.POST)
@@ -232,8 +214,6 @@ class DispatcherInspectionHandlerTest {
 
         @Test
         void noQueryParamUsesConfigDefault() {
-            // No query param → behavior matches what the real handler would do under this config.
-            // This is the contract that makes dry-run usable as a "what would production do" check.
             BatchScheduleClient client = mock(BatchScheduleClient.class);
             when(client.requestTargets(anyInt())).thenReturn(Mono.just(List.of(target("10.0.0.1"))));
             DispatcherInspectionHandler handler = handlerWith(true, client);
@@ -259,7 +239,6 @@ class DispatcherInspectionHandlerTest {
                 assertNotNull(roleAddrs,
                         "every chunk must show its stamped role_addrs when pre_assign effective");
             }
-            // preAssignTargets is a flat dump of what BatchScheduleClient returned, in resolution order.
             assertEquals("10.0.0.1", out.get("preAssignTargets").get(0).get("ip").asText());
             assertEquals("10.0.0.2", out.get("preAssignTargets").get(1).get("ip").asText());
         }
@@ -288,7 +267,7 @@ class DispatcherInspectionHandlerTest {
             MockServerRequest req = MockServerRequest.builder()
                     .method(HttpMethod.POST)
                     .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
-                    .body(Mono.just(mapper.createArrayNode().add("a")));
+                    .body(Mono.just("[\"a\"]".getBytes(StandardCharsets.UTF_8)));
 
             assertResponse(handler.dryRun(req), HttpStatus.BAD_REQUEST, body ->
                     assertEquals("invalid_inspection_request", body.get("error").asText()));
@@ -299,8 +278,7 @@ class DispatcherInspectionHandlerTest {
             BatchScheduleClient client = mock(BatchScheduleClient.class);
             DispatcherInspectionHandler handler = handlerWith(false, client);
 
-            ObjectNode body = mapper.createObjectNode();
-            body.put("not_prompt_batch", "x");
+            byte[] body = "{\"not_prompt_batch\":\"x\"}".getBytes(StandardCharsets.UTF_8);
             MockServerRequest req = MockServerRequest.builder()
                     .method(HttpMethod.POST)
                     .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
@@ -315,17 +293,12 @@ class DispatcherInspectionHandlerTest {
 
         @Test
         void internalErrorReturns500NotBadRequest() {
-            // If BatchScheduleClient ever broke its no-throw contract (or any other code path
-            // inside the handler raised an unexpected exception), the response must be 500 — not
-            // 400. Mixing user-input failures with server-internal failures into one status defeats
-            // the dry-run's diagnostic purpose.
             BatchScheduleClient client = mock(BatchScheduleClient.class);
             when(client.requestTargets(anyInt())).thenReturn(
                     Mono.error(new RuntimeException("simulated coordinator failure")));
             DispatcherInspectionHandler handler = handlerWith(true, client);
 
-            ObjectNode body = mapper.createObjectNode();
-            body.putArray("prompt_batch").add("a");
+            byte[] body = "{\"prompt_batch\":[\"a\"]}".getBytes(StandardCharsets.UTF_8);
             MockServerRequest req = MockServerRequest.builder()
                     .method(HttpMethod.POST)
                     .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
@@ -350,7 +323,7 @@ class DispatcherInspectionHandlerTest {
         when(refresher.source()).thenReturn(() -> urls);
         BatchScheduleClient client = mock(BatchScheduleClient.class);
         DispatcherInspectionHandler handler =
-                new DispatcherInspectionHandler(cfg, refresher, hc, client, mapper);
+                new DispatcherInspectionHandler(cfg, refresher, hc, client);
 
         MockServerRequest req = MockServerRequest.builder()
                 .method(HttpMethod.GET)
@@ -361,7 +334,7 @@ class DispatcherInspectionHandlerTest {
         StepVerifier.create(handler.snapshot(req))
                 .assertNext(resp -> {
                     assertEquals(HttpStatus.OK, resp.statusCode());
-                    captured[0] = (ObjectNode) ((EntityResponse<?>) resp).entity();
+                    captured[0] = parseBody(resp);
                 })
                 .verifyComplete();
         return captured[0];
@@ -376,20 +349,20 @@ class DispatcherInspectionHandlerTest {
         DispatcherFePoolRefresher refresher = mock(DispatcherFePoolRefresher.class);
         when(refresher.source()).thenReturn(() -> List.<String>of());
         FeHealthChecker hc = mock(FeHealthChecker.class);
-        return new DispatcherInspectionHandler(cfg, refresher, hc, client, mapper);
+        return new DispatcherInspectionHandler(cfg, refresher, hc, client);
     }
 
-    /**
-     * @param preAssignParam pass {@code "true"} or {@code "false"} to set the query param
-     *                       explicitly, or {@code null} to omit it (handler then falls back to
-     *                       config default). {@link MockServerRequest} does not parse URI query
-     *                       strings — query params must be set on the builder directly.
-     */
     private ObjectNode invokeDryRun(DispatcherInspectionHandler handler, String preAssignParam,
                                     List<String> prompts) {
-        ObjectNode body = mapper.createObjectNode();
-        ArrayNode arr = body.putArray("prompt_batch");
-        prompts.forEach(arr::add);
+        StringBuilder sb = new StringBuilder("{\"prompt_batch\":[");
+        for (int i = 0; i < prompts.size(); i++) {
+            if (i > 0) {
+                sb.append(",");
+            }
+            sb.append("\"").append(prompts.get(i)).append("\"");
+        }
+        sb.append("]}");
+        byte[] body = sb.toString().getBytes(StandardCharsets.UTF_8);
 
         MockServerRequest.Builder builder = MockServerRequest.builder()
                 .method(HttpMethod.POST)
@@ -403,7 +376,7 @@ class DispatcherInspectionHandlerTest {
         StepVerifier.create(handler.dryRun(req))
                 .assertNext(resp -> {
                     assertEquals(HttpStatus.OK, resp.statusCode());
-                    captured[0] = (ObjectNode) ((EntityResponse<?>) resp).entity();
+                    captured[0] = parseBody(resp);
                 })
                 .verifyComplete();
         return captured[0];
@@ -414,10 +387,22 @@ class DispatcherInspectionHandlerTest {
         StepVerifier.create(mono)
                 .assertNext(resp -> {
                     assertEquals(expectedStatus, resp.statusCode());
-                    EntityResponse<?> entity = (EntityResponse<?>) resp;
-                    bodyAssertions.accept((ObjectNode) entity.entity());
+                    bodyAssertions.accept(parseBody(resp));
                 })
                 .verifyComplete();
+    }
+
+    private ObjectNode parseBody(org.springframework.web.reactive.function.server.ServerResponse resp) {
+        EntityResponse<?> entity = (EntityResponse<?>) resp;
+        Object value = entity.entity();
+        try {
+            if (value instanceof byte[] bytes) {
+                return (ObjectNode) mapper.readTree(bytes);
+            }
+            throw new IllegalStateException("unexpected entity type: " + value.getClass());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private static BatchScheduleTarget target(String ip) {

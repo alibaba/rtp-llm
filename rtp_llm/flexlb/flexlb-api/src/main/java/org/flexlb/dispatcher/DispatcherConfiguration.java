@@ -75,14 +75,13 @@ public class DispatcherConfiguration {
     }
 
     /**
-     * Exposes {@link BatchEndpointSpec#SPECS} as a Spring bean so {@link DispatchRouter} can
-     * inject {@code List<BatchEndpointSpec>} via single-ctor autowire — matching the codebase's
-     * "single ctor, no @Autowired" idiom (see {@code RoundRobinLoadBalancer},
-     * {@code BatchScheduleCoordinator}). Tests bypass Spring and pass a custom list directly.
+     * Exposes the dispatcher's batch endpoint table as a Spring bean for {@link DispatchRouter}
+     * to autowire. Single source of truth — every batch endpoint the dispatcher serves is one
+     * row in {@link org.flexlb.dispatcher.BatchEndpointSpec#SPECS}.
      */
     @Bean
-    public List<BatchEndpointSpec> batchEndpointSpecs() {
-        return BatchEndpointSpec.SPECS;
+    public List<org.flexlb.dispatcher.BatchEndpointSpec> batchEndpointSpecs() {
+        return org.flexlb.dispatcher.BatchEndpointSpec.SPECS;
     }
 
     /**
@@ -175,7 +174,7 @@ public class DispatcherConfiguration {
                 "dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatch={}, batchSpecs={}, "
                         + "batchTimeoutMs={}, probePath={}, preAssignBe={}",
                 cfg.getFePoolServiceId(), refresher.currentSize(), cfg.getSubBatch(),
-                BatchEndpointSpec.SPECS.size(), cfg.getBatchTimeoutMs(),
-                cfg.getProbePath(), cfg.isPreAssignBe());
+                org.flexlb.dispatcher.BatchEndpointSpec.SPECS.size(),
+                cfg.getBatchTimeoutMs(), cfg.getProbePath(), cfg.isPreAssignBe());
     }
 }

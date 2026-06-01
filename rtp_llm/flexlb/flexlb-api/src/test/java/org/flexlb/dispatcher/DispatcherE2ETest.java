@@ -1,7 +1,5 @@
 package org.flexlb.dispatcher;
 
-import static org.flexlb.dispatcher.BatchEndpointSpec.FailedItemFactory;
-
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -36,10 +34,12 @@ import static org.mockito.Mockito.when;
 
 /**
  * End-to-end test for the assembled dispatcher: real {@link DispatchRouter} on top of real
- * {@link GenericBatchHandler}, real {@link FanoutService}, real {@link FeClient}, and a
- * real {@link FePool} round-robin-ing across three {@link MockWebServer}s. Every batch endpoint
- * registered by {@link BatchEndpointSpec#SPECS} is exercised with one chunk induced to fail
- * (HTTP 500), and the non-batch path falls through to passthrough.
+ * {@link org.flexlb.dispatcher.BatchHandler}, real
+ * {@link org.flexlb.dispatcher.FanoutService}, real {@link FeClient},
+ * and a real {@link FePool} round-robin-ing across three {@link MockWebServer}s. Every batch
+ * endpoint registered by
+ * {@link org.flexlb.dispatcher.BatchEndpointSpec#SPECS} is exercised with
+ * one chunk induced to fail (HTTP 500), and the non-batch path falls through to passthrough.
  */
 class DispatcherE2ETest {
 
@@ -406,14 +406,16 @@ class DispatcherE2ETest {
                 WebClient.builder(),
                 reactor.netty.resources.ConnectionProvider.builder("e2e").build(),
                 cfg);
-        FanoutService fanout = new FanoutService(feClient, pool);
+        org.flexlb.dispatcher.FanoutService fanout =
+                new org.flexlb.dispatcher.FanoutService(feClient, pool);
         BatchScheduleClient batchScheduleClient = new BatchScheduleClient(null) {
             @Override
             public reactor.core.publisher.Mono<List<org.flexlb.dao.loadbalance.BatchScheduleTarget>> requestTargets(int count) {
                 return reactor.core.publisher.Mono.just(targets);
             }
         };
-        GenericBatchHandler batchHandler = new GenericBatchHandler(fanout, mapper, cfg, batchScheduleClient);
+        org.flexlb.dispatcher.BatchHandler batchHandler =
+                new org.flexlb.dispatcher.BatchHandler(fanout, cfg, batchScheduleClient);
 
         PassthroughClient passthrough =
                 new PassthroughClient(WebClient.create(), pool);
@@ -430,9 +432,10 @@ class DispatcherE2ETest {
         when(hc.isAlive(anyString())).thenReturn(true);
         when(hc.consecFails(anyString())).thenReturn(0);
         DispatcherInspectionHandler inspectionHandler =
-                new DispatcherInspectionHandler(cfg, inspectionRefresher, hc, batchScheduleClient, mapper);
+                new DispatcherInspectionHandler(cfg, inspectionRefresher, hc, batchScheduleClient);
 
-        List<BatchEndpointSpec> specs = BatchEndpointSpec.SPECS;
+        List<org.flexlb.dispatcher.BatchEndpointSpec> specs =
+                org.flexlb.dispatcher.BatchEndpointSpec.SPECS;
         DispatchRouter router = new DispatchRouter(
                 batchHandler, passthrough, inspectionHandler, specs);
 
