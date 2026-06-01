@@ -456,6 +456,9 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
         if (attn_inputs.is_target_verify && total_tokens > 0) {
             target_verify_total_tokens_ = static_cast<int>(total_tokens);
         }
+        if (total_tokens > 0 && batch_size > 0) {
+            prefill_tokens_per_batch_ = static_cast<int>(total_tokens) / batch_size;
+        }
 
         if (graph_token_capacity > 0) {
             ensureTensorSize(batch_size, static_cast<int>(graph_token_capacity), forbid_realloc);
@@ -563,10 +566,13 @@ void SparseMlaParams::fillTargetVerifyCudaGraphParams(torch::Tensor input_length
                                              seq_size_per_block,
                                              stream);
 
+    int total_tokens = target_verify_total_tokens_;
+    if (total_tokens <= 0 && prefill_tokens_per_batch_ > 0) {
+        total_tokens = batch_size * prefill_tokens_per_batch_;
+    }
     RTP_LLM_CHECK_WITH_INFO(
-        target_verify_total_tokens_ > 0,
-        "target_verify_total_tokens_ must be set (call fillParams once with is_target_verify=true first)");
-    const int total_tokens  = target_verify_total_tokens_;
+        total_tokens > 0,
+        "total_tokens must be derivable from target_verify_total_tokens_ or prefill_tokens_per_batch_");
     const int page_capacity = batch_size * max_blocks_per_batch;
 
     auto set_shape = [](torch::Tensor& t, std::vector<int64_t> s) {
@@ -682,6 +688,7 @@ void registerPySparseMlaParams(pybind11::module& m) {
         .def_readonly("ks", &SparseMlaParams::ks)
         .def_readonly("ke", &SparseMlaParams::ke)
         .def_readonly("target_verify_total_tokens", &SparseMlaParams::target_verify_total_tokens_)
+        .def_readonly("prefill_tokens_per_batch", &SparseMlaParams::prefill_tokens_per_batch_)
         .def_readonly("prefill_total_kv_tokens", &SparseMlaParams::prefill_total_kv_tokens)
         .def_readwrite("schedule_metadata", &SparseMlaParams::schedule_metadata)
         .def(
