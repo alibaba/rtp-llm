@@ -460,10 +460,23 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
     )
 
 
+def get_cuda_device_id_for_local_rank(local_rank: int) -> int:
+    """Map logical local rank to CUDA device id.
+
+    RTP_LLM_LOCAL_DEVICE_OFFSET is only intended for local multi-part smoke tests
+    that simulate multiple nodes in separate server processes on one host.
+    """
+    return local_rank + int(os.environ.get("RTP_LLM_LOCAL_DEVICE_OFFSET", "0"))
+
+
 def setup_cuda_device_and_accl_env(local_rank: int) -> None:
     """Apply CUDA device and ACCL env side effects (same as ParallelInfo.from_params)."""
+    cuda_device_id = get_cuda_device_id_for_local_rank(local_rank)
     if torch.cuda.is_available():
-        torch.cuda.set_device(local_rank)
+        torch.cuda.set_device(cuda_device_id)
+        logging.info(
+            "local rank %s mapped to cuda device %s", local_rank, cuda_device_id
+        )
 
     if os.environ.get("ACCL_SELECT_PATH") == "1":
         select_port = str(local_rank % 2)
