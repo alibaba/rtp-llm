@@ -7,6 +7,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.DpBatchReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -61,6 +62,14 @@ class SloBudgetBatcherTest {
         cfg.setBatchMaxCapacity(1_000_000);
         when(configService.loadBalanceConfig()).thenReturn(cfg);
 
+        WorkerStatus prefillWorker = new WorkerStatus();
+        prefillWorker.setIp("10.0.0.1");
+        prefillWorker.setPort(8080);
+        prefillWorker.setGroup("g1");
+        prefillWorker.setAlive(true);
+        prefillWorker.setDpSize(1);
+        when(planner.selectPrefillWorker(any(), any(), anyInt())).thenReturn(prefillWorker);
+
         when(planner.plan(any(), any())).thenAnswer(inv -> {
             List<QueuedRequest> drained = inv.getArgument(0);
             if (drained == null || drained.isEmpty()) {
@@ -80,7 +89,7 @@ class SloBudgetBatcherTest {
         });
 
         reporter = mock(DpBatchReporter.class);
-        batcher = new SloBudgetBatcher("m1", configService, planner, dispatched::add, predictor, reporter);
+        batcher = new SloBudgetBatcher("m1", configService, planner, dispatched::add, predictor, reporter, prefillWorker);
     }
 
     @AfterEach

@@ -1,5 +1,8 @@
 package org.flexlb.balance.dp;
 
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.master.WorkerStatus;
+
 import java.util.List;
 
 /**
@@ -26,4 +29,25 @@ import java.util.List;
 public interface DispatchPlanner {
 
     DispatchPlan plan(List<QueuedRequest> drained, DispatchContext context);
+
+    /**
+     * Select a target group for request routing. Called at request arrival
+     * time to determine which group (and its prefill worker) the request
+     * should be batched with.
+     *
+     * @return the prefill WorkerStatus representing the selected group, or {@code null}
+     */
+    default WorkerStatus selectPrefillWorker(String model, FlexlbConfig cfg, int dpSize) {
+        return null;
+    }
+
+    /**
+     * Select a decode worker in the given group. Used by the planner for
+     * per-request decode assignment within a batch.
+     *
+     * @return an alive decode worker as ServerStatus, or {@code null}
+     */
+    default org.flexlb.dao.loadbalance.ServerStatus selectDecodeWorker(String model, FlexlbConfig cfg, String group) {
+        return null;
+    }
 }

@@ -16,6 +16,7 @@ import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -39,48 +40,113 @@ public class DefaultDispatchPlanner implements DispatchPlanner {
     }
 
     @Override
+    public WorkerStatus selectPrefillWorker(String model, FlexlbConfig cfg, int dpSize) {
+        List<WorkerStatus> candidates = dpEnabledPrefillCandidates(cfg, dpSize);
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        Map<String, WorkerStatus> decodeWorkers =
+                engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, null);
+        if (decodeWorkers != null && !decodeWorkers.isEmpty()) {
+            List<WorkerStatus> withDecode = candidates.stream()
+                    .filter(w -> hasAliveDecodeInGroup(decodeWorkers, w.getGroup()))
+                    .toList();
+            if (!withDecode.isEmpty()) {
+                candidates = withDecode;
+            }
+        }
+        if (candidates.size() == 1) {
+            return candidates.get(0);
+        }
+        return candidates.stream()
+                .min(Comparator.comparingLong(w -> w.getRunningQueueTime().get()))
+                .orElse(candidates.get(0));
+    }
+
+    @Override
+    public ServerStatus selectDecodeWorker(String model, FlexlbConfig cfg, String group) {
+        LoadBalancer decodeSelector = LoadBalanceStrategyFactory.getLoadBalancer(
+                cfg.getStrategyForRoleType(RoleType.DECODE));
+        if (decodeSelector == null) {
+            return null;
+        }
+        org.flexlb.dao.BalanceContext probeCtx = new org.flexlb.dao.BalanceContext();
+        probeCtx.setConfig(cfg);
+        ServerStatus result = decodeSelector.select(probeCtx, RoleType.DECODE, group);
+        if (result == null || !result.isSuccess()) {
+            return null;
+        }
+        return result;
+    }
+
+    private static boolean hasAliveDecodeInGroup(Map<String, WorkerStatus> allDecode, String group) {
+        if (group == null) {
+            return false;
+        }
+        return allDecode.values().stream()
+                .anyMatch(w -> w.isAlive() && group.equals(w.getGroup()));
+    }
+
+
+
+    @Override
     public DispatchPlan plan(List<QueuedRequest> drained, DispatchContext context) {
         if (drained == null || drained.isEmpty()) {
             return DispatchPlan.empty();
         }
 
         FlexlbConfig cfg = context.config();
-        List<WorkerStatus> candidates = dpEnabledPrefillCandidates(cfg, context.dpSize());
-        if (candidates.isEmpty()) {
-            return DispatchPlan.allFailed(drained, StrategyErrorType.NO_PREFILL_WORKER,
-                    "no DP-enabled prefill worker available");
-        }
+        WorkerStatus group;
 
-        String selectorName = cfg.isCacheAwareSchedulingEnabled()
-                ? cfg.getDpGroupSelector()
-                : FirstAliveGroupSelector.NAME;
-        GroupSelector groupSelector = groupSelectors.getOrDefault(selectorName,
-                groupSelectors.get(CacheAwareGroupSelector.NAME));
-        if (groupSelector == null) {
-            groupSelector = groupSelectors.values().iterator().next();
-        }
+        if (context.preSelectedPrefill() != null) {
+            group = context.preSelectedPrefill();
+        } else {
+            List<WorkerStatus> candidates = dpEnabledPrefillCandidates(cfg, context.dpSize());
+            if (candidates.isEmpty()) {
+                return DispatchPlan.allFailed(drained, StrategyErrorType.NO_PREFILL_WORKER,
+                        "no DP-enabled prefill worker available");
+            }
 
-        WorkerStatus group = groupSelector.select(candidates, context);
-        if (group == null) {
-            return DispatchPlan.allFailed(drained, StrategyErrorType.NO_PREFILL_WORKER,
-                    "GroupSelector(" + groupSelector.name() + ") returned no candidate");
+            String selectorName = cfg.isCacheAwareSchedulingEnabled()
+                    ? cfg.getDpGroupSelector()
+                    : FirstAliveGroupSelector.NAME;
+            GroupSelector groupSelector = groupSelectors.getOrDefault(selectorName,
+                    groupSelectors.get(CacheAwareGroupSelector.NAME));
+            if (groupSelector == null) {
+                groupSelector = groupSelectors.values().iterator().next();
+            }
+
+            group = groupSelector.select(candidates, context);
+            if (group == null) {
+                return DispatchPlan.allFailed(drained, StrategyErrorType.NO_PREFILL_WORKER,
+                        "GroupSelector(" + groupSelector.name() + ") returned no candidate");
+            }
         }
 
         ServerStatus prefill = toPrefillServerStatus(group);
-        LoadBalancer decodeSelector = LoadBalanceStrategyFactory.getLoadBalancer(
-                cfg.getStrategyForRoleType(RoleType.DECODE));
 
         List<PendingRequest> placed = new ArrayList<>(drained.size());
         List<FailedRequest> failures = new ArrayList<>();
-        for (QueuedRequest qr : drained) {
-            qr.ctx().setConfig(cfg);
-            ServerStatus decode = decodeSelector.select(qr.ctx(), RoleType.DECODE, prefill.getGroup());
-            if (decode == null || !decode.isSuccess()) {
-                String msg = decode == null ? "decode selector returned null" : decode.getMessage();
-                failures.add(new FailedRequest(qr, StrategyErrorType.NO_DECODE_WORKER, msg));
-                continue;
+
+        if (context.preSelectedDecode() != null) {
+            ServerStatus decode = context.preSelectedDecode();
+            for (QueuedRequest qr : drained) {
+                qr.ctx().setConfig(cfg);
+                placed.add(new PendingRequest(qr.ctx(), prefill, decode, qr.future(), qr.enqueuedAtMicros()));
             }
-            placed.add(new PendingRequest(qr.ctx(), prefill, decode, qr.future(), qr.enqueuedAtMicros()));
+        } else {
+            LoadBalancer decodeSelector = LoadBalanceStrategyFactory.getLoadBalancer(
+                    cfg.getStrategyForRoleType(RoleType.DECODE));
+            for (QueuedRequest qr : drained) {
+                qr.ctx().setConfig(cfg);
+                ServerStatus decode = decodeSelector.select(qr.ctx(), RoleType.DECODE, prefill.getGroup());
+                if (decode == null || !decode.isSuccess()) {
+                    String msg = decode == null ? "decode selector returned null" : decode.getMessage();
+                    failures.add(new FailedRequest(qr, StrategyErrorType.NO_DECODE_WORKER, msg));
+                    continue;
+                }
+                placed.add(new PendingRequest(qr.ctx(), prefill, decode, qr.future(), qr.enqueuedAtMicros()));
+            }
         }
 
         if (placed.isEmpty()) {

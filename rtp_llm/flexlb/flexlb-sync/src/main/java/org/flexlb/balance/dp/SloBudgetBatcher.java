@@ -4,6 +4,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.DpBatchReporter;
 import org.flexlb.util.Logger;
 
@@ -48,6 +49,7 @@ public class SloBudgetBatcher {
     private final Consumer<PrefillBatch> dispatchCallback;
     private final PrefillTimePredictor predictor;
     private final DpBatchReporter dpBatchReporter;
+    private final WorkerStatus targetGroup;
 
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition arrival = lock.newCondition();
@@ -62,15 +64,21 @@ public class SloBudgetBatcher {
                             DispatchPlanner planner,
                             Consumer<PrefillBatch> dispatchCallback,
                             PrefillTimePredictor predictor,
-                            DpBatchReporter dpBatchReporter) {
+                            DpBatchReporter dpBatchReporter,
+                            WorkerStatus targetGroup) {
         this.model = model;
         this.configService = configService;
         this.planner = planner;
         this.dispatchCallback = dispatchCallback;
         this.predictor = predictor;
         this.dpBatchReporter = dpBatchReporter;
+        this.targetGroup = targetGroup;
 
-        this.worker = new Thread(this::runLoop, "slo-batcher-" + (model == null ? "default" : model));
+        String suffix = model == null ? "default" : model;
+        if (targetGroup != null) {
+            suffix += "-" + targetGroup.getGroup();
+        }
+        this.worker = new Thread(this::runLoop, "slo-batcher-" + suffix);
         this.worker.setDaemon(true);
     }
 
@@ -117,6 +125,10 @@ public class SloBudgetBatcher {
         } finally {
             lock.unlock();
         }
+    }
+
+    public WorkerStatus getTargetGroup() {
+        return targetGroup;
     }
 
     public void shutdown() {
@@ -190,6 +202,12 @@ public class SloBudgetBatcher {
 
             reportQueueSnapshotLocked();
 
+            // 0. verify target group is still alive
+            if (targetGroup == null || !targetGroup.isAlive()) {
+                QueuedRequest head = queue.poll();
+                return StepResult.fail(head, cfg);
+            }
+
             QueuedRequest head = queue.peek();
             long nowMicros = System.nanoTime() / 1000;
             long budgetMs = (head.sloDeadlineMicros() - nowMicros) / 1000;
@@ -203,7 +221,7 @@ public class SloBudgetBatcher {
             // 2. urgent — no time to batch -> send head alone
             if (budgetMs < marginMs) {
                 queue.poll();
-                return StepResult.dispatch(List.of(head), DpBatchReporter.FlushReason.EDF_URGENT, cfg, computeTokens(head));
+                return StepResult.dispatch(List.of(head), DpBatchReporter.FlushReason.EDF_URGENT, cfg, computeTokens(head), targetGroup);
             }
 
             // 3. binary search for max batch tokens within budget
@@ -247,7 +265,7 @@ public class SloBudgetBatcher {
                 for (QueuedRequest qr : picked) {
                     queue.remove(qr);
                 }
-                return StepResult.dispatch(picked, DpBatchReporter.FlushReason.BATCH_READY, cfg, batchMaxTokens);
+                return StepResult.dispatch(picked, DpBatchReporter.FlushReason.BATCH_READY, cfg, batchMaxTokens, targetGroup);
             }
 
             // wait for new arrivals; budget shrinks each iteration -> converges
@@ -271,7 +289,7 @@ public class SloBudgetBatcher {
             return;
         }
         if (result.drained != null && !result.drained.isEmpty()) {
-            planAndDispatch(result.drained, result.cfg, result.reason, result.batchMaxTokens);
+            planAndDispatch(result.drained, result.cfg, result.reason, result.batchMaxTokens, result.targetGroup);
         }
     }
 
@@ -319,7 +337,8 @@ public class SloBudgetBatcher {
     private void planAndDispatch(List<QueuedRequest> drained,
                                   FlexlbConfig cfg,
                                   DpBatchReporter.FlushReason reason,
-                                  long batchMaxTokens) {
+                                  long batchMaxTokens,
+                                  WorkerStatus prefillWorker) {
         long actualTokens = 0;
         for (QueuedRequest qr : drained) {
             actualTokens += computeTokens(qr);
@@ -336,7 +355,7 @@ public class SloBudgetBatcher {
 
         DispatchPlan plan;
         try {
-            plan = planner.plan(drained, new DispatchContext(model, 1, cfg, drained));
+            plan = planner.plan(drained, new DispatchContext(model, 1, cfg, drained, prefillWorker));
         } catch (Throwable t) {
             Logger.error("SloBudgetBatcher[{}] planner threw on {} requests; failing all",
                     model, drained.size(), t);
@@ -398,28 +417,32 @@ public class SloBudgetBatcher {
         final QueuedRequest failOne;
         final FlexlbConfig cfg;
         final long batchMaxTokens;
+        final WorkerStatus targetGroup;
 
         private StepResult(List<QueuedRequest> drained,
                            DpBatchReporter.FlushReason reason,
                            QueuedRequest failOne,
                            FlexlbConfig cfg,
-                           long batchMaxTokens) {
+                           long batchMaxTokens,
+                           WorkerStatus targetGroup) {
             this.drained = drained;
             this.reason = reason;
             this.failOne = failOne;
             this.cfg = cfg;
             this.batchMaxTokens = batchMaxTokens;
+            this.targetGroup = targetGroup;
         }
 
         static StepResult dispatch(List<QueuedRequest> drained,
                                    DpBatchReporter.FlushReason reason,
                                    FlexlbConfig cfg,
-                                   long batchMaxTokens) {
-            return new StepResult(drained, reason, null, cfg, batchMaxTokens);
+                                   long batchMaxTokens,
+                                   WorkerStatus targetGroup) {
+            return new StepResult(drained, reason, null, cfg, batchMaxTokens, targetGroup);
         }
 
         static StepResult fail(QueuedRequest one, FlexlbConfig cfg) {
-            return new StepResult(null, null, one, cfg, 0);
+            return new StepResult(null, null, one, cfg, 0, null);
         }
     }
 }

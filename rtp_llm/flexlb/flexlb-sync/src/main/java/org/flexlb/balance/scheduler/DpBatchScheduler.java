@@ -58,7 +58,7 @@ public class DpBatchScheduler {
     private DpBatchReporter dpBatchReporter;
 
     private final Map<String, GlobalPrefillBatcher> batchers = new ConcurrentHashMap<>();
-    private final Map<String, SloBudgetBatcher> sloBatchers = new ConcurrentHashMap<>();
+    private final Map<String, ConcurrentHashMap<String, SloBudgetBatcher>> sloBatchers = new ConcurrentHashMap<>();
 
     private final ScheduledExecutorService timerExecutor = Executors.newScheduledThreadPool(2, r -> {
         Thread t = new Thread(r, "dp-batch-timer");
@@ -101,7 +101,15 @@ public class DpBatchScheduler {
             int dpSize = peekModelDpSize();
             QueuedRequest qr = QueuedRequest.of(ctx, future);
             if (dpSize == 1) {
-                sloBatchers.computeIfAbsent(key, this::newSloBatcher).offer(qr);
+                WorkerStatus group = planner.selectPrefillWorker(key, configService.loadBalanceConfig(), 1);
+                if (group == null) {
+                    future.complete(failResponse("no available group"));
+                    return future;
+                }
+                String groupKey = group.getGroup();
+                ConcurrentHashMap<String, SloBudgetBatcher> modelBatchers =
+                        sloBatchers.computeIfAbsent(key, k -> new ConcurrentHashMap<>());
+                modelBatchers.computeIfAbsent(groupKey, k -> newSloBatcher(key, group)).offer(qr);
             } else {
                 batchers.computeIfAbsent(key, this::newBatcher).offer(qr);
             }
@@ -132,11 +140,19 @@ public class DpBatchScheduler {
                 planner, this::dispatchBatch, timerExecutor, cacheAwareService, dpBatchReporter);
     }
 
-    private SloBudgetBatcher newSloBatcher(String model) {
+    private SloBudgetBatcher newSloBatcher(String model, WorkerStatus prefillWorker) {
         SloBudgetBatcher b = new SloBudgetBatcher(model, configService, planner,
-                this::dispatchBatch, prefillTimePredictor, dpBatchReporter);
+                this::dispatchBatch, prefillTimePredictor, dpBatchReporter, prefillWorker);
         b.start();
         return b;
+    }
+
+    private static Response failResponse(String message) {
+        Response r = new Response();
+        r.setSuccess(false);
+        r.setCode(org.flexlb.dao.loadbalance.StrategyErrorType.NO_PREFILL_WORKER.getErrorCode());
+        r.setErrorMessage(message);
+        return r;
     }
 
     // ============== Dispatch (called by GlobalPrefillBatcher) ==============
@@ -325,9 +341,11 @@ public class DpBatchScheduler {
                 return;
             }
         }
-        for (SloBudgetBatcher b : sloBatchers.values()) {
-            if (b.cancelInQueue(requestId)) {
-                return;
+        for (ConcurrentHashMap<String, SloBudgetBatcher> modelMap : sloBatchers.values()) {
+            for (SloBudgetBatcher b : modelMap.values()) {
+                if (b.cancelInQueue(requestId)) {
+                    return;
+                }
             }
         }
         InflightBatchRegistry.RequestEntry entry = inflightRegistry.lookupByRequest(requestId);
@@ -514,8 +532,10 @@ public class DpBatchScheduler {
 
     @PreDestroy
     public void shutdown() {
-        for (SloBudgetBatcher b : sloBatchers.values()) {
-            b.shutdown();
+        for (ConcurrentHashMap<String, SloBudgetBatcher> modelMap : sloBatchers.values()) {
+            for (SloBudgetBatcher b : modelMap.values()) {
+                b.shutdown();
+            }
         }
         timerExecutor.shutdownNow();
     }
