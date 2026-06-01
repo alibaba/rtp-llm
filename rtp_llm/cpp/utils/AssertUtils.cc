@@ -21,4 +21,12 @@ namespace rtp_llm {
     throwRuntimeError(file, line, info);
 }
 
+[[noreturn]] void fatalAbort(const char* const file, int const line, std::string const& info) {
+    auto error_msg = std::string("[ERROR] ") + info + " Fatal abort: " + file + ":" + std::to_string(line) + " \n";
+    RTP_LLM_LOG_ERROR("FATAIL ERROR!!! %s", error_msg.c_str());
+    fflush(stdout);
+    fflush(stderr);
+    abort();
+}
+
 }  // namespace rtp_llm

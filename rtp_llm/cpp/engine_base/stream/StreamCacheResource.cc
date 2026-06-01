@@ -290,6 +290,7 @@ void StreamCacheResource::releaseResource() {
                           std::hash<std::thread::id>{}(std::this_thread::get_id()));
         abort();
     }
+    load_cache_context_.reset();
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
     if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->hasError())) {
         return;
