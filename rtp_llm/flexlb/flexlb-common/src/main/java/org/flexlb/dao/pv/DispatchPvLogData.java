@@ -4,9 +4,9 @@ import lombok.Data;
 
 /**
  * PV log entry for {@code /dispatcher/**} requests &mdash; both the batch fanout path
- * ({@link org.flexlb.dispatcher.GenericBatchHandler}) and the passthrough path
- * ({@link org.flexlb.dispatcher.PassthroughClient}) emit one record per inbound
- * request to {@code pvLogger}, sharing this schema so {@code pv.log} stays single-format.
+ * ({@link org.flexlb.dispatcher.BatchHandler}) and the passthrough
+ * path ({@link org.flexlb.dispatcher.PassthroughClient}) emit one record per inbound request
+ * to {@code pvLogger}, sharing this schema so {@code pv.log} stays single-format.
  *
  * <p>Discriminated from {@link PvLogData} ({@code /schedule}) and {@link BatchPvLogData}
  * ({@code /batch_schedule}) by the {@code type} field. Batch-only counters are 0 for the

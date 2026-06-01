@@ -1,7 +1,8 @@
 package org.flexlb.dispatcher;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONArray;
+import com.alibaba.fastjson2.JSONObject;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -16,7 +17,6 @@ import reactor.test.StepVerifier;
 class FeClientTest {
 
     private MockWebServer server;
-    private final ObjectMapper mapper = new ObjectMapper();
 
     @BeforeEach
     void start() throws Exception {
@@ -30,7 +30,7 @@ class FeClientTest {
     }
 
     @Test
-    void postsToBatchInferAndParsesResponse() throws Exception {
+    void postsToBatchInferAndReturnsResponseBytes() throws Exception {
         server.enqueue(new MockResponse()
                 .setHeader("Content-Type", "application/json")
                 .setBody("{\"response_batch\":[{\"response\":\"ok\"}]}"));
@@ -39,18 +39,20 @@ class FeClientTest {
         FeClient client = new FeClient(
                 WebClient.builder(), ConnectionProvider.builder("test").build(), cfg);
 
-        ObjectNode body = mapper.createObjectNode();
-        body.putArray("prompt_batch").add("hi");
+        JSONObject body = new JSONObject();
+        body.put("prompt_batch", JSONArray.of("hi"));
 
         String base = "http://" + server.getHostName() + ":" + server.getPort();
-        StepVerifier.create(client.post(base, "/batch_infer", body))
-                .assertNext(n -> Assertions.assertEquals("ok",
-                        n.get("response_batch").get(0).get("response").asText()))
+        StepVerifier.create(client.postBytes(base, "/batch_infer", JSON.toJSONBytes(body)))
+                .assertNext(bytes -> {
+                    JSONObject parsed = JSON.parseObject(bytes);
+                    Assertions.assertEquals("ok",
+                            parsed.getJSONArray("response_batch").getJSONObject(0).getString("response"));
+                })
                 .verifyComplete();
 
         RecordedRequest rec = server.takeRequest();
         Assertions.assertEquals("/batch_infer", rec.getPath());
         Assertions.assertEquals("POST", rec.getMethod());
     }
-
 }

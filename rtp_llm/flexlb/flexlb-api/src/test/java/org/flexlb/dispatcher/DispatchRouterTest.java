@@ -23,11 +23,11 @@ class DispatchRouterTest {
                     FailedItemFactory.NULL, null);
     private static final BatchEndpointSpec EMBEDDINGS =
             new BatchEndpointSpec("/v1/embeddings", "input", "data",
-                    FailedItemFactory.EMBEDDING_NULL, EmbeddingPostMerger.INSTANCE);
+                    FailedItemFactory.EMBEDDING_NULL, EmbeddingMerger.INSTANCE);
 
     @Test
     void nonDispatcherPathsAreNotMatched() {
-        GenericBatchHandler batch = mock(GenericBatchHandler.class);
+        BatchHandler batch = mock(BatchHandler.class);
         PassthroughClient passthrough = mock(PassthroughClient.class);
         RouterFunction<ServerResponse> routes =
                 new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(BATCH_INFER)).routes();
@@ -42,7 +42,7 @@ class DispatchRouterTest {
 
     @Test
     void dispatcherAnyOtherPathGoesToPassthrough() {
-        GenericBatchHandler batch = mock(GenericBatchHandler.class);
+        BatchHandler batch = mock(BatchHandler.class);
         PassthroughClient passthrough = mock(PassthroughClient.class);
         when(passthrough.forward(any()))
                 .thenReturn(ServerResponse.ok().bodyValue("pass"));
@@ -58,7 +58,7 @@ class DispatchRouterTest {
 
     @Test
     void registersOneRouteForEachSpec() {
-        GenericBatchHandler batch = mock(GenericBatchHandler.class);
+        BatchHandler batch = mock(BatchHandler.class);
         when(batch.handle(any(), eq(BATCH_INFER)))
                 .thenReturn(ServerResponse.ok().bodyValue(BATCH_INFER.getPath()));
         when(batch.handle(any(), eq(EMBEDDINGS)))

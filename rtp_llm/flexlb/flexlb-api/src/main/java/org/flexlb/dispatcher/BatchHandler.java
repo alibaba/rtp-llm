@@ -1,11 +1,15 @@
 package org.flexlb.dispatcher;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONArray;
+import com.alibaba.fastjson2.JSONException;
+import com.alibaba.fastjson2.JSONObject;
+import com.alibaba.fastjson2.JSONWriter;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.pv.DispatchPvLogData;
+import org.flexlb.dispatcher.BatchScheduleClient;
+import org.flexlb.dispatcher.DispatchConfig;
+import org.flexlb.dispatcher.SubBatchSpec;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -18,38 +22,34 @@ import reactor.core.publisher.Mono;
 import java.util.List;
 
 /**
- * One handler for every batch endpoint. Parses the body, splits {@code spec.requestArrayField}
- * into chunks of at most {@code subBatchSize}, fans out one chunk per FE call, and merges with
- * {@link PartialFailureMerger}. Returns 200 on partial success, 500 only on
- * {@link PartialFailureMerger.MergedResponse#allFailed()}, and 400 when the body is not a JSON object or the
- * requested array field is missing/non-array (a request that landed on a batch path but doesn't
- * shape like a batch is a client bug, not something to silently relay to FE).
+ * Dispatcher batch handler. Reads each batch request body as raw bytes (no Jackson
+ * round-trip), parses with fastjson2, splits the request array per {@link SubBatchSpec},
+ * builds per-chunk bodies, stamps any pre-assigned BE targets, fans out via
+ * {@link FanoutService}, and merges with {@link ResponseMerger}.
  *
- * <p>Single-element batches fanout as one chunk — same merge path, same status mapping —
- * rather than being forwarded verbatim. The router is responsible for sending non-batch traffic
- * to passthrough; by the time we're inside this handler the request body has already been
- * consumed by {@link ServerRequest#bodyToMono}, so re-forwarding through {@code WebClient}
- * would lose the body.
+ * <p>Behavior-equivalent to {@code GenericBatchHandler} on the Jackson side — same status
+ * mapping (400 on missing/non-array field, 500 only when every sub-batch failed, 200 on
+ * full or partial success), same pv.log shape, same partial-failure envelope.
+ *
+ * <p>Single-element batches still fan out as one chunk so partial-failure semantics stay
+ * uniform; router-level rejection of non-batch traffic happens upstream.
  */
 @Component
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
-public class GenericBatchHandler {
+public class BatchHandler {
 
     /** Per-request access log, shared with {@code /schedule} / {@code /batch_schedule} → pv.log. */
     private static final org.slf4j.Logger pvLogger = LoggerFactory.getLogger("pvLogger");
 
     private final FanoutService fanoutService;
-    private final ObjectMapper mapper;
     private final SubBatchSpec subBatch;
     private final BatchScheduleClient batchScheduleClient;
     private final boolean preAssignBe;
 
-    public GenericBatchHandler(FanoutService fanoutService,
-                               ObjectMapper mapper,
-                               DispatchConfig cfg,
-                               BatchScheduleClient batchScheduleClient) {
+    public BatchHandler(FanoutService fanoutService,
+                                 DispatchConfig cfg,
+                                 BatchScheduleClient batchScheduleClient) {
         this.fanoutService = fanoutService;
-        this.mapper = mapper;
         this.subBatch = cfg.subBatchSpec();
         this.batchScheduleClient = batchScheduleClient;
         this.preAssignBe = cfg.isPreAssignBe();
@@ -57,53 +57,55 @@ public class GenericBatchHandler {
 
     public Mono<ServerResponse> handle(ServerRequest request, BatchEndpointSpec spec) {
         DispatchPvLogData pv = DispatchPvLogData.batch(spec.getPath(), System.currentTimeMillis());
-        return request.bodyToMono(JsonNode.class).flatMap(body -> {
-            if (!(body instanceof ObjectNode obj)) {
+        return request.bodyToMono(byte[].class).flatMap(bytes -> {
+            JSONObject body;
+            try {
+                body = BatchBodyParser.parseObject(bytes);
+            } catch (JSONException e) {
+                return badRequest("malformed JSON: " + e.getMessage());
+            }
+            if (body == null) {
                 return badRequest("expected a JSON object body");
             }
-            JsonNode arr = obj.get(spec.getRequestArrayField());
-            if (arr == null || !arr.isArray()) {
+            JSONArray arr = BatchBodyParser.findArrayField(body, spec.getRequestArrayField());
+            if (arr == null) {
                 return badRequest("missing or non-array field: " + spec.getRequestArrayField());
             }
             if (arr.isEmpty()) {
-                ObjectNode emptyEnvelope = mapper.createObjectNode();
-                emptyEnvelope.set(spec.getResponseArrayField(), mapper.createArrayNode());
-                return json(200, emptyEnvelope);
+                JSONObject emptyEnvelope = new JSONObject();
+                emptyEnvelope.put(spec.getResponseArrayField(), new JSONArray());
+                return jsonBytes(200, serialize(emptyEnvelope));
             }
             pv.setTotalItems(arr.size());
-            List<ArrayNode> chunks = BatchSplitter.split((ArrayNode) arr, subBatch, mapper);
+            List<JSONArray> chunks = BatchChunkAssembler.split(arr, subBatch);
             pv.setChunkCount(chunks.size());
-            List<ObjectNode> chunkBodies = BatchChunkBuilder.buildChunkBodies(
-                    obj, chunks, spec.getRequestArrayField());
+            List<JSONObject> chunkBodies = BatchChunkAssembler.buildChunkBodies(
+                    body, chunks, spec.getRequestArrayField());
             return resolvePreAssignedTargets(chunks.size())
                     .flatMap(targets -> {
-                        BatchChunkBuilder.stampPreAssignedBe(chunkBodies, targets);
+                        BatchChunkAssembler.stampPreAssignedBe(chunkBodies, targets);
                         return fanoutService.dispatchChunks(spec.getPath(), chunkBodies, spec)
-                                .map(subs -> PartialFailureMerger.merge(subs, spec, mapper))
+                                .map(subs -> ResponseMerger.merge(subs, spec))
                                 .flatMap(merged -> {
                                     pv.setFailedChunks(merged.failedIndices().size());
-                                    return merged.allFailed() ? errorResponse(merged) : json(200, merged.body());
+                                    if (merged.allFailed()) {
+                                        return errorResponse(merged);
+                                    }
+                                    return jsonBytes(200, serialize(merged.body()));
                                 });
                     });
         }).onErrorResume(e -> {
             String errMsg = e.getClass().getSimpleName() + ": " + e.getMessage();
             Logger.warn("dispatcher request failed: spec={}, err={}", spec.getPath(), errMsg);
             pv.setError(errMsg);
-            ObjectNode err = mapper.createObjectNode();
+            JSONObject err = new JSONObject();
             err.put("error", "dispatch_failed");
             err.put("message", String.valueOf(e.getMessage()));
-            return json(500, err);
+            return jsonBytes(500, serialize(err));
         }).doOnNext(resp -> pv.setHttpStatus(resp.statusCode().value()))
           .doFinally(signal -> finalizePvRecord(pv, signal));
     }
 
-    /**
-     * Finalize on every terminal signal (COMPLETE / ERROR / CANCEL) so a client-disconnect
-     * before {@code writeTo} subscribes still produces a pv.log line. Mirrors
-     * {@code HttpLoadBalanceServer}'s {@code doFinally(signal -> finalizeXxx(...))} pattern;
-     * cancel events arrive with httpStatus=0 and are stamped 499 so operators can discriminate
-     * client-cancel from server-side errors.
-     */
     private void finalizePvRecord(DispatchPvLogData pv, reactor.core.publisher.SignalType signal) {
         int status = pv.getHttpStatus();
         String error = pv.getError();
@@ -115,39 +117,42 @@ public class GenericBatchHandler {
         pv.emit(pvLogger);
     }
 
-    /** Wraps {@link ServerResponse#status(int)} + JSON content type + body in one call. */
-    private static Mono<ServerResponse> json(int status, Object body) {
+    private static Mono<ServerResponse> jsonBytes(int status, byte[] body) {
         return ServerResponse.status(status).contentType(MediaType.APPLICATION_JSON).bodyValue(body);
     }
 
     private Mono<ServerResponse> badRequest(String message) {
-        ObjectNode err = mapper.createObjectNode();
+        JSONObject err = new JSONObject();
         err.put("error", "invalid_batch_request");
         err.put("message", message);
-        return json(400, err);
+        return jsonBytes(400, serialize(err));
     }
 
-    private Mono<ServerResponse> errorResponse(PartialFailureMerger.MergedResponse merged) {
-        ObjectNode body = mapper.createObjectNode();
+    private Mono<ServerResponse> errorResponse(ResponseMerger.MergedResponse merged) {
+        JSONObject body = new JSONObject();
         body.put("error", "all_sub_batches_failed");
         body.put("failed_count", merged.failedIndices().size());
         body.put("total_chunks", merged.totalChunks());
-        ArrayNode reasons = body.putArray("failed_reasons");
+        JSONArray reasons = new JSONArray();
         merged.failedReasons().stream().distinct().forEach(reasons::add);
-        return json(500, body);
+        body.put("failed_reasons", reasons);
+        return jsonBytes(500, serialize(body));
     }
 
     /**
-     * Resolves N pre-assigned BE targets via {@link BatchScheduleClient} when
-     * {@link #preAssignBe} is on, returning {@link List#of()} otherwise. The client itself
-     * collapses every failure path to an empty list, so the caller never has to handle
-     * errors here — an empty list simply means "no stamping happens this round".
+     * WriteNulls preserves explicit nulls on the wire (e.g. {@code embedding: null} from
+     * {@link BatchEndpointSpec.FailedItemFactory#EMBEDDING_NULL}); without it fastjson2
+     * strips null entries by default, which would diverge from the Jackson handler's
+     * {@code mapper.nullNode()} behavior.
      */
+    private static byte[] serialize(JSONObject body) {
+        return JSON.toJSONBytes(body, JSONWriter.Feature.WriteNulls);
+    }
+
     private Mono<List<BatchScheduleTarget>> resolvePreAssignedTargets(int chunkCount) {
         if (!preAssignBe || batchScheduleClient == null) {
             return Mono.just(List.of());
         }
         return batchScheduleClient.requestTargets(chunkCount);
     }
-
 }
