@@ -230,6 +230,11 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                                
         waitRecvTasksWithReadDeadlinePolicy(task_group, deadline_ms, request_id, unique_key);
 
     {
+        int done_cnt = 0, total_cnt = static_cast<int>(task_group->tasks.size());
+        for (const auto& t : task_group->tasks) { if (t->done()) ++done_cnt; }
+    }
+
+    {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
         building_read_keys_.erase(unique_key);
         pending_cancel_keys_.erase(unique_key);
