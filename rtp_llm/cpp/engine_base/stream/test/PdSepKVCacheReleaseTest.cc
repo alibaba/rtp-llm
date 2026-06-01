@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -570,6 +571,36 @@ TEST_F(PdSepKVCacheReleaseTest, testHoldWithoutReleasePDSep_ResourceReleasedStil
     // After ref drop, blocks should be returned (minus any held by device cache for reuse)
     EXPECT_GE(cache_manager_->freeBlocksNum(), initial_free_blocks_ - 2)
         << "Blocks should be freed once pd_kvcache_ref_ is dropped (minus device cache refs)";
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testPrefillContextStopStream_ReleasesPDSepHold) {
+    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
+    allocateAndFinish();
+
+    auto& resource = stream_->streamCacheResource();
+    resource.holdKVCacheForPDSep();
+    ASSERT_NE(resource.pd_kvcache_ref_, nullptr);
+    ASSERT_GT(cache_manager_->allocator_->connectorRefBlocksNum(), 0);
+
+    RemoteServerResource remote_resource;
+    remote_resource.workers     = {"local"};
+    remote_resource.cache_store = std::make_shared<MemoryBackedCacheStore>();
+
+    GenerateInputPB request;
+    request.set_request_id(1001);
+    RPCContext                   rpc_context{&request, nullptr};
+    grpc::ServerContext          server_context;
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+
+    {
+        PrefillGenerateContext prefill_context(
+            &remote_resource, rpc_context, /*timeout_ms=*/0, &server_context, metrics_reporter, meta);
+        prefill_context.setStream(stream_);
+    }
+
+    EXPECT_EQ(resource.pd_kvcache_ref_, nullptr);
+    EXPECT_EQ(cache_manager_->allocator_->connectorRefBlocksNum(), 0);
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDeviceCache) {
