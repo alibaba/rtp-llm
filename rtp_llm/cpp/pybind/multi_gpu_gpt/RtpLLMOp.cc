@@ -5,6 +5,7 @@
 #include "c10/util/intrusive_ptr.h"
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/resource_quota.h>
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -287,11 +288,18 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                              py::object                                    token_processor) {
     std::string server_address;
+    int64_t     http_port                 = 0;
+    int64_t     model_rpc_port            = 0;
+    bool        start_grpc_before_init    = false;
     {
         pybind11::gil_scoped_acquire acquire;
-        int64_t                      http_port = maga_init_params.server_config.attr("http_port").cast<int64_t>();
-        int64_t model_rpc_port                 = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
-        auto    role_type                      = maga_init_params.pd_sep_config.role_type;
+        http_port                          = maga_init_params.server_config.attr("http_port").cast<int64_t>();
+        model_rpc_port                     = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
+        auto role_type                     = maga_init_params.pd_sep_config.role_type;
+        start_grpc_before_init             = model_rpc_port >= 0
+                                 && autil::EnvUtil::getEnv("RTP_LLM_CROSS_NODE_CPU_TP_BROADCAST", false)
+                                 && maga_init_params.parallelism_config.tp_size
+                                        > maga_init_params.parallelism_config.local_world_size;
         // NOTE: ip/ip段可自定义为所需范围。
         server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
         if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
@@ -299,22 +307,26 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         } else {
             model_rpc_service_.reset(new LocalRpcServiceImpl());
         }
-        grpc::Status grpc_status =
-            model_rpc_service_->init(maga_init_params, std::move(mm_process_engine), std::move(propose_params));
-        if (!grpc_status.ok()) {
-            RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
-        }
+        if (start_grpc_before_init) {
+            model_rpc_service_->prepareLocalServer();
+        } else {
+            grpc::Status grpc_status =
+                model_rpc_service_->init(maga_init_params, std::move(mm_process_engine), std::move(propose_params));
+            if (!grpc_status.ok()) {
+                RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
+            }
 
-        // NOTE: ip/ip段可自定义为所需范围。
-        std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
-        http_server_.reset(new HttpApiServer(model_rpc_service_->getEngine(),
-                                             model_rpc_service_->getMultimodalProcessor(),
-                                             http_server_address,
-                                             maga_init_params,
-                                             token_processor));
-        if (model_rpc_port < 0) {
-            is_server_ready_ = true;
-            return;
+            // NOTE: ip/ip段可自定义为所需范围。
+            std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
+            http_server_.reset(new HttpApiServer(model_rpc_service_->getEngine(),
+                                                 model_rpc_service_->getMultimodalProcessor(),
+                                                 http_server_address,
+                                                 maga_init_params,
+                                                 token_processor));
+            if (model_rpc_port < 0) {
+                is_server_ready_ = true;
+                return;
+            }
         }
     }
     grpc::ServerBuilder builder;
@@ -335,6 +347,21 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     RTP_LLM_CHECK_WITH_INFO(grpc_server_ != nullptr, "grpc server start failed at address " + server_address);
 
     RTP_LLM_LOG_INFO("Server listening on %s", server_address.c_str());
+    if (start_grpc_before_init) {
+        pybind11::gil_scoped_acquire acquire;
+        grpc::Status grpc_status =
+            model_rpc_service_->init(maga_init_params, std::move(mm_process_engine), std::move(propose_params));
+        if (!grpc_status.ok()) {
+            RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
+        }
+
+        std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
+        http_server_.reset(new HttpApiServer(model_rpc_service_->getEngine(),
+                                             model_rpc_service_->getMultimodalProcessor(),
+                                             http_server_address,
+                                             maga_init_params,
+                                             token_processor));
+    }
     is_server_ready_ = true;
     grpc_server_->Wait();
     RTP_LLM_LOG_INFO("Server exit on %s", server_address.c_str());
