@@ -22,7 +22,7 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.fused_prefill_rope_hadamard imp
 )
 
 
-def _make_cos_sin_cache(rope_head_dim: int, max_pos: int = 8192) -> torch.Tensor:
+def _make_cos_sin_cache(rope_head_dim: int, max_pos: int = 131072) -> torch.Tensor:
     """Build the cos_sin_cache in flashinfer convention: [max_pos, rope_head_dim]
     with cache[:, :rope_head_dim//2] = cos, cache[:, rope_head_dim//2:] = sin.
     Must be fp32 — bf16 silently produces garbage."""
@@ -90,8 +90,9 @@ class TestFusedPrefillRopeHadamardNeox(unittest.TestCase):
         self.assertEqual(max_abs_k, 0.0,
             f"K should be bit-identical but max_abs={max_abs_k:.4e}")
 
-    def test_T_1024(self):
-        self._run(T=1024)
+    def test_T_small(self):
+        for T in range(1, 1024):
+            self._run(T=T)
 
     def test_T_2048(self):
         self._run(T=2048)
@@ -103,9 +104,8 @@ class TestFusedPrefillRopeHadamardNeox(unittest.TestCase):
     def test_T_8192(self):
         self._run(T=8192)
 
-    def test_T_1(self):
-        """Edge: single token."""
-        self._run(T=1)
+    def test_T_16384(self):
+        self._run(T=16384)
 
     def test_T_0(self):
         """Edge: empty input — should not crash."""
@@ -158,8 +158,9 @@ class TestFusedPrefillRopeHadamardInterleaved(unittest.TestCase):
         self.assertEqual(max_abs_k, 0.0,
             f"K should be bit-identical but max_abs={max_abs_k:.4e}")
 
-    def test_T_1024(self):
-        self._run(T=1024)
+    def test_T_small(self):
+        for T in range(1, 1025):
+            self._run(T=T)
 
     def test_T_2048(self):
         self._run(T=2048)
@@ -171,9 +172,8 @@ class TestFusedPrefillRopeHadamardInterleaved(unittest.TestCase):
     def test_T_8192(self):
         self._run(T=8192)
 
-    def test_T_1(self):
-        """Edge: single token."""
-        self._run(T=1)
+    def test_T_16384(self):
+        self._run(T=16384)
 
     def test_T_0(self):
         """Edge: empty input — should not crash."""
