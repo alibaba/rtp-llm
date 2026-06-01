@@ -604,11 +604,13 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
             RTP_LLM_CHECK_WITH_INFO(false, "kv_cache_block_id shape should be 2 or 3");
         }
 
-        if (physical_group0.dtype() != torch::kInt32) {
-            physical_group0 = physical_group0.to(torch::kInt32);
-        }
-        if (!physical_group0.is_contiguous()) {
-            physical_group0 = physical_group0.contiguous();
+        if (!skip_host_kv) {
+            if (physical_group0.dtype() != torch::kInt32) {
+                physical_group0 = physical_group0.to(torch::kInt32);
+            }
+            if (!physical_group0.is_contiguous()) {
+                physical_group0 = physical_group0.contiguous();
+            }
         }
 
         if (physical_group0.device().is_cuda()) {
@@ -630,9 +632,11 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
                 physical_group0 = physical_group0.pin_memory();
             }
             buffer_holder_.hold_host(physical_group0);
-            py_attn_inputs.kv_cache_block_id_host   = physical_group0;
+            if (!skip_host_kv) {
+                py_attn_inputs.kv_cache_block_id_host = physical_group0;
+            }
             const auto cuda_i32                     = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
-            py_attn_inputs.kv_cache_block_id_device = physical_group0.to(cuda_i32, /*non_blocking=*/false);
+            py_attn_inputs.kv_cache_block_id_device = physical_group0.to(cuda_i32, /*non_blocking=*/true);
         }
     }
     if (debug_mtp_decode) {
@@ -948,7 +952,9 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
         }
         if (physical_group0.device().is_cuda()) {
             attention_inputs_.kv_cache_block_id_device = physical_group0;
-            if (description_.attention_conf.use_mla) {
+            const bool skip_host_kv                    = enable_cuda_graph_ && !inputs.warmup
+                                      && description_.attention_conf.kv_cache_dtype == KvCacheDataType::FP8;
+            if (description_.attention_conf.use_mla && !skip_host_kv) {
                 auto physical_host = physical_group0.cpu().contiguous().pin_memory();
                 buffer_holder_.hold_host(physical_host);
                 attention_inputs_.kv_cache_block_id_host = physical_host;

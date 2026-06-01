@@ -720,6 +720,25 @@ class SparseMlaImpl(MlaImplBase):
             self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc=True)
             self.fmha_impl.plan(self.fmha_params, block_table, attn_inputs=attn_inputs)
             return
+        if (
+            getattr(attn_inputs, "is_prefill", False)
+            and not getattr(attn_inputs, "is_target_verify", False)
+            and isinstance(self.fmha_impl, SparseMlaFp8Op)
+            and attn_inputs.kv_cache_kernel_block_id_device is not None
+            and self.fmha_params.prefill_tokens_per_batch > 0
+        ):
+            block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
+            if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
+                block_table = attn_inputs.kv_cache_kernel_block_id_device
+            self.fmha_params.fill_target_verify_cuda_graph_params(
+                attn_inputs.input_lengths,
+                attn_inputs.prefix_lengths,
+                block_table,
+                self.seq_size_per_block,
+            )
+            self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc=True)
+            self.fmha_impl.plan(self.fmha_params, block_table, attn_inputs=attn_inputs)
+            return
         self.prepare(attn_inputs, forbid_realloc=True)
 
     # -- BMMs ----------------------------------------------------------------
