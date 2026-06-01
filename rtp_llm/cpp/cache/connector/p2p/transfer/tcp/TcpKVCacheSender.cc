@@ -4,6 +4,12 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "aios/network/arpc/arpc/ANetRPCController.h"
 
+namespace {
+inline size_t alignUp(size_t value, size_t alignment) {
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+}  // namespace
+
 namespace rtp_llm {
 namespace transfer {
 namespace tcp {
@@ -76,6 +82,10 @@ private:
 TcpKVCacheSender::TcpKVCacheSender(const kmonitor::MetricsReporterPtr& metrics_reporter):
     metrics_reporter_(metrics_reporter), cuda_copy_util_(std::make_unique<CudaCopyUtil>()) {}
 
+TcpKVCacheSender::~TcpKVCacheSender() {
+    releaseStagedMemoryCopyScratch(staged_scratch_);
+}
+
 bool TcpKVCacheSender::init(int                       io_thread_count,
                             std::chrono::milliseconds channel_idle_ttl,
                             std::uint64_t             sweep_interval_calls) {
@@ -139,9 +149,21 @@ TcpKVCacheSender::makeTransferRequest(const transfer::SendRequest&              
     }
 
     if (!copy_tasks.empty()) {
-        if (!cuda_copy_util_->batchCopyToHost(copy_tasks)) {
-            RTP_LLM_LOG_WARNING("TcpKVCacheSender: batchCopyToHost failed, unique_key: %s", request.unique_key.c_str());
-            return nullptr;
+        int device_index = -1;
+        for (const auto& [cache_key, kbi_ptr] : request.block_info) {
+            for (const auto& bi : kbi_ptr->blocks) {
+                if (bi.addr != nullptr && bi.is_cuda) {
+                    device_index = bi.device_index;
+                    goto found_device;
+                }
+            }
+        }
+        found_device:
+        if (!tryStagedGatherCopyToHost(copy_tasks, device_index)) {
+            if (!cuda_copy_util_->batchCopyToHost(copy_tasks)) {
+                RTP_LLM_LOG_WARNING("TcpKVCacheSender: batchCopyToHost failed, unique_key: %s", request.unique_key.c_str());
+                return nullptr;
+            }
         }
     }
     return transfer_request;
@@ -169,6 +191,31 @@ void TcpKVCacheSender::loadToRemote(
     ::tcp_transfer::TcpTransferService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
                                                  ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
     stub.transfer(controller, transfer_request.get(), transfer_response.get(), closure);
+}
+
+bool TcpKVCacheSender::tryStagedGatherCopyToHost(std::vector<CopyTask>& copy_tasks, int device_index) {
+    constexpr size_t kMinTilesForStaged = 4;
+    if (device_index < 0 || copy_tasks.size() < kMinTilesForStaged) {
+        return false;
+    }
+
+    constexpr size_t kAlignment = 16;
+    StagedMemoryCopyParams params;
+    params.direction    = StagedMemoryCopyDirection::D2H;
+    params.device_index = device_index;
+    params.host_bytes   = 0;
+
+    params.tiles.reserve(copy_tasks.size());
+    params.host_segments.reserve(copy_tasks.size());
+    for (auto& task : copy_tasks) {
+        size_t offset = alignUp(params.host_bytes, kAlignment);
+        params.tiles.push_back(StagedMemoryCopyTile{task.src_ptr, offset, task.size});
+        params.host_segments.push_back(StagedMemoryCopyHostSegment{task.dst_ptr, offset, task.size});
+        params.host_bytes = offset + task.size;
+    }
+
+    std::lock_guard<std::mutex> lock(staged_scratch_mutex_);
+    return execStagedMemoryCopy(params, &staged_scratch_);
 }
 
 void TcpKVCacheSender::send(const transfer::SendRequest&                               request,
