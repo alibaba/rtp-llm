@@ -1249,6 +1249,30 @@ class ProtocolErrorMessageTest(InterceptorTestBase):
         self.assertEqual(len(success_calls), 0)
         self.assertEqual(error_calls[0][2]["error_code"], "BACKEND_EMPTY_OUTPUTS")
 
+    def test_backend_error_code_overrides_error_message_bucket(self) -> None:
+        def inner(request, context):
+            access_record = ForwardAccessRecord.from_context(context)
+            self.assertIsNotNone(access_record)
+            access_record.backend_error_code = "8400_MASTER_NO_AVAILABLE_WORKER"
+            return self._make_error_response("FtRuntimeException: no worker")
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=False, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        behavior(_make_infer_request(input_ids=[1]), FakeContext())
+
+        rec = self.records[0]
+        self.assertEqual(rec["status"], "8400_MASTER_NO_AVAILABLE_WORKER")
+        self.assertEqual(rec["backend_error_code"], "8400_MASTER_NO_AVAILABLE_WORKER")
+        error_calls = [
+            c for c in self.kmon_calls if c[0] == AccMetrics.ERROR_QPS_METRIC
+        ]
+        self.assertEqual(len(error_calls), 1)
+        self.assertEqual(
+            error_calls[0][2]["error_code"], "8400_MASTER_NO_AVAILABLE_WORKER"
+        )
+
     def test_error_message_in_streaming_frame_routes_to_error_qps(self) -> None:
         """Mid-stream ``error_message`` frame (e.g. backend hit exception after
         a few tokens) still routes to ERROR_QPS; the first non-empty error

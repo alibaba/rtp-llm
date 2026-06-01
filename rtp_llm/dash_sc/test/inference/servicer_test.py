@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr
 from rtp_llm.dash_sc.codec import OtherParams, SamplingParams
 from rtp_llm.dash_sc.inference.servicer import (
@@ -289,6 +290,37 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(chunks), 1)
         self.assertIn("backend down", chunks[0].error_message)
+
+    async def test_ft_exception_sets_access_backend_error_code(self) -> None:
+        req = self._minimal_request()
+
+        class _BoomVisitor:
+            async def enqueue(self, _gi):
+                e = FtRuntimeException(ExceptionType.ROUTE_ERROR, "route failed")
+                e.rtp_error_code = int(ExceptionType.MASTER_NO_AVAILABLE_WORKER)
+                raise e
+
+        class _AccessAgg:
+            backend_error_code = None
+
+        access_agg = _AccessAgg()
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(),
+                _BoomVisitor(),
+                rtp_llm_request_id=1,
+                access_agg=access_agg,
+            )
+        )
+
+        self.assertEqual(len(chunks), 1)
+        self.assertIn("route failed", chunks[0].error_message)
+        self.assertEqual(
+            access_agg.backend_error_code, "8400_MASTER_NO_AVAILABLE_WORKER"
+        )
 
     async def test_stream_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
@@ -570,9 +602,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             {"type": "json_object"},
         )
         self.assertFalse(visitor.generate_inputs[1].generate_config.in_think_mode)
-        self.assertEqual(
-            len(visitor.generate_inputs[0].generate_config.role_addrs), 1
-        )
+        self.assertEqual(len(visitor.generate_inputs[0].generate_config.role_addrs), 1)
         self.assertEqual(visitor.generate_inputs[1].generate_config.role_addrs, [])
         self.assertNotIn(10, phase2_input_ids)
         self.assertNotIn(11, phase2_input_ids)
