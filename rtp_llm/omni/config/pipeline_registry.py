@@ -16,6 +16,11 @@ class OmniPipelineRegistry:
             raise ValueError(
                 f"Pipeline already registered for model_type={config.model_type}"
             )
+        if config.model_arch in cls._arch_registry:
+            raise ValueError(
+                f"Architecture already registered: model_arch={config.model_arch} "
+                f"(used by model_type={cls._arch_registry[config.model_arch]})"
+            )
         cls._registry[config.model_type] = config
         cls._arch_registry[config.model_arch] = config.model_type
         logger.info(

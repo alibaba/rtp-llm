@@ -35,6 +35,6 @@ class OmniStagePool:
                     f"No replicas available for stage {self.stage_id} "
                     f"({self.stage_config.model_stage})"
                 )
-            replica = self._replicas[self._index % len(self._replicas)]
-            self._index += 1
+            replica = self._replicas[self._index]
+            self._index = (self._index + 1) % len(self._replicas)
             return replica

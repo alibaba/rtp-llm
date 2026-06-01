@@ -33,6 +33,13 @@ class TestOmniRequestState(unittest.TestCase):
         state.advance()
         self.assertTrue(state.is_complete)
 
+    def test_advance_past_complete_raises(self):
+        state = OmniRequestState(request_id="req_1", num_stages=1)
+        state.advance()
+        self.assertTrue(state.is_complete)
+        with self.assertRaises(RuntimeError):
+            state.advance()
+
 
 class TestOmniOrchestrator(unittest.TestCase):
     def _make_pipeline_config(self):
@@ -93,6 +100,18 @@ class TestOmniOrchestrator(unittest.TestCase):
         )
         order = orchestrator.get_execution_order()
         self.assertEqual(order, [0, 1])
+
+    def test_submit_duplicate_raises(self):
+        config = self._make_pipeline_config()
+        connector = SharedMemoryConnector()
+        orchestrator = OmniOrchestrator(
+            pipeline_config=config,
+            connector=connector,
+            stage_pools={},
+        )
+        orchestrator.submit("req_1")
+        with self.assertRaises(ValueError):
+            orchestrator.submit("req_1")
 
     def test_cleanup_request(self):
         config = self._make_pipeline_config()

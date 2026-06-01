@@ -17,6 +17,10 @@ class OmniRequestState:
         self.is_complete = False
 
     def advance(self) -> None:
+        if self.is_complete:
+            raise RuntimeError(
+                f"Request {self.request_id} is already complete, cannot advance"
+            )
         self.stage_status[self.current_stage] = "completed"
         self.current_stage += 1
         if self.current_stage >= self._num_stages:
@@ -36,6 +40,11 @@ class OmniOrchestrator:
         self._requests: Dict[str, OmniRequestState] = {}
 
     def submit(self, request_id: str) -> OmniRequestState:
+        if request_id in self._requests:
+            raise ValueError(
+                f"Request {request_id} already submitted to pipeline "
+                f"{self._pipeline_config.model_type}"
+            )
         state = OmniRequestState(
             request_id=request_id,
             num_stages=len(self._pipeline_config.stages),

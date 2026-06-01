@@ -15,8 +15,12 @@ class OmniEngine:
         self,
         pipeline_config: OmniPipelineConfig,
         connector: Optional[StageConnector] = None,
+        model_config: Any = None,
+        engine_config: Any = None,
     ):
         self.pipeline_config = pipeline_config
+        self.model_config = model_config
+        self.engine_config = engine_config
         self.connector = connector or SharedMemoryConnector()
         self.output_processor = OmniOutputProcessor()
 
@@ -55,4 +59,8 @@ class OmniEngine:
         model_config: Any = None,
         engine_config: Any = None,
     ) -> "OmniEngine":
-        return cls(pipeline_config=pipeline_config)
+        return cls(
+            pipeline_config=pipeline_config,
+            model_config=model_config,
+            engine_config=engine_config,
+        )

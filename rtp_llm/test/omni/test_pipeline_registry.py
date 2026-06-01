@@ -55,6 +55,37 @@ class TestOmniPipelineRegistry(unittest.TestCase):
         with self.assertRaises(ValueError):
             OmniPipelineRegistry.register(pipeline2)
 
+    def test_register_duplicate_arch_raises(self):
+        p1 = OmniPipelineConfig(
+            model_type="type_a",
+            model_arch="SharedArch",
+            stages=(
+                OmniStageConfig(
+                    stage_id=0,
+                    model_stage="thinker",
+                    execution_type=StageExecutionType.LLM_AR,
+                    model_cls="TestThinker",
+                    input_sources=(),
+                ),
+            ),
+        )
+        p2 = OmniPipelineConfig(
+            model_type="type_b",
+            model_arch="SharedArch",
+            stages=(
+                OmniStageConfig(
+                    stage_id=0,
+                    model_stage="thinker",
+                    execution_type=StageExecutionType.LLM_AR,
+                    model_cls="TestThinker",
+                    input_sources=(),
+                ),
+            ),
+        )
+        OmniPipelineRegistry.register(p1)
+        with self.assertRaises(ValueError):
+            OmniPipelineRegistry.register(p2)
+
     def test_list_all(self):
         p1 = self._make_pipeline("a")
         p2 = self._make_pipeline("b")

@@ -2,7 +2,7 @@ import base64
 import io
 import logging
 import struct
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import torch
 
@@ -43,8 +43,11 @@ class OmniOutputProcessor:
     def encode_audio_base64(
         waveform: torch.Tensor,
         sample_rate: int = 16000,
-        format: str = "wav",
+        audio_format: str = "wav",
     ) -> str:
+        if audio_format != "wav":
+            raise ValueError(f"Unsupported audio format: {audio_format}")
+
         audio_data = waveform.squeeze().cpu().numpy()
         buf = io.BytesIO()
         num_samples = len(audio_data)
