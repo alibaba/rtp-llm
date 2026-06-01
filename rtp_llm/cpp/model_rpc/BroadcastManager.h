@@ -87,12 +87,12 @@ public:
 
                 const auto& status = ctx->status;
                 if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
-                    RTP_LLM_FAIL("broadcast rpc timeout, timeout_ms=%d rank=%d err=%d(%s) addr=%s",
-                                 ctx->timeout_ms,
-                                 rank,
-                                 status.error_code(),
-                                 status.error_message().c_str(),
-                                 ctx->server_addr.c_str());
+                    RTP_LLM_FATAL_ABORT("broadcast rpc timeout, timeout_ms=%d rank=%d err=%d(%s) addr=%s",
+                                        ctx->timeout_ms,
+                                        rank,
+                                        status.error_code(),
+                                        status.error_message().c_str(),
+                                        ctx->server_addr.c_str());
                 }
                 if (!status.ok()) {
                     RTP_LLM_LOG_WARNING("broadcast rpc failed, rank=%d err=%d(%s) addr=%s",

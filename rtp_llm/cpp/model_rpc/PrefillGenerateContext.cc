@@ -71,6 +71,7 @@ PrefillGenerateContext::~PrefillGenerateContext() {
 
 void PrefillGenerateContext::stopStream() {
     if (stream_) {
+        stream_->releaseKVCacheForPDSep();
         // if is waiting, cancel it
         meta->dequeue(request_id, stream_);
         if (stream_->getStatus() != StreamState::FINISHED) {
