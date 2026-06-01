@@ -11,6 +11,13 @@ PREFILL_ROLE_NAME = "prefill"
 DECODE_ROLE_NAME = "decode"
 FRONTEND_ROLE_NAME = "frontend"
 PD_FUNSION_ROLE_NAME = "pd_fusion"
+GPU_VISIBILITY_ENV_KEYS = ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES")
+
+
+def _set_visible_devices(envs: Dict[str, str], gpu_ids: List[str]) -> None:
+    visible_devices = ",".join(gpu_ids)
+    for env_key in GPU_VISIBILITY_ENV_KEYS:
+        envs[env_key] = visible_devices
 
 
 class PdSeperationCaseRunner(CaseRunner):
@@ -97,13 +104,13 @@ class PdSeperationCaseRunner(CaseRunner):
                 role_name="frontend",
             )
 
-        decode_envs["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids[:decode_gpu_size])
+        _set_visible_devices(decode_envs, gpu_ids[:decode_gpu_size])
         decode_envs["REMOTE_RPC_SERVER_IP"] = "localhost"
         decode_envs["REMOTE_SERVER_PORT"] = prefill_port
 
         prefill_envs["REMOTE_SERVER_PORT"] = decode_port
         prefill_envs["REMOTE_RPC_SERVER_IP"] = "localhost"
-        prefill_envs["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids[decode_gpu_size:])
+        _set_visible_devices(prefill_envs, gpu_ids[decode_gpu_size:])
         prefill_envs["MODEL_SERVICE_CONFIG"] = service_route.model_dump_json()
 
         server_configs = [
@@ -256,14 +263,14 @@ class DpSeperationCaseRunner(CaseRunner):
             )
 
         # prepare server configurations for parallel start
-        decode_envs["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids[:decode_gpu_size])
+        _set_visible_devices(decode_envs, gpu_ids[:decode_gpu_size])
         decode_envs["REMOTE_RPC_SERVER_IP"] = "localhost"
         decode_envs["REMOTE_SERVER_PORT"] = prefill_port
         decode_envs["MODEL_SERVICE_CONFIG"] = service_route.model_dump_json()
 
         prefill_envs["REMOTE_SERVER_PORT"] = decode_port
         prefill_envs["REMOTE_RPC_SERVER_IP"] = "localhost"
-        prefill_envs["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids[decode_gpu_size:])
+        _set_visible_devices(prefill_envs, gpu_ids[decode_gpu_size:])
 
         server_configs = [
             {
@@ -388,7 +395,7 @@ class FrontAppSeperationCaseRunner(CaseRunner):
         ), "frontend server manager should not be None"
 
         # start PDFUSION server after frontend is ready
-        pd_fusion_envs["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids[:gpu_size])
+        _set_visible_devices(pd_fusion_envs, gpu_ids[:gpu_size])
         pd_fusion_envs["REMOTE_RPC_SERVER_IP"] = "localhost"
         pd_fusion_envs["REMOTE_SERVER_PORT"] = pd_fusion_port
         task_states = TaskStates()
@@ -465,12 +472,12 @@ class VitSeperationCaseRunner(CaseRunner):
 
         llm_envs["MODEL_SERVICE_CONFIG"] = service_route.model_dump_json()
         # prepare server configurations for parallel start
-        llm_envs["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids[:llm_gpu_size])
+        _set_visible_devices(llm_envs, gpu_ids[:llm_gpu_size])
         llm_envs["REMOTE_VIT_SERVER_IP"] = "localhost"
         llm_envs["REMOTE_SERVER_PORT"] = vit_port
         llm_envs["VIT_SEPARATION"] = "2"
 
-        vit_envs["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids[llm_gpu_size:])
+        _set_visible_devices(vit_envs, gpu_ids[llm_gpu_size:])
         vit_envs["VIT_SEPARATION"] = "1"
         vit_envs["ROLE_TYPE"] = "VIT"
         vit_envs["MODEL_SERVICE_CONFIG"] = service_route.model_dump_json()

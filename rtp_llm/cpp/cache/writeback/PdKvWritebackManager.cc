@@ -67,6 +67,15 @@ absl::Status keepLocalTpRankMappings(PdKvWritebackTopologyPlan& topology, int32_
     return absl::OkStatus();
 }
 
+void dropLocalDecodeRankMappings(PdKvWritebackTopologyPlan& topology, int32_t local_tp_rank) {
+    topology.mappings.erase(std::remove_if(topology.mappings.begin(),
+                                           topology.mappings.end(),
+                                           [local_tp_rank](const PdKvWritebackRankMapping& mapping) {
+                                               return mapping.decode_rank == local_tp_rank;
+                                           }),
+                            topology.mappings.end());
+}
+
 absl::StatusOr<BatchKVCacheResourcePtr> buildLocalDecodeSourceResource(const PdKvWritebackLaunchRequest& request) {
     const int group_count = request.source.group_count > 0 ? request.source.group_count :
                                                              static_cast<int>(request.manifest.group_block_ids.size());
@@ -348,11 +357,14 @@ PdKvWritebackLaunchResult PdKvWritebackManager::launchFromDecode(const PdKvWrite
     auto request_copy         = std::move(request_for_topology);
     request_copy.deadline_ms  = buildPdKvWritebackDeadlineMs(pd_config_);
     auto topology             = std::move(topology_status).value();
-    auto local_mapping_status = keepLocalTpRankMappings(topology, request_copy.local_tp_rank);
+    auto local_topology       = topology;
+    auto local_mapping_status = keepLocalTpRankMappings(local_topology, request_copy.local_tp_rank);
     if (!local_mapping_status.ok()) {
         report_launch(PdKvWritebackLaunchStatus::Skipped, "topology_mismatch");
         return {PdKvWritebackLaunchStatus::Skipped, std::string(local_mapping_status.message())};
     }
+    auto remote_decode_topology = topology;
+    dropLocalDecodeRankMappings(remote_decode_topology, request_copy.local_tp_rank);
     auto* transfer_client = owned_transfer_client_ ? owned_transfer_client_.get() : transfer_client_;
     if (!transfer_client) {
         report_launch(PdKvWritebackLaunchStatus::Failed, "transfer_client_null");
@@ -369,6 +381,8 @@ PdKvWritebackLaunchResult PdKvWritebackManager::launchFromDecode(const PdKvWrite
             std::launch::async,
             [request_copy,
              topology,
+             local_topology,
+             remote_decode_topology,
              rpc_client,
              rpc_client_owner,
              transfer_client,
@@ -379,19 +393,34 @@ PdKvWritebackLaunchResult PdKvWritebackManager::launchFromDecode(const PdKvWrite
                     std::async(std::launch::async, [request_copy, topology, rpc_client, rpc_client_owner]() {
                         return rpc_client->requestPrefillReceive(request_copy, topology);
                     });
+                const bool has_remote_decode_mappings = !remote_decode_topology.mappings.empty();
+                std::future<absl::Status> remote_decode_task;
+                if (has_remote_decode_mappings) {
+                    remote_decode_task = std::async(std::launch::async,
+                                                    [request_copy, remote_decode_topology, rpc_client, rpc_client_owner]() {
+                                                        return rpc_client->requestDecodeSend(request_copy,
+                                                                                            remote_decode_topology);
+                                                    });
+                }
                 auto source_resource = buildLocalDecodeSourceResource(request_copy);
                 auto send_status     = source_resource.ok() ? sendOnDecodeWithClient(pd_config,
                                                                                  transfer_client,
                                                                                  metrics_reporter,
                                                                                  request_copy,
                                                                                  source_resource.value(),
-                                                                                 &topology) :
+                                                                                 &local_topology) :
                                                               source_resource.status();
                 auto receive_status  = receive_task.get();
+                auto remote_decode_status = has_remote_decode_mappings ? remote_decode_task.get() : absl::OkStatus();
                 if (!receive_status.ok()) {
                     RTP_LLM_LOG_WARNING("PD KV writeback prefill receive fanout failed, request_id=%ld, error=%s",
                                         request_copy.manifest.request_id,
                                         receive_status.ToString().c_str());
+                }
+                if (!remote_decode_status.ok()) {
+                    RTP_LLM_LOG_WARNING("PD KV writeback remote decode send fanout failed, request_id=%ld, error=%s",
+                                        request_copy.manifest.request_id,
+                                        remote_decode_status.ToString().c_str());
                 }
                 if (!send_status.ok()) {
                     RTP_LLM_LOG_WARNING("PD KV writeback decode send fanout failed, request_id=%ld, error=%s",

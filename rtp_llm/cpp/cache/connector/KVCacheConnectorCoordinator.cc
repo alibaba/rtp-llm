@@ -67,7 +67,7 @@ public:
             return absl::FailedPreconditionError("unsupported role type for writeback transfer");
         }
         if (error_info.hasError()) {
-            return absl::InternalError(error_info.ToString());
+            return absl::InternalError(ErrorCodeToString(error_info.code()) + ": " + error_info.ToString());
         }
         return absl::OkStatus();
     }
@@ -116,6 +116,41 @@ PdKvWritebackRequestPB buildPdKvWritebackRequestPB(const PdKvWritebackLaunchRequ
     fillPdKvWritebackCompatibilityPB(request.destination, pb.mutable_destination());
     pb.set_deadline_us(request.deadline_ms * 1000);
     return pb;
+}
+
+std::string classifyPdKvWritebackResponseErrorReason(const std::string& error_message) {
+    if (error_message.find("P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE") != std::string::npos) {
+        return "read_transfer_not_done";
+    }
+    if (error_message.find("P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT") != std::string::npos
+        || error_message.find("P2P_CONNECTOR_WORKER_READ_TIMEOUT") != std::string::npos
+        || error_message.find("timeout") != std::string::npos) {
+        return "transfer_timeout";
+    }
+    if (error_message.find("P2P_CONNECTOR_WORKER_READ_TRANSFER_RDMA_FAILED") != std::string::npos
+        || error_message.find("rdma") != std::string::npos || error_message.find("RDMA") != std::string::npos) {
+        return "rdma_transfer_failed";
+    }
+    if (error_message.find("P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED") != std::string::npos
+        || error_message.find("layer buffers are empty") != std::string::npos) {
+        return "stream_resource_failed";
+    }
+    if (error_message.find("disabled") != std::string::npos) {
+        return "disabled";
+    }
+    if (error_message.find("cache_writer is null") != std::string::npos) {
+        return "cache_writer_null";
+    }
+    if (error_message.find("transfer_client is null") != std::string::npos) {
+        return "transfer_client_null";
+    }
+    if (error_message.find("cache_keys shorter") != std::string::npos) {
+        return "cache_keys_shorter_than_reusable_blocks";
+    }
+    if (error_message.find("compatibility") != std::string::npos) {
+        return "compatibility_mismatch";
+    }
+    return "response_error";
 }
 
 class GrpcPdKvWritebackRpcClient: public PdKvWritebackRpcClient {
@@ -224,14 +259,16 @@ private:
             return absl::InternalError(grpc_status.error_message());
         }
         if (response.has_error_info() && response.error_info().error_code() != ErrorCodePB::NONE_ERROR) {
+            const auto reason = classifyPdKvWritebackResponseErrorReason(response.error_info().error_message());
             RTP_LLM_LOG_WARNING(
-                "PD KV writeback RPC response error, target_role=%s, target_rank=%d, addr=%s, error_code=%d, error=%s",
+                "PD KV writeback RPC response error, target_role=%s, target_rank=%d, addr=%s, error_code=%d, reason=%s, error=%s",
                 target_role.c_str(),
                 target_rank,
                 addr.c_str(),
                 static_cast<int>(response.error_info().error_code()),
+                reason.c_str(),
                 response.error_info().error_message().c_str());
-            report_rpc("failed", "response_error", "OK");
+            report_rpc("failed", reason, "OK");
             return absl::InternalError(response.error_info().error_message());
         }
         if (!response.accepted()) {

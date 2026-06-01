@@ -91,7 +91,7 @@ class PdKvWritebackCoordinatorStaticTest(unittest.TestCase):
         self.assertIn("keepLocalTpRankMappings", manager_cc)
         self.assertIn("request_copy.local_tp_rank", manager_cc)
         self.assertIn("sendOnDecodeWithClient(", manager_cc)
-        self.assertNotIn("rpc_client->requestDecodeSend(request_copy", manager_cc)
+        self.assertIn("rpc_client->requestDecodeSend(request_copy", manager_cc)
 
     def test_writeback_rpc_fanout_is_parallel_and_reports_target_tags(self):
         coordinator_cc = (
@@ -105,6 +105,20 @@ class PdKvWritebackCoordinatorStaticTest(unittest.TestCase):
         self.assertIn('"target_rank"', coordinator_cc)
         self.assertIn('"grpc_code"', coordinator_cc)
         self.assertIn('"backend"', coordinator_cc)
+
+    def test_writeback_rpc_response_error_reason_is_classified(self):
+        coordinator_cc = (
+            REPO_ROOT / "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.cc"
+        ).read_text()
+
+        self.assertIn("classifyPdKvWritebackResponseErrorReason", coordinator_cc)
+        self.assertIn('"read_transfer_not_done"', coordinator_cc)
+        self.assertIn('"transfer_timeout"', coordinator_cc)
+        self.assertIn('"rdma_transfer_failed"', coordinator_cc)
+        self.assertIn('"stream_resource_failed"', coordinator_cc)
+        self.assertIn("ErrorCodeToString(error_info.code())", coordinator_cc)
+        self.assertIn("report_rpc(\"failed\", reason, \"OK\")", coordinator_cc)
+        self.assertNotIn('report_rpc("failed", "response_error", "OK")', coordinator_cc)
 
 
 if __name__ == "__main__":

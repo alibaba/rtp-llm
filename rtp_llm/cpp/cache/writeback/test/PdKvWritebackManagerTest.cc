@@ -255,10 +255,10 @@ TEST(PdKvWritebackManagerTest, LaunchTpEqualSendsLocalRankToPrefillAndUsesLocalD
     EXPECT_EQ(result.status, PdKvWritebackLaunchStatus::Started);
     manager.waitForWritebackTasksForTest();
 
-    ASSERT_EQ(events.size(), 2);
+    ASSERT_EQ(events.size(), 3);
     EXPECT_NE(std::find(events.begin(), events.end(), "prefill_rpc"), events.end());
     EXPECT_NE(std::find(events.begin(), events.end(), "transfer"), events.end());
-    EXPECT_EQ(std::find(events.begin(), events.end(), "decode_rpc"), events.end());
+    EXPECT_NE(std::find(events.begin(), events.end(), "decode_rpc"), events.end());
     EXPECT_EQ(transfer_client->last_plan.request_key, request.manifest.request_key);
     EXPECT_EQ(transfer_client->last_plan.decode_group_block_ids, request.manifest.group_block_ids);
     EXPECT_EQ(transfer_client->last_plan.prefill_transfer_servers.size(), 4);
@@ -273,8 +273,9 @@ TEST(PdKvWritebackManagerTest, LaunchTpEqualSendsLocalRankToPrefillAndUsesLocalD
     EXPECT_EQ(transfer_client->last_plan.prefill_transfer_targets[0].remote_partition_id, 0);
     EXPECT_EQ(rpc_client->last_request.manifest.request_id, request.manifest.request_id);
     EXPECT_EQ(rpc_client->last_request.decode_worker_addrs, decode_worker_grpc_addrs);
-    EXPECT_EQ(rpc_client->prefill_targets, std::vector<std::string>({"p2:1000"}));
-    EXPECT_TRUE(rpc_client->decode_targets.empty());
+    EXPECT_EQ(rpc_client->prefill_targets,
+              std::vector<std::string>({"p0:1000", "p1:1000", "p2:1000", "p3:1000"}));
+    EXPECT_EQ(rpc_client->decode_targets, std::vector<std::string>({"d0:1000", "d1:1000", "d3:1000"}));
 }
 
 TEST(PdKvWritebackManagerTest, LaunchSkipsWhenLocalTpRankHasNoMapping) {
@@ -324,7 +325,7 @@ TEST(PdKvWritebackManagerTest, LaunchStartsDecodeSendWhilePrefillReceiveIsWaitin
 
     EXPECT_TRUE(rpc_client->prefill_started);
     EXPECT_TRUE(rpc_client->local_decode_started);
-    EXPECT_FALSE(rpc_client->remote_decode_started);
+    EXPECT_TRUE(rpc_client->remote_decode_started);
     EXPECT_FALSE(rpc_client->prefill_timed_out);
 }
 
