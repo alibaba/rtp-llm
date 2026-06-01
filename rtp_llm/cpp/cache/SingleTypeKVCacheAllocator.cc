@@ -233,31 +233,17 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
     batch_size     = 1;
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-        kv_resource->cacheResource(batch_id).ensureLinearBlockDependencies();
         const auto& blocks = kv_resource->blocks(batch_id);
 
         // Under CP sharding, use the same last-rank-key namespace as match()
         // (see initMallocForCommonLen) so the device cache stays consistent
         // across ranks without any cross-rank coordination.
         CacheKeysType insert_keys;
-        SharedBlockCache::NamespaceId namespace_id = SharedBlockCache::kGpuLogicalNamespace;
         if (insert_info.cp_slot_mapper && insert_info.cp_slot_mapper->isSharded()) {
             int cp_size = insert_info.cp_slot_mapper->cpSize();
             insert_keys = kv_resource->cacheResource(batch_id).localCacheKeys(cp_size - 1, cp_size);
-            namespace_id = SharedBlockCache::kGpuCpCanonicalNamespace;
         } else {
             insert_keys = kv_resource->cacheKeys(batch_id);
-        }
-        BlockDependenciesType dependencies;
-        dependencies.reserve(insert_keys.size());
-        for (size_t i = 0; i < insert_keys.size(); ++i) {
-            BlockDependency dependency;
-            dependency.ordinal = static_cast<uint32_t>(i);
-            if (i > 0) {
-                dependency.has_parent = true;
-                dependency.parent_key = insert_keys[i - 1];
-            }
-            dependencies.push_back(dependency);
         }
 
         size_t block_num = std::min(size_t(insert_keys.size()), size_t(blocks.size()));
@@ -271,8 +257,7 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
                 continue;
             }
             std::vector<BlockIdxType> group_slots = {blocks[idx]};
-            shared_block_cache_->put(
-                insert_keys[idx], group_slots, insert_info.is_resident, namespace_id, dependencies[idx]);
+            shared_block_cache_->put(insert_keys[idx], group_slots, insert_info.is_resident);
         }
     }
 }
@@ -342,13 +327,10 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
     selected_resource->initGroups(
         1, config_.layer_all_num, config_.layer_to_group_id, config_.kernelBlocksPerKvBlock());
 
-    CacheKeysType          selected_cache_keys;
-    BlockDependenciesType  selected_dependencies;
-    BlockIndicesType       selected_blocks;
-    BlockIndicesType       referenced_blocks;
+    CacheKeysType    selected_cache_keys;
+    BlockIndicesType selected_blocks;
 
-    const auto& src_blocks           = kvcache_resource.blocks(0);
-    const auto& source_dependencies  = kvcache_resource.blockDependencies();
+    const auto& src_blocks = kvcache_resource.blocks(0);
 
     for (auto key : cache_keys) {
         auto it = key_to_pos.find(key);
@@ -356,37 +338,27 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
             continue;
         }
         const size_t pos = it->second;
-        const bool preserve_connector_tail = is_connector && !kvcache_resource.lastBlockAligned()
-                                             && pos + 1 == resource_keys.size() && !selected_cache_keys.empty();
-        if (pos >= src_blocks.size() && !preserve_connector_tail) {
+        if (pos >= src_blocks.size()) {
             continue;
         }
-        const auto block = pos < src_blocks.size() ? src_blocks[pos] : NULL_BLOCK_IDX;
-        if ((block > 0 && !isNullBlockIdx(block)) || preserve_connector_tail) {
+        const auto block = src_blocks[pos];
+        if (block > 0 && !isNullBlockIdx(block)) {
             selected_cache_keys.push_back(key);
-            selected_dependencies.push_back(
-                pos < source_dependencies.size() ?
-                    source_dependencies[pos] :
-                    BlockDependency{false, 0, static_cast<uint32_t>(selected_dependencies.size())});
             selected_blocks.push_back(block);
-            if (block > 0 && !isNullBlockIdx(block)) {
-                referenced_blocks.push_back(block);
-            }
         }
     }
 
-    if (referenced_blocks.empty()) {
+    if (selected_blocks.empty()) {
         return nullptr;
     }
 
     if (is_connector) {
-        block_pool_->connectorReference(referenced_blocks);
+        block_pool_->connectorReference(selected_blocks);
     } else {
-        block_pool_->requestReference(referenced_blocks);
+        block_pool_->requestReference(selected_blocks);
     }
     selected_resource->mutableBlockIds(0).assign(std::move(selected_blocks));
-    selected_resource->setCacheKeys(std::move(selected_cache_keys));
-    selected_resource->setBlockDependencies(std::move(selected_dependencies));
+    selected_resource->cacheKeys() = std::move(selected_cache_keys);
 
     return selected_resource;
 }
@@ -395,12 +367,7 @@ void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_r
     RTP_LLM_CHECK_WITH_INFO(
         kvcache_resource.groupNums() == 1, "decrKVCacheRef expects groupNums==1, got %d", kvcache_resource.groupNums());
 
-    BlockIndicesType blocks_to_free;
-    for (auto block : kvcache_resource.blocks(0)) {
-        if (block > 0 && !isNullBlockIdx(block)) {
-            blocks_to_free.push_back(block);
-        }
-    }
+    const auto& blocks_to_free = kvcache_resource.blocks(0);
     if (!blocks_to_free.empty()) {
         if (is_connector) {
             block_pool_->connectorFree(blocks_to_free);

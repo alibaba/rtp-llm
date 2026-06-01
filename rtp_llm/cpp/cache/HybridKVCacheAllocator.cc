@@ -43,10 +43,6 @@ inline bool cpShardThisGroup(const std::shared_ptr<CPSlotMapper>& mapper, CacheG
     return mapper && mapper->isSharded() && group_type == CacheGroupType::FULL;
 }
 
-inline bool containsGroupId(const std::vector<int>& group_ids, int gid) {
-    return std::find(group_ids.begin(), group_ids.end(), gid) != group_ids.end();
-}
-
 inline int
 cpEffectiveSeqLenForGroup(const std::shared_ptr<CPSlotMapper>& mapper, CacheGroupType group_type, int seq_len) {
     return cpShardThisGroup(mapper, group_type) ? mapper->effectiveSeqLenForAlloc(seq_len) : seq_len;
@@ -375,17 +371,14 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
     const int   batch_size = kv_cache_resource->batchSize();
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-        kv_cache_resource->cacheResource(batch_id).ensureLinearBlockDependencies();
         const auto& full_keys = kv_cache_resource->cacheKeys(batch_id);
         if (full_keys.empty()) {
             continue;
         }
-        const auto& full_dependencies = kv_cache_resource->cacheResource(batch_id).blockDependencies();
 
         if (!cp_active) {
-            // Preserve the legacy non-CP GPU reuse surface: aggregate all groups
-            // under one key. The prefix tree only receives extra dependency
-            // metadata here.
+            // Non-CP fast path: aggregate all groups under one key per put, reverse iterate
+            // so prefix-base cache_keys[0] lands at MRU end of SharedBlockCache LRU.
             const size_t max_keys = full_keys.size();
             for (size_t pos = max_keys; pos > 0; --pos) {
                 const size_t              i = pos - 1;
@@ -405,39 +398,21 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                     }
                 }
                 if (has_valid) {
-                    const auto dependency =
-                        i < full_dependencies.size() ? full_dependencies[i] :
-                                                       BlockDependency{false, 0, static_cast<uint32_t>(i)};
-                    shared_block_cache_->put(full_keys[i],
-                                             group_slots,
-                                             insert_info.is_resident,
-                                             SharedBlockCache::kGpuLogicalNamespace,
-                                             dependency);
+                    shared_block_cache_->put(full_keys[i], group_slots, insert_info.is_resident);
                 }
             }
             continue;
         }
 
-        // Per-group key namespace, per-(key, group) put. SharedBlockCache::put
+        // CP path: per-group key namespace, per-(key, group) put. SharedBlockCache::put
         // merges multiple puts on the same key into a single item with each group's slot
         // populated independently (NULL_BLOCK_IDX entries are skipped by the merge path).
         //
-        // CP per-group key namespace: paged FULL groups use cp-subsampled (last-rank) keys
-        // to align 1:1 with rank-local blocks; non-paged groups (SWA / LINEAR) keep the
-        // full key sequence so their tail blocks (real entries at positions >= length-2)
-        // get inserted alongside the keys that the reuseCache tail-loop later queries.
+        // Per-group key namespace: paged FULL groups use cp-subsampled (last-rank) keys to
+        // align 1:1 with rank-local blocks; non-paged groups (SWA / LINEAR) keep the full
+        // key sequence so their tail blocks (real entries at positions >= length-2) get
+        // inserted alongside the keys that the reuseCache tail-loop later queries.
         CacheKeysType cp_keys   = cpEffectiveCacheKeys(cp_mapper, full_keys);
-        BlockDependenciesType cp_dependencies;
-        cp_dependencies.reserve(cp_keys.size());
-        for (size_t i = 0; i < cp_keys.size(); ++i) {
-            BlockDependency dependency;
-            dependency.ordinal = static_cast<uint32_t>(i);
-            if (i > 0) {
-                dependency.has_parent = true;
-                dependency.parent_key = cp_keys[i - 1];
-            }
-            cp_dependencies.push_back(dependency);
-        }
         auto          token_ids = insert_info.complete_token_ids->completeTokenIdsVec(batch_id);
         if (token_ids.size() <= 1) {
             continue;
@@ -448,21 +423,12 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
             if (skipReuseCacheGroup(gid)) {
                 continue;
             }
-            const int  raw_group_seq = kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock();
-            const auto group_type    = static_cast<size_t>(gid) < config_.group_types.size() ?
-                                           config_.group_types[static_cast<size_t>(gid)] :
-                                           (containsGroupId(linear_group_ids_, gid) ?
-                                                CacheGroupType::LINEAR :
-                                                (containsGroupId(swa_group_ids_, gid) ? CacheGroupType::SWA :
-                                                                                        CacheGroupType::FULL));
-            if (static_cast<size_t>(gid) >= config_.group_types.size() && group_type != CacheGroupType::FULL) {
-                continue;
-            }
+            const int            raw_group_seq = kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock();
+            const auto           group_type    = static_cast<size_t>(gid) < config_.group_types.size() ?
+                                                     config_.group_types[static_cast<size_t>(gid)] :
+                                                     CacheGroupType::FULL;
             const bool           gp_sharded    = cpShardThisGroup(cp_mapper, group_type);
-            const CacheKeysType& src_keys      = cp_active && gp_sharded ? cp_keys : full_keys;
-            const auto&          dependencies  = cp_active && gp_sharded ? cp_dependencies : full_dependencies;
-            const auto           namespace_id  = gp_sharded ? SharedBlockCache::kGpuCpCanonicalNamespace :
-                                                               SharedBlockCache::kGpuLogicalNamespace;
+            const CacheKeysType& src_keys      = gp_sharded ? cp_keys : full_keys;
             if (src_keys.empty()) {
                 continue;
             }
@@ -479,15 +445,8 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                     continue;
                 }
                 std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_nums), NULL_BLOCK_IDX);
-                std::vector<bool>         matchable_slots(static_cast<size_t>(group_nums), true);
                 group_slots[static_cast<size_t>(gid)] = blocks[i];
-                if (static_cast<size_t>(gid) >= config_.group_types.size() && group_type != CacheGroupType::FULL) {
-                    matchable_slots[static_cast<size_t>(gid)] = false;
-                }
-                const auto dependency =
-                    i < dependencies.size() ? dependencies[i] : BlockDependency{false, 0, static_cast<uint32_t>(i)};
-                shared_block_cache_->put(
-                    src_keys[i], group_slots, insert_info.is_resident, namespace_id, dependency, matchable_slots);
+                shared_block_cache_->put(src_keys[i], group_slots, insert_info.is_resident);
             }
         }
     }
@@ -519,48 +478,25 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
                                   config_.group_types,
                                   config_.layer_region_to_group_id);
 
-    CacheKeysType                 selected_keys;
-    BlockDependenciesType         selected_dependencies;
+    CacheKeysType&                selected_keys = selected_resource->cacheKeys();
     std::vector<BlockIndicesType> selected_blocks(static_cast<size_t>(kvcache_resource.groupNums()));
-    const auto&                   source_dependencies = kvcache_resource.blockDependencies();
 
-    selected_dependencies.reserve(cache_keys.size());
-    selected_keys.reserve(cache_keys.size());
     for (auto key : cache_keys) {
         auto it = key_to_pos.find(key);
         if (it == key_to_pos.end()) {
             continue;
         }
         const size_t pos = it->second;
-        bool any_valid_block = false;
-        std::vector<BlockIdxType> blocks_for_key(static_cast<size_t>(kvcache_resource.groupNums()), NULL_BLOCK_IDX);
         for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
             const auto& src_blocks = kvcache_resource.blocks(gid);
-            const auto  block      = pos < src_blocks.size() ? src_blocks[pos] : NULL_BLOCK_IDX;
-            blocks_for_key[static_cast<size_t>(gid)] = block;
-            any_valid_block = any_valid_block || (!isNullBlockIdx(block) && block > 0);
-        }
-        const bool preserve_connector_tail = is_connector && !kvcache_resource.lastBlockAligned()
-                                             && pos + 1 == resource_keys.size() && !selected_keys.empty();
-        if (!any_valid_block && !preserve_connector_tail) {
-            continue;
-        }
-        selected_keys.push_back(key);
-        selected_dependencies.push_back(
-            pos < source_dependencies.size() ?
-                source_dependencies[pos] :
-                BlockDependency{false, 0, static_cast<uint32_t>(selected_dependencies.size())});
-        for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
-            selected_blocks[static_cast<size_t>(gid)].push_back(blocks_for_key[static_cast<size_t>(gid)]);
+            if (pos >= src_blocks.size()) {
+                continue;
+            }
+            selected_blocks[static_cast<size_t>(gid)].push_back(src_blocks[pos]);
         }
     }
 
-    if (selected_keys.empty()) {
-        return nullptr;
-    }
-
-    selected_resource->cacheKeys() = std::move(selected_keys);
-    selected_resource->setBlockDependencies(std::move(selected_dependencies));
+    selected_keys.assign(cache_keys.begin(), cache_keys.end());
     for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
         BlockIndicesType valid;
         for (auto b : selected_blocks[static_cast<size_t>(gid)]) {
