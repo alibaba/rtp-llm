@@ -70,6 +70,28 @@ _DEBUG_SCORE_TOKEN_LABELS = {
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 
 
+def _exception_metric_code(error_code: Any) -> str:
+    code = int(error_code)
+    try:
+        return f"{code}_{ExceptionType.from_value(code)}"
+    except ValueError:
+        return str(code)
+
+
+def _set_access_backend_error_code(access_agg: Any, e: BaseException) -> None:
+    if access_agg is None:
+        return
+    raw_code = getattr(e, "rtp_error_code", None)
+    if raw_code is None and isinstance(e, FtRuntimeException):
+        raw_code = int(e.exception_type)
+    if raw_code is None:
+        return
+    try:
+        access_agg.backend_error_code = _exception_metric_code(raw_code)
+    except (TypeError, ValueError):
+        access_agg.backend_error_code = str(raw_code)
+
+
 def stream_log_tag(
     *, request_id_numeric: int, trace_id: str, phase: Optional[int] = None
 ) -> str:
@@ -564,6 +586,7 @@ async def iter_real_model_stream_infer(
     generate_env_config: Any = None,
     think_runtime: Optional[_ThinkRuntime] = None,
     phase2_request_id_factory: Optional[Callable[[], int]] = None,
+    access_agg: Any = None,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -1110,6 +1133,7 @@ async def iter_real_model_stream_infer(
                 FINISH_REASON_ABORT,
             )
         else:
+            _set_access_backend_error_code(access_agg, e)
             logging.exception("[DashScGrpc] [%s] engine error: %s", tag, e)
             yield predict_v2_pb2.ModelStreamInferResponse(
                 error_message=f"{type(e).__name__}: {e}"
@@ -1233,6 +1257,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     generate_env_config=self._generate_env_config,
                     think_runtime=self._think_runtime,
                     phase2_request_id_factory=self._next_rtp_llm_request_id,
+                    access_agg=getattr(context, "_dash_sc_access_agg", None),
                 ):
                     yield resp
                 return
