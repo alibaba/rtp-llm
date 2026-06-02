@@ -54,6 +54,36 @@ class PdKvWritebackRpcStaticTest(unittest.TestCase):
         self.assertIn("PdKvWritebackSend", decode_h)
         self.assertIn("decode_server_->PdKvWritebackSend", remote_impl_h)
 
+    def test_decode_stream_writeback_uses_stable_non_empty_unique_key(self):
+        query_converter_cc = (
+            REPO_ROOT / "rtp_llm/cpp/model_rpc/QueryConverter.cc"
+        ).read_text()
+        decode_cc = (REPO_ROOT / "rtp_llm/cpp/model_rpc/DecodeRpcServer.cc").read_text()
+
+        self.assertIn("generate_config->unique_key", query_converter_cc)
+        self.assertIn("config_proto->unique_key()", query_converter_cc)
+        self.assertIn("input->generate_config->unique_key.empty()", decode_cc)
+        self.assertIn("input->generate_config->unique_key = decode_context.request_key", decode_cc)
+
+    def test_writeback_p2p_transfer_plans_keep_manifest_request_key(self):
+        manifest_cc = (
+            REPO_ROOT / "rtp_llm/cpp/cache/writeback/PdKvWritebackManifest.cc"
+        ).read_text()
+        manager_cc = (
+            REPO_ROOT / "rtp_llm/cpp/cache/writeback/PdKvWritebackManager.cc"
+        ).read_text()
+
+        self.assertIn("snapshot.request_key.empty()", manifest_cc)
+        self.assertIn(
+            'snapshot.request_key.empty() ? "pd_kv_writeback_" + std::to_string(snapshot.request_id) : snapshot.request_key',
+            manifest_cc,
+        )
+        self.assertGreaterEqual(
+            manager_cc.count("plan.request_key              = request.manifest.request_key"),
+            2,
+        )
+        self.assertIn("request.manifest.request_key", manager_cc)
+
 
 if __name__ == "__main__":
     unittest.main()

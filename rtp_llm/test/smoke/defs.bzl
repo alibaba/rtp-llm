@@ -89,7 +89,9 @@ def get_aiter_envs(name, envs):
     return ["AITER_ASM_DIR=../../../../../../../bin/internal_source/rtp_llm/test/smoke/" + name + ".runfiles/pip_gpu_rocm_torch_aiter/site-packages/aiter_meta/hsa/"]
 
 def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_args="",
-               kvcm_envs=[], sleep_time_qr=0, kill_remote=False, concurrency_test=False):
+               kvcm_envs=[], sleep_time_qr=0, kill_remote=False, concurrency_test=False,
+               concurrency_request_count=5, concurrency_workers=10, stability_repeat=0,
+               assert_no_log_patterns=[]):
     path = '/'.join(task_info.split('/')[:-1])
     data = data + native.glob([path + '/*.pt',
                                path + '/*.jpg',
@@ -131,6 +133,7 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
         fail("unknown smoke_args type: " + str(type(smoke_args)))
 
     kvcm_envs_str = "[" + ",".join(["\\\"" + x + "\\\"" for x in kvcm_envs]) + "]"
+    assert_no_log_patterns_str = ",".join(assert_no_log_patterns)
 
     local_srcs = native.glob(["*.py", "mainse/*.py"])
     has_entry = bool([f for f in local_srcs if f == "entry.py" or f.endswith("/entry.py")])
@@ -185,6 +188,10 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
             "--sleep_time_qr", str(sleep_time_qr),
             "--kill_remote", str(kill_remote),
             "--concurrency_test", str(concurrency_test),
+            "--concurrency_request_count", str(concurrency_request_count),
+            "--concurrency_workers", str(concurrency_workers),
+            "--stability_repeat", str(stability_repeat),
+            "--assert_no_log_patterns", assert_no_log_patterns_str,
         ],
         exec_properties = {
             'gpu':gpu_type[0],

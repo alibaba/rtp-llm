@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <atomic>
 #if USING_CUDA
@@ -386,6 +387,11 @@ at::cuda::CUDAStream& getNoBlockCopyStream() {
     static thread_local auto stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
     return stream;
 }
+#elif USING_ROCM
+at::hip::HIPStream& getNoBlockCopyStream() {
+    static thread_local auto stream = at::hip::getStreamFromPool(/*isHighPriority=*/false);
+    return stream;
+}
 #endif
 }  // anonymous namespace
 
@@ -399,7 +405,24 @@ void execNoBlockCopy(const CopyParams& params) {
     check_cuda_value(cudaStreamSynchronize(stream));
     check_cuda_error();
 #elif USING_ROCM
-    dst.copy_(src);
+    ROCM_CHECK(hipSetDevice(getDeviceId()));
+    auto stream = getNoBlockCopyStream().stream();
+    if (!src.is_hip() && !dst.is_hip()) {
+        std::memcpy(dst.data_ptr(), src.data_ptr(), src.nbytes());
+        ROCM_CHECK_ERROR();
+        return;
+    }
+    hipMemcpyKind copy_type;
+    if (src.is_hip() && !dst.is_hip()) {
+        copy_type = hipMemcpyDeviceToHost;
+    } else if (!src.is_hip() && dst.is_hip()) {
+        copy_type = hipMemcpyHostToDevice;
+    } else {
+        copy_type = hipMemcpyDeviceToDevice;
+    }
+    ROCM_CHECK(hipMemcpyAsync(dst.data_ptr(), src.data_ptr(), src.nbytes(), copy_type, stream));
+    ROCM_CHECK(hipStreamSynchronize(stream));
+    ROCM_CHECK_ERROR();
 #else
     dst.copy_(src);
 #endif

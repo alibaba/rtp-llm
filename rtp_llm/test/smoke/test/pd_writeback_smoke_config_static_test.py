@@ -5,7 +5,12 @@ import unittest
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
 SMOKE_ROOT = REPO_ROOT / "rtp_llm" / "test" / "smoke"
 TASK_INFO = SMOKE_ROOT / "data" / "model" / "qwen3" / "q_r_h20_pd_writeback_reuse.json"
+ROCM_TASK_INFO = SMOKE_ROOT / "data" / "model" / "qwen3" / "q_r_rocm_pd_writeback_reuse.json"
 SUITE = SMOKE_ROOT / "suites_h20_oss.bzl"
+ROCM_SUITE = SMOKE_ROOT / "suites_rocm_oss.bzl"
+DEFS = SMOKE_ROOT / "defs.bzl"
+ENTRY = SMOKE_ROOT / "entry.py"
+CASE_RUNNER = SMOKE_ROOT / "case_runner.py"
 
 
 class PdWritebackSmokeConfigStaticTest(unittest.TestCase):
@@ -76,6 +81,89 @@ class PdWritebackSmokeConfigStaticTest(unittest.TestCase):
         second_assertions = task["query_result"][1]["aux_info_assertions"]
         self.assertEqual(second_assertions["mode"], "aux_info_only")
         self.assertIn("aux_info.prefill_local_reuse_len", second_assertions["fields"])
+
+    def test_rocm_pd_writeback_stress_case_repeats_concurrent_reuse_queries(self):
+        suite = ROCM_SUITE.read_text()
+        task = json.loads(ROCM_TASK_INFO.read_text())
+
+        self.assertIn('name="rocm_pd_qwen3_8b_tp1_to_tp1_tcp_writeback_reuse"', suite)
+        self.assertIn('name="rocm_pd_qwen3_8b_tp2_to_tp2_tcp_writeback_reuse_single"', suite)
+        self.assertIn('name="rocm_pd_qwen3_8b_tp2_to_tp2_tcp_writeback_reuse"', suite)
+        self.assertIn('name="rocm_pd_qwen3_8b_tp2_to_tp2_rdma_stress"', suite)
+        self.assertIn('name = "smoke_rocm_pd_stress"', suite)
+        pd_suite = suite[
+            suite.index('name = "smoke_rocm_pd"'):suite.index('name = "smoke_rocm_pd_stress"')
+        ]
+        self.assertNotIn('name="rocm_pd_qwen3_8b_tp2_to_tp2_rdma_stress"', pd_suite)
+
+        tcp_case_block = _case_block(suite, "rocm_pd_qwen3_8b_tp1_to_tp1_tcp_writeback_reuse")
+        self.assertIn('task_info="data/model/qwen3/q_r_rocm_pd_writeback_reuse.json"', tcp_case_block)
+        self.assertIn("--tp_size 1 --world_size 1", tcp_case_block)
+        self.assertIn("--cache_store_rdma_mode 0", tcp_case_block)
+        self.assertIn("concurrency_request_count=4", tcp_case_block)
+        self.assertIn("stability_repeat=2", tcp_case_block)
+
+        tcp_tp2_single_case_block = _case_block(suite, "rocm_pd_qwen3_8b_tp2_to_tp2_tcp_writeback_reuse_single")
+        self.assertIn('task_info="data/model/qwen3/q_r_rocm_pd_writeback_reuse.json"', tcp_tp2_single_case_block)
+        self.assertIn("--tp_size 2 --world_size 2", tcp_tp2_single_case_block)
+        self.assertIn("--cache_store_rdma_mode 0", tcp_tp2_single_case_block)
+        self.assertNotIn("concurrency_test=True", tcp_tp2_single_case_block)
+        self.assertIn("read_transfer_not_done", tcp_tp2_single_case_block)
+
+        tcp_tp2_case_block = _case_block(suite, "rocm_pd_qwen3_8b_tp2_to_tp2_tcp_writeback_reuse")
+        self.assertIn('task_info="data/model/qwen3/q_r_rocm_pd_writeback_reuse.json"', tcp_tp2_case_block)
+        self.assertIn("--tp_size 2 --world_size 2", tcp_tp2_case_block)
+        self.assertIn("--cache_store_rdma_mode 0", tcp_tp2_case_block)
+        self.assertIn("concurrency_request_count=4", tcp_tp2_case_block)
+        self.assertIn("stability_repeat=2", tcp_tp2_case_block)
+
+        case_block = _case_block(suite, "rocm_pd_qwen3_8b_tp2_to_tp2_rdma_stress")
+        self.assertIn('task_info="data/model/qwen3/q_r_rocm_pd_writeback_reuse.json"', case_block)
+        self.assertIn("concurrency_test=True", case_block)
+        self.assertIn("concurrency_request_count=16", case_block)
+        self.assertIn("concurrency_workers=16", case_block)
+        self.assertIn("stability_repeat=10", case_block)
+        self.assertIn("read_transfer_not_done", case_block)
+        self.assertIn("P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE", case_block)
+        self.assertIn("--tp_size 2 --world_size 2", case_block)
+        self.assertIn("--cache_store_rdma_mode 1", case_block)
+
+        self.assertEqual(task["model_type"], "qwen_3")
+        self.assertEqual(len(task["query_result"]), 2)
+        first_assertions = task["query_result"][0]["aux_info_assertions"]
+        self.assertEqual(first_assertions["mode"], "aux_info_only")
+        self.assertEqual(
+            first_assertions["fields"],
+            {"aux_info.pd_sep": {"eq": True}},
+        )
+        second_assertions = task["query_result"][1]["aux_info_assertions"]
+        self.assertEqual(second_assertions["mode"], "aux_info_only")
+        self.assertGreaterEqual(
+            second_assertions["fields"]["aux_info.prefill_local_reuse_len"]["ge"],
+            64,
+        )
+
+    def test_smoke_runner_exposes_stress_knobs_and_log_failure_assertions(self):
+        defs = DEFS.read_text()
+        entry = ENTRY.read_text()
+        case_runner = CASE_RUNNER.read_text()
+
+        for token in [
+            "concurrency_request_count",
+            "concurrency_workers",
+            "stability_repeat",
+            "assert_no_log_patterns",
+        ]:
+            self.assertIn(token, defs)
+            self.assertIn(token, entry)
+            self.assertIn(token, case_runner)
+
+        self.assertIn("STABILITY_REPEAT", case_runner)
+        self.assertIn("ThreadPoolExecutor(max_workers=self.concurrency_workers)", case_runner)
+        self.assertIn("range(self.concurrency_request_count)", case_runner)
+        self.assertIn("read_transfer_not_done", case_runner)
+        self.assertIn("P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE", case_runner)
+        self.assertIn("TEST_UNDECLARED_OUTPUTS_DIR", case_runner)
 
 
 def _case_block(suite: str, case_name: str) -> str:

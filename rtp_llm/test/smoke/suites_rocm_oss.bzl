@@ -197,6 +197,92 @@ def rocm_oss_suites():
         ],
     )
 
+    native.test_suite(
+        name = "smoke_rocm_pd_stress",
+        tests = [
+            smoke_test(
+                name="rocm_pd_qwen3_8b_tp1_to_tp1_tcp_writeback_reuse",
+                task_info="data/model/qwen3/q_r_rocm_pd_writeback_reuse.json",
+                smoke_args= {
+                    "prefill": "--test_block_num 1000 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flash_infer 1 --use_aiter_pa 1 --role_type PREFILL --cache_store_rdma_mode 0 --tp_size 1 --world_size 1 --use_local 1 --reuse_cache 1 --load_cache_timeout_ms 120000",
+                    "decode": "--test_block_num 1000 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flash_infer 1 --use_aiter_pa 1 --role_type DECODE --cache_store_rdma_mode 0 --tp_size 1 --world_size 1 --use_local 1 --reuse_cache 1 --load_cache_timeout_ms 120000"
+                },
+                envs = {
+                    "prefill": ["USE_CACHE_STORE=1", "ENABLE_PD_KV_CACHE_WRITEBACK=1", "CACHE_STORE_RDMA_MODE=0"],
+                    "decode": ["USE_CACHE_STORE=1", "ENABLE_PD_KV_CACHE_WRITEBACK=1", "CACHE_STORE_RDMA_MODE=0"],
+                },
+                concurrency_test=True,
+                concurrency_request_count=4,
+                concurrency_workers=4,
+                stability_repeat=2,
+                assert_no_log_patterns=[
+                    "read_transfer_not_done",
+                    "P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE",
+                ],
+                gpu_type=["MI308X-ROCM7"]
+            ),
+            smoke_test(
+                name="rocm_pd_qwen3_8b_tp2_to_tp2_tcp_writeback_reuse_single",
+                task_info="data/model/qwen3/q_r_rocm_pd_writeback_reuse.json",
+                smoke_args= {
+                    "prefill": "--test_block_num 1000 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flash_infer 1 --use_aiter_pa 1 --role_type PREFILL --cache_store_rdma_mode 0 --tp_size 2 --world_size 2 --use_local 1 --reuse_cache 1 --load_cache_timeout_ms 120000",
+                    "decode": "--test_block_num 1000 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flash_infer 1 --use_aiter_pa 1 --role_type DECODE --cache_store_rdma_mode 0 --tp_size 2 --world_size 2 --use_local 1 --reuse_cache 1 --load_cache_timeout_ms 120000"
+                },
+                envs = {
+                    "prefill": ["USE_CACHE_STORE=1", "ENABLE_PD_KV_CACHE_WRITEBACK=1", "CACHE_STORE_RDMA_MODE=0"],
+                    "decode": ["USE_CACHE_STORE=1", "ENABLE_PD_KV_CACHE_WRITEBACK=1", "CACHE_STORE_RDMA_MODE=0"],
+                },
+                assert_no_log_patterns=[
+                    "read_transfer_not_done",
+                    "P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE",
+                ],
+                gpu_type=["MI308X-ROCM7"]
+            ),
+            smoke_test(
+                name="rocm_pd_qwen3_8b_tp2_to_tp2_tcp_writeback_reuse",
+                task_info="data/model/qwen3/q_r_rocm_pd_writeback_reuse.json",
+                smoke_args= {
+                    "prefill": "--test_block_num 1000 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flash_infer 1 --use_aiter_pa 1 --role_type PREFILL --cache_store_rdma_mode 0 --tp_size 2 --world_size 2 --use_local 1 --reuse_cache 1 --load_cache_timeout_ms 300000",
+                    "decode": "--test_block_num 1000 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flash_infer 1 --use_aiter_pa 1 --role_type DECODE --cache_store_rdma_mode 0 --tp_size 2 --world_size 2 --use_local 1 --reuse_cache 1 --load_cache_timeout_ms 300000"
+                },
+                envs = {
+                    "prefill": ["USE_CACHE_STORE=1", "ENABLE_PD_KV_CACHE_WRITEBACK=1", "CACHE_STORE_RDMA_MODE=0"],
+                    "decode": ["USE_CACHE_STORE=1", "ENABLE_PD_KV_CACHE_WRITEBACK=1", "CACHE_STORE_RDMA_MODE=0"],
+                },
+                concurrency_test=True,
+                concurrency_request_count=4,
+                concurrency_workers=4,
+                stability_repeat=2,
+                assert_no_log_patterns=[
+                    "read_transfer_not_done",
+                    "P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE",
+                ],
+                gpu_type=["MI308X-ROCM7"]
+            ),
+            smoke_test(
+                name="rocm_pd_qwen3_8b_tp2_to_tp2_rdma_stress",
+                task_info="data/model/qwen3/q_r_rocm_pd_writeback_reuse.json",
+                smoke_args= {
+                    "prefill": "--test_block_num 1000 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flash_infer 1 --use_aiter_pa 1 --role_type PREFILL --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 800 --tp_size 2 --world_size 2 --use_local 1 --reuse_cache 1 --load_cache_timeout_ms 300000",
+                    "decode": "--test_block_num 1000 --warm_up 0 --seq_size_per_block 16 --act_type bf16 --use_swizzleA 1 --use_asm_pa 1 --disable_flash_infer 1 --use_aiter_pa 1 --role_type DECODE --cache_store_rdma_mode 1 --cache_store_rdma_connect_timeout_ms 800 --tp_size 2 --world_size 2 --use_local 1 --reuse_cache 1 --load_cache_timeout_ms 300000"
+                },
+                envs = {
+                    "prefill": ["USE_CACHE_STORE=1", "ENABLE_PD_KV_CACHE_WRITEBACK=1", "CACHE_STORE_RDMA_MODE=1", "RDMA_CONNECT_RETRY_TIMES=2"],
+                    "decode": ["USE_CACHE_STORE=1", "ENABLE_PD_KV_CACHE_WRITEBACK=1", "CACHE_STORE_RDMA_MODE=1", "RDMA_CONNECT_RETRY_TIMES=2"],
+                },
+                concurrency_test=True,
+                concurrency_request_count=16,
+                concurrency_workers=16,
+                stability_repeat=10,
+                assert_no_log_patterns=[
+                    "read_transfer_not_done",
+                    "P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE",
+                ],
+                gpu_type=["MI308X-ROCM7"]
+            ),
+        ],
+    )
+
 
     # ROCm Embedding (BERT/RoBERTa)
     native.test_suite(

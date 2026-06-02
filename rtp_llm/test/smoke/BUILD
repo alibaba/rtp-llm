@@ -9,10 +9,13 @@ filegroup(
 )
 
 exports_files([
+    "defs.bzl",
     "entry.py",
     "data/prompt_candidates.json",
     "data/model/qwen3/q_r_h20_pd_writeback_reuse.json",
+    "data/model/qwen3/q_r_rocm_pd_writeback_reuse.json",
     "suites_h20_oss.bzl",
+    "suites_rocm_oss.bzl",
 ])
 
 # ============================================================================

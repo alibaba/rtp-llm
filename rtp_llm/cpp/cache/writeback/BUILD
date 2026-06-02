@@ -1,6 +1,10 @@
 load("//:def.bzl", "copts")
 
-exports_files(["PdKvWritebackTransfer.h"])
+exports_files([
+    "PdKvWritebackManager.cc",
+    "PdKvWritebackManifest.cc",
+    "PdKvWritebackTransfer.h",
+])
 
 cc_library(
     name = "pd_kv_writeback_topology",

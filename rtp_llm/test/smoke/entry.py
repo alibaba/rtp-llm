@@ -57,6 +57,10 @@ def _parse_kv_list(raw: str) -> Dict[str, str]:
     return result
 
 
+def _parse_csv_list(raw: str) -> List[str]:
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="smoke runner")
     parser.add_argument("--suite_name", type=str, required=True, help="suite_name")
@@ -68,6 +72,17 @@ if __name__ == "__main__":
     parser.add_argument("--sleep_time_qr", type=int, default=0, help="sleep seconds between queries")
     parser.add_argument("--kill_remote", type=str, default="False", help="kill KVCM server mid-test")
     parser.add_argument("--concurrency_test", type=str, default="False", help="concurrent request mode")
+    parser.add_argument("--concurrency_request_count", type=int, default=5, help="concurrent request count")
+    parser.add_argument("--concurrency_workers", type=int, default=10, help="concurrent request workers")
+    parser.add_argument("--stability_repeat", type=int, default=0, help="repeat all queries after the first pass")
+    parser.add_argument(
+        "--assert_no_log_patterns",
+        type=str,
+        nargs="?",
+        const="",
+        default="",
+        help="comma-separated forbidden log substrings",
+    )
     args, _ = parser.parse_known_args()
 
     logging.info(
@@ -98,6 +113,8 @@ if __name__ == "__main__":
             smoke_args = smoke_args[1:-1]
 
     kvcm_config = _parse_kv_list(args.kvcm_envs)
+    if args.stability_repeat > 0:
+        os.environ["STABILITY_REPEAT"] = str(args.stability_repeat)
 
     runner_class = get_runner_type(env_args)
     logging.info("runner_class: %s", str(runner_class))
@@ -110,6 +127,10 @@ if __name__ == "__main__":
         "sleep_time_qr": args.sleep_time_qr,
         "kill_remote": str_to_bool(args.kill_remote),
         "concurrency_test": str_to_bool(args.concurrency_test),
+        "concurrency_request_count": args.concurrency_request_count,
+        "concurrency_workers": args.concurrency_workers,
+        "stability_repeat": args.stability_repeat,
+        "assert_no_log_patterns": _parse_csv_list(args.assert_no_log_patterns),
     }
     # prompt_batch queries are now routed to /batch_infer per-query in case_runner
     # (see CaseRunner._resolve_endpoint), no env-level switch needed.

@@ -13,6 +13,7 @@ exports_files([
     "PdKvWritebackRpcUtil.h",
     "PrefillRpcServer.cc",
     "PrefillRpcServer.h",
+    "QueryConverter.cc",
     "RemoteRpcServiceImpl.h",
 ])
 

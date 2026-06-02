@@ -173,6 +173,7 @@ class PdSeperationCaseRunner(CaseRunner):
         if enable_remote_cache and self.remote_kvcm_server is not None:
             self.remote_kvcm_server.stop_server()
             self.remote_kvcm_server.copy_logs()
+        self.assert_no_log_patterns_absent(task_states)
         return task_states
 
 

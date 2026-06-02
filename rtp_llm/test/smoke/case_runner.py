@@ -48,6 +48,11 @@ from rtp_llm.utils.util import (
 from rtp_llm.test.utils.coredump_util import summarize_and_cleanup_coredumps
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
+PD_WRITEBACK_FAILURE_LOG_PATTERNS = [
+    "read_transfer_not_done",
+    "P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE",
+]
+
 
 def _iterate_modidfy_qr(origin: Dict[str, Any], new: Dict[str, Any]):
     assert isinstance(origin, dict) and isinstance(
@@ -75,6 +80,10 @@ class CaseRunner(object):
         sleep_time_qr: int = 0,
         kill_remote: bool = False,
         concurrency_test: bool = False,
+        concurrency_request_count: int = 5,
+        concurrency_workers: int = 10,
+        stability_repeat: int = 0,
+        assert_no_log_patterns: Optional[List[str]] = None,
     ):
         self.task_info = task_info
         self.env_args = env_args
@@ -95,6 +104,10 @@ class CaseRunner(object):
         self.sleep_time_qr = sleep_time_qr
         self.kill_remote = kill_remote
         self.concurrency_test = concurrency_test
+        self.concurrency_request_count = max(1, concurrency_request_count)
+        self.concurrency_workers = max(1, concurrency_workers)
+        self.stability_repeat = max(0, stability_repeat)
+        self.assert_no_log_patterns = assert_no_log_patterns or []
 
     @staticmethod
     def _extract_bool_arg(args_str: str, arg_name: str, default: bool = False) -> bool:
@@ -125,13 +138,12 @@ class CaseRunner(object):
                 task_states.ret = False
                 return task_states
             task_states = self.curl_server(server_manager)
-            if task_states.ret != True:
-                return task_states
             assert server_manager is not None, "server manager should not be None"
             server_manager.stop_server()
             if enable_remote_cache and self.remote_kvcm_server is not None:
                 self.remote_kvcm_server.stop_server()
                 self.remote_kvcm_server.copy_logs()
+            self.assert_no_log_patterns_absent(task_states)
             return task_states
         finally:
             summarize_and_cleanup_coredumps(
@@ -155,12 +167,12 @@ class CaseRunner(object):
     ) -> TaskStates:
         if self.concurrency_test:
             task_states = TaskStates()
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.concurrency_workers) as executor:
                 futures = [
                     executor.submit(
                         self._curl_server_impl, server_manager, self.task_info
                     )
-                    for _ in range(5)
+                    for _ in range(self.concurrency_request_count)
                 ]
                 results = []
                 for future in concurrent.futures.as_completed(futures):
@@ -244,6 +256,8 @@ class CaseRunner(object):
         task_states: TaskStates,
     ) -> None:
         repeat_count = int(os.environ.get('STABILITY_REPEAT', '0'))
+        if self.stability_repeat > 0:
+            repeat_count = self.stability_repeat
         if repeat_count <= 0 or task_states.ret == False:
             return
 
@@ -305,6 +319,54 @@ class CaseRunner(object):
                 (QueryStatus.OTHERS,
                  f"Stability test: {total_fail}/{total_checks} failures in {repeat_count} iterations",
                  Tracer()))
+
+    def assert_no_log_patterns_absent(self, task_states: TaskStates) -> None:
+        if not self.assert_no_log_patterns:
+            return
+
+        output_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "")
+        if not output_dir or not os.path.isdir(output_dir):
+            logging.warning("skip log pattern assertion: TEST_UNDECLARED_OUTPUTS_DIR is unavailable")
+            return
+
+        matches = []
+        for root, _, files in os.walk(output_dir):
+            for file_name in files:
+                log_path = os.path.join(root, file_name)
+                if not os.path.isfile(log_path):
+                    continue
+                try:
+                    with open(log_path, "r", errors="ignore") as log_file:
+                        for line_no, line in enumerate(log_file, 1):
+                            for pattern in self.assert_no_log_patterns:
+                                if pattern and pattern in line:
+                                    matches.append((pattern, log_path, line_no, line.strip()[:500]))
+                                    break
+                            if len(matches) >= 20:
+                                break
+                except OSError:
+                    continue
+                if len(matches) >= 20:
+                    break
+            if len(matches) >= 20:
+                break
+
+        if not matches:
+            return
+
+        failure_lines = [
+            f"{pattern} at {path}:{line_no}: {line}"
+            for pattern, path, line_no, line in matches
+        ]
+        task_states.ret = False
+        task_states.query_status.append(
+            (
+                QueryStatus.OTHERS,
+                "Smoke log assertion matched forbidden writeback failure pattern:\n"
+                + "\n".join(failure_lines),
+                Tracer(),
+            )
+        )
 
     def _curl_server_impl(
         self, server_manager: MagaServerManager, task_info: TaskInfo
