@@ -62,11 +62,6 @@ public:
                        bool                           copy_last_block,
                        std::vector<BlockIdPair>&      block_update_mapping);
 
-    // Write one KV block (optionally per-layer) from host/device tensors for test
-    virtual bool
-    setKVBlockValue(int block_index, int layer_id, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
-    virtual bool setKVBlockValue(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
-
     // 地址转换和缓冲区访问
     BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id) const;
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
@@ -136,6 +131,11 @@ public:
     std::shared_ptr<CPSlotMapper> cpSlotMapper() const {
         return cp_slot_mapper_;
     }
+
+    // Write one KV block (optionally per-layer) from host/device tensors for test
+    virtual bool
+    writeKVBlockForTest(int block_index, int layer_id, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
+    virtual bool writeKVBlockForTest(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
 
 private:
     void initConnectorCoordinator();
