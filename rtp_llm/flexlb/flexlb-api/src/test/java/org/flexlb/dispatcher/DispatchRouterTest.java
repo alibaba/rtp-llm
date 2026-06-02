@@ -20,10 +20,10 @@ class DispatchRouterTest {
 
     private static final BatchEndpointSpec BATCH_INFER =
             new BatchEndpointSpec("/batch_infer", "prompt_batch", "response_batch",
-                    FailedItemFactory.NULL, null);
+                    FailedItemFactory.NULL, null, false);
     private static final BatchEndpointSpec EMBEDDINGS =
             new BatchEndpointSpec("/v1/embeddings", "input", "data",
-                    FailedItemFactory.EMBEDDING_NULL, EmbeddingMerger.INSTANCE);
+                    FailedItemFactory.EMBEDDING_NULL, EmbeddingMerger.INSTANCE, true);
 
     @Test
     void nonDispatcherPathsAreNotMatched() {

@@ -17,12 +17,12 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Per-chunk fanout on the dispatcher batch path. Type-for-type mirror of
- * {@code FanoutService} on the Jackson side; serializes each chunk via fastjson2's
- * {@link JSON#toJSONBytes(Object, JSONWriter.Feature...)} (with {@link JSONWriter.Feature#WriteNulls}
- * to preserve explicit null entries — e.g. user-supplied {@code embedding: null}) and parses the
- * FE response bytes back into a {@link JSONObject}. Failed chunks become
- * {@link SubBatchResult#failed} and never abort their siblings.
+ * Per-chunk fanout on the dispatcher batch path. Serializes each chunk via fastjson2's
+ * {@link JSON#toJSONBytes(Object, JSONWriter.Feature...)} and parses the FE response bytes back
+ * into a {@link JSONObject}. Whether the serialize includes {@link JSONWriter.Feature#WriteNulls}
+ * is driven by {@link BatchEndpointSpec#isFanoutWriteNulls()} — see the field's Javadoc for
+ * when null preservation matters. Failed chunks become {@link SubBatchResult#failed} and never
+ * abort their siblings.
  */
 @Component
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
@@ -37,10 +37,13 @@ public class FanoutService {
                                                               BatchEndpointSpec spec) {
         List<Mono<SubBatchResult>> calls = new ArrayList<>(chunkBodies.size());
         int start = 0;
+        JSONWriter.Feature[] features = spec.isFanoutWriteNulls()
+                ? new JSONWriter.Feature[] { JSONWriter.Feature.WriteNulls }
+                : new JSONWriter.Feature[0];
         for (JSONObject body : chunkBodies) {
             int chunkSize = body.getJSONArray(spec.getRequestArrayField()).size();
             int startIndex = start;
-            byte[] payload = JSON.toJSONBytes(body, JSONWriter.Feature.WriteNulls);
+            byte[] payload = JSON.toJSONBytes(body, features);
             calls.add(Mono.fromCallable(fePool::next)
                     .flatMap(feUrl -> feClient.postBytes(feUrl, fePath, payload)
                             .map(bytes -> SubBatchResult.ok(

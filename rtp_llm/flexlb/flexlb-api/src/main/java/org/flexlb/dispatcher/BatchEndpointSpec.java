@@ -33,6 +33,18 @@ public class BatchEndpointSpec {
     FailedItemFactory failedItemFactory;
     /** May be null when an endpoint has no cross-chunk aggregation. */
     PostMerger postMerger;
+    /**
+     * When true, outbound chunk bodies serialize with
+     * {@link com.alibaba.fastjson2.JSONWriter.Feature#WriteNulls} so user-supplied null entries
+     * (e.g. {@code "tools": null}) reach FE byte-for-byte. The dispatcher itself never adds
+     * nulls to a chunk body — they only come from the input request — so this matters only when
+     * FE pydantic distinguishes "field absent" from "field null" (rare in rtp_llm FE: pydantic
+     * Optional defaults to None and treats both the same). Costs ~18% on the chunk serialize
+     * step (measured by {@code SerializeMicroBench}), which on a 100-chunk fanout request is
+     * ~160µs CPU per request. Default false to take that win on the common wire shape; flip
+     * per-endpoint above for any endpoint where wire compat matters.
+     */
+    boolean fanoutWriteNulls;
 
     /**
      * Cross-chunk aggregation hook; runs after {@link ResponseMerger} has stitched
@@ -82,16 +94,16 @@ public class BatchEndpointSpec {
     public static final List<BatchEndpointSpec> SPECS = List.of(
             new BatchEndpointSpec("/",
                     "prompt_batch", "response_batch",
-                    FailedItemFactory.NULL, null),
+                    FailedItemFactory.NULL, null, false),
             new BatchEndpointSpec("/batch_infer",
                     "prompt_batch", "response_batch",
-                    FailedItemFactory.NULL, null),
+                    FailedItemFactory.NULL, null, false),
             new BatchEndpointSpec("/v1/batch/chat/completions",
                     "requests", "responses",
-                    FailedItemFactory.OPENAI_ERROR, null),
+                    FailedItemFactory.OPENAI_ERROR, null, true),
             new BatchEndpointSpec("/v1/embeddings",
                     "input", "data",
-                    FailedItemFactory.EMBEDDING_NULL, EmbeddingMerger.INSTANCE)
+                    FailedItemFactory.EMBEDDING_NULL, EmbeddingMerger.INSTANCE, true)
     );
 
     /**
