@@ -156,9 +156,9 @@ def _build_cp_full_state_read_cache(
 
 
 def _cp_sliced_state_read_needed(
-    meta: "CompressorMeta", cp_ctx: Optional[CPContext], raw_disabled: bool
+    meta: "CompressorMeta", cp_ctx: Optional[CPContext]
 ) -> bool:
-    if raw_disabled or cp_ctx is None or cp_ctx.cp_size <= 1:
+    if cp_ctx is None or cp_ctx.cp_size <= 1:
         return False
     if not getattr(cp_ctx, "kv_cache_sharded", False):
         return False
@@ -183,10 +183,6 @@ class CompressorMeta:
       * ``kv_slots``     : int64 KV-pool slot per token (-1 if non-boundary
                            or unallocated)
       * ``token_to_req`` : int32 alias of ``b_idx`` for the fused KV writer
-      * ``is_batched``   : True when this meta uses the varlen/per-request
-                           raw path. This includes B==1 CP prefill, where
-                           keeping the same path avoids reintroducing a
-                           scalar-B special case.
     """
 
     positions: torch.Tensor
@@ -194,9 +190,8 @@ class CompressorMeta:
     state_slots: torch.Tensor
     kv_slots: torch.Tensor
     token_to_req: torch.Tensor
-    is_batched: bool = False
-    # Phase-3a part 4c — varlen raw path. Populated when is_batched;
-    # otherwise the legacy scalar-seq_start path is used.
+    # Varlen raw path metadata. Required by the compressor writer once pools
+    # are bound; B==1 uses the same per-request arrays as larger batches.
     #   seq_start_per_req[b] = abs position of req b's first new token (sp_b)
     #   cu_seq_per_req[b+1]  = end offset of req b in flat kv_flat axis
     seq_start_per_req: Optional[torch.Tensor] = None
@@ -400,7 +395,6 @@ class CompressorFP8(PoolBackedModule):
         self,
         positions: torch.Tensor,  # [N] int64
         b_idx: torch.Tensor,  # [N] int64
-        is_batched: bool = False,
         seq_start_per_req: Optional[torch.Tensor] = None,
         cu_seq_per_req: Optional[torch.Tensor] = None,
     ) -> CompressorMeta:
@@ -430,7 +424,6 @@ class CompressorFP8(PoolBackedModule):
                 state_slots=None,
                 kv_slots=None,
                 token_to_req=b_idx.to(torch.int32),
-                is_batched=is_batched,
                 seq_start_per_req=seq_start_per_req,
                 cu_seq_per_req=cu_seq_per_req,
             )
@@ -476,7 +469,6 @@ class CompressorFP8(PoolBackedModule):
                 state_slots=state_slots,
                 kv_slots=kv_slots,
                 token_to_req=token_to_req,
-                is_batched=is_batched,
                 seq_start_per_req=seq_start_per_req,
                 cu_seq_per_req=cu_seq_per_req,
             )
@@ -495,7 +487,6 @@ class CompressorFP8(PoolBackedModule):
             state_slots=state_slots,
             kv_slots=kv_slots,
             token_to_req=token_to_req,
-            is_batched=is_batched,
             seq_start_per_req=seq_start_per_req,
             cu_seq_per_req=cu_seq_per_req,
         )
@@ -653,23 +644,13 @@ class CompressorFP8(PoolBackedModule):
         kv_flat: torch.Tensor,  # [N, coff*head_dim] fp32
         score_flat: torch.Tensor,  # [N, coff*head_dim] fp32
         meta: CompressorMeta,
-        seq_start: Optional[int] = None,
     ) -> None:
         """Launch the two vLLM kernels (state write + boundary KV write).
 
-        ``seq_start`` is the absolute position of ``kv_flat[0]`` for
-        sequentially-laid-out batches (prefill: ``sp_int``). When provided
-        the fused kernel reads any overlap-window position with
-        ``flat_idx = pos - seq_start in [0, N)`` directly from
-        ``kv_flat / score_flat`` instead of reading back through the state
-        pool, where current-launch writes are still in flight.
-
-        Pass ``None`` to disable the raw path (decode: ``kv_flat`` is
-        indexed by ``req_idx``, not by absolute position offset).
-
         All slot-mapping math is consumed from ``meta`` — this method only
-        does kernel launches and the cos_sin_cache lazy build. Designed to
-        stay branch-light so it composes cleanly with CUDA graph capture.
+        does kernel launches and the cos_sin_cache lazy build. The fused
+        writer always consumes per-request raw-window metadata, including the
+        B==1 path, so there is no scalar ``seq_start`` fallback.
         """
         if (
             self._state_pool_3d is None
@@ -698,20 +679,13 @@ class CompressorFP8(PoolBackedModule):
                 compress_ratio=self.compress_ratio,
             )
 
-        # Decode path passes seq_start=None: disable the raw branch so the
-        # kernel only reads state_cache. seq_start value is then irrelevant.
-        # Phase-3a part 4c: when meta carries per-request raw windows, the
-        # kernel uses native varlen raw path (one address per request) and
-        # the scalar ``seq_start`` is unused.
-        use_varlen_raw = (
-            meta.is_batched
-            and meta.seq_start_per_req is not None
-            and meta.cu_seq_per_req is not None
+        assert meta.seq_start_per_req is not None and meta.cu_seq_per_req is not None, (
+            "CompressorFP8 requires per-request raw metadata; "
+            "legacy scalar seq_start metadata is unsupported"
         )
-        raw_disabled = (seq_start is None) and not use_varlen_raw
         state_cache_for_read = self._state_pool_3d
         state_block_table_for_read = self._state_block_table
-        if _cp_sliced_state_read_needed(meta, self._cp_ctx, raw_disabled):
+        if _cp_sliced_state_read_needed(meta, self._cp_ctx):
             with record_function_range(
                 "dsv4.fp8.compressor.launch.cp_gather_state_read_cache"
             ):
@@ -738,14 +712,14 @@ class CompressorFP8(PoolBackedModule):
                 kv_flat,
                 score_flat,
                 self.ape,
-                0 if (raw_disabled or use_varlen_raw) else seq_start,
-                disable_raw_path=raw_disabled,
+                0,
+                disable_raw_path=False,
                 head_dim=self.head_dim,
                 rope_head_dim=self.rope_head_dim,
                 compress_ratio=self.compress_ratio,
                 overlap=self.overlap,
-                seq_start_per_req=meta.seq_start_per_req if use_varlen_raw else None,
-                cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
+                seq_start_per_req=meta.seq_start_per_req,
+                cu_seq_per_req=meta.cu_seq_per_req,
                 state_tokens_per_block=self._state_tokens_per_block,
             )
 
@@ -911,9 +885,8 @@ class CompressorFP8(PoolBackedModule):
             kv_flat = fused_flat[:, :out_dim]
             score_flat = fused_flat[:, out_dim:]
 
-        seq_start = None if meta.is_batched else pending.sp
         with record_function_range("dsv4.fp8.compressor.prefill.launch"):
-            self._launch(kv_flat, score_flat, meta, seq_start=seq_start)
+            self._launch(kv_flat, score_flat, meta)
 
     # ----------------------------------------------------------------------
     # Forward (prefill)
@@ -946,11 +919,6 @@ class CompressorFP8(PoolBackedModule):
             seqlen = int(x.size(0))
         else:
             bsz, seqlen, _ = x.size()
-        sp = (
-            int(start_pos.item())
-            if isinstance(start_pos, torch.Tensor)
-            else int(start_pos)
-        )
         # Warmup forward (no pool bound by framework): no-op.
         if (
             self._state_pool_3d is None
@@ -1014,12 +982,8 @@ class CompressorFP8(PoolBackedModule):
             )
             kv_flat = fused_flat[:, :out_dim]
             score_flat = fused_flat[:, out_dim:]
-        # Varlen prefill carries per-request raw arrays, so ``_launch`` routes
-        # through the kernel's BATCHED branch even when CP has only one
-        # request. Legacy scalar metadata keeps the old ``seq_start`` path.
-        seq_start = None if meta.is_batched else sp
         with record_function_range("dsv4.fp8.compressor.prefill.launch"):
-            self._launch(kv_flat, score_flat, meta, seq_start=seq_start)
+            self._launch(kv_flat, score_flat, meta)
         return None
 
     # ----------------------------------------------------------------------
@@ -1099,7 +1063,6 @@ def build_prefill_metadata(
 
 def build_prepare_metadata_args(
     *,
-    use_varlen: bool,
     device: torch.device,
     sp_int: int,
     seqlen: int,
@@ -1108,53 +1071,44 @@ def build_prepare_metadata_args(
     seq_start_per_req: Optional[torch.Tensor] = None,
     cu_seqlens: Optional[torch.Tensor] = None,
 ) -> Dict[str, Any]:
-    """Return the kwargs dict for ``CompressorFP8.prepare_metadata``,
-    branching on ``use_varlen``. Single source of truth for the three
-    call sites that used to inline this dispatch:
+    """Return the kwargs dict for ``CompressorFP8.prepare_metadata``.
+
+    Varlen/per-request metadata is required so callers cannot silently
+    re-enter the legacy scalar metadata path. Single source of truth for the
+    three call sites that used to inline this dispatch:
 
       * ``Attention._build_compressor_meta`` (HCA + standalone CSA path)
       * ``Attention._build_csa_prefill_meta`` (CSA inline that shares the
         pool bind with ``IndexerFP8.prepare``)
       * ``IndexerFP8.prepare`` nested compressor hoist
 
-    Under varlen we pass the upper-layer-derived per-request tensors
-    straight through; the legacy B==1 path collapses to the same
-    ``(arange(sp, sp+T), zeros)`` pair ``_build_prefill_positions`` produces
-    so bisecting between the two stays bit-equal.
-
     ``seq_start_per_req`` accepts either ``sp_per_req`` (Attention) or
     ``prefix_lengths`` (Indexer) — both index32-cast to the same int32
     layout the compressor's varlen raw kernel consumes.
     """
-    if use_varlen:
-        assert (
-            position_ids is not None
-            and req_id_per_token is not None
-            and seq_start_per_req is not None
-            and cu_seqlens is not None
-        ), "varlen dispatch requires position_ids/req_id_per_token/seq_start_per_req/cu_seqlens"
-        return dict(
-            positions=position_ids.to(device=device, dtype=torch.long)
-            .reshape(-1)
-            .contiguous(),
-            b_idx=req_id_per_token.to(device=device, dtype=torch.long)
-            .reshape(-1)
-            .contiguous(),
-            is_batched=True,
-            seq_start_per_req=seq_start_per_req.to(device=device, dtype=torch.int32)
-            .reshape(-1)
-            .contiguous(),
-            cu_seq_per_req=cu_seqlens.to(device=device, dtype=torch.int32)
-            .reshape(-1)
-            .contiguous(),
+    if (
+        position_ids is None
+        or req_id_per_token is None
+        or seq_start_per_req is None
+        or cu_seqlens is None
+    ):
+        raise RuntimeError(
+            "CompressorFP8 requires varlen metadata: "
+            "position_ids/req_id_per_token/seq_start_per_req/cu_seqlens"
         )
-    positions, b_idx = _build_prefill_positions(sp_int, 1, seqlen, device)
     return dict(
-        positions=positions,
-        b_idx=b_idx,
-        is_batched=False,
-        seq_start_per_req=None,
-        cu_seq_per_req=None,
+        positions=position_ids.to(device=device, dtype=torch.long)
+        .reshape(-1)
+        .contiguous(),
+        b_idx=req_id_per_token.to(device=device, dtype=torch.long)
+        .reshape(-1)
+        .contiguous(),
+        seq_start_per_req=seq_start_per_req.to(device=device, dtype=torch.int32)
+        .reshape(-1)
+        .contiguous(),
+        cu_seq_per_req=cu_seqlens.to(device=device, dtype=torch.int32)
+        .reshape(-1)
+        .contiguous(),
     )
 
 
@@ -1166,5 +1120,8 @@ def build_decode_metadata(
     b_idx = torch.arange(bsz, device=device, dtype=torch.long)
     cu_seq_per_req = torch.arange(0, bsz + 1, device=device, dtype=torch.int64)
     return compressor.prepare_metadata(
-        positions, b_idx, seq_start_per_req=positions, cu_seq_per_req=cu_seq_per_req
+        positions,
+        b_idx,
+        seq_start_per_req=positions,
+        cu_seq_per_req=cu_seq_per_req,
     )

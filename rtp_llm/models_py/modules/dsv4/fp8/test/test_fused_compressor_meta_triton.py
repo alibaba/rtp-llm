@@ -71,7 +71,6 @@ def _assert_meta_equal(py, fused):
     assert torch.equal(py.state_slots, fused.state_slots)
     assert torch.equal(py.kv_slots, fused.kv_slots)
     assert torch.equal(py.token_to_req, fused.token_to_req)
-    assert py.is_batched == fused.is_batched
 
 
 def _prepare_python_reference(
@@ -105,7 +104,6 @@ def _prepare_python_reference(
         ),
         kv_slots=cmp._compute_kv_slot_mapping(positions, b_idx),
         token_to_req=b_idx.to(torch.int32),
-        is_batched=q_len > 1,
         seq_start_per_req=seq_start_per_req,
         cu_seq_per_req=cu_seq_per_req,
     )
@@ -151,7 +149,6 @@ def _compare_default_fused_to_python(
     fused = cmp.prepare_metadata(
         positions,
         b_idx,
-        is_batched=q_len > 1,
         seq_start_per_req=seq_start_per_req,
         cu_seq_per_req=cu_seq_per_req,
     )

@@ -181,7 +181,6 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         ).view(1, S)
         req_id = torch.zeros((1, S), dtype=torch.int32, device=self.device)
         args = build_prepare_metadata_args(
-            use_varlen=True,
             device=self.device,
             sp_int=12,
             seqlen=S,

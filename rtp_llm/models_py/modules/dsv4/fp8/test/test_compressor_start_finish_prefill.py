@@ -9,7 +9,7 @@ locks the split's externally observable behaviour against the existing
   * exactly one CP all-gather per pending, with the same ``local_2d``
     source and ``cp_ctx`` as ``forward``;
   * the wait + split + ``_launch`` path receives identical
-    ``kv_flat`` / ``score_flat`` / ``meta`` / ``seq_start`` arguments;
+    ``kv_flat`` / ``score_flat`` / ``meta`` arguments;
   * warmup (no pool bound) → ``start_prefill`` returns ``None`` and
     ``finish_prefill(None)`` is a no-op (mirrors ``forward``'s early
     return → ``None``);
@@ -111,7 +111,6 @@ def _make_meta(cp_ctx: CPContext, device: torch.device) -> CompressorMeta:
         state_slots=torch.zeros(cp_ctx.seq_len_full, dtype=torch.long, device=device),
         kv_slots=torch.zeros(cp_ctx.seq_len_full, dtype=torch.long, device=device),
         token_to_req=torch.zeros(cp_ctx.seq_len_full, dtype=torch.int32, device=device),
-        is_batched=True,
         seq_start_per_req=torch.tensor([0], dtype=torch.int32, device=device),
         cu_seq_per_req=torch.tensor(
             [0, cp_ctx.seq_len_full], dtype=torch.int32, device=device
@@ -158,11 +157,10 @@ class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
             assert actual_handle is handle
             return self.gathered_fused
 
-        def fake_launch(kv_flat, score_flat, actual_meta, seq_start=None):
+        def fake_launch(kv_flat, score_flat, actual_meta):
             launch_args["kv_flat"] = kv_flat
             launch_args["score_flat"] = score_flat
             launch_args["meta"] = actual_meta
-            launch_args["seq_start"] = seq_start
 
         with (
             patch(
@@ -234,7 +232,6 @@ class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
             torch.equal(sync_launch["score_flat"], split_launch["score_flat"])
         )
         self.assertIs(sync_launch["meta"], split_launch["meta"])
-        self.assertEqual(sync_launch["seq_start"], split_launch["seq_start"])
 
     def test_caller_supplied_cp_gather_stream_is_forwarded(self):
         cmp = _build_compressor(
@@ -273,8 +270,8 @@ class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
             wait_calls.append(actual_handle)
             return self.gathered_fused
 
-        def fake_launch(kv_flat, score_flat, actual_meta, seq_start=None):
-            launch_calls.append((kv_flat, score_flat, actual_meta, seq_start))
+        def fake_launch(kv_flat, score_flat, actual_meta):
+            launch_calls.append((kv_flat, score_flat, actual_meta))
 
         with (
             patch(
@@ -300,11 +297,10 @@ class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
         # must perform the single pool write after the caller's explicit fence.
         self.assertEqual(wait_calls, [handle])
         self.assertEqual(len(launch_calls), 1)
-        kv_flat, score_flat, actual_meta, seq_start = launch_calls[0]
+        kv_flat, score_flat, actual_meta = launch_calls[0]
         self.assertTrue(torch.equal(kv_flat, self.gathered_fused[:, : self.out_dim]))
         self.assertTrue(torch.equal(score_flat, self.gathered_fused[:, self.out_dim :]))
         self.assertIs(actual_meta, self.meta)
-        self.assertIsNone(seq_start)
 
     def test_warmup_start_returns_none_and_finish_is_noop(self):
         cmp = _build_compressor(

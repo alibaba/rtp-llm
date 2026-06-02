@@ -96,7 +96,6 @@ class CompressorFP8CPMergedGatherTest(unittest.TestCase):
             state_slots=torch.zeros(cp_ctx.seq_len_full, dtype=torch.long),
             kv_slots=torch.zeros(cp_ctx.seq_len_full, dtype=torch.long),
             token_to_req=torch.zeros(cp_ctx.seq_len_full, dtype=torch.int32),
-            is_batched=True,
             seq_start_per_req=torch.tensor([0], dtype=torch.int32),
             cu_seq_per_req=torch.tensor([0, cp_ctx.seq_len_full], dtype=torch.int32),
         )
@@ -114,11 +113,10 @@ class CompressorFP8CPMergedGatherTest(unittest.TestCase):
             self.assertIs(actual_handle, handle)
             return gathered_fused
 
-        def fake_launch(kv_flat, score_flat, actual_meta, seq_start=None):
+        def fake_launch(kv_flat, score_flat, actual_meta):
             launch_args["kv_flat"] = kv_flat
             launch_args["score_flat"] = score_flat
             launch_args["meta"] = actual_meta
-            launch_args["seq_start"] = seq_start
 
         def fake_linear(local_2d, weight):
             del weight
@@ -160,7 +158,6 @@ class CompressorFP8CPMergedGatherTest(unittest.TestCase):
             torch.equal(launch_args["score_flat"], gathered_fused[:, out_dim:])
         )
         self.assertIs(launch_args["meta"], meta)
-        self.assertIsNone(launch_args["seq_start"])
 
 
 if __name__ == "__main__":

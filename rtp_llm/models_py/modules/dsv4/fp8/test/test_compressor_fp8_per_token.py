@@ -412,9 +412,7 @@ def test_prepared_metadata_path() -> None:
         cmp_a, seqlen=seqlen, head_dim=head_dim, coff=coff, compress_ratio=ratio
     )
     x = torch.randn(1, seqlen, dim, dtype=torch.bfloat16, device=DEVICE) * 0.1
-    meta_a = build_prefill_metadata(
-        cmp_a, sp=sp, bsz=1, seqlen=seqlen, device=x.device
-    )
+    meta_a = build_prefill_metadata(cmp_a, sp=sp, bsz=1, seqlen=seqlen, device=x.device)
     pending = cmp_a.start_prefill(x, sp, meta=meta_a)
     cmp_a.finish_prefill(pending)
     torch.cuda.synchronize()
@@ -502,7 +500,6 @@ def test_decode_strided_kv_score_matches_contiguous_path() -> None:
     meta_strided = cmp_strided.prepare_metadata(
         positions,
         b_idx,
-        is_batched=True,
         seq_start_per_req=seq_start,
         cu_seq_per_req=cu_seq,
     )
@@ -526,7 +523,6 @@ def test_decode_strided_kv_score_matches_contiguous_path() -> None:
     meta_contig = cmp_contig.prepare_metadata(
         positions,
         b_idx,
-        is_batched=True,
         seq_start_per_req=seq_start,
         cu_seq_per_req=cu_seq,
     )
@@ -550,7 +546,6 @@ def test_decode_strided_kv_score_matches_contiguous_path() -> None:
         kv_view.contiguous(),
         score_view.contiguous(),
         meta_contig,
-        seq_start=None,
     )
 
     torch.cuda.synchronize()

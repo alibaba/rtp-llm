@@ -189,7 +189,6 @@ class CompressorVarlenRawPathTest(unittest.TestCase):
         meta_a = cmp_a.prepare_metadata(
             positions,
             b_idx,
-            is_batched=True,
             seq_start_per_req=sp_per_req,
             cu_seq_per_req=cu_seqlens,
         )
@@ -199,10 +198,10 @@ class CompressorVarlenRawPathTest(unittest.TestCase):
         fused_out = _linear_bf16_bf16_fp32(x_flat, cmp_a._wkv_wgate_fused)
         kv_flat = fused_out[..., :out_dim].contiguous()
         score_flat = fused_out[..., out_dim:].contiguous()
-        cmp_a._launch(kv_flat, score_flat, meta_a, seq_start=None)
+        cmp_a._launch(kv_flat, score_flat, meta_a)
         torch.cuda.synchronize()
 
-        # ── Path B: per-request reference (legacy scalar seq_start) ──
+        # ── Path B: per-request reference with the same metadata path ──
         torch.manual_seed(42)
         cmp_b = _build_compressor(
             dim=dim,
@@ -240,12 +239,12 @@ class CompressorVarlenRawPathTest(unittest.TestCase):
                     [0, S_per_req[b]], dtype=torch.int64, device=DEVICE
                 ),
             )
-            cmp_b._launch(kv_b_flat, score_b_flat, meta_b, seq_start=sps[b])
+            cmp_b._launch(kv_b_flat, score_b_flat, meta_b)
         torch.cuda.synchronize()
 
         self.assertTrue(
             torch.equal(state_a, state_b),
-            "state pool diverged between BATCHED kernel and per-request scalar path",
+            "state pool diverged between batched and per-request metadata paths",
         )
         self.assertTrue(
             torch.equal(kv_a, kv_b),

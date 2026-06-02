@@ -709,8 +709,8 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import CsaPrefillMeta, HcaPref
 
 class _StubCompressor:
     """Capture every ``prepare_metadata`` call so the UT can assert the
-    builder fed ``positions`` / ``b_idx`` / ``is_batched`` /
-    ``seq_start_per_req`` / ``cu_seq_per_req`` correctly."""
+    builder fed ``positions`` / ``b_idx`` / ``seq_start_per_req`` /
+    ``cu_seq_per_req`` correctly."""
 
     def __init__(self) -> None:
         self.calls: list = []
@@ -719,7 +719,6 @@ class _StubCompressor:
         self,
         positions,
         b_idx,
-        is_batched=False,
         seq_start_per_req=None,
         cu_seq_per_req=None,
     ):
@@ -727,7 +726,6 @@ class _StubCompressor:
             dict(
                 positions=positions,
                 b_idx=b_idx,
-                is_batched=is_batched,
                 seq_start_per_req=seq_start_per_req,
                 cu_seq_per_req=cu_seq_per_req,
             )
@@ -879,7 +877,7 @@ def _make_no_bind_stub(**kwargs) -> _NoBindStubAttention:
 
 # -------------------------------------------------------------------------
 # 5. _build_compressor_meta — varlen vs legacy dispatch (shared by HCA
-#    + the inline CSA path). Verifies positions/b_idx/is_batched/
+#    + the inline CSA path). Verifies positions/b_idx/
 #    seq_start_per_req/cu_seq_per_req plumbing.
 # -------------------------------------------------------------------------
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA needed for tensor scaffolding")
@@ -929,30 +927,15 @@ class BuildCompressorMetaTest(unittest.TestCase):
         )
 
     def test_use_varlen_false_uses_single_request_positions(self) -> None:
-        """``use_varlen=False`` direct helper path:
-        positions = arange(sp, sp+S), b_idx = zeros(S), is_batched=False,
-        seq_start/cu_seq = None."""
+        """``use_varlen=False`` is rejected by the compressor metadata path."""
         stub = _make_no_bind_stub(win=8, compress_ratio=128)  # HCA host compressor
-        ret = self._call(stub, sp_int=10, seqlen=20, use_varlen=False)
-        self.assertEqual(ret, "compressor_meta_call_1")
-        call = stub.compressor.calls[0]
-        self.assertEqual(call["is_batched"], False)
-        self.assertIsNone(call["seq_start_per_req"])
-        self.assertIsNone(call["cu_seq_per_req"])
-        # positions == arange(sp, sp+S) per _build_prefill_positions contract.
-        expected_pos = torch.arange(10, 30, dtype=torch.long, device=self.device)
-        self.assertTrue(torch.equal(call["positions"], expected_pos))
-        # b_idx == zeros(S) (B==1 flat batch).
-        self.assertTrue(
-            torch.equal(
-                call["b_idx"], torch.zeros(20, dtype=torch.long, device=self.device)
-            )
-        )
+        with self.assertRaisesRegex(RuntimeError, "requires varlen metadata"):
+            self._call(stub, sp_int=10, seqlen=20, use_varlen=False)
 
     def test_varlen_b2_threads_position_ids_and_req_id(self) -> None:
         """B==2 cold+cont: positions = position_ids.long(), b_idx =
-        req_id_per_token.long(), is_batched=True, seq_start_per_req =
-        prefix_lengths.int32, cu_seq_per_req = cu_seqlens.int32."""
+        req_id_per_token.long(), seq_start_per_req = prefix_lengths.int32,
+        cu_seq_per_req = cu_seqlens.int32."""
         stub = _make_no_bind_stub(win=8, compress_ratio=128, n_reqs=2)
         ret = self._call(
             stub,
@@ -965,7 +948,6 @@ class BuildCompressorMetaTest(unittest.TestCase):
         )
         self.assertEqual(ret, "compressor_meta_call_1")
         call = stub.compressor.calls[0]
-        self.assertEqual(call["is_batched"], True)
         # positions == flat per-token absolute positions (req0 [0..7] +
         # req1 [32..37]).
         expected_pos = torch.cat(
@@ -1026,8 +1008,7 @@ class BuildCompressorMetaTest(unittest.TestCase):
             max_seqlen_q=10,
         )
         call = stub.compressor.calls[0]
-        # Varlen branch — kernel-native batched dispatch even at B==1.
-        self.assertEqual(call["is_batched"], True)
+        # Varlen branch — kernel-native per-request metadata even at B==1.
         self.assertIsNotNone(call["seq_start_per_req"])
         self.assertIsNotNone(call["cu_seq_per_req"])
         self.assertEqual(call["seq_start_per_req"].dtype, torch.int32)
@@ -1111,7 +1092,6 @@ class BuildCsaPrefillMetaTest(unittest.TestCase):
         self.assertEqual(idx_call["kv_eb"], 32)
         # CSA inline compressor.prepare_metadata: varlen path even at B==1.
         cmp_call = stub.compressor.calls[0]
-        self.assertEqual(cmp_call["is_batched"], True)
         self.assertEqual(cmp_call["positions"].dtype, torch.long)
         # B==1 collapse: positions == arange(sp, sp+S) == position_ids.
         expected_pos = torch.arange(4, 14, dtype=torch.long, device=self.device)
@@ -1146,7 +1126,7 @@ class BuildCsaPrefillMetaTest(unittest.TestCase):
     def test_b2_varlen_threads_all_kwargs(self) -> None:
         """B==2: indexer.prepare receives every per-request tensor,
         compressor.prepare_metadata uses position_ids/req_id_per_token
-        AND is_batched + seq_start_per_req + cu_seq_per_req."""
+        and seq_start_per_req + cu_seq_per_req."""
         stub = _make_no_bind_stub(win=8, compress_ratio=4, n_reqs=2, bind_indexer=True)
         ret = self._call(stub, [0, 32], [8, 6], use_varlen=True)
         self.assertIsInstance(ret, CsaPrefillMeta)
@@ -1188,7 +1168,6 @@ class BuildCsaPrefillMetaTest(unittest.TestCase):
 
         # ---- Compressor call (inline) ----
         cmp_call = stub.compressor.calls[0]
-        self.assertEqual(cmp_call["is_batched"], True)
         self.assertEqual(cmp_call["positions"].dtype, torch.long)
         self.assertTrue(torch.equal(cmp_call["positions"], expected_pos))
         # b_idx == req_id_per_token long.
@@ -1280,7 +1259,6 @@ class BuildHcaPrefillMetaTest(unittest.TestCase):
         ret = self._call(stub, [256], [128], use_varlen=True)
         self.assertIsInstance(ret, HcaPrefillMeta)
         cmp_call = stub.compressor.calls[0]
-        self.assertEqual(cmp_call["is_batched"], True)
         # positions = arange(256, 256+128) = position_ids.
         expected_pos = torch.arange(256, 384, dtype=torch.long, device=self.device)
         self.assertTrue(torch.equal(cmp_call["positions"], expected_pos))
@@ -1317,13 +1295,12 @@ class BuildHcaPrefillMetaTest(unittest.TestCase):
             self._call(stub, [256], [128], use_varlen=False)
 
     def test_b2_varlen_compressor_and_workspace_dense_topk(self) -> None:
-        """B==2: compressor gets is_batched=True + per-request tensors;
+        """B==2: compressor gets per-request tensors;
         workspace gets dense_cmp_topk shape [T_total, N_max]."""
         stub = _make_no_bind_stub(win=512, compress_ratio=128, n_reqs=2)
         # sp=[0, 256], S=[64, 128]: N=[0, 3], N_max=3, T_total=192.
         ret = self._call(stub, [0, 256], [64, 128], use_varlen=True)
         cmp_call = stub.compressor.calls[0]
-        self.assertEqual(cmp_call["is_batched"], True)
         # positions = req0 [0..63] + req1 [256..383]
         expected_pos = torch.cat(
             [

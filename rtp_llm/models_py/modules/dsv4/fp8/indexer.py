@@ -779,8 +779,9 @@ class IndexerFP8(PoolBackedModule):
             # not consume ``end_pos`` / ``is_fresh_prefill`` (the kernel-
             # native path drives off the per-request tensors); ``sp_int``
             # is still passed to ``self.compressor(x, sp, meta=...)`` but
-            # is ignored there because ``meta.is_batched=True``. Keep the
-            # request-0 values for diagnostics / B==1 collapse equivalence.
+            # the compressor now derives raw windows only from per-request
+            # metadata. Keep the request-0 values for diagnostics / B==1
+            # collapse equivalence.
             end_pos = int(seq_total_per_req[0].item())
             is_fresh_prefill = sp_int == 0
         else:
@@ -868,7 +869,6 @@ class IndexerFP8(PoolBackedModule):
                             compressor_meta = compressor.prepare_metadata(
                                 cp_positions,
                                 cp_b_idx,
-                                is_batched=True,
                                 seq_start_per_req=cp_seq_start_per_req,
                                 cu_seq_per_req=cp_cu_seq_per_req,
                             )
@@ -879,7 +879,6 @@ class IndexerFP8(PoolBackedModule):
                         "dsv4.fp8.indexer.prepare.nested_compressor_meta"
                     ):
                         cmp_args = build_prepare_metadata_args(
-                            use_varlen=use_varlen,
                             device=device,
                             sp_int=sp_int,
                             seqlen=seqlen,
