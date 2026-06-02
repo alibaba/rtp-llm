@@ -1,3 +1,5 @@
+import logging
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -69,6 +71,26 @@ class GenericMoeLayer(nn.Module):
             )
         else:
             self.fake_balance_expert = None
+        self.add_shared_expert = config.moe_style == 2
+        self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
+        self.ep_size = parallelism_config.ep_size
+
+        moe_w1_check = weights.get(W.moe_w1, None)
+        actual_experts = moe_w1_check.shape[0] if moe_w1_check is not None else 0
+        self.use_fused_shared_expert = (
+            self.add_shared_expert
+            and self.ep_size == 1
+            and actual_experts > config.expert_num
+            and os.environ.get("DISABLE_SHARED_EXPERT_FUSION", "0") != "1"
+        )
+        if self.use_fused_shared_expert:
+            self.fused_shared_expert_id = config.expert_num
+            logging.info(
+                "shared expert fused as expert %d, moe_w1: %s",
+                self.fused_shared_expert_id,
+                moe_w1_check.shape,
+            )
+
         config_adapter = MoEConfigAdapter(
             model_config=config,
             parallelism_config=parallelism_config,
@@ -76,6 +98,8 @@ class GenericMoeLayer(nn.Module):
             quant_config=quant_config,
             enable_cuda_graph=enable_cuda_graph,
         )
+        if self.use_fused_shared_expert:
+            config_adapter.expert_num = moe_w1_check.shape[0]
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
 
         self.w1 = weights.get(W.moe_w1, None)
@@ -84,30 +108,57 @@ class GenericMoeLayer(nn.Module):
             self.w1 is not None and self.w2 is not None
         ), "Weights w1 and w2 must be provided"
         self.num_local_experts = self.w1.shape[0]
-        self.add_shared_expert = config.moe_style == 2
-        self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
-        self.ep_size = parallelism_config.ep_size
-        if self.add_shared_expert:
-            self.shared_expert = DenseMLP(
-                config.activation_type,
-                parallelism_config,
-                weights,
-                quant_config,
-                hw_kernel_config=hw_kernel_config,
-            )
-        else:
+
+        if self.use_fused_shared_expert:
             self.shared_expert = None
-        if weights.get(W.shared_expert_gate, None) is not None:
-            self.shared_expert_gate = LinearFactory.create_linear_from_weights(
-                weights, W.shared_expert_gate, None, None, config
-            )
-            self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
-        else:
-            self.shared_expert_gate = None
+            if weights.get(W.shared_expert_gate, None) is not None:
+                self.shared_expert_gate = LinearFactory.create_linear_from_weights(
+                    weights, W.shared_expert_gate, None, None, config
+                )
+            else:
+                self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
+        else:
+            if self.add_shared_expert:
+                self.shared_expert = DenseMLP(
+                    config.activation_type,
+                    parallelism_config,
+                    weights,
+                    quant_config,
+                    hw_kernel_config=hw_kernel_config,
+                )
+            else:
+                self.shared_expert = None
+            if weights.get(W.shared_expert_gate, None) is not None:
+                self.shared_expert_gate = LinearFactory.create_linear_from_weights(
+                    weights, W.shared_expert_gate, None, None, config
+                )
+                self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
+            else:
+                self.shared_expert_gate = None
+                self.sigmoid_gate_scale_add = None
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
+
+    def _extend_topk_with_shared_expert(self, topk_ids, topk_weights, hidden_states):
+        num_tokens = topk_ids.shape[0]
+        shared_ids = torch.full(
+            (num_tokens, 1),
+            self.fused_shared_expert_id,
+            dtype=topk_ids.dtype,
+            device=topk_ids.device,
+        )
+        if self.shared_expert_gate is not None:
+            gate_out = self.shared_expert_gate(hidden_states)
+            shared_weights = torch.sigmoid(gate_out).float()
+        else:
+            shared_weights = torch.ones(
+                (num_tokens, 1), dtype=torch.float32, device=topk_ids.device
+            )
+        topk_ids = torch.cat([topk_ids, shared_ids], dim=1).contiguous()
+        topk_weights = torch.cat([topk_weights, shared_weights], dim=1).contiguous()
+        return topk_ids, topk_weights
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
@@ -152,6 +203,17 @@ class GenericMoeLayer(nn.Module):
 
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
+
+        if self.use_fused_shared_expert:
+            topk_ids, topk_weights = self._extend_topk_with_shared_expert(
+                topk_ids, topk_weights, hidden_states
+            )
+            return self.fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation="SiGLU",
+            )
 
         is_ep_mode = self.ep_size > 1
         # EP mode: routed expert output is already complete (EP combine handles it).

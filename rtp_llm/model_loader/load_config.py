@@ -88,7 +88,10 @@ class LoadConfig(BaseModel):
     def get_selected_experts(self, layer_id: int, expert_num):
         selected_experts = range(expert_num)
         if self.phy2log:
-            selected_experts = self.phy2log[layer_id]
+            selected_experts = list(self.phy2log[layer_id])
+            # Append fused shared experts beyond phy2log range
+            for eid in range(len(selected_experts), expert_num):
+                selected_experts.append(eid)
         expert_per_ep = len(selected_experts) // self.ep_size
         ep_rank = self.ep_rank
         selected_experts = selected_experts[

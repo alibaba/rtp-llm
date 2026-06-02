@@ -298,11 +298,13 @@ class MoeAtomicWeight(AtomicWeight):
         data_type: Optional[torch.dtype] = None,
         config: MoeConfig = None,
         stacked_ckpt_keys: bool = False,
+        expert_key_overrides: Optional[Dict[int, List[CkptWeightInfo]]] = None,
         *args: Any,
         **kwargs: Any,
     ):
         self.config = config
         self.stacked_ckpt_keys = stacked_ckpt_keys
+        self.expert_key_overrides = expert_key_overrides or {}
         # Pre-resolve function name for GPU preallocate path dispatch.
         # functools.partial objects have .func instead of __name__.
         if isinstance(process_fun, functools.partial):
@@ -334,6 +336,8 @@ class MoeAtomicWeight(AtomicWeight):
             stacked_key = ckpt_weight.tensor_name(layer_id)
             pattern = self._expert_key_pattern(idx)
             for expert_id in selected_experts:
+                if expert_id in self.expert_key_overrides:
+                    continue
                 per_expert_key = pattern.format(
                     i=str(layer_id), expert_id=str(expert_id)
                 )
@@ -417,28 +421,65 @@ class MoeAtomicWeight(AtomicWeight):
 
         # Fallback: original serial path
         before_merge_tensors = []
-        for ckpt_weight in ckpt_weights:
+        for ckpt_idx, ckpt_weight in enumerate(ckpt_weights):
             for expert_id in selected_experts:
-                name = ckpt_weight.name.format(
-                    i=str(layer_id), i_1=str(layer_id + 1), expert_id=str(expert_id)
-                )
-                try:
-                    before_merge_tensors.append(
-                        ckpt_weight.merge_fun(
-                            [
-                                x.to(device)
-                                for x in tensor_source.load_tensor(name, convert_type)
-                            ]
+                if (
+                    expert_id in self.expert_key_overrides
+                    and len(self.expert_key_overrides[expert_id]) > 1
+                    and self.stacked_ckpt_keys
+                ):
+                    parts = []
+                    for ow in self.expert_key_overrides[expert_id]:
+                        n = ow.name.format(
+                            i=str(layer_id),
+                            i_1=str(layer_id + 1),
+                            expert_id=str(expert_id),
                         )
+                        parts.append(
+                            ow.merge_fun(
+                                [
+                                    x.to(device)
+                                    for x in tensor_source.load_tensor(n, convert_type)
+                                ]
+                            )
+                        )
+                    before_merge_tensors.append(torch.cat(parts, dim=0))
+                else:
+                    effective = self._resolve_ckpt_weight(
+                        ckpt_weight, ckpt_idx, expert_id
                     )
-                except Exception as e:
-                    logging.error(
-                        f"加载 {name} 失败，完整堆栈:\n{traceback.format_exc()}"
+                    name = effective.name.format(
+                        i=str(layer_id),
+                        i_1=str(layer_id + 1),
+                        expert_id=str(expert_id),
                     )
-                    raise e
+                    try:
+                        before_merge_tensors.append(
+                            effective.merge_fun(
+                                [
+                                    x.to(device)
+                                    for x in tensor_source.load_tensor(
+                                        name, convert_type
+                                    )
+                                ]
+                            )
+                        )
+                    except Exception as e:
+                        logging.error(
+                            f"加载 {name} 失败，完整堆栈:\n{traceback.format_exc()}"
+                        )
+                        raise e
 
         after_merge_tensor = self.process_fun(before_merge_tensors).to(convert_type)
         return {self.name: after_merge_tensor}
+
+    def _resolve_ckpt_weight(self, ckpt_weight, ckpt_idx, expert_id):
+        """Return the CkptWeightInfo for a given expert, applying overrides."""
+        if expert_id in self.expert_key_overrides:
+            overrides = self.expert_key_overrides[expert_id]
+            if ckpt_idx < len(overrides):
+                return overrides[ckpt_idx]
+        return ckpt_weight
 
     def _load_expert_tensor(
         self,
@@ -449,9 +490,40 @@ class MoeAtomicWeight(AtomicWeight):
         convert_type,
         first_name=None,
         first_tensor=None,
+        ckpt_idx=0,
     ):
         """Load a single expert tensor with error handling."""
-        name = ckpt_weight.name.format(
+        if expert_id in self.expert_key_overrides:
+            overrides = self.expert_key_overrides[expert_id]
+            # Override experts are not in the TensorCollector (to avoid
+            # delaying collector completion). Load directly from database.
+            from rtp_llm.model_loader.tensor_source import DatabaseTensorSource
+
+            db = tensor_source.get_database()
+            db_source = DatabaseTensorSource(db)
+            if len(overrides) > 1 and self.stacked_ckpt_keys:
+                parts = []
+                for ow in overrides:
+                    n = ow.name.format(
+                        i=str(layer_id),
+                        i_1=str(layer_id + 1),
+                        expert_id=str(expert_id),
+                    )
+                    parts.append(ow.merge_fun(db_source.load_tensor(n, convert_type)))
+                combined = torch.cat(parts, dim=0)
+                return overrides[0].name.format(i=str(layer_id)), combined
+            else:
+                effective = overrides[0]
+                n = effective.name.format(
+                    i=str(layer_id),
+                    i_1=str(layer_id + 1),
+                    expert_id=str(expert_id),
+                )
+                t = effective.merge_fun(db_source.load_tensor(n, convert_type))
+                return n, t
+
+        effective = self._resolve_ckpt_weight(ckpt_weight, ckpt_idx, expert_id)
+        name = effective.name.format(
             i=str(layer_id),
             i_1=str(layer_id + 1),
             expert_id=str(expert_id),
@@ -459,7 +531,7 @@ class MoeAtomicWeight(AtomicWeight):
         if first_name is not None and name == first_name:
             return name, first_tensor
         try:
-            t = ckpt_weight.merge_fun(tensor_source.load_tensor(name, convert_type))
+            t = effective.merge_fun(tensor_source.load_tensor(name, convert_type))
             return name, t
         except Exception as e:
             logging.error(f"加载 {name} 失败，完整堆栈:\n{traceback.format_exc()}")
@@ -490,6 +562,7 @@ class MoeAtomicWeight(AtomicWeight):
             selected_experts[0],
             tensor_source,
             convert_type,
+            ckpt_idx=0,
         )
         expert_shape = first_tensor.shape  # e.g., [intermediate, hidden] for fp8
 
@@ -497,9 +570,6 @@ class MoeAtomicWeight(AtomicWeight):
         is_w1_s2 = self._process_fun_name == "stack_moe_w1_s2"
 
         if is_w1:
-            # stack_moe_w1: gate[512] + up[512] → [512, 2*intermediate, hidden]
-            # For non-2D tensors (e.g. per-tensor quant scales), fall back to
-            # the normal serial path which handles all shapes.
             if len(expert_shape) != 2:
                 return None
             assert num_ckpt_weights == 2
@@ -520,10 +590,10 @@ class MoeAtomicWeight(AtomicWeight):
                         convert_type,
                         first_name,
                         first_tensor,
+                        ckpt_idx=cw_idx,
                     )
                     out[local_idx, row_offset : row_offset + dim0, :].copy_(t)
         elif is_w1_s2:
-            # stack_moe_w1_s2: scale (max of gate/up scales per expert)
             assert num_ckpt_weights == 2
             out = torch.empty(
                 [num_experts] + list(expert_shape),
@@ -543,13 +613,13 @@ class MoeAtomicWeight(AtomicWeight):
                         convert_type,
                         first_name,
                         first_tensor,
+                        ckpt_idx=cw_idx,
                     )
                     target.append(t)
             for i in range(num_experts):
                 out[i].copy_(torch.max(gate_scales[i], up_scales[i]))
             return {self.name: out}
         else:
-            # stack_: simple stack → [num_experts, *expert_shape]
             assert (
                 num_ckpt_weights == 1
             ), f"stack_ fast path expects 1 ckpt_weight, got {num_ckpt_weights}"
@@ -568,6 +638,7 @@ class MoeAtomicWeight(AtomicWeight):
                     convert_type,
                     first_name,
                     first_tensor,
+                    ckpt_idx=0,
                 )
                 out[local_idx].copy_(t)
 
@@ -581,13 +652,17 @@ class MoeAtomicWeight(AtomicWeight):
         )
 
         names = set[str]()
-        for ckpt_weight in ckpt_weights:
-            selected_experts = load_config.get_selected_experts(
-                layer_id, self.config.expert_num
-            )
+        selected_experts = load_config.get_selected_experts(
+            layer_id, self.config.expert_num
+        )
+        for ckpt_idx, ckpt_weight in enumerate(ckpt_weights):
             for expert_id in selected_experts:
+                if expert_id in self.expert_key_overrides:
+                    continue
                 name = ckpt_weight.name.format(
-                    i=str(layer_id), i_1=str(layer_id + 1), expert_id=str(expert_id)
+                    i=str(layer_id),
+                    i_1=str(layer_id + 1),
+                    expert_id=str(expert_id),
                 )
                 names.add(name)
         return names

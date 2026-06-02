@@ -770,7 +770,12 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
             return None
 
         first_name, first_tensor = kernel._load_expert_tensor(
-            ckpt_weights[0], layer_id, selected_experts[0], tensor_source, convert_type
+            ckpt_weights[0],
+            layer_id,
+            selected_experts[0],
+            tensor_source,
+            convert_type,
+            ckpt_idx=0,
         )
         if first_tensor.dim() != 2:
             return None
@@ -802,6 +807,7 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
                         convert_type,
                         first_name=first_name,
                         first_tensor=first_tensor,
+                        ckpt_idx=cw_idx,
                     )
                     if has_prequant and tensor_source.has_prequantized_scale(name):
                         fp8_out[local_idx, row_offset : row_offset + dim0].copy_(t)
@@ -833,8 +839,13 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
                     convert_type,
                     first_name=first_name,
                     first_tensor=first_tensor,
+                    ckpt_idx=0,
                 )
-                if has_prequant and tensor_source.has_prequantized_scale(name):
+                if (
+                    has_prequant
+                    and "float8" in str(t.dtype)
+                    and tensor_source.has_prequantized_scale(name)
+                ):
                     fp8_out[local_idx].copy_(t)
                     scale_out[local_idx].copy_(tensor_source.get_scale(name))
                 else:
@@ -860,16 +871,13 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
             swapped_scale[:, half:, :].copy_(scale_out[:, :half, :])
             scale_out = swapped_scale
 
-        used_prequant = (
-            has_prequant
-            and any(
-                tensor_source.has_prequantized_scale(
-                    ckpt_weights[0].name.format(
-                        i=str(layer_id), i_1=str((layer_id or 0) + 1), expert_id=str(eid)
-                    )
+        used_prequant = has_prequant and any(
+            tensor_source.has_prequantized_scale(
+                ckpt_weights[0].name.format(
+                    i=str(layer_id), i_1=str((layer_id or 0) + 1), expert_id=str(eid)
                 )
-                for eid in selected_experts[:1]
             )
+            for eid in selected_experts[:1]
         )
         logging.info(
             f"inline MoE FP8 quant: {self.kernel.name} layer={layer_id} "
