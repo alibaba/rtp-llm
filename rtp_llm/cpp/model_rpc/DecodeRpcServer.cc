@@ -49,8 +49,8 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
 }
 
 grpc::Status DecodeRpcServer::PdKvWritebackSend(grpc::ServerContext*          server_context,
-                                                 const PdKvWritebackRequestPB* request,
-                                                 PdKvWritebackResponsePB*      response) {
+                                                const PdKvWritebackRequestPB* request,
+                                                PdKvWritebackResponsePB*      response) {
     (void)server_context;
     auto cache_manager = engine_->resourceContext().cache_manager;
     if (!cache_manager || !cache_manager->writebackManager()) {
@@ -61,10 +61,10 @@ grpc::Status DecodeRpcServer::PdKvWritebackSend(grpc::ServerContext*          se
         return grpc::Status::OK;
     }
 
-    auto launch_request = pdKvWritebackLaunchRequestFromPB(*request);
-    const int group_count = launch_request.source.group_count > 0 ?
-                                launch_request.source.group_count :
-                                static_cast<int>(launch_request.manifest.group_block_ids.size());
+    auto      launch_request = pdKvWritebackLaunchRequestFromPB(*request);
+    const int group_count    = launch_request.source.group_count > 0 ?
+                                   launch_request.source.group_count :
+                                   static_cast<int>(launch_request.manifest.group_block_ids.size());
     if (group_count <= 0 || group_count != static_cast<int>(launch_request.manifest.group_block_ids.size())) {
         const std::string reason = "invalid writeback source group count";
         response->mutable_error_info()->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
@@ -87,9 +87,8 @@ grpc::Status DecodeRpcServer::PdKvWritebackSend(grpc::ServerContext*          se
     }
     source_resource->setBatchCacheKeys(0, launch_request.manifest.cache_keys);
 
-    auto held_resource = cache_manager->incrKVCacheRef(source_resource->cacheResource(0),
-                                                       launch_request.manifest.cache_keys,
-                                                       true);
+    auto held_resource =
+        cache_manager->incrKVCacheRef(source_resource->cacheResource(0), launch_request.manifest.cache_keys, true);
     if (!held_resource) {
         const std::string reason = "hold decode writeback source blocks failed";
         response->mutable_error_info()->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
@@ -99,6 +98,7 @@ grpc::Status DecodeRpcServer::PdKvWritebackSend(grpc::ServerContext*          se
         return grpc::Status::OK;
     }
     launch_request.held_resource = std::move(held_resource);
+    launch_request.local_tp_rank = engine_->resourceContext().pd_kv_writeback_tp_rank;
 
     auto status = cache_manager->writebackManager()->sendOnDecode(launch_request, source_resource);
     response->mutable_error_info()->set_error_code(status.ok() ? ErrorCodePB::NONE_ERROR : ErrorCodePB::UNKNOWN_ERROR);

@@ -273,9 +273,33 @@ TEST(PdKvWritebackManagerTest, LaunchTpEqualSendsLocalRankToPrefillAndUsesLocalD
     EXPECT_EQ(transfer_client->last_plan.prefill_transfer_targets[0].remote_partition_id, 0);
     EXPECT_EQ(rpc_client->last_request.manifest.request_id, request.manifest.request_id);
     EXPECT_EQ(rpc_client->last_request.decode_worker_addrs, decode_worker_grpc_addrs);
-    EXPECT_EQ(rpc_client->prefill_targets,
-              std::vector<std::string>({"p0:1000", "p1:1000", "p2:1000", "p3:1000"}));
+    EXPECT_EQ(rpc_client->prefill_targets, std::vector<std::string>({"p0:1000", "p1:1000", "p2:1000", "p3:1000"}));
     EXPECT_EQ(rpc_client->decode_targets, std::vector<std::string>({"d0:1000", "d1:1000", "d3:1000"}));
+}
+
+TEST(PdKvWritebackManagerTest, LaunchSkipsBeforePrefillReceiveWhenSourceHasMissingLayerBlocks) {
+    PDSepConfig pd_config;
+    pd_config.enable_pd_kv_cache_writeback = true;
+    std::vector<std::string>       events;
+    auto                           transfer_client          = std::make_shared<RecordingTransferClient>(&events);
+    auto                           rpc_client               = std::make_shared<RecordingRpcClient>(&events);
+    const std::vector<std::string> decode_worker_grpc_addrs = {"d0:1000", "d1:1000", "d2:1000", "d3:1000"};
+    PdKvWritebackManager manager(pd_config, nullptr, transfer_client, rpc_client, decode_worker_grpc_addrs, nullptr);
+
+    auto request                     = makeFourRankLaunchRequest();
+    request.source.layer_count       = 2;
+    request.source.group_count       = 2;
+    request.source.layer_to_group_id = {0, 1};
+    request.source.group_types       = {0, 0};
+    request.destination              = request.source;
+    request.manifest.group_block_ids = {{4, 5}, {NULL_BLOCK_IDX, NULL_BLOCK_IDX}};
+    request.local_tp_rank            = 0;
+
+    auto result = manager.launchFromDecode(request);
+
+    EXPECT_EQ(result.status, PdKvWritebackLaunchStatus::Skipped);
+    EXPECT_EQ(result.reason, "source_incomplete");
+    EXPECT_TRUE(events.empty());
 }
 
 TEST(PdKvWritebackManagerTest, LaunchSkipsWhenLocalTpRankHasNoMapping) {
@@ -462,7 +486,10 @@ TEST(PdKvWritebackManagerTest, SendOnDecodeTransfersFromHeldSourceBlocks) {
     request.source.layer_to_group_id      = {0};
     request.source.group_types            = {0};
     request.destination                   = request.source;
+    request.source_prefill_grpc_addrs     = {"p0:1000", "p1:1000", "p2:1000", "p3:1000"};
+    request.decode_worker_addrs           = {"d0:1000", "d1:1000", "d2:1000", "d3:1000"};
     request.prefill_worker_addrs          = {"p0:2000:3000", "p1:2000:3000", "p2:2000:3000", "p3:2000:3000"};
+    request.local_tp_rank                 = 2;
 
     auto status = manager.sendOnDecode(request, source_resource);
 
@@ -474,7 +501,48 @@ TEST(PdKvWritebackManagerTest, SendOnDecodeTransfersFromHeldSourceBlocks) {
     EXPECT_EQ(transfer_client->last_plan.prefill_transfer_servers.size(), 4);
     EXPECT_EQ(transfer_client->last_plan.prefill_transfer_servers[0].first, "p0");
     EXPECT_EQ(transfer_client->last_plan.prefill_transfer_servers[0].second, 2001);
-    EXPECT_TRUE(transfer_client->last_plan.prefill_transfer_targets.empty());
+    ASSERT_EQ(transfer_client->last_plan.prefill_transfer_targets.size(), 1);
+    EXPECT_EQ(transfer_client->last_plan.prefill_transfer_targets[0].ip, "p2");
+    EXPECT_EQ(transfer_client->last_plan.prefill_transfer_targets[0].port, 2001);
+    EXPECT_EQ(transfer_client->last_plan.prefill_transfer_targets[0].decode_rank, 2);
+    EXPECT_EQ(transfer_client->last_plan.prefill_transfer_targets[0].prefill_rank, 2);
+}
+
+TEST(PdKvWritebackManagerTest, SendOnDecodeRejectsIncompleteSourceBeforeTransfer) {
+    PDSepConfig pd_config;
+    pd_config.enable_pd_kv_cache_writeback = true;
+    auto                 transfer_client   = std::make_shared<RecordingTransferClient>();
+    PdKvWritebackManager manager(pd_config, nullptr, transfer_client, nullptr, {}, nullptr);
+
+    auto source_resource = std::make_shared<BatchKVCacheResource>();
+    source_resource->resetBatchSize(1);
+    source_resource->initBatchGroups(0, 2, 2, {0, 1});
+    source_resource->setBatchBlocks(0, 0, {101, 102});
+    source_resource->setBatchBlocks(0, 1, {NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    source_resource->setBatchCacheKeys(0, {11, 12});
+
+    PdKvWritebackLaunchRequest request;
+    request.manifest.request_id           = 10;
+    request.manifest.request_key          = "request_10";
+    request.manifest.final_token_count    = 130;
+    request.manifest.reusable_block_count = 2;
+    request.manifest.cache_keys           = {11, 12};
+    request.manifest.group_block_ids      = {{101, 102}, {NULL_BLOCK_IDX, NULL_BLOCK_IDX}};
+    request.source.seq_size_per_block     = 64;
+    request.source.layer_count            = 2;
+    request.source.group_count            = 2;
+    request.source.partition_count        = 4;
+    request.source.layer_to_group_id      = {0, 1};
+    request.source.group_types            = {0, 0};
+    request.destination                   = request.source;
+    request.source_prefill_grpc_addrs     = {"p0:1000", "p1:1000", "p2:1000", "p3:1000"};
+    request.decode_worker_addrs           = {"d0:1000", "d1:1000", "d2:1000", "d3:1000"};
+    request.prefill_worker_addrs          = {"p0:2000:3000", "p1:2000:3000", "p2:2000:3000", "p3:2000:3000"};
+
+    auto status = manager.sendOnDecode(request, source_resource);
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_NE(std::string(status.message()).find("source_incomplete"), std::string::npos);
 }
 
 }  // namespace

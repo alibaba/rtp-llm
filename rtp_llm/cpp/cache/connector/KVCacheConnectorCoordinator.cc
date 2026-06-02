@@ -112,6 +112,9 @@ PdKvWritebackRequestPB buildPdKvWritebackRequestPB(const PdKvWritebackLaunchRequ
     for (const auto& addr : request.prefill_worker_addrs) {
         pb.add_prefill_worker_addrs(addr);
     }
+    for (const auto& addr : request.source_prefill_grpc_addrs) {
+        pb.add_source_prefill_grpc_addrs(addr);
+    }
     fillPdKvWritebackCompatibilityPB(request.source, pb.mutable_source());
     fillPdKvWritebackCompatibilityPB(request.destination, pb.mutable_destination());
     pb.set_deadline_us(request.deadline_ms * 1000);

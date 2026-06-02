@@ -9,6 +9,7 @@ bool PdKvWritebackMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(launch_failed_qps_metric, "rtp_llm_pd_kv_writeback_launch_failed_qps");
     REGISTER_QPS_MUTABLE_METRIC(launch_skipped_qps_metric, "rtp_llm_pd_kv_writeback_launch_skipped_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(launch_latency_us_metric, "rtp_llm_pd_kv_writeback_launch_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(launch_rate_metric, "rtp_llm_pd_kv_writeback_launch_rate");
     REGISTER_QPS_MUTABLE_METRIC(rpc_qps_metric, "rtp_llm_pd_kv_writeback_rpc_qps");
     REGISTER_QPS_MUTABLE_METRIC(rpc_failed_qps_metric, "rtp_llm_pd_kv_writeback_rpc_failed_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(rpc_latency_us_metric, "rtp_llm_pd_kv_writeback_rpc_latency_us");
@@ -37,6 +38,9 @@ void PdKvWritebackMetrics::report(const kmonitor::MetricsTags* tags, PdKvWriteba
     }
     if (collector->launch_latency_us > 0) {
         REPORT_MUTABLE_METRIC(launch_latency_us_metric, collector->launch_latency_us);
+    }
+    if (collector->launch_rate_valid) {
+        REPORT_MUTABLE_METRIC(launch_rate_metric, collector->launch_rate);
     }
     if (collector->rpc_qps) {
         REPORT_MUTABLE_QPS(rpc_qps_metric);

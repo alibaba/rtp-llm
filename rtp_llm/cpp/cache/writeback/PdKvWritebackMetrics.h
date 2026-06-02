@@ -20,6 +20,8 @@ public:
     bool    launch_failed_qps  = false;
     bool    launch_skipped_qps = false;
     int64_t launch_latency_us  = 0;
+    bool    launch_rate_valid  = false;
+    double  launch_rate        = 0.0;
 
     bool    rpc_qps        = false;
     bool    rpc_failed_qps = false;
@@ -49,6 +51,7 @@ private:
     kmonitor::MutableMetric* launch_failed_qps_metric   = nullptr;
     kmonitor::MutableMetric* launch_skipped_qps_metric  = nullptr;
     kmonitor::MutableMetric* launch_latency_us_metric   = nullptr;
+    kmonitor::MutableMetric* launch_rate_metric         = nullptr;
     kmonitor::MutableMetric* rpc_qps_metric             = nullptr;
     kmonitor::MutableMetric* rpc_failed_qps_metric      = nullptr;
     kmonitor::MutableMetric* rpc_latency_us_metric      = nullptr;

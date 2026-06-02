@@ -289,6 +289,7 @@ message PdKvWritebackRequestPB {
     PdKvWritebackCompatibilityPB source = 9;
     PdKvWritebackCompatibilityPB destination = 10;
     int64 deadline_us = 11;
+    repeated string source_prefill_grpc_addrs = 12;
 }
 
 message PdKvWritebackResponsePB {
