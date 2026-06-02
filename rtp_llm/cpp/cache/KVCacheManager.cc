@@ -617,6 +617,7 @@ void KVCacheManager::initConnectorCoordinator() {
 }
 
 void KVCacheManager::allocateAndSync() {
+    RTP_LLM_LOG_INFO("allocateAndSync start, block_num=%d", config_.block_num);
     size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
     if (world_size > 1) {
         size_t local_rank    = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;
@@ -642,11 +643,6 @@ void KVCacheManager::allocateAndSync() {
 void KVCacheManager::reportMetricsLoop() {
     RTP_LLM_PROFILE_FUNCTION();
     kmonitor::MetricsTags tags;
-    // Raw "kvc raw" log lines are throttled to once every 1 minute — kmonitor
-    // gauges still report every 1s so dashboards stay continuous, but the
-    // diagnostic log is intended for sporadic spot-checks, not per-tick spam.
-    // Initialise to "1 min ago" so the first iteration emits one line right
-    // away (gives operators an immediate baseline after restart).
     constexpr auto kLogInterval  = std::chrono::minutes(1);
     auto           last_log_time = std::chrono::steady_clock::now() - kLogInterval;
     while (!stop_.load(std::memory_order_relaxed)) {
@@ -678,9 +674,6 @@ void KVCacheManager::reportMetricsLoop() {
 
         metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &collector);
 
-        // Decide once per tick whether the throttled diagnostic log should fire.
-        // Math is self-consistent within this tick by construction; the log is
-        // for spot-checking when dashboards look off — once every 1 min suffices.
         const auto now        = std::chrono::steady_clock::now();
         const bool should_log = (now - last_log_time) >= kLogInterval;
         if (should_log) {
@@ -696,10 +689,6 @@ void KVCacheManager::reportMetricsLoop() {
                 collector.kv_cache_used_ratio);
         }
 
-        // Allocator-specific per-pool breakdown. Single-pool allocators skip this.
-        // kmonitor samples are emitted every tick (dashboards stay continuous);
-        // the diagnostic "kvc raw pool[gid]" lines piggyback on should_log so
-        // they fire alongside "kvc raw global" once every 1 min.
         for (const auto& pool_snapshot : allocator_->poolMetricsSnapshots()) {
             if (should_log) {
                 RTP_LLM_LOG_INFO(
