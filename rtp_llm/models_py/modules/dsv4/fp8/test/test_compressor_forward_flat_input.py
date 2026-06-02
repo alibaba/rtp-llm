@@ -30,13 +30,23 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     KV_ENTRY_BYTES,
     KV_HEAD_DIM,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
-    CompressorFP8,
-    build_prefill_metadata,
-)
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8
 
 DEVICE = "cuda"
 TOKENS_PER_STATE_BLOCK = 256
+
+
+def _build_prefill_metadata(
+    compressor: CompressorFP8, sp: int, seqlen: int, device: torch.device
+):
+    positions = torch.arange(sp, sp + seqlen, device=device, dtype=torch.long)
+    b_idx = torch.zeros(seqlen, device=device, dtype=torch.long)
+    return compressor.prepare_metadata(
+        positions,
+        b_idx,
+        seq_start_per_req=torch.tensor([sp], dtype=torch.int32, device=device),
+        cu_seq_per_req=torch.tensor([0, seqlen], dtype=torch.int32, device=device),
+    )
 
 
 def _build_compressor(
@@ -158,9 +168,7 @@ class CompressorFP8FlatInputParityTest(unittest.TestCase):
             coff=coff,
             compress_ratio=compress_ratio,
         )
-        meta = build_prefill_metadata(
-            cmp, sp=sp, bsz=1, seqlen=seqlen, device=x.device
-        )
+        meta = _build_prefill_metadata(cmp, sp=sp, seqlen=seqlen, device=x.device)
         cmp.forward(x, sp, meta=meta)
         torch.cuda.synchronize()
         return state_view.clone(), kv_pool.clone()

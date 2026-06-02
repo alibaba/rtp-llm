@@ -880,8 +880,6 @@ class IndexerFP8(PoolBackedModule):
                     ):
                         cmp_args = build_prepare_metadata_args(
                             device=device,
-                            sp_int=sp_int,
-                            seqlen=seqlen,
                             position_ids=position_ids,
                             req_id_per_token=req_id_per_token,
                             seq_start_per_req=prefix_lengths,

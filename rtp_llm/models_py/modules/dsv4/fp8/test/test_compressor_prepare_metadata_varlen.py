@@ -36,9 +36,17 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorFP8,
     CompressorMeta,
-    _build_prefill_positions,
     build_prepare_metadata_args,
 )
+
+
+def _build_prefill_positions(
+    sp: int, bsz: int, seqlen: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert bsz == 1
+    positions = torch.arange(sp, sp + seqlen, device=device, dtype=torch.long)
+    b_idx = torch.zeros(seqlen, device=device, dtype=torch.long)
+    return positions, b_idx
 
 
 class _StubCompressor:
@@ -182,8 +190,6 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         req_id = torch.zeros((1, S), dtype=torch.int32, device=self.device)
         args = build_prepare_metadata_args(
             device=self.device,
-            sp_int=12,
-            seqlen=S,
             position_ids=position_ids,
             req_id_per_token=req_id,
             seq_start_per_req=torch.tensor([12], dtype=torch.int32, device=self.device),

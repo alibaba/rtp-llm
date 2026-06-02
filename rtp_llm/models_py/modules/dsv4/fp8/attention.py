@@ -3779,8 +3779,6 @@ class AttentionFP8(nn.Module):
             with record_function_range("dsv4.fp8.meta.csa.compressor_prepare"):
                 cmp_args = build_prepare_metadata_args(
                     device=device,
-                    sp_int=sp_int,
-                    seqlen=seqlen,
                     position_ids=position_ids,
                     req_id_per_token=req_id_per_token,
                     seq_start_per_req=sp_per_req,
@@ -4296,8 +4294,6 @@ class AttentionFP8(nn.Module):
 
         cmp_args = build_prepare_metadata_args(
             device=device,
-            sp_int=sp_int,
-            seqlen=seqlen,
             position_ids=position_ids,
             req_id_per_token=req_id_per_token,
             seq_start_per_req=sp_per_req,

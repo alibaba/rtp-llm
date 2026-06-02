@@ -167,6 +167,44 @@ def _cp_sliced_state_read_needed(
     return bool(torch.any(meta.seq_start_per_req > 0).item())
 
 
+def _validate_per_request_metadata(
+    positions: torch.Tensor,
+    b_idx: torch.Tensor,
+    seq_start_per_req: Optional[torch.Tensor],
+    cu_seq_per_req: Optional[torch.Tensor],
+) -> None:
+    if seq_start_per_req is None or cu_seq_per_req is None:
+        raise RuntimeError(
+            "CompressorFP8 requires per-request metadata: "
+            "seq_start_per_req/cu_seq_per_req"
+        )
+    if seq_start_per_req.dim() != 1:
+        raise RuntimeError(
+            f"seq_start_per_req must be 1D, got {tuple(seq_start_per_req.shape)}"
+        )
+    if cu_seq_per_req.dim() != 1:
+        raise RuntimeError(
+            f"cu_seq_per_req must be 1D, got {tuple(cu_seq_per_req.shape)}"
+        )
+    req_count = int(seq_start_per_req.numel())
+    if int(cu_seq_per_req.numel()) != req_count + 1:
+        raise RuntimeError(
+            "cu_seq_per_req length must equal seq_start_per_req length + 1, "
+            f"got {cu_seq_per_req.numel()} vs {req_count}"
+        )
+    if positions.numel() == 0:
+        return
+    if req_count == 0:
+        raise RuntimeError("seq_start_per_req must not be empty when positions exist")
+    min_req = int(b_idx.min().item())
+    max_req = int(b_idx.max().item())
+    if min_req < 0 or max_req >= req_count:
+        raise RuntimeError(
+            f"b_idx out of range for per-request metadata: "
+            f"min={min_req} max={max_req} req_count={req_count}"
+        )
+
+
 @dataclass(frozen=True)
 class CompressorMeta:
     """Pre-computed per-token launch metadata.
@@ -217,9 +255,6 @@ class _CompressorPending:
       local reference with the gathered full-seq tensor.
     * ``fused_gather_handle`` — ``CPCudaAsyncGatherHandle`` (or sync handle)
       when CP is active; ``None`` when CP is off (single-rank prefill).
-    * ``sp / bsz / seqlen`` — pre-resolved scalars mirroring what
-      ``forward`` derives from ``start_pos`` / input shape, so
-      ``finish_prefill`` does not need to re-inspect ``x``.
     * ``meta`` — caller-provided ``CompressorMeta``. The attention layer
       builds it before the compressor write so slot mapping is not rebuilt
       inside the hot path.
@@ -236,9 +271,6 @@ class _CompressorPending:
 
     fused_flat: torch.Tensor
     fused_gather_handle: Optional[Any]
-    sp: int
-    bsz: int
-    seqlen: int
     meta: CompressorMeta
     out_dim: int
     profile_label: Optional[str] = None
@@ -413,6 +445,9 @@ class CompressorFP8(PoolBackedModule):
         assert (
             positions.numel() == b_idx.numel()
         ), f"positions/b_idx length mismatch: {positions.numel()} vs {b_idx.numel()}"
+        _validate_per_request_metadata(
+            positions, b_idx, seq_start_per_req, cu_seq_per_req
+        )
 
         # Warmup: pool context unbound — return None-slotted meta so
         # callers (compressor.forward, _forward_prefill_compressed) can
@@ -428,10 +463,6 @@ class CompressorFP8(PoolBackedModule):
                 cu_seq_per_req=cu_seq_per_req,
             )
 
-        assert seq_start_per_req is not None and cu_seq_per_req is not None, (
-            "seq_start_per_req and cu_seq_per_req are required for ring write mask; "
-            "caller must supply per-request metadata"
-        )
         input_lens = (cu_seq_per_req[1:] - cu_seq_per_req[:-1]).to(torch.long)
         seq_end_per_req = seq_start_per_req.to(torch.long) + input_lens
 
@@ -679,10 +710,11 @@ class CompressorFP8(PoolBackedModule):
                 compress_ratio=self.compress_ratio,
             )
 
-        assert meta.seq_start_per_req is not None and meta.cu_seq_per_req is not None, (
-            "CompressorFP8 requires per-request raw metadata; "
-            "legacy scalar seq_start metadata is unsupported"
-        )
+        if meta.seq_start_per_req is None or meta.cu_seq_per_req is None:
+            raise RuntimeError(
+                "CompressorFP8 requires per-request raw metadata: "
+                "seq_start_per_req/cu_seq_per_req"
+            )
         state_cache_for_read = self._state_pool_3d
         state_block_table_for_read = self._state_block_table
         if _cp_sliced_state_read_needed(meta, self._cp_ctx):
@@ -757,7 +789,7 @@ class CompressorFP8(PoolBackedModule):
         """Begin a prefill compressor launch without waiting on the CP gather.
 
         Steps performed eagerly on the **default** stream:
-          * shape / sp resolve (mirrors ``forward``);
+          * shape resolve (mirrors ``forward``);
           * warmup early return → ``None`` (no pool bound by framework);
           * fused KV/gate projection (``_linear_bf16_bf16_fp32``).
 
@@ -772,11 +804,6 @@ class CompressorFP8(PoolBackedModule):
             seqlen = int(x.size(0))
         else:
             bsz, seqlen, _ = x.size()
-        sp = (
-            int(start_pos.item())
-            if isinstance(start_pos, torch.Tensor)
-            else int(start_pos)
-        )
         if (
             self._state_pool_3d is None
             or self._kv_pool_view is None
@@ -831,9 +858,6 @@ class CompressorFP8(PoolBackedModule):
         return _CompressorPending(
             fused_flat=fused_flat,
             fused_gather_handle=fused_gather_handle,
-            sp=sp,
-            bsz=bsz,
-            seqlen=seqlen,
             meta=meta,
             out_dim=out_dim,
             profile_label=profile_label,
@@ -898,7 +922,7 @@ class CompressorFP8(PoolBackedModule):
         sequence_lengths: Optional[torch.Tensor] = None,
         meta: Optional[CompressorMeta] = None,
     ) -> Optional[torch.Tensor]:
-        """Prefill entry. ``bsz==1`` (FIFO scheduler).
+        """Prefill entry.
 
         Returns ``None`` — downstream readers gather compressed K from the
         FP8 KV pool directly.
@@ -910,10 +934,9 @@ class CompressorFP8(PoolBackedModule):
         provide this metadata; warmup still exits before metadata is used.
         """
         del sequence_lengths  # not needed: positions derived from start_pos+arange
-        # Phase-3a: accept either flat ``[T_total, dim]`` (vLLM-native /
-        # batched prefill) or legacy ``[B, S, dim]``. The compressor kernels
-        # consume token-major 2D tensors, so the prefill path flattens once
-        # immediately after the fused projection and never reintroduces B.
+        # Accept either flat ``[T_total, dim]`` or ``[B, S, dim]``. The
+        # compressor kernels consume token-major 2D tensors, so prefill
+        # flattens once after the fused projection and never reintroduces B.
         if x.dim() == 2:
             bsz = 1
             seqlen = int(x.size(0))
@@ -1024,48 +1047,9 @@ class CompressorFP8(PoolBackedModule):
         return None
 
 
-# ---------------------------------------------------------------------------
-# Free helpers — exposed so the attention layer can build positions/b_idx
-# once per forward and feed them through ``prepare_metadata`` / ``forward``.
-# ---------------------------------------------------------------------------
-def _build_prefill_positions(
-    sp: int, bsz: int, seqlen: int, device: torch.device
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """``positions = sp + arange(seqlen)`` flat ``[seqlen]``; ``b_idx``
-    all-zeros ``[seqlen]``.
-
-    Single-request helper only — batched prefill feeds
-    ``(position_ids, req_id_per_token)`` straight into
-    ``compressor.prepare_metadata`` so this builder must not be reached
-    from a batched call site.
-    """
-    assert bsz == 1, (
-        f"_build_prefill_positions is the legacy B==1 helper; got bsz={bsz}. "
-        "Varlen callers must use position_ids / req_id_per_token directly."
-    )
-    positions = torch.arange(sp, sp + seqlen, device=device, dtype=torch.long)
-    b_idx = torch.zeros(seqlen, device=device, dtype=torch.long)
-    return positions, b_idx
-
-
-def build_prefill_metadata(
-    compressor: "CompressorFP8", sp: int, bsz: int, seqlen: int, device: torch.device
-) -> CompressorMeta:
-    """Convenience: build positions/b_idx + ``CompressorMeta`` in one call."""
-    positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
-    return compressor.prepare_metadata(
-        positions,
-        b_idx,
-        seq_start_per_req=torch.tensor([sp], dtype=torch.int32, device=device),
-        cu_seq_per_req=torch.tensor([0, seqlen], dtype=torch.int32, device=device),
-    )
-
-
 def build_prepare_metadata_args(
     *,
     device: torch.device,
-    sp_int: int,
-    seqlen: int,
     position_ids: Optional[torch.Tensor] = None,
     req_id_per_token: Optional[torch.Tensor] = None,
     seq_start_per_req: Optional[torch.Tensor] = None,
@@ -1073,9 +1057,8 @@ def build_prepare_metadata_args(
 ) -> Dict[str, Any]:
     """Return the kwargs dict for ``CompressorFP8.prepare_metadata``.
 
-    Varlen/per-request metadata is required so callers cannot silently
-    re-enter the legacy scalar metadata path. Single source of truth for the
-    three call sites that used to inline this dispatch:
+    Per-request metadata is required. Single source of truth for the three
+    call sites that used to inline this dispatch:
 
       * ``Attention._build_compressor_meta`` (HCA + standalone CSA path)
       * ``Attention._build_csa_prefill_meta`` (CSA inline that shares the

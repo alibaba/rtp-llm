@@ -207,9 +207,6 @@ class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
 
         # Pending plumbed through correctly.
         self.assertIsInstance(pending, _CompressorPending)
-        self.assertEqual(pending.sp, 0)
-        self.assertEqual(pending.bsz, 1)
-        self.assertEqual(pending.seqlen, int(self.x.size(0)))
         self.assertEqual(pending.out_dim, self.out_dim)
         self.assertIs(pending.meta, self.meta)
 

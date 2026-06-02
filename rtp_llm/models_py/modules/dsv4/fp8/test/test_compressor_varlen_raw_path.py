@@ -1,10 +1,8 @@
-"""UT: ``run_fused_compress_kv_write`` BATCHED varlen raw path
-(Phase-3a part 4c).
+"""UT: ``run_fused_compress_kv_write`` varlen raw path.
 
-Validates that the kernel's new ``BATCHED=True`` branch (per-request
-``seq_start_per_req`` + ``cu_seq_per_req`` arrays) produces byte-equal
-state-pool + KV-pool to the per-request scalar-``seq_start`` path the
-legacy B==1 launch already covers.
+Validates that the kernel's per-request ``seq_start_per_req`` +
+``cu_seq_per_req`` raw-window metadata produces byte-equal state-pool +
+KV-pool to per-request launches.
 
 Constructs a 2-request batch (different ``sp_b``, different ``S_b``),
 runs CompressorFP8.forward in two ways and compares:
@@ -217,9 +215,10 @@ class CompressorVarlenRawPathTest(unittest.TestCase):
             compress_ratio=compress_ratio,
             n_compressed_per_req=n_compressed_per_req,
         )
-        # Per-req launches; each request's b_idx is 0 against its own
-        # block-table row. To stay in the shared pool we patch
-        # ``b_idx = b`` so block_table[req_idx] resolves to the right row.
+        # Per-req launches stay in the shared pool by keeping ``b_idx = b``
+        # so block_table[req_idx] resolves to the right row. The raw metadata
+        # uses dummy earlier rows for b>0 so token_to_req and b_idx remain the
+        # same index while kv_raw is still the per-request local tensor.
         for b in range(2):
             x_b = x_per_req[b]
             fused_b = _linear_bf16_bf16_fp32(x_b, cmp_b._wkv_wgate_fused)
@@ -229,15 +228,15 @@ class CompressorVarlenRawPathTest(unittest.TestCase):
                 sps[b], sps[b] + S_per_req[b], device=DEVICE, dtype=torch.long
             )
             bidx_b = torch.full((S_per_req[b],), b, device=DEVICE, dtype=torch.long)
+            seq_start_b = torch.zeros(b + 1, dtype=torch.int32, device=DEVICE)
+            seq_start_b[b] = sps[b]
+            cu_seq_b = torch.zeros(b + 2, dtype=torch.int32, device=DEVICE)
+            cu_seq_b[b + 1] = S_per_req[b]
             meta_b = cmp_b.prepare_metadata(
                 pos_b,
                 bidx_b,
-                seq_start_per_req=torch.tensor(
-                    [sps[b]], dtype=torch.int64, device=DEVICE
-                ),
-                cu_seq_per_req=torch.tensor(
-                    [0, S_per_req[b]], dtype=torch.int64, device=DEVICE
-                ),
+                seq_start_per_req=seq_start_b,
+                cu_seq_per_req=cu_seq_b,
             )
             cmp_b._launch(kv_b_flat, score_b_flat, meta_b)
         torch.cuda.synchronize()

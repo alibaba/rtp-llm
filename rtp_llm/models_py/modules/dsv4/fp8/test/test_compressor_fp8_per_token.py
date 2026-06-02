@@ -28,11 +28,23 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorFP8,
     _linear_bf16_bf16_fp32,
     build_decode_metadata,
-    build_prefill_metadata,
 )
 
 DEVICE = "cuda"
 TOKENS_PER_STATE_BLOCK = 256
+
+
+def _build_prefill_metadata(
+    compressor: CompressorFP8, sp: int, seqlen: int, device: torch.device
+):
+    positions = torch.arange(sp, sp + seqlen, device=device, dtype=torch.long)
+    b_idx = torch.zeros(seqlen, device=device, dtype=torch.long)
+    return compressor.prepare_metadata(
+        positions,
+        b_idx,
+        seq_start_per_req=torch.tensor([sp], dtype=torch.int32, device=device),
+        cu_seq_per_req=torch.tensor([0, seqlen], dtype=torch.int32, device=device),
+    )
 
 
 def _build_compressor(
@@ -222,7 +234,7 @@ def test_csa_per_token(seqlen: int = 64) -> None:
     )
     sp = 0
     x = torch.randn(1, seqlen, dim, dtype=torch.bfloat16, device=DEVICE) * 0.1
-    meta = build_prefill_metadata(cmp, sp=sp, bsz=1, seqlen=seqlen, device=x.device)
+    meta = _build_prefill_metadata(cmp, sp=sp, seqlen=seqlen, device=x.device)
     cmp.forward(x, sp, meta=meta)
     torch.cuda.synchronize()
     _state_write_check(
@@ -262,7 +274,7 @@ def test_indexer_per_token(seqlen: int = 32) -> None:
     )
     sp = 0
     x = torch.randn(1, seqlen, dim, dtype=torch.bfloat16, device=DEVICE) * 0.1
-    meta = build_prefill_metadata(cmp, sp=sp, bsz=1, seqlen=seqlen, device=x.device)
+    meta = _build_prefill_metadata(cmp, sp=sp, seqlen=seqlen, device=x.device)
     cmp.forward(x, sp, meta=meta)
     torch.cuda.synchronize()
     _state_write_check(
@@ -412,7 +424,7 @@ def test_prepared_metadata_path() -> None:
         cmp_a, seqlen=seqlen, head_dim=head_dim, coff=coff, compress_ratio=ratio
     )
     x = torch.randn(1, seqlen, dim, dtype=torch.bfloat16, device=DEVICE) * 0.1
-    meta_a = build_prefill_metadata(cmp_a, sp=sp, bsz=1, seqlen=seqlen, device=x.device)
+    meta_a = _build_prefill_metadata(cmp_a, sp=sp, seqlen=seqlen, device=x.device)
     pending = cmp_a.start_prefill(x, sp, meta=meta_a)
     cmp_a.finish_prefill(pending)
     torch.cuda.synchronize()
@@ -432,7 +444,7 @@ def test_prepared_metadata_path() -> None:
     state_b, kv_b, _ = _bind_pools(
         cmp_b, seqlen=seqlen, head_dim=head_dim, coff=coff, compress_ratio=ratio
     )
-    meta = build_prefill_metadata(cmp_b, sp=sp, bsz=1, seqlen=seqlen, device=x.device)
+    meta = _build_prefill_metadata(cmp_b, sp=sp, seqlen=seqlen, device=x.device)
     cmp_b.forward(x, sp, meta=meta)
     torch.cuda.synchronize()
 
