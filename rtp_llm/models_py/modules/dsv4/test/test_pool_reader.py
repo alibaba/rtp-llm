@@ -11,6 +11,7 @@ case, including rank-major cp_size>1 payloads for the sharded reader.
 import importlib.util
 import sys
 import types
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
@@ -74,6 +75,17 @@ def _stub_modules():
 
     cp_name = "rtp_llm.models_py.modules.dsv4.cp"
     if cp_name not in sys.modules:
+        profiler_name = "rtp_llm.models_py.modules.dsv4._profiler"
+        if profiler_name not in sys.modules:
+            profiler = types.ModuleType(profiler_name)
+
+            @contextmanager
+            def _record_function_range(*args, **kwargs):
+                yield
+
+            profiler.record_function_range = _record_function_range
+            sys.modules[profiler_name] = profiler
+
         spec = importlib.util.spec_from_file_location(
             cp_name,
             _REPO_ROOT / "rtp_llm/models_py/modules/dsv4/cp.py",
@@ -195,6 +207,20 @@ def test_factory_sharded_returns_cp_reader():
     assert r.cfg.cp_ctx.cp_size == 4
     # 16 tokens, vb=16 → 1 vb → 4 local tokens per req
     assert r.cfg.total_local_kv == 4
+
+
+def test_factory_sharded_uses_owner_block_size_for_restore_lengths():
+    r = PR.make_compressed_k_pool_reader(
+        cp_ctx=_fake_cp_ctx(cp_size=4),
+        kv_cache_sharded=True,
+        per_req_total_kv_lens=torch.tensor([16], dtype=torch.int64),
+        block_size=2,
+        owner_block_size=8,
+    )
+    assert isinstance(r, PR.CPShardedPoolReader)
+    assert r.cfg.block_size == 2
+    assert r.cfg.owner_block_size == 8
+    assert r.cfg.total_local_kv == 8
 
 
 def test_factory_missing_args_raises():
@@ -357,6 +383,72 @@ def test_cp_sharded_fill_dataflow_cp2_batched_partial_blocks():
         assert torch.equal(out[req_id, 0], torch.full((D,), -1.0))
         assert torch.equal(out[req_id, 1 + int(req_len)], torch.full((D,), -1.0))
     assert len(_DEQUANT_CALLS) == 1, "only local packed gather is stub-recorded"
+
+
+def test_cp_sharded_fill_uses_owner_block_size_for_restore_but_pool_block_for_gather():
+    _DEQUANT_CALLS.clear()
+    cp_size = 2
+    pool_block_size = 2
+    owner_block_size = 4
+    D = 3
+    per_req = torch.tensor([5, 9], dtype=torch.int64)
+    cp_ctx = _fake_cp_ctx(cp_size=cp_size, cp_rank=0)
+    cp_mod = sys.modules["rtp_llm.models_py.modules.dsv4.cp"]
+    restore_idx = cp_mod.build_kv_allgather_restore_indices(
+        per_req, cp_size, owner_block_size, torch.device("cpu")
+    )
+    local_lens = PR._compute_local_seq_lens(per_req, cp_size, owner_block_size)
+    actual_lens = PR._compute_local_owned_kv_lens(
+        per_req, cp_size, owner_block_size, cp_ctx.cp_rank
+    ).to(torch.int32)
+    total_local = int(local_lens.sum().item())
+    gathered = _rank_major_packed_payload(
+        per_req, cp_size, owner_block_size, total_local, D
+    )
+
+    old_all_gather = PR.all_gather
+
+    def fake_all_gather(local, group=None):
+        assert local.shape == (total_local, PR.ENTRY_BYTES)
+        return gathered
+
+    PR.all_gather = fake_all_gather
+    try:
+        reader = PR.CPShardedPoolReader(
+            PR.CPShardConfig(
+                cp_ctx=cp_ctx,
+                per_req_total_kv_lens=per_req,
+                restore_indices=restore_idx,
+                block_size=pool_block_size,
+                total_local_kv=total_local,
+                owner_block_size=owner_block_size,
+            )
+        )
+        out = torch.full((2, 11, D), -1.0)
+        reader.fill(
+            out=out,
+            k_cache=torch.zeros(
+                (8, pool_block_size, PR.ENTRY_BYTES), dtype=torch.uint8
+            ),
+            seq_lens=per_req.to(torch.int32),
+            gather_lens=None,
+            block_table=torch.zeros(
+                (2, int((local_lens.max().item() + pool_block_size - 1) // pool_block_size)),
+                dtype=torch.int32,
+            ),
+            block_size=pool_block_size,
+            offset=1,
+        )
+    finally:
+        PR.all_gather = old_all_gather
+
+    assert _DEQUANT_CALLS[0]["block_size"] == pool_block_size
+    assert torch.equal(_DEQUANT_CALLS[0]["seq_lens"], actual_lens)
+    for req_id, req_len in enumerate(per_req.tolist()):
+        for token_idx in range(int(req_len)):
+            tag = req_id * 40 + token_idx + 1
+            expected = torch.arange(tag, tag + D, dtype=torch.float32)
+            assert torch.equal(out[req_id, 1 + token_idx], expected)
 
 
 def test_cp_sharded_fill_rejects_gather_lens():

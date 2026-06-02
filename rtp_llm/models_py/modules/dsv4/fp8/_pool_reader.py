@@ -105,9 +105,11 @@ class CPShardConfig:
       * ``restore_indices`` — ``[total_logical_kv]`` int64. Pre-built by
         ``cp.build_kv_allgather_restore_indices(per_req_total_kv_lens,
         cp_size, block_size, device)``.
-      * ``block_size`` — pool's tokens-per-block.
+      * ``block_size`` — pool block entries used by ``gather_k_cache_packed``.
+      * ``owner_block_size`` — logical owner block entries used by CP restore.
       * ``total_local_kv`` — sum of per-rank local lengths (==
-        ``ceil(T_r/(block_size*cp_size)) * block_size`` per req, summed).
+        ``ceil(T_r/(owner_block_size*cp_size)) * owner_block_size`` per req,
+        summed).
     """
 
     cp_ctx: CPContext
@@ -115,6 +117,7 @@ class CPShardConfig:
     restore_indices: torch.Tensor
     block_size: int
     total_local_kv: int
+    owner_block_size: int = 0
 
 
 class CPShardedPoolReader(CompressedKPoolReader):
@@ -158,11 +161,15 @@ class CPShardedPoolReader(CompressedKPoolReader):
         #     cp_rank), AND the last owned block may be partial. Reading
         #     past `actual` lands on uninitialized FP8 bytes that decode to
         #     NaN and propagate through all_gather → restore → workspace.
+        owner_block_size = int(cfg.owner_block_size or cfg.block_size)
         local_seq_lens_padded = cp_padded_local_kv_lens(
-            cfg.per_req_total_kv_lens, cp_ctx.cp_size, block_size
+            cfg.per_req_total_kv_lens, cp_ctx.cp_size, owner_block_size
         ).to(device=device, dtype=torch.int32)
         local_seq_lens_actual = cp_actual_owned_kv_lens(
-            cfg.per_req_total_kv_lens, cp_ctx.cp_size, block_size, cp_ctx.cp_rank
+            cfg.per_req_total_kv_lens,
+            cp_ctx.cp_size,
+            owner_block_size,
+            cp_ctx.cp_rank,
         ).to(device=device, dtype=torch.int32)
         # Use the rank's existing block_table directly — Stage 5a guarantees
         # block_table[r, :] holds this rank's local entries in compact form.
@@ -288,6 +295,7 @@ def make_compressed_k_pool_reader(
     kv_cache_sharded: bool,
     per_req_total_kv_lens: Optional[torch.Tensor] = None,
     block_size: Optional[int] = None,
+    owner_block_size: Optional[int] = None,
 ) -> CompressedKPoolReader:
     """Pick the right reader for this prefill iteration.
 
@@ -312,11 +320,14 @@ def make_compressed_k_pool_reader(
     from rtp_llm.models_py.modules.dsv4.cp import build_kv_allgather_restore_indices
 
     device = per_req_total_kv_lens.device
+    owner_bs = int(owner_block_size or block_size)
+    if owner_bs <= 0:
+        raise ValueError(f"owner_block_size must be positive, got {owner_bs}")
     restore = build_kv_allgather_restore_indices(
-        per_req_total_kv_lens, cp_ctx.cp_size, block_size, device
+        per_req_total_kv_lens, cp_ctx.cp_size, owner_bs, device
     )
     local_lens = cp_padded_local_kv_lens(
-        per_req_total_kv_lens, cp_ctx.cp_size, block_size
+        per_req_total_kv_lens, cp_ctx.cp_size, owner_bs
     )
     total_local = int(local_lens.sum().item())
     return CPShardedPoolReader(
@@ -326,5 +337,6 @@ def make_compressed_k_pool_reader(
             restore_indices=restore,
             block_size=block_size,
             total_local_kv=total_local,
+            owner_block_size=owner_bs,
         )
     )

@@ -433,11 +433,19 @@ class IndexerFP8(PoolBackedModule):
 
         cu = attention_inputs.cu_kv_seqlens.to(torch.int64)
         per_req_T = (cu[1:] - cu[:-1]).contiguous()
+        owner_block_size = self._kv_eb
+        if (
+            self.compress_ratio > 0
+            and self._state_tokens_per_block > 0
+            and self._state_tokens_per_block % self.compress_ratio == 0
+        ):
+            owner_block_size = self._state_tokens_per_block // self.compress_ratio
         plan = build_indexer_cp_chunk_plan(
             cp_ctx=cp_ctx,
             per_req_total_kv_lens=per_req_T,
             block_size=self._kv_eb,
             device=k_quant_flat.device,
+            owner_block_size=owner_block_size,
         )
         local_cu = build_local_cu_kv_seqlens(plan)
         local_q = torch.empty(

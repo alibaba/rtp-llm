@@ -12,6 +12,7 @@ Verifies:
 import importlib.util
 import sys
 import types
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
@@ -43,6 +44,17 @@ def _stub_modules():
 
     cp_name = "rtp_llm.models_py.modules.dsv4.cp"
     if cp_name not in sys.modules:
+        profiler_name = "rtp_llm.models_py.modules.dsv4._profiler"
+        if profiler_name not in sys.modules:
+            profiler = types.ModuleType(profiler_name)
+
+            @contextmanager
+            def _record_function_range(*args, **kwargs):
+                yield
+
+            profiler.record_function_range = _record_function_range
+            sys.modules[profiler_name] = profiler
+
         spec = importlib.util.spec_from_file_location(
             cp_name,
             _REPO_ROOT / "rtp_llm/models_py/modules/dsv4/cp.py",
@@ -107,6 +119,21 @@ def test_build_plan_lengths_and_restore():
     assert plan.total_local_T == 12
     # chunk_T = 8+12 = 20
     assert plan.restore_indices.numel() == 20
+
+
+def test_build_plan_uses_owner_block_size_for_restore_lengths():
+    plan = A.build_indexer_cp_chunk_plan(
+        cp_ctx=_ctx(4, 0),
+        per_req_total_kv_lens=torch.tensor([16], dtype=torch.int64),
+        block_size=2,
+        owner_block_size=8,
+        device=torch.device("cpu"),
+    )
+    assert plan.block_size == 2
+    assert plan.owner_block_size == 8
+    assert torch.equal(plan.per_req_local_kv_lens, torch.tensor([8]))
+    assert plan.total_local_T == 8
+    assert plan.restore_indices.numel() == 16
 
 
 def test_build_local_cu_kv_seqlens():
