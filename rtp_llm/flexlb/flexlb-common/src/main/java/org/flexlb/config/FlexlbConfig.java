@@ -205,6 +205,33 @@ public class FlexlbConfig {
      */
     private long flexlbBatchInflightTtlMs = 3600L * 1000L;
 
+    // ========== CostBasedPrefill Strategy Configuration ==========
+
+    private long costSloMs = 500;
+
+    private long costSloRiskMarginMs = 100;
+
+    private double costHotspotMultiplier = 3.0;
+
+    private double costImbalanceMultiplier = 3.0;
+
+    private double costAlpha0 = 0;
+    private double costAlpha1 = 1.0;
+    private double costAlpha2 = 0;
+    private double costAlpha3 = 0;
+    private double costAlpha4 = 0.3;
+    private double costAlpha5 = 0;
+
+    // ========== SLO-Budget Batcher Configuration ==========
+
+    private double flexlbBatchFillThreshold = 0.5;
+
+    private int flexlbBatchMaxCapacity = 32768;
+
+    private int flexlbBatchSearchIter = 10;
+
+    private int flexlbBatchScanAhead = 64;
+
     /**
      * Get load balancing strategy for a role type
      * This method handles the logic of selecting the appropriate strategy based on role type and configuration

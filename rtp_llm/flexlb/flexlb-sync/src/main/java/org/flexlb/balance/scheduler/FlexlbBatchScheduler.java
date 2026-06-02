@@ -3,6 +3,9 @@ package org.flexlb.balance.scheduler;
 import com.google.protobuf.Int32Value;
 import com.google.protobuf.Int64Value;
 import com.google.protobuf.InvalidProtocolBufferException;
+import org.flexlb.balance.strategy.BatcherSnapshot;
+import org.flexlb.balance.strategy.PrefillTimePredictor;
+import org.flexlb.balance.strategy.RequestProfile;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -16,28 +19,31 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.PriorityQueue;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Component
 public class FlexlbBatchScheduler {
@@ -46,25 +52,19 @@ public class FlexlbBatchScheduler {
     private final Router router;
     private final EngineGrpcClient grpcClient;
     private final EngineWorkerStatus engineWorkerStatus;
-    private final ScheduledExecutorService timerExecutor;
     private final ExecutorService dispatchExecutor;
     private final Map<String, WorkerBatcher> batchers = new ConcurrentHashMap<>();
     private final Map<Long, InflightEntry> inflight = new ConcurrentHashMap<>();
     private final AtomicLong batchIdGenerator = new AtomicLong(0);
 
     public FlexlbBatchScheduler(ConfigService configService,
-                                Router router,
+                                @Lazy Router router,
                                 EngineGrpcClient grpcClient,
                                 EngineWorkerStatus engineWorkerStatus) {
         this.configService = configService;
         this.router = router;
         this.grpcClient = grpcClient;
         this.engineWorkerStatus = engineWorkerStatus;
-        this.timerExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "flexlb-batch-timer");
-            t.setDaemon(true);
-            return t;
-        });
         this.dispatchExecutor = Executors.newFixedThreadPool(
                 Math.max(1, configService.loadBalanceConfig().getScheduleWorkerSize()),
                 r -> {
@@ -96,9 +96,15 @@ public class FlexlbBatchScheduler {
                 return future;
             }
 
-            BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode));
+            FlexlbConfig cfg = configService.loadBalanceConfig();
+            long deadlineMs = computeDeadlineMs(ctx, prefill, cfg);
+            BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode), deadlineMs);
             String batcherKey = batcherKey(ctx.getRequest(), prefill);
-            batchers.computeIfAbsent(batcherKey, ignored -> new WorkerBatcher(batcherKey, copyOf(prefill))).offer(item);
+            batchers.computeIfAbsent(batcherKey, k -> {
+                WorkerBatcher b = new WorkerBatcher(k, copyOf(prefill));
+                b.start();
+                return b;
+            }).offer(item);
         } catch (Throwable t) {
             Logger.error("FlexlbBatchScheduler submit failed for request id: {}",
                     ctx == null ? null : ctx.getRequestId(), t);
@@ -371,6 +377,12 @@ public class FlexlbBatchScheduler {
         return null;
     }
 
+    public BatcherSnapshot snapshotForWorker(String model, String workerIp, int workerHttpPort) {
+        String key = (model == null ? "" : model) + "|" + workerIp + ":" + CommonUtils.toGrpcPort(workerHttpPort);
+        WorkerBatcher batcher = batchers.get(key);
+        return batcher != null ? batcher.snapshot() : BatcherSnapshot.EMPTY;
+    }
+
     private String batcherKey(Request request, ServerStatus prefill) {
         String model = request.getModel() == null ? "" : request.getModel();
         return model + "|" + prefill.getServerIp() + ":" + prefill.getGrpcPort();
@@ -398,6 +410,30 @@ public class FlexlbBatchScheduler {
         if (workerStatus != null) {
             workerStatus.removeLocalTask(serverStatus.getRequestId());
         }
+    }
+
+    private long computeDeadlineMs(BalanceContext ctx, ServerStatus prefill, FlexlbConfig cfg) {
+        long seqLen = ctx.getRequest().getSeqLen();
+        long hitCache = prefill.getDebugInfo() != null ? prefill.getDebugInfo().getHitCacheLen() : 0;
+        PrefillTimePredictor predictor = createPredictor(cfg);
+        long predMs = predictor.estimateMs(seqLen, hitCache);
+        return System.currentTimeMillis() + Math.max(0, cfg.getCostSloMs() - predMs);
+    }
+
+    private static PrefillTimePredictor createPredictor(FlexlbConfig cfg) {
+        return new PrefillTimePredictor(
+                cfg.getCostAlpha0(), cfg.getCostAlpha1(), cfg.getCostAlpha2(),
+                cfg.getCostAlpha3(), cfg.getCostAlpha4(), cfg.getCostAlpha5());
+    }
+
+    private static long seqLenOf(BatchItem item) {
+        return item.ctx() != null && item.ctx().getRequest() != null
+                ? item.ctx().getRequest().getSeqLen() : 0;
+    }
+
+    private static long hitOf(BatchItem item) {
+        return item.prefill() != null && item.prefill().getDebugInfo() != null
+                ? item.prefill().getDebugInfo().getHitCacheLen() : 0;
     }
 
     private static Response copyResponse(Response src) {
@@ -462,90 +498,229 @@ public class FlexlbBatchScheduler {
         for (WorkerBatcher batcher : batchers.values()) {
             batcher.shutdown();
         }
-        timerExecutor.shutdownNow();
         dispatchExecutor.shutdownNow();
     }
+
+    // ==================== WorkerBatcher: SLO-budget EDF ====================
 
     private final class WorkerBatcher {
         private final String key;
         private final ServerStatus prefill;
-        private final List<BatchItem> queue = new ArrayList<>();
-        private ScheduledFuture<?> flushFuture;
-        private boolean stopped;
+        private final PriorityQueue<BatchItem> queue =
+                new PriorityQueue<>(Comparator.comparingLong(BatchItem::deadlineMs));
+        private final ReentrantLock lock = new ReentrantLock();
+        private final Condition arrival = lock.newCondition();
+        private final Thread workerThread;
+        private volatile boolean stopped;
 
         private WorkerBatcher(String key, ServerStatus prefill) {
             this.key = key;
             this.prefill = prefill;
+            this.workerThread = new Thread(this::runLoop, "flexlb-batcher-" + key);
+            this.workerThread.setDaemon(true);
+            this.workerThread.setUncaughtExceptionHandler((t, e) ->
+                    Logger.error("WorkerBatcher[{}] thread died unexpectedly", key, e));
         }
 
-        synchronized void offer(BatchItem item) {
-            if (stopped) {
-                rollback(item.routeResponse);
-                item.future.completeExceptionally(new IllegalStateException("FlexLB batcher stopped"));
-                return;
-            }
-            queue.add(item);
-            if (queue.size() == 1) {
-                scheduleFlush();
-            }
-            if (queue.size() >= Math.max(1, configService.loadBalanceConfig().getFlexlbBatchSizeMax())) {
-                flushLocked();
-            }
+        void start() {
+            workerThread.start();
         }
 
-        synchronized boolean cancelQueued(long requestId) {
-            Iterator<BatchItem> iterator = queue.iterator();
-            while (iterator.hasNext()) {
-                BatchItem item = iterator.next();
-                if (item.requestId() == requestId) {
-                    iterator.remove();
-                    completeCancelled(item);
-                    if (queue.isEmpty()) {
-                        cancelFlushTimer();
-                    }
-                    return true;
+        void offer(BatchItem item) {
+            lock.lock();
+            try {
+                if (stopped) {
+                    rollback(item.routeResponse);
+                    item.future.completeExceptionally(new IllegalStateException("FlexLB batcher stopped"));
+                    return;
                 }
+                queue.add(item);
+                arrival.signalAll();
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        boolean cancelQueued(long requestId) {
+            lock.lock();
+            try {
+                Iterator<BatchItem> it = queue.iterator();
+                while (it.hasNext()) {
+                    BatchItem item = it.next();
+                    if (item.requestId() == requestId) {
+                        it.remove();
+                        completeCancelled(item);
+                        return true;
+                    }
+                }
+            } finally {
+                lock.unlock();
             }
             return false;
         }
 
-        private synchronized void flushFromTimer() {
-            flushLocked();
-        }
-
-        private void scheduleFlush() {
-            long delayMs = Math.max(1L, configService.loadBalanceConfig().getFlexlbBatchWindowMs());
-            flushFuture = timerExecutor.schedule(this::flushFromTimer, delayMs, TimeUnit.MILLISECONDS);
-        }
-
-        private void flushLocked() {
-            if (queue.isEmpty()) {
-                cancelFlushTimer();
-                return;
+        BatcherSnapshot snapshot() {
+            lock.lock();
+            try {
+                if (queue.isEmpty()) {
+                    return BatcherSnapshot.EMPTY;
+                }
+                List<RequestProfile> requests = new ArrayList<>(queue.size());
+                long earliest = Long.MAX_VALUE;
+                long headDeadline = queue.peek().deadlineMs();
+                for (BatchItem item : queue) {
+                    requests.add(new RequestProfile(seqLenOf(item), hitOf(item)));
+                    if (item.ctx() != null) {
+                        earliest = Math.min(earliest, item.ctx().getStartTime());
+                    }
+                }
+                return new BatcherSnapshot(queue.size(), requests, earliest, headDeadline);
+            } finally {
+                lock.unlock();
             }
-            List<BatchItem> items = new ArrayList<>(queue);
+        }
+
+        void shutdown() {
+            stopped = true;
+            workerThread.interrupt();
+            lock.lock();
+            try {
+                arrival.signalAll();
+                for (BatchItem item : queue) {
+                    item.future.completeExceptionally(new CancellationException("FlexLB batcher stopped: " + key));
+                }
+                queue.clear();
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        private void runLoop() {
+            while (!stopped && !Thread.currentThread().isInterrupted()) {
+                try {
+                    waitForNonEmpty();
+                    processQueue();
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
+                } catch (Throwable t) {
+                    Logger.error("WorkerBatcher[{}] loop failed", key, t);
+                }
+            }
+        }
+
+        private void waitForNonEmpty() throws InterruptedException {
+            lock.lock();
+            try {
+                while (queue.isEmpty()) {
+                    arrival.await();
+                    if (stopped) {
+                        throw new InterruptedException("stopped");
+                    }
+                }
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        private void processQueue() throws InterruptedException {
+            lock.lock();
+            try {
+                if (queue.isEmpty()) {
+                    return;
+                }
+
+                FlexlbConfig cfg = configService.loadBalanceConfig();
+                long marginMs = cfg.getCostSloRiskMarginMs();
+                int maxScan = cfg.getFlexlbBatchScanAhead();
+                double fillThreshold = cfg.getFlexlbBatchFillThreshold();
+                int bsIter = cfg.getFlexlbBatchSearchIter();
+                int maxCapacity = cfg.getFlexlbBatchMaxCapacity();
+                int batchSizeMax = cfg.getFlexlbBatchSizeMax();
+
+                BatchItem head = queue.peek();
+                long budgetMs = head.deadlineMs() - System.currentTimeMillis();
+
+                // 1. expired → drop
+                if (budgetMs < 0) {
+                    queue.poll();
+                    dropItem(head);
+                    return;
+                }
+
+                // 2. urgent → dispatch head alone
+                if (budgetMs < marginMs) {
+                    queue.poll();
+                    flushItems(List.of(head));
+                    return;
+                }
+
+                // 3. binary search for max batch tokens within budget
+                PrefillTimePredictor predictor = createPredictor(cfg);
+                long headTokens = seqLenOf(head);
+                long headHit = hitOf(head);
+                long lo = headTokens;
+                long hi = maxCapacity;
+                for (int i = 0; i < bsIter && lo < hi; i++) {
+                    long mid = lo + (hi - lo + 1) / 2;
+                    if (predictor.estimateMs(mid, headHit) > budgetMs - marginMs) {
+                        hi = mid - 1;
+                    } else {
+                        lo = mid;
+                    }
+                }
+                long batchMaxTokens = Math.max(headTokens, lo);
+
+                // 4. greedy fill from queue
+                List<BatchItem> picked = new ArrayList<>();
+                picked.add(head);
+                long sumTokens = headTokens;
+                int scanned = 0;
+                for (BatchItem c : queue) {
+                    if (c == head) {
+                        continue;
+                    }
+                    if (scanned >= maxScan) {
+                        break;
+                    }
+                    scanned++;
+                    long cTok = seqLenOf(c);
+                    if (sumTokens + cTok <= batchMaxTokens) {
+                        picked.add(c);
+                        sumTokens += cTok;
+                    }
+                }
+
+                // 5. dispatch or wait
+                double fillRatio = batchMaxTokens > 0 ? (double) sumTokens / batchMaxTokens : 1.0;
+                if (fillRatio >= fillThreshold || picked.size() >= batchSizeMax) {
+                    for (BatchItem item : picked) {
+                        queue.remove(item);
+                    }
+                    flushItems(picked);
+                    return;
+                }
+
+                // park — budget shrinks each iteration, converges to dispatch
+                arrival.awaitNanos(1_000_000L);
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        private void flushItems(List<BatchItem> items) {
             for (BatchItem item : items) {
                 inflight.put(item.requestId(), new InflightEntry(item, prefill));
             }
-            queue.clear();
-            cancelFlushTimer();
             dispatchExecutor.execute(() -> dispatch(items, prefill));
         }
 
-        private void cancelFlushTimer() {
-            if (flushFuture != null) {
-                flushFuture.cancel(false);
-                flushFuture = null;
+        private void dropItem(BatchItem item) {
+            rollback(item.routeResponse);
+            if (!item.future.isDone()) {
+                item.future.completeExceptionally(
+                        new RuntimeException("FlexLB request deadline expired — cannot meet TTFT SLO"));
             }
-        }
-
-        synchronized void shutdown() {
-            stopped = true;
-            cancelFlushTimer();
-            for (BatchItem item : queue) {
-                item.future.completeExceptionally(new CancellationException("FlexLB batcher stopped: " + key));
-            }
-            queue.clear();
         }
     }
 
@@ -553,7 +728,8 @@ public class FlexlbBatchScheduler {
                              CompletableFuture<Response> future,
                              Response routeResponse,
                              ServerStatus prefill,
-                             ServerStatus decode) {
+                             ServerStatus decode,
+                             long deadlineMs) {
         long requestId() {
             return ctx.getRequestId();
         }
