@@ -97,6 +97,8 @@ KVCacheManager::~KVCacheManager() {
 // 初始化和配置相关
 
 bool KVCacheManager::init() {
+    RTP_LLM_CHECK_WITH_INFO(!allocator_ && !coordinator_ && !metrics_reporter_thread_.joinable(),
+                            "KVCacheManager::init called more than once");
     RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "cache specs must not be empty");
 
     auto shared_cache = std::make_shared<SharedBlockCache>();
@@ -156,6 +158,13 @@ const CacheConfig& KVCacheManager::cacheConfig() const {
 }
 
 const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) const {
+    RTP_LLM_CHECK_WITH_INFO(mtp_module_id >= 0 && static_cast<size_t>(mtp_module_id) < config_.mtp_sub_configs.size(),
+                            "Invalid mtp_module_id: %d, must be in range [0, %zu)",
+                            mtp_module_id,
+                            config_.mtp_sub_configs.size());
+    RTP_LLM_CHECK_WITH_INFO(config_.mtp_sub_configs[mtp_module_id] != nullptr,
+                            "mtp_sub_configs[%d] is null",
+                            mtp_module_id);
     return *config_.mtp_sub_configs[mtp_module_id];
 }
 
@@ -232,7 +241,8 @@ void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
 int KVCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                           int                            seq_len,
                                           int                            reserve_step) const {
-    return allocator_->singleBatchNeedBlocks(batch_kv_cache_resource, seq_len, reserve_step);
+    RTP_LLM_CHECK_WITH_INFO(allocator_ != nullptr, "singleBatchNeedBlocks called before KVCacheManager initialized");
+    return allocator_->singleBatchNeedBlocks(batch_kv_cache_resource, seq_len, reserve_step, cp_slot_mapper_);
 }
 
 // 块操作相关
@@ -289,14 +299,16 @@ bool KVCacheManager::setKVBlockValue(int                  block_index,
         return false;
     }
 
-    auto copyFunc = [&](const torch::Tensor& src_tensor, const BlockInfo& dst_block, size_t dst_byte_offset) -> bool {
+    auto copyFunc = [&](const torch::Tensor& src_tensor,
+                        const BlockInfo&     dst_block,
+                        size_t               dst_byte_offset,
+                        size_t               copy_bytes) -> bool {
         const size_t dst_bytes = dst_block.size_bytes;
-        const size_t src_bytes = src_tensor.nbytes();
-        if (dst_bytes < dst_byte_offset + src_bytes) {
-            RTP_LLM_LOG_ERROR("dst block bytes[%zu] < dst_offset[%zu] + src bytes[%zu] in setKVBlockValue(layer=%d)",
+        if (dst_bytes < dst_byte_offset + copy_bytes) {
+            RTP_LLM_LOG_ERROR("dst block bytes[%zu] < dst_offset[%zu] + copy bytes[%zu] in setKVBlockValue(layer=%d)",
                               dst_bytes,
                               dst_byte_offset,
-                              src_bytes,
+                              copy_bytes,
                               layer_id);
             return false;
         }
@@ -305,19 +317,19 @@ bool KVCacheManager::setKVBlockValue(int                  block_index,
         auto  dst_device = dst_block.is_cuda ? torch::kCUDA : torch::kCPU;
         auto  src_device = src_tensor.is_cuda() ? torch::kCUDA : torch::kCPU;
         auto  dst_t      = torch::from_blob(
-            dst_ptr, {(int64_t)src_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(dst_device));
+            dst_ptr, {(int64_t)copy_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(dst_device));
         auto src_t = torch::from_blob(src_tensor.data_ptr(),
-                                      {(int64_t)src_bytes},
+                                      {(int64_t)copy_bytes},
                                       torch::TensorOptions().dtype(torch::kUInt8).device(src_device));
         dst_t.copy_(src_t);
         return true;
     };
 
-    if (!copyFunc(k_buffer, dst[0], 0)) {
+    if (!copyFunc(k_buffer, dst[0], 0, expected_k_bytes)) {
         return false;
     }
 
-    if (!copyFunc(v_buffer, dst[0], expected_k_bytes)) {
+    if (!copyFunc(v_buffer, dst[0], expected_k_bytes, expected_v_bytes)) {
         return false;
     }
 
@@ -591,10 +603,10 @@ size_t KVCacheManager::maxAvailableTokensNum() const {
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
     KVCacheInfo info;
+    info.version = latest_version;
 
     if (!allocator_) {
         RTP_LLM_LOG_ERROR("getKVCacheInfo called before KVCacheManager initialized");
-        info.version = latest_version;
         return info;
     }
 
@@ -609,6 +621,8 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
             info.version = shared_cache->version();
         }
         // memory cache keys
+        RTP_LLM_CHECK_WITH_INFO(coordinator_ != nullptr,
+                                "getKVCacheInfo called before KVCacheManager coordinator initialized");
         const auto mem_cache_keys = coordinator_->memoryCacheKeys();
         all_keys.insert(mem_cache_keys.begin(), mem_cache_keys.end());
 
@@ -661,16 +675,19 @@ bool KVCacheManager::hasP2PConnector() const {
 std::shared_ptr<AsyncContext>
 KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
     RTP_LLM_PROFILE_FUNCTION();
+    RTP_LLM_CHECK_WITH_INFO(coordinator_ != nullptr, "asyncLoadCache called before KVCacheManager initialized");
     return coordinator_->asyncRead(connector_context);
 }
 
 std::shared_ptr<AsyncContext>
 KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
     RTP_LLM_PROFILE_FUNCTION();
+    RTP_LLM_CHECK_WITH_INFO(coordinator_ != nullptr, "asyncStoreCache called before KVCacheManager initialized");
     return coordinator_->asyncWrite(connector_context);
 }
 
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
+    RTP_LLM_CHECK_WITH_INFO(coordinator_ != nullptr, "executeFunction called before KVCacheManager initialized");
     return coordinator_->executeFunction(request, response);
 }
 

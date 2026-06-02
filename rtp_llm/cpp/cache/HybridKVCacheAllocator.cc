@@ -714,12 +714,17 @@ int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
 
 int HybridKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                   int                            seq_len,
-                                                  int                            reserve_step) const {
+                                                  int                            reserve_step,
+                                                  const std::shared_ptr<CPSlotMapper>& cp_mapper) const {
     int need_blocks = 0;
     for (int gid = 0; gid < batch_kv_cache_resource->groupNums(); ++gid) {
-        const int cur_blocks = batch_kv_cache_resource->blocksNum(0, gid);
-        const int group_seq_len = cpEffectiveSeqLenForAlloc(static_cast<size_t>(gid), seq_len);
-        need_blocks += kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(group_seq_len, cur_blocks, reserve_step);
+        const auto group_type = static_cast<size_t>(gid) < config_.group_types.size() ?
+                                    config_.group_types[static_cast<size_t>(gid)] :
+                                    CacheGroupType::FULL;
+        const int effective_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, group_type, seq_len);
+        const int cur_blocks        = batch_kv_cache_resource->blocksNum(0, gid);
+        need_blocks +=
+            kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(effective_seq_len, cur_blocks, reserve_step);
     }
     return need_blocks;
 }
