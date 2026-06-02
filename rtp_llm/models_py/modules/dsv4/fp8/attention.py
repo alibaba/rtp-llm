@@ -3952,7 +3952,13 @@ class AttentionFP8(nn.Module):
         ``COMPRESS_RATIO`` so no per-token mask is required up here).
         CSA passes ``False`` and feeds runtime indexer output to combine_topk.
         """
-        from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV, SWA_KV
+        from rtp_llm.models_py.modules.dsv4.attn_type import (
+            CSA_KV,
+            CSA_STATE,
+            HCA_KV,
+            HCA_STATE,
+            SWA_KV,
+        )
 
         if self._kv_cache is None or self._block_tables_by_type is None:
             return None
@@ -3960,6 +3966,7 @@ class AttentionFP8(nn.Module):
         if ratio not in (4, 128):
             return None
         cmp_at = CSA_KV if ratio == 4 else HCA_KV
+        state_at = CSA_STATE if ratio == 4 else HCA_STATE
 
         swa_bt = self._block_tables_by_type.get(SWA_KV)
         cmp_bt = self._block_tables_by_type.get(cmp_at)
@@ -4163,11 +4170,17 @@ class AttentionFP8(nn.Module):
             per_req_total_kv_lens = cmp_seq_lens.to(
                 device=device, dtype=torch.int64
             ).contiguous()
+        cmp_owner_block_size: Optional[int] = None
+        if kv_cache_sharded and ratio > 0 and self._kv_cache is not None:
+            state_tpb = _dsv4_pool_tokens_per_block(self._kv_cache, region=state_at)
+            if state_tpb % ratio == 0:
+                cmp_owner_block_size = state_tpb // ratio
         cmp_reader = make_compressed_k_pool_reader(
             cp_ctx=cp_ctx_local,
             kv_cache_sharded=kv_cache_sharded,
             per_req_total_kv_lens=per_req_total_kv_lens,
             block_size=cmp_eb if cmp_eb > 0 else None,
+            owner_block_size=cmp_owner_block_size,
         )
 
         # Layer-invariant gate for the raw-q-merge alternative path. Compute

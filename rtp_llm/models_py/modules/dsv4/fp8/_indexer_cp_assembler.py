@@ -54,6 +54,7 @@ class IndexerCPChunkPlan:
     # restore_indices into [cp_size * total_local_T] gathered rows.
     restore_indices: torch.Tensor  # [chunk_T] int64
     block_size: int
+    owner_block_size: int
 
 
 def build_indexer_cp_chunk_plan(
@@ -61,19 +62,23 @@ def build_indexer_cp_chunk_plan(
     per_req_total_kv_lens: torch.Tensor,
     block_size: int,
     device: torch.device,
+    owner_block_size: Optional[int] = None,
 ) -> IndexerCPChunkPlan:
     """Build per-chunk indexer assembler plan (CPU; no NCCL)."""
     if cp_ctx.cp_size <= 0:
         raise ValueError(f"cp_size must be > 0, got {cp_ctx.cp_size}")
     if block_size <= 0:
         raise ValueError(f"block_size must be > 0, got {block_size}")
+    owner_bs = int(owner_block_size or block_size)
+    if owner_bs <= 0:
+        raise ValueError(f"owner_block_size must be > 0, got {owner_bs}")
     per_req = per_req_total_kv_lens.to(device=device, dtype=torch.int64).contiguous()
     local_lens = cp_padded_local_kv_lens(
-        per_req, cp_ctx.cp_size, block_size
+        per_req, cp_ctx.cp_size, owner_bs
     ).contiguous()
     total_local = int(local_lens.sum().item())
     restore = build_kv_allgather_restore_indices(
-        per_req, cp_ctx.cp_size, block_size, device
+        per_req, cp_ctx.cp_size, owner_bs, device
     )
     return IndexerCPChunkPlan(
         cp_ctx=cp_ctx,
@@ -82,6 +87,7 @@ def build_indexer_cp_chunk_plan(
         total_local_T=total_local,
         restore_indices=restore,
         block_size=block_size,
+        owner_block_size=owner_bs,
     )
 
 
