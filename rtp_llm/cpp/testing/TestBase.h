@@ -267,7 +267,7 @@ protected:
                                                        .size_per_head)})
                                      .transpose(2, 1)
                                      .contiguous();
-                        // vblock is not used in setKVBlockValue in this case
+                        // vblock is not used in writeKVBlockForTest in this case
                         vblock = kvCache
                                      .index({torch::indexing::Slice(),
                                              static_cast<int64_t>(i),
@@ -284,8 +284,8 @@ protected:
                     }
                     // std::cout << "index: " << k << " start: " << block_start << " end: " << block_end << std::endl;
                     // std::cout << "block index: " << k_indexs[k] << std::endl;
-                    if (!cache_manager_->setKVBlockValue(k_indexs[k], kblock, vblock)) {
-                        std::cout << "setKVBlockValue failed for block index: " << k_indexs[k] << std::endl;
+                    if (!cache_manager_->writeKVBlockForTest(k_indexs[k], kblock, vblock)) {
+                        std::cout << "writeKVBlockForTest failed for block index: " << k_indexs[k] << std::endl;
                         return torch::Tensor();
                     }
                 }

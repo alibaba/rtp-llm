@@ -300,7 +300,7 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     auto                k_t = torch::from_blob(k_vec.data(), {(int64_t)k_bytes}, torch::kInt8).clone();
     auto                v_t = torch::from_blob(v_vec.data(), {(int64_t)v_bytes}, torch::kInt8).clone();
 
-    ASSERT_TRUE(cache_manager->setKVBlockValue(block_src, k_t, v_t));
+    ASSERT_TRUE(cache_manager->writeKVBlockForTest(block_src, k_t, v_t));
 
     std::vector<int8_t> expected_block(k_bytes + v_bytes, 0);
     std::fill(expected_block.begin(), expected_block.begin() + k_bytes, 7);
@@ -320,7 +320,7 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     std::vector<int8_t> v2_vec(v_bytes, 2);
     auto                k2_t = torch::from_blob(k2_vec.data(), {(int64_t)k_bytes}, torch::kInt8).clone();
     auto                v2_t = torch::from_blob(v2_vec.data(), {(int64_t)v_bytes}, torch::kInt8).clone();
-    ASSERT_TRUE(cache_manager->setKVBlockValue(block_dst, /*layer_id=*/0, k2_t, v2_t));
+    ASSERT_TRUE(cache_manager->writeKVBlockForTest(block_dst, /*layer_id=*/0, k2_t, v2_t));
 
     std::vector<int8_t> expected_layer0(k_bytes + v_bytes, 0);
     std::fill(expected_layer0.begin(), expected_layer0.begin() + k_bytes, 1);
@@ -397,7 +397,7 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
         std::vector<int8_t> v_vec(v_bytes, static_cast<int8_t>(block_id + 10));
         auto                k_t = torch::from_blob(k_vec.data(), {(int64_t)k_bytes}, torch::kInt8).clone();
         auto                v_t = torch::from_blob(v_vec.data(), {(int64_t)v_bytes}, torch::kInt8).clone();
-        ASSERT_TRUE(cache_manager->setKVBlockValue(block_id, k_t, v_t));
+        ASSERT_TRUE(cache_manager->writeKVBlockForTest(block_id, k_t, v_t));
     }
 
     std::vector<BlockIdPair> mapping;

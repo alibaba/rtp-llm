@@ -348,6 +348,16 @@ size_t KVCacheAllocator::maxAvailableTokensNum() const {
     return block_pool_ ? (block_pool_->totalBlocksNum() * seqSizePerBlock()) : 0;
 }
 
+KVCacheTokenCapacity KVCacheAllocator::tokenCapacity(size_t default_seq_size_per_block) const {
+    const size_t total_blocks     = totalBlocksNum();
+    const size_t available_blocks = availableBlocksNum();
+    return {total_blocks * default_seq_size_per_block, available_blocks * default_seq_size_per_block};
+}
+
+std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots() const {
+    return {};
+}
+
 void KVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
     if (block_pool_) {
         block_pool_->regUserMr(model_id, std::move(cache_store));

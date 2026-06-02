@@ -574,6 +574,54 @@ size_t HybridPoolKVCacheAllocator::maxAvailableTokensNum() const {
     return min_tokens;
 }
 
+KVCacheTokenCapacity HybridPoolKVCacheAllocator::tokenCapacity(size_t default_seq_size_per_block) const {
+    if (group_block_pools_.empty()) {
+        return {};
+    }
+    size_t total_tokens     = std::numeric_limits<size_t>::max();
+    size_t available_tokens = std::numeric_limits<size_t>::max();
+    bool   has_pool         = false;
+    for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
+        const auto& pool = group_block_pools_[gid];
+        if (!pool) {
+            continue;
+        }
+        const size_t seq_size =
+            (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
+                config_.group_seq_size_per_block[gid] :
+                default_seq_size_per_block;
+        total_tokens     = std::min(total_tokens, pool->totalBlocksNum() * seq_size);
+        available_tokens = std::min(available_tokens, pool->availableBlocksNum() * seq_size);
+        has_pool         = true;
+    }
+    return has_pool ? KVCacheTokenCapacity{total_tokens, available_tokens} : KVCacheTokenCapacity{};
+}
+
+std::vector<KVCachePoolMetricsSnapshot> HybridPoolKVCacheAllocator::poolMetricsSnapshots() const {
+    std::vector<KVCachePoolMetricsSnapshot> snapshots;
+    snapshots.reserve(group_block_pools_.size());
+    for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
+        const auto& pool = group_block_pools_[gid];
+        if (!pool) {
+            continue;
+        }
+        KVCachePoolMetricsSnapshot snapshot;
+        snapshot.pool_index           = gid;
+        snapshot.total_blocks         = pool->totalBlocksNum();
+        snapshot.available_blocks     = pool->availableBlocksNum();
+        snapshot.free_blocks          = pool->freeBlocksNum();
+        snapshot.request_ref_blocks   = pool->requestRefBlocksNum();
+        snapshot.connector_ref_blocks = pool->connectorRefBlocksNum();
+        snapshot.used_ratio =
+            (snapshot.total_blocks == 0) ?
+                0.0f :
+                static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
+                                   / static_cast<double>(snapshot.total_blocks));
+        snapshots.push_back(snapshot);
+    }
+    return snapshots;
+}
+
 void HybridPoolKVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
     for (auto& pool : group_block_pools_) {
         pool->regUserMr(model_id, cache_store);

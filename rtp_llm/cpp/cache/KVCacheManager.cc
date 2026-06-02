@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <limits>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -268,85 +267,6 @@ bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache
                                    std::vector<BlockIdPair>&      block_update_mapping) {
     RTP_LLM_PROFILE_FUNCTION();
     return allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
-}
-
-// Write one KV block (optionally per-layer) from host/device tensors for test
-bool KVCacheManager::setKVBlockValue(int                  block_index,
-                                     int                  layer_id,
-                                     const torch::Tensor& k_buffer,
-                                     const torch::Tensor& v_buffer) {
-    // Basic size/type validation to prevent out-of-bounds copy
-    auto&  spec             = config_.cache_specs[0];
-    size_t expected_k_bytes = spec->k_block_size_bytes();
-    size_t expected_v_bytes = spec->v_block_size_bytes();
-    size_t src_k_bytes      = k_buffer.nbytes();
-    size_t src_v_bytes      = v_buffer.nbytes();
-    if (src_k_bytes < expected_k_bytes || src_v_bytes < expected_v_bytes) {
-        RTP_LLM_LOG_ERROR("setKVBlockValue src bytes too small: k[%zu]<[%zu] or v[%zu]<[%zu]",
-                          src_k_bytes,
-                          expected_k_bytes,
-                          src_v_bytes,
-                          expected_v_bytes);
-        return false;
-    }
-
-    auto dst = allocator_->convertIndexToBuffer(layer_id, block_index);
-    RTP_LLM_CHECK_WITH_INFO(
-        !dst.empty(), "convertIndexToBuffer returned empty for layer %d, block %d", layer_id, block_index);
-    if (!dst[0].addr) {
-        RTP_LLM_LOG_ERROR("convertIndexToBuffer returned null for layer %d, block %d", layer_id, block_index);
-        return false;
-    }
-
-    auto copyFunc = [&](const torch::Tensor& src_tensor,
-                        const BlockInfo&     dst_block,
-                        size_t               dst_byte_offset,
-                        size_t               copy_bytes) -> bool {
-        const size_t dst_bytes = dst_block.size_bytes;
-        if (dst_bytes < dst_byte_offset + copy_bytes) {
-            RTP_LLM_LOG_ERROR("dst block bytes[%zu] < dst_offset[%zu] + copy bytes[%zu] in setKVBlockValue(layer=%d)",
-                              dst_bytes,
-                              dst_byte_offset,
-                              copy_bytes,
-                              layer_id);
-            return false;
-        }
-
-        auto* dst_ptr    = static_cast<char*>(dst_block.addr) + dst_byte_offset;
-        auto  dst_device = dst_block.is_cuda ? torch::kCUDA : torch::kCPU;
-        auto  src_device = src_tensor.is_cuda() ? torch::kCUDA : torch::kCPU;
-        auto  dst_t      = torch::from_blob(
-            dst_ptr, {(int64_t)copy_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(dst_device));
-        auto src_t = torch::from_blob(src_tensor.data_ptr(),
-                                      {(int64_t)copy_bytes},
-                                      torch::TensorOptions().dtype(torch::kUInt8).device(src_device));
-        dst_t.copy_(src_t);
-        return true;
-    };
-
-    if (!copyFunc(k_buffer, dst[0], 0, expected_k_bytes)) {
-        return false;
-    }
-
-    if (!copyFunc(v_buffer, dst[0], expected_k_bytes, expected_v_bytes)) {
-        return false;
-    }
-
-    cudaSyncAndCheck();
-    return true;
-}
-
-bool KVCacheManager::setKVBlockValue(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer) {
-    if (block_index < 0 || block_index >= config_.block_num) {
-        RTP_LLM_LOG_WARNING("Invalid block_index: %d, valid range: [0, %d)", block_index, config_.block_num);
-        return false;
-    }
-
-    bool all_success = true;
-    for (int layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
-        all_success = setKVBlockValue(block_index, layer_id, k_buffer, v_buffer) && all_success;
-    }
-    return all_success;
 }
 
 // 地址转换和缓冲区访问
@@ -630,33 +550,10 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
                                          cp_slot_mapper_->virtualBlockSize() :
                                          config_.seq_size_per_block;
 
-    info.block_size = block_size_tokens;
-    if (auto hybrid = std::dynamic_pointer_cast<rtp_llm::HybridPoolKVCacheAllocator>(allocator_)) {
-        const auto& pools            = hybrid->groupBlockPools();
-        size_t      total_tokens     = std::numeric_limits<size_t>::max();
-        size_t      available_tokens = std::numeric_limits<size_t>::max();
-        bool        has_pool         = false;
-        for (size_t gid = 0; gid < pools.size(); ++gid) {
-            const auto& pool = pools[gid];
-            if (!pool) {
-                continue;
-            }
-            const size_t seq_size =
-                (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
-                    config_.group_seq_size_per_block[gid] :
-                    block_size_tokens;
-            total_tokens     = std::min(total_tokens, pool->totalBlocksNum() * seq_size);
-            available_tokens = std::min(available_tokens, pool->availableBlocksNum() * seq_size);
-            has_pool         = true;
-        }
-        info.total_kv_cache     = has_pool ? total_tokens : 0;
-        info.available_kv_cache = has_pool ? available_tokens : 0;
-    } else {
-        const size_t total_blocks     = allocator_->totalBlocksNum();
-        const size_t available_blocks = allocator_->availableBlocksNum();
-        info.total_kv_cache           = total_blocks * block_size_tokens;
-        info.available_kv_cache       = available_blocks * block_size_tokens;
-    }
+    const auto capacity     = allocator_->tokenCapacity(block_size_tokens);
+    info.block_size         = block_size_tokens;
+    info.total_kv_cache     = capacity.total_tokens;
+    info.available_kv_cache = capacity.available_tokens;
     // cached_keys left empty for now; can be populated when distributed cache is wired up.
 
     return info;
@@ -759,12 +656,12 @@ void KVCacheManager::allocateAndSync() {
 void KVCacheManager::reportMetricsLoop() {
     RTP_LLM_PROFILE_FUNCTION();
     kmonitor::MetricsTags tags;
-    // Raw "kvc raw" log lines are throttled to once every 3 minutes — kmonitor
+    // Raw "kvc raw" log lines are throttled to once every 1 minute — kmonitor
     // gauges still report every 1s so dashboards stay continuous, but the
     // diagnostic log is intended for sporadic spot-checks, not per-tick spam.
-    // Initialise to "3 min ago" so the first iteration emits one line right
+    // Initialise to "1 min ago" so the first iteration emits one line right
     // away (gives operators an immediate baseline after restart).
-    constexpr auto kLogInterval  = std::chrono::minutes(3);
+    constexpr auto kLogInterval  = std::chrono::minutes(1);
     auto           last_log_time = std::chrono::steady_clock::now() - kLogInterval;
     while (!stop_.load(std::memory_order_relaxed)) {
         if (!metrics_reporter_ || !allocator_) {
@@ -797,7 +694,7 @@ void KVCacheManager::reportMetricsLoop() {
 
         // Decide once per tick whether the throttled diagnostic log should fire.
         // Math is self-consistent within this tick by construction; the log is
-        // for spot-checking when dashboards look off — once every 3 min suffices.
+        // for spot-checking when dashboards look off — once every 1 min suffices.
         const auto now        = std::chrono::steady_clock::now();
         const bool should_log = (now - last_log_time) >= kLogInterval;
         if (should_log) {
@@ -813,52 +710,34 @@ void KVCacheManager::reportMetricsLoop() {
                 collector.kv_cache_used_ratio);
         }
 
-        // Per-pool breakdown — only meaningful for HybridPoolKVCacheAllocator
-        // (DSv4's 7-pool layout etc.). Single-pool allocators skip this.
+        // Allocator-specific per-pool breakdown. Single-pool allocators skip this.
         // kmonitor samples are emitted every tick (dashboards stay continuous);
         // the diagnostic "kvc raw pool[gid]" lines piggyback on should_log so
-        // they fire alongside "kvc raw global" once every 3 min.
-        if (auto hybrid = std::dynamic_pointer_cast<rtp_llm::HybridPoolKVCacheAllocator>(allocator_)) {
-            const auto& pools = hybrid->groupBlockPools();
-            for (size_t gid = 0; gid < pools.size(); ++gid) {
-                const auto& pool = pools[gid];
-                if (!pool) {
-                    continue;
-                }
-                const size_t pool_total     = pool->totalBlocksNum();
-                const size_t pool_available = pool->availableBlocksNum();
-                const size_t pool_free      = pool->freeBlocksNum();
-                const size_t pool_req_ref   = pool->requestRefBlocksNum();
-                const size_t pool_con_ref   = pool->connectorRefBlocksNum();
-                const float  pool_used_ratio =
-                    (pool_total == 0) ?
-                         0.0f :
-                         static_cast<float>(100.0 * (pool_total - pool_available) / static_cast<double>(pool_total));
-
-                if (should_log) {
-                    RTP_LLM_LOG_INFO(
-                        "kvc raw pool[%zu]: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu ratio=%.4f%%",
-                        gid,
-                        pool_total,
-                        pool_available,
-                        pool_req_ref,
-                        pool_con_ref,
-                        pool_free,
-                        pool_used_ratio);
-                }
-
-                RtpLLMCachePoolMetricsCollector pool_collector;
-                pool_collector.free_blocks          = static_cast<int64_t>(pool_free);
-                pool_collector.available_blocks     = static_cast<int64_t>(pool_available);
-                pool_collector.request_ref_blocks   = static_cast<int64_t>(pool_req_ref);
-                pool_collector.connector_ref_blocks = static_cast<int64_t>(pool_con_ref);
-                pool_collector.total_blocks         = static_cast<int64_t>(pool_total);
-                pool_collector.used_ratio           = pool_used_ratio;
-
-                kmonitor::MetricsTags pool_tags("pool", std::to_string(gid));
-                metrics_reporter_->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&pool_tags,
-                                                                                                   &pool_collector);
+        // they fire alongside "kvc raw global" once every 1 min.
+        for (const auto& pool_snapshot : allocator_->poolMetricsSnapshots()) {
+            if (should_log) {
+                RTP_LLM_LOG_INFO(
+                    "kvc raw pool[%zu]: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu ratio=%.4f%%",
+                    pool_snapshot.pool_index,
+                    pool_snapshot.total_blocks,
+                    pool_snapshot.available_blocks,
+                    pool_snapshot.request_ref_blocks,
+                    pool_snapshot.connector_ref_blocks,
+                    pool_snapshot.free_blocks,
+                    pool_snapshot.used_ratio);
             }
+
+            RtpLLMCachePoolMetricsCollector pool_collector;
+            pool_collector.free_blocks          = static_cast<int64_t>(pool_snapshot.free_blocks);
+            pool_collector.available_blocks     = static_cast<int64_t>(pool_snapshot.available_blocks);
+            pool_collector.request_ref_blocks   = static_cast<int64_t>(pool_snapshot.request_ref_blocks);
+            pool_collector.connector_ref_blocks = static_cast<int64_t>(pool_snapshot.connector_ref_blocks);
+            pool_collector.total_blocks         = static_cast<int64_t>(pool_snapshot.total_blocks);
+            pool_collector.used_ratio           = pool_snapshot.used_ratio;
+
+            kmonitor::MetricsTags pool_tags("pool", std::to_string(pool_snapshot.pool_index));
+            metrics_reporter_->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&pool_tags,
+                                                                                               &pool_collector);
         }
 
         std::this_thread::sleep_for(std::chrono::seconds(1));  // 1s
@@ -871,6 +750,85 @@ void KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
     if (coordinator_) {
         coordinator_->handleRead(request, response, is_cancelled);
     }
+}
+
+// Write one KV block (optionally per-layer) from host/device tensors for test
+bool KVCacheManager::writeKVBlockForTest(int                  block_index,
+                                          int                  layer_id,
+                                          const torch::Tensor& k_buffer,
+                                          const torch::Tensor& v_buffer) {
+    // Basic size/type validation to prevent out-of-bounds copy
+    auto&  spec             = config_.cache_specs[0];
+    size_t expected_k_bytes = spec->k_block_size_bytes();
+    size_t expected_v_bytes = spec->v_block_size_bytes();
+    size_t src_k_bytes      = k_buffer.nbytes();
+    size_t src_v_bytes      = v_buffer.nbytes();
+    if (src_k_bytes < expected_k_bytes || src_v_bytes < expected_v_bytes) {
+        RTP_LLM_LOG_ERROR("writeKVBlockForTest src bytes too small: k[%zu]<[%zu] or v[%zu]<[%zu]",
+                          src_k_bytes,
+                          expected_k_bytes,
+                          src_v_bytes,
+                          expected_v_bytes);
+        return false;
+    }
+
+    auto dst = allocator_->convertIndexToBuffer(layer_id, block_index);
+    RTP_LLM_CHECK_WITH_INFO(
+        !dst.empty(), "convertIndexToBuffer returned empty for layer %d, block %d", layer_id, block_index);
+    if (!dst[0].addr) {
+        RTP_LLM_LOG_ERROR("convertIndexToBuffer returned null for layer %d, block %d", layer_id, block_index);
+        return false;
+    }
+
+    auto copyFunc = [&](const torch::Tensor& src_tensor,
+                        const BlockInfo&     dst_block,
+                        size_t               dst_byte_offset,
+                        size_t               copy_bytes) -> bool {
+        const size_t dst_bytes = dst_block.size_bytes;
+        if (dst_bytes < dst_byte_offset + copy_bytes) {
+            RTP_LLM_LOG_ERROR("dst block bytes[%zu] < dst_offset[%zu] + copy bytes[%zu] in writeKVBlockForTest(layer=%d)",
+                              dst_bytes,
+                              dst_byte_offset,
+                              copy_bytes,
+                              layer_id);
+            return false;
+        }
+
+        auto* dst_ptr    = static_cast<char*>(dst_block.addr) + dst_byte_offset;
+        auto  dst_device = dst_block.is_cuda ? torch::kCUDA : torch::kCPU;
+        auto  src_device = src_tensor.is_cuda() ? torch::kCUDA : torch::kCPU;
+        auto  dst_t      = torch::from_blob(
+            dst_ptr, {(int64_t)copy_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(dst_device));
+        auto src_t = torch::from_blob(src_tensor.data_ptr(),
+                                      {(int64_t)copy_bytes},
+                                      torch::TensorOptions().dtype(torch::kUInt8).device(src_device));
+        dst_t.copy_(src_t);
+        return true;
+    };
+
+    if (!copyFunc(k_buffer, dst[0], 0, expected_k_bytes)) {
+        return false;
+    }
+
+    if (!copyFunc(v_buffer, dst[0], expected_k_bytes, expected_v_bytes)) {
+        return false;
+    }
+
+    cudaSyncAndCheck();
+    return true;
+}
+
+bool KVCacheManager::writeKVBlockForTest(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer) {
+    if (block_index < 0 || block_index >= config_.block_num) {
+        RTP_LLM_LOG_WARNING("Invalid block_index: %d, valid range: [0, %d)", block_index, config_.block_num);
+        return false;
+    }
+
+    bool all_success = true;
+    for (int layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
+        all_success = writeKVBlockForTest(block_index, layer_id, k_buffer, v_buffer) && all_success;
+    }
+    return all_success;
 }
 
 }  // namespace rtp_llm
