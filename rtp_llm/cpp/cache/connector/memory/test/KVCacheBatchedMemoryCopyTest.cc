@@ -481,7 +481,10 @@ public:
         return static_cast<int>(config_.seq_size_per_block);
     }
 
-    int singleBatchNeedBlocks(const BatchKVCacheResourcePtr&, int, int) const override {
+    int singleBatchNeedBlocks(const BatchKVCacheResourcePtr&,
+                              int,
+                              int,
+                              const std::shared_ptr<CPSlotMapper>& = nullptr) const override {
         return 0;
     }
 

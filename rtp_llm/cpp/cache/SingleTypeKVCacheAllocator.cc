@@ -504,8 +504,11 @@ int SingleTypeKVCacheAllocator::seqSizePerBlock() const {
 
 int SingleTypeKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                       int                            seq_len,
-                                                      int                            reserve_step) const {
-    return full_kv_cache_group_->needBlocksNum(seq_len, 0, reserve_step);
+                                                      int                            reserve_step,
+                                                      const std::shared_ptr<CPSlotMapper>& cp_mapper) const {
+    const int effective_seq_len =
+        (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->effectiveSeqLenForAlloc(seq_len) : seq_len;
+    return full_kv_cache_group_->needBlocksNum(effective_seq_len, 0, reserve_step);
 }
 
 }  // namespace rtp_llm
