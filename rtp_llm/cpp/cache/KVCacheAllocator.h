@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -13,6 +14,21 @@
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 
 namespace rtp_llm {
+
+struct KVCacheTokenCapacity {
+    size_t total_tokens     = 0;
+    size_t available_tokens = 0;
+};
+
+struct KVCachePoolMetricsSnapshot {
+    size_t pool_index           = 0;
+    size_t free_blocks          = 0;
+    size_t available_blocks     = 0;
+    size_t request_ref_blocks   = 0;
+    size_t connector_ref_blocks = 0;
+    size_t total_blocks         = 0;
+    float  used_ratio           = 0.0f;
+};
 
 class KVCacheAllocator {
 public:
@@ -107,6 +123,8 @@ public:
     virtual size_t                  totalTokensNum() const;
     virtual size_t                  totalBlocksNum() const;
     virtual size_t                  maxAvailableTokensNum() const;
+    virtual KVCacheTokenCapacity    tokenCapacity(size_t default_seq_size_per_block) const;
+    virtual std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const;
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
     uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
