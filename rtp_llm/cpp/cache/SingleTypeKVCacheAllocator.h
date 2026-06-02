@@ -35,7 +35,8 @@ public:
     int seqSizePerBlock() const override;
     int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                               int                            seq_len,
-                              int                            reserve_step) const override;
+                              int                            reserve_step,
+                              const std::shared_ptr<CPSlotMapper>& cp_mapper = nullptr) const override;
 
 private:
     bool         doInit() override;

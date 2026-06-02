@@ -63,7 +63,8 @@ public:
     }
     int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                               int                            seq_len,
-                              int                            reserve_step) const override {
+                              int                            reserve_step,
+                              const std::shared_ptr<CPSlotMapper>& cp_mapper = nullptr) const override {
         return 0;
     }
     int getNeedBlocks(const MallocInfo& malloc_info) const override {
