@@ -103,6 +103,14 @@ size_t KVCacheAllocator::maxAvailableTokensNum() const {
     return 0;
 }
 
+KVCacheTokenCapacity KVCacheAllocator::tokenCapacity(size_t) const {
+    return {};
+}
+
+std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots() const {
+    return {};
+}
+
 uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t, int local_layer_id) const {
     return static_cast<uint32_t>(local_layer_id);
 }
@@ -488,10 +496,7 @@ public:
         return static_cast<int>(config_.seq_size_per_block);
     }
 
-    int singleBatchNeedBlocks(const BatchKVCacheResourcePtr&,
-                              int,
-                              int,
-                              const std::shared_ptr<CPSlotMapper>& = nullptr) const override {
+    int singleBatchNeedBlocks(const BatchKVCacheResourcePtr&, int, int) const override {
         return 0;
     }
 

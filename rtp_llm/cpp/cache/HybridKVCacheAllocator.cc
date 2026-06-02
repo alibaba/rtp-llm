@@ -209,7 +209,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
 
     const int   seq_len        = malloc_info.complete_token_ids->seqLength();
     const int   common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
-    const auto& cp_mapper      = malloc_info.cp_slot_mapper;
+    const auto& cp_mapper      = cp_slot_mapper_;
     // reuse_unit_tokens is computed against the canonical (paged FULL) group's
     // block_size: cache_keys reuse only happens for paged groups so virtual block
     // size = canonical block_size * cp_size; non-paged groups don't enter reuse.
@@ -287,7 +287,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
 
 MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     auto&       kv_resource  = malloc_info.batch_kv_cache_resource;
-    const auto& cp_mapper    = malloc_info.cp_slot_mapper;
+    const auto& cp_mapper    = cp_slot_mapper_;
     const int   batch_size   = kv_resource->batchSize();
     const int   raw_seq_len  = malloc_info.incrSeqLen();
     const int   reserve_step = malloc_info.complete_token_ids->getReserveStep();
@@ -385,7 +385,7 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         return;
     }
 
-    const auto& cp_mapper  = insert_info.cp_slot_mapper;
+    const auto& cp_mapper  = cp_slot_mapper_;
     const bool  cp_active  = cp_mapper && cp_mapper->isSharded();
     const int   group_nums = kv_cache_resource->groupNums();
     const int   batch_size = kv_cache_resource->batchSize();
@@ -687,7 +687,7 @@ int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
     if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
         return 0;
     }
-    const auto& cp_mapper          = malloc_info.cp_slot_mapper;
+    const auto& cp_mapper          = cp_slot_mapper_;
     const int   batch_size         = malloc_info.batch_kv_cache_resource->batchSize();
     const int   total_seq_len      = malloc_info.complete_token_ids->totalSeqLength();
     const int   raw_common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
@@ -714,14 +714,13 @@ int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
 
 int HybridKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                   int                            seq_len,
-                                                  int                            reserve_step,
-                                                  const std::shared_ptr<CPSlotMapper>& cp_mapper) const {
+                                                  int                            reserve_step) const {
     int need_blocks = 0;
     for (int gid = 0; gid < batch_kv_cache_resource->groupNums(); ++gid) {
         const auto group_type = static_cast<size_t>(gid) < config_.group_types.size() ?
                                     config_.group_types[static_cast<size_t>(gid)] :
                                     CacheGroupType::FULL;
-        const int effective_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, group_type, seq_len);
+        const int effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, group_type, seq_len);
         const int cur_blocks        = batch_kv_cache_resource->blocksNum(0, gid);
         need_blocks +=
             kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(effective_seq_len, cur_blocks, reserve_step);

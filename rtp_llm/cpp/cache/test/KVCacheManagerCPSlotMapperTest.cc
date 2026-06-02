@@ -143,7 +143,9 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
     auto token_ids = makeTokenIds(1, /*seq_len=*/1, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
-    info.cp_slot_mapper = std::make_shared<CPSlotMapper>(0, 2, seq_size_per_block);
+    auto       cp_mapper = std::make_shared<CPSlotMapper>(0, 2, seq_size_per_block);
+    mgr->cp_slot_mapper_ = cp_mapper;
+    mgr->allocator_->setCPSlotMapper(cp_mapper);
 
     auto result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
@@ -156,7 +158,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
     EXPECT_EQ(resource->cacheKeys(0).size(), 0);
 }
 
-// malloc() should auto-inject cpSlotMapper when caller does not provide one.
+// malloc() should use the manager-level cpSlotMapper.
 // With CP sharding (cp_size=2, block_size=4), virtual_block_size=8.
 // A sequence of 16 tokens needs ceil(16/8)=2 physical blocks per batch (not 4).
 // DISABLED: needs multi-rank NCCL harness (KVCacheManager::allocateAndSync calls
@@ -181,7 +183,6 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCoun
     auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
-    // cp_slot_mapper left as nullptr -- should be auto-injected
     auto result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
 
@@ -220,14 +221,13 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocWithoutCPAllocatesFullBloc
     EXPECT_EQ(resource->blocksNum(0, 0), 4);
 }
 
-// Caller-provided cp_slot_mapper should override the auto-injected one.
+// Allocator-level cp_slot_mapper should drive malloc sharding.
 // DISABLED: needs multi-rank NCCL harness (KVCacheManager::allocateAndSync calls
 // execAllGather across the tp_size group); covered end-to-end in Stage 6 smoke.
-TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocExplicitMapperOverridesAutoInject) {
+TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/30, seq_size_per_block);
 
-    // Manager has cp_size=2, but we'll pass a mapper with cp_size=4.
     ParallelismConfig par;
     par.tp_rank                            = 0;
     par.tp_size                            = 2;
@@ -248,14 +248,15 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocExplicitMapperOverridesAut
     // effectiveSeqLenForAlloc(64) = ceil(64/16)*4 = 16 tokens => ceil(16/4) = 4 blocks
 
     MallocInfo info{resource, token_ids};
-    info.cp_slot_mapper = explicit_mapper;
+    mgr->cp_slot_mapper_ = explicit_mapper;
+    mgr->allocator_->setCPSlotMapper(explicit_mapper);
     auto result         = mgr->malloc(info);
     ASSERT_TRUE(result.success);
 
     EXPECT_EQ(resource->blocksNum(0, 0), 4);
 }
 
-// insertIntoCache() should also auto-inject the mapper.
+// insertIntoCache() should also use the manager-level mapper.
 // DISABLED: same reason as above (multi-rank harness needed).
 TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     const int seq_size_per_block = 4;
@@ -285,7 +286,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     auto result                     = mgr->malloc(malloc_info);
     ASSERT_TRUE(result.success);
 
-    // Insert into cache (cp_slot_mapper is auto-injected).
+    // Insert into cache using the allocator-level cp_slot_mapper.
     // This should not crash and should use sharded insert logic.
     InsertInfo insert_info{resource, token_ids, /*is_resident=*/false};
     EXPECT_NO_THROW(mgr->insertIntoCache(insert_info));

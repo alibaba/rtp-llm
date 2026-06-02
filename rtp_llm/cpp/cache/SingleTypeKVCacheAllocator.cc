@@ -22,9 +22,9 @@ int SingleTypeKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) con
     const int  reserve_step     = malloc_info.complete_token_ids->getReserveStep();
     int        common_seq_len   = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
 
-    if (malloc_info.cp_slot_mapper && malloc_info.cp_slot_mapper->isSharded()) {
-        seq_len        = malloc_info.cp_slot_mapper->effectiveSeqLenForAlloc(seq_len);
-        common_seq_len = malloc_info.cp_slot_mapper->effectiveSeqLenForAlloc(common_seq_len);
+    if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
+        seq_len        = cp_slot_mapper_->effectiveSeqLenForAlloc(seq_len);
+        common_seq_len = cp_slot_mapper_->effectiveSeqLenForAlloc(common_seq_len);
     }
 
     const auto need =
@@ -81,8 +81,8 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     int   common_seq_len =
         std::min(malloc_info.complete_token_ids->commonSeqLength(), malloc_info.complete_token_ids->totalSeqLength());
 
-    if (malloc_info.cp_slot_mapper && malloc_info.cp_slot_mapper->isSharded()) {
-        common_seq_len = malloc_info.cp_slot_mapper->effectiveSeqLenForAlloc(common_seq_len);
+    if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
+        common_seq_len = cp_slot_mapper_->effectiveSeqLenForAlloc(common_seq_len);
     }
 
     const auto& cache_keys         = kv_resource->cacheKeys(0);
@@ -100,11 +100,11 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     // in computing ops.
     if (malloc_info.enable_device_cache) {
         CacheKeysType match_keys;
-        if (malloc_info.cp_slot_mapper && malloc_info.cp_slot_mapper->isSharded()) {
+        if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
             // Drop the last virtual-block key (same reasoning as non-CP) to avoid
             // a full-len reuse / empty-block crash. Use last-rank stride so all
             // ranks share one canonical key namespace.
-            int  cp_size     = malloc_info.cp_slot_mapper->cpSize();
+            int  cp_size     = cp_slot_mapper_->cpSize();
             auto vblock_keys = kv_resource->cacheResource(0).localCacheKeys(cp_size - 1, cp_size);
             match_keys.assign(vblock_keys.begin(), vblock_keys.empty() ? vblock_keys.end() : vblock_keys.end() - 1);
         } else {
@@ -112,10 +112,10 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         }
         auto        match_begin_time_us = currentTimeUs();
         MatchResult match_result        = full_kv_cache_group_->match(match_keys);
-        if (malloc_info.cp_slot_mapper && malloc_info.cp_slot_mapper->isSharded()) {
+        if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
             // virtual block ⇒ reuse_length covers cp_size physical blocks of
             // tokens; reuse_blocks counts virtual blocks.
-            match_result.reuse_length = match_result.reuse_blocks * malloc_info.cp_slot_mapper->virtualBlockSize();
+            match_result.reuse_length = match_result.reuse_blocks * cp_slot_mapper_->virtualBlockSize();
         }
         match_cost_time_us = currentTimeUs() - match_begin_time_us;
         reuse_len          = static_cast<int>(match_result.reuse_length);
@@ -163,8 +163,8 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     int   seq_len        = malloc_info.incrSeqLen();
     int   reserve_step   = malloc_info.complete_token_ids->getReserveStep();
 
-    if (malloc_info.cp_slot_mapper && malloc_info.cp_slot_mapper->isSharded()) {
-        seq_len = malloc_info.cp_slot_mapper->effectiveSeqLenForAlloc(seq_len);
+    if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
+        seq_len = cp_slot_mapper_->effectiveSeqLenForAlloc(seq_len);
     }
 
     auto need_blocks = full_kv_cache_group_->needBlocksNum(seq_len, current_blocks, reserve_step);
@@ -241,8 +241,8 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
         // across ranks without any cross-rank coordination.
         CacheKeysType insert_keys;
         SharedBlockCache::NamespaceId namespace_id = SharedBlockCache::kGpuLogicalNamespace;
-        if (insert_info.cp_slot_mapper && insert_info.cp_slot_mapper->isSharded()) {
-            int cp_size = insert_info.cp_slot_mapper->cpSize();
+        if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
+            int cp_size = cp_slot_mapper_->cpSize();
             insert_keys = kv_resource->cacheResource(batch_id).localCacheKeys(cp_size - 1, cp_size);
             namespace_id = SharedBlockCache::kGpuCpCanonicalNamespace;
         } else {
@@ -504,11 +504,10 @@ int SingleTypeKVCacheAllocator::seqSizePerBlock() const {
 
 int SingleTypeKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                       int                            seq_len,
-                                                      int                            reserve_step,
-                                                      const std::shared_ptr<CPSlotMapper>& cp_mapper) const {
+                                                      int                            reserve_step) const {
     (void)batch_kv_cache_resource;
     const int effective_seq_len =
-        (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->effectiveSeqLenForAlloc(seq_len) : seq_len;
+        (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) ? cp_slot_mapper_->effectiveSeqLenForAlloc(seq_len) : seq_len;
     return full_kv_cache_group_->needBlocksNum(effective_seq_len, 0, reserve_step);
 }
 
