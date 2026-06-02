@@ -291,9 +291,32 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                                       stream_groups.totalDecodeBatchSize(),
                                       stream_groups.modelExecuteTokenSize(),
                                       stream_groups.maxSeqLen());
+        if (tp_rank_ == 0 && stream_groups.totalContextBatchSize() > 0) {
+            std::string details;
+            for (auto& s : stream_groups.contextStreams()) {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "{id=%ld input=%d prefix=%d reuse=%d ctx=%d grp=%ld/%d tokens=%d} ",
+                         s->streamId(), s->inputLength(), s->prefixLength(),
+                         s->reuseLength(), s->contextLength(),
+                         s->batchGroupId(), s->batchGroupSize(), s->currentExecuteTokenSize());
+                details += buf;
+            }
+            RTP_LLM_LOG_INFO("prefill_batch_begin: ctx_batch=%zu gen_batch=%zu total_tokens=%zu max_seq=%zu streams=[%s]",
+                              stream_groups.totalContextBatchSize(),
+                              stream_groups.totalDecodeBatchSize(),
+                              stream_groups.modelExecuteTokenSize(),
+                              stream_groups.maxSeqLen(),
+                              details.c_str());
+        }
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (tp_rank_ == 0 && stream_groups.totalContextBatchSize() > 0) {
+            RTP_LLM_LOG_INFO("prefill_batch_end: ctx_batch=%zu total_tokens=%zu forward_us=%ld",
+                              stream_groups.totalContextBatchSize(),
+                              stream_groups.modelExecuteTokenSize(),
+                              executor_collector.model_forward_us);
+        }
     }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
