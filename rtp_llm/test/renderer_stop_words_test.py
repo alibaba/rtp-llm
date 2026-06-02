@@ -1,9 +1,25 @@
 from typing import List
-from unittest import TestCase, main
+from unittest import IsolatedAsyncioTestCase, TestCase, main
 from unittest.mock import MagicMock, Mock
 
-from rtp_llm.openai.api_datatype import FinisheReason
-from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer, StreamStatus
+import torch
+
+from rtp_llm.openai.api_datatype import (
+    ChatCompletionRequest,
+    ChatMessage,
+    FinisheReason,
+    RoleEnum,
+)
+from rtp_llm.openai.renderers.custom_renderer import (
+    CustomChatRenderer,
+    RendererParams,
+    StreamStatus,
+)
+from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
+    ReasoningToolBaseRenderer,
+)
+from rtp_llm.config.py_config_modules import GenerateEnvConfig
+from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
 from rtp_llm.utils.word_util import get_stop_word_slices
 
 
@@ -263,6 +279,331 @@ class ProcessStopWordsTest(TestCase):
 
         self.assertEqual(truncated, "文本")
         self.assertEqual(self.status.finish_reason, FinisheReason.stop)
+
+
+class _RendererTestBase(IsolatedAsyncioTestCase):
+    """Shared helpers for ReasoningToolBaseRenderer stop-word tests."""
+
+    @staticmethod
+    def _make_tokenizer(token_map: dict):
+        class DummyTokenizer:
+            chat_template = ""
+            path = None
+
+            def __init__(self):
+                self._map = token_map
+
+            def decode(self, token_ids):
+                if token_ids is None:
+                    return ""
+                if isinstance(token_ids, int):
+                    token_ids = [token_ids]
+                return "".join(self._map.get(t, "") for t in token_ids)
+
+            def encode(self, text: str, add_special_tokens: bool = False):
+                return []
+
+            def convert_tokens_to_ids(self, word):
+                return None
+
+        return DummyTokenizer()
+
+    @staticmethod
+    def _make_renderer(tokenizer, eos_token_id=0, stop_word_ids_list=None):
+        class TestRenderer(ReasoningToolBaseRenderer):
+            def _setup_chat_template(self):
+                self.chat_template = "test"
+
+            def in_think_mode(self, request: ChatCompletionRequest):
+                return False
+
+        return TestRenderer(
+            tokenizer=tokenizer,
+            renderer_params=RendererParams(
+                model_type="test",
+                max_seq_len=2048,
+                eos_token_id=eos_token_id,
+                stop_word_ids_list=stop_word_ids_list or [],
+            ),
+            generate_env_config=GenerateEnvConfig(),
+        )
+
+    @staticmethod
+    def _create_output(tokens):
+        aux_info = AuxInfo()
+        aux_info.input_len = 0
+        aux_info.output_len = len(tokens)
+        aux_info.reuse_len = 0
+        output = GenerateOutput()
+        output.output_ids = torch.tensor([tokens])
+        output.aux_info = aux_info
+        return output
+
+    async def _make_status(self, renderer):
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="test")], tools=[]
+        )
+        status_list = await renderer._create_status_list(1, request)
+        return status_list[0]
+
+
+class TestStopWordTruncation(_RendererTestBase):
+    """Tests for multi-token stop word handling in _update_single_status."""
+
+    async def test_buffered_stop_word_prefix_not_leaked_when_token_stop_truncates(self):
+        """MTP: trailing tokens after stop word. _check_finish_reason misses (suffix ≠ stop word),
+        _remove_stop_word_ids truncates output_ids backward. Without the rewind guard,
+        delta_output_string would retain the buffered "ST" prefix and _flush_buffer()
+        (called after the streaming loop ends, custom_renderer.py:955) would emit it."""
+        tokenizer = self._make_tokenizer(
+            {100: "Hello ", 200: "S", 201: "T", 202: "OP", 103: "after"}
+        )
+        renderer = self._make_renderer(tokenizer, stop_word_ids_list=[[200, 201, 202]])
+        status = await self._make_status(renderer)
+
+        stop_words_str = ["STOP"]
+        stop_word_slice_list = get_stop_word_slices(stop_words_str)
+
+        # Chunk 1: emits "Hello ", buffers "ST" (partial stop-word prefix)
+        delta1 = await renderer._update_single_status(
+            status,
+            self._create_output([100, 200, 201]),
+            max_new_tokens=100,
+            stop_words_str=stop_words_str,
+            stop_word_slice_list=stop_word_slice_list,
+            is_streaming=True,
+        )
+        self.assertEqual(delta1.output_str, "Hello ")
+        self.assertEqual(status.delta_output_string, "ST")
+        self.assertIsNone(status.finish_reason)
+
+        # Chunk 2: completes stop-word [200,201,202] with trailing token 103.
+        # Rewind guard must: (1) clear "ST" from delta_output_string so _flush_buffer
+        # won't emit it, (2) set finish_reason=stop so _check_all_finished breaks the
+        # loop and no further chunks are processed.
+        delta2 = await renderer._update_single_status(
+            status,
+            self._create_output([202, 103]),
+            max_new_tokens=100,
+            stop_words_str=stop_words_str,
+            stop_word_slice_list=stop_word_slice_list,
+            is_streaming=True,
+        )
+
+        self.assertEqual(delta2.output_str, "")
+        self.assertEqual(status.finish_reason, FinisheReason.stop)
+        # Critical: delta_output_string must be empty, otherwise _flush_buffer leaks "ST"
+        self.assertEqual(status.delta_output_string, "")
+
+    async def test_multi_token_stop_word_completes_at_chunk_boundary(self):
+        """Standard generation: stop word completes exactly at the end of output_ids_list.
+        _check_finish_reason catches it via suffix check; truncation guard is NOT triggered.
+        """
+        tokenizer = self._make_tokenizer({100: "Hello ", 200: "S", 201: "T", 202: "OP"})
+        renderer = self._make_renderer(tokenizer, stop_word_ids_list=[[200, 201, 202]])
+        status = await self._make_status(renderer)
+
+        stop_words_str = ["STOP"]
+        stop_word_slice_list = get_stop_word_slices(stop_words_str)
+
+        # Chunk 1: partial stop word, buffers "ST"
+        delta1 = await renderer._update_single_status(
+            status,
+            self._create_output([100, 200, 201]),
+            max_new_tokens=100,
+            stop_words_str=stop_words_str,
+            stop_word_slice_list=stop_word_slice_list,
+            is_streaming=True,
+        )
+        self.assertEqual(delta1.output_str, "Hello ")
+        self.assertIsNone(status.finish_reason)
+
+        # Chunk 2: only the completing token, no trailing tokens.
+        # _check_finish_reason sees output_ids_list ending with [200,201,202] → finish_reason=stop.
+        # _remove_stop_word_ids truncates to [100]. last_output_ids was [100,200,201].
+        delta2 = await renderer._update_single_status(
+            status,
+            self._create_output([202]),
+            max_new_tokens=100,
+            stop_words_str=stop_words_str,
+            stop_word_slice_list=stop_word_slice_list,
+            is_streaming=True,
+        )
+        self.assertEqual(delta2.output_str, "")
+        self.assertEqual(status.finish_reason, FinisheReason.stop)
+
+    async def test_single_token_stop_word_in_mtp_chunk(self):
+        """MTP: single-token stop word appears mid-chunk with trailing tokens.
+        _check_finish_reason only checks the suffix of output_ids_list, so it
+        misses a stop word that isn't at the end. _remove_stop_word_ids truncates
+        the content correctly, but finish_reason is not set by the renderer
+        (the engine is expected to set it)."""
+        tokenizer = self._make_tokenizer({100: "A", 101: "B", 999: "X", 102: "C"})
+        renderer = self._make_renderer(tokenizer, stop_word_ids_list=[[999]])
+        status = await self._make_status(renderer)
+
+        # Single MTP chunk: [100, 101, 999, 102]. Stop word 999 in middle.
+        delta = await renderer._update_single_status(
+            status,
+            self._create_output([100, 101, 999, 102]),
+            max_new_tokens=100,
+            stop_words_str=["X"],
+            stop_word_slice_list=get_stop_word_slices(["X"]),
+            is_streaming=True,
+        )
+        # Content is correctly truncated — "X" and "C" are not emitted
+        self.assertEqual(delta.output_str, "AB")
+        # NOTE: finish_reason is None because _check_finish_reason only checks
+        # the suffix of output_ids_list ([102] ≠ [999]). In production the engine
+        # sets finish_reason; the renderer relies on that.
+        self.assertIsNone(status.finish_reason)
+
+    async def test_eos_in_mtp_chunk_with_trailing_tokens(self):
+        """MTP: EOS token appears mid-chunk with trailing tokens.
+        _check_finish_reason only checks the last token — does NOT catch mid-chunk EOS.
+        _remove_stop_word_ids truncates content at EOS position. Engine sets finish_reason.
+        """
+        eos = 2
+        tokenizer = self._make_tokenizer({100: "Hello", eos: "", 103: "extra"})
+        renderer = self._make_renderer(
+            tokenizer, eos_token_id=eos, stop_word_ids_list=[]
+        )
+        status = await self._make_status(renderer)
+
+        # MTP chunk with EOS mid-stream: [100, 2, 103]
+        delta = await renderer._update_single_status(
+            status,
+            self._create_output([100, eos, 103]),
+            max_new_tokens=100,
+            stop_words_str=[],
+            stop_word_slice_list=[],
+            is_streaming=True,
+        )
+        # Content correctly truncated — tokens after EOS are not emitted
+        self.assertEqual(delta.output_str, "Hello")
+        # finish_reason is None for the same reason as the stop-word case:
+        # _check_finish_reason checks token_ids[-1] == eos_token_id, but the
+        # last token is 103, not EOS. Engine handles this.
+        self.assertIsNone(status.finish_reason)
+
+    async def test_string_level_stop_word_without_token_truncation(self):
+        """String-level stop word that doesn't correspond to a token boundary.
+        Token-level truncation doesn't fire; _process_stop_words handles it.
+
+        Known limitation: _process_streaming_tokens doesn't break on
+        finish_reason, so tokens after the string-level stop word still get
+        processed and emitted in the same chunk. In production this is masked
+        because the engine stops generating when it hits stop words at the
+        token level.  Here we test the actual (imperfect) renderer behavior."""
+        tokenizer = self._make_tokenizer({100: "Hello", 101: "<|end|>", 102: "world"})
+        renderer = self._make_renderer(tokenizer, stop_word_ids_list=[])
+        status = await self._make_status(renderer)
+
+        stop_words_str = ["<|end|>"]
+        stop_word_slice_list = get_stop_word_slices(stop_words_str)
+
+        delta = await renderer._update_single_status(
+            status,
+            self._create_output([100, 101, 102]),
+            max_new_tokens=100,
+            stop_words_str=stop_words_str,
+            stop_word_slice_list=stop_word_slice_list,
+            is_streaming=True,
+        )
+        # "world" leaks because the per-token loop doesn't break on finish_reason.
+        # In production the engine wouldn't generate token 102 after stop word.
+        self.assertEqual(delta.output_str, "Helloworld")
+        self.assertEqual(status.finish_reason, FinisheReason.stop)
+
+    async def test_string_level_stop_word_single_token_per_chunk(self):
+        """String-level stop word — standard (non-MTP) case: one token per chunk.
+        After the stop-word token, no more chunks arrive."""
+        tokenizer = self._make_tokenizer({100: "Hello", 101: "<|end|>"})
+        renderer = self._make_renderer(tokenizer, stop_word_ids_list=[])
+        status = await self._make_status(renderer)
+
+        stop_words_str = ["<|end|>"]
+        stop_word_slice_list = get_stop_word_slices(stop_words_str)
+
+        delta1 = await renderer._update_single_status(
+            status,
+            self._create_output([100]),
+            max_new_tokens=100,
+            stop_words_str=stop_words_str,
+            stop_word_slice_list=stop_word_slice_list,
+            is_streaming=True,
+        )
+        self.assertEqual(delta1.output_str, "Hello")
+        self.assertIsNone(status.finish_reason)
+
+        delta2 = await renderer._update_single_status(
+            status,
+            self._create_output([101]),
+            max_new_tokens=100,
+            stop_words_str=stop_words_str,
+            stop_word_slice_list=stop_word_slice_list,
+            is_streaming=True,
+        )
+        # Stop word consumed, nothing emitted, finish_reason set
+        self.assertEqual(delta2.output_str, "")
+        self.assertEqual(status.finish_reason, FinisheReason.stop)
+
+    async def test_no_stop_word_normal_streaming(self):
+        """Baseline: normal streaming with no stop words. All content emitted."""
+        tokenizer = self._make_tokenizer({100: "Hello", 101: " world"})
+        renderer = self._make_renderer(tokenizer)
+        status = await self._make_status(renderer)
+
+        delta1 = await renderer._update_single_status(
+            status,
+            self._create_output([100]),
+            max_new_tokens=100,
+            stop_words_str=[],
+            stop_word_slice_list=[],
+            is_streaming=True,
+        )
+        self.assertEqual(delta1.output_str, "Hello")
+        self.assertIsNone(status.finish_reason)
+
+        delta2 = await renderer._update_single_status(
+            status,
+            self._create_output([101]),
+            max_new_tokens=100,
+            stop_words_str=[],
+            stop_word_slice_list=[],
+            is_streaming=True,
+        )
+        self.assertEqual(delta2.output_str, " world")
+        self.assertIsNone(status.finish_reason)
+
+    async def test_subsequent_calls_after_finish_return_empty(self):
+        """After finish_reason is set, subsequent calls must return empty."""
+        eos = 2
+        tokenizer = self._make_tokenizer({100: "A", eos: ""})
+        renderer = self._make_renderer(tokenizer, eos_token_id=eos)
+        status = await self._make_status(renderer)
+
+        delta1 = await renderer._update_single_status(
+            status,
+            self._create_output([100, eos]),
+            max_new_tokens=100,
+            stop_words_str=[],
+            stop_word_slice_list=[],
+            is_streaming=True,
+        )
+        self.assertEqual(delta1.output_str, "A")
+        self.assertEqual(status.finish_reason, FinisheReason.stop)
+
+        # Subsequent call must be a no-op
+        delta2 = await renderer._update_single_status(
+            status,
+            self._create_output([]),
+            max_new_tokens=100,
+            stop_words_str=[],
+            stop_word_slice_list=[],
+            is_streaming=True,
+        )
+        self.assertEqual(delta2.output_str, "")
 
 
 if __name__ == "__main__":

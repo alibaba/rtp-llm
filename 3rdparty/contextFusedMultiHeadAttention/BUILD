@@ -1,6 +1,6 @@
 load("//:def.bzl", "rpm_library", "copts", "cuda_copts",)
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch", "if_cuda")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 package(default_visibility = ["//visibility:public"])
 
@@ -42,8 +42,8 @@ cc_library(
     ]),
     deps = [
         ":fmha_v2_header",
-        "//rtp_llm/cpp/kernels:attn_utils",
-        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/common/kernels:attn_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         "//rtp_llm/cpp/utils:math_utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",

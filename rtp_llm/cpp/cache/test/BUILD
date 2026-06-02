@@ -1,5 +1,5 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
@@ -8,7 +8,8 @@ test_copts = [
 ] + copts()
 
 test_deps = [
-    "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+    "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/cache",
@@ -21,8 +22,8 @@ test_deps = [
 ] + torch_deps()
 
 block_cache_test_deps = [
-    "//rtp_llm/cpp/devices/testing:device_test_utils",
-    "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+    "//rtp_llm/cpp/testing:device_test_utils",
+    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/cache",
@@ -67,7 +68,7 @@ cc_test(
     copts = test_copts,
     deps = block_cache_test_deps,
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -81,7 +82,7 @@ cc_test(
         ":block_pool_test_helper",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -93,7 +94,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -107,7 +108,7 @@ cc_test(
         ":block_pool_test_helper",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -121,7 +122,7 @@ cc_test(
         ":block_pool_test_helper",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -138,5 +139,45 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "linear_kv_cache_group_test",
+    srcs = [
+        "LinearKVCacheGroupTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "hybrid_kv_cache_allocator_test",
+    srcs = [
+        "HybridTypeKVCacheAllocatorTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "kv_cache_resource_test",
+    srcs = [
+        "KVCacheResourceTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+    exec_properties = {'gpu':'H20'},
 )

@@ -3,10 +3,10 @@
 #include <cstddef>
 #include <vector>
 #include <cstdint>
-#include <sstream>
-#include <string>
 
-#include "rtp_llm/cpp/core/Types.h"
+#include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
@@ -15,34 +15,9 @@ namespace rtp_llm {
 typedef int32_t          GroupIdType;
 typedef std::vector<int> LayerIdsType;
 
-constexpr int32_t NULL_BLOCK_IDX = -1;
-
-inline bool isNullBlockIdx(BlockIdxType block_idx) {
-    return block_idx == NULL_BLOCK_IDX;
-}
-
 struct BlockAddrInfo {
     void* kv_addr       = nullptr;
     void* kv_scale_addr = nullptr;
-};
-
-// Lightweight block descriptor for cache-store / RPC use cases.
-// Upper layers may convert (device, scalar_type) to rtp_llm::MemoryType/DataType and build Buffer views as needed.
-struct BlockInfo {
-    // Torch device of the backing storage (CPU/CUDA), taken from the underlying tensor.
-    // Kept as raw values to avoid torch->rtp conversions inside cache.
-    bool    is_cuda      = false;
-    int32_t device_index = 0;
-
-    int32_t scalar_type = 0;  // c10::ScalarType
-
-    void*  addr       = nullptr;
-    size_t size_bytes = 0;
-};
-
-struct BlockInfoPair {
-    BlockInfo kv;
-    BlockInfo kv_scale;
 };
 
 struct KVCacheInfo {
@@ -62,25 +37,26 @@ struct MatchResult {
     size_t           reuse_length = 0;
     size_t           reuse_blocks = 0;
     BlockIndicesType block_indices;
+};
 
-    std::string debugString() const {
-        std::stringstream debug_string;
-        debug_string << "MatchResult reuse_length: " << reuse_length << ", reuse_blocks: " << reuse_blocks
-                     << ", block_indices: ";
-        for (const auto& v : block_indices) {
-            debug_string << v << ", ";
-        }
-        return debug_string.str();
-    }
+// for p2p connector when TP settings of prefill & decode are different.
+struct KVPartitionBytes {
+    size_t k_off = 0;
+    size_t k_sz  = 0;
+    size_t v_off = 0;
+    size_t v_sz  = 0;
 };
 
 struct MallocInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
-    int64_t                 request_id          = 0;
-    int64_t                 epoch               = 0;     // Batch Epoch ID: 0 = not assigned, >0 = batch-specific
-    bool                    verbose             = true;  // for failed log
-    bool                    enable_device_cache = true;
+    int64_t                 request_id = 0;
+    int64_t epoch               = 0;  // Batch Epoch ID: 0 = globally visible, >=1 = visible only within the same batch
+    bool    verbose             = true;  // for failed log
+    bool    reuse_cache         = true;
+    bool    enable_device_cache = true;
+    // Sparse linear-block cleanup is only valid for incremental allocation.
+    bool enable_remove_skipped_blocks = true;
 };
 
 struct MallocResult {
@@ -88,13 +64,6 @@ struct MallocResult {
     int  reuse_len;
 
     int64_t match_cost_time_us = 0;
-
-    std::string debugString() const {
-        std::stringstream debug_string;
-        debug_string << "MallocResult success: " << (success ? "true" : "false") << ", reuse_len: " << reuse_len
-                     << ", match_cost_time_us: " << match_cost_time_us;
-        return debug_string.str();
-    }
 };
 
 struct FreeInfo {
@@ -102,68 +71,13 @@ struct FreeInfo {
     CompleteTokenIdsPtr     complete_token_ids;
 
     int64_t request_id = 0;
-
-    std::string debugString() const {
-        std::stringstream debug_string;
-        debug_string << "FreeInfo request_id: " << request_id;
-        if (batch_kv_cache_resource) {
-            debug_string << ", batch_size: " << batch_kv_cache_resource->batchSize();
-            if (batch_kv_cache_resource->batchSize() > 0) {
-                debug_string << ", cache_keys: ";
-                const auto& cache_keys = batch_kv_cache_resource->cacheKeys(0);
-                for (size_t i = 0; i < cache_keys.size() && i < 10; ++i) {  // Limit to first 10
-                    debug_string << cache_keys[i] << ", ";
-                }
-                if (cache_keys.size() > 10) {
-                    debug_string << "...";
-                }
-                debug_string << ", blocks: ";
-                const auto& blocks = batch_kv_cache_resource->blocks(0);
-                for (size_t i = 0; i < blocks.size() && i < 10; ++i) {  // Limit to first 10
-                    debug_string << blocks[i] << ", ";
-                }
-                if (blocks.size() > 10) {
-                    debug_string << "...";
-                }
-            }
-        }
-        return debug_string.str();
-    }
 };
 
 struct InsertInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
-    int64_t                 epoch = 0;  // Epoch ID: 0 = global visible, >0 = batch-specific
-
-    std::string debugString() const {
-        std::stringstream debug_string;
-        debug_string << "InsertInfo is_resident: " << (is_resident ? "true" : "false");
-        debug_string << ", epoch: " << epoch;
-        if (batch_kv_cache_resource) {
-            debug_string << ", batch_size: " << batch_kv_cache_resource->batchSize();
-            if (batch_kv_cache_resource->batchSize() > 0) {
-                debug_string << ", cache_keys: ";
-                const auto& cache_keys = batch_kv_cache_resource->cacheKeys(0);
-                for (size_t i = 0; i < cache_keys.size() && i < 10; ++i) {  // Limit to first 10
-                    debug_string << cache_keys[i] << ", ";
-                }
-                if (cache_keys.size() > 10) {
-                    debug_string << "...";
-                }
-                debug_string << ", blocks: ";
-                const auto& blocks = batch_kv_cache_resource->blocks(0);
-                for (size_t i = 0; i < blocks.size() && i < 10; ++i) {  // Limit to first 10
-                    debug_string << blocks[i] << ", ";
-                }
-                if (blocks.size() > 10) {
-                    debug_string << "...";
-                }
-            }
-        }
-        return debug_string.str();
-    }
+    int64_t                 epoch = 0;  // Epoch ID: 0 = globally visible, >=1 = visible only within the same batch
 };
 
 }  // namespace rtp_llm

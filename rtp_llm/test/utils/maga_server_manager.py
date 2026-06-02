@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import shlex
+import signal as signal_mod
 import socket
 import subprocess
 import sys
@@ -45,6 +46,7 @@ class MagaServerManager(object):
         self._process_file_name = process_file_name
         self._port = port
         self._smoke_args_str = smoke_args_str
+        self._exit_code: Optional[int] = None
         if self._port is None:
             self._port = MagaServerManager.get_free_port()
 
@@ -62,6 +64,38 @@ class MagaServerManager(object):
     def port(self) -> int:
         return int(self._port)
 
+    @property
+    def exit_code(self) -> Optional[int]:
+        return self._exit_code
+
+    @property
+    def log_file_path(self) -> Optional[str]:
+        return self._log_file
+
+    @property
+    def server_pid(self) -> Optional[int]:
+        if self._server_process is not None:
+            return self._server_process.pid
+        return None
+
+    @property
+    def server_proc_status(self) -> Optional[str]:
+        """Pre-captured /proc/<pid>/status snapshot for diagnostics.
+
+        Returns None when no snapshot is available (e.g. the server process
+        has already been reaped or its /proc entry is unreadable). Callers
+        such as smoke gpu_diagnostics.dump_gpu_state will fall back to
+        reading /proc/<server_pid>/status live when this is None.
+        """
+        pid = self.server_pid
+        if pid is None:
+            return None
+        try:
+            with open(f"/proc/{pid}/status", "r") as f:
+                return f.read()
+        except Exception:
+            return None
+
     def wait_sever_done(self, timeout: int = 1600):
         # currently we can not check vit server health, assume it is ready, xieshui will fix it
         if int(self._env_args.get("VIT_SEPARATION", "0")) == 1:
@@ -72,7 +106,23 @@ class MagaServerManager(object):
         # Health check uses START_PORT (self._port); when VIT_SEPARATION==1 we return True above
         result = wait_sever_done(self._server_process, int(self._port), timeout)
         if not result:
-            # Print process log when server startup fails
+            rc = self._server_process.poll() if self._server_process else None
+            self._exit_code = rc
+            if rc is not None:
+                if rc < 0:
+                    sig = -rc
+                    sig_name = signal_mod.Signals(sig).name if sig in signal_mod.Signals._value2member_map_ else f"signal {sig}"
+                    logging.warning(
+                        f"Server process pid={self._server_process.pid} killed by {sig_name} (exit code {rc})"
+                    )
+                else:
+                    logging.warning(
+                        f"Server process pid={self._server_process.pid} exited with code {rc}"
+                    )
+            else:
+                logging.warning(
+                    f"Server process pid={self._server_process.pid} still alive, health check timed out after {timeout}s"
+                )
             self.print_process_log()
         return result
 
@@ -96,16 +146,18 @@ class MagaServerManager(object):
         role_log_name = self._role_name + "_logs"
         current_env: Dict[str, str] = os.environ.copy()
         for k, v in self._env_args.items():
-            current_env[k] = v
+            if v is not None:
+                current_env[k] = v
 
-        current_env[MODEL_TYPE] = model_type
-        current_env[CHECKPOINT_PATH] = model_path
+        if model_type is not None:
+            current_env[MODEL_TYPE] = model_type
+        if model_path is not None:
+            current_env[CHECKPOINT_PATH] = model_path
         current_env[LOG_PATH] = role_log_name
 
-        if tokenizer_path is not None:
-            current_env[TOKENIZER_PATH] = tokenizer_path
-        else:
-            current_env[TOKENIZER_PATH] = model_path
+        effective_tok = tokenizer_path if tokenizer_path is not None else model_path
+        if effective_tok is not None:
+            current_env[TOKENIZER_PATH] = effective_tok
         if lora_infos is not None:
             current_env[LORA_INFO] = json.dumps(lora_infos)
         if ptuning_path is not None:
@@ -125,10 +177,6 @@ class MagaServerManager(object):
             current_env["DG_JIT_CACHE_DIR"] = os.path.join(home_dir, ".deep_gemm")
 
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
-        if "MULTI_TASK_PROMPT" in current_env:
-            current_env["MULTI_TASK_PROMPT"] = os.path.join(
-                os.getcwd(), current_env["MULTI_TASK_PROMPT"]
-            )
         cwd_path = os.environ.get("MAGA_SERVER_WORK_DIR", bazel_outputs_dir)
         # 创建一个文件来存储子进程的日志
         self._log_file = (
@@ -142,7 +190,20 @@ class MagaServerManager(object):
             )
             self._file_stream = open(self._log_file, "w")
         logging.info(f"smoke_args_str: {self._smoke_args_str}")
+        # Parse smoke_args_str (single string with all arguments) into list
         parsed_args = shlex.split(self._smoke_args_str)
+
+        # Handle --multi_task_prompt argument: convert relative path to absolute path
+        for i in range(len(parsed_args)):
+            if parsed_args[i] == "--multi_task_prompt" and i + 1 < len(parsed_args):
+                path = parsed_args[i + 1]
+                if not os.path.isabs(path):
+                    parsed_args[i + 1] = os.path.join(os.getcwd(), path)
+                    logging.info(
+                        f"Converted --multi_task_prompt path from '{path}' to '{parsed_args[i + 1]}'"
+                    )
+                break
+
         p = subprocess.Popen(
             ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"] + parsed_args,
             env=current_env,
@@ -231,10 +292,10 @@ class MagaServerManager(object):
         self.print_process_log()
         return False, None
 
-    def print_process_log(self):
+    def print_process_log(self, max_lines: int = 0):
+        """Print server process log. If max_lines > 0, only print last N lines."""
         if self._log_file is None:
             return
-        # Flush file stream before reading to ensure all logs are written
         if self._file_stream is not None:
             try:
                 self._file_stream.flush()
@@ -243,7 +304,13 @@ class MagaServerManager(object):
         try:
             if os.path.exists(self._log_file):
                 with open(self._log_file, "r") as f:
-                    content = f.read()
+                    if max_lines > 0:
+                        all_lines = f.readlines()
+                        content = "".join(all_lines[-max_lines:])
+                        if len(all_lines) > max_lines:
+                            content = f"... ({len(all_lines) - max_lines} lines truncated)\n" + content
+                    else:
+                        content = f.read()
                 if content:
                     logging.warning("=" * 80)
                     logging.warning(f"Server process log ({self._log_file}):")

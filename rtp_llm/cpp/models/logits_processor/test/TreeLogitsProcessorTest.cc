@@ -1,11 +1,10 @@
 
 #include "gtest/gtest.h"
 
-#include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/models/logits_processor/PrefixToCandidateTokens.h"
-#include "rtp_llm/cpp/core/BufferHelper.h"
 #include <unistd.h>
 
 using namespace std;
@@ -14,7 +13,7 @@ namespace rtp_llm {
 
 class SamplerDataBuilder {
 public:
-    SamplerDataBuilder(): device_(rtp_llm::DeviceFactory::getDefaultDevice()) {};
+    SamplerDataBuilder() = default;
 
     struct Config {
         size_t            batch_size;
@@ -38,7 +37,7 @@ public:
             tree_infos.push_back(tree_info);
         }
 
-        BaseLogitsProcessorPtr processor_ptr = std::make_shared<TreeLogitsProcessor>(device_, tree_infos);
+        BaseLogitsProcessorPtr processor_ptr = std::make_shared<TreeLogitsProcessor>(tree_infos);
         return processor_ptr;
     }
 
@@ -55,32 +54,22 @@ public:
             idx += nums[i];
         }
         sampler_inputs.logits_processor_states_ptr = state_ptr;
-        sampler_inputs.logits                      = device_->allocateBuffer(
-            {config.logits_type, {config.batch_size, config.vocab_size}, rtp_llm::AllocationType::DEVICE}, {});
-        sampler_inputs.sequence_lengths = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_INT32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
-        sampler_inputs.input_lengths = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_INT32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
-        sampler_inputs.num_beams_in = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_UINT64, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
-        sampler_inputs.num_beams_out = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_UINT64, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
-        sampler_inputs.top_k = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_UINT32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
-        sampler_inputs.top_p = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_FP32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
-        sampler_inputs.temperature = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_FP32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
-        sampler_inputs.repetition_penalty = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_FP32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
-        sampler_inputs.cum_log_probs = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_FP32, {config.batch_size}, rtp_llm::AllocationType::HOST}, {});
-        sampler_inputs.token_ids = device_->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                                            {config.batch_size, sampler_inputs.step + 1},
-                                                            rtp_llm::AllocationType::HOST},
-                                                           {});
-        device_->bufMemset(*sampler_inputs.logits, 0);
-        device_->bufMemset(*sampler_inputs.token_ids, 0);
+        sampler_inputs.logits =
+            torch::empty({(int64_t)config.batch_size, (int64_t)config.vocab_size},
+                         torch::TensorOptions().dtype(dataTypeToTorchType(config.logits_type)).device(torch::kCUDA));
+        sampler_inputs.sequence_lengths   = torch::empty({(int64_t)config.batch_size}, torch::kInt32);
+        sampler_inputs.input_lengths      = torch::empty({(int64_t)config.batch_size}, torch::kInt32);
+        sampler_inputs.num_beams_in       = torch::empty({(int64_t)config.batch_size}, torch::kLong);
+        sampler_inputs.num_beams_out      = torch::empty({(int64_t)config.batch_size}, torch::kLong);
+        sampler_inputs.top_k              = torch::empty({(int64_t)config.batch_size}, torch::kInt32);
+        sampler_inputs.top_p              = torch::empty({(int64_t)config.batch_size}, torch::kFloat32);
+        sampler_inputs.temperature        = torch::empty({(int64_t)config.batch_size}, torch::kFloat32);
+        sampler_inputs.repetition_penalty = torch::empty({(int64_t)config.batch_size}, torch::kFloat32);
+        sampler_inputs.cum_log_probs      = torch::empty({(int64_t)config.batch_size}, torch::kFloat32);
+        sampler_inputs.token_ids =
+            torch::empty({(int64_t)config.batch_size, (int64_t)(sampler_inputs.step + 1)}, torch::kInt32);
+        sampler_inputs.logits.zero_();
+        sampler_inputs.token_ids.zero_();
         return sampler_inputs;
     };
 
@@ -88,38 +77,15 @@ public:
         RTP_LLM_CHECK(token_ids.size() == sampler_inputs.batch_size);
         RTP_LLM_CHECK(token_ids[0].size() == sampler_inputs.step + 1);
         for (auto i = 0; i < sampler_inputs.batch_size; i++) {
-            auto tensor = Buffer2torchTensor(*sampler_inputs.token_ids->index(i), false);
+            auto tensor = sampler_inputs.token_ids[i];
             for (auto j = 0; j < sampler_inputs.step + 1; j++) {
                 tensor[j] = token_ids[i][j];
             }
         }
     }
-
-    rtp_llm::DeviceBase* device_;
 };
 
-class TreeLogitsProcessorTest: public DeviceTestBase {
-protected:
-    void SetUp() override {
-        DeviceTestBase::SetUp();
-    }
-
-    void TearDown() override {
-        DeviceTestBase::TearDown();
-    }
-
-    rtp_llm::BufferPtr randint(int start, int end, std::vector<int64_t> shape, bool is_host) {
-        auto tensor  = torch::randint(start, end, shape, at::TensorOptions().dtype(at::ScalarType::Int));
-        auto alloc_t = is_host ? AllocationType::HOST : AllocationType::DEVICE;
-        return tensorToBuffer(tensor, alloc_t);
-    }
-
-    rtp_llm::BufferPtr rand(std::vector<int64_t> shape, bool is_host) {
-        auto tensor  = torch::rand(torch::IntArrayRef(shape));
-        auto alloc_t = is_host ? AllocationType::HOST : AllocationType::DEVICE;
-        return tensorToBuffer(tensor, alloc_t);
-    }
-};
+class TreeLogitsProcessorTest: public DeviceTestBase {};
 
 #define EXPECT_SIMILAR(vec1, vec2, eps)                                                                                \
     do {                                                                                                               \
@@ -146,7 +112,8 @@ TEST_F(TreeLogitsProcessorTest, testGenerateVocabMask) {
     BaseLogitsProcessorPtr processor  = builder.generateLogitsProcessor(true, batch_size, file_path);
     SamplerInputs sampler_inputs = builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
     std::vector<std::vector<size_t>> batch_candidate_token_ids = {{}, {1}, {2, 3, 4}, {1, 3, 5}};
-    rtp_llm::BufferPtr vocab_mask = processor->generateVocabMask(batch_size, vocab_size, batch_candidate_token_ids);
+    auto vocab_mask     = processor->generateVocabMask(batch_size, vocab_size, batch_candidate_token_ids);
+    auto vocab_mask_cpu = vocab_mask.cpu().contiguous();
 
     std::vector<std::vector<int32_t>> expect_vocab_mask(batch_size, std::vector<int32_t>(vocab_size, 1));
     expect_vocab_mask[1][1] = 0;
@@ -157,7 +124,7 @@ TEST_F(TreeLogitsProcessorTest, testGenerateVocabMask) {
     expect_vocab_mask[3][3] = 0;
     expect_vocab_mask[3][5] = 0;
 
-    auto vocab_mask_hosts = getBufferValues<uint8_t>(*vocab_mask);
+    auto vocab_mask_hosts = vocab_mask_cpu.data_ptr<uint8_t>();
     for (size_t i = 0; i < batch_size; i++) {
         for (size_t j = 0; j < vocab_size; j++) {
             ASSERT_TRUE(vocab_mask_hosts[i * vocab_size + j] == expect_vocab_mask[i][j]);
@@ -166,14 +133,13 @@ TEST_F(TreeLogitsProcessorTest, testGenerateVocabMask) {
 }
 
 template<typename Dtype>
-void setBuffer(rtp_llm::BufferPtr buf, std::vector<std::vector<Dtype>> content) {
-    RTP_LLM_CHECK(buf->shape().size() == 2);
-    RTP_LLM_CHECK(buf->shape()[0] == content.size());
-    RTP_LLM_CHECK(buf->shape()[1] == content[0].size());
-    for (auto i = 0; i < buf->shape()[0]; i++) {
-        auto tensor = Buffer2torchTensor(*buf->index(i), false);
-        for (auto j = 0; j < buf->shape()[1]; j++) {
-            tensor[j] = content[i][j];
+void setTensor(torch::Tensor& tensor, std::vector<std::vector<Dtype>> content) {
+    RTP_LLM_CHECK(tensor.dim() == 2);
+    RTP_LLM_CHECK((size_t)tensor.size(0) == content.size());
+    RTP_LLM_CHECK((size_t)tensor.size(1) == content[0].size());
+    for (int64_t i = 0; i < tensor.size(0); i++) {
+        for (int64_t j = 0; j < tensor.size(1); j++) {
+            tensor[i][j] = content[i][j];
         }
     }
 }
@@ -189,10 +155,7 @@ TEST_F(TreeLogitsProcessorTest, testUpdateStatus) {
         SamplerInputs          sampler_inputs =
             builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
 
-        rtp_llm::BufferPtr new_token = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_INT32, {batch_size, 1}, rtp_llm::AllocationType::HOST}, {});
-        std::vector<std::vector<int>> new_token_ids = {{64000}, {64003}, {64006}, {64008}};
-        setBuffer(new_token, new_token_ids);
+        auto new_token = torch::tensor({{64000}, {64003}, {64006}, {64008}}, torch::kInt32);
 
         processor->updateStatus(new_token, 1);
 
@@ -204,7 +167,7 @@ TEST_F(TreeLogitsProcessorTest, testUpdateStatus) {
         EXPECT_EQ("225_64008", status_list[3]);
 
         std::vector<std::vector<int>> token_ids_2 = {{64001}, {64001}, {64004}, {64001}};
-        setBuffer(new_token, token_ids_2);
+        setTensor(new_token, token_ids_2);
 
         processor->updateStatus(new_token, 1);
 
@@ -215,7 +178,7 @@ TEST_F(TreeLogitsProcessorTest, testUpdateStatus) {
         EXPECT_EQ("225_64008_64001", status_list[3]);
 
         std::vector<std::vector<int>> token_ids_3 = {{2}, {2}, {2}, {2}};
-        setBuffer(new_token, token_ids_3);
+        setTensor(new_token, token_ids_3);
 
         processor->updateStatus(new_token, 1);
 
@@ -226,7 +189,7 @@ TEST_F(TreeLogitsProcessorTest, testUpdateStatus) {
         EXPECT_EQ("225_64008_64001_2", status_list[3]);
 
         std::vector<std::vector<int>> token_ids_4 = {{1}, {1}, {1}, {1}};
-        setBuffer(new_token, token_ids_4);
+        setTensor(new_token, token_ids_4);
 
         processor->updateStatus(new_token, 1);
 
@@ -258,8 +221,7 @@ TEST_F(TreeLogitsProcessorTest, testProcess) {
         std::vector<std::vector<float>> logits_list;
         std::vector<std::vector<float>> logits_index_list = {{64000}, {64003, 64006, 64008}, {64011}, {64001}};
         for (size_t i = 0; i < batch_size; i++) {
-            auto logits = sampler_inputs.logits->index(i);
-            auto tensor = Buffer2torchTensor(*logits, false);
+            auto tensor = sampler_inputs.logits[i];
             tensor.fill_(0);
             for (auto index : logits_index_list[i]) {
                 tensor[index] = 1;
@@ -267,8 +229,9 @@ TEST_F(TreeLogitsProcessorTest, testProcess) {
         }
         processor->process(sampler_inputs, 0, batch_size);
 
-        auto logits       = sampler_inputs.logits->index(0);
-        auto logits_hosts = getBufferValues<float>(*logits);
+        auto logits_tensor = sampler_inputs.logits[0].cpu();
+        auto logits_hosts  = std::vector<float>(logits_tensor.data_ptr<float>(),
+                                               logits_tensor.data_ptr<float>() + logits_tensor.numel());
         ASSERT_EQ(logits_hosts[64000], 1);
         ASSERT_EQ(logits_hosts[64003], 0);
         ASSERT_EQ(logits_hosts[64011], 0);

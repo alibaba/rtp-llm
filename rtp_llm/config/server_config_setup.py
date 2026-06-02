@@ -11,6 +11,7 @@ from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.ops import (
     FfnDisAggregateConfig,
     ParallelismConfig,
+    PrefillCPConfig,
     RoleType,
     SpeculativeType,
 )
@@ -52,14 +53,62 @@ def auto_configure_deepep(
     - PD separation + Decode node + Multi-node multi-GPU (>=9 GPUs): 1, 1, 1
     """
 
+    # MoE uses physical TP topology, not attention TP. get_attn_tp_size()
+    # returns 1 when CP is enabled, which would incorrectly disable
+    # use_all_gather for ep_size == tp_size configurations.
     tp_size = parallelism_config.tp_size
     ep_size = parallelism_config.ep_size
-    world_size = parallelism_config.world_size
+    dp_size = parallelism_config.dp_size
     moe_config.ll_num_max_token = ll_num_max_token
+
+    # Explicit MoriEP is incompatible with use_all_gather (PURE_TP router).
+    # Disable use_all_gather when user explicitly requests MoriEP.
+    if deep_ep_config.use_mori_ep:
+        moe_config.use_all_gather = False
+        logging.info(
+            "use_mori_ep is explicitly enabled; disabling use_all_gather "
+            "to allow MoriEP router selection"
+        )
+
+    # allgather default applies only to single GPU and pure TP (no CP).
+    # PureCP / PureDP routers exist but must be opted in via --moe_strategy
+    # (auto-selection falls back to DeepEP). CP-enabled topologies share the
+    # tp>1 / dp==1 / ep==tp shape with pure TP, so they must be excluded here
+    # to avoid silently disabling DeepEP without selecting PureCP.
+    prefill_cp_enabled = parallelism_config.prefill_cp_config.is_enabled()
+    is_single_gpu = ep_size == 1
+    is_pure_tp = (
+        tp_size > 1
+        and dp_size == 1
+        and ep_size == tp_size
+        and not prefill_cp_enabled
+    )
+    # Explicit opt-in via --moe_strategy must preserve use_all_gather, otherwise
+    # the matching strategy's check_conditions (which requires use_all_gather)
+    # will never be satisfied. Topology is validated here to keep the auto path
+    # falling back to DeepEP when --moe_strategy and shape disagree.
+    explicit_pure_dp = (
+        moe_config.moe_strategy == "fp8_per_block_pure_dp"
+        and tp_size == 1
+        and dp_size > 1
+        and ep_size == dp_size
+    )
+    explicit_pure_cp = (
+        moe_config.moe_strategy == "fp8_per_block_pure_cp"
+        and tp_size > 1
+        and dp_size == 1
+        and ep_size == tp_size
+        and prefill_cp_enabled
+    )
+
+    # use_deepep_moe disables use_all_gather only when a viable DeepEP path
+    # exists (ep_size > 1). On single-GPU configs there is no DeepEP path,
+    # so honor the implicit allgather fallback even if --use_deepep_moe was set.
     moe_config.use_all_gather = (
         moe_config.use_all_gather
         and not deep_ep_config.use_deepep_low_latency
-        and ep_size == tp_size
+        and (is_single_gpu or not deep_ep_config.use_deepep_moe)
+        and (is_single_gpu or is_pure_tp or explicit_pure_dp or explicit_pure_cp)
     )
     if moe_config.use_all_gather:
         moe_config.use_deepep_moe = False
@@ -76,6 +125,7 @@ def auto_configure_deepep(
         deep_ep_config.use_deepep_moe is None
         and deep_ep_config.use_deepep_internode is None
         and deep_ep_config.use_deepep_low_latency is None
+        and deep_ep_config.use_mori_ep is None
     ):
         # All are None, use auto configuration
         _apply_auto_deepep_config(
@@ -92,11 +142,27 @@ def auto_configure_deepep(
             moe_config.use_deepep_internode = deep_ep_config.use_deepep_internode
         if deep_ep_config.use_deepep_low_latency is not None:
             moe_config.use_deepep_low_latency = deep_ep_config.use_deepep_low_latency
+        if deep_ep_config.use_mori_ep is not None:
+            moe_config.use_mori_ep = deep_ep_config.use_mori_ep
+
+        # MoriEP does not support low-latency mode. When use_mori_ep is
+        # explicitly enabled and use_deepep_low_latency was not explicitly set
+        # by the user, disable the default True value so that MoriEP strategy
+        # can pass its check_conditions.
+        if moe_config.use_mori_ep and deep_ep_config.use_deepep_low_latency is None:
+            moe_config.use_deepep_low_latency = False
+            logging.info(
+                "use_mori_ep is enabled and use_deepep_low_latency was not "
+                "explicitly set; disabling the default low-latency mode so "
+                "that MoriEP strategy is selectable"
+            )
+
         logging.info(
-            f"Using user-specified DeepEP configuration:\n"
+            f"Using user-specified DeepEP/MoriEP configuration:\n"
             f"  USE_DEEPEP_MOE: {moe_config.use_deepep_moe}\n"
             f"  USE_DEEPEP_INTERNODE: {moe_config.use_deepep_internode}\n"
-            f"  USE_DEEPEP_LOW_LATENCY: {moe_config.use_deepep_low_latency}"
+            f"  USE_DEEPEP_LOW_LATENCY: {moe_config.use_deepep_low_latency}\n"
+            f"  USE_MORI_EP: {moe_config.use_mori_ep}\n"
             f"  ll_num_max_token: {moe_config.ll_num_max_token}"
         )
 
@@ -182,8 +248,9 @@ def _apply_auto_deepep_config(
 
 def set_parallelism_config(
     parallelism_config: ParallelismConfig,
-    world_rank: int = 0,
+    world_rank: Optional[int] = None,
     py_ffn_disaggregate_config: Optional[FfnDisAggregateConfig] = None,
+    py_prefill_cp_config: Optional[PrefillCPConfig] = None,
 ) -> None:
     """Update rank-related fields in ParallelismConfig from a given world_rank.
 
@@ -204,18 +271,47 @@ def set_parallelism_config(
             n = world_size
         parallelism_config.local_world_size = max(n, 1)
 
-    expected_ep = parallelism_config.tp_size * parallelism_config.dp_size
-    need_ep = expected_ep > 1 and parallelism_config.ep_size == 1
-    if need_ep:
-        parallelism_config.ep_size = expected_ep
+    # Resolve and validate parallelism configuration.
+    # ep_size default is 0, which triggers automatic derivation.
+    # Three supported modes:
+    # 1. Single GPU: tp_size == 1, dp_size == 1, ep_size == 0 (default) → ep_size set to 1
+    # 2. Pure TP:    ep_size explicitly set to 1, tp_size > 1, dp_size == 1
+    # 3. EP mode:    ep_size == 0 (default), ep_size auto-derived as tp_size * dp_size
+    if parallelism_config.ep_size == 1:
+        assert (
+            parallelism_config.tp_size >= 1
+        ), f"Pure TP mode (ep_size=1) requires tp_size >= 1, got tp_size={parallelism_config.tp_size}"
+        assert (
+            parallelism_config.dp_size == 1
+        ), f"Pure TP mode (ep_size=1) requires dp_size == 1, got dp_size={parallelism_config.dp_size}"
+    elif parallelism_config.ep_size == 0:
+        logging.info("parallelism_config.ep_size == 0, auto set to world size")
+        parallelism_config.ep_size = (
+            parallelism_config.tp_size * parallelism_config.dp_size
+        )
+    else:
+        assert (
+            parallelism_config.ep_size
+            == parallelism_config.tp_size * parallelism_config.dp_size
+        ), f"ep_size must be equal to 1 or tp_size * dp_size, got ep_size={parallelism_config.ep_size}, tp_size={parallelism_config.tp_size}, dp_size={parallelism_config.dp_size}"
+
     ffn_tp_size = parallelism_config.tp_size // parallelism_config.ffn_sp_size
     parallelism_config.ffn_tp_size = ffn_tp_size
     parallelism_config.enable_sp = parallelism_config.ffn_sp_size > 1
-    parallelism_config.world_rank = world_rank
-    parallelism_config.local_rank = world_rank % parallelism_config.local_world_size
-    parallelism_config.tp_rank = world_rank % parallelism_config.tp_size
-    parallelism_config.dp_rank = world_rank // parallelism_config.tp_size
-    parallelism_config.ep_rank = world_rank % parallelism_config.ep_size
+    if world_rank is not None:
+        parallelism_config.world_rank = world_rank
+    parallelism_config.local_rank = (
+        parallelism_config.world_rank % parallelism_config.local_world_size
+    )
+    parallelism_config.tp_rank = (
+        parallelism_config.world_rank % parallelism_config.tp_size
+    )
+    parallelism_config.dp_rank = (
+        parallelism_config.world_rank // parallelism_config.tp_size
+    )
+    parallelism_config.ep_rank = (
+        parallelism_config.world_rank % parallelism_config.ep_size
+    )
     parallelism_config.ffn_tp_rank = (
         parallelism_config.tp_rank % parallelism_config.ffn_tp_size
     )
@@ -242,13 +338,44 @@ def set_parallelism_config(
         parallelism_config.ffn_disaggregate_config.is_ffn_rank = (
             parallelism_config.world_rank >= attention_tp_size * attention_dp_size
         )
+
+    if py_prefill_cp_config:
+        parallelism_config.prefill_cp_config.method = py_prefill_cp_config.method
+        parallelism_config.prefill_cp_config.comm_buffer_size = (
+            py_prefill_cp_config.comm_buffer_size
+        )
     logging.info(
-        f"set_parallelism_config : rank {world_rank}, parallelism_config={parallelism_config.to_string()}, world_rank={world_rank}"
+        f"set_parallelism_config: rank {world_rank}\nparallelism_config={parallelism_config.to_string()}world_rank={world_rank}\n"
     )
 
 
+def _infer_model_type(ckpt_path: str) -> Optional[str]:
+    """Infer ``model_type`` by reading config.json from a local checkpoint directory.
+
+    Importing ``rtp_llm.models`` triggers all ``register_model`` calls so that
+    the architecture / repo lookup tables are populated before we query them.
+    """
+    if not ckpt_path or not os.path.isdir(ckpt_path):
+        return None
+    config_path = os.path.join(ckpt_path, "config.json")
+    if not os.path.isfile(config_path):
+        return None
+    try:
+        import rtp_llm.models  # noqa: F401  — trigger model registrations
+
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        return ModelDict.get_ft_model_type_by_config(config)
+    except Exception as e:
+        logging.warning(f"Failed to infer model_type from {config_path}: {e}")
+        return None
+
+
 def setup_default_args(py_env_configs):
-    set_parallelism_config(py_env_configs.parallelism_config)
+    set_parallelism_config(
+        py_env_configs.parallelism_config,
+        py_prefill_cp_config=py_env_configs.prefill_cp_config,
+    )
     if not py_env_configs.model_args.tokenizer_path:
         py_env_configs.model_args.tokenizer_path = py_env_configs.model_args.ckpt_path
 
@@ -258,7 +385,7 @@ def setup_default_args(py_env_configs):
         )
 
     if not py_env_configs.model_args.model_type:
-        py_env_configs.model_args.model_type = ModelDict.get_ft_model_type_by_config(
+        py_env_configs.model_args.model_type = _infer_model_type(
             py_env_configs.model_args.ckpt_path
         )
     if not py_env_configs.model_args.model_type:
@@ -274,14 +401,22 @@ def setup_default_args(py_env_configs):
             "[MI308X] enable FT_DISABLE_CUSTOM_AR by default, as amd has own implementation."
         )
 
-    if os.path.exists("/dev/kfd") and os.getenv("SEQ_SIZE_PER_BLOCK") is None:
+    if (
+        os.path.exists("/dev/kfd")
+        and py_env_configs.kv_cache_config.seq_size_per_block == 0
+    ):
         py_env_configs.kv_cache_config.seq_size_per_block = 16
         logging.info(
             "[MI308X] set SEQ_SIZE_PER_BLOCK 16 by default, as it just support 16 now."
         )
-    if os.path.exists("/dev/alixpu") and os.getenv("SEQ_SIZE_PER_BLOCK") is None:
+    if (
+        os.path.exists("/dev/alixpu")
+        and py_env_configs.kv_cache_config.seq_size_per_block == 0
+    ):
         py_env_configs.kv_cache_config.seq_size_per_block = 256
         logging.info("set SEQ_SIZE_PER_BLOCK 256 by default")
+    if py_env_configs.kv_cache_config.seq_size_per_block == 0:
+        py_env_configs.kv_cache_config.seq_size_per_block = 64
 
     # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
     # Frontend doesn't need this setting
@@ -293,6 +428,30 @@ def setup_default_args(py_env_configs):
             ):
                 os.environ["NCCL_P2P_DISABLE"] = "1"
                 logging.info("set NCCL_P2P_DISABLE to 1")
+
+    if (
+        py_env_configs.role_config.role_type == RoleType.PREFILL
+        or py_env_configs.role_config.role_type == RoleType.DECODE
+    ):
+        if py_env_configs.pd_separation_config.cache_store_rdma_mode == True:
+            # AcclBarex envs in cache store, can be replaced by user config
+            if os.getenv("ACCL_MAX_USER_MR_GB") is None:
+                os.environ["ACCL_MAX_USER_MR_GB"] = "2000"
+            if os.getenv("ACCL_SOFT_TX_DEPTH") is None:
+                os.environ["ACCL_SOFT_TX_DEPTH"] = "8192"
+            # for mlx
+            if os.getenv("ACCL_RX_DEPTH") is None:
+                os.environ["ACCL_RX_DEPTH"] = "32"
+            if os.getenv("ACCL_TX_DEPTH") is None:
+                os.environ["ACCL_TX_DEPTH"] = "512"
+            # for eic
+            if os.getenv("ACCL_RX_CONN_DEPTH") is None:
+                os.environ["ACCL_RX_CONN_DEPTH"] = "32"
+            if os.getenv("ACCL_TX_CONN_DEPTH") is None:
+                os.environ["ACCL_TX_CONN_DEPTH"] = "512"
+            logging.info(
+                f"role type is {py_env_configs.role_config.role_type}, cache store rdma mode is {py_env_configs.pd_separation_config.cache_store_rdma_mode}, set ACCL_MAX_USER_MR_GB to {os.getenv('ACCL_MAX_USER_MR_GB')}, ACCL_SOFT_TX_DEPTH to {os.getenv('ACCL_SOFT_TX_DEPTH')}, ACCL_RX_DEPTH to {os.getenv('ACCL_RX_DEPTH')}, ACCL_TX_DEPTH to {os.getenv('ACCL_TX_DEPTH')}, ACCL_RX_CONN_DEPTH to {os.getenv('ACCL_RX_CONN_DEPTH')}, ACCL_TX_CONN_DEPTH to {os.getenv('ACCL_TX_CONN_DEPTH')}"
+            )
 
     return py_env_configs
 

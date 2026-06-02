@@ -1,0 +1,21 @@
+{
+    "model_type": "qwen_3_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3-30B-A3B",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s3",
+                "generate_config": {
+                    "max_new_tokens": 26,
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response": "\n\nI'm trying to run this code, but I get the error: NameError: name 'screen\\_manager' is not",
+                "finished": true
+            }
+        }
+    ]
+}

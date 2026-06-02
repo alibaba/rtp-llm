@@ -1,2 +1,0 @@
--r ../../open_source/deps/requirements_base.txt
-https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.1.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076 ; platform_machine == "aarch64"

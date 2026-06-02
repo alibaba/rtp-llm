@@ -3,7 +3,6 @@ import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
-import aiter
 
 
 class SelectTopk(nn.Module):

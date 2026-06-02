@@ -1,21 +1,17 @@
 #include "rtp_llm/cpp/cache/BlockCache.h"
 #include "rtp_llm/cpp/utils/LRUCache.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
 
 BlockCache::MatchResult BlockCache::match(CacheKeyType cache_key, int group_id, int64_t current_batch_epoch) {
+    RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
     CacheKeyGroupPair           key{cache_key, group_id};
     auto [success, item] = lru_cache_.get(key);
     if (success) {
-        // Matching logic for Epoch-based cache isolation:
-        // 1. epoch == 0: Legacy blocks (backward compatible), globally visible (completed and committed batches)
-        // 2. epoch == current_batch_epoch: Blocks from current batch, visible (allows cross-step visibility within same
-        // batch)
-        // 3. epoch != current_batch_epoch && epoch > 0: Blocks from other incomplete batches, invisible (prevents dirty
-        // data)
-        if (item.epoch == 0 || (current_batch_epoch > 0 && item.epoch == current_batch_epoch)) {
+        if (current_batch_epoch == NO_EPOCH_FILTER || item.epoch == 0 || item.epoch == current_batch_epoch) {
             return {item.block_index};
         }
     }
@@ -29,36 +25,58 @@ bool BlockCache::contains(CacheKeyType cache_key, int group_id) const {
 }
 
 BlockCache::PutResult BlockCache::put(CacheItem& item) {
+    RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
     RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null block");
+    RTP_LLM_CHECK_WITH_INFO(item.epoch >= 0,
+                            "CacheItem.epoch must be >= 0 (got %ld); negative values are reserved as query-side "
+                            "sentinels",
+                            item.epoch);
 
     CacheKeyGroupPair key{item.cache_key, item.group_id};
     auto [found, old_item] = lru_cache_.get(key);
     if (found) {
+        // Preserve privileged states: a resident entry must not be downgraded
+        // by a non-resident put, and a globally-visible (epoch=0) entry must
+        // not be narrowed to batch-specific (epoch>0) visibility.
+        if (old_item.is_resident && !item.is_resident) {
+            return {PutResult::Action::SKIPPED, NULL_BLOCK_IDX};
+        }
         if (old_item.epoch == 0 && item.epoch != 0) {
             return {PutResult::Action::SKIPPED, NULL_BLOCK_IDX};
         }
 
-        // Replace old item
         BlockIdxType old_block_index = old_item.block_index;
         lru_cache_.put(key, item);
         return {PutResult::Action::REPLACED, old_block_index};
     } else {
-        // Insert new item
         lru_cache_.put(key, item);
         return {PutResult::Action::INSERTED, NULL_BLOCK_IDX};
     }
 }
 
 BlockIndicesType BlockCache::pop(int nums) {
+    RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
     RTP_LLM_CHECK_WITH_INFO(nums > 0, "pop nums should > 0, nums = " + std::to_string(nums));
     BlockIndicesType pop_blocks;
 
-    auto cond = [&](const CacheKeyGroupPair& key, const CacheItem& item) { return !item.is_resident; };
-
+    // Phase 1: prefer evicting stale epoch>0 entries (batch-specific, likely dead)
+    auto stale_cond = [](const CacheKeyGroupPair& key, const CacheItem& item) {
+        return !item.is_resident && item.epoch > 0;
+    };
     while (nums > 0 && !lru_cache_.empty()) {
-        auto [success, item] = lru_cache_.popWithCond(cond);
+        auto [success, item] = lru_cache_.popWithCond(stale_cond);
+        if (!success)
+            break;
+        pop_blocks.push_back(item.block_index);
+        nums--;
+    }
+
+    // Phase 2: fall back to normal LRU eviction
+    auto normal_cond = [](const CacheKeyGroupPair& key, const CacheItem& item) { return !item.is_resident; };
+    while (nums > 0 && !lru_cache_.empty()) {
+        auto [success, item] = lru_cache_.popWithCond(normal_cond);
         if (!success)
             break;
         pop_blocks.push_back(item.block_index);
@@ -66,6 +84,16 @@ BlockIndicesType BlockCache::pop(int nums) {
     }
 
     return pop_blocks;
+}
+
+std::optional<BlockCache::CacheItem> BlockCache::remove(CacheKeyType cache_key, int group_id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    CacheKeyGroupPair           key{cache_key, group_id};
+    CacheItem                   removed_item;
+    if (!lru_cache_.remove(key, &removed_item)) {
+        return std::nullopt;
+    }
+    return removed_item;
 }
 
 bool BlockCache::empty() const {
@@ -83,24 +111,85 @@ BlockCache::CacheSnapshot BlockCache::cacheSnapshot(int64_t latest_version) cons
     return lru_cache_.cacheSnapshot(latest_version);
 }
 
-void BlockCache::debugString() const {
+BlockCache::EvictResult BlockCache::selectAndEvict(size_t min_blocks) {
     std::lock_guard<std::mutex> lock(mu_);
-    size_t                      cache_size = lru_cache_.size();
-    RTP_LLM_LOG_INFO("BlockCache state: total cached items = %zu", cache_size);
-    if (cache_size > 0) {
-        auto snapshot = lru_cache_.cacheSnapshot(-1);
-        RTP_LLM_LOG_INFO(
-            "BlockCache snapshot: version = %ld, items count = %zu", snapshot.version, snapshot.values.size());
-        size_t item_count = 0;
-        for (const auto& item : snapshot.values) {
-            RTP_LLM_LOG_INFO("BlockCache item[%zu]: %s", item_count++, item.debugString().c_str());
-            // Limit output to avoid log flooding
-            if (item_count >= 50) {
-                RTP_LLM_LOG_INFO("BlockCache: ... (showing first 50 items, total %zu items)", snapshot.values.size());
-                break;
-            }
+
+    EvictResult result;
+    if (lru_cache_.empty()) {
+        return result;
+    }
+
+    // First pass: collect resident keys
+    std::unordered_set<CacheKeyType> resident_keys;
+    for (const auto& [key, item] : lru_cache_.items()) {
+        if (item.is_resident) {
+            resident_keys.insert(item.cache_key);
         }
     }
+
+    // Second pass: group non-resident items by cache_key in LRU order (back = least-recently-used).
+    // Tiered eviction promotes selected entries to memory/remote cache via
+    // storeCacheAsync, where there is no epoch concept — exposing a batch-local
+    // (epoch>0) entry to that path would leak it into the global memory cache and
+    // break batch isolation. Skip epoch>0 entries here; they are only reclaimed
+    // through BlockCache::pop (Phase 1) which frees blocks locally without export.
+    std::unordered_map<CacheKeyType, std::vector<CacheItem>> grouped_items;
+    std::vector<CacheKeyType>                                lru_keys;
+    for (auto it = lru_cache_.items().rbegin(); it != lru_cache_.items().rend(); ++it) {
+        const auto& item = it->second;
+        if (item.is_resident) {
+            continue;
+        }
+        if (item.epoch != GLOBAL_EPOCH) {
+            continue;
+        }
+        auto [iter, inserted] = grouped_items.try_emplace(item.cache_key);
+        if (inserted) {
+            lru_keys.push_back(item.cache_key);
+        }
+        iter->second.push_back(item);
+    }
+
+    // Select keys until we have enough blocks
+    std::vector<CacheKeyType> selected_keys;
+    size_t                    selected_blocks = 0;
+    for (const auto cache_key : lru_keys) {
+        if (resident_keys.find(cache_key) != resident_keys.end()) {
+            continue;
+        }
+        const auto group_it = grouped_items.find(cache_key);
+        if (group_it == grouped_items.end() || group_it->second.empty()) {
+            continue;
+        }
+        selected_keys.push_back(cache_key);
+        selected_blocks += group_it->second.size();
+        if (selected_blocks >= min_blocks) {
+            break;
+        }
+    }
+
+    if (selected_keys.empty()) {
+        return result;
+    }
+
+    // Remove selected items from LRU cache and build result
+    for (const auto cache_key : selected_keys) {
+        auto&                  items = grouped_items.at(cache_key);
+        std::vector<CacheItem> evicted_items;
+        for (const auto& item : items) {
+            CacheKeyGroupPair key{item.cache_key, item.group_id};
+            CacheItem         removed_item;
+            if (lru_cache_.remove(key, &removed_item)) {
+                evicted_items.push_back(removed_item);
+            }
+        }
+        if (!evicted_items.empty()) {
+            result.evicted_keys.push_back(cache_key);
+            result.evicted_items[cache_key] = std::move(evicted_items);
+        }
+    }
+
+    return result;
 }
 
 }  // namespace rtp_llm

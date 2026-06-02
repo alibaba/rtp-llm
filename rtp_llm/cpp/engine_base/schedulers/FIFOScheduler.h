@@ -4,7 +4,7 @@
 #include <tuple>
 #include <vector>
 #include <atomic>
-#include "autil/AtomicCounter.h"
+#include <unordered_map>
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
@@ -26,9 +26,17 @@ public:
 
     ~FIFOScheduler() override;
 
-    absl::Status                                 enqueue(const GenerateStreamPtr& stream) override;
-    absl::Status                                 batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override;
-    absl::StatusOr<std::list<GenerateStreamPtr>> schedule(size_t reserve_step = 0) override;
+    // Enqueue a single stream. Returns OkStatus on success, InvalidArgumentError if checkInputLength fails.
+    // On failure, the stream's error is reported via reportError() but the stream is NOT queued.
+    // Caller must check the return status to know whether the stream was actually enqueued.
+    absl::Status enqueue(const GenerateStreamPtr& stream) override;
+
+    // Enqueue multiple streams. Returns the input vector unchanged so callers can index 1:1 with
+    // their original input list. Streams that fail checkInputLength are NOT added to the waiting
+    // queue, but their errors are reported via reportError() and they are still returned in the
+    // output vector — collectStreamOutput / pollStreamOutput will surface the error per-stream.
+    std::vector<std::shared_ptr<GenerateStream>> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override;
+    absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
     absl::Status                                 stop() override;
     bool                                         empty() override;
 
@@ -42,29 +50,26 @@ public:
     std::vector<EngineScheduleInfo::TaskInfo> runningTaskList();
     int64_t                                   onflightStreams() override;
 
-protected:
-    virtual std::list<GenerateStreamPtr> scheduleNew(size_t reserve_step);
-
 private:
-    void    evictDoneStreams(std::list<GenerateStreamPtr>& streams);
-    bool    evaluateNewStream(const std::list<GenerateStreamPtr>& streams,
-                              const GenerateStreamPtr&            new_stream,
-                              size_t                              reserve_step);
-    int     evaluateRunningNext(size_t reserve_step);
-    void    evaluateRunningRemote();
     int64_t lastScheduleTime() override;
-    int     runningNextBlockNum(size_t reserve_step) const;
     bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
-    void accountBatchMetrics(const std::list<GenerateStreamPtr>& new_streams,
-                             const std::list<GenerateStreamPtr>& running_streams);
+    void accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool waitPredicate();
+    void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
+    void evaluateWaitingStreams();
+    void cancelStreams(std::list<GenerateStreamPtr>& streams);
+    bool checkInputLength(const GenerateStreamPtr& stream);
+
+protected:
+    void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
 
 protected:
     PDSepConfig                     pd_sep_config_;
     ModelSpecificConfig             model_specific_config_;
     std::list<GenerateStreamPtr>    waiting_streams_;
+    std::list<GenerateStreamPtr>    loading_cache_streams_;
     std::list<GenerateStreamPtr>    running_streams_;
-    std::list<GenerateStreamPtr>    remote_running_streams_;
+    std::list<GenerateStreamPtr>    new_streams_;
     std::shared_ptr<KVCacheManager> cache_manager_;
     std::atomic<int64_t>            last_schedule_time_      = autil::TimeUtility::currentTimeInMilliSeconds();
     size_t                          max_seq_len_             = 0;
@@ -72,6 +77,7 @@ protected:
     size_t                          max_generate_batch_size_ = 1;
     const bool                      need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;
+    bool                            schedule_trigger_        = false;
     std::mutex                      lock_;
     std::condition_variable         cond_;
     kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
@@ -79,8 +85,7 @@ protected:
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;
 
-    // Static atomic counter for generating unique batch Epoch IDs
-    static std::shared_ptr<autil::AtomicCounter> batch_epoch_counter_;
+    static std::atomic<int64_t> schedule_round_;
 
     // TODO @wangyin support different beams run togather
 };

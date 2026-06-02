@@ -1,38 +1,43 @@
 package org.flexlb.service.grace;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.listener.ShutdownListener;
+import org.flexlb.service.grace.strategy.ActiveRequestShutdownHooker;
+import org.flexlb.service.grace.strategy.HealthCheckHooker;
+import org.flexlb.service.grace.strategy.LbConsistencyHooker;
 import org.springframework.stereotype.Component;
-import sun.misc.Signal;
-import sun.misc.SignalHandler;
-
-import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * 服务优雅上下线配置
+ * Graceful shutdown orchestrator.
+ * <p>
+ * Executes shutdown hooks in a fixed order:
+ * 1. HealthCheck offline  — stop accepting new requests
+ * 2. ZK / LB consistency offline — deregister from service discovery
+ * 3. Active request drain — wait for in-flight requests to complete
  */
 @Slf4j
 @Component
-public class GracefulShutdownService implements SignalHandler {
+public class GracefulShutdownService {
 
-    private static final List<ShutdownListener> SHUTDOWN_LISTENERS = new CopyOnWriteArrayList<>();
+    private final HealthCheckHooker healthCheckHooker;
+    private final LbConsistencyHooker lbConsistencyHooker;
+    private final ActiveRequestShutdownHooker activeRequestShutdownHooker;
 
-    public GracefulShutdownService() {
-        Signal sig = new Signal("USR2");
-        Signal.handle(sig, this);
+    public GracefulShutdownService(HealthCheckHooker healthCheckHooker,
+                                   LbConsistencyHooker lbConsistencyHooker,
+                                   ActiveRequestShutdownHooker activeRequestShutdownHooker) {
+        this.healthCheckHooker = healthCheckHooker;
+        this.lbConsistencyHooker = lbConsistencyHooker;
+        this.activeRequestShutdownHooker = activeRequestShutdownHooker;
     }
 
-    @Override
-    public void handle(Signal signal) {
-        log.info("receive signal: {}", signal.getName());
-        for (ShutdownListener listener : SHUTDOWN_LISTENERS) {
-            listener.beforeShutdown();
-        }
-    }
+    public void offline() {
+        log.info("Graceful shutdown: step 1 — mark unhealthy");
+        healthCheckHooker.beforeShutdown();
 
-    public static void addShutdownListener(ShutdownListener listener) {
-        SHUTDOWN_LISTENERS.add(listener);
-    }
+        log.info("Graceful shutdown: step 2 — deregister from service discovery");
+        lbConsistencyHooker.beforeShutdown();
 
+        log.info("Graceful shutdown: step 3 — drain active requests");
+        activeRequestShutdownHooker.beforeShutdown();
+    }
 }

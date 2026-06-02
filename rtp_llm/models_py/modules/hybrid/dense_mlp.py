@@ -54,6 +54,8 @@ class DenseMLP(nn.Module):
                     quant_config=quant_config,
                     dim=-1,
                     hw_kernel_config=hw_kernel_config,
+                    scale2_keys=[W.ffn_w1_s2, W.ffn_w3_s2],
+                    input_scale_keys=[W.ffn_w1_i_s, W.ffn_w3_i_s],
                 )
             else:
                 self.up_proj = LinearFactory.create_linear_from_weights(
@@ -63,6 +65,8 @@ class DenseMLP(nn.Module):
                     W.ffn_b13,
                     quant_config=quant_config,
                     hw_kernel_config=hw_kernel_config,
+                    weight_scale_2_key=W.ffn_w13_s2,
+                    input_scale_key=W.ffn_w13_i_s,
                 )
 
         else:
@@ -73,6 +77,8 @@ class DenseMLP(nn.Module):
                 W.ffn_b3,
                 quant_config=quant_config,
                 hw_kernel_config=hw_kernel_config,
+                weight_scale_2_key=W.ffn_w3_s2,
+                input_scale_key=W.ffn_w3_i_s,
             )
 
         self.down_proj = LinearFactory.create_linear_from_weights(
@@ -82,19 +88,14 @@ class DenseMLP(nn.Module):
             W.ffn_b2,
             quant_config=quant_config,
             hw_kernel_config=hw_kernel_config,
+            weight_scale_2_key=W.ffn_w2_s2,
+            input_scale_key=W.ffn_w2_i_s,
         )
 
-    def forward(
-        self,
-        x: torch.Tensor,
-    ):
+    def forward(self, x: torch.Tensor, skip_allreduce: bool = False) -> torch.Tensor:
         up = self.up_proj(x)
-
         activated = self.act_fn(up)
-
         output = self.down_proj(activated)
-
-        if self.parallelism_config.tp_size > 1:
+        if not skip_allreduce and self.parallelism_config.get_ffn_tp_size() > 1:
             output = all_reduce(output, group=Group.TP)
-
         return output

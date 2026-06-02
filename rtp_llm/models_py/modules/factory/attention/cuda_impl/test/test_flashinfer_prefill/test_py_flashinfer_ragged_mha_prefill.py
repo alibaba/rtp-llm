@@ -14,7 +14,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_t
     BaseAttentionTest,
     compare_tensors,
 )
-from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
+from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -39,7 +39,7 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
         dtype: torch.dtype = torch.float16,
     ):
         """Helper to create empty KV cache for prefill"""
-        kv_cache = KVCache()
+        kv_cache = LayerKVCache()
 
         # Create combined KV cache with shape [total_blocks, 2, num_kv_heads, seq_size_per_block, head_dim]
         # Initialize with zeros since we'll write to it during prefill

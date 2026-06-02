@@ -3,7 +3,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreServiceImpl.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreMetricsCollector.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpClient.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
 
 namespace rtp_llm {
 
@@ -42,7 +41,6 @@ protected:
 
 private:
     std::shared_ptr<TcpClient> tcp_client_;
-    rtp_llm::DeviceBase*       device_{nullptr};
 };
 
 }  // namespace rtp_llm

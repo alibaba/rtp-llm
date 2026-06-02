@@ -67,11 +67,7 @@ public:
 public:
     bool        start();
     bool        start(const std::string& address);
-    bool        start(py::object model_weights_loader,
-                      py::object lora_infos,
-                      py::object world_info,
-                      py::object tokenizer,
-                      py::object render);
+    bool        start(py::object model_weights_loader, py::object world_info, py::object tokenizer, py::object render);
     void        stop();
     bool        isStoped() const;
     std::string getListenAddr() const {
@@ -116,14 +112,14 @@ private:
     std::map<std::string, std::string>       lora_infos_;
     py::object                               py_model_;  // Python model object for extra input processing
 
-    std::shared_ptr<HealthService>       health_service_;
-    std::shared_ptr<WorkerStatusService> worker_status_service_;
-    std::shared_ptr<ModelStatusService>  model_status_service_;
-    std::shared_ptr<SysCmdService>       sys_cmd_service_;
-    std::shared_ptr<TokenizerService>    tokenizer_service_;
-    std::shared_ptr<ChatService>         chat_service_;
-    std::shared_ptr<InferenceService>    inference_service_;
-    std::shared_ptr<EmbeddingService>    embedding_service_;
+    std::shared_ptr<HealthService>           health_service_;
+    std::shared_ptr<WorkerStatusService>     worker_status_service_;
+    std::shared_ptr<ModelStatusService>      model_status_service_;
+    std::shared_ptr<SysCmdService>           sys_cmd_service_;
+    std::shared_ptr<TokenizerService>        tokenizer_service_;
+    std::shared_ptr<ChatService>             chat_service_;
+    std::shared_ptr<InferenceService>        inference_service_;
+    std::shared_ptr<EmbeddingService>        embedding_service_;
 };
 
 class CounterGuard {

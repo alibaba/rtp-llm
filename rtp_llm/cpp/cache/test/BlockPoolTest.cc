@@ -10,7 +10,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 
 namespace rtp_llm {
@@ -19,14 +19,13 @@ namespace test {
 class BlockPoolTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        device_ = createDevice();
+        createDevice();
     }
 
     void TearDown() override {
         block_pool_.reset();
     }
 
-    rtp_llm::DeviceBase*       device_;
     std::shared_ptr<BlockPool> block_pool_;
 };
 
@@ -86,7 +85,7 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
 // Initialization Test
 TEST_F(BlockPoolTest, ConstructorAndInit) {
     auto config = createTestConfig();
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    block_pool_ = std::make_shared<BlockPool>(config);
     ASSERT_NE(block_pool_, nullptr);
 
     bool init_result = block_pool_->init();
@@ -106,8 +105,8 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
     ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
     ASSERT_NE(cache_cfg.mtp_sub_configs[1], nullptr);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->cache_specs.size(), 1u);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->cache_specs.size(), 1u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->groupNums(), 1);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->groupNums(), 1);
     EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->cache_specs[0]->block_size_bytes(),
               cache_cfg.mtp_sub_configs[1]->cache_specs[0]->block_size_bytes());
 
@@ -118,13 +117,13 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->global_layer_ids[0][0], 2);
     EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->global_layer_ids[0][0], 3);
 
-    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createLayerFirstConfig(cache_cfg);
+    auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
     ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
     ASSERT_EQ(pool_cfg.memory_layouts[0].layer_num, 2u);
     ASSERT_EQ(pool_cfg.memory_layouts[1].layer_num, 1u);
     ASSERT_EQ(pool_cfg.memory_layouts[2].layer_num, 1u);
 
-    block_pool_ = std::make_shared<BlockPool>(pool_cfg, device_);
+    block_pool_ = std::make_shared<BlockPool>(pool_cfg);
     ASSERT_TRUE(block_pool_->init());
 
     const int global_main = 0;
@@ -202,7 +201,7 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
 // Allocation Test
 TEST_F(BlockPoolTest, AllocSingleBlock) {
     auto config = createTestConfig();
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    block_pool_ = std::make_shared<BlockPool>(config);
     block_pool_->init();
 
     auto blocks = block_pool_->malloc(1);
@@ -214,7 +213,7 @@ TEST_F(BlockPoolTest, AllocSingleBlock) {
 
 TEST_F(BlockPoolTest, AllocMultipleBlocks) {
     auto config = createTestConfig();
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    block_pool_ = std::make_shared<BlockPool>(config);
     block_pool_->init();
 
     int  alloc_count = 5;
@@ -228,7 +227,7 @@ TEST_F(BlockPoolTest, AllocMultipleBlocks) {
 
 TEST_F(BlockPoolTest, AllocAllBlocks) {
     auto config = createTestConfig();
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    block_pool_ = std::make_shared<BlockPool>(config);
     block_pool_->init();
 
     auto blocks = block_pool_->malloc(config.block_num - 1);
@@ -238,7 +237,7 @@ TEST_F(BlockPoolTest, AllocAllBlocks) {
 
 TEST_F(BlockPoolTest, AllocMoreThanAvailable) {
     auto config = createTestConfig();
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    block_pool_ = std::make_shared<BlockPool>(config);
     block_pool_->init();
 
     auto blocks1 = block_pool_->malloc(5);
@@ -252,7 +251,7 @@ TEST_F(BlockPoolTest, AllocMoreThanAvailable) {
 // Free Test
 TEST_F(BlockPoolTest, FreeBlocks) {
     auto config = createTestConfig();
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    block_pool_ = std::make_shared<BlockPool>(config);
     block_pool_->init();
 
     auto blocks = block_pool_->malloc(5);
@@ -264,7 +263,7 @@ TEST_F(BlockPoolTest, FreeBlocks) {
 
 TEST_F(BlockPoolTest, FreePartialBlocks) {
     auto config = createTestConfig();
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    block_pool_ = std::make_shared<BlockPool>(config);
     block_pool_->init();
 
     auto blocks = block_pool_->malloc(5);
@@ -277,7 +276,7 @@ TEST_F(BlockPoolTest, FreePartialBlocks) {
 
 TEST_F(BlockPoolTest, ReferenceAndFree) {
     auto config = createTestConfig();
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    block_pool_ = std::make_shared<BlockPool>(config);
     block_pool_->init();
     auto total_blocks = block_pool_->freeBlocksNum();
 
@@ -318,11 +317,43 @@ TEST_F(BlockPoolTest, ReferenceAndFree) {
         EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks);
         EXPECT_EQ(block_pool_->availableBlocksNum(), total_blocks);
     }
+
+    {
+        auto blocks = block_pool_->malloc(2);
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks - 2);
+        EXPECT_EQ(block_pool_->availableBlocksNum(), total_blocks - 2);
+
+        block_pool_->blockCacheReference(blocks);
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks - 2);
+        EXPECT_EQ(block_pool_->availableBlocksNum(), total_blocks - 2);
+
+        block_pool_->connectorReference(blocks);
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks - 2);
+        EXPECT_EQ(block_pool_->availableBlocksNum(), total_blocks - 2);
+        EXPECT_EQ(block_pool_->connectorRefBlocksNum(), 2);
+        EXPECT_EQ(block_pool_->requestRefBlocksNum(), 2);
+
+        block_pool_->requestFree(blocks);
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks - 2);
+        EXPECT_EQ(block_pool_->availableBlocksNum(), total_blocks - 2);
+        EXPECT_EQ(block_pool_->connectorRefBlocksNum(), 2);
+        EXPECT_EQ(block_pool_->requestRefBlocksNum(), 0);
+
+        block_pool_->connectorFree(blocks);
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks - 2);
+        EXPECT_EQ(block_pool_->availableBlocksNum(), total_blocks);
+        EXPECT_EQ(block_pool_->connectorRefBlocksNum(), 0);
+        EXPECT_EQ(block_pool_->requestRefBlocksNum(), 0);
+
+        block_pool_->blockCacheFree(blocks);
+        EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks);
+        EXPECT_EQ(block_pool_->availableBlocksNum(), total_blocks);
+    }
 }
 
 TEST_F(BlockPoolTest, MultipleReferencesAndFrees) {
     auto config = createTestConfig();
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    block_pool_ = std::make_shared<BlockPool>(config);
     block_pool_->init();
 
     auto blocks = block_pool_->malloc(2);
@@ -346,9 +377,9 @@ TEST_F(BlockPoolTest, MultipleReferencesAndFrees) {
 }
 
 // Convert Index to Addr Test
-TEST_F(BlockPoolTest, ConvertIndexToAddrLayerFirst) {
-    auto config = createTestConfig(LAYER_FIRST);
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+TEST_F(BlockPoolTest, ConvertIndexToAddr) {
+    auto config = createTestConfig();
+    block_pool_ = std::make_shared<BlockPool>(config);
     block_pool_->init();
 
     const auto layer_num = static_cast<int>(config.memory_layouts[0].layer_num);
@@ -362,7 +393,7 @@ TEST_F(BlockPoolTest, ConvertIndexToAddrLayerFirst) {
 
 TEST_F(BlockPoolTest, ConvertIndexToBuffer) {
     auto config = createTestConfig();
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    block_pool_ = std::make_shared<BlockPool>(config);
     block_pool_->init();
 
     int layer = 0;
@@ -375,14 +406,16 @@ TEST_F(BlockPoolTest, ConvertIndexToBuffer) {
 
 TEST_F(BlockPoolTest, ConvertIndexToAddrAndBufferWithScale) {
     // dtype=int8 will enable kv-scale pool automatically in BlockPoolConfigHelper.
-    auto config = createTestConfig(LAYER_FIRST,
-                                   /*k_block_stride_bytes=*/512,
-                                   /*v_block_stride_bytes=*/512,
-                                   /*dtype=*/rtp_llm::DataType::TYPE_INT8,
-                                   /*local_head_num_kv=*/2,
-                                   /*seq_size_per_block=*/4);
+    auto config = createTestConfig(
+        /*k_block_stride_bytes=*/512,
+        /*v_block_stride_bytes=*/512,
+        /*k_scale_stride_bytes=*/128,
+        /*v_scale_stride_bytes=*/128,
+        /*dtype=*/rtp_llm::DataType::TYPE_INT8,
+        /*local_head_num_kv=*/2,
+        /*seq_size_per_block=*/4);
 
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    block_pool_ = std::make_shared<BlockPool>(config);
     ASSERT_TRUE(block_pool_->init());
 
     const auto& layout_cfg = config.memory_layouts[0];
@@ -400,9 +433,9 @@ TEST_F(BlockPoolTest, ConvertIndexToAddrAndBufferWithScale) {
 }
 
 // LayerCache Base Test
-TEST_F(BlockPoolTest, LayerCacheBaseLayerFirst) {
-    auto config = createTestConfig(LAYER_FIRST);
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+TEST_F(BlockPoolTest, LayerCacheBase) {
+    auto config = createTestConfig();
+    block_pool_ = std::make_shared<BlockPool>(config);
     block_pool_->init();
 
     auto layer_tensors = block_pool_->allLayerCacheBase();
@@ -417,7 +450,7 @@ TEST_F(BlockPoolTest, LayerCacheBaseLayerFirst) {
 // Boundary Condition Test
 TEST_F(BlockPoolTest, AllocZeroBlocks) {
     auto config = createTestConfig();
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    block_pool_ = std::make_shared<BlockPool>(config);
     block_pool_->init();
 
     auto blocks = block_pool_->malloc(0);
@@ -427,7 +460,7 @@ TEST_F(BlockPoolTest, AllocZeroBlocks) {
 
 TEST_F(BlockPoolTest, FreeEmptyVector) {
     auto config = createTestConfig();
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    block_pool_ = std::make_shared<BlockPool>(config);
     block_pool_->init();
 
     std::vector<BlockIdxType> empty_blocks;
@@ -437,7 +470,7 @@ TEST_F(BlockPoolTest, FreeEmptyVector) {
 
 TEST_F(BlockPoolTest, OutOfRangeLayerId) {
     auto config = createTestConfig();
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    block_pool_ = std::make_shared<BlockPool>(config);
     block_pool_->init();
 
     int invalid_layer = static_cast<int>(config.memory_layouts[0].layer_num) + 10;
@@ -446,7 +479,7 @@ TEST_F(BlockPoolTest, OutOfRangeLayerId) {
 
 TEST_F(BlockPoolTest, AllocFreeAllocCycle) {
     auto config = createTestConfig();
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    block_pool_ = std::make_shared<BlockPool>(config);
     block_pool_->init();
 
     for (int i = 0; i < 5; ++i) {
@@ -461,7 +494,7 @@ TEST_F(BlockPoolTest, AllocFreeAllocCycle) {
 
 TEST_F(BlockPoolTest, MixedAllocFreeOperations) {
     auto config = createTestConfig();
-    block_pool_ = std::make_shared<BlockPool>(config, device_);
+    block_pool_ = std::make_shared<BlockPool>(config);
     block_pool_->init();
 
     std::vector<std::vector<BlockIdxType>> allocated_blocks;

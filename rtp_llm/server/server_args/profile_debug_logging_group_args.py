@@ -17,20 +17,12 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         help="控制是否在BufferManager中启用内存追踪功能。可选值: True (启用), False (禁用)。默认为 False",
     )
     profile_debug_logging_group.add_argument(
-        "--trace_malloc_stack",
-        env_name="RTP_LLM_TRACE_MALLOC_STACK",
-        bind_to=(profiling_debug_config, "trace_malloc_stack"),
-        type=str2bool,
-        default=False,
-        help="是否启用 malloc stack 追踪,与RTP_LLM_TRACE_MEMORY结合使用",
-    )
-    profile_debug_logging_group.add_argument(
         "--enable_device_perf",
         env_name="ENABLE_DEVICE_PERF",
         bind_to=(profiling_debug_config, "enable_device_perf"),
         type=str2bool,
         default=False,
-        help="控制是否在DeviceBase中启用设备性能指标的收集和报告。可选值: True (启用), False (禁用)。",
+        help="控制是否启用设备性能指标的收集和报告。可选值: True (启用), False (禁用)。",
     )
     profile_debug_logging_group.add_argument(
         "--ft_core_dump_on_exception",
@@ -103,12 +95,4 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         type=str2bool,
         default=False,
         help="控制是否check nan, 为了排查。可选值: True (启用), False (禁用)。默认为 False",
-    )
-    profile_debug_logging_group.add_argument(
-        "--enable_torch_alloc_profile",
-        env_name="ENABLE_TORCH_ALLOC_PROFILE",
-        bind_to=(profiling_debug_config, "enable_torch_alloc_profile"),
-        type=str2bool,
-        default=False,
-        help="控制是否在TorchCudaAllocator中启用Python堆栈追踪,用于调试Torch buffer分配。可选值: True (启用), False (禁用)。默认为 False",
     )

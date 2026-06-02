@@ -7,11 +7,11 @@ from rtp_llm.config.generate_config import RoleType
 
 class WorkerStatusRequest(BaseModel):
     latest_cache_version: Optional[int] = -1
+    latest_finished_version: Optional[int] = -1
 
 
 class TaskInfo(BaseModel):
     request_id: int
-    inter_request_id: int
     prefix_length: int  # cache hit len
     input_length: int
     waiting_time_ms: int  # for master check server is hang or not
@@ -46,6 +46,7 @@ class WorkStatus(BaseModel):
     alive: bool
     precision: str = "fp16"
     status_version: Optional[int] = -1  # 时间戳
+    latest_finished_version: Optional[int] = -1  # 最新完成任务的版本
 
     profile_meta: Optional[ProfileMeta] = None  # 统计的处理数据
 
@@ -82,5 +83,7 @@ class ServerStatus(BaseModel):
 class ScheduleMeta(BaseModel):
     server_status: List[ServerStatus]
     cache_local: int = 0  # 0: LOCAL, 1: REMOTE
-    inter_request_id: int
     code: int = 200  # 200: OK
+    error_message: Optional[str] = None
+    success: Optional[bool] = True
+    real_master_host: Optional[str] = None

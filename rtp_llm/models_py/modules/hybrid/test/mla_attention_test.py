@@ -121,6 +121,7 @@ class MLATest(TestCase):
         self.config.attn_config.v_head_dim = 128
         self.config.attn_config.q_lora_rank = 0
         self.config.attn_config.tokens_per_block = 64
+        self.config.attn_config.kernel_tokens_per_block = 64
         self.config.attn_config.softmax_extra_scale = 1.0
         self.config.attn_config.use_mla = True
         self.config.quant_config = None
@@ -147,6 +148,9 @@ class MLATest(TestCase):
         )
         attn_inputs.input_lengths = sequence_lengths_t
         attn_inputs.kv_cache_block_id_host = kvcache_block_id
+        attn_inputs.kv_cache_block_id_device = kvcache_block_id.to(device)
+        attn_inputs.kv_cache_kernel_block_id_host = kvcache_block_id
+        attn_inputs.kv_cache_kernel_block_id_device = kvcache_block_id.to(device)
 
         weights = {}
         weights[W.mla_fusedqkrope_no_lora_w] = torch.randn(
@@ -184,14 +188,15 @@ class MLATest(TestCase):
             device=device,
         )
 
-        weights[W.mla_v_w] = torch.randn(
-            [self.config.attn_config.kv_lora_rank, hidden_size],
-            dtype=torch.bfloat16,
-            device=device,
-        )
-
-        weights[W.mla_k_nope_w] = torch.randn(
-            [self.config.attn_config.kv_lora_rank, hidden_size],
+        weights[W.mla_kv_b_w] = torch.randn(
+            [
+                self.config.attn_config.kv_lora_rank,
+                self.config.attn_config.head_num
+                * (
+                    self.config.attn_config.nope_head_dim
+                    + self.config.attn_config.v_head_dim
+                ),
+            ],
             dtype=torch.bfloat16,
             device=device,
         )
@@ -208,7 +213,9 @@ class MLATest(TestCase):
         layer_weights: List[Dict[str, torch.Tensor]] = []
         layer_weights.append(weights)
 
-        attn_configs = self.config.getAttentionConfigs(self.parallelism_config.tp_size)
+        attn_configs = self.config.getAttentionConfigs(
+            self.parallelism_config.get_attn_tp_size()
+        )
         fmha_impl = MlaFlashInferPrefillImpl(
             attn_configs,
             attn_inputs,

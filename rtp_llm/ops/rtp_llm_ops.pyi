@@ -12,9 +12,6 @@ import torch
 from rtp_llm.ops import KVCache, PyCacheStoreInputs
 
 __all__ = [
-    "FlashInferAttnParams",
-    "FlashInferOp",
-    "FusedMoEOp",
     "SelectTopkOp",
     "TRTAttn",
     "TRTAttnOp",
@@ -31,40 +28,8 @@ __all__ = [
     "silu_and_mul",
 ]
 
-class FlashInferAttnParams:
-    def __init__(self) -> None: ...
-
 class FlashInferMlaAttnParams:
     def __init__(self) -> None: ...
-
-class FlashInferOp:
-    def __init__(
-        self, attn_configs: typing.Any
-    ) -> None: ...
-    def forward(
-        self,
-        input: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
-        params: FlashInferAttnParams,
-    ) -> torch.Tensor: ...
-    def prepare(
-        self, attn_inputs: libth_transformer.PyAttentionInputs
-    ) -> FlashInferAttnParams: ...
-
-class FusedMoEOp:
-    def __init__(
-        self, attn_configs: typing.Any
-    ) -> None: ...
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        up_proj: torch.Tensor,
-        down_proj: torch.Tensor,
-        expert_scales: torch.Tensor,
-        expert_ids: torch.Tensor,
-        outputs: torch.Tensor,
-    ) -> None: ...
 
 class SelectTopkOp:
     def __init__(

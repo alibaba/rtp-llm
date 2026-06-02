@@ -8,8 +8,8 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
-#include "rtp_llm/cpp/models/lora/LoraManager.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 
 namespace rtp_llm {
@@ -38,38 +38,15 @@ public:
     EngineBase(const EngineInitParams& params);
     virtual ~EngineBase();
 
-    void                 initDevices(const EngineInitParams& params);
-    rtp_llm::DeviceBase* getDevice() {
-        return device_;
-    }
-
-    void addLora(const std::string&                 adapter_name,
-                 rtp_llm::lora::loraLayerWeightsMap lora_a,
-                 rtp_llm::lora::loraLayerWeightsMap lora_b);
-
-    void removeLora(const std::string& adapter_name);
+    void initRuntime(const EngineInitParams& params);
 
     void pause() {
-        // This very simple function sets the pause_ flag to true.
-        // At the beginning of the Engine's Step method, it checks if pause_ is true.
-        // If it is, the Engine will sleep for a moment, thus pausing its execution.
-        // Pausing the Engine is necessary for tasks like updating model weights, swapping LoRA adapters,
-        // or clearing GPU memory, as it prevents model forwarding during these updates.
-        // The pause_ parameter doesn't need to guarantee thread-safe access; only this interface modifies it.
         pause_ = true;
     }
 
     void restart() {
-        // This very simple function sets the pause_ flag to false, resuming the model's execution.
-        // At the beginning of the Engine's Step method, it checks if pause_ is true.
-        // If it is, the Engine will sleep for a moment, thus pausing its execution.
-        // Pausing the Engine is necessary for tasks like updating model weights, swapping LoRA adapters,
-        // or clearing GPU memory, as it prevents model forwarding during these updates.
-        // The pause_ parameter doesn't need to guarantee thread-safe access; only this interface modifies it.
         pause_ = false;
     }
-
-    std::shared_ptr<lora::LoraManager> getLoraManager();
 
     virtual std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) = 0;
 
@@ -109,15 +86,17 @@ public:
     virtual bool updateEplbConfig(const EPLBConfig& config) {
         return false;
     }
+    virtual void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {}
 
     std::shared_ptr<KVCacheManager> getCacheManager() const;
 
 protected:
-    rtp_llm::DeviceBase*               device_;
-    ResourceContext                    resource_context_;
-    std::shared_ptr<lora::LoraManager> lora_manager_;
-    std::unique_ptr<SchedulerBase>     scheduler_ = nullptr;
-    bool                               pause_     = false;
+    ResourceContext                resource_context_;
+    MlaOpsType                     mla_ops_type_       = MlaOpsType::AUTO;
+    int32_t                        kv_cache_group_num_ = 1;
+    std::vector<int32_t>           kv_cache_layer_to_group_;
+    std::unique_ptr<SchedulerBase> scheduler_ = nullptr;
+    bool                           pause_     = false;
 };
 
 }  // namespace rtp_llm

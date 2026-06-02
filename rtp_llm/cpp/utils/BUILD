@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//:__subpackages__"])
 
@@ -40,6 +40,16 @@ cc_library(
     implementation_deps = [
         "//rtp_llm/cpp/config:static_config",
     ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "profiling_scope",
+    hdrs = [
+        "ProfilingScope.h",
+    ],
+    deps = torch_deps(),
     copts = copts(),
     visibility = ["//visibility:public"],
 )
@@ -139,6 +149,63 @@ cc_library(
     name = "math_utils",
     hdrs = [
         "math_utils.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Linear blocks utilities
+cc_library(
+    name = "linear_blocks_util",
+    hdrs = [
+        "LinearBlocksUtil.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Lightweight tensor debug string utilities
+cc_library(
+    name = "tensor_debug_utils",
+    hdrs = [
+        "TensorDebugUtils.h",
+    ],
+    deps = [
+    ] + torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Debug utilities (migrated from devices/utils/)
+cc_library(
+    name = "debug_utils",
+    hdrs = [
+        "DebugUtils.h",
+    ],
+    srcs = [
+        "DebugUtils.cc",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda/ops:exec_ctx_fwd",
+        "//rtp_llm/models_py/bindings/core:type_convert",
+        "//rtp_llm/models_py/bindings/core:common_defines",
+    ] + select({
+        "//:using_cuda": ["//rtp_llm/models_py/bindings/cuda/ops:gpu_base"],
+        "//conditions:default": [],
+    }),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Device performance wrapper (migrated from devices/utils/)
+cc_library(
+    name = "device_perf_wrapper",
+    hdrs = [
+        "DevicePerfWrapper.h",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda/ops:exec_ctx_fwd",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

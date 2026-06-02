@@ -2,11 +2,10 @@
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
-#include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
+#include "rtp_llm/models_py/bindings/common/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
+#include "rtp_llm/models_py/bindings/rocm/CKAttnUtils.h"
 
 namespace rtp_llm {
 
@@ -16,11 +15,13 @@ public:
     FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs);
     CKAttnPtr prepare(torch_ext::PyAttentionInputs attn_inputs);
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-    forward(const torch::Tensor& qkv, std::optional<torch_ext::KVCache> kv_cache_base, const CKAttnPtr& params);
+    forward(const torch::Tensor& qkv, std::optional<torch_ext::LayerKVCache> kv_cache_base, const CKAttnPtr& params);
+
+    bool use_paged_fmha = false;  // When true, output Q as [total_tokens, heads, dim] and skip prefix KV copy
+    bool pad_query      = false;
 
 protected:
     AttentionConfigs attn_configs_;
-    ROCmDevice*      device_;  // Only used for PrepareCKAttn
     virtual bool     use_asm() const = 0;
 };
 
@@ -52,11 +53,10 @@ public:
     FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs);
     CKAttnPtr prepare(torch_ext::PyAttentionInputs attn_inputs);
     torch::Tensor
-    forward(const torch::Tensor& qkv, std::optional<torch_ext::KVCache> kv_cache_base, const CKAttnPtr& params);
+    forward(const torch::Tensor& qkv, std::optional<torch_ext::LayerKVCache> kv_cache_base, const CKAttnPtr& params);
 
 protected:
     AttentionConfigs attn_configs_;
-    ROCmDevice*      device_;  // Only used for PrepareCKAttn
     virtual bool     use_asm() const = 0;
 };
 

@@ -1,2 +1,0 @@
-# docker build script
-

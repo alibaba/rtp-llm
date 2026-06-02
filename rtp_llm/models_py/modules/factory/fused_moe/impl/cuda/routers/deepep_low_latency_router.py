@@ -202,6 +202,8 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             assert self.quant_config.is_block_quantized or (
                 self.quant_config.is_per_act_token and self._use_accl_ep
             ), "DeepEP Low-Latency only supports fp8 block quantization or per_act_token quantization with ACCL-EP"
+        elif self.quant_config.is_per_group_fp4:
+            pass
         else:
             assert not self.quant_config.is_quantized
         # Check handle
@@ -244,7 +246,9 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         return combined_x
 
     def _finalize_post_tp_gather(
-        self, combined_x: torch.Tensor, extra_finalize_args: Optional[Dict[str, Any]]
+        self,
+        combined_x: torch.Tensor,
+        extra_finalize_args: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
         """Finalize post tp gather for DeepEP Low-Latency.
         Args:

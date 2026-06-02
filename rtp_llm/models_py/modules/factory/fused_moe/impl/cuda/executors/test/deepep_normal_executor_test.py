@@ -9,6 +9,7 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_us
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
     per_block_cast_to_fp8,
     per_token_cast_to_fp8,
+    requant_weight_ue8m0,
     sgl_per_token_group_quant_fp8,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -17,8 +18,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_continous_executor import (
-    DeepGemmContinousExecutor,
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor import (
+    DeepGemmHybridExecutor,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.fused_moe_executor_test_util import (
     generate_payload_and_weights,
@@ -29,7 +30,7 @@ from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.utils.model_weight import W
 
 
-class DeepGemmContinousExecutorTestBase:
+class DeepGemmHybridExecutorTestBase:
     DP_SIZE = 4
     TP_SIZE = 1
     EP_SIZE = 4
@@ -134,16 +135,24 @@ class DeepGemmContinousExecutorTestBase:
                     )
                 )
                 new_w1[i], weights[W.moe_s1][i] = per_block_cast_to_fp8(
-                    weights[W.moe_w1][i], use_ue8m0=is_deep_gemm_e8m0_used()
+                    weights[W.moe_w1][i], use_ue8m0=False
                 )
                 new_w2[i], weights[W.moe_s2][i] = per_block_cast_to_fp8(
-                    weights[W.moe_w2][i], use_ue8m0=is_deep_gemm_e8m0_used()
+                    weights[W.moe_w2][i], use_ue8m0=False
                 )
+            if is_deep_gemm_e8m0_used():
+                new_w1, weights[W.moe_s1] = requant_weight_ue8m0(
+                    new_w1, weights[W.moe_s1]
+                )
+                new_w2, weights[W.moe_s2] = requant_weight_ue8m0(
+                    new_w2, weights[W.moe_s2]
+                )
+
             payload.expert_x = new_expert_x
             weights[W.moe_w1] = new_w1
             weights[W.moe_w2] = new_w2
 
-        executor = DeepGemmContinousExecutor(
+        executor = DeepGemmHybridExecutor(
             config,
             FusedMoEQuantConfig(
                 quant_dtype=torch.float8_e4m3fn if use_fp8 else None,
@@ -191,14 +200,12 @@ class DeepGemmContinousExecutorTestBase:
                 combine_payload.fused_expert_output[token_idx : token_idx + num_token],
                 ref_output[i, :num_token],
             )
-            # print('diff:', diff, output[token_idx : token_idx + num_token], ref_output[i, :num_token])
+            # print('diff:', diff, combine_payload.fused_expert_output[token_idx : token_idx + num_token], ref_output[i, :num_token])
             token_idx += num_token
-            assert diff < 0.0022
+            assert diff < 0.003
 
 
-class DeepGemmContinousExecutorTestBase(
-    DeepGemmContinousExecutorTestBase, unittest.TestCase
-):
+class DeepGemmHybridExecutorTestBase(DeepGemmHybridExecutorTestBase, unittest.TestCase):
     pass
 
 

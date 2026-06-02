@@ -1,13 +1,12 @@
 
-#include "rtp_llm/cpp/devices/CommonDefines.h"
-#include "rtp_llm/cpp/core/Dispatch.h"
-#include "rtp_llm/cpp/devices/utils/DebugUtils.h"
-#include "rtp_llm/cpp/rocm/cuda_shims.h"
-#include "rtp_llm/cpp/rocm/hip_host_utils.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/devices/rocm_impl/aiterPA.h"
+#include "rtp_llm/models_py/bindings/core/CommonDefines.h"
+#include "rtp_llm/models_py/bindings/core/Dispatch.h"
+#include "rtp_llm/cpp/utils/DebugUtils.h"
+#include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
+#include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
+#include "rtp_llm/models_py/bindings/rocm/atrexPA.h"
 #include "rtp_llm/models_py/bindings/rocm/PagedAttn.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
 
 namespace rtp_llm {
 
@@ -18,44 +17,38 @@ PagedAttnDecodeOp::PagedAttnDecodeOp(const AttentionConfigs& attn_configs,
     attn_configs_(attn_configs),
     layer_num_(layer_num),
     fmha_config_(fmha_config),
-    device_(dynamic_cast<ROCmDevice*>(DeviceFactory::getDefaultDevice())),
     use_aiter_pa_(fmha_config.use_aiter_pa) {}
 
 bool PagedAttnDecodeOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     return true;
-    // return fmha_config_.enable_paged_trt_fmha && attn_configs_.kv_cache_dtype != KvCacheDataType::INT8;
 }
 
 CKAttnPtr PagedAttnDecodeOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     int batch_size = attn_inputs.sequence_lengths.size(0);
 
-    BufferPtr kv_cache_block_id_host, kv_cache_block_id_device;
-    if (attn_inputs.kv_cache_block_id_host.size(0)) {
-        kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
-        kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
+    torch::Tensor kv_cache_kernel_block_id_device;
+    if (attn_inputs.kv_cache_kernel_block_id_host.defined() && attn_inputs.kv_cache_kernel_block_id_host.numel() > 0) {
+        kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     }
 
     CKAttnPtr attn_params;
-    bool      use_fmha_fp8 = false;
-    auto      params       = device_->PrepareCKAttn(
-        attn_configs_, kv_cache_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8);
+    bool      use_fmha_fp8 = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
+    auto      params       = PrepareCKAttn(
+        attn_configs_, kv_cache_kernel_block_id_device, attn_inputs.sequence_lengths.size(0), use_fmha_fp8);
 
-    attn_params              = CKAttnPtr(params, (CKAttn*)params.get());
-    attn_params->decode_plan = true;
-    attn_params->attn_type   = torchDTypeToDataType(attn_inputs.dtype);
-    // attn_params->cu_seqlens                = cu_seqlens;
-    // attn_params->cu_kv_seqlens             = cu_kv_seqlens;
+    attn_params                            = CKAttnPtr(params, (CKAttn*)params.get());
+    attn_params->decode_plan               = true;
+    attn_params->attn_type                 = torchDTypeToDataType(attn_inputs.dtype);
     attn_params->sequence_lengths          = attn_inputs.sequence_lengths.cuda();
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
     attn_params->max_seq_len               = attn_inputs.sequence_lengths.max().item<int32_t>();
 
-    // attn_params->stream = (int64_t)device_->getStream();
     return attn_params;
 }
 
-forward_param PagedAttnDecodeOp::forward(const torch::Tensor&              qkv,
-                                         std::optional<torch_ext::KVCache> kv_cache,
-                                         const CKAttnPtr&                  params) {
+forward_param PagedAttnDecodeOp::forward(const torch::Tensor&                   qkv,
+                                         std::optional<torch_ext::LayerKVCache> kv_cache,
+                                         const CKAttnPtr&                       params) {
     auto kv_block_array            = params->kv_block_array;
     kv_block_array.mPrimaryPoolPtr = kv_cache.value().kv_cache_base.data_ptr();
     if (kv_cache.value().kv_scale_base.defined() && kv_cache.value().kv_scale_base.numel()) {
@@ -105,21 +98,16 @@ forward_param PagedAttnDecodeOp::forward(const torch::Tensor&              qkv,
         int64_t max_seq_len        = params->max_seq_len;
         size_t  max_num_partitions = (max_seq_len + partition_size - 1) / partition_size;
         auto    datatype           = params->attn_type;
-        // params.attn_type
 
-        BufferPtr exp_sums_buffer = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_FP32, {num_seqs, num_heads, max_num_partitions}, AllocationType::DEVICE},
-            {"exp_sums"});
-        auto exp_sums = Buffer2torchTensor(exp_sums_buffer, false);
+        auto exp_sums = torch::empty({(int64_t)num_seqs, (int64_t)num_heads, (int64_t)max_num_partitions},
+                                     torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
 
-        BufferPtr max_logits_buffer = device_->allocateBuffer(
-            {rtp_llm::DataType::TYPE_FP32, {num_seqs, num_heads, max_num_partitions}, AllocationType::DEVICE},
-            {"max_logits"});
-        auto max_logits = Buffer2torchTensor(max_logits_buffer, false);
+        auto max_logits = torch::empty({(int64_t)num_seqs, (int64_t)num_heads, (int64_t)max_num_partitions},
+                                       torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
 
-        BufferPtr tmp_out_buffer = device_->allocateBuffer(
-            {datatype, {num_seqs, num_heads, max_num_partitions, head_size}, AllocationType::DEVICE}, {"tmp_out"});
-        auto tmp_out = Buffer2torchTensor(tmp_out_buffer, false);
+        auto tmp_out =
+            torch::empty({(int64_t)num_seqs, (int64_t)num_heads, (int64_t)max_num_partitions, (int64_t)head_size},
+                         torch::TensorOptions(dataTypeToTorchType(datatype)).device(torch::kCUDA));
 
         int64_t num_kv_heads = attn_configs_.kv_head_num;
         double  scale        = attn_configs_.softmax_extra_scale / sqrtf(attn_configs_.size_per_head * 1.0f);
@@ -175,5 +163,22 @@ void registerPagedAttnDecodeOp(py::module& m) {
         .def_readwrite("block_size", &forward_param::block_size)
         .def_readwrite("max_seq_len", &forward_param::max_seq_len)
         .def_readwrite("partition_size", &forward_param::partition_size);
+
+    // Add atrex paged_attention_atrex binding
+    m.def("paged_attention_atrex",
+          &paged_attention_atrex,
+          py::arg("out"),
+          py::arg("exp_sums"),
+          py::arg("max_logits"),
+          py::arg("tmp_out"),
+          py::arg("query"),
+          py::arg("key_cache"),
+          py::arg("value_cache"),
+          py::arg("context_lens"),
+          py::arg("block_tables"),
+          py::arg("scale"),
+          py::arg("max_context_len"),
+          py::arg("alibi_slopes") = py::none(),
+          "Paged attention with atrex implementation");
 }
 }  // namespace rtp_llm

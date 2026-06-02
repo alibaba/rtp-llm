@@ -2,10 +2,10 @@
 
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
-#include "rtp_llm/cpp/models/GptModel.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include <memory>
 #include <cstdlib>
 
@@ -13,14 +13,14 @@ namespace rtp_llm {
 
 class Executor {
 public:
-    Executor(rtp_llm::DeviceBase* device): device_(device) {};
+    Executor() {};
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams) = 0;
 
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,
                                                    const EPLBConfig&        eplb_config,
                                                    const MoeConfig&         moe_config) {
-        AttentionConfigs attention_config = model_config.getAttentionConfigs(parallelism_config.tp_size);
+        AttentionConfigs attention_config = model_config.getAttentionConfigs(parallelism_config.get_attn_tp_size());
         // TP在init的时候处理，认为每个MOE Plugin只看到一个TP rank；EP在MOE Plugin中处理；
         auto moe_configs =
             model_config.moe_style ?
@@ -58,6 +58,8 @@ public:
             act_qscheme = rtp_llm::QScheme::Qfp8PerTokenBlock;
         } else if (model_config.quant_algo.isFp8PTPC()) {
             act_qscheme = rtp_llm::QScheme::Qfp8PerToken;
+        } else if (model_config.quant_algo.isW4a8Int4PTPC()) {
+            act_qscheme = rtp_llm::QScheme::Qfp8PerToken;
         }
 
         return {attention_config,
@@ -81,7 +83,6 @@ public:
     }
 
 public:
-    rtp_llm::DeviceBase* device_;
 };
 
 }  // namespace rtp_llm

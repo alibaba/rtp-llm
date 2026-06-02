@@ -1,6 +1,6 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "torch_deps")
-load("//rtp_llm/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs")
+load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 test_copts = [
     "-fno-access-control",
@@ -32,7 +32,7 @@ py_test(
         "//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
         "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
     }),
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_library(

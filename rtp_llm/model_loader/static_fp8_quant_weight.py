@@ -1,4 +1,5 @@
 import copy
+import math
 import functools
 import logging
 from typing import Any, Dict, List, Optional, Union
@@ -594,7 +595,8 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
             kernel_scale = processed_res[W.attn_qkv_s]
 
             head_size = load_config.size_per_head
-            head_num_kv = load_config.head_num_kv // load_config.tp_size
+            _kv_tp = math.gcd(load_config.head_num_kv, load_config.tp_size)
+            head_num_kv = load_config.head_num_kv // _kv_tp
             head_num_q = load_config.head_num // load_config.tp_size
             assert (head_num_q + 2 * head_num_kv) == kernel_weight.shape[0] // head_size
             logical_widths = [

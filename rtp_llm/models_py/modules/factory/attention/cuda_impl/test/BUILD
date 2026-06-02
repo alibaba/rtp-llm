@@ -170,6 +170,24 @@ py_test(
     },
 )
 
+# Test for PyFlashinferPrefillPagedAttnOp CUDA graph path vs normal path
+py_test(
+    name = "test_py_flashinfer_paged_prefill_cuda_graph",
+    srcs = [
+        "test_flashinfer_prefill/test_py_flashinfer_paged_prefill_cuda_graph.py",
+        "base_attention_test.py"
+    ],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
 # Test for MhaRotaryEmbeddingOp - RoPE implementation for MHA
 py_test(
     name = "test_mha_rotary_emb",

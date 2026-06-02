@@ -22,7 +22,7 @@ public class GrpcReporter {
         this.monitor = monitor;
     }
 
-    // gRPC 调用相关指标常量
+    // gRPC call related metric constants
     private static final String GRPC_CALL_DURATION = "grpc.call.duration";
     private static final String GRPC_RESPONSE_SIZE = "grpc.response.size";
     private static final String GRPC_CALL_COUNT = "grpc.call.count";
@@ -47,13 +47,13 @@ public class GrpcReporter {
     }
     
     /**
-     * 上报 gRPC 调用指标
-     * 
-     * @param ip 目标 IP
-     * @param serviceType 服务类型
-     * @param duration 调用耗时（毫秒）
-     * @param responseSize 响应体大小（字节）
-     * @param isRetry 是否为重试调用
+     * Report gRPC call metrics
+     *
+     * @param ip Target IP address
+     * @param serviceType Service type
+     * @param duration Call duration in milliseconds
+     * @param responseSize Response body size in bytes
+     * @param isRetry Whether this is a retry call
      */
     public void reportCallMetrics(String ip, String serviceType, long duration, int responseSize, boolean isRetry) {
         FlexMetricTags tags = FlexMetricTags.of(
@@ -61,31 +61,31 @@ public class GrpcReporter {
             "service", serviceType,
             "retry", String.valueOf(isRetry)
         );
-        
-        // 上报调用耗时
+
+        // Report call duration
         monitor.report(GRPC_CALL_DURATION, tags, duration);
-        
-        // 上报响应体大小
+
+        // Report response body size
         monitor.report(GRPC_RESPONSE_SIZE, tags, responseSize);
-        
-        // 上报调用次数
+
+        // Report call count
         monitor.report(GRPC_CALL_COUNT, tags, 1);
     }
     
     /**
-     * 上报 gRPC 连接持续时间
-     * 
-     * @param ip 目标 IP
-     * @param serviceType 服务类型
-     * @param connectionDuration 连接持续时间（微秒）
+     * Report gRPC connection duration
+     *
+     * @param ip Target IP address
+     * @param serviceType Service type
+     * @param connectionDuration Connection duration in microseconds
      */
     public void reportConnectionDuration(String ip, String serviceType, long connectionDuration) {
         FlexMetricTags tags = FlexMetricTags.of(
             "ip", ip,
             "service", serviceType
         );
-        
-        // 上报连接持续时间
+
+        // Report connection duration
         monitor.report(GRPC_CONNECTION_DURATION, tags, connectionDuration);
     }
 }

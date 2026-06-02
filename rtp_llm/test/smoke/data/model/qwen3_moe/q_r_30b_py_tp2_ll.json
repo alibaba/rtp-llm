@@ -1,0 +1,21 @@
+{
+    "model_type": "qwen_3_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3-30B-A3B-Instruct-2507-FP8",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s1",
+                "generate_config": {
+                    "max_new_tokens": 55,
+                    "temperature": 0.0,
+                    "top_p": 0,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response": " explain in simple terms\n\nSure! Let's break down the **CAP Theorem** in simple terms.\n\n---\n\n### 🌐 What is the CAP Theorem?\n\nThe **CAP Theorem** (also called **Brewer’s Theorem**) says that in a **",
+                "finished": true
+            }
+        }
+    ]
+}

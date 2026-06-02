@@ -8,9 +8,6 @@ import lombok.Data;
 @Data
 public class Endpoint {
 
-    @JsonProperty("type")
-    private String type;
-
     @JsonProperty("address")
     private String address;
 

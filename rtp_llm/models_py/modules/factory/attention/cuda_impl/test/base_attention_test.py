@@ -6,7 +6,7 @@ from typing import List, NamedTuple
 import torch
 
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, get_typemeta
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, get_typemeta
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -79,6 +79,7 @@ class BaseAttentionTest(unittest.TestCase):
         attn_configs.kv_head_num = head_num_kv
         attn_configs.size_per_head = size_per_head
         attn_configs.tokens_per_block = seq_size_per_block
+        attn_configs.kernel_tokens_per_block = seq_size_per_block
         attn_configs.use_mla = False
 
         # Set dtype based on data_type parameter
@@ -171,6 +172,8 @@ class BaseAttentionTest(unittest.TestCase):
         )
         attn_inputs.kv_cache_block_id_host = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
+        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
 
         # Create cu_seqlens for decode (just counting tokens)
         attn_inputs.cu_seqlens = torch.arange(
@@ -226,6 +229,8 @@ class BaseAttentionTest(unittest.TestCase):
         )
         attn_inputs.kv_cache_block_id_host = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
+        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
 
         # Create cu_seqlens (cumulative sequence lengths) for ragged tensor
         cu_seqlens = [0]
@@ -254,7 +259,7 @@ class BaseAttentionTest(unittest.TestCase):
         [total_blocks, 2, num_kv_heads, seq_size_per_block, head_dim]
         where dimension 1 index 0 is K cache and index 1 is V cache.
         """
-        kv_cache = KVCache()
+        kv_cache = LayerKVCache()
 
         # Create combined KV cache with shape [total_blocks, 2, num_kv_heads, seq_size_per_block, head_dim]
         # where dim=1, index=0 is K and index=1 is V

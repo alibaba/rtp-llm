@@ -2,10 +2,15 @@
 
 #include <mutex>
 #include <memory>
+#include <optional>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <sstream>
+
 #include "rtp_llm/cpp/utils/LRUCache.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
@@ -15,12 +20,23 @@ using CacheKeyGroupPair = std::pair<CacheKeyType, GroupIdType>;  // <cache_key, 
 
 class BlockCache {
 public:
+    // Epoch sentinels:
+    //   GLOBAL_EPOCH (0)    : applied to CacheItem.epoch — entry is globally visible.
+    //                         Also valid as a query epoch meaning "no batch identity,
+    //                         only see global entries".
+    //   NO_EPOCH_FILTER (-1): query-side ONLY — bypass filter, see everything (diagnostics
+    //                         and legacy callers without batch context).
+    // Batch-local epochs are positive integers (>= 1) assigned by the scheduler.
+    // CacheItem.epoch must always be >= 0.
+    static constexpr int64_t GLOBAL_EPOCH    = 0;
+    static constexpr int64_t NO_EPOCH_FILTER = -1;
+
     struct CacheItem {
         CacheKeyType cache_key;
         GroupIdType  group_id;
         BlockIdxType block_index;
         bool         is_resident = false;
-        int64_t      epoch       = 0;  // Epoch ID: 0 = global visible, >0 = batch-specific
+        int64_t      epoch       = GLOBAL_EPOCH;  // 0 = globally visible, >=1 = visible only within the same batch
         std::string  debugString() const {
             std::stringstream debug_string;
             debug_string << "CacheItem cache_key: " << cache_key << ", group_id: " << group_id
@@ -40,13 +56,13 @@ public:
 
     struct PutResult {
         enum class Action {
-            INSERTED,  // 新插入的 item（需要增加新 block 引用计数）
-            REPLACED,  // 替换了旧 item（需要减少旧 block，增加新 block 引用计数）
-            SKIPPED    // 跳过（epoch 优先级，不需要更新引用计数）
+            INSERTED,  // New item inserted
+            REPLACED,  // Replaced old item (need to free old block, reference new block)
+            SKIPPED    // Skipped (epoch priority, no update needed)
         };
 
-        Action       action;           // 操作类型
-        BlockIdxType old_block_index;  // 旧 block index（如果替换，否则为 NULL_BLOCK_IDX）
+        Action       action;
+        BlockIdxType old_block_index;  // Old block index if replaced, otherwise NULL_BLOCK_IDX
     };
 
     using LRUCacheType  = LRUCache<CacheKeyGroupPair,
@@ -60,11 +76,28 @@ public:
 
     PutResult put(CacheItem& cache_item);
 
+    // Remove a cache entry by key. Returns the removed CacheItem if found, std::nullopt otherwise.
+    std::optional<CacheItem> remove(CacheKeyType cache_key, int group_id = 0);
+
     bool contains(CacheKeyType cache_key, int group_id = 0) const;
 
-    MatchResult match(CacheKeyType cache_key, int group_id = 0, int64_t current_batch_epoch = -1);
+    // current_batch_epoch semantics:
+    //   NO_EPOCH_FILTER (-1): bypass filter, match every item regardless of epoch
+    //   GLOBAL_EPOCH    ( 0): no batch identity, match ONLY items with epoch == 0
+    //                         (this is what feature-OFF callers and non-batch-bound paths use)
+    //   >= 1                : same-batch caller — match global items OR items with the same epoch
+    MatchResult match(CacheKeyType cache_key, int group_id = 0, int64_t current_batch_epoch = NO_EPOCH_FILTER);
 
     BlockIndicesType pop(int n);
+
+    // Select and remove LRU cache entries until at least min_blocks are freed.
+    // Skips resident entries and keys that have any resident item.
+    // Returns evicted items grouped by cache_key (in LRU order).
+    struct EvictResult {
+        std::vector<CacheKeyType>                                evicted_keys;
+        std::unordered_map<CacheKeyType, std::vector<CacheItem>> evicted_items;
+    };
+    EvictResult selectAndEvict(size_t min_blocks);
 
     bool empty() const;
 
@@ -72,14 +105,11 @@ public:
 
     CacheSnapshot cacheSnapshot(int64_t latest_version) const;
 
-    // Print current cache state for debugging
-    void debugString() const;
-
 private:
     size_t       seq_size_per_block_;
     LRUCacheType lru_cache_;
-    // NOTE: BlockCache/LRUCache is accessed from multiple RPC/engine threads.
-    // LRUCache is NOT thread-safe (unordered_map + list). Guard all accesses here.
+    // All public methods acquire mu_ before accessing lru_cache_.
+    // This mutex is required because BlockCache is shared across scheduler and rpc threads.
     mutable std::mutex mu_;
 };
 

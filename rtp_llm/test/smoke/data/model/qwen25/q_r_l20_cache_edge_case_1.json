@@ -1,0 +1,49 @@
+{
+  "model_type": "qwen_2",
+  "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+  "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+  "query_result": [
+    {
+      "query": {
+        "prompt": "hello hello hello hello hello hello hello hello",
+        "generate_config": {
+          "max_new_tokens": 10,
+          "top_k": 1,
+          "top_p": 0
+        }
+      },
+      "result": {
+        "response": " hello hello hello hello hello hello hello hello hello hello",
+        "finished": true,
+        "aux_info": {
+          "iter_count": 10,
+          "input_len": 8,
+          "output_len": 10,
+          "step_output_len": 10,
+          "reuse_len": 0
+        }
+      }
+    },
+    {
+      "query": {
+        "prompt": "hello hello hello hello hello hello hello hello",
+        "generate_config": {
+          "max_new_tokens": 10,
+          "top_k": 1,
+          "top_p": 0
+        }
+      },
+      "result": {
+        "response": " hello hello hello hello hello hello hello hello hello hello",
+        "finished": true,
+        "aux_info": {
+          "iter_count": 10,
+          "input_len": 8,
+          "output_len": 10,
+          "step_output_len": 10,
+          "reuse_len": 4
+        }
+      }
+    }
+  ]
+}

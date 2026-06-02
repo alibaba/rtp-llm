@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -17,9 +18,10 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
-#include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/RoleTypes.h"
 
 #include <chrono>
 #include <memory>
@@ -40,26 +42,50 @@ protected:
                                               rtp_llm::DataType::TYPE_INT8);
     }
 
-    void prepareResource(bool reuse_cache = false) {
-        prepareResourceWithInputTokens(/*input_tokens=*/{1, 2, 3, 4, 5, 6}, reuse_cache);
+    void prepareResource(bool reuse_cache = false, RoleType role_type = RoleType::PDFUSION) {
+        prepareResourceWithInputTokens(/*input_tokens=*/{1, 2, 3, 4, 5, 6}, reuse_cache, role_type);
     }
 
-    void prepareResourceWithInputTokens(const std::vector<int>& input_tokens, bool reuse_cache = false) {
-        auto cache_config = init_config();
-        cache_manager_    = std::make_shared<KVCacheManager>(cache_config, device_);
+    void prepareHybridResource(bool reuse_cache = false, RoleType role_type = RoleType::PDFUSION) {
+        prepareHybridResourceWithInputTokens(/*input_tokens=*/{1, 2, 3, 4, 5, 6}, reuse_cache, role_type);
+    }
+
+    void prepareResourceWithInputTokens(const std::vector<int>& input_tokens,
+                                        bool                    reuse_cache = false,
+                                        RoleType                role_type   = RoleType::PDFUSION) {
+        prepareResourceWithCacheConfig(init_config(), input_tokens, reuse_cache, role_type);
+    }
+
+    void prepareHybridResourceWithInputTokens(const std::vector<int>& input_tokens,
+                                              bool                    reuse_cache = false,
+                                              RoleType                role_type   = RoleType::PDFUSION) {
+        prepareResourceWithCacheConfig(test::makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
+                                                                            /*block_num=*/9,
+                                                                            /*tokens_per_block=*/2,
+                                                                            rtp_llm::DataType::TYPE_FP16,
+                                                                            /*group_layer_num=*/2),
+                                       input_tokens,
+                                       reuse_cache,
+                                       role_type);
+    }
+
+    void prepareResourceWithCacheConfig(const CacheConfig&      cache_config,
+                                        const std::vector<int>& input_tokens,
+                                        bool                    reuse_cache,
+                                        RoleType                role_type) {
+        cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr);
         ASSERT_TRUE(cache_manager_->init());
         ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;
         resource_context.reuse_cache   = reuse_cache;
+        resource_context.role_type     = role_type;
 
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         generate_config->num_return_sequences = 2;
-        auto                vec               = input_tokens;  // keep alive until stream is constructed
-        std::vector<size_t> shape             = {vec.size()};
         generate_input->input_ids =
-            std::make_unique<rtp_llm::Buffer>(rtp_llm::MEMORY_CPU, rtp_llm::TYPE_INT32, shape, (void*)(vec.data()));
+            torch::tensor(std::vector<int32_t>(input_tokens.begin(), input_tokens.end()), torch::kInt32);
         generate_input->generate_config = generate_config;
         ModelConfig model_config;
         model_config.attn_config.tokens_per_block = 2;
@@ -67,7 +93,7 @@ protected:
         model_config.max_seq_len = 2048;
         stream_                  = std::make_shared<NormalGenerateStream>(
             generate_input, model_config, runtime_config, resource_context, nullptr);
-        stream_->setRunning();
+        stream_->generate_status_->status = StreamState::RUNNING;
     }
 
     void checkBlockFunc(BatchKVCacheResource& batch_resource, int outter_size, int inner_size) {
@@ -226,32 +252,8 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
     ASSERT_FALSE(resource.reuseCache());
 }
 
-TEST_F(StreamCacheResourceTest, testStreamCacheResourceEnable3FSMethod) {
-    // Start with engine=true to test query toggling
-    prepareResource(true);
-    auto& resource = stream_->streamCacheResource();
-
-    // engine=true, query=true -> true
-    resource.resource_context_.enable_3fs                 = true;
-    stream_->generate_input_->generate_config->enable_3fs = true;
-    ASSERT_TRUE(resource.enable3FS());
-
-    // engine=true, query=false -> false
-    stream_->generate_input_->generate_config->enable_3fs = false;
-    ASSERT_FALSE(resource.enable3FS());
-
-    // engine=false, query=true -> false
-    resource.resource_context_.enable_3fs                 = false;
-    stream_->generate_input_->generate_config->enable_3fs = true;
-    ASSERT_FALSE(resource.enable3FS());
-
-    // engine=false, query=false -> false
-    stream_->generate_input_->generate_config->enable_3fs = false;
-    ASSERT_FALSE(resource.enable3FS());
-}
-
 TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdatesReuseLen) {
-    // initKVBlock() calls incrKVBlock() then loadCacheSync() internally.
+    // initKVBlock() ends with loadCacheSync() (same as GenerateStream::initKVBlock).
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
 
@@ -264,8 +266,8 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
         std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
                                                                              cache_manager_->kv_cache_config_,
                                                                              cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_,
-                                                                             device_);
+                                                                             cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
     cache_manager_->coordinator_ = mock_coord;
 
     // Build a FusedAsyncReadContext that is immediately done/success and has reuse blocks set.
@@ -291,6 +293,8 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
         }));
 
     ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.asyncLoadCache());
+    ASSERT_TRUE(resource.loadCacheDone());
     ASSERT_NE(captured_ctx, nullptr);
     ASSERT_NE(captured_ctx->meta(), nullptr);
     EXPECT_TRUE(captured_ctx->meta()->enableMemoryCache());
@@ -302,6 +306,61 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
     EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->localReuseLength(), expected_total_reuse_len);
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
+}
+
+TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {
+    prepareHybridResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+
+    // Enable query-level reuse/device cache, but decode initKVBlock should still force device cache off.
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    stream_->generate_input_->generate_config->enable_device_cache = true;
+    resource.resource_context_.enable_device_cache                 = true;
+
+    // initKVBlock() -> loadCacheSync() -> asyncRead.
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+
+    auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+    cache_manager_->allocator_ = allocator;
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
+    cache_manager_->coordinator_ = mock_coord;
+    EXPECT_CALL(*mock_coord, asyncRead(testing::_)).WillOnce(testing::Return(nullptr));
+
+    testing::InSequence seq;
+    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
+        .WillOnce(testing::Invoke([&](const MallocInfo& info) -> MallocResult {
+            EXPECT_FALSE(info.enable_device_cache);
+            return {true, 0};
+        }));
+
+    EXPECT_CALL(*allocator, incrMalloc(testing::_))
+        .WillOnce(testing::Invoke([&](const MallocInfo& info) -> MallocResult {
+            // initKVBlock should force-disable device cache on the first malloc for decode role.
+            EXPECT_FALSE(info.enable_device_cache);
+            // Simulate a successful allocation so subsequent calls go through incrMalloc path.
+            for (int b = 0; b < info.batch_kv_cache_resource->batchSize(); ++b) {
+                auto& block_ids = info.batch_kv_cache_resource->mutableBlockIds(b, /*group_id=*/0);
+                block_ids.assign(BlockIndicesType{/*block=*/1});
+            }
+            return {true, 0};
+        }))
+        .WillOnce(testing::Invoke([&](const MallocInfo& info) -> MallocResult {
+            // incrKVBlock should respect runtime config: reuseCache() && enableDeviceCache().
+            EXPECT_TRUE(info.enable_device_cache);
+            return {true, 0};
+        }));
+
+    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
+    resource.asyncLoadCache();
+    resource.loadCacheDone();
+    ASSERT_TRUE(resource.incrKVBlock(/*reserve_step=*/0).ok());
 }
 
 TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TriggersStoreCacheAsync_WhenFinishedAndReuseCache) {
@@ -323,8 +382,8 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TriggersStoreCacheAsync_Wh
         std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
                                                                              cache_manager_->kv_cache_config_,
                                                                              cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_,
-                                                                             device_);
+                                                                             cache_manager_->allocator_);
+
     cache_manager_->coordinator_ = mock_coord;
 
     std::shared_ptr<KVCacheConnectorReadWriteContext> captured_ctx;
@@ -338,7 +397,8 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TriggersStoreCacheAsync_Wh
     ASSERT_TRUE(resource.incrKVBlock(/*reserve_step=*/0).ok());
     ASSERT_GT(resource.curBlocksNum(), 0);
 
-    stream_->setFinishedWithoutLock();
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->fillSubGenerateStatus(StreamState::FINISHED);
     const int blocks = resource.curBlocksNum();
     ASSERT_EQ(resource.tryReleaseKVBlock(blocks), blocks);
 
@@ -359,8 +419,8 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_DoesNotStoreCacheAsync_Whe
         std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
                                                                              cache_manager_->kv_cache_config_,
                                                                              cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_,
-                                                                             device_);
+                                                                             cache_manager_->allocator_);
+
     cache_manager_->coordinator_ = mock_coord;
 
     EXPECT_CALL(*mock_coord, asyncWrite(testing::_)).Times(0);
@@ -371,6 +431,353 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_DoesNotStoreCacheAsync_Whe
 
     // Stream is still running -> should not store to connector.
     ASSERT_EQ(resource.tryReleaseKVBlock(blocks), blocks);
+}
+
+TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TieredMemoryCache_EvictsDeviceBlocksWithSeparateMeta) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+    resource.resource_context_.enable_remote_cache                 = true;
+    stream_->generate_input_->generate_config->enable_remote_cache = true;
+    resource.resource_context_.enable_tiered_memory_cache          = true;
+    resource.resource_context_.device_cache_min_free_blocks        = 8;
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+
+    cache_manager_->coordinator_ = mock_coord;
+
+    std::vector<std::shared_ptr<KVCacheConnectorReadWriteContext>> captured_ctxs;
+    auto store_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    EXPECT_CALL(*mock_coord, asyncWrite(testing::_))
+        .Times(2)
+        .WillRepeatedly(
+            testing::Invoke([&](const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
+                captured_ctxs.push_back(connector_context);
+                return store_ctx;
+            }));
+
+    ASSERT_TRUE(resource.incrKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_GT(resource.curBlocksNum(), 0);
+
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->fillSubGenerateStatus(StreamState::FINISHED);
+    const int blocks = resource.curBlocksNum();
+    ASSERT_EQ(resource.tryReleaseKVBlock(blocks), blocks);
+
+    ASSERT_EQ(captured_ctxs.size(), 2u);
+    ASSERT_NE(captured_ctxs[0], nullptr);
+    ASSERT_NE(captured_ctxs[1], nullptr);
+    EXPECT_FALSE(captured_ctxs[0]->meta()->enableMemoryCache());
+    EXPECT_TRUE(captured_ctxs[0]->meta()->enableRemoteCache());
+    EXPECT_TRUE(captured_ctxs[1]->meta()->enableMemoryCache());
+    EXPECT_FALSE(captured_ctxs[1]->meta()->enableRemoteCache());
+    EXPECT_FALSE(captured_ctxs[1]->kvCacheResource().cacheKeys().empty());
+    EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+}
+
+// ============================================================================
+// asyncLoadCache() and loadCacheDone() tests
+// ============================================================================
+
+TEST_F(StreamCacheResourceTest, testAsyncLoadCache_NoReuseCache_ReturnsFalse) {
+    prepareResource(/*reuse_cache=*/false);
+    auto& resource = stream_->streamCacheResource();
+
+    // Without reuse_cache, asyncLoadCache should return false
+    ASSERT_FALSE(resource.asyncLoadCache());
+}
+
+TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ReuseCacheNoConnector_ReturnsFalse) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    // reuse_cache=true but neither memory_cache nor remote_cache enabled
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    resource.resource_context_.enable_memory_cache                 = false;
+    stream_->generate_input_->generate_config->enable_memory_cache = false;
+    resource.resource_context_.enable_remote_cache                 = false;
+    stream_->generate_input_->generate_config->enable_remote_cache = false;
+
+    ASSERT_FALSE(resource.asyncLoadCache());
+}
+
+TEST_F(StreamCacheResourceTest, testAsyncLoadCache_WithMemoryCache_SubmitsLoad) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
+    cache_manager_->coordinator_ = mock_coord;
+
+    auto mock_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*mock_ctx, done()).WillByDefault(testing::Return(false));
+    EXPECT_CALL(*mock_coord, asyncRead(testing::_))
+        .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(mock_ctx)));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.asyncLoadCache());
+
+    // Second call is idempotent - already has load_cache_context_
+    ASSERT_TRUE(resource.asyncLoadCache());
+}
+
+TEST_F(StreamCacheResourceTest, testAsyncLoadCache_CoordinatorReturnsNull_ReturnsFalse) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
+    cache_manager_->coordinator_ = mock_coord;
+
+    // Coordinator returns nullptr (no connector available)
+    EXPECT_CALL(*mock_coord, asyncRead(testing::_)).WillOnce(testing::Return(nullptr));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_FALSE(resource.asyncLoadCache());
+}
+
+TEST_F(StreamCacheResourceTest, testLoadCacheDone_NoContext_ReturnsTrue) {
+    prepareResource(/*reuse_cache=*/false);
+    auto& resource = stream_->streamCacheResource();
+
+    // No load_cache_context_ -> immediately done
+    ASSERT_TRUE(resource.loadCacheDone());
+}
+
+TEST_F(StreamCacheResourceTest, testLoadCacheDone_Pending_ReturnsFalse) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
+    cache_manager_->coordinator_ = mock_coord;
+
+    auto mock_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*mock_ctx, done()).WillByDefault(testing::Return(false));
+    EXPECT_CALL(*mock_coord, asyncRead(testing::_))
+        .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(mock_ctx)));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.asyncLoadCache());
+    // Still pending
+    ASSERT_FALSE(resource.loadCacheDone());
+}
+
+TEST_F(StreamCacheResourceTest, testLoadCacheDone_Done_ReturnsTrue_ClearsContext) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
+    cache_manager_->coordinator_ = mock_coord;
+
+    // Build a complete FusedAsyncReadContext that is immediately done
+    auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*match_child, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*match_child, success()).WillByDefault(testing::Return(true));
+    auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
+
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    kv_resource->setDeviceReuseBlockNum(1);
+    kv_resource->setMemoryReuseBlockNum(1);
+
+    std::shared_ptr<Meta> meta;
+    auto                  load_ctx = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
+    load_ctx->setFusedReadContext(nullptr);
+
+    EXPECT_CALL(*mock_coord, asyncRead(testing::_))
+        .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(load_ctx)));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.asyncLoadCache());
+    ASSERT_TRUE(resource.loadCacheDone());
+
+    // After loadCacheDone, the context should be cleared
+    ASSERT_EQ(resource.load_cache_context_, nullptr);
+
+    // Subsequent call returns true (no context)
+    ASSERT_TRUE(resource.loadCacheDone());
+}
+
+TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ThenLoadCacheDone_UpdatesReuseLength) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
+    cache_manager_->coordinator_ = mock_coord;
+
+    auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*match_child, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*match_child, success()).WillByDefault(testing::Return(true));
+    auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
+
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    kv_resource->setDeviceReuseBlockNum(2);
+    kv_resource->setMemoryReuseBlockNum(3);
+
+    std::shared_ptr<Meta> meta;
+    auto                  load_ctx = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
+    load_ctx->setFusedReadContext(nullptr);
+
+    EXPECT_CALL(*mock_coord, asyncRead(testing::_))
+        .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(load_ctx)));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.asyncLoadCache());
+    ASSERT_TRUE(resource.loadCacheDone());
+
+    // Verify reuse lengths are updated
+    // seq_size_per_block = 2 (from init_config)
+    const int total_reuse_len  = (2 + 3) * resource.seqSizePerBlock();
+    const int memory_reuse_len = 3 * resource.seqSizePerBlock();
+    EXPECT_EQ(stream_->initialReuseLength(), total_reuse_len);
+    EXPECT_EQ(stream_->reuseLength(), total_reuse_len);
+    EXPECT_EQ(stream_->memoryReuseLength(), memory_reuse_len);
+}
+
+TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseLength) {
+    // Simulates PD separation: initKVBlock called twice on the same stream.
+    // First call sets reuse length via asyncLoadCache+loadCacheDone; second call should NOT overwrite it with 0.
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
+    cache_manager_->coordinator_ = mock_coord;
+
+    // First call: asyncLoadCache returns reuse blocks (memory=1, device=2)
+    auto match_child1 = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*match_child1, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*match_child1, success()).WillByDefault(testing::Return(true));
+    auto fused_match1 = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child1});
+
+    auto kv_resource1 = std::make_shared<KVCacheResource>();
+    kv_resource1->setDeviceReuseBlockNum(2);
+    kv_resource1->setMemoryReuseBlockNum(1);
+
+    std::shared_ptr<Meta> meta1;
+    auto                  load_ctx1 = std::make_shared<FusedAsyncReadContext>(fused_match1, kv_resource1, meta1);
+    load_ctx1->setFusedReadContext(nullptr);
+
+    // Second call: load_cache_once_ prevents re-issue (no asyncRead call expected)
+    // loadCacheSync runs once inside initKVBlock; second initKVBlock skips async read (load_cache_once_).
+    EXPECT_CALL(*mock_coord, asyncRead(testing::_))
+        .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(load_ctx1)));
+
+    // First initKVBlock + asyncLoadCache + loadCacheDone: sets reuse lengths
+    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_GT(resource.curBlocksNum(), 0);
+    ASSERT_TRUE(resource.asyncLoadCache());
+    ASSERT_TRUE(resource.loadCacheDone());
+
+    const int expected_total_reuse_len  = (2 + 1) * resource.seqSizePerBlock();
+    const int expected_memory_reuse_len = 1 * resource.seqSizePerBlock();
+    EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
+    EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
+
+    // Second initKVBlock + asyncLoadCache + loadCacheDone: load_cache_once_ prevents re-issue.
+    // The once-per-lifecycle guard means the second asyncLoadCache() returns false (skipped),
+    // which inherently preserves the reuse lengths set by the first load.
+    ASSERT_TRUE(resource.initKVBlock(/*reserve_step=*/0).ok());
+    ASSERT_TRUE(resource.asyncLoadCache());
+    ASSERT_TRUE(resource.loadCacheDone());
+
+    EXPECT_EQ(stream_->reuseLength(), expected_total_reuse_len);
+    EXPECT_EQ(stream_->initialReuseLength(), expected_total_reuse_len);
+    EXPECT_EQ(stream_->localReuseLength(), expected_total_reuse_len);
+    EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
+}
+
+TEST_F(StreamCacheResourceTest, testWaitLoadCacheDone_ZeroReuseLen_DoesNotOverwriteExisting) {
+    // Directly tests that waitLoadCacheDone with total_reuse_len == 0 preserves existing values.
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    // Pre-set reuse lengths on the stream (simulating a prior successful loadCacheSync)
+    stream_->setReuseLength(100);
+    stream_->setInitialReuseLength(100);
+    stream_->setLocalReuseLength(80);
+    stream_->setMemoryReuseLength(40);
+    stream_->setRemoteReuseLength(20);
+    stream_->setMtpTokenIndex(100);
+
+    // Build a FusedAsyncReadContext with 0 reuse blocks
+    auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*match_child, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*match_child, success()).WillByDefault(testing::Return(true));
+    auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
+
+    auto                  kv_resource = std::make_shared<KVCacheResource>();
+    std::shared_ptr<Meta> meta;
+    auto                  load_ctx = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
+    load_ctx->setFusedReadContext(nullptr);
+
+    // Call waitLoadCacheDone directly
+    resource.waitLoadCacheDone(load_ctx);
+
+    // All values should be preserved — not overwritten with 0
+    EXPECT_EQ(stream_->reuseLength(), 100);
+    EXPECT_EQ(stream_->initialReuseLength(), 100);
+    EXPECT_EQ(stream_->localReuseLength(), 80);
+    EXPECT_EQ(stream_->memoryReuseLength(), 40);
+    EXPECT_EQ(stream_->remoteReuseLength(), 20);
+    EXPECT_EQ(stream_->getMtpTokenIndex(), 100);
 }
 
 }  // namespace rtp_llm

@@ -6,10 +6,10 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.ops.compute_ops import DeviceType, get_device
 from rtp_llm.utils.util import to_torch_dtype
 
 
@@ -23,7 +23,7 @@ class MoeConfigResolver:
         Returns:
             Device type
         """
-        return get_device().get_device_type()
+        return get_device_type()
 
     @staticmethod
     def has_quantization(config: MoEConfigAdapter) -> bool:
@@ -73,7 +73,7 @@ class MoeConfigResolver:
         Returns:
             Whether EP is enabled
         """
-        return config.parallelism_config.ep_size > 1
+        return config.ep_size > 1
 
     @staticmethod
     def use_low_latency(config: MoEConfigAdapter) -> bool:
@@ -97,19 +97,46 @@ class MoeConfigResolver:
         Returns:
             Whether single GPU
         """
-        return config.parallelism_config.ep_size == 1
+        return config.ep_size == 1
 
     @staticmethod
     def is_tp_equal_ep(config: MoEConfigAdapter) -> bool:
-        """Check if TP size equals EP size
+        """Check if attention TP size equals EP size.
+
+        Uses MoEConfigAdapter.tp_size, which reflects the attention/MoE-input
+        view (= get_attn_tp_size(), == 1 when CP is enabled). In CP mode this
+        returns False even if physical TP equals EP — use is_cp_equal_ep for
+        the physical-topology check.
+        """
+        return config.tp_size == config.ep_size
+
+    @staticmethod
+    def is_cp_equal_ep(config: MoEConfigAdapter) -> bool:
+        """Check if physical TP (= CP size when CP is enabled) equals EP size.
+
+        Reads raw parallelism_config.tp_size, bypassing the adapter's tp_size
+        which is squashed to 1 in CP mode. Used by router selectors that need
+        to know the underlying TP topology (e.g. pure_cp_router).
+        """
+        return config.parallelism_config.tp_size == config.ep_size
+
+    @staticmethod
+    def is_pure_tp_mode(config: MoEConfigAdapter) -> bool:
+        """Check if pure TP mode is applicable.
+
+        Pure TP mode requires ep_size == 1 and dp_size == 1, meaning each
+        rank holds all experts without EP/DP splitting. This covers both
+        single-GPU (tp=1) and multi-GPU pure-TP (tp>1) scenarios. This
+        aligns with the weight-splitting condition (moe_pure_tp_mode) in
+        model_weight_info.py.
 
         Args:
             config: MOE configuration adapter
 
         Returns:
-            Whether TP size equals EP size
+            Whether pure TP mode can be used
         """
-        return config.parallelism_config.tp_size == config.parallelism_config.ep_size
+        return config.ep_size == 1 and config.dp_size == 1 and config.tp_size >= 1
 
     @staticmethod
     def use_all_gather(config: MoEConfigAdapter) -> bool:

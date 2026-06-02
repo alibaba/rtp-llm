@@ -1,6 +1,6 @@
-from typing import Dict, Optional
 import logging
 import time
+from typing import Dict, Optional
 
 from typing_extensions import override
 
@@ -63,7 +63,6 @@ class LanguageCppEngine(BaseEngine):
         ):
             self.rtp_llm_op_.ft_op.start_http_server(
                 self.model.model_weights_loader,
-                self.model.model_config.lora_infos,
                 self.world_info,
                 self.tokenizer,
                 None,  # chat_renderer is not needed for HTTP server startup

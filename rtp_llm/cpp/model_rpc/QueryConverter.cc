@@ -1,9 +1,8 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 
 #include "RPCPool.h"
-#include "rtp_llm/cpp/core/Buffer.h"
-#include "rtp_llm/cpp/core/Types.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
 namespace rtp_llm {
@@ -41,6 +40,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->can_use_pd_separation    = config_proto->can_use_pd_separation();
     generate_config->gen_timeline             = config_proto->gen_timeline();
     generate_config->profile_step             = config_proto->profile_step();
+    generate_config->profile_trace_name       = config_proto->profile_trace_name();
     generate_config->ignore_eos               = config_proto->ignore_eos();
     generate_config->select_tokens_id.resize(config_proto->select_tokens_id_size());
     memcpy(generate_config->select_tokens_id.data(),
@@ -83,12 +83,24 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
             RoleType(role_addr.role()), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
     }
 
-    generate_config->inter_request_id    = config_proto->inter_request_id();
     generate_config->reuse_cache         = config_proto->reuse_cache();
-    generate_config->enable_3fs          = config_proto->enable_3fs();
     generate_config->enable_device_cache = config_proto->enable_device_cache();
     generate_config->enable_memory_cache = config_proto->enable_memory_cache();
+    generate_config->enable_remote_cache = config_proto->enable_remote_cache();
     TRANS_OPTIONAL(trace_id);
+    TRANS_OPTIONAL(batch_group_timeout);
+    TRANS_OPTIONAL(force_batch);
+
+    // 生成式推荐：组合 token 约束
+    generate_config->combo_token_size = config_proto->combo_token_size();
+    for (const auto& combo_proto : config_proto->banned_combo_token_ids().rows()) {
+        std::vector<int> combo;
+        combo.reserve(combo_proto.values_size());
+        for (const int value : combo_proto.values()) {
+            combo.push_back(value);
+        }
+        generate_config->banned_combo_token_ids.push_back(std::move(combo));
+    }
 
     return generate_config;
 }
@@ -100,10 +112,9 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     if (input->has_generate_config()) {
         generate_input->generate_config = transGenerateConfig(&(input->generate_config()));
     }
-    auto device               = rtp_llm::DeviceFactory::getDefaultDevice();
-    generate_input->input_ids = device->allocateBuffer(
-        {rtp_llm::DataType::TYPE_INT32, {(size_t)input->token_ids_size()}, rtp_llm::AllocationType::HOST}, {});
-    memcpy(generate_input->input_ids->data(), input->token_ids().data(), generate_input->input_ids->sizeBytes());
+    generate_input->input_ids =
+        torch::from_blob(const_cast<int*>(input->token_ids().data()), {(int64_t)input->token_ids_size()}, torch::kInt32)
+            .clone();
     if (input->multimodal_inputs_size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
         for (int i = 0; i < input->multimodal_inputs_size(); i++) {
@@ -121,6 +132,10 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
                                    mm_preprocess_config->max_frames());
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
+    }
+    generate_input->batch_group_size = input->batch_group_size() > 0 ? input->batch_group_size() : 1;
+    if (input->has_batch_group_id()) {
+        generate_input->batch_group_id = input->batch_group_id().value();
     }
 
     if (input->extra_input_ids_size() > 0) {
@@ -170,7 +185,7 @@ MultimodalInputsPB QueryConverter::transMMInputsPB(const std::vector<MultimodalI
         auto now_input = mm_inputs_pb.add_multimodal_inputs();
         now_input->set_multimodal_url(mm_input.url);
         now_input->set_multimodal_type(mm_input.mm_type);
-        transTensorPB(now_input->mutable_multimodal_tensor(), rtp_llm::torchTensor2Buffer(mm_input.tensor).get());
+        transTensorPB(now_input->mutable_multimodal_tensor(), mm_input.tensor);
         transMMPreprocessConfig(now_input->mutable_mm_preprocess_config(), mm_input.mm_preprocess_config);
     }
     return mm_inputs_pb;
@@ -200,205 +215,66 @@ MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputsPB* output
 }
 
 torch::Tensor QueryConverter::transTensor(const TensorPB& tensor_pb) {
-    std::vector<int64_t> shape(tensor_pb.shape().begin(), tensor_pb.shape().end());
-    void*                data_ptr = nullptr;
-    switch (tensor_pb.data_type()) {
-        case TensorPB::FP32: {
-            data_ptr     = const_cast<char*>(tensor_pb.fp32_data().data());
-            auto options = torch::TensorOptions().dtype(torch::kFloat32);
-            return torch::from_blob(data_ptr, shape, options).clone();
-        }
-        case TensorPB::INT32: {
-            data_ptr     = const_cast<char*>(tensor_pb.int32_data().data());
-            auto options = torch::TensorOptions().dtype(torch::kInt32);
-            return torch::from_blob(data_ptr, shape, options).clone();
-        }
-        case TensorPB::FP16: {
-            data_ptr     = const_cast<char*>(tensor_pb.fp16_data().data());
-            auto options = torch::TensorOptions().dtype(torch::kFloat16);
-            return torch::from_blob(data_ptr, shape, options).clone();
-        }
-        case TensorPB::BF16: {
-            data_ptr     = const_cast<char*>(tensor_pb.bf16_data().data());
-            auto options = torch::TensorOptions().dtype(torch::kBFloat16);
-            return torch::from_blob(data_ptr, shape, options).clone();
-        }
-        default:
-            throw std::runtime_error("Unsupported data type.");
-    }
+    return TensorPbConvert::pbToTorch(tensor_pb);
 }
 
 void QueryConverter::transTensorPB(TensorPB* tensor_pb, const torch::Tensor& tensor) {
-
-    // 设置数据类型
-    switch (tensor.dtype().toScalarType()) {
-        case torch::kFloat32:
-            tensor_pb->set_data_type(TensorPB::FP32);
-            break;
-        case torch::kInt32:
-            tensor_pb->set_data_type(TensorPB::INT32);
-            break;
-        case torch::kFloat16:
-            tensor_pb->set_data_type(TensorPB::FP16);
-            break;
-        case torch::kBFloat16:
-            tensor_pb->set_data_type(TensorPB::BF16);
-            break;
-        default:
-            throw std::runtime_error("Unsupported tensor data type.");
-    }
-    auto shape = tensor.sizes();
-    for (auto dim : shape) {
-        tensor_pb->add_shape(dim);
-    }
-    torch::Tensor contiguous_tensor = tensor.contiguous();
-    switch (tensor.dtype().toScalarType()) {
-        case torch::kFloat32: {
-            size_t      num_bytes = contiguous_tensor.numel() * sizeof(float);
-            const char* data_ptr  = static_cast<const char*>(contiguous_tensor.data_ptr());
-            tensor_pb->set_fp32_data(data_ptr, num_bytes);
-            break;
-        }
-        case torch::kInt32: {
-            size_t      num_bytes = contiguous_tensor.numel() * sizeof(int32_t);
-            const char* data_ptr  = static_cast<const char*>(contiguous_tensor.data_ptr());
-            tensor_pb->set_int32_data(data_ptr, num_bytes);
-            break;
-        }
-        case torch::kFloat16: {
-            size_t      num_bytes = contiguous_tensor.numel() * sizeof(c10::Half);
-            const char* data_ptr  = static_cast<const char*>(contiguous_tensor.data_ptr());
-            tensor_pb->set_fp16_data(data_ptr, num_bytes);
-            break;
-        }
-        case torch::kBFloat16: {
-            size_t      num_bytes = contiguous_tensor.numel() * sizeof(c10::BFloat16);
-            const char* data_ptr  = static_cast<const char*>(contiguous_tensor.data_ptr());
-            tensor_pb->set_bf16_data(data_ptr, num_bytes);
-            break;
-        }
-        default:
-            throw std::runtime_error("Unsupported tensor data type.");
-    }
-}
-
-void QueryConverter::transTensorPB(TensorPB* t, const rtp_llm::Buffer* buffer) {
-    RTP_LLM_CHECK(t != nullptr);
-    RTP_LLM_CHECK_WITH_INFO(buffer->where() != rtp_llm::MemoryType::MEMORY_GPU,
-                            "buffer is on gpu, not supported transfer to tensorpb");
-    auto shape       = t->mutable_shape();
-    auto shape_array = buffer->shape();
-    shape->Resize(shape_array.size(), 0);
-    memcpy(shape->mutable_data(), shape_array.data(), shape_array.size() * sizeof(int64_t));
-
-    TensorPB_DataType data_type;
-    switch (buffer->type()) {
-        case rtp_llm::DataType::TYPE_FP32:
-            data_type = TensorPB_DataType::TensorPB_DataType_FP32;
-            t->set_fp32_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
-            break;
-        case rtp_llm::DataType::TYPE_INT32:
-            data_type = TensorPB_DataType::TensorPB_DataType_INT32;
-            t->set_int32_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
-            break;
-        case rtp_llm::DataType::TYPE_FP16:
-            data_type = TensorPB_DataType::TensorPB_DataType_FP16;
-            t->set_fp16_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
-            break;
-        case rtp_llm::DataType::TYPE_BF16:
-            data_type = TensorPB_DataType::TensorPB_DataType_BF16;
-            t->set_bf16_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
-            break;
-        default:
-            throw std::invalid_argument("unsupport buffer data type: " + std::to_string(buffer->type()));
-            break;
-    }
-    t->set_data_type(data_type);
+    TensorPbConvert::torchToPb(tensor_pb, tensor);
 }
 
 template<typename T>
-void QueryConverter::mergeAndPadBuffersToTensorPB(TensorPB*                                   target_pb,
-                                                  const std::vector<rtp_llm::ConstBufferPtr>& buffers,
-                                                  T                                           pad_value) {
-    if (buffers.empty()) {
+void QueryConverter::mergeAndPadTensorsToTensorPB(TensorPB*                         target_pb,
+                                                  const std::vector<torch::Tensor>& tensors,
+                                                  T                                 pad_value) {
+    if (tensors.empty()) {
         return;
     }
 
-    size_t max_len = 0;
-    for (const auto& buffer : buffers) {
-        RTP_LLM_CHECK(buffer->dim() == 2 && buffer->shape()[0] == 1);
-        if (buffer->shape()[1] > max_len) {
-            max_len = buffer->shape()[1];
+    int64_t max_len = 0;
+    for (const auto& t : tensors) {
+        RTP_LLM_CHECK(t.dim() == 2 && t.size(0) == 1);
+        if (t.size(1) > max_len) {
+            max_len = t.size(1);
         }
     }
 
-    const size_t        batch_size  = buffers.size();
-    std::vector<size_t> final_shape = {batch_size, 1, max_len};
-
-    const auto   mem_type       = buffers[0]->where();
-    const auto   data_type      = buffers[0]->type();
-    const size_t total_elements = batch_size * max_len;
-    T*           new_data       = new T[total_elements];
-    std::fill(new_data, new_data + total_elements, pad_value);
-
-    for (size_t i = 0; i < batch_size; ++i) {
-        const auto&  src_buffer = buffers[i];
-        T*           dst_ptr    = new_data + i * max_len;
-        const T*     src_ptr    = src_buffer->data<T>();
-        const size_t src_len    = src_buffer->shape()[1];
-        memcpy(dst_ptr, src_ptr, src_len * sizeof(T));
+    const int64_t batch_size = tensors.size();
+    // Create padded tensor [batch_size, 1, max_len]
+    auto merged = torch::full({batch_size, 1, max_len}, pad_value, tensors[0].options());
+    for (int64_t i = 0; i < batch_size; ++i) {
+        int64_t src_len = tensors[i].size(1);
+        merged[i][0].slice(0, 0, src_len).copy_(tensors[i][0].slice(0, 0, src_len));
     }
-
-    auto deleter       = [=](rtp_llm::Buffer* b) { delete[] b->data<T>(); };
-    auto merged_buffer = std::make_shared<rtp_llm::Buffer>(mem_type, data_type, final_shape, new_data, deleter);
-    transTensorPB(target_pb, merged_buffer.get());
+    transTensorPB(target_pb, merged.contiguous());
 }
 
 template<typename Container, typename Accessor>
 void QueryConverter::stackBuffersToTensorPB(TensorPB*        target_pb,
                                             const Container& source_container,
                                             Accessor         tensor_accessor) {
-    rtp_llm::ConstBufferPtr ref_buffer = nullptr;
+    torch::Tensor ref_tensor;
     for (const auto& item : source_container) {
-        auto buffer_opt = std::invoke(tensor_accessor, item);
-        if (buffer_opt.has_value()) {
-            ref_buffer = *buffer_opt;
+        auto tensor_opt = std::invoke(tensor_accessor, item);
+        if (tensor_opt.has_value()) {
+            ref_tensor = *tensor_opt;
             break;
         }
     }
 
-    if (!ref_buffer) {
+    if (!ref_tensor.defined()) {
         return;
     }
 
-    const auto&  ref_shape                = ref_buffer->shape();
-    const size_t single_buffer_size_bytes = ref_buffer->sizeBytes();
-    const size_t batch_size               = source_container.size();
-
-    std::vector<size_t> final_shape = {batch_size};
-    final_shape.insert(final_shape.end(), ref_shape.begin(), ref_shape.end());
-
-    const auto   mem_type    = ref_buffer->where();
-    const auto   data_type   = ref_buffer->type();
-    const size_t total_bytes = batch_size * single_buffer_size_bytes;
-    char*        new_data    = new char[total_bytes];
-
-    char* current_dst_ptr = new_data;
+    std::vector<torch::Tensor> tensors;
+    tensors.reserve(source_container.size());
     for (const auto& item : source_container) {
-        auto buffer_opt = std::invoke(tensor_accessor, item);
-        RTP_LLM_CHECK_WITH_INFO(buffer_opt.has_value(), "Inconsistent tensor presence in a batch for stacking.");
-        auto current_buffer = *buffer_opt;
-
-        RTP_LLM_CHECK_WITH_INFO(current_buffer->shape() == ref_shape,
-                                "All buffers must have the same shape for stacking.");
-
-        memcpy(current_dst_ptr, current_buffer->data(), single_buffer_size_bytes);
-        current_dst_ptr += single_buffer_size_bytes;
+        auto tensor_opt = std::invoke(tensor_accessor, item);
+        RTP_LLM_CHECK_WITH_INFO(tensor_opt.has_value(), "Inconsistent tensor presence in a batch for stacking.");
+        tensors.push_back(tensor_opt->contiguous());
     }
 
-    auto deleter        = [=](rtp_llm::Buffer* b) { delete[] static_cast<char*>(b->data()); };
-    auto stacked_buffer = std::make_shared<rtp_llm::Buffer>(mem_type, data_type, final_shape, new_data, deleter);
-    QueryConverter::transTensorPB(target_pb, stacked_buffer.get());
+    auto stacked = torch::stack(tensors, 0);
+    QueryConverter::transTensorPB(target_pb, stacked);
 }
 
 void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
@@ -440,23 +316,26 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_decode_memory_reuse_len(response.aux_info.decode_memory_reuse_len);
             aux_info->set_aux_string(aux_string);
             if (response.aux_info.cum_log_probs.has_value()) {
-                transTensorPB(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value().get());
+                transTensorPB(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value());
             }
             if (response.aux_info.softmax_probs.has_value()) {
-                transTensorPB(aux_info->mutable_softmax_probs(), response.aux_info.softmax_probs.value().get());
+                transTensorPB(aux_info->mutable_softmax_probs(), response.aux_info.softmax_probs.value());
             }
         }
     }
 
-    std::vector<rtp_llm::ConstBufferPtr> output_id_buffers;
-    output_id_buffers.reserve(source_outputs.size());
-    for (const auto& resp : source_outputs) {
-        if (resp.output_ids) {
-            output_id_buffers.push_back(resp.output_ids);
+    {
+        std::vector<torch::Tensor> output_id_tensors;
+        output_id_tensors.reserve(source_outputs.size());
+        for (const auto& resp : source_outputs) {
+            if (resp.output_ids.defined()) {
+                output_id_tensors.push_back(resp.output_ids.contiguous());
+            }
         }
-    }
-    if (!output_id_buffers.empty()) {
-        mergeAndPadBuffersToTensorPB<int32_t>(flatten_output->mutable_output_ids(), output_id_buffers, eos_token_id);
+        if (!output_id_tensors.empty()) {
+            mergeAndPadTensorsToTensorPB<int32_t>(
+                flatten_output->mutable_output_ids(), output_id_tensors, eos_token_id);
+        }
     }
 
     stackBuffersToTensorPB(

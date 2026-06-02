@@ -1,5 +1,5 @@
 
-#include "rtp_llm/cpp/kernels/embedding_kernels.h"
+#include "rtp_llm/models_py/bindings/common/kernels/embedding_kernels.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include "rtp_llm/models_py/bindings/common/RtpEmbeddingLookup.h"
 #include <cstdint>

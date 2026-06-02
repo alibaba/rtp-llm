@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "normal_engine",
@@ -22,6 +22,18 @@ cc_library(
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt_constructor",
         "//rtp_llm/cpp/models:eplb",
-    ],
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
+        "//rtp_llm/cpp/utils:tensor_debug_utils",
+        "//rtp_llm/cpp/utils:profiling_scope",
+    ] + select({
+        "//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        ],
+        "@//:using_rocm": [
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )

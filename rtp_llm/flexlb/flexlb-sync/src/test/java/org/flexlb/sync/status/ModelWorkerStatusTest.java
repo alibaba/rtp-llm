@@ -133,55 +133,6 @@ class ModelWorkerStatusTest {
     }
 
     @Test
-    void should_filter_status_by_group_when_getting_role_status_map_with_group_filter() {
-        // Given
-        String ipPort1 = "127.0.0.1:8080";
-        String ipPort2 = "127.0.0.1:8081";
-        WorkerStatus status1 = new WorkerStatus();
-        status1.setGroup("groupA");
-        WorkerStatus status2 = new WorkerStatus();
-        status2.setGroup("groupB");
-        modelWorkerStatus.getPrefillStatusMap().put(ipPort1, status1);
-        modelWorkerStatus.getPrefillStatusMap().put(ipPort2, status2);
-
-        // When
-        var result = modelWorkerStatus.getRoleStatusMap(RoleType.PREFILL, "groupA");
-
-        // Then
-        assertNotNull(result);
-        assertEquals(1, result.size());
-        assertTrue(result.containsKey(ipPort1));
-        assertFalse(result.containsKey(ipPort2));
-    }
-
-    @Test
-    void should_return_empty_map_when_getting_role_status_map_with_group_filter_and_no_matching_group() {
-        // Given
-        String ipPort = "127.0.0.1:8080";
-        workerStatus1.setGroup("group1");
-        modelWorkerStatus.getPdFusionStatusMap().put(ipPort, workerStatus1);
-
-        // When
-        var result = modelWorkerStatus.getRoleStatusMap(RoleType.PDFUSION, "nonExistingGroup");
-
-        // Then
-        assertNotNull(result);
-        assertTrue(result.isEmpty());
-    }
-
-    @Test
-    void should_log_warning_when_getting_role_status_map_with_group_filter_on_empty_map() {
-        // Given - empty status map for role
-
-        // When
-        var result = modelWorkerStatus.getRoleStatusMap(RoleType.DECODE, "anyGroup");
-
-        // Then
-        assertNotNull(result);
-        assertTrue(result.isEmpty());
-    }
-
-    @Test
     void should_return_total_count_of_all_status_maps_when_getting_worker_total_count() {
         // Given
         modelWorkerStatus.getPdFusionStatusMap().put("127.0.0.1:8080", workerStatus1);

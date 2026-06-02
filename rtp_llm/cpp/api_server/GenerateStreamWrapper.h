@@ -29,7 +29,7 @@ private:
     static MultiSeqsResponse formatResponse(const std::vector<std::string>&        generate_texts,
                                             const GenerateOutputs&                 generate_outputs,
                                             const std::shared_ptr<GenerateConfig>& generate_config,
-                                            rtp_llm::BufferPtr                     input_ids);
+                                            const torch::Tensor&                   input_ids);
 
 private:
     GenerateStreamPtr                        stream_;
@@ -37,10 +37,9 @@ private:
     std::shared_ptr<ApiServerMetricReporter> metric_reporter_;
     std::shared_ptr<TokenProcessor>          token_processor_;
     std::shared_ptr<TokenProcessorPerStream> token_processor_ctx_;
-    std::shared_ptr<lora::LoraResourceGuard> lora_guard_;
     std::vector<int>                         output_lens_;
     GenerateOutputs                          outputs_cache_;
-    rtp_llm::BufferPtr                       input_ids_;
+    torch::Tensor                            input_ids_;
 };
 
 }  // namespace rtp_llm

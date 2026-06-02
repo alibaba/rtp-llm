@@ -78,16 +78,28 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             error_msg = f"Weight and weight scale must be 2D tensors, but got weight dim: {self.weight.dim()} and weight scale dim: {self.weight_scales.dim()}"
             logger.error(error_msg)
             raise ValueError(error_msg)
-        # Reshape weight and weight scale
-        self.K, self.N = self.weight.shape
-        self.scale_K, self.scale_N = self.weight_scales.shape
-        self.weight = self.weight.reshape(self.N, self.K)
-        self.weight_scales = self.weight_scales.reshape(self.scale_N, self.scale_K)
+        # e8m0 load not need reshape
+        if is_deep_gemm_e8m0_used():
+            self.N, self.K = self.weight.shape
+            self.scale_N, self.scale_K = self.weight_scales.shape
+        else:
+            # Reshape weight and weight scale
+            self.K, self.N = self.weight.shape
+            self.scale_K, self.scale_N = self.weight_scales.shape
+            self.weight = self.weight.reshape(self.N, self.K)
+            self.weight_scales = self.weight_scales.reshape(self.scale_N, self.scale_K)
         # Check weight scale sizes
-        if (self.N + 127) // 128 != self.scale_N or (
-            self.K + 127
-        ) // 128 != self.scale_K:
-            error_msg = f"Weight scale dimension mismatch! N: {self.N}, scale_N: {self.scale_N}, K: {self.K}, scale_K: {self.scale_K}"
+        if self.weight_scales.dtype is torch.float32 and (
+            (self.N + 127) // 128 != self.scale_N
+            or (self.K + 127) // 128 != self.scale_K
+        ):
+            error_msg = f"Weight scale dimension mismatch! float scale N: {self.N}, scale_N: {self.scale_N}, K: {self.K}, scale_K: {self.scale_K}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        if self.weight_scales.dtype is torch.int32 and (
+            self.N != self.scale_N or (self.K + 511) // 512 != self.scale_K
+        ):
+            error_msg = f"Weight scale dimension mismatch! int32 e8m0 scale N: {self.N}, scale_N: {self.scale_N}, K: {self.K}, scale_K: {self.scale_K}"
             logger.error(error_msg)
             raise ValueError(error_msg)
         # Check weight and weight scale dtypes
@@ -95,10 +107,8 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             error_msg = f"Weight dtype must be float8_e4m3fn, got {self.weight.dtype}"
             logger.error(error_msg)
             raise ValueError(error_msg)
-        if self.weight_scales.dtype != torch.float32:
-            error_msg = (
-                f"Weight scale dtype must be float32, got {self.weight_scales.dtype}"
-            )
+        if self.weight_scales.dtype not in (torch.float32, torch.int32):
+            error_msg = f"Weight scale dtype must be float32 or int32, got {self.weight_scales.dtype}"
             logger.error(error_msg)
             raise ValueError(error_msg)
         # Check bias
@@ -121,20 +131,12 @@ class CudaFp8DeepGEMMLinear(LinearBase):
                 error_msg = f"Bias dtype must be bfloat16, got {self.bias.dtype}"
                 logger.error(error_msg)
                 raise ValueError(error_msg)
-        self.scale_ue8m0 = is_deep_gemm_e8m0_used()
+        # requant_weight_ue8m0 is applied at weight load time in _postprocess;
+        # detect whether UE8M0 format was applied by checking scale dtype.
+        self.scale_ue8m0 = self.weight_scales.dtype == torch.int32
         # Initialize cached scales attributes
         self.cached_scales = None
         self.cached_scales_max_len = 0
-        # Disable UE8M0 for small tensors due to performance/accuracy trade-offs.
-        # TODO: Re-evaluate this threshold after further optimization of UE8M0 kernels.
-        if self.weight.shape[0] < 128 or self.weight.shape[1] < 256:
-            self.scale_ue8m0 = False
-        if self.scale_ue8m0:
-            w_tmp, self.weight_scales = requant_weight_ue8m0(
-                self.weight, self.weight_scales
-            )
-            self.weight.copy_(w_tmp)
-            del w_tmp
 
     def maybe_cache_quant_scale(self, max_len: int) -> None:
         if not self.scale_ue8m0:

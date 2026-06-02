@@ -7,20 +7,28 @@ bool KVCacheGroup::init() {
     auto layer_tensors = block_pool_->allLayerCacheBase();
     auto scale_tensors = block_pool_->allLayerScaleCacheBase();
 
+    // 检查layer_tensors的大小是否足够
+    RTP_LLM_CHECK_WITH_INFO(layer_tensors.size() >= layer_ids_.size(),
+                            "layer_tensors size (%zu) is less than layer_ids size (%zu)",
+                            layer_tensors.size(),
+                            layer_ids_.size());
+    RTP_LLM_CHECK_WITH_INFO(scale_tensors.size() >= layer_ids_.size(),
+                            "scale_tensors size (%zu) is less than layer_ids size (%zu)",
+                            scale_tensors.size(),
+                            layer_ids_.size());
+
     for (int i = 0; i < static_cast<int>(layer_ids_.size()); ++i) {
         const int global_layer_id = layer_ids_[i];
-        RTP_LLM_CHECK_WITH_INFO(global_layer_id >= 0 && static_cast<size_t>(global_layer_id) < layer_tensors.size(),
-                                "global_layer_id out of range in KVCacheGroup::init: id=%d tensors_size=%zu",
-                                global_layer_id,
-                                layer_tensors.size());
-        global_layer_to_kv_tensors[global_layer_id] = layer_tensors[static_cast<size_t>(global_layer_id)];
+        // - For non-hybrid (single-model) layout, BlockPool exposes per-layer tensors indexed by global layer id,
+        //   and typically global_layer_id == i.
+        // - For hybrid layout, BlockPool exposes per-group "physical layer slot" tensors sized by
+        //   CacheConfig.group_layer_num, while layer_ids_ still stores global model layer ids.
+        //   In that case, we must bind global_layer_id -> layer_tensors[local_slot=i].
+
+        global_layer_to_kv_tensors[global_layer_id] = layer_tensors[static_cast<size_t>(i)];
 
         if (!scale_tensors.empty()) {
-            RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(global_layer_id) < scale_tensors.size(),
-                                    "global_layer_id out of range in scale_tensors: id=%d tensors_size=%zu",
-                                    global_layer_id,
-                                    scale_tensors.size());
-            global_layer_to_kv_scale_tensors[global_layer_id] = scale_tensors[static_cast<size_t>(global_layer_id)];
+            global_layer_to_kv_scale_tensors[global_layer_id] = scale_tensors[static_cast<size_t>(i)];
         }
         global_layer_to_local_layer[layer_ids_[i]] = i;
     }
@@ -63,6 +71,10 @@ int KVCacheGroup::seqSizePerBlock() const {
     return seq_size_per_block_;
 }
 
+int KVCacheGroup::group_id() const {
+    return group_id_;
+}
+
 std::unordered_map<int, torch::Tensor> KVCacheGroup::allLayerCacheBase() const {
     return global_layer_to_kv_tensors;
 }
@@ -91,6 +103,22 @@ KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id, int partition_cou
     RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
     int local_layer_id = it->second;
     return block_pool_->convertIndexToBuffer(local_layer_id, block_id, partition_count, partition_id);
+}
+
+void KVCacheGroup::handlePutResult(const BlockCache::PutResult& result, BlockIdxType block_index) {
+    switch (result.action) {
+        case BlockCache::PutResult::Action::SKIPPED:
+            break;
+        case BlockCache::PutResult::Action::REPLACED:
+            if (result.old_block_index != block_index) {
+                block_pool_->blockCacheFree(result.old_block_index);
+                block_pool_->blockCacheReference(block_index);
+            }
+            break;
+        case BlockCache::PutResult::Action::INSERTED:
+            block_pool_->blockCacheReference(block_index);
+            break;
+    }
 }
 
 void KVCacheGroup::reference(const BlockIndicesType& new_block_indices) {

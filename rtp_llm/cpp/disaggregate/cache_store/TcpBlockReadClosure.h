@@ -1,6 +1,5 @@
 #pragma once
 
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/proto/cache_store_service.pb.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/TransferConnection.h"
 #include "aios/network/arpc/arpc/ANetRPCController.h"
@@ -31,6 +30,5 @@ private:
     BlockReadRequest*        request_;
     BlockReadResponse*       response_;
     arpc::ANetRPCController* controller_;
-    rtp_llm::DeviceBase*     device_{nullptr};
 };
 }  // namespace rtp_llm

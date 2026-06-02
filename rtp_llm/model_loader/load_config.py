@@ -5,10 +5,11 @@ from typing import Any, List, Optional, Union
 
 import torch
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
-from rtp_llm.device.device_base import DeviceBase
+
+from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.util import check_with_info
-from rtp_llm.ops import VitSeparation
+
 
 class LoadMethod(str, enum.Enum):
     AUTO = "auto"
@@ -18,14 +19,14 @@ class LoadMethod(str, enum.Enum):
 
 class LoadConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    
+
     database: Any
     num_layers: int
     hidden_size: int  # Model hidden size
     head_num: int
     head_num_kv: int
     size_per_head: int
-    use_stack_weight: bool
+    moe_pure_tp_mode: bool
     align_size: int  # Alignment size for FFN weights
     moe_align_size: int  # Alignment size for MoE weights
     moe_layer_index: List[int]
@@ -40,13 +41,17 @@ class LoadConfig(BaseModel):
     ep_rank: int
     dp_size: int
     dp_rank: int
+    lm_head_tp_size: int
+    lm_head_tp_rank: int
     ffn_tp_size: int
     ffn_tp_rank: int
     num_nodes: int
     bit: int = 16
     merge_lora: bool = False
 
-    vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL  # VitSeparation enum
+    vit_separation: VitSeparation = (
+        VitSeparation.VIT_SEPARATION_LOCAL
+    )  # VitSeparation enum
     compute_dtype: Any = torch.float16
 
     quant_algo: Any = None
@@ -57,8 +62,9 @@ class LoadConfig(BaseModel):
 
     phy2log: Optional[List[List[int]]] = None
     use_swizzleA: bool = False
+    force_cpu_load_weights: bool = False
 
-    @field_validator("database", "compute_dtype", "quant_algo", "exported_device", "vit_separation")
+    @field_validator("database", "compute_dtype", "quant_algo", "vit_separation")
     @classmethod
     def validate_custom_types(cls, value: Any, info) -> Any:
         field_name = info.field_name
@@ -70,12 +76,11 @@ class LoadConfig(BaseModel):
                     f"Field 'vit_separation' expects type VitSeparation, got {type(value)}"
                 )
             return value
-        
+
         expected_types = {
             "database": BaseDatabase,
             "compute_dtype": torch.dtype,
             "quant_algo": (type(None), object),
-            "exported_device": (type(None), DeviceBase),
         }
         expected = expected_types[field_name]
 

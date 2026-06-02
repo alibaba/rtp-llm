@@ -1,0 +1,173 @@
+{
+  "model_type": "qwen_2",
+  "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+  "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+  "query_result": [
+    {
+      "endpoint": "/rtp_llm/worker_status",
+      "query": {},
+      "result": {
+        "role": "RoleType.PDFUSION",
+        "server_port": 8888,
+        "http_port": 8888,
+        "grpc_port": 8888,
+        "running_task_info": [],
+        "finished_task_list": [],
+        "dp_size": 1,
+        "tp_size": 1,
+        "alive": true,
+        "version": 0,
+        "status_version": 1776526568540850,
+        "precision": "FP16",
+        "latest_finished_version": 0,
+        "waiting_query_len": 0,
+        "running_query_len": 0,
+        "frontend_available_concurrency": 32
+      }
+    },
+    {
+      "query": {
+        "prompt": "Write a detailed analogy between mathematics and a lighthouse.",
+        "generate_config": {
+          "max_new_tokens": 10,
+          "top_k": 1,
+          "top_p": 0
+        }
+      },
+      "result": {
+        "response": " Mathematics is like a lighthouse, a beacon of",
+        "finished": true,
+        "aux_info": {
+          "input_len": 11,
+          "reuse_len": 0,
+          "prefix_len": 0,
+          "iter_count": 10,
+          "output_len": 10
+        }
+      }
+    },
+    {
+      "endpoint": "/rtp_llm/worker_status",
+      "query": {
+        "latest_cache_version": -1
+      },
+      "result": {
+        "role": "RoleType.PDFUSION",
+        "server_port": 8888,
+        "http_port": 8888,
+        "grpc_port": 8888,
+        "running_task_info": [],
+        "finished_task_list": [
+          {
+            "request_id": 3333461163854987265,
+            "prefix_length": 0,
+            "input_length": 11,
+            "waiting_time_ms": 0,
+            "iterate_count": 10,
+            "end_time_ms": 1776526569459,
+            "dp_rank": 0
+          }
+        ],
+        "dp_size": 1,
+        "tp_size": 1,
+        "alive": true,
+        "version": 0,
+        "status_version": 1776526569464589,
+        "precision": "FP16",
+        "latest_finished_version": 0,
+        "waiting_query_len": 0,
+        "running_query_len": 0,
+        "frontend_available_concurrency": 32
+      }
+    },
+    {
+      "query": {
+        "prompt": "Write a detailed analogy between mathematics and a lighthouse.\n\nAnswer: ",
+        "generate_config": {
+          "max_new_tokens": 10,
+          "top_k": 1,
+          "top_p": 0
+        }
+      },
+      "result": {
+        "response": "1. Mathematics is like a lighthouse in the",
+        "finished": true,
+        "aux_info": {
+          "input_len": 14,
+          "reuse_len": 8,
+          "prefix_len": 0,
+          "iter_count": 10,
+          "output_len": 10
+        }
+      }
+    },
+    {
+      "endpoint": "/rtp_llm/worker_status",
+      "query": {
+        "latest_cache_version": 1
+      },
+      "result": {
+        "role": "RoleType.PDFUSION",
+        "server_port": 8888,
+        "http_port": 8888,
+        "grpc_port": 8888,
+        "running_task_info": [],
+        "finished_task_list": [
+          {
+            "request_id": 3333461163854987265,
+            "prefix_length": 0,
+            "input_length": 11,
+            "waiting_time_ms": 0,
+            "iterate_count": 10,
+            "end_time_ms": 1776526569459,
+            "dp_rank": 0
+          },
+          {
+            "request_id": 3333461179345899522,
+            "prefix_length": 8,
+            "input_length": 14,
+            "waiting_time_ms": 0,
+            "iterate_count": 10,
+            "end_time_ms": 1776526569557,
+            "dp_rank": 0
+          }
+        ],
+        "dp_size": 1,
+        "tp_size": 1,
+        "alive": true,
+        "version": 0,
+        "status_version": 1776526569561813,
+        "precision": "FP16",
+        "latest_finished_version": 1,
+        "waiting_query_len": 0,
+        "running_query_len": 0,
+        "frontend_available_concurrency": 32
+      }
+    },
+    {
+      "endpoint": "/rtp_llm/worker_status",
+      "query": {
+        "latest_cache_version": -1,
+        "latest_finished_version": 3
+      },
+      "result": {
+        "role": "RoleType.PDFUSION",
+        "server_port": 17961,
+        "http_port": 17966,
+        "grpc_port": 17962,
+        "running_task_info": [],
+        "finished_task_list": [],
+        "dp_size": 1,
+        "tp_size": 1,
+        "alive": true,
+        "version": 0,
+        "status_version": 1776526569564832,
+        "waiting_query_len": 0,
+        "running_query_len": 0,
+        "precision": "FP16",
+        "latest_finished_version": 3,
+        "frontend_available_concurrency": 32
+      }
+    }
+  ]
+}

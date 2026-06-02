@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/Messager.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheTransferServiceClosure.h"
 
 #include "autil/NetUtil.h"

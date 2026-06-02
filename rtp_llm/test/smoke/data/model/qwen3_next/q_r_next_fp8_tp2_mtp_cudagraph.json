@@ -1,0 +1,63 @@
+{
+    "model_type": "qwen35_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s2"
+                    }
+                ],
+                "max_tokens": 100,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1,
+                "random_seed": 42
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Here's a thinking process that leads to the suggested questions about English listening methods:\n\n1.  **Analyze the Request:**\n    *   **Topic:** English Listening Methods (英语听力方法).\n    *   **Task:** Propose several questions (提出几个问题).\n    *   **Language:** The user asked in Chinese, so the output should be in Chinese (with English terms where appropriate for clarity).\n    *   **Goal:** The questions should be thought-prov"
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 18,
+                    "total_tokens": 118,
+                    "completion_tokens": 100,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                }
+            }
+        },
+        {
+            "query": {
+                "top_p": 0,
+                "yield_generator": false,
+                "generate_config": {
+                    "top_p": 0,
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "random_seed": 42,
+                    "temperature": 0
+                },
+                "top_k": 1,
+                "random_seed": 42,
+                "temperature": 0,
+                "prompt": "<|im_start|>user\nwhat is CAP Theorem ?<|im_end|>\n<|im_start|>assistant\n",
+                "_prompt_source": "chat-template wrapping $prompt:s1"
+            },
+            "result": {
+                "response": "<think>\n\n</think>\n\nThe **CAP Theorem** (also known as Brewer's Theorem) is",
+                "finished": true
+            }
+        }
+    ]
+}

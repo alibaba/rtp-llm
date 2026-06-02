@@ -33,6 +33,28 @@ TEST_F(FullKVCacheGroupTest, NeedBlocksNumTest) {
     ASSERT_EQ(0, group1.needBlocksNum(2, 1));
 }
 
+TEST_F(FullKVCacheGroupTest, GetNeedBlocksTest) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block = 4;
+
+    FullKVCacheGroup group({}, spec, block_pool, 0);
+
+    // common=8 => 2 blocks, seq=12 reserve=3 => ceil(15/4)=4 blocks => extra=2
+    const auto need =
+        group.getNeedBlocks(/*common_seq_len=*/8, /*seq_len=*/12, /*reserve_step=*/3, /*reuse_blocks_len=*/0, false);
+    EXPECT_EQ(need.common_blocks, 2);
+    EXPECT_EQ(need.extra_blocks, 2);
+
+    // no reserve: common=12 => 3, seq=12 => 3 => extra=0
+    const auto need2 =
+        group.getNeedBlocks(/*common_seq_len=*/12, /*seq_len=*/12, /*reserve_step=*/0, /*reuse_blocks_len=*/0, false);
+    EXPECT_EQ(need2.common_blocks, 3);
+    EXPECT_EQ(need2.extra_blocks, 0);
+}
+
 TEST_F(FullKVCacheGroupTest, RemoveSkippedBlocksTest) {
     auto block_pool = createBlockPool();
     block_pool->init();
@@ -42,10 +64,11 @@ TEST_F(FullKVCacheGroupTest, RemoveSkippedBlocksTest) {
 
     FullKVCacheGroup group1({}, spec, block_pool, 0);
 
-    BlockIndicesType old_indices   = {1, 2, 3, 4};
-    BlockIndicesType block_indices = old_indices;
-    group1.removeSkippedBlocks(block_indices);
-    ASSERT_EQ(old_indices, block_indices);
+    BlockIndicesType old_indices = {1, 2, 3, 4};
+    BlockIds         block_ids(/*kernel_blocks_per_kv_block=*/1);
+    block_ids.assign(old_indices);
+    group1.removeSkippedBlocks(block_ids);
+    ASSERT_EQ(old_indices, block_ids.blocks());
 }
 
 TEST_F(FullKVCacheGroupTest, MatchTest) {
@@ -56,11 +79,11 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
 
     BlockCache::CacheItem item    = {101, 0, 1, false};
     auto                  result1 = block_cache->put(item);
-    EXPECT_TRUE(result1);
+    EXPECT_EQ(result1.action, BlockCache::PutResult::Action::INSERTED);
 
     BlockCache::CacheItem item2   = {102, 0, 2, false};
     auto                  result2 = block_cache->put(item2);
-    EXPECT_TRUE(result2);
+    EXPECT_EQ(result2.action, BlockCache::PutResult::Action::INSERTED);
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
@@ -86,11 +109,11 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
     // all match
     BlockCache::CacheItem item3   = {103, 0, 3, false};
     auto                  result3 = block_cache->put(item3);
-    EXPECT_TRUE(result3);
+    EXPECT_EQ(result3.action, BlockCache::PutResult::Action::INSERTED);
 
     BlockCache::CacheItem item4   = {104, 0, 4, false};
     auto                  result4 = block_cache->put(item4);
-    EXPECT_TRUE(result4);
+    EXPECT_EQ(result4.action, BlockCache::PutResult::Action::INSERTED);
 
     cache_keys         = {101, 102, 103, 104};
     auto match_result3 = group1.match(cache_keys);
@@ -112,22 +135,23 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
 
     FullKVCacheGroup group1({}, spec, block_pool, 0);
 
-    CacheKeysType    cache_keys = {101, 102, 103};
-    BlockIndicesType block_indices;
+    CacheKeysType cache_keys = {101, 102, 103};
+    BlockIds      block_ids(/*kernel_blocks_per_kv_block=*/1);
 
-    ASSERT_TRUE(group1.malloc(block_indices, 7));
+    ASSERT_TRUE(group1.malloc(block_ids, 7));
     ASSERT_EQ(block_pool->freeBlocksNum(), 5);
     ASSERT_EQ(block_pool->availableBlocksNum(), 5);
-    ASSERT_EQ(block_indices.size(), 4);
+    ASSERT_EQ(block_ids.blocks().size(), 4);
 
     BlockIndicesType expected_result = {1, 2, 3, 4};
-    ASSERT_EQ(block_indices, expected_result);
+    ASSERT_EQ(block_ids.blocks(), expected_result);
 
-    group1.free(block_indices);
+    group1.free(block_ids.blocks());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
     ASSERT_EQ(block_pool->availableBlocksNum(), 9);
 
-    ASSERT_FALSE(group1.malloc(block_indices, 180));
+    BlockIds block_ids2(/*kernel_blocks_per_kv_block=*/1);
+    ASSERT_FALSE(group1.malloc(block_ids2, 180));
 }
 
 TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {
@@ -141,16 +165,16 @@ TEST_F(FullKVCacheGroupTest, InsertIntoCacheTest) {
 
     FullKVCacheGroup group1({}, spec, block_pool, 0);
 
-    CacheKeysType    cache_keys = {103, 104, 105, 106};
-    BlockIndicesType block_indices;
+    CacheKeysType cache_keys = {103, 104, 105, 106};
+    BlockIds      block_ids(/*kernel_blocks_per_kv_block=*/1);
 
-    group1.malloc(block_indices, 8);
+    group1.malloc(block_ids, 8);
     ASSERT_EQ(block_pool->freeBlocksNum(), 5);
-    ASSERT_EQ(block_indices.size(), 4);
+    ASSERT_EQ(block_ids.blocks().size(), 4);
     BlockIndicesType expected_result = {1, 2, 3, 4};
-    ASSERT_EQ(block_indices, expected_result);
+    ASSERT_EQ(block_ids.blocks(), expected_result);
 
-    group1.insertIntoCache(cache_keys, block_indices, false);
+    group1.insertIntoCache(cache_keys, block_ids.blocks(), false);
 
     CacheKeysType cache_keys1   = {107, 108};
     auto          match_result1 = group1.match(cache_keys1);
@@ -185,20 +209,20 @@ TEST_F(FullKVCacheGroupTest, EnsureFreeBlocksTest) {
 
     ASSERT_EQ(false, group1.ensureFreeBlocks(10));
 
-    CacheKeysType    cache_keys = {101, 102, 103, 104};
-    BlockIndicesType block_indices;
+    CacheKeysType cache_keys = {101, 102, 103, 104};
+    BlockIds      block_ids(/*kernel_blocks_per_kv_block=*/1);
 
-    ASSERT_TRUE(group1.malloc(block_indices, 8));
-    ASSERT_EQ(block_indices.size(), 4);
+    ASSERT_TRUE(group1.malloc(block_ids, 8));
+    ASSERT_EQ(block_ids.blocks().size(), 4);
     ASSERT_EQ(block_pool->freeBlocksNum(), total_blocks - 4);
     ASSERT_EQ(block_pool->availableBlocksNum(), total_blocks - 4);
 
-    group1.insertIntoCache(cache_keys, block_indices, false);
+    group1.insertIntoCache(cache_keys, block_ids.blocks(), false);
     ASSERT_EQ(block_cache->size(), 4);
     ASSERT_EQ(block_pool->freeBlocksNum(), total_blocks - 4);
     ASSERT_EQ(block_pool->availableBlocksNum(), total_blocks - 4);
 
-    group1.free(block_indices);
+    group1.free(block_ids.blocks());
     ASSERT_EQ(block_cache->size(), 4);
     ASSERT_EQ(block_pool->freeBlocksNum(), total_blocks - 4);
     ASSERT_EQ(block_pool->availableBlocksNum(), total_blocks);
@@ -207,6 +231,96 @@ TEST_F(FullKVCacheGroupTest, EnsureFreeBlocksTest) {
     ASSERT_EQ(block_cache->size(), 2);
     ASSERT_EQ(block_pool->freeBlocksNum(), total_blocks - 2);
     ASSERT_EQ(block_pool->availableBlocksNum(), total_blocks);
+}
+
+// ==================== Epoch-based cache isolation tests ====================
+//
+// NOTE: The epoch filter logic itself is exercised by
+// BlockCacheTest::MatchEpochZeroDoesNotSeeBatchLocal (covers all four query
+// modes: epoch=0, NO_EPOCH_FILTER, same-batch, different-batch).
+// FullKVCacheGroup::match is a thin pass-through to BlockCache::match with no
+// extra business logic, so a duplicate visibility matrix at this layer would
+// add no coverage. Group-specific behavior (put/promote/pop) is covered below.
+
+TEST_F(FullKVCacheGroupTest, EpochPutSkipsOverwritingGlobalWithBatch) {
+    auto block_pool = createBlockPool();
+    block_pool->init();
+    auto block_cache = block_pool->blockCache();
+
+    // Insert global item (epoch=0)
+    BlockCache::CacheItem global_item = {301, 0, 1, false, /*epoch=*/0};
+    EXPECT_EQ(block_cache->put(global_item).action, BlockCache::PutResult::Action::INSERTED);
+
+    // Try to overwrite with batch-specific item (epoch=42) — should be SKIPPED
+    BlockCache::CacheItem batch_item = {301, 0, 2, false, /*epoch=*/42};
+    auto                  result     = block_cache->put(batch_item);
+    EXPECT_EQ(result.action, BlockCache::PutResult::Action::SKIPPED);
+
+    // Original global item still there
+    auto match = block_cache->match(301, 0);
+    EXPECT_EQ(match.matched_index, 1);
+}
+
+TEST_F(FullKVCacheGroupTest, EpochPopPrefersStaleEpochEntries) {
+    auto block_pool = createBlockPool();
+    block_pool->init();
+    auto block_cache = block_pool->blockCache();
+
+    // Insert global item
+    BlockCache::CacheItem global_item = {401, 0, 1, false, /*epoch=*/0};
+    block_cache->put(global_item);
+
+    // Insert batch-specific item (stale epoch)
+    BlockCache::CacheItem batch_item = {402, 0, 2, false, /*epoch=*/42};
+    block_cache->put(batch_item);
+
+    EXPECT_EQ(block_cache->size(), 2);
+
+    // Pop 1 — should prefer epoch>0 (stale) entry first
+    auto popped = block_cache->pop(1);
+    ASSERT_EQ(popped.size(), 1);
+    EXPECT_EQ(popped[0], 2);  // batch item evicted first
+
+    // Global item still there
+    EXPECT_EQ(block_cache->size(), 1);
+    auto match = block_cache->match(401, 0);
+    EXPECT_EQ(match.matched_index, 1);
+}
+
+TEST_F(FullKVCacheGroupTest, EpochInsertAndPromoteTest) {
+    auto block_pool = createBlockPool();
+    block_pool->init();
+    auto block_cache = block_pool->blockCache();
+
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block = 4;
+    FullKVCacheGroup group({}, spec, block_pool, 0);
+
+    // Malloc blocks
+    BlockIds block_ids(1);
+    ASSERT_TRUE(group.malloc(block_ids, 8));
+    ASSERT_EQ(block_ids.blocks().size(), 2);
+
+    CacheKeysType keys = {501, 502};
+
+    // Insert with epoch=42 (batch-specific)
+    group.insertIntoCache(keys, block_ids.blocks(), false, /*epoch=*/42);
+    EXPECT_EQ(block_cache->size(), 2);
+
+    // Invisible to different batch
+    auto result1 = group.match(keys, /*current_batch_epoch=*/99);
+    EXPECT_EQ(result1.reuse_blocks, 0);
+
+    // Visible to same batch
+    auto result2 = group.match(keys, /*current_batch_epoch=*/42);
+    EXPECT_EQ(result2.reuse_blocks, 2);
+
+    // "Promote" by re-inserting with epoch=0
+    group.insertIntoCache(keys, block_ids.blocks(), false, /*epoch=*/0);
+
+    // Now visible to all batches
+    auto result3 = group.match(keys, /*current_batch_epoch=*/99);
+    EXPECT_EQ(result3.reuse_blocks, 2);
 }
 
 }  // namespace test

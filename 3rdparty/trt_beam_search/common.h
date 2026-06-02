@@ -21,7 +21,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "rtp_llm/cpp/cuda/cuda_host_utils.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 
 namespace tensorrt_llm::common {
 

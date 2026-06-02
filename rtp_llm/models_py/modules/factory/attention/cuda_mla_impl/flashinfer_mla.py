@@ -1,31 +1,12 @@
 import logging
-import os
 from typing import Any, Dict, List, Optional
 
 import torch
 
 # import flashinfer
+import torch.nn.functional as F
 import triton
 import triton.language as tl
-
-# NVTX for profiling
-try:
-    if hasattr(torch.cuda, "nvtx"):
-        nvtx = torch.cuda.nvtx
-    else:
-        raise ImportError("torch.cuda.nvtx not available")
-except (ImportError, AttributeError):
-    # Fallback if nvtx is not available
-    class nvtx:
-        @staticmethod
-        def range_push(msg: str) -> None:
-            pass
-
-        @staticmethod
-        def range_pop() -> None:
-            pass
-
-
 from flashinfer import (
     BatchMLAPagedAttentionWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
@@ -35,8 +16,8 @@ from flashinfer.utils import is_sm90a_supported
 
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
 from rtp_llm.models_py.utils.arch import is_cuda
-from rtp_llm.ops import AttentionConfigs
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 g_workspace_buffer = None
@@ -93,6 +74,7 @@ def check_attention_inputs(attention_inputs: PyAttentionInputs) -> None:
         "prefix_lengths": torch.empty(0, dtype=dtype, device=device),
         "sequence_lengths": torch.empty(0, dtype=dtype, device=device),
         "kv_cache_block_id_host": torch.empty(0, dtype=dtype, device=device),
+        "kv_cache_kernel_block_id_host": torch.empty(0, dtype=dtype, device=device),
     }
 
     for attr_name, default_tensor in default_tensors.items():
@@ -145,7 +127,6 @@ def concat_and_cast_mha_k_triton(
     k_nope: torch.Tensor,
     k_rope: torch.Tensor,
 ):
-    nvtx.range_push("concat_and_cast_mha_k_triton:start")
     # The source data type will be implicitly converted to the target data type.
     assert (
         len(k.shape) == 3 and len(k_nope.shape) == 3 and len(k_rope.shape) == 3
@@ -160,13 +141,10 @@ def concat_and_cast_mha_k_triton(
         k.shape[-1] == k_nope.shape[-1] + k_rope.shape[-1]
     ), f"invalid shape, got {k.shape=}, {k_nope.shape=}, {k_rope.shape=}"
 
-    nvtx.range_push("concat_and_cast_mha_k_triton:prepare_grid")
     nope_dim = k_nope.shape[-1]
     rope_dim = k_rope.shape[-1]
     grid = (k.shape[0],)
-    nvtx.range_pop()
 
-    nvtx.range_push("concat_and_cast_mha_k_kernel:launch")
     concat_and_cast_mha_k_kernel[grid](
         k,
         k_nope,
@@ -180,22 +158,24 @@ def concat_and_cast_mha_k_triton(
         nope_dim,
         rope_dim,
     )
-    nvtx.range_pop()
-    nvtx.range_pop()
 
 
 class MlaFlashInferPrefillOp(object):
+    _triton_compat_warned = False  # Class variable to track warning status
+
     def __init__(
         self,
         num_heads: int,
         kv_lora_rank: int,
         qk_rope_head_dim: int,
         qk_nope_head_dim: int,
+        v_head_dim: int,
         page_size: int,
         softmax_extra_scale: float,
         use_mla: bool,
         weights: List[Dict[str, torch.Tensor]] | None,
         quant_config: Optional[object] = None,
+        kv_cache_dtype: KvCacheDataType = KvCacheDataType.BASE,
     ):
         super().__init__()
 
@@ -206,17 +186,27 @@ class MlaFlashInferPrefillOp(object):
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_nope_head_dim = qk_nope_head_dim
+        self.v_head_dim = v_head_dim
         self.scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** -0.5
         self.weights = weights
         self.token_per_block = page_size
         self.softmax_extra_scale = softmax_extra_scale
         self.use_mla = use_mla
+        self.kv_cache_type = kv_cache_dtype
         global g_workspace_buffer
         if g_workspace_buffer is None:
+            # Find first layer that has MLA weights (hybrid models may have non-MLA layers)
+            device = None
+            for w in self.weights:
+                kv_b = w.get(W.mla_kv_b_w)
+                if kv_b is not None:
+                    device = kv_b.device
+                    break
+            assert device is not None, "No MLA weights found in any layer"
             g_workspace_buffer = torch.empty(
                 512 * 1024 * 1024,
                 dtype=torch.int8,
-                device=self.weights[0].get(W.mla_k_nope_w).device,
+                device=device,
             )
 
         self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
@@ -233,7 +223,7 @@ class MlaFlashInferPrefillOp(object):
             self.num_heads,
             self.num_heads,
             self.qk_rope_head_dim + self.qk_nope_head_dim,
-            self.qk_nope_head_dim,
+            self.v_head_dim,
             sm_scale=(1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5)
             * self.softmax_extra_scale,
             causal=True,
@@ -243,12 +233,18 @@ class MlaFlashInferPrefillOp(object):
         self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
         self.qo_indptr = mla_params.qo_indptr_d
         self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
+        self.total_kv_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1].item()
+        self.block_table = mla_params.page_indice_d.unsqueeze(0)
+        self.workspace_starts = torch.zeros(
+            1, dtype=torch.int32, device=self.block_table.device
+        )
+        self.seq_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1:]
 
     def _reuse_kv_cache_indexed_batched(
         self,
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """使用融合 CUDA kernel 的优化版本"""
 
@@ -259,6 +255,28 @@ class MlaFlashInferPrefillOp(object):
 
         if num_blocks == 0:
             return compressed_kv, k_pe
+
+        if self.kv_cache_type == KvCacheDataType.FP8:
+            final_compressed_kv = torch.empty(
+                [self.total_kv_lens, self.kv_lora_rank],
+                dtype=torch.bfloat16,
+                device=compressed_kv.device,
+            )
+            final_k_pe = torch.empty(
+                [self.total_kv_lens, self.qk_rope_head_dim],
+                dtype=torch.bfloat16,
+                device=compressed_kv.device,
+            )
+            rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache(
+                kv_cache.kv_cache_base.view(torch.uint8),
+                final_compressed_kv,
+                final_k_pe,
+                self.block_table,
+                self.seq_lens,
+                self.workspace_starts,
+                batch_size=1,  # ragged
+            )
+            return final_compressed_kv, final_k_pe
 
         compressed_kv_dim = compressed_kv.size(1)
         qo_indptr = self.qo_indptr
@@ -299,303 +317,77 @@ class MlaFlashInferPrefillOp(object):
         return final_compressed_kv, final_k_pe
 
     def _concat_and_cast_mha_k(self, k_nope, k_pe):
-        nvtx.range_push("_concat_and_cast_mha_k:start")
         # Temporary for DeepSeek V3/R1 only, but can generalize if needed
-        nvtx.range_push("_concat_and_cast_mha_k:prepare_shape")
         k_shape = (
             k_nope.shape[0],
             self.num_heads,
             self.qk_nope_head_dim + self.qk_rope_head_dim,
         )
-        nvtx.range_pop()
-
         if (
             is_cuda()
             and (self.num_heads == 128)
             and (self.qk_nope_head_dim == 128)
             and (self.qk_rope_head_dim == 64)
         ):
-            nvtx.range_push("_concat_and_cast_mha_k:mla_k_merge_path")
             k = k_nope.new_empty(*k_shape)
             rtp_llm_ops.mla_k_merge(k, k_nope, k_pe)
-            nvtx.range_pop()
-        elif is_cuda():
-            nvtx.range_push("_concat_and_cast_mha_k:triton_path")
+        elif is_cuda() and self._is_triton_compatible():
+            # Triton kernel requires dimensions to be power of 2
             attn_dtype = k_nope.dtype
             k = k_nope.new_empty(*k_shape, dtype=attn_dtype)
             concat_and_cast_mha_k_triton(k, k_nope, k_pe)
-            nvtx.range_pop()
         else:
-            nvtx.range_push("_concat_and_cast_mha_k:fallback_path")
+            # Fallback to PyTorch native operations for non-power-of-2 dimensions
             k = k_nope.new_empty(*k_shape)
             k[..., : self.qk_nope_head_dim] = k_nope
             k[..., self.qk_nope_head_dim :] = k_pe
-            nvtx.range_pop()
-        nvtx.range_pop()
         return k
 
-    def _copy_inputs_to_cpu(
-        self,
-        q: torch.Tensor,
-        compressed_kv: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
-        layer_id: int,
-    ) -> Dict[str, Any]:
-        """Copy inputs to CPU early to avoid copy failure when CUDA error occurs"""
-        try:
-            inputs_cpu = {
-                "q": q.cpu().clone() if q is not None else None,
-                "q_shape": list(q.shape) if q is not None else None,
-                "compressed_kv": (
-                    compressed_kv.cpu().clone() if compressed_kv is not None else None
-                ),
-                "compressed_kv_shape": (
-                    list(compressed_kv.shape) if compressed_kv is not None else None
-                ),
-                "k_pe": k_pe.cpu().clone() if k_pe is not None else None,
-                "k_pe_shape": list(k_pe.shape) if k_pe is not None else None,
-                "layer_id": layer_id,
-                "num_heads": self.num_heads,
-                "qk_nope_head_dim": self.qk_nope_head_dim,
-                "qk_rope_head_dim": self.qk_rope_head_dim,
-                "kv_lora_rank": self.kv_lora_rank,
-                "token_per_block": self.token_per_block,
-                "softmax_extra_scale": self.softmax_extra_scale,
-            }
+    def _is_triton_compatible(self):
+        """Check if dimensions are compatible with Triton kernel (must be power of 2)."""
 
-            # Add KV cache information if available
-            if kv_cache is not None:
-                try:
-                    inputs_cpu["kv_cache"] = {
-                        "kv_cache_base_shape": (
-                            list(kv_cache.kv_cache_base.shape)
-                            if kv_cache.kv_cache_base is not None
-                            else None
-                        ),
-                        "kv_cache_base_dtype": (
-                            str(kv_cache.kv_cache_base.dtype)
-                            if kv_cache.kv_cache_base is not None
-                            else None
-                        ),
-                    }
-                except Exception:
-                    inputs_cpu["kv_cache"] = {
-                        "error": "Failed to extract KV cache info"
-                    }
+        def is_power_of_2(n):
+            return n > 0 and (n & (n - 1)) == 0
 
-            # Add plan-related information if available
-            try:
-                if hasattr(self, "qo_indptr") and self.qo_indptr is not None:
-                    inputs_cpu["qo_indptr"] = (
-                        self.qo_indptr.cpu().clone()
-                        if isinstance(self.qo_indptr, torch.Tensor)
-                        else self.qo_indptr
-                    )
-                if (
-                    hasattr(self, "reuse_cache_page_indice")
-                    and self.reuse_cache_page_indice is not None
-                ):
-                    inputs_cpu["reuse_cache_page_indice"] = (
-                        self.reuse_cache_page_indice.cpu().clone()
-                        if isinstance(self.reuse_cache_page_indice, torch.Tensor)
-                        else self.reuse_cache_page_indice
-                    )
-                if (
-                    hasattr(self, "batch_reuse_info_vec")
-                    and self.batch_reuse_info_vec is not None
-                ):
-                    inputs_cpu["batch_reuse_info_vec"] = (
-                        self.batch_reuse_info_vec.cpu().clone()
-                        if isinstance(self.batch_reuse_info_vec, torch.Tensor)
-                        else self.batch_reuse_info_vec
-                    )
-            except Exception:
-                pass
-
-            return inputs_cpu
-        except Exception as e:
-            logging.warning(f"[FlashInferMLA Debug] Failed to copy inputs to CPU: {e}")
-            return {}
-
-    def _dump_inputs_for_debug_from_cpu(
-        self,
-        inputs_cpu: Dict[str, Any],
-        error_msg: str,
-    ) -> None:
-        """Dump inputs for debugging CUDA/TVM errors using pre-copied CPU data"""
-        import time
-
-        # Log immediately to ensure we see the dump attempt even if it fails
-        logging.error(
-            "[FlashInferMLA Debug] CUDA/TVM error detected, starting dump process..."
+        compatible = (
+            is_power_of_2(self.qk_nope_head_dim)
+            and is_power_of_2(self.qk_rope_head_dim)
+            and is_power_of_2(self.num_heads)
         )
-        logging.error(f"[FlashInferMLA Debug] Error message: {error_msg}")
-
-        timestamp = int(time.time())
-        dump_dir = os.getenv("RTP_LLM_DEBUG_DUMP_DIR", "./rtp_llm_debug")
-        os.makedirs(dump_dir, exist_ok=True)
-
-        dump_file = os.path.join(
-            dump_dir, f"flashinfer_mla_prefill_inputs_{timestamp}.pt"
-        )
-
-        try:
-            # Use pre-copied CPU data directly
-            dump_data = {
-                "error_msg": error_msg,
-                "layer_id": inputs_cpu.get("layer_id"),
-                "num_heads": inputs_cpu.get("num_heads"),
-                "qk_nope_head_dim": inputs_cpu.get("qk_nope_head_dim"),
-                "qk_rope_head_dim": inputs_cpu.get("qk_rope_head_dim"),
-                "kv_lora_rank": inputs_cpu.get("kv_lora_rank"),
-                "token_per_block": inputs_cpu.get("token_per_block"),
-                "softmax_extra_scale": inputs_cpu.get("softmax_extra_scale"),
-                "q": inputs_cpu.get("q"),
-                "q_shape": inputs_cpu.get("q_shape"),
-                "k": inputs_cpu.get("k"),
-                "k_shape": (
-                    list(inputs_cpu["k"].shape)
-                    if inputs_cpu.get("k") is not None
-                    else None
-                ),
-                "value_states": inputs_cpu.get("value_states"),
-                "value_states_shape": (
-                    list(inputs_cpu["value_states"].shape)
-                    if inputs_cpu.get("value_states") is not None
-                    else None
-                ),
-                "compressed_kv": inputs_cpu.get(
-                    "compressed_kv_after_reuse", inputs_cpu.get("compressed_kv")
-                ),
-                "compressed_kv_shape": (
-                    list(inputs_cpu["compressed_kv_after_reuse"].shape)
-                    if inputs_cpu.get("compressed_kv_after_reuse") is not None
-                    else inputs_cpu.get("compressed_kv_shape")
-                ),
-                "k_pe": inputs_cpu.get("k_pe_after_reuse", inputs_cpu.get("k_pe")),
-                "k_pe_shape": (
-                    list(inputs_cpu["k_pe_after_reuse"].shape)
-                    if inputs_cpu.get("k_pe_after_reuse") is not None
-                    else inputs_cpu.get("k_pe_shape")
-                ),
-                "k_nope": inputs_cpu.get("k_nope"),
-                "k_nope_shape": (
-                    list(inputs_cpu["k_nope"].shape)
-                    if inputs_cpu.get("k_nope") is not None
-                    else None
-                ),
-                "kv_cache": inputs_cpu.get("kv_cache"),
-                "qo_indptr": inputs_cpu.get("qo_indptr"),
-                "reuse_cache_page_indice": inputs_cpu.get("reuse_cache_page_indice"),
-                "batch_reuse_info_vec": inputs_cpu.get("batch_reuse_info_vec"),
-            }
-
-            # Save to file
-            torch.save(dump_data, dump_file)
-            logging.error(
-                f"[FlashInferMLA Debug] CUDA/TVM error detected. Inputs dumped to: {dump_file}"
-            )
-            logging.error(f"[FlashInferMLA Debug] Error message: {error_msg}")
-            if inputs_cpu.get("q") is not None:
-                logging.error(
-                    f"[FlashInferMLA Debug] q shape: {inputs_cpu.get('q_shape')}"
-                )
-            if inputs_cpu.get("k") is not None:
-                logging.error(
-                    f"[FlashInferMLA Debug] k shape: {list(inputs_cpu['k'].shape)}"
-                )
-            if inputs_cpu.get("value_states") is not None:
-                logging.error(
-                    f"[FlashInferMLA Debug] value_states shape: {list(inputs_cpu['value_states'].shape)}"
-                )
-            if inputs_cpu.get("compressed_kv_after_reuse") is not None:
-                logging.error(
-                    f"[FlashInferMLA Debug] compressed_kv shape: {list(inputs_cpu['compressed_kv_after_reuse'].shape)}"
-                )
-        except Exception as dump_error:
-            logging.error(f"[FlashInferMLA Debug] Failed to dump inputs: {dump_error}")
+        return compatible
 
     def forward(
         self,
         q: torch.Tensor,
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         layer_id: int,
     ) -> torch.Tensor:
-        nvtx.range_push(f"MlaFlashInferPrefillOp.forward:layer_{layer_id}")
 
-        nvtx.range_push("forward:reuse_kv_cache")
         compressed_kv, k_pe = self._reuse_kv_cache_indexed_batched(
             compressed_kv, k_pe, kv_cache
         )
-        nvtx.range_pop()
 
-        nvtx.range_push("forward:prepare_k_pe")
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
-        nvtx.range_pop()
-
-        nvtx.range_push("forward:create_linear_proj")
-        self.k_nope_proj = LinearFactory.create_linear_from_weights(
+        self.kv_b_proj = LinearFactory.create_linear_from_weights(
             self.weights[layer_id],
-            W.mla_k_nope_w,
-            W.mla_k_nope_s,
+            W.mla_kv_b_w,
+            W.mla_kv_b_s,
             None,
             self.quant_config,
         )
 
-        self.v_proj = LinearFactory.create_linear_from_weights(
-            self.weights[layer_id], W.mla_v_w, W.mla_v_s, None, self.quant_config
-        )
-        nvtx.range_pop()
-
-        nvtx.range_push("forward:k_nope_proj")
-        k_nope = self.k_nope_proj(compressed_kv)
-        nvtx.range_pop()
-
-        nvtx.range_push("forward:v_proj")
-        value_states = self.v_proj(compressed_kv)
-        nvtx.range_pop()
-
-        nvtx.range_push("forward:reshape_k_nope_value_states")
-        k_nope = k_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
-        value_states = value_states.view(-1, self.num_heads, self.qk_nope_head_dim)
-        nvtx.range_pop()
-
-        nvtx.range_push("forward:concat_and_cast_mha_k")
+        kv = self.kv_b_proj(compressed_kv)
+        kv = kv.view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+        k_nope = kv[:, :, : self.qk_nope_head_dim]
+        value_states = kv[:, :, self.qk_nope_head_dim :]
         k = self._concat_and_cast_mha_k(k_nope, k_pe)
-        nvtx.range_pop()
-
-        # Copy intermediate tensors to CPU before the risky operation
-        nvtx.range_push("forward:copy_intermediate_to_cpu")
-        # inputs_cpu.update(
-        #     {
-        #         "k": k.cpu().clone(),
-        #         "k_nope": k_nope.cpu().clone(),
-        #         "value_states": value_states.cpu().clone(),
-        #         "compressed_kv_after_reuse": compressed_kv.cpu().clone(),
-        #         "k_pe_after_reuse": k_pe.cpu().clone(),
-        #     }
-        # )
-        nvtx.range_pop()
 
         # TODO: add TRT prefill support
-        nvtx.range_push("forward:prefill_wrapper_run")
-        try:
-            attn_output = self.prefill_wrapper.run(q, k, value_states)
-            nvtx.range_push("forward:reshape_attn_output")
-            attn_output = attn_output.view(-1, self.num_heads, self.qk_nope_head_dim)
-            nvtx.range_pop()
-            nvtx.range_pop()
-            nvtx.range_pop()
-            return attn_output
-        except RuntimeError as e:
-            # nvtx.range_pop()
-            # error_msg = str(e)
-            # self._dump_inputs_for_debug_from_cpu(inputs_cpu, error_msg)
-            # nvtx.range_pop()
-            raise  # Re-raise the exception after dumping
+        attn_output = self.prefill_wrapper.run(q, k, value_states)
+        attn_output = attn_output.view(-1, self.num_heads, self.v_head_dim)
+        return attn_output
 
 
 class MlaFlashInferDecodeOp(object):
@@ -608,6 +400,7 @@ class MlaFlashInferDecodeOp(object):
         token_per_block: int,
         softmax_extra_scale: float,
         use_mla: bool,
+        is_sparse: bool,
         weights: List[Dict[str, torch.Tensor]] | None = None,
         max_bs: int = 0,
         max_context_len: int = 0,
@@ -627,6 +420,7 @@ class MlaFlashInferDecodeOp(object):
         self.softmax_extra_scale = softmax_extra_scale
         self.weights = weights
         self.use_mla = use_mla
+        self.is_sparse = is_sparse
         self.use_cuda_graph = is_cuda_graph
         global g_workspace_buffer
         self.kv_indices_d = torch.empty(
@@ -640,10 +434,18 @@ class MlaFlashInferDecodeOp(object):
         self.kv_len_arr_h = torch.ones((max_bs,), dtype=torch.int32, device="cpu")
 
         if g_workspace_buffer is None:
+            # Find first layer that has MLA weights (hybrid models may have non-MLA layers)
+            device = None
+            for w in self.weights:
+                vc = w.get(W.mla_vc)
+                if vc is not None:
+                    device = vc.device
+                    break
+            assert device is not None, "No MLA weights found in any layer"
             g_workspace_buffer = torch.empty(
                 512 * 1024 * 1024,
                 dtype=torch.int8,
-                device=self.weights[0].get(W.mla_vc).device,
+                device=device,
             )
 
         self.mla_wrapper = BatchMLAPagedAttentionWrapper(
@@ -686,14 +488,16 @@ class MlaFlashInferDecodeOp(object):
         self,
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         layer_id: int,
     ) -> torch.Tensor:
 
         k_weight = self.weights[layer_id].get(W.mla_kc, None)
         v_weight = self.weights[layer_id].get(W.mla_vc, None)
 
-        compressed_kv = kv_cache.kv_cache_base
+        compressed_kv = kv_cache.kv_cache_base.view(
+            -1, self.token_per_block, self.kv_lora_rank + self.qk_rope_head_dim
+        )
 
         q_nope = q_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
         q_pe = q_pe.view(-1, self.num_heads, self.qk_rope_head_dim)

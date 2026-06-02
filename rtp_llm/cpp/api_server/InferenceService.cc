@@ -200,7 +200,6 @@ void InferenceService::inferResponse(int64_t                                    
     }
     auto [iterate_count, complete_response] = iterateStreams(streams, writer, req, iterate_stage_timer);
 
-    iterate_stage_timer.end_stage();
     writer->WriteDone();
     AccessLogWrapper::logSuccessAccess(body, request_id, complete_response, req.private_request);
     if (metric_reporter_) {
@@ -235,7 +234,6 @@ InferenceService::fillGenerateInput(int64_t                                reque
                                          "mm_processor updateMultimodalFeatures failed: " + mm_res.ToString());
         }
     }
-    input->lora_id = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
     if (metric_reporter_) {
         metric_reporter_->reportFTInputTokenLengthMetric(input->generate_config->select_tokens_id.size());
         metric_reporter_->reportFTNumBeansMetric(input->generate_config->maxNumBeams());
@@ -265,10 +263,7 @@ InferenceService::fillGenerateInput(int64_t                                reque
     if (metric_reporter_) {
         metric_reporter_->reportFTPreTokenProcessorRtMetric(timer.done_ms());
     }
-    auto device = rtp_llm::DeviceFactory::getDefaultDevice();
-    input->input_ids =
-        device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {vec.size()}, rtp_llm::AllocationType::HOST}, {});
-    memcpy(input->input_ids->data(), vec.data(), input->input_ids->sizeBytes());
+    input->input_ids = torch::from_blob(const_cast<int*>(vec.data()), {(int64_t)vec.size()}, torch::kInt32).clone();
 
     return input;
 }
@@ -455,6 +450,7 @@ InferenceService::iterateStreams(std::vector<std::shared_ptr<GenerateStreamWrapp
         complete_response.push_back(response);
 
         if (metric_reporter_) {
+            iterate_stage_timer.end_stage();
             if (iterate_counter == 0) {
                 metric_reporter_->reportResponseFirstTokenLatencyMs(iterate_stage_timer.last_ms());
             } else {

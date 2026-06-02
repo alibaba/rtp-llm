@@ -1,9 +1,8 @@
 #include "rtp_llm/models_py/bindings/cuda/TRTAttnOp.h"
-#include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/models_py/bindings/cuda/cufmha/TRTAttn.h"
+#include "rtp_llm/models_py/bindings/cuda/cufmha/TrtV2FmhaRunner.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
 #include <vector>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -20,19 +19,18 @@ bool TRTPrefillOpBase::support(torch_ext::PyAttentionInputs attn_inputs) {
 }
 
 ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs) {
-    static_scale_        = torch::ones({1}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
-    int       batch_size = attn_inputs.input_lengths.size(0);
-    BufferPtr kv_cache_block_id_host, kv_cache_block_id_device;
-    if (attn_inputs.kv_cache_block_id_host.defined() && attn_inputs.kv_cache_block_id_host.numel() > 0) {
-        kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
-        kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
+    static_scale_            = torch::ones({1}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+    int           batch_size = attn_inputs.input_lengths.size(0);
+    torch::Tensor kv_cache_kernel_block_id_device;
+    if (attn_inputs.kv_cache_kernel_block_id_host.defined() && attn_inputs.kv_cache_kernel_block_id_host.numel() > 0) {
+        kv_cache_kernel_block_id_device = attn_inputs.kv_cache_kernel_block_id_device;
     }
 
     TRTAttnPtr attn_params;
     auto       run_stream   = GET_CURRENT_STREAM();
     bool       use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     auto       params       = prepareTrtAttnParams(attn_configs_,
-                                       kv_cache_block_id_device,
+                                       kv_cache_kernel_block_id_device,
                                        attn_inputs.input_lengths.size(0),
                                        use_fp8_fmha,
                                        run_stream,
@@ -86,9 +84,9 @@ bool TRTPagedPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     return trt_v2_runner_->trtV2PagedFmhaSupported();
 }
 
-torch::Tensor TRTPagedPrefillOp::forward(const torch::Tensor&              input,
-                                         std::optional<torch_ext::KVCache> kv_cache,
-                                         const TRTAttnPtr&                 params) {
+torch::Tensor TRTPagedPrefillOp::forward(const torch::Tensor&                   input,
+                                         std::optional<torch_ext::LayerKVCache> kv_cache,
+                                         const TRTAttnPtr&                      params) {
 
     KVBlockArray kv_block_array;
     if (!kv_cache.has_value()) {
@@ -150,9 +148,9 @@ bool TRTNormalPrefillOp::support(torch_ext::PyAttentionInputs attn_inputs) {
     return trt_v2_runner_->trtV2FmhaSupported();
 }
 
-torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&              input,
-                                          std::optional<torch_ext::KVCache> kv_cache,
-                                          const TRTAttnPtr&                 params) {
+torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&                   input,
+                                          std::optional<torch_ext::LayerKVCache> kv_cache,
+                                          const TRTAttnPtr&                      params) {
     KVBlockArray kv_block_array;
     if (kv_cache.has_value()) {
         kv_block_array                 = params->kv_block_array;
@@ -166,7 +164,6 @@ torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&              inpu
     const int            size_per_head  = attn_configs_.size_per_head;
     const int            token_num      = input.size(0);
     const int            batch_size     = params->input_lengths.size(0);
-    auto*                device         = dynamic_cast<CudaDevice*>(DeviceFactory::getDefaultDevice());
     torch::TensorOptions options        = torch::TensorOptions(input.dtype()).device(input.device());
 
     torch::Tensor output        = torch::empty({token_num, local_head_num * size_per_head}, options);
@@ -187,13 +184,16 @@ torch::Tensor TRTNormalPrefillOp::forward(const torch::Tensor&              inpu
     }
     RTP_LLM_CHECK_WITH_INFO(fmha_output_ptr, "fmha_output_ptr must be provided for trt v2 fmha");
 
+    // When is_s_padded, layout stride is token_num/batch_size, not max(input_lengths)
+    size_t effective_max_seq_len = trt_v2_runner_->isSPadded() ? static_cast<size_t>(token_num / batch_size) :
+                                                                 static_cast<size_t>(params->max_seq_len);
     trt_v2_runner_->runTrtV2Fmha(fmha_input_ptr,
                                  params->cu_seqlens.data_ptr(),
                                  fmha_output_ptr,
                                  reinterpret_cast<uint32_t*>(tiled_counter.data_ptr()),
                                  attention_output_orig_quant_scale,
                                  batch_size,
-                                 params->max_seq_len,
+                                 effective_max_seq_len,
                                  token_num,
                                  kv_block_array);
     if (use_fp8_fmha) {
@@ -225,6 +225,16 @@ void registerTRTAttnOp(const py::module& m) {
         .def("support", &TRTNormalPrefillOp::support, py::arg("attn_inputs"))
         .def("prepare", &TRTNormalPrefillOp::prepare, py::arg("attn_inputs"))
         .def("forward", &TRTNormalPrefillOp::forward, py::arg("input"), py::arg("kv_cache"), py::arg("params"));
+}
+
+void registerTRTAttn(const py::module& m) {
+    pybind11::class_<TRTAttn, std::shared_ptr<TRTAttn>, rtp_llm::ParamsBase>(m, "TRTAttn")
+        .def(pybind11::init<>())
+        .def_readwrite("kv_cache_offset", &TRTAttn::kv_cache_offset)
+        .def(
+            "__cpp_ptr__",
+            [](TRTAttn& self) { return reinterpret_cast<uintptr_t>(&self); },
+            "Get C++ object pointer address");
 }
 
 }  // namespace rtp_llm

@@ -1,10 +1,12 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
 test_deps = [
-    "//rtp_llm/cpp/devices/cuda_impl:cuda_impl",
+    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+    "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+    "//rtp_llm/models_py/bindings/cuda:no_block_copy",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/utils:core_utils",
@@ -31,7 +33,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory/test/mock:test_rpc_service_lib",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -45,7 +47,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -59,5 +61,5 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )

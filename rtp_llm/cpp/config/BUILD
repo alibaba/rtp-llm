@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//:__subpackages__"])
 
@@ -25,6 +25,7 @@ cc_library(
         "@havenask//aios/autil:env_util",
         ":role_types",
         ":eplb_config",
+        "//rtp_llm/models_py/bindings/core:types",
     ],
     copts = copts(),
 )
@@ -53,8 +54,8 @@ cc_library(
         ":special_tokens",
         ":config_modules",
         "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/core:types",
-        "//rtp_llm/cpp/core:buffer_torch"
+        "//rtp_llm/models_py/bindings/core:types",
+        "//rtp_llm/models_py/bindings/core:type_convert"
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

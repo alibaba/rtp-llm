@@ -5,11 +5,11 @@ import lombok.Getter;
 @Getter
 public enum LoadBalanceStrategyEnum {
 
-    RANDOM("Random"),  // 随机分配
+    RANDOM("Random"),  // Random assignment
 
-    SHORTEST_TTFT("ShortestTTFT"),  // 最短TTFT
+    SHORTEST_TTFT("ShortestTTFT"),  // Shortest Time-To-First-Token
 
-    WEIGHTED_CACHE("WeightedCache")  // 最低缓存使用策略
+    WEIGHTED_CACHE("WeightedCache")  // Lowest cache usage strategy
 
     ;
     private final String name;

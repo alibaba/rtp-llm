@@ -7,7 +7,6 @@
 #include <functional>
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "rtp_llm/cpp/devices/DeviceBase.h"
 
 namespace rtp_llm {
 
@@ -18,7 +17,7 @@ namespace rtp_llm {
 class RequestBlockBufferStore {
 
 public:
-    RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util, rtp_llm::DeviceBase* device);
+    RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util);
     ~RequestBlockBufferStore() = default;
 
 public:
@@ -45,7 +44,6 @@ private:
 
 private:
     std::shared_ptr<MemoryUtil> memory_util_;
-    rtp_llm::DeviceBase*        device_;
 
     mutable std::shared_mutex                                            request_cache_map_mutex_;
     std::unordered_map<std::string, std::shared_ptr<RequestBlockBuffer>> request_cache_map_;

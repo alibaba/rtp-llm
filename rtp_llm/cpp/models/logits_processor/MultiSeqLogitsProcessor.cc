@@ -2,16 +2,14 @@
 
 namespace rtp_llm {
 
-MultiSeqLogitsProcessor::MultiSeqLogitsProcessor(rtp_llm::DeviceBase* device): BaseLogitsProcessor(device) {}
-
-std::shared_ptr<MultiSeqLogitsProcessor> MultiSeqLogitsProcessor::fromGenerateInput(
-    rtp_llm::DeviceBase* device, std::shared_ptr<GenerateInput> generate_input, int64_t eos_token_id) {
+std::shared_ptr<MultiSeqLogitsProcessor>
+MultiSeqLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> generate_input, int64_t eos_token_id) {
 
     if (generate_input->generate_config->num_return_sequences <= 1 && !generate_input->generate_config->hasNumBeams()) {
         return nullptr;
     }
 
-    auto processor_ptr           = std::make_shared<MultiSeqLogitsProcessor>(device);
+    auto processor_ptr           = std::make_shared<MultiSeqLogitsProcessor>();
     processor_ptr->eos_token_id_ = eos_token_id;
 
     return processor_ptr;
@@ -19,11 +17,10 @@ std::shared_ptr<MultiSeqLogitsProcessor> MultiSeqLogitsProcessor::fromGenerateIn
 
 void MultiSeqLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
     size_t batch_size = finish_idx - start_idx;
-    size_t vocab_size = inputs.logits->shape()[1];
+    size_t vocab_size = inputs.logits.size(1);
 
-    auto logits            = inputs.logits->slice(start_idx, batch_size);
-    auto finished_mask     = inputs.finished_mask->slice(start_idx, finish_idx - start_idx);
-    auto finished_mask_ptr = finished_mask->data<bool>();
+    auto logits            = inputs.logits.narrow(0, start_idx, batch_size);
+    auto finished_mask_ptr = reinterpret_cast<bool*>(inputs.finished_mask.data_ptr()) + start_idx;
 
     // return early when no sequence needs processing
     if (!std::any_of(finished_mask_ptr, finished_mask_ptr + batch_size, [](bool v) { return v; })) {
@@ -31,11 +28,8 @@ void MultiSeqLogitsProcessor::process(const SamplerInputs& inputs, size_t start_
     }
 
     // mask all logits of the finished sequences except the eos token
-    auto logit_mask_host =
-        device_->allocateBuffer({DataType::TYPE_UINT8, {batch_size, vocab_size}, AllocationType::HOST});
-
-    auto logit_mask_host_ptr = logit_mask_host->data<uint8_t>();
-    memset(logit_mask_host_ptr, 0, batch_size * vocab_size * sizeof(uint8_t));
+    auto logit_mask_host_tensor = torch::zeros({(int64_t)batch_size, (int64_t)vocab_size}, torch::kUInt8);
+    auto logit_mask_host_ptr    = logit_mask_host_tensor.data_ptr<uint8_t>();
 
     for (size_t idx = 0; idx < batch_size; ++idx) {
         if (finished_mask_ptr[idx]) {
@@ -45,7 +39,7 @@ void MultiSeqLogitsProcessor::process(const SamplerInputs& inputs, size_t start_
         }
     }
 
-    auto logit_mask = device_->clone({*logit_mask_host, AllocationType::DEVICE});
+    auto logit_mask = logit_mask_host_tensor.to(torch::kCUDA);
 
     maskLogits(logits, logit_mask);
 }
@@ -54,7 +48,7 @@ void MultiSeqLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_b
     // do nothing
 }
 
-void MultiSeqLogitsProcessor::updateStatus(const rtp_llm::BufferPtr& new_tokens, int32_t num_new_tokens) {
+void MultiSeqLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
     // do nothing
 }
 

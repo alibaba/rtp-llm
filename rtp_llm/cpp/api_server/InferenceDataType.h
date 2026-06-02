@@ -91,8 +91,9 @@ public:
         json.Jsonize("step_output_len", step_output_len, step_output_len);
         json.Jsonize("beam_responses", beam_responses, beam_responses);
         if (json.GetMode() == FastJsonizableBase::Mode::TO_JSON && cum_log_probs.has_value()) {
-            auto buffer = cum_log_probs.value();
-            json.Jsonize("cum_log_probs", rtp_llm::buffer2vector<float>(*buffer));
+            auto               tensor = cum_log_probs.value().to(torch::kFloat).contiguous();
+            std::vector<float> cum_log_probs_vec(tensor.data_ptr<float>(), tensor.data_ptr<float>() + tensor.numel());
+            json.Jsonize("cum_log_probs", cum_log_probs_vec);
         }
         json.Jsonize("local_reuse_len", local_reuse_len, local_reuse_len);
         json.Jsonize("remote_reuse_len", remote_reuse_len, remote_reuse_len);

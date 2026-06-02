@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import logging
 import queue
 import threading
@@ -8,6 +9,7 @@ import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
     IncrementDecodingUtils,
@@ -53,6 +55,8 @@ class Pipeline(object):
         grpc_config: Optional[Any] = None,  # grpc_config from PyEnvConfigs (optional)
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
         extra_input_processor: Optional[Any] = None,  # callable(input_ids) -> (processed_ids, extra_ids, loc)
+        server_config=None,
+        master_config=None,
     ):
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
@@ -72,6 +76,8 @@ class Pipeline(object):
             sp_config=sp_config,
             grpc_config=grpc_config,
             vit_separation=vit_separation,
+            server_config=server_config,
+            master_config=master_config,
         )
 
     def encode(self, prompt: str):
@@ -186,6 +192,10 @@ class Pipeline(object):
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "expect string prompt, actual: " + str(prompt),
             )
+        # 生成式推荐：由开关控制，默认关闭、对非推荐场景零侵入。
+        # 在 tokenizer.encode(prompt) 之前解析及填充 banned_combo_token_ids，
+        # 避免重复编码 prompt。
+        parse_and_fill_banned_combo(prompt, generate_config, self.tokenizer)
         token_ids = self.tokenizer.encode(prompt)
 
         extra_input_ids = None
@@ -314,7 +324,7 @@ class Pipeline(object):
                     )
                 else:
                     tokens = tokens.reshape(-1)
-                tokens_lists_for_decode_input.append(tokens)
+                tokens_lists_for_decode_input.append(tokens.tolist())
         for i, generate_output in enumerate(generate_outputs.generate_outputs):
             tokens_list = tokens_lists_for_decode_input[i]
             output_lens.append(len(tokens_list))
@@ -470,6 +480,8 @@ class Pipeline(object):
             token_type_ids=token_type_ids,
             extra_input_ids=extra_input_ids,
             extra_input_ids_loc=extra_input_ids_loc,
+            batch_group_size=kwargs.get("batch_group_size", 1),
+            batch_group_id=kwargs.get("batch_group_id", -1),
         )
 
         stop_word_strs = generate_config.stop_words_str
@@ -563,3 +575,79 @@ class Pipeline(object):
                         sum(output_lens) / len(output_lens),
                     )
                 break
+
+    @torch.inference_mode()
+    async def batch_infer(
+        self,
+        prompts: List[str],
+        base_request_id: int,
+        generate_config_json: dict,
+        generate_env_config=None,
+        **kwargs: Any
+    ) -> List[GenerateResponse]:
+        generate_config = self.create_generate_config(
+            generate_config_json,
+            len(self.tokenizer),
+            self._special_tokens,
+            self.tokenizer,
+            generate_env_config=generate_env_config,
+            **kwargs
+        )
+        generate_config.is_streaming = False
+
+        inputs = []
+        for i, prompt in enumerate(prompts):
+            if len(prompt) == 0:
+                raise FtRuntimeException(
+                    ExceptionType.EMPTY_PROMPT_ERROR,
+                    "prompt should have at least one token!",
+                )
+            token_ids = self.tokenizer.encode(prompt)
+
+            if generate_config.sp_advice_prompt != "":
+                generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
+                    generate_config.sp_advice_prompt
+                )
+
+            input_tensor = torch.tensor(token_ids, dtype=torch.int)
+            # Shallow copy is enough: GenerateConfig is treated as immutable from here on,
+            # and at the RPC layer it is converted to a per-request protobuf so any brief
+            # list aliasing across siblings is dropped before it reaches the engine.
+            gen_input = GenerateInput(
+                request_id=base_request_id + i,
+                token_ids=input_tensor,
+                mm_inputs=[],
+                generate_config=copy.copy(generate_config),
+                tokenizer=self.tokenizer,
+            )
+            inputs.append(gen_input)
+
+        batch_outputs = await self.backend_rpc_server_visitor.batch_enqueue(inputs)
+
+        stop_word_strs = generate_config.stop_words_str
+        stop_word_str_slices = get_stop_word_slices(stop_word_strs)
+        stop_word_ids = generate_config.stop_words_list
+        stop_word_id_slices = get_stop_word_slices(stop_word_ids)
+
+        responses = []
+        for i, outputs in enumerate(batch_outputs):
+            (
+                generate_texts,
+                output_lens,
+                _,
+            ) = self.decode_non_incremental_tokens(
+                generate_config,
+                outputs,
+                stop_word_strs,
+                stop_word_str_slices,
+                stop_word_ids,
+                stop_word_id_slices,
+                [],
+            )
+            responses.append(
+                GenerateResponse(
+                    generate_outputs=outputs,
+                    generate_texts=generate_texts,
+                )
+            )
+        return responses

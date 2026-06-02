@@ -35,8 +35,9 @@ inline void calculatePaddingOffset(torch_ext::PyAttentionInputs& py_attn_inputs)
 
     // inputs_length:  [1,2,1,1] ,total_tokens = 5
     // padding_offsets: [0,1,1,1,2]
-    int  max_seq_len         = py_attn_inputs.input_lengths.max().item<int32_t>();
-    auto padding_offset_host = torch::zeros({total_tokens}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
+    int  max_seq_len = py_attn_inputs.input_lengths.max().item<int32_t>();
+    auto padding_offset_host =
+        torch::zeros({total_tokens}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
 
     if (total_tokens > 0) {
         getPaddingOffset(padding_offset_host.data_ptr<int32_t>(),

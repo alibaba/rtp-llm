@@ -38,7 +38,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
         memory_util_ = createMemoryUtilImpl(params_.rdma_mode);
     }
 
-    request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(memory_util_, params.device);
+    request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(memory_util_);
 
     // always has metric
     metrics_reporter_ = params.metrics_reporter;
@@ -74,7 +74,7 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
                 auto& [buffer, item]   = *it;
                 auto& [callback, task] = item;
                 auto event             = buffer->getEvent();
-                if ((event && event->checkReadiness()) || event == nullptr) {
+                if ((event && event->query()) || event == nullptr) {
                     if (this->thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
                         RTP_LLM_LOG_WARNING("normal cache store push store task to thread pool failed");
                         callback(false, CacheStoreErrorCode::PushWorkerItemFailed);

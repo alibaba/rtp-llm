@@ -1,7 +1,7 @@
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include "rtp_llm/models_py/bindings/cuda/PerTokenGroupQuantFp8.h"
-#include "rtp_llm/cpp/kernels/per_token_group_quant_8bit.h"
-#include "rtp_llm/cpp/kernels/per_token_group_quant_8bit_v2.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/per_token_group_quant_8bit.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/per_token_group_quant_8bit_v2.h"
 #include <cuda_bf16.h>
 #include <cuda_device_runtime_api.h>
 #include <cuda_fp16.h>

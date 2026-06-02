@@ -13,8 +13,10 @@ public interface MasterElectService {
 
     void destroy();
 
+    boolean isNeedConsistency();
+
     boolean isMaster();
 
-    String getMasterHostIp(boolean forceSync);
+    void refreshMasterHost(boolean forceSync);
 
 }

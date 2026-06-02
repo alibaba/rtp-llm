@@ -97,8 +97,8 @@ class BatchedDataRouter(FusedMoeDataRouter):
 
         # Calculate parameters from config
         max_num_tokens = (
-            config.ll_num_max_token + config.parallelism_config.tp_size - 1
-        ) // config.parallelism_config.tp_size
+            config.ll_num_max_token + config.tp_size - 1
+        ) // config.tp_size
         self.max_num_tokens = max_num_tokens
         self.ep_rank = config.ep_rank
         self.tp_size = config.tp_size

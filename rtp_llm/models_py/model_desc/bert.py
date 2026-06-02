@@ -17,7 +17,7 @@ from rtp_llm.models_py.modules import (
 )
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
-    KVCache,
+    LayerKVCache,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
@@ -35,7 +35,7 @@ class BertDecoderLayer(nn.Module):
         hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
-        attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+        attn_configs = config.getAttentionConfigs(parallelism_config.get_attn_tp_size())
         attn_configs.need_rope_kv_cache = False
         self.self_attn = CausalAttention(
             attn_configs,
@@ -67,7 +67,7 @@ class BertDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
-        kv_cache: Optional[KVCache] = None,
+        kv_cache: Optional[LayerKVCache] = None,
     ) -> torch.Tensor:
         residual = hidden_states
         # Self Attention

@@ -16,7 +16,10 @@ Usage example:
     moe = FusedMoeFactory.create_fused_moe(config, weights)
 """
 
-from rtp_llm.ops.compute_ops import DeviceType, get_device
+import torch
+
+from rtp_llm.device.device_type import DeviceType, get_device_type
+from rtp_llm.models_py.utils.arch import get_sm, is_cuda
 
 from .defs.fused_moe import FusedMoe
 from .factory import FusedMoeFactory
@@ -28,7 +31,7 @@ __all__ = ["FusedMoeFactory", "StrategyRegistry", "FusedMoe"]
 # Device-specific MoE strategy registration
 # ============================================================================
 
-device_type = get_device().get_device_type()
+device_type = get_device_type()
 
 # Import common strategies
 from rtp_llm.models_py.modules.factory.fused_moe.impl.common.strategy.batched_triton_strategy import (
@@ -40,13 +43,19 @@ if device_type == DeviceType.ROCm:
 
     # MoE strategies
     from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.strategy import (
+        RocmBf16PureTPStrategy,
         RocmEpLowLatencyStrategy,
         RocmEpNormalStrategy,
+        RocmFp8PerBlockPureTPStrategy,
+        RocmFp8PerChannelPureTPStrategy,
     )
 
     registry = StrategyRegistry()
     registry.register(RocmEpLowLatencyStrategy())
     registry.register(RocmEpNormalStrategy())
+    registry.register(RocmFp8PerChannelPureTPStrategy())
+    registry.register(RocmFp8PerBlockPureTPStrategy())
+    registry.register(RocmBf16PureTPStrategy())
     registry.register(BatchedTritonStrategy())
     FusedMoeFactory.set_registry(registry)
 
@@ -55,8 +64,11 @@ else:
 
     # MoE strategies
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
+        CudaFp8PerBlockPureCPStrategy,
+        CudaFp8PerBlockPureDPStrategy,
         CudaFp8PerBlockEpLowLatencyStrategy,
         CudaFp8PerBlockEpNormalStrategy,
+        CudaFp8PerBlockNoDPMaskedStrategy,
         CudaFp8PerBlockNoDPStrategy,
         CudaFp8PerTensorEpLowLatencyStrategy,
         CudaFp8PerTensorEpNormalStrategy,
@@ -64,6 +76,9 @@ else:
         CudaNoQuantCppStrategy,
         CudaNoQuantDpNormalStrategy,
         CudaNoQuantEpLowLatencyStrategy,
+        CudaW4a8Int4PerChannelEpLowLatencyStrategy,
+        CudaW4a8Int4PerChannelEpNormalStrategy,
+        CudaW4a8Int4PerChannelNoDPStrategy,
     )
 
     registry = StrategyRegistry()
@@ -71,10 +86,27 @@ else:
     registry.register(CudaFp8PerTensorEpNormalStrategy())
     registry.register(CudaFp8PerBlockEpLowLatencyStrategy())
     registry.register(CudaFp8PerBlockEpNormalStrategy())
+    registry.register(CudaFp8PerBlockPureCPStrategy())
+    registry.register(CudaFp8PerBlockPureDPStrategy())
+    registry.register(CudaFp8PerBlockNoDPMaskedStrategy())
     registry.register(CudaFp8PerBlockNoDPStrategy())
     registry.register(CudaFp8PerTensorNoDPStrategy())
     registry.register(CudaNoQuantEpLowLatencyStrategy())
     registry.register(CudaNoQuantDpNormalStrategy())
     registry.register(CudaNoQuantCppStrategy())
     registry.register(BatchedTritonStrategy())
+    registry.register(CudaW4a8Int4PerChannelEpLowLatencyStrategy())
+    registry.register(CudaW4a8Int4PerChannelEpNormalStrategy())
+    registry.register(CudaW4a8Int4PerChannelNoDPStrategy())
+    # Only register FP4 strategies on SM_100+ (and only if CUDA GPU is available)
+    if torch.cuda.is_available() and is_cuda() and get_sm()[0] >= 10:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
+            CudaFp4EpLowLatencyStrategy,
+            CudaFp4EpNormalStrategy,
+            CudaFp4NoDPStrategy,
+        )
+
+        registry.register(CudaFp4EpLowLatencyStrategy())
+        registry.register(CudaFp4EpNormalStrategy())
+        registry.register(CudaFp4NoDPStrategy())
     FusedMoeFactory.set_registry(registry)

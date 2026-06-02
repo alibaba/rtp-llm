@@ -1,16 +1,15 @@
 #pragma once
-#include "rtp_llm/cpp/kernels/unfused_attention_kernels.h"
+#include "rtp_llm/models_py/bindings/rocm/kernels/fused_rope_kvcache_kernel.h"
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
-#include "rtp_llm/cpp/kernels/kv_cache/kv_cache_utils.h"
+#include "rtp_llm/models_py/bindings/common/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
-#include "rtp_llm/cpp/devices/rocm_impl/ROCmDevice.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/models_py/bindings/rocm/CKAttnUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <pybind11/pybind11.h>
 
-#include "rtp_llm/cpp/devices/DeviceData.h"
+#include "rtp_llm/models_py/bindings/core/DeviceData.h"
 
 namespace py = pybind11;
 using namespace torch_ext;
@@ -39,19 +38,17 @@ public:
 
     CKAttnPtr prepare(torch_ext::PyAttentionInputs attn_inputs);
     forward_param
-    forward(const torch::Tensor& qkv, std::optional<torch_ext::KVCache> kv_cache, const CKAttnPtr& params);
+    forward(const torch::Tensor& qkv, std::optional<torch_ext::LayerKVCache> kv_cache, const CKAttnPtr& params);
 
 private:
     AttentionConfigs attn_configs_;
     int              layer_num_;
     FMHAConfig       fmha_config_;
-    ROCmDevice*      device_;
-    // Offset for KV cache blocks, calculated as num_layers * block_nums
     // Flag to control whether to use AITER paged attention, controlled by USE_AITER_PA env var
     bool use_aiter_pa_ = true;
 };
 
-// Register the PagedAttnDecodeOp class with Python bindings
+// Register the PagedAttnDecodeOp class and atrex_paged_attention op with Python bindings
 void registerPagedAttnDecodeOp(py::module& m);
 
 }  // namespace rtp_llm

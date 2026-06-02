@@ -1,6 +1,6 @@
 load("@//:def.bzl", "copts", "cuda_copts")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch", "if_cuda")
-load("@//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 load("@//3rdparty/flashinfer:def.bzl", "sub_lib")
 
 common_copts = [
@@ -179,41 +179,15 @@ cc_library(
 cc_library(
     name = "flashinfer",
     srcs = [
-        "csrc/bmm_fp8.cu",
-        "csrc/cascade.cu",
-        "csrc/group_gemm.cu",
         "csrc/norm.cu",
-        "csrc/page.cu",
-        "csrc/quantization.cu",
-        "csrc/rope.cu",
         "csrc/sampling.cu",
         "csrc/renorm.cu",
         "csrc/activation.cu",
-        "csrc/batch_decode.cu",
-        "csrc/batch_prefill.cu",
-        "csrc/single_decode.cu",
-        "csrc/single_prefill.cu",
-        "csrc/group_gemm_sm90.cu",
-        "csrc/single_prefill_sm90.cu",
-        "csrc/batch_prefill_sm90.cu",
     ] + glob([
         "csrc/*.h",
         "csrc/*.inc",
-    ]) + [
-        "flashinfer_single_decode",
-        "flashinfer_single_decode_256",
-        "flashinfer_single_prefill",
-        "flashinfer_single_prefill_256",
-        "flashinfer_batch_paged_prefill",
-        "flashinfer_batch_paged_prefill_256",
-        "flashinfer_batch_paged_decode",
-        "flashinfer_batch_paged_decode_256",
-        "flashinfer_batch_ragged_prefill",
-        "flashinfer_batch_ragged_prefill_256",
-        "flashinfer_sm90"
-    ],
+    ]),
     implementation_deps = [
-        ":flashinfer_mla",
         ":dispatch",
         ":flashinfer_hdrs",
         ":aot_default_additional_params",

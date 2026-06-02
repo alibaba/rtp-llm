@@ -1,6 +1,5 @@
 #pragma once
 
-#include "rtp_llm/cpp/devices/DeviceBase.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -12,8 +11,8 @@ namespace speculative {
 
 struct SpeculativeSamplerOutput {
 public:
-    std::vector<BufferPtr> accept_tokens;
-    std::vector<int>       accept_len;
+    std::vector<torch::Tensor> accept_tokens;
+    std::vector<int>           accept_len;
 };
 
 struct FastTopKSamplerOutput {
@@ -30,8 +29,7 @@ public:
 
 class SpeculativeSampler {
 public:
-    SpeculativeSampler(rtp_llm::DeviceBase* device, size_t propose_step):
-        device_(device), propose_step_(propose_step) {}
+    SpeculativeSampler(size_t propose_step): propose_step_(propose_step) {}
 
     virtual SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
                                              SamplerOutput&                      draft_sampler_output,
@@ -48,8 +46,7 @@ private:
                       SamplerOutput&                      target_sampler_output) const;
 
 protected:
-    rtp_llm::DeviceBase* device_;
-    size_t               propose_step_;
+    size_t propose_step_;
 };
 
 }  // namespace speculative

@@ -5,11 +5,11 @@
 #include <map>
 #include <vector>
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {
 
-/** NCCL communication config (ip + ports). When set, DeviceFactory::initDevices uses this
- * instead of ParallelismConfig for master_ip and tp/dp_tp/ffn_tp ports. Aligns with Python NcclCommConfig. */
+/** NCCL communication config (ip + ports). Aligns with Python NcclCommConfig. */
 struct NcclCommConfig {
     std::string master_ip   = "";
     int64_t     tp_port     = 0;
@@ -18,6 +18,26 @@ struct NcclCommConfig {
     std::string to_string() const;
 };
 
+enum class CPRotateMethod {
+    DISABLED                = 0,
+    ALL_GATHER              = 1,
+    ALL_GATHER_WITH_OVERLAP = 2,
+    ALLTOALL                = 3,
+    PREFILL_CP              = 4,
+    UNKNOWN                 = 5,
+};
+struct PrefillCPConfig {
+    CPRotateMethod method           = CPRotateMethod::DISABLED;
+    size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
+    bool           is_enabled() const {
+        return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
+               && method != CPRotateMethod::PREFILL_CP;
+    }
+    bool is_prefill_enabled() const {
+        return method == CPRotateMethod::PREFILL_CP;
+    }
+    std::string to_string() const;
+};
 struct FfnDisAggregateConfig {
     bool        enable_ffn_disaggregate = false;
     int         attention_tp_size       = 1;
@@ -47,9 +67,25 @@ struct ParallelismConfig {
     int64_t ffn_tp_size      = 1;
     int64_t ffn_tp_rank      = 0;
     bool    enable_sp        = false;
+    bool    use_ub_comm      = false;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
 
+    // Context Parallel configuration
+    PrefillCPConfig prefill_cp_config;
+
+    int64_t get_attn_tp_size() const {
+        return prefill_cp_config.is_enabled() ? 1 : tp_size;
+    }
+    int64_t get_attn_tp_rank() const {
+        return prefill_cp_config.is_enabled() ? 0 : tp_rank;
+    }
+    int64_t get_ffn_tp_size() const {
+        return prefill_cp_config.is_enabled() ? 1 : ffn_tp_size;
+    }
+    int64_t get_ffn_tp_rank() const {
+        return prefill_cp_config.is_enabled() ? 0 : ffn_tp_rank;
+    }
     std::string to_string() const;
 };
 
@@ -70,25 +106,37 @@ enum class FMHAType {
     XQA,
     AITER_PREFILL,
     AITER_ASM_PREFILL,
+    AITER_PAGED_PREFILL,
     AITER_DECODE,
     AITER_ASM_DECODE,
+    AITER_TRITON_DECODE,
     PY_FLASHINFER_PREFILL_PAGED,
     PY_FLASHINFER_PREFILL_RAGGED,
     PY_FLASHINFER_DECODE,
+    FLASHINFER_MLA_PREFILL,
+    FLASHINFER_MLA_DECODE,
+    SPARSE_FLASHMLA,
+    CP_FLASH_INFER,
+    CP_SPARSE_FLASHMLA,
+    HEADWISE,
 };
 
 struct FMHAConfig {
-    bool        enable_fmha                   = true;
-    bool        enable_trt_fmha               = true;
-    bool        enable_paged_trt_fmha         = true;
-    bool        enable_open_source_fmha       = true;
-    bool        enable_paged_open_source_fmha = true;
-    bool        enable_trtv1_fmha             = true;
-    bool        disable_flash_infer           = false;
-    bool        enable_xqa                    = true;
-    bool        use_aiter_pa                  = true;
-    bool        use_asm_pa                    = true;
-    int64_t     absorb_opt_len                = 1024;
+    bool enable_fmha                   = true;
+    bool enable_trt_fmha               = true;
+    bool enable_paged_trt_fmha         = true;
+    bool enable_open_source_fmha       = true;
+    bool enable_paged_open_source_fmha = true;
+    bool enable_trtv1_fmha             = true;
+    bool disable_flash_infer           = false;
+    bool enable_xqa                    = true;
+    bool use_aiter_pa                  = true;
+    bool use_asm_pa                    = true;
+    // Default off: Triton PA on ROCm regressed vs ASM PA after the rocm_impl
+    // refactor; ASM/NonAsm now own the default decode path. Set to true to opt
+    // back into the Triton kernel.
+    bool        use_triton_pa  = false;
+    int64_t     absorb_opt_len = 1024;
     std::string to_string() const;
 };
 
@@ -98,46 +146,68 @@ struct KVCacheConfig {
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     int64_t                                 reserve_block_ratio          = 5;
-    bool                                    enable_3fs                   = false;
-    int                                     match_timeout_ms             = 1000;
-    int                                     rpc_get_cache_timeout_ms     = 2000;
-    int                                     rpc_put_cache_timeout_ms     = 2000;
-    int                                     threefs_read_timeout_ms      = 1000;
-    int                                     threefs_write_timeout_ms     = 2000;
     int                                     max_block_size_per_item      = 16;
-    int64_t                                 threefs_read_iov_size        = 1LL << 32;  // 4GB
-    int64_t                                 threefs_write_iov_size       = 1LL << 32;  // 4GB
     int64_t                                 memory_cache_size_mb         = 0;
     int64_t                                 memory_cache_sync_timeout_ms = 10000;
+    int                                     linear_step                  = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
-    int         int8_kv_cache       = 0;
-    int         fp8_kv_cache        = 0;
-    int64_t     kv_cache_mem_mb     = -1;
-    int         seq_size_per_block  = 64;
-    int         test_block_num      = 0;
-    int         use_block_cache     = -1;  // -1 means not set, use Optional<int> equivalent
-    bool        enable_device_cache = true;
-    bool        enable_memory_cache = false;
-    bool        write_cache_sync    = false;
+    int         int8_kv_cache             = 0;
+    int         fp8_kv_cache              = 0;
+    std::string ssm_state_dtype           = "bf16";
+    int64_t     kv_cache_mem_mb           = -1;
+    int         seq_size_per_block        = 64;
+    int         kernel_seq_size_per_block = 0;
+    int         test_block_num            = 0;
+    int         use_block_cache           = -1;  // -1 means not set, use Optional<int> equivalent
+    bool        enable_device_cache       = true;
+    bool        enable_memory_cache       = false;
+    // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
+    bool    enable_memory_cache_sm_copy  = false;
+    bool    enable_remote_cache          = false;
+    bool    write_cache_sync             = false;
+    bool    enable_tiered_memory_cache   = false;
+    bool    enable_reuse_cache_in_batch  = false;
+    int64_t device_cache_min_free_blocks = 0;
+    int     load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures
+
+    // Remote connector configuration fields
+    bool        reco_enable_vipserver                = false;
+    std::string reco_vipserver_domain                = "";
+    std::string reco_server_address                  = "";
+    std::string reco_instance_group                  = "default";
+    uint32_t    reco_meta_channel_retry_time         = 3;
+    uint32_t    reco_meta_channel_connection_timeout = 6000;
+    uint32_t    reco_meta_channel_call_timeout       = 1500;
+    uint32_t    reco_storage_thread_num              = 4;
+    uint32_t    reco_storage_queue_size              = 2000;
+    int         reco_put_timeout_ms                  = 12000;
+    int         reco_get_timeout_ms                  = 12000;
+    std::string reco_model_sdk_config                = R"([{"type":"local","sdk_log_level":"DEBUG"}])";
+    std::string reco_model_user_data                 = "";
+    std::string reco_model_extra_info                = "";
+    std::string reco_instance_id_salt                = "";
+    size_t      reco_asyncwrapper_thread_num         = 16;
+    size_t      reco_asyncwrapper_queue_size         = 1000;
+    int         reco_get_broadcast_timeout           = 15000;
+    int         reco_put_broadcast_timeout           = 15000;
+    std::string reco_client_config                   = "";
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };
 
 struct ProfilingDebugLoggingConfig {
-    bool        trace_memory               = false;
-    bool        trace_malloc_stack         = false;
-    bool        enable_device_perf         = false;
-    bool        ft_core_dump_on_exception  = false;
-    std::string ft_alog_conf_path          = "";
-    bool        gen_timeline_sync          = false;
-    std::string torch_cuda_profiler_dir    = "";
-    int         log_file_backup_count      = 16;
-    bool        debug_load_server          = false;
-    int         hack_layer_num             = 0;
-    bool        debug_start_fake_process   = false;
-    bool        enable_detail_log          = false;
-    bool        check_nan                  = false;
-    bool        enable_torch_alloc_profile = false;
+    bool        trace_memory              = false;
+    bool        enable_device_perf        = false;
+    bool        ft_core_dump_on_exception = false;
+    std::string ft_alog_conf_path         = "";
+    bool        gen_timeline_sync         = false;
+    std::string torch_cuda_profiler_dir   = "";
+    int         log_file_backup_count     = 16;
+    bool        debug_load_server         = false;
+    int         hack_layer_num            = 0;
+    bool        debug_start_fake_process  = false;
+    bool        enable_detail_log         = false;
+    bool        check_nan                 = false;
 
     std::string to_string() const;
 };
@@ -145,7 +215,6 @@ struct ProfilingDebugLoggingConfig {
 struct HWKernelConfig {
     int         deep_gemm_num_sm             = -1;
     bool        arm_gemm_use_kai             = false;
-    bool        enable_stable_scatter_add    = false;
     bool        enable_multi_block_mode      = true;
     bool        ft_disable_custom_ar         = true;
     std::string rocm_hipblaslt_config        = "gemm_config.csv";
@@ -166,33 +235,32 @@ struct HWKernelConfig {
 };
 
 struct DeviceResourceConfig {
-    int64_t     device_reserve_memory_bytes = -1073741824;
-    int64_t     host_reserve_memory_bytes   = 4LL * 1024 * 1024 * 1024;
-    int         overlap_math_sm_count       = 0;
-    int         overlap_comm_type           = 0;
-    int         m_split                     = 0;
-    bool        enable_comm_overlap         = true;
-    int         enable_layer_micro_batch    = 0;
+    int         overlap_math_sm_count    = 0;
+    int         overlap_comm_type        = 0;
+    int         m_split                  = 0;
+    bool        enable_comm_overlap      = true;
+    int         enable_layer_micro_batch = 0;
     std::string to_string() const;
 };
 
 struct MoeConfig {
-    bool        use_deepep_moe                  = false;
-    bool        use_deepep_internode            = false;
-    bool        use_deepep_low_latency          = true;
-    bool        use_deepep_p2p_low_latency      = false;
-    bool        fake_balance_expert             = false;
-    bool        hack_moe_expert                 = false;
-    int         deep_ep_num_sm                  = 0;
-    int         max_moe_normal_masked_token_num = 1024;
-    bool        use_all_gather                  = false;
-    int         ll_num_max_token                = 0;
+    bool        use_deepep_moe             = false;
+    bool        use_deepep_internode       = false;
+    bool        use_deepep_low_latency     = true;
+    bool        use_deepep_p2p_low_latency = false;
+    bool        use_mori_ep                = false;
+    bool        fake_balance_expert        = false;
+    bool        hack_moe_expert            = false;
+    int         deep_ep_num_sm             = 0;
+    int         masked_max_token_num       = 256;
+    bool        use_all_gather             = false;
+    int         ll_num_max_token           = 0;
+    std::string moe_strategy               = "auto";
+    std::string fp4_moe_op                 = "auto";
     std::string to_string() const;
 };
 
 struct ModelSpecificConfig {
-    int64_t     max_lora_model_size = -1;
-    bool        load_python_model   = false;
     std::string to_string() const;
 };
 
@@ -216,7 +284,6 @@ struct SpeculativeExecutionConfig {
     bool            force_score_context_attention = true;
     std::string     quantization                  = "";
     std::string     checkpoint_path               = "";
-    bool            use_new_sp_engine             = false;
     std::string     to_string() const;
 
     // Helper functions for enum conversion
@@ -230,16 +297,31 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
-    bool        cache_store_rdma_mode        = false;
-    int         wrr_available_ratio          = 80;
-    int         rank_factor                  = 0;
-    int         thread_count                 = 16;
-    int         rdma_connect_timeout_ms      = 250;
-    int         rdma_qp_count_per_connection = 2;
-    int         rdma_io_thread_count         = 4;
-    int         rdma_worker_thread_count     = 2;
-    int         messager_io_thread_count     = 2;
-    int         messager_worker_thread_count = 16;
+    bool    cache_store_rdma_mode               = false;
+    int     wrr_available_ratio                 = 80;
+    int     rank_factor                         = 0;
+    int     thread_count                        = 16;
+    int     rdma_connect_timeout_ms             = 250;
+    int     rdma_qp_count_per_connection        = 2;
+    int     rdma_io_thread_count                = 4;
+    int     rdma_worker_thread_count            = 2;
+    int     messager_io_thread_count            = 2;
+    int     messager_worker_thread_count        = 16;
+    int64_t rdma_transfer_wait_timeout_ms       = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
+    int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
+    int64_t p2p_read_steal_before_deadline_ms =
+        250;  // Decode read：在此距 deadline 时从 recv store steal，阻止新 transfer 匹配
+    int64_t p2p_read_return_before_deadline_ms = 100;  // Decode read 与 Prefill send：transfer 层 deadline / worker
+                                                       // 须在 D 前该毫秒数完成（与对端 recv/send 对齐）
+    int64_t p2p_transfer_not_done_resource_hold_ms =
+        10 * 1000;  // Scheduler：TRANSFER_NOT_DONE 后延迟 done 以保留显存安全窗口
+
+    int     p2p_resource_store_timeout_check_interval_ms = 100;
+    int64_t p2p_layer_cache_buffer_store_timeout_ms      = 100 * 1000;
+    int64_t p2p_cancel_broadcast_timeout_ms              = 1000;
+    int     cache_store_tcp_anet_rpc_thread_num          = 3;
+    int     cache_store_tcp_anet_rpc_queue_num           = 100;
+
     std::string to_string() const;
 };
 
@@ -256,16 +338,9 @@ struct FIFOSchedulerConfig {
     std::string to_string() const;
 };
 
-struct SchedulerConfig {
-    bool        use_batch_decode_scheduler = false;
-    bool        use_gather_batch_scheduler = false;
-    std::string to_string() const;
-};
-
 struct RuntimeConfig {
     int64_t max_generate_batch_size = 1;
 
-    bool    pre_allocate_op_mem     = true;
     int64_t max_block_size_per_item = 16;
 
     int64_t reserve_runtime_mem_mb = 0;
@@ -274,7 +349,6 @@ struct RuntimeConfig {
 
     // Scheduler configuration
     bool                       use_batch_decode_scheduler = false;
-    bool                       use_gather_batch_scheduler = false;
     BatchDecodeSchedulerConfig batch_decode_scheduler_config;
     FIFOSchedulerConfig        fifo_scheduler_config;
 
@@ -283,8 +357,7 @@ struct RuntimeConfig {
     std::vector<std::string> worker_addrs;
 
     // Fields merged from PyDeviceResourceConfig
-    std::string specify_gpu_arch      = "";
-    std::string acext_gemm_config_dir = "";
+    std::string specify_gpu_arch = "";
 
     std::string to_string() const;
 };
@@ -454,6 +527,8 @@ struct LinearAttentionConfig {
     int         linear_num_key_heads   = 0;
     int         linear_num_value_heads = 0;
     int         linear_value_head_dim  = 0;
+    DataType    ssm_state_dtype        = DataType::TYPE_BF16;
+    DataType    conv_state_dtype       = DataType::TYPE_BF16;
     std::string to_string() const;
 };
 

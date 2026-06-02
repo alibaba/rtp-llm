@@ -18,14 +18,16 @@ class AddBiasResLayerNormROCmTorch(torch.nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor
     ):
-        output = F.layer_norm(
-            input=hidden_states,
-            normalized_shape=(hidden_states.shape[-1],),
-            weight=self.weight.data,
-            bias=bias,
-            eps=self.variance_epsilon,
+        hidden_states = hidden_states + bias + residual
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        mean = hidden_states.mean(dim=-1, keepdim=True)
+        squared_sum = (hidden_states**2).mean(dim=-1, keepdim=True)
+
+        x_normalized = (hidden_states - mean) / torch.sqrt(
+            (squared_sum - (mean**2)) + self.variance_epsilon
         )
-        return output
+        return (self.weight * x_normalized + self.beta).to(input_dtype)
 
 
 class LayerNormTest(TestCase):
@@ -45,16 +47,47 @@ class LayerNormTest(TestCase):
         res_layernorm = AddBiasResLayerNorm(w, beta)
         res_layernorm_torch = AddBiasResLayerNormROCmTorch(w, beta)
         x = torch.randn(num_tokens, hidden_size, dtype=dtype)
+        residual = torch.randn(num_tokens, hidden_size, dtype=dtype)
         bias = torch.randn(hidden_size, dtype=dtype)
-        residual = torch.randn(hidden_size, dtype=dtype)
-        self.assertTrue(
-            torch.allclose(
-                res_layernorm_torch(x, residual, bias),
-                res_layernorm(x, residual, bias),
-                atol=1e-2,
-                rtol=1e-2,
+
+        # Check which code path will be taken
+        uses_layernorm2d = num_tokens > 32 and hidden_size <= 768
+
+        result_torch = res_layernorm_torch(x.clone(), residual.clone(), bias.clone())
+        result_rocm = res_layernorm(x.clone(), residual.clone(), bias.clone())
+
+        # Use higher tolerance for bfloat16 due to lower precision
+        if dtype == torch.bfloat16:
+            atol, rtol = 5e-2, 5e-2
+        else:
+            atol, rtol = 1e-2, 1e-2
+
+        is_close = torch.allclose(result_torch, result_rocm, atol=atol, rtol=rtol)
+
+        if not is_close:
+            diff = (result_torch - result_rocm).abs()
+            print(f"\n{'='*70}")
+            print(
+                f"FAILED: num_tokens={num_tokens}, hidden_size={hidden_size}, dtype={dtype}"
             )
-        )
+            print(
+                f"Code path: {'layernorm2d_fwd' if uses_layernorm2d else 'fused_add_layernorm'}"
+            )
+            print(f"Tolerance: atol={atol}, rtol={rtol}")
+            print(f"Max absolute diff: {diff.max().item():.6f}")
+            print(f"Mean absolute diff: {diff.mean().item():.6f}")
+            print(f"Median absolute diff: {diff.median().item():.6f}")
+            print(f"Result torch [0, :5]: {result_torch[0, :5]}")
+            print(f"Result rocm  [0, :5]: {result_rocm[0, :5]}")
+            print(f"Diff         [0, :5]: {diff[0, :5]}")
+
+            # Check relative error
+            rel_diff = diff / (result_torch.abs() + 1e-8)
+            print(f"Max relative diff: {rel_diff.max().item():.6f}")
+            print(f"Mean relative diff: {rel_diff.mean().item():.6f}")
+            print(f"{'='*70}\n")
+
+        self.assertTrue(is_close)
 
     def test_res_layernorm(self):
         for params in itertools.product(

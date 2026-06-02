@@ -1,8 +1,10 @@
 import asyncio
 import gc
+import json
 import logging
 import socket
 import threading
+import time
 from typing import Any, Dict, List, Optional, Union
 
 from anyio import CapacityLimiter
@@ -18,11 +20,17 @@ from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
+from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
+from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
-from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.frontend.frontend_worker import get_dp_addrs_from_world_info
+from rtp_llm.openai.api_datatype import (
+    BatchChatCompletionRequest,
+    ChatCompletionRequest,
+)
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
 from rtp_llm.utils.util import AtomicCounter, async_request_server
 from rtp_llm.utils.version_info import VersionInfo
@@ -62,11 +70,53 @@ class FrontendApp(object):
             py_env_configs,
         )
         self.separated_frontend = separated_frontend
-        self.grpc_client = GrpcClientWrapper(self.server_config.rpc_server_port)
+
+        # Compute all DP addresses for broadcast operations (e.g. update_scheduler_info)
+        engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
+        world_info = get_world_info(
+            server_config=py_env_configs.server_config,
+            distribute_config=py_env_configs.distribute_config,
+            parallelism_config=py_env_configs.parallelism_config,
+        )
+        dp_addresses = get_dp_addrs_from_world_info(
+            world_info=world_info,
+            parallelism_config=engine_config.parallelism_config,
+        )
+        self.grpc_client = GrpcClientWrapper(
+            self.server_config.rpc_server_port, dp_addresses=dp_addresses
+        )
 
         logging.info(
             f"frontend app rank_id = {self.server_config.rank_id}, "
             f"server_port = {self.server_config.server_port}, frontend_server_id = {self.server_config.frontend_server_id}"
+        )
+
+    async def _wait_backend_health_ready_impl(self) -> None:
+        """Loop until backend gRPC health_check returns ok (used when PD 不分离)."""
+        if self.frontend_server.is_embedding:
+            return
+        timeout_s = 3600
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                response = await self.grpc_client.post_request("health_check", {})
+                if response.get("status") == "ok":
+                    logging.info(
+                        "Backend health_check ready, starting frontend rank_id=%s frontend_server_id=%s",
+                        self.server_config.rank_id,
+                        self.server_config.frontend_server_id,
+                    )
+                    return
+            except Exception as e:
+                logging.debug(
+                    "Backend not ready, starting frontend rank_id=%s frontend_server_id=%s: %s",
+                    self.server_config.rank_id,
+                    self.server_config.frontend_server_id,
+                    e,
+                )
+            await asyncio.sleep(1)
+        raise RuntimeError(
+            "Backend health_check did not become ready within %ds" % timeout_s
         )
 
     def start(self):
@@ -83,7 +133,7 @@ class FrontendApp(object):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         logging.info(
-            f"server_config.ip = {self.server_config.ip}, port = {self.server_config.server_port}, rank id = {self.server_config.rank_id}"
+            f"server_config.ip = {self.server_config.ip}, port = {self.server_config.server_port}, rank id = {self.server_config.rank_id}, server_id = {self.server_config.frontend_server_id}, separated_frontend = {self.separated_frontend}"
         )
         sock.bind(("0.0.0.0", self.server_config.server_port))
         sock.listen()
@@ -125,6 +175,9 @@ class FrontendApp(object):
 
         @app.on_event("startup")
         async def startup():
+            # PD 不分离时在 Uvicorn 的 loop 里等后端就绪，channel 在此 loop 创建并一直复用
+            if not self.separated_frontend:
+                await self._wait_backend_health_ready_impl()
             RunVar("_default_thread_limiter").set(
                 CapacityLimiter(
                     self.frontend_server._global_controller.max_concurrency * 2
@@ -223,6 +276,9 @@ class FrontendApp(object):
                 response["frontend_available_concurrency"] = (
                     self.frontend_server._global_controller.get_available_concurrency()
                 )
+                response["frontend_concurrency_limit"] = (
+                    self.frontend_server._global_controller.max_concurrency
+                )
             else:
                 return ORJSONResponse(
                     status_code=500,
@@ -239,6 +295,13 @@ class FrontendApp(object):
         @app.post("/set_log_level")
         async def set_log_level(req: Union[str, Dict[Any, Any]]):
             result = await self.grpc_client.post_request("set_log_level", req)
+            return result
+
+        # request format: '{"trace_name":"normal_profiler", "start_step": 0, "num_steps": 3, "enable_all_rank": false}'
+        @app.post("/rtp_llm/start_profile")
+        @app.post("/start_profile")
+        async def start_profile(req: Union[str, Dict[Any, Any]] = Body(default={})):
+            result = await self.grpc_client.post_request("start_profile", req)
             return result
 
         # request format: {"mode": "NONE", "update_time": 5000}
@@ -269,6 +332,30 @@ class FrontendApp(object):
             active_requests.increment()
             try:
                 return await self.frontend_server.chat_completion(request, raw_request)
+            finally:
+                active_requests.decrement()
+
+        @app.post("/v1/batch/chat/completions")
+        async def batch_chat_completion(
+            request: BatchChatCompletionRequest, raw_request: RawRequest
+        ):
+            global active_requests
+            active_requests.increment()
+            try:
+                return await self.frontend_server.batch_chat_completion(
+                    request, raw_request
+                )
+            finally:
+                active_requests.decrement()
+
+        @app.post("/batch_infer")
+        async def batch_infer(req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
+            global active_requests
+            active_requests.increment()
+            try:
+                if isinstance(req, str):
+                    req = json.loads(req)
+                return await self.frontend_server.batch_infer(req, raw_request)
             finally:
                 active_requests.decrement()
 

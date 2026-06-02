@@ -29,6 +29,13 @@ def w_half2(ts: List[torch.Tensor], inter_size: int):
     return ts[0][inter_size:, ...].contiguous()
 
 
+def max_scalar(ts: List[torch.Tensor]) -> torch.Tensor:
+    if len(ts) == 1:
+        return ts[0]
+    stacked = torch.stack(ts)
+    return torch.max(stacked)
+
+
 def concat_0(ts: List[torch.Tensor]) -> torch.Tensor:
     if len(ts) == 1:
         return ts[0]
@@ -49,6 +56,16 @@ def concat_0(ts: List[torch.Tensor]) -> torch.Tensor:
 def concat_1(ts: List[torch.Tensor]) -> torch.Tensor:
     if len(ts) == 1:
         return ts[0]
+    # torch.concat() does not support fp8 in current rocm torch version
+    if ts[0].dtype in [
+        torch.float8_e4m3fn,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2,
+        torch.float8_e5m2fnuz,
+    ]:
+        dtype = ts[0].dtype
+        out_u8 = torch.concat([x.view(torch.uint8) for x in ts], dim=1).contiguous()
+        return out_u8.view(dtype)
     return torch.concat(ts, dim=1).contiguous()
 
 
@@ -236,6 +253,10 @@ def sp_1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
 
 
 def sp_neg1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
+    if t.shape[-1] % tp != 0:
+        raise ValueError(
+            f"tensor split error: the last dimension size {t.shape[-1]} is not divisible by tp size: {tp}"
+        )
     return torch.split(t, t.shape[-1] // tp, dim=-1)[tp_rank]
 
 
@@ -281,17 +302,11 @@ def sp_moe_neg1(
     ep_rank: int,
     dp: int,
     dp_rank: int,
-    use_stack_weight: bool,
+    moe_pure_tp_mode: bool = False,
     **kwargs: Any,
 ) -> torch.Tensor:
-    if use_stack_weight:
-        if ep > 1:
-            tp_rank = (dp_rank * tp + tp_rank) // ep
-            tp = tp * dp // ep
-        t1 = torch.split(t, t.shape[-1] // tp, dim=-1)[tp_rank]
-        if ep > 1:
-            t1 = torch.split(t1, t1.shape[0] // ep, dim=0)[ep_rank]
-        return t1
+    if moe_pure_tp_mode:
+        return t.split(t.shape[-1] // tp, dim=-1)[tp_rank]
     else:
         return t
 
@@ -304,27 +319,25 @@ def sp_moe_w1(
     ep_rank: int,
     dp: int,
     dp_rank: int,
-    use_stack_weight: bool,
+    moe_pure_tp_mode: bool = False,
     **kwargs: Any,
 ) -> torch.Tensor:
-    # [expert_num, 2*n, k]
-    if use_stack_weight:
-        if ep > 1:
-            tp_rank = (dp_rank * tp + tp_rank) // ep
-            tp = tp * dp // ep
+    # [expert_num, 2*n, k] where dim=1 is gate+up concatenated
+    if moe_pure_tp_mode:
         t1 = t.reshape([t.shape[0], 2, -1, t.shape[-1]])
         t2 = torch.split(t1, t1.shape[2] // tp, dim=2)[tp_rank]
         t2 = t2.reshape([t2.shape[0], -1, t2.shape[-1]])
-        if ep > 1:
-            t2 = torch.split(t2, t2.shape[0] // ep, dim=0)[ep_rank]
-        t3 = t2.reshape([t2.shape[0], -1, t2.shape[-1]])
-        return t3
+        return t2
     else:
         return t
 
 
 def stack_(ts: List[torch.Tensor]):
     return stack_0(ts)
+
+
+def transpose_stack(ts: List[torch.Tensor]):
+    return stack_0(ts).transpose(-1, -2).contiguous()
 
 
 def stack_pad(ts: List[torch.Tensor], moe_align_size: int, dim: int):
@@ -411,9 +424,20 @@ def stack_0(ts: List[torch.Tensor]) -> torch.Tensor:
 def stack_moe_w1(ts: List[torch.Tensor]):
     gate = ts[: len(ts) // 2]
     up = ts[len(ts) // 2 :]
+    # Stack all gate and up weights first (2 big ops), then concat along dim=1 (1 op)
+    # Instead of 512x concat_0 + 1x stack_0
+    gate_stacked = stack_0(gate)  # [experts, intermediate, hidden]
+    up_stacked = stack_0(up)  # [experts, intermediate, hidden]
+    x = concat_1([gate_stacked, up_stacked])  # [experts, 2*intermediate, hidden]
+    return x
+
+
+def stack_moe_w1_s2(ts: List[torch.Tensor]):
+    gate = ts[: len(ts) // 2]
+    up = ts[len(ts) // 2 :]
     ws = []
     for w1, w3 in zip(gate, up):
-        ws.append(concat_0([w1, w3]))
+        ws.append(max_scalar([w1, w3]))
     x = stack_0(ws)
     return x
 
@@ -433,12 +457,11 @@ def get_sp_tensor(
     if len(t.shape) == 1:
         t = t.unsqueeze(0)
     qs = sp_neg1(t[:, :q_hidden], tp, tp_rank)
-    if head_num_kv == 1:
-        ks = t[:, q_hidden : q_hidden + kv_hidden]
-        vs = t[:, q_hidden + kv_hidden :]
-    else:
-        ks = sp_neg1(t[:, q_hidden : q_hidden + kv_hidden], tp, tp_rank)
-        vs = sp_neg1(t[:, q_hidden + kv_hidden :], tp, tp_rank)
+
+    _kv_tp = math.gcd(head_num_kv, tp)
+    _kv_rank = tp_rank // (tp // _kv_tp)
+    ks = sp_neg1(t[:, q_hidden : q_hidden + kv_hidden], _kv_tp, _kv_rank)
+    vs = sp_neg1(t[:, q_hidden + kv_hidden :], _kv_tp, _kv_rank)
     return torch.concat([qs, ks, vs], dim=1).contiguous()
 
 
@@ -493,10 +516,10 @@ def sp_head_qk_norm(
     q_hidden = head_num * size_per_head
     t = t.reshape(1, -1)
     qs = sp_neg1(t[:, :q_hidden], tp, tp_rank)
-    if head_num_kv == 1:
-        ks = t[:, q_hidden:]
-    else:
-        ks = sp_neg1(t[:, q_hidden:], tp, tp_rank)
+
+    _kv_tp = math.gcd(head_num_kv, tp)
+    _kv_rank = tp_rank // (tp // _kv_tp)
+    ks = sp_neg1(t[:, q_hidden:], _kv_tp, _kv_rank)
     return torch.concat([qs, ks], dim=1).contiguous()
 
 
@@ -528,13 +551,12 @@ def get_sp_tensor_blocked(
     kv_hidden = head_num_kv * size_per_head // block_size
     if len(t.shape) == 1:
         t = t.unsqueeze(0)
+
     qs = sp_neg1(t[:, :q_hidden], tp, tp_rank)
-    if head_num_kv == 1:
-        ks = t[:, q_hidden : q_hidden + kv_hidden]
-        vs = t[:, q_hidden + kv_hidden :]
-    else:
-        ks = sp_neg1(t[:, q_hidden : q_hidden + kv_hidden], tp, tp_rank)
-        vs = sp_neg1(t[:, q_hidden + kv_hidden :], tp, tp_rank)
+    _kv_tp = math.gcd(head_num_kv, tp)
+    _kv_rank = tp_rank // (tp // _kv_tp)
+    ks = sp_neg1(t[:, q_hidden : q_hidden + kv_hidden], _kv_tp, _kv_rank)
+    vs = sp_neg1(t[:, q_hidden + kv_hidden :], _kv_tp, _kv_rank)
     return torch.concat([qs, ks, vs], dim=1).contiguous()
 
 
@@ -548,6 +570,14 @@ def sp_head_s_gemm_a8_channel(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
 
 def sp_head_s_gemm_a8(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
     return sp_head_s(t, **kwargs)
+
+
+def sp_head_s_gemm_a4(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    return sp_head_s(t.T, **kwargs).T
+
+
+def sp_head_s_gemm_a4_group(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    return sp_head_s(t.T, **kwargs).T
 
 
 def sp_attn_gate(
@@ -904,33 +934,6 @@ def concat_0_tranpose(ts: List[torch.Tensor]):
     return torch.concat(ts, dim=0).transpose(0, 1).contiguous()
 
 
-def transpose_kv_rope(ts: List[torch.Tensor], kv_lora_rank: int, rope_size: int):
-    rope_size_half = rope_size // 2
-    kva = ts[0]
-    kva[kv_lora_rank:, :] = (
-        kva[kv_lora_rank:, :]
-        .reshape([rope_size_half, 2, -1])
-        .transpose(0, 1)
-        .reshape([rope_size, -1])
-    )
-    return kva.reshape(ts[0].shape).contiguous()
-
-
-def transpose_q_rope(
-    ts: List[torch.Tensor], head_num: int, nope_head_dim: int, rope_size: int
-):
-    rope_size_half = rope_size // 2
-    q = ts[0]
-    q = q.reshape([head_num, nope_head_dim + rope_size, -1])
-    q[:, nope_head_dim:, :] = (
-        q[:, nope_head_dim:, :]
-        .reshape([head_num, rope_size_half, 2, -1])
-        .transpose(1, 2)
-        .reshape([head_num, rope_size, -1])
-    )
-    return q.reshape(ts[0].shape).contiguous()
-
-
 # for w1 w3
 def pad_w13(ts: List[torch.Tensor], align_size: int, dim: int):
     """Pad w1 and w3 tensors to align_size and concatenate them.
@@ -1078,6 +1081,51 @@ def slopes(ts: List[torch.Tensor], n: int):
     return slopes
 
 
+def merge_qkvz_transpose_reorder(
+    ts: List[torch.Tensor],
+):
+    """Merge and reorder qkv and z tensors for Qwen3.5Moe.
+
+    Merges qkv (shape: [token, head_num_k * dim_q + head_num_k * dim_k + head_num_v * dim_v])
+    and z (shape: [token, head_num_v, dim_v * group_v]) into a single transposed tensor.
+    """
+    qkv = ts[0]
+    z = ts[1]
+    return torch.cat([qkv, z], dim=0).T
+
+
+def merge_ba_transpose_reorder(
+    ts: List[torch.Tensor],
+):
+    """Merge and reorder b and a tensors, then transpose."""
+    b = ts[0]
+    a = ts[1]
+    return torch.cat([b, a], dim=0).T
+
+
+def split_q_gate(ts: List[torch.Tensor], head_num: int, head_dim: int, part: int):
+    """Split q_gate tensor into q or gate part.
+
+    This function is used for both weight and scale (if fp8_per_block).
+    For weight, new_head_dim is head_dim; for scale, it's head_dim / block_size.
+    """
+    dim0, dim1 = ts[0].shape
+    assert (
+        dim0 % (head_num * 2) == 0
+    ), f"dim0 % (head_num * 2) != 0, dim0: {dim0}, head_num: {head_num}, head_dim: {head_dim}, dim1: {dim1}"
+    new_head_dim = dim0 // (head_num * 2)
+    t = ts[0].reshape(head_num, 2, new_head_dim, dim1)
+    if part == 0:
+        return t[:, 0, :, :].reshape(-1, dim1)
+    else:
+        return t[:, 1, :, :].reshape(-1, dim1)
+
+
+def plus_one(ts: List[torch.Tensor]):
+    """Add one to the tensor. Qwen3Next uses gemma_rms_norm."""
+    return ts[0] + 1
+
+
 class W:
     # global
     embedding = "embedding"
@@ -1132,6 +1180,19 @@ class W:
     linear_attn_out_w = "linear_attn.out_proj.weight"
     linear_attn_out_s = "linear_attn.out_proj.scale"
 
+    # KDA (Kimi Delta Attention) specific weights
+    linear_attn_qkv_w = "linear_attn.in_proj_qkv.weight"
+    # b_proj: [hidden] -> [num_heads], beta gate
+    linear_attn_b_w = "linear_attn.b_proj.weight"
+    # LoRA forget gate: f_a_proj [hidden -> lora_rank], f_b_proj [lora_rank -> num_heads*head_dim]
+    linear_attn_f_a_w = "linear_attn.f_a_proj.weight"
+    linear_attn_f_b_w = "linear_attn.f_b_proj.weight"
+    # LoRA output gate: g_a_proj [hidden -> lora_rank], g_b_proj [lora_rank -> num_heads*head_dim]
+    linear_attn_g_a_w = "linear_attn.g_a_proj.weight"
+    linear_attn_g_b_w = "linear_attn.g_b_proj.weight"
+    # KDA-specific dt_bias: shape [num_heads * head_dim] (per-dim vector)
+    linear_attn_dt_b_kda = "linear_attn.dt_bias_kda"
+
     # jina_bert
     q_ln_gamma = "self_attention_weights.q_layernorm.gamma"
     q_ln_beta = "self_attention_weights.q_layernorm.beta"
@@ -1145,8 +1206,7 @@ class W:
     mla_fusedqkrope_w = "self_attention_weights.mla.fusedqkrope.kernel"
     mla_fusedqkrope_no_lora_w = "self_attention_weights.mla.fusedqkrope_no_lora.kernel"
     mla_q_b_w = "self_attention_weights.mla.query_b_weight.kernel"
-    mla_k_nope_w = "self_attention_weights.mla.key_nope_weight.kernel"
-    mla_v_w = "self_attention_weights.mla.value_weight.kernel"
+    mla_kv_b_w = "self_attention_weights.mla.kv_b_weight.kernel"
     mla_q_a_ln_gamma = "self_attention_weights.mla.query_a_layernorm_weight.gamma"
     mla_q_a_ln_beta = "self_attention_weights.mla.query_a_layernorm_weight.beta"
     mla_kv_a_ln_gamma = "self_attention_weights.mla.key_value_a_layernorm_weight.gamma"
@@ -1157,9 +1217,7 @@ class W:
         "self_attention_weights.mla.fusedqkrope_no_lora.weight_only_quant_scale"
     )
     mla_q_b_s = "self_attention_weights.mla.query_b_weight.weight_only_quant_scale"
-    mla_k_nope_s = "self_attention_weights.mla.key_nope_weight.weight_only_quant_scale"
-
-    mla_v_s = "self_attention_weights.mla.value_weight.weight_only_quant_scale"
+    mla_kv_b_s = "self_attention_weights.mla.kv_b_weight.weight_only_quant_scale"
 
     # mla + absorb
     mla_kc = "self_attention_weights.mla.kc.kernel"
@@ -1199,6 +1257,16 @@ class W:
     # deepseek3 noaux_tc
     e_score_correction_b = "partial_moe_weights.e_score_correction_bias"
 
+    # deepseek32 indexer
+    mla_indexer_qb_w = "self_attention_weights.mla.indexer.wq_b.kernel"
+    mla_indexer_qb_s = "self_attention_weights.mla.indexer.wq_b.weight_only_quant_scale"
+    mla_indexer_k_w = "self_attention_weights.mla.indexer.wk.kernel"
+    mla_indexer_k_s = "self_attention_weights.mla.indexer.wk.weight_only_quant_scale"
+    mla_indexer_k_norm_w = "self_attention_weights.mla.indexer.k_norm.kernel"
+    mla_indexer_k_norm_b = "self_attention_weights.mla.indexer.k_norm.bias"
+    mla_indexer_weights_proj_w = (
+        "self_attention_weights.mla.indexer.weights_proj.kernel"
+    )
     # cross attn
     cross_attn_pre_ln_gamma = "cross_attention_weights_pre_layernorm.gamma"
     cross_attn_pre_ln_beta = "cross_attention_weights_pre_layernorm.beta"
@@ -1222,21 +1290,37 @@ class W:
     # gptq
     attn_qkv_z = "self_attention_weights.query_weight.zero"
     attn_qkv_s = "self_attention_weights.query_weight.weight_only_quant_scale"
+    attn_qkv_s2 = "self_attention_weights.query_weight.weight_scale_2"
+    attn_qkv_i_s = "self_attention_weights.query_weight.input_scale"
     attn_o_z = "self_attention_weights.attention_output_weight.zero"
     attn_o_s = "self_attention_weights.attention_output_weight.weight_only_quant_scale"
+    attn_o_s2 = "self_attention_weights.attention_output_weight.weight_scale_2"
+    attn_o_i_s = "self_attention_weights.attention_output_weight.input_scale"
     ffn_z1 = "ffn_weights.intermediate_weight.zero"
     ffn_s1 = "ffn_weights.intermediate_weight.weight_only_quant_scale"
+    ffn_w1_s2 = "ffn_weights.intermediate_weight.weight_scale_2"
+    ffn_w1_i_s = "ffn_weights.intermediate_weight.input_scale"
     ffn_z3 = "ffn_weights.intermediate_weight3.zero"
     ffn_s3 = "ffn_weights.intermediate_weight3.weight_only_quant_scale"
+    ffn_w3_s2 = "ffn_weights.intermediate_weight3.weight_scale_2"
+    ffn_w3_i_s = "ffn_weights.intermediate_weight3.input_scale"
     ffn_z13 = "ffn_weights.intermediate_weight13.zero"
     ffn_s13 = "ffn_weights.intermediate_weight13.weight_only_quant_scale"
     ffn_act_s = "ffn_weights.intermediate_weight2.act_quant_scale"  # gpt_xx model awq quant act need div scales
+    ffn_w13_s2 = "ffn_weights.intermediate_weight13.weight_scale_2"
+    ffn_w13_i_s = "ffn_weights.intermediate_weight13.input_scale"
     ffn_z2 = "ffn_weights.intermediate_weight2.zero"
     ffn_s2 = "ffn_weights.intermediate_weight2.weight_only_quant_scale"
+    ffn_w2_s2 = "ffn_weights.intermediate_weight2.weight_scale_2"
+    ffn_w2_i_s = "ffn_weights.intermediate_weight2.input_scale"
     moe_z1 = "partial_moe_weights.intermediate_weight.zero"
     moe_s1 = "partial_moe_weights.intermediate_weight.weight_only_quant_scale"
+    moe_w1_s2 = "partial_moe_weights.intermediate_weight.weight_scale_2"
+    moe_w1_i_s = "partial_moe_weights.intermediate_weight.input_scale"
     moe_z2 = "partial_moe_weights.intermediate_weight2.zero"
     moe_s2 = "partial_moe_weights.intermediate_weight2.weight_only_quant_scale"
+    moe_w2_s2 = "partial_moe_weights.intermediate_weight2.weight_scale_2"
+    moe_w2_i_s = "partial_moe_weights.intermediate_weight2.input_scale"
 
     # sq
     attn_i_smoother = "self_attention_weights.query_weight.smoother"
@@ -1330,16 +1414,14 @@ class W:
         mla_fusedqkrope_s: sp_id,
         mla_fusedqkrope_no_lora_w: sp_neg1_part_by_head,
         mla_fusedqkrope_no_lora_s: sp_neg1_part_by_head,
-        mla_k_nope_w: sp_neg1,
-        mla_v_w: sp_neg1,
-        mla_v_s: sp_neg1,
+        mla_kv_b_w: sp_neg1,
+        mla_kv_b_s: sp_neg1,
         mla_q_a_ln_gamma: sp_id,
         mla_q_a_ln_beta: sp_id,
         mla_kv_a_ln_gamma: sp_id,
         mla_kv_a_ln_beta: sp_id,
         mla_q_b_s: sp_neg1,
         mla_fusedqkrope_s: sp_id,
-        mla_k_nope_s: sp_neg1,
         mla_kc: sp_0,
         mla_vc: sp_0,
         mla_kc_s: sp_0,
@@ -1371,11 +1453,15 @@ class W:
         moe_w1: sp_moe_w1,
         moe_z1: sp_moe_w1,
         moe_s1: sp_moe_w1,
+        moe_w1_s2: sp_id,
+        moe_w1_i_s: sp_id,
         moe_b1: sp_moe_neg1,
         moe_w2: sp_moe_neg1,
         moe_z2: sp_moe_neg1,
         moe_s2: sp_moe_neg1,
         moe_b2: sp_moe_neg1,
+        moe_w2_s2: sp_id,
+        moe_w2_i_s: sp_id,
         e_score_correction_b: sp_id,
         post_ln_beta: sp_id,
         post_ln_gamma: sp_id,
@@ -1396,6 +1482,11 @@ class W:
         post_ffn_ln_gamma: sp_id,
         token_type_embedding: sp_neg1,
         attention_output_static_quant_reciprocal: sp_id,
+        mla_indexer_k_norm_w: sp_id,
+        mla_indexer_k_norm_b: sp_id,
+        mla_indexer_weights_proj_w: sp_id,
+        mla_indexer_qb_w: sp_id,
+        mla_indexer_k_w: sp_id,
     }
 
     weights_list = [

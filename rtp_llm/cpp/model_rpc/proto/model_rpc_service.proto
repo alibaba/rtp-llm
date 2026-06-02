@@ -2,7 +2,6 @@
 syntax = "proto3";
 import "google/protobuf/wrappers.proto";
 
-
 message TensorPB {
     enum DataType {
         FP32 = 0;
@@ -83,18 +82,26 @@ message GenerateConfigPB {
     bool normalized_hidden_states = 39;
     int32 profile_step = 40;
     repeated RoleAddrPB role_addrs = 41;
-    int64 inter_request_id = 42;
+    reserved 42;
+    reserved "inter_request_id";
     bool ignore_eos = 43;
     float presence_penalty = 44;
     float frequency_penalty = 45;
     bool do_sample = 46;
     bool reuse_cache = 47;
-    bool enable_3fs = 48;
-    repeated int32 variable_num_beams = 49;
-    google.protobuf.StringValue trace_id = 50;
-    bool return_all_hidden_states = 51;
-    bool enable_memory_cache = 52;
-    bool enable_device_cache = 53;
+    repeated int32 variable_num_beams = 48;
+    google.protobuf.StringValue trace_id = 49;
+    bool return_all_hidden_states = 50;
+    bool enable_memory_cache = 51;
+    bool enable_device_cache = 52;
+    bool enable_remote_cache = 53;
+    string unique_key = 54;
+    google.protobuf.Int32Value force_batch = 55;
+    google.protobuf.Int32Value batch_group_timeout = 56;
+    string profile_trace_name = 57;
+    // 生成式推荐：组合 token 粒度去重与曝光过滤
+    int32 combo_token_size = 58;
+    IntMatrix banned_combo_token_ids = 59;
 }
 
 message MMPreprocessConfigPB {
@@ -134,8 +141,10 @@ message GenerateInputPB {
     GenerateConfigPB generate_config = 4;
     string client_id = 5;
     int64 start_time = 6;
-    repeated int32 extra_input_ids = 7;
-    int32 extra_input_ids_loc = 8;  // -1 means not present
+    int32 batch_group_size = 7;
+    google.protobuf.Int64Value batch_group_id = 8;
+    repeated int32 extra_input_ids = 9;
+    int32 extra_input_ids_loc = 10;  // -1 means not present
 }
 
 message AuxInfoPB {
@@ -206,6 +215,22 @@ enum ErrorCodePB {
     CACHE_STORE_LOAD_RDMA_CONNECT_FAILED = 7;
     CACHE_STORE_LOAD_RDMA_WRITE_FAILED = 8;
     CACHE_STORE_LOAD_BUFFER_TIMEOUT = 9;
+    P2P_CONNECTOR_CALL_PREFILL_FAILED = 10;
+    P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED = 11;
+    P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED = 12;
+    P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED = 13;
+    P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED = 14;
+    P2P_CONNECTOR_WORKER_ASYMMETRIC_TP_FAILED = 15;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT = 16;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED = 17;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED = 18;
+    P2P_CONNECTOR_WORKER_READ_TRANSFER_RDMA_FAILED = 19;
+    P2P_CONNECTOR_WORKER_READ_BUFFER_MISMATCH = 20;
+    P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_TIMEOUT = 21;
+    P2P_CONNECTOR_WORKER_READ_FAILED = 22;
+    P2P_CONNECTOR_WORKER_READ_CANCELED = 23;
+    P2P_CONNECTOR_WORKER_READ_TIMEOUT = 24;
+    P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
 }
 
 // transfer between prefill and decode
@@ -249,6 +274,8 @@ message BroadcastLoadRequestPB {
     int64 dp_rank = 9;
     int32 partition_count = 10;
     int32 partition_id = 11;
+    repeated IntVector group_block_ids = 12;
+
 }
 
 message BroadcastLoadResponsePB {
@@ -332,6 +359,19 @@ message SetLogLevelRequestPB {
     string log_level = 1;
 }
 
+message StartProfileRequestPB {
+    string trace_name = 1;
+    int32 start_step = 2;
+    int32 num_steps = 3;
+    bool enable_all_rank = 4;
+}
+
+message StartProfileInternalRequestPB {
+    string trace_name = 1;
+    int32 start_step = 2;
+    int32 num_steps = 3;
+}
+
 message CheckHealthResponsePB {
     string health = 1;
 }
@@ -343,7 +383,8 @@ message UpdateEplbConfigRequestPB {
 
 message TaskInfoPB {
     int64 request_id = 1;
-    int64 inter_request_id = 2;
+    reserved 2;
+    reserved "inter_request_id";
     int64 prefix_length = 3;
     int64 input_length = 4;
     int64 waiting_time_ms = 5;
@@ -373,6 +414,7 @@ message WorkerStatusPB {
     int64 status_version = 12;
     bool alive = 13;
     string precision = 14;
+    int64 latest_finished_version = 15;
 }
 
 message EmbeddingInputPB {
@@ -403,43 +445,164 @@ service EmbeddingRpcService {
 }
 
 message MemoryOperationRequestPB {
-    message GpuBlock {
-        message LayerBlock {
-            int32 layer_id = 1;
-            int32 block_id = 2;
-        }
-        repeated LayerBlock layer_blocks = 1;
+    message CopyItem {
+        int32 mem_block = 1;
+        repeated int32 gpu_blocks = 2;
     }
     enum CopyDirection {
         H2D = 0;
         D2H = 1;
     }
-    repeated GpuBlock gpu_blocks = 1;
-    repeated int32 mem_block_ids = 2;
-    repeated int64 mem_block_sizes = 3;
-    CopyDirection copy_direction = 4;
+    repeated CopyItem copy_items = 1;
+    CopyDirection copy_direction = 2;
 }
 
 message MemoryOperationResponsePB {
     bool success = 1;
 }
 
+message TPWorkerInfoPB {
+    string ip = 1;
+    int32 cache_store_port = 2;
+}
+
+message LayerCacheBlockPB {
+    uint32 layer_id = 1;
+    repeated int64 cache_keys = 2;
+    repeated uint32 block_ids = 3;
+}
+
+enum P2PConnectorBroadcastType {
+    READ = 0;
+    HANDLE_READ = 1;
+    CANCEL_READ = 2;
+    CANCEL_HANDLE_READ = 3;
+}
+
+message P2PConnectorBroadcastTpRequestPB {
+    repeated LayerCacheBlockPB layer_blocks = 1;
+    repeated TPWorkerInfoPB peer_workers = 2;
+    string unique_key = 3;
+    int64 request_id = 4;
+    int64 deadline_ms = 5;
+    P2PConnectorBroadcastType type = 6;
+    // TP size of the remote side (prefill_tp_size for decode, decode_tp_size for prefill)
+    int32 remote_tp_size = 8;
+}
+
+// GetPeerInfo: Decode calls this on Prefill to exchange TP size before recv registration
+message GetPeerInfoRequestPB {
+    string requester_ip = 1;
+    int32  requester_tp_size = 2;
+}
+
+message GetPeerInfoResponsePB {
+    int32  tp_size = 1;
+}
+
+message P2PConnectorBroadcastTpResponsePB {
+    ErrorCodePB error_code = 1;
+    string error_message = 2;
+}
+
+message P2PConnectorStartLoadRequestPB {
+    string unique_key = 1;
+    repeated TPWorkerInfoPB workers = 2;
+    int64 deadline_ms = 3;
+}
+
+// Side-channel tensor blob: carries named tensor data between prefill and decode
+message SideChannelTensorPB {
+    TensorPB tensor = 1;
+}
+
+// Side-channel payload: replaces fixed first_token/reuse/SP/position_ids fields
+// Keys: "propose_tokens", "propose_probs", "propose_hidden", "position_ids"
+message SideChannelPayloadPB {
+    map<string, SideChannelTensorPB> tensors = 1;
+    // Scalar fields that don't fit tensor format
+    int64  first_generate_token_id = 2;
+    int32  total_reuse_len         = 3;
+    int32  local_reuse_len         = 4;
+    int32  remote_reuse_len        = 5;
+    int32  memory_reuse_len        = 6;
+}
+
+message P2PConnectorStartLoadResponsePB {
+    // Legacy fixed fields reserved (replaced by SideChannelPayloadPB)
+    reserved 1 to 8;
+    reserved "first_generate_token_id", "total_reuse_len", "local_reuse_len", "remote_reuse_len", "propose_token_ids", "propose_probs", "propose_hidden", "position_ids";
+
+    // Error handling - preserve field numbers 9, 10 for backward compatibility with deployed nodes
+    ErrorCodePB error_code = 9;
+    string error_message = 10;
+
+    // New side-channel payload: all data carried as structured map + scalars
+    // Field number 12+ to avoid conflict with legacy error_code (was field 9 in old proto)
+    SideChannelPayloadPB payload = 12;
+}
+
+enum RemoteOpType {
+    REMOTE_OPERATION_UNSPECIFIED = 0;
+    REMOTE_OPERATION_READ = 1;
+    REMOTE_OPERATION_WRITE = 2;
+}
+
+message RemoteBoolMasksTypePB { repeated bool values = 1; }
+message RemoteBlockMaskPB {
+    oneof info {
+        int32 offset = 1;
+        RemoteBoolMasksTypePB bool_masks = 2;
+    }
+}
+
 message FunctionRequestPB {
     oneof request {
         MemoryOperationRequestPB mem_request = 1;
+        RemoteOperationRequestPB remote_request = 2;
+        P2PConnectorBroadcastTpRequestPB p2p_request = 3;
     }
+}
+
+message RemoteOperationRequestPB {
+    RemoteOpType op = 1;
+    string trace_id = 2;
+    repeated int32 group_ids = 3;
+    repeated int32 block_ids = 4;
+    repeated string uris = 5;
+}
+
+message RemoteOperationResponsePB {
+    RemoteBlockMaskPB succeed_block = 1;  // for read/write, TODO
+    repeated string actual_uris = 2; // only for write
 }
 
 message FunctionResponsePB {
     oneof response {
         MemoryOperationResponsePB mem_response = 1;
+        RemoteOperationResponsePB remote_response = 2;
+        P2PConnectorBroadcastTpResponsePB p2p_response = 3;
     }
+}
+
+message BatchGenerateInputPB {
+    repeated GenerateInputPB inputs = 1;
+}
+
+message BatchGenerateResultPB {
+    GenerateOutputsPB final_output = 1;
+    RpcErrorPB error_info = 2;
+}
+
+message BatchGenerateOutputsPB {
+    repeated BatchGenerateResultPB results = 1;
 }
 
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);
+    rpc BatchGenerateCall(BatchGenerateInputPB) returns (BatchGenerateOutputsPB);
     rpc RemoteLoad(BroadcastLoadRequestPB) returns (BroadcastLoadResponsePB);
     rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
@@ -450,6 +613,8 @@ service RpcService {
     rpc SetPause(EmptyPB) returns (EmptyPB);
     rpc SetRestart(EmptyPB) returns (EmptyPB);
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
+    rpc StartProfile(StartProfileRequestPB) returns (EmptyPB);
+    rpc StartProfileInternal(StartProfileInternalRequestPB) returns (EmptyPB);
     rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
 
     rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);
@@ -457,8 +622,12 @@ service RpcService {
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
+    rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
+    rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
 }
 
 service MultimodalRpcService {
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputsPB);
+    rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
+    rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
 }

@@ -1,8 +1,8 @@
 
 #ifdef USING_CUDA12
 #include "rtp_llm/models_py/bindings/cuda/XQAAttnOp.h"
-#include "rtp_llm/cpp/cuda/cufmha/TrtV2FmhaRunner.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
+#include "rtp_llm/models_py/bindings/cuda/cufmha/TrtV2FmhaRunner.h"
+#include <ATen/cuda/CUDAContext.h>
 
 namespace rtp_llm {
 
@@ -15,24 +15,21 @@ bool XQAAttnOp::support(torch_ext::PyAttentionInputs attn_inputs) {
                          DataType::TYPE_FP8_E4M3,
                          attn_configs_.head_num / attn_configs_.kv_head_num,
                          attn_configs_.size_per_head,
-                         attn_configs_.tokens_per_block);
+                         attn_configs_.kernel_tokens_per_block);
 }
 
 ParamsBasePtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     XQAParamsPtr params     = std::make_shared<XQAParams>();
     int          batch_size = attn_inputs.sequence_lengths.size(0);
-    BufferPtr    kv_cache_block_id_host, kv_cache_block_id_device;
-    RTP_LLM_CHECK_WITH_INFO(attn_inputs.kv_cache_block_id_host.defined()
-                                && attn_inputs.kv_cache_block_id_device.defined(),
+    RTP_LLM_CHECK_WITH_INFO(attn_inputs.kv_cache_kernel_block_id_host.defined()
+                                && attn_inputs.kv_cache_kernel_block_id_device.defined(),
                             "decode should have kv cache block id.");
-    kv_cache_block_id_host   = torchTensor2Buffer(attn_inputs.kv_cache_block_id_host);
-    kv_cache_block_id_device = torchTensor2Buffer(attn_inputs.kv_cache_block_id_device);
 
     // 使用独立的工具函数准备 TRT attention 参数
     auto run_stream   = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
     bool use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
-    auto trt_params =
-        prepareTrtAttnParams(attn_configs_, kv_cache_block_id_device, batch_size, use_fp8_fmha, run_stream, false);
+    auto trt_params   = prepareTrtAttnParams(
+        attn_configs_, attn_inputs.kv_cache_kernel_block_id_device, batch_size, use_fp8_fmha, run_stream, false);
 
     params->kv_block_array            = ((TRTAttn*)trt_params.get())->kv_block_array;
     params->kv_cache_offset           = ((TRTAttn*)trt_params.get())->kv_cache_offset.clone();
@@ -44,8 +41,9 @@ ParamsBasePtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
     return ParamsBasePtr(params);
 }
 
-torch::Tensor
-XQAAttnOp::forward(const torch::Tensor& input, std::optional<torch_ext::KVCache> kv_cache, const XQAParamsPtr& params) {
+torch::Tensor XQAAttnOp::forward(const torch::Tensor&                   input,
+                                 std::optional<torch_ext::LayerKVCache> kv_cache,
+                                 const XQAParamsPtr&                    params) {
     const int            batch_size        = input.size(0);
     const int            local_head_num    = attn_configs_.head_num;
     const int            local_head_num_kv = attn_configs_.kv_head_num;
@@ -74,7 +72,7 @@ XQAAttnOp::forward(const torch::Tensor& input, std::optional<torch_ext::KVCache>
            params->batch_size,
            static_cast<size_t>(kv_block_array.mMaxBlocksPerSeq),
            params->max_seq_len + 1,
-           attn_configs_.tokens_per_block,
+           attn_configs_.kernel_tokens_per_block,
            kv_cache.value().kv_cache_base.data_ptr(),  // params->kv_block_array.mPrimaryPoolPtr,
            reinterpret_cast<int32_t*>((KVCacheIndex*)(params->kv_cache_offset.data_ptr())),
            kv_block_array.cache_type == KvCacheDataType::FP8,

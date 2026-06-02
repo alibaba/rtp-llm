@@ -13,7 +13,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 /**
- * NoOpServiceDiscovery - 默认的服务发现实现
+ * NoOpServiceDiscovery - Default service discovery implementation
  *
  * @author saichen.sm
  */
@@ -23,8 +23,8 @@ public final class NoOpServiceDiscovery implements ServiceDiscovery {
 
     private static final NoOpServiceDiscovery INSTANCE = new NoOpServiceDiscovery();
     /**
-     * 环境变量前缀，用于配置服务地址对应的主机列表
-     * 格式：ip1:port1,ip2:port2
+     * Environment variable prefix for configuring host list corresponding to service address
+     * Format: ip1:port1,ip2:port2
      */
     private static final String ENV_DOMAIN_ADDRESS = "DOMAIN_ADDRESS:";
 
@@ -38,7 +38,7 @@ public final class NoOpServiceDiscovery implements ServiceDiscovery {
             log.warn("Service address is blank, returning empty host list");
             return Collections.emptyList();
         }
-        // 将地址转换为环境变量key（替换特殊字符）
+        // Convert address to environment variable key (replace special characters)
         String envKey = ENV_DOMAIN_ADDRESS + address;
         String hostsConfig = System.getenv(envKey);
         if (StringUtils.isBlank(hostsConfig)) {
@@ -46,13 +46,11 @@ public final class NoOpServiceDiscovery implements ServiceDiscovery {
             return Collections.emptyList();
         }
         try {
-            List<WorkerHost> hosts = Arrays.stream(hostsConfig.split(","))
+            return Arrays.stream(hostsConfig.split(","))
                     .map(String::trim)
                     .filter(StringUtils::isNotBlank)
                     .map(this::parseHost)
                     .collect(Collectors.toList());
-            log.info("Found {} hosts for address {}: {}", hosts.size(), address, hosts);
-            return hosts;
         } catch (Exception e) {
             log.error("Failed to parse hosts configuration for address: {}, config: {}", address, hostsConfig, e);
             return new ArrayList<>();
@@ -62,8 +60,8 @@ public final class NoOpServiceDiscovery implements ServiceDiscovery {
     @Override
     public void listen(String address, ServiceHostListener listener) {
         log.info("NoOpServiceDiscovery does not support dynamic listening for address: {}", address);
-        // 默认空实现类不支持动态监听，可以考虑定时轮询实现
-        // 这里简单触发一次初始化
+        // Default empty implementation does not support dynamic listening, could consider periodic polling implementation
+        // Simply trigger initialization once here
         if (listener != null) {
             listener.onHostsChanged(getHosts(address));
         }
@@ -72,11 +70,11 @@ public final class NoOpServiceDiscovery implements ServiceDiscovery {
     @Override
     public void shutdown() {
         log.info("NoOpServiceDiscovery shutdown");
-        // 无操作
+        // No operation
     }
 
     /**
-     * 解析主机字符串为WorkerHost对象
+     * Parse host string to WorkerHost object
      */
     private WorkerHost parseHost(String hostStr) {
         String[] parts = hostStr.split(":");

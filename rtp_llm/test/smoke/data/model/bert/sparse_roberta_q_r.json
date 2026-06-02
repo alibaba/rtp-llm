@@ -1,0 +1,90 @@
+{
+    "model_type": "roberta",
+    "endpoint": "/v1/embeddings",
+    "model_path": "/mnt/nas1/hf/bge-m3",
+    "query_result": [
+        {
+            "query": {
+                "input": [
+                    "hello, what is your name?",
+                    "hello"
+                ]
+            },
+            "result": {
+                "object": "list",
+                "data": [
+                    {
+                        "object": "sparse_embedding",
+                        "embedding": "data/model/bert/sparse_roberta_expect_0.pt",
+                        "index": 0
+                    },
+                    {
+                        "object": "sparse_embedding",
+                        "embedding": "data/model/bert/sparse_roberta_expect_1.pt",
+                        "index": 1
+                    }
+                ],
+                "model": "",
+                "usage": {
+                    "prompt_tokens": 14,
+                    "total_tokens": 14
+                }
+            }
+        },
+        {
+            "query": {
+                "input": [
+                    "hello, what is your name?",
+                    "hello"
+                ],
+                "return_decoded": false
+            },
+            "result": {
+                "object": "list",
+                "data": [
+                    {
+                        "object": "sparse_embedding",
+                        "embedding": "data/model/bert/sparse_roberta_expect_2.pt",
+                        "index": 0
+                    },
+                    {
+                        "object": "sparse_embedding",
+                        "embedding": "data/model/bert/sparse_roberta_expect_3.pt",
+                        "index": 1
+                    }
+                ],
+                "model": "",
+                "usage": {
+                    "prompt_tokens": 14,
+                    "total_tokens": 14
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/embeddings/similarity",
+            "query": {
+                "left": [
+                    "hello, what is your name?"
+                ],
+                "right": [
+                    "hello",
+                    "what is your name"
+                ],
+                "embedding_config": {
+                    "type": "sparse"
+                },
+                "model": "xx"
+            },
+            "result": {
+                "type": "sparse",
+                "model": "",
+                "similarity": [
+                    [
+                        0.10735732316970825,
+                        0.1616213619709015
+                    ]
+                ]
+            }
+        }
+    ]
+}

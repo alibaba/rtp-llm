@@ -4,7 +4,7 @@
 #define private public
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
-#include "rtp_llm/cpp/devices/testing/TestBase.h"
+#include "rtp_llm/cpp/testing/TestBase.h"
 
 #include <memory>
 #include <thread>

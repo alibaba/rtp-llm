@@ -6,9 +6,7 @@ from unittest import SkipTest, TestCase, main
 
 import torch
 import torch.nn.functional as F
-
-import rtp_llm.ops  # isort:skip
-from rtp_llm.ops.compute_ops import cutlass_moe_mm  # isort:skip
+from rtp_kernel.fp8_group_gemm import fp8_grouped_gemm_ptpc
 
 
 def to_fp8(tensor: torch.Tensor):
@@ -70,6 +68,7 @@ class Fp8GroupedGemmOpTest(TestCase):
     PER_ACT_TOKEN = [False]
     PER_OUT_CHANNEL = [False]
     USE_BIAS = [False]
+    SWAP_AB = [False, True]
 
     def setUp(self) -> None:
         if not torch.cuda.is_available():
@@ -83,6 +82,7 @@ class Fp8GroupedGemmOpTest(TestCase):
         per_act_token: bool,
         per_out_ch: bool,
         use_bias: bool,
+        swap_ab: bool,
     ):
         out_dtype = torch.half
 
@@ -112,9 +112,15 @@ class Fp8GroupedGemmOpTest(TestCase):
             m_g = alignment * random.randint(1, 64)
 
             expert_offsets[g + 1] = expert_offsets[g] + m_g
-            problem_sizes[g][0] = m_g
-            problem_sizes[g][1] = n_g
-            problem_sizes[g][2] = k_g
+
+            if swap_ab:
+                problem_sizes[g][0] = n_g
+                problem_sizes[g][1] = m_g
+                problem_sizes[g][2] = k_g
+            else:
+                problem_sizes[g][0] = m_g
+                problem_sizes[g][1] = n_g
+                problem_sizes[g][2] = k_g
 
             m_a_scales = m_g if per_act_token else 1
             n_b_scales = n_g if per_out_ch else 1
@@ -191,7 +197,7 @@ class Fp8GroupedGemmOpTest(TestCase):
             device=self.device,
             dtype=torch.int64,
         )
-        cutlass_moe_mm(
+        fp8_grouped_gemm_ptpc(
             out_tensors_stacked,
             a_tensors_stacked,
             b_tensors_stacked,
@@ -204,6 +210,8 @@ class Fp8GroupedGemmOpTest(TestCase):
             c_strides,
             per_act_token,
             per_out_ch,
+            swap_ab=swap_ab,
+            profile=True,
         )
 
         # Validate each group's result against the baseline
@@ -214,13 +222,18 @@ class Fp8GroupedGemmOpTest(TestCase):
 
     def test_fp8_groupedgemm(self):
         for params in itertools.product(
-            self.NUM_EXPERT, self.PER_ACT_TOKEN, self.PER_OUT_CHANNEL, self.USE_BIAS
+            self.NUM_EXPERT,
+            self.PER_ACT_TOKEN,
+            self.PER_OUT_CHANNEL,
+            self.USE_BIAS,
+            self.SWAP_AB,
         ):
             with self.subTest(
                 num_expert=params[0],
                 per_act_token=params[1],
                 per_out_ch=params[2],
                 use_bias=params[3],
+                swap_ab=params[4],
             ):
                 self._run_fp8_groupedgemm_op_test(*params)
 

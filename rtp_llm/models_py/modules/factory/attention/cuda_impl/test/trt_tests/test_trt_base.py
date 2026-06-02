@@ -26,7 +26,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.trt_te
     print_q_tensor_info,
 )
 from rtp_llm.ops import AttentionConfigs, ParallelismConfig
-from rtp_llm.ops.compute_ops import PyAttentionInputs, get_typemeta, init_device
+from rtp_llm.ops.compute_ops import PyAttentionInputs, get_typemeta, init_exec_ctx
 
 
 def compute_attention_per_head(
@@ -106,27 +106,17 @@ class TRTAttnTestBase(BaseAttentionTest):
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size = (
                 64
             )
-            py_env_configs.device_resource_config.host_reserve_memory_bytes = 0
 
             engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
             model_config = ModelConfig()
             model_config.max_seq_len = 512
 
-            init_device(
-                parallelism_config=engine_config.parallelism_config,
-                model_config=model_config,
-                eplb_config=model_config.eplb_config,
-                fmha_config=engine_config.fmha_config,
-                device_resource_config=engine_config.device_resource_config,
-                moe_config=engine_config.moe_config,
-                sp_config=engine_config.sp_config,
-                misc_config=engine_config.misc_config,
-                profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
-                hw_kernel_config=engine_config.hw_kernel_config,
-                concurrency_config=engine_config.concurrency_config,
-                ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
-                runtime_config=engine_config.runtime_config,
-                model_specific_config=engine_config.model_specific_config,
+            pc = engine_config.parallelism_config
+            init_exec_ctx(
+                device_id=pc.world_rank % pc.local_world_size,
+                trace_memory=engine_config.profiling_debug_logging_config.trace_memory,
+                enable_comm_overlap=engine_config.device_resource_config.enable_comm_overlap,
+                mla_ops_type=int(model_config.mla_ops_type),
             )
             print("Device initialized successfully", flush=True)
         except Exception as e:
@@ -149,6 +139,7 @@ class TRTAttnTestBase(BaseAttentionTest):
         attn_configs.kv_head_num = head_num_kv
         attn_configs.size_per_head = size_per_head
         attn_configs.tokens_per_block = seq_size_per_block
+        attn_configs.kernel_tokens_per_block = seq_size_per_block
         attn_configs.use_mla = False
 
         dtype_map = {
@@ -253,6 +244,8 @@ class TRTAttnTestBase(BaseAttentionTest):
 
         attn_inputs.kv_cache_block_id_host = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
+        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
 
         return attn_inputs
 
@@ -309,6 +302,8 @@ class TRTAttnTestBase(BaseAttentionTest):
 
         attn_inputs.kv_cache_block_id_host = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
+        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
         attn_inputs.is_s_padded = True
         return attn_inputs
 

@@ -5,6 +5,10 @@
 #include "rtp_llm/models_py/bindings/rocm/Gemm.h"
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
+#include "rtp_llm/models_py/bindings/rocm/TrtllmAllReduceFusion.h"
+#include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
+#include "rtp_llm/models_py/bindings/rocm/FakeBalanceExpertOp.h"
+namespace py = pybind11;
 
 namespace rtp_llm {
 
@@ -42,9 +46,34 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
     rtp_ops_m.def(
         "embedding", &embedding, "Embedding lookup kernel", py::arg("output"), py::arg("input"), py::arg("weight"));
 
+    rtp_ops_m.def("embedding_bert",
+                  &embeddingBert,
+                  "EmbeddingBert lookup kernel",
+                  py::arg("output"),
+                  py::arg("input"),
+                  py::arg("weight"),
+                  py::arg("combo_position_ids"),
+                  py::arg("position_encoding"),
+                  py::arg("combo_tokens_type_ids"),
+                  py::arg("token_type_embedding"),
+                  py::arg("input_embedding_scalar") = 1.0f);
+
     rtp_ops_m.def("fused_qk_rmsnorm",
                   &FusedQKRMSNorm,
                   "Fused QK RMSNorm kernel",
+                  py::arg("IO"),
+                  py::arg("q_gamma"),
+                  py::arg("k_gamma"),
+                  py::arg("layernorm_eps"),
+                  py::arg("q_group_num"),
+                  py::arg("k_group_num"),
+                  py::arg("m"),
+                  py::arg("n"),
+                  py::arg("norm_size"));
+
+    rtp_ops_m.def("fused_qk_rmsnorm_v2",
+                  &FusedQKRMSNormV2,
+                  "Fused QK RMSNorm V2 (warp-per-head wave64 single-pass, ROCm)",
                   py::arg("IO"),
                   py::arg("q_gamma"),
                   py::arg("k_gamma"),
@@ -59,7 +88,7 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
 
     // CUDA Graph Copy Kernel Functions (also supported in ROCm)
     rtp_ops_m.def("cuda_graph_copy_small2large",
-                  &cuda_graph_copy_small2large,
+                  &torch_ext::cuda_graph_copy_small2large,
                   "CUDA Graph copy kernel: Small to Large tensor copy",
                   py::arg("input_tensor"),
                   py::arg("output_tensor"),
@@ -71,7 +100,7 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
                   py::arg("cu_seq_len"));
 
     rtp_ops_m.def("cuda_graph_copy_large2small",
-                  &cuda_graph_copy_large2small,
+                  &torch_ext::cuda_graph_copy_large2small,
                   "CUDA Graph copy kernel: Large to Small tensor copy",
                   py::arg("input_tensor"),
                   py::arg("output_tensor"),
@@ -81,6 +110,25 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
                   py::arg("input_lengths"),
                   py::arg("hidden_size"),
                   py::arg("cu_seq_len"));
+
+    rtp_ops_m.def("is_hipgraph_capture_enabled",
+                  &rtp_llm::rocm::isHipGraphCaptureEnabled,
+                  "Return whether HIP graph capture mode is currently enabled");
+
+    // TRT-LLM AllReduce Fusion — registered as a pybind11 class
+    registerTrtllmArFusionHandle(rtp_ops_m);
+
+    // Fake balance expert kernel for MoE load-balance testing
+    rtp_ops_m.def("fake_balance_expert",
+                  &rtp_llm::fake_balance_expert_op,
+                  "Fake balance expert kernel (deterministic token->expert assignment)",
+                  py::arg("expert_ids"),
+                  py::arg("expert_scales"),
+                  py::arg("dp_rank"),
+                  py::arg("dp_size"),
+                  py::arg("ep_size"),
+                  py::arg("expert_num"),
+                  py::arg("hip_stream") = 0);
 }
 
 void registerBaseRocmBindings(py::module& rtp_ops_m) {

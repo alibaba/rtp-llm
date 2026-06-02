@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "trt_fused_multihead_attention_impl",
@@ -13,7 +13,7 @@ cc_library(
         "@cutlass//:cutlass",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-        "//rtp_llm/cpp/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         "//3rdparty:cuda_driver",
     ],
     copts = copts(),

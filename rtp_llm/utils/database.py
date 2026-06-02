@@ -26,15 +26,18 @@ class BaseDatabase:
     ) -> List[torch.Tensor]:
         raise NotImplementedError
 
+    def has_tensor(self, name: str) -> bool:
+        raise NotImplementedError
+
     def get_tensor_order(self, name: str) -> List[int]:
         raise NotImplementedError
 
     def get_tensor_type(self, name: str) -> torch.dtype:
         raise NotImplementedError
-    
+
     def get_max_file_size(self) -> int:
         raise NotImplementedError
-    
+
     @property
     def is_safetensor(self) -> bool:
         return False
@@ -82,10 +85,22 @@ class CkptDatabase(BaseDatabase):
             f"CkptDatabase all tensor names = {self.get_pretrain_tensor_names()}"
         )
 
+        # Build tensor_name -> CkptFileInfo index for O(1) lookup.
+        # If a tensor name appears in multiple files, the last file wins.
+        # In practice safetensors checkpoints guarantee each tensor is in
+        # exactly one shard, so duplicates should not occur.
+        self._tensor_index: Dict[str, CkptFileInfo] = {}
+        for ckpt_file in self.pretrain_file_list:
+            for tname in ckpt_file.metadata.keys():
+                self._tensor_index[tname] = ckpt_file
+        for ckpt_file in self.finetune_file_list:
+            for tname in ckpt_file.metadata.keys():
+                self._tensor_index[tname] = ckpt_file
+
     @property
     def is_ft_style(self) -> bool:
         return self._is_ft_style
-    
+
     @property
     def is_safetensor(self) -> bool:
         return all(map(lambda file: file.is_safetensor(), self.pretrain_file_list))
@@ -93,9 +108,45 @@ class CkptDatabase(BaseDatabase):
     @property
     def ft_weight_params(self) -> Optional[Dict[str, Any]]:
         return self._ft_weight_params
-    
+
     def get_max_file_size(self) -> int:
+        if not self.pretrain_file_list:
+            return 0
         return max([file.file_size for file in self.pretrain_file_list])
+
+    def filter_by_tensor_name_regexes(
+        self, required_tensor_patterns: List[re.Pattern[str]]
+    ):
+        """Keep only pretrain checkpoint files containing tensors required by the model.
+
+        Finetune files, such as ptuning weights, are intentionally left untouched
+        because they are small and still need to be applied after pretrain loading.
+        """
+        if len(self.pretrain_file_list) <= 1 or not required_tensor_patterns:
+            return
+
+        def is_required_file(ckpt_file: CkptFileInfo) -> bool:
+            return any(
+                pattern.fullmatch(tensor_name)
+                for tensor_name in ckpt_file.get_tensor_names()
+                for pattern in required_tensor_patterns
+            )
+
+        original_count = len(self.pretrain_file_list)
+        filtered_file_list = [
+            ckpt for ckpt in self.pretrain_file_list if is_required_file(ckpt)
+        ]
+        if not filtered_file_list:
+            logging.warning(
+                "filter_by_tensor_name_regexes found no matching checkpoint files; "
+                "keep original pretrain_file_list"
+            )
+            return
+
+        self.pretrain_file_list = filtered_file_list
+        logging.info(
+            f"filter_by_tensor_name_regexes: {original_count} -> {len(self.pretrain_file_list)} files"
+        )
 
     def load_hf_meta(self, path: str):
         # avoid consolidated.safetensors in Mistral-Nemo-Instruct-2407
@@ -154,16 +205,13 @@ class CkptDatabase(BaseDatabase):
     def load_tensor(
         self, name: str, data_type: Optional[torch.dtype] = torch.float16
     ) -> List[torch.Tensor]:
-        tensors = []
-        for ckpt_file in self.pretrain_file_list:
-            if name in ckpt_file.get_tensor_names():
-                tensors.append(ckpt_file.load_tensor(name, data_type))
+        ckpt_file = self._tensor_index.get(name)
+        if ckpt_file is not None:
+            return [ckpt_file.load_tensor(name, data_type)]
+        return []
 
-        for ckpt_file in self.finetune_file_list:
-            if name in ckpt_file.get_tensor_names():
-                tensors.append(ckpt_file.load_tensor(name, data_type))
-
-        return tensors
+    def has_tensor(self, name: str) -> bool:
+        return name in self._tensor_index
 
     def get_tensor_type(self, name: str) -> torch.dtype:
         return self.pretrain_file_list[0].get_tensor_type(name)
@@ -189,8 +237,11 @@ class CkptDatabase(BaseDatabase):
     ) -> dict[str, List[torch.Tensor]]:
         try:
             from fast_safetensors import LoadWithShm
+
             loader = LoadWithShm(2 * 1024 * 1024 * 1024, device, direct_io)
-            load_tensors = lambda ckptfile: loader.load_safetensors_to_device(ckptfile.file_name)
+            load_tensors = lambda ckptfile: loader.load_safetensors_to_device(
+                ckptfile.file_name
+            )
         except (ModuleNotFoundError, ImportError):
             load_tensors = lambda ckptfile: ckptfile.load_tensors(device, direct_io)
 
@@ -208,9 +259,19 @@ class CkptDatabase(BaseDatabase):
                     else:
                         res[k].append(v)
         return res
-    
-    def fastsafetensors_weights_iterator(self, device: str, use_tqdm_on_load: bool):
+
+    def fastsafetensors_weights_iterator(
+        self,
+        device: str,
+        use_tqdm_on_load: bool,
+        stacked_key_config: Optional[Dict[str, str]] = None,
+    ):
         from fastsafetensors import ParallelLoader, SingleGroup
+
+        from rtp_llm.model_loader.per_expert_parallel_loader import (
+            PerExpertParallelLoader,
+        )
+
         def iterator(device: str, use_tqdm_on_load: bool):
             if torch.distributed.is_initialized():
                 pg = torch.distributed.group.WORLD
@@ -223,20 +284,24 @@ class CkptDatabase(BaseDatabase):
             if device == "cuda":
                 device = f"cuda:{pg.rank()}"
                 logging.debug(f"origin device is cuda, set to {device}")
-            # Create loader
-            iterator = ParallelLoader(
-                pg,
+
+            loader_kwargs: Dict[str, Any] = dict(
+                pg=pg,
                 hf_weights_files=hf_weights_files,
                 use_tqdm_on_load=use_tqdm_on_load,
                 device=device,
                 bbuf_size_kb=1024 * 1024 * 2,
                 use_shm=True,
             )
+            if stacked_key_config:
+                loader = PerExpertParallelLoader(stacked_key_config, **loader_kwargs)
+            else:
+                loader = ParallelLoader(**loader_kwargs)
             try:
-                # Execute parallel iteration
-                yield from iterator.iterate_weights()
+                yield from loader.iterate_weights()
             finally:
-                iterator.loader.close()
+                loader.loader.close()
+
         return iterator(device, use_tqdm_on_load)
 
     def get_lora_tensor_names(self, config_name: str) -> List[str]:

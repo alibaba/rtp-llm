@@ -1,0 +1,47 @@
+{
+    "model_type": "qwen35_moe",
+    "model_path": "/mnt/nas1/smoke/Qwen3.5-35B-A3B-NVFP4-reshard",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "Please introduce yourself.",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "temperature": 0.0,
+                    "top_p": 0,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language",
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt_batch": [
+                    "Please introduce yourself.",
+                    "Please introduce yourself.",
+                    "Please introduce yourself."
+                ],
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language"
+                    },
+                    {
+                        "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language"
+                    },
+                    {
+                        "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language"
+                    }
+                ]
+            }
+        }
+    ]
+}

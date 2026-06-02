@@ -8,18 +8,20 @@
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 using namespace std;
 
 namespace rtp_llm {
 
 MemoryBlockCache::MatchResult MemoryBlockCache::match(CacheKeyType cache_key) {
+    RTP_LLM_PROFILE_FUNCTION();
     std::unique_lock<std::shared_mutex> lock(mutex_);
     const auto& [success, item] = lru_cache_.get(cache_key);
     if (success) {
-        return {item.block_index, item.block_size};
+        return {item.block_index, item.block_size, item.is_complete};
     } else {
-        return {NULL_BLOCK_IDX, 0};
+        return {NULL_BLOCK_IDX, 0, false};
     }
 }
 
@@ -29,12 +31,20 @@ bool MemoryBlockCache::contains(CacheKeyType cache_key) const {
 }
 
 std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> MemoryBlockCache::put(const CacheItem& item) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(item.block_index), "put block id should not be null");
 
     std::unique_lock<std::shared_mutex> lock(mutex_);
     if (lru_cache_.contains(item.cache_key)) {
-        // Increase old matched item's popularity
-        lru_cache_.get(item.cache_key);
+        // Key exists:
+        // - Always increase old matched item's popularity
+        // - Allow "partial -> complete" upgrade (same cache_key) by replacing the stored item.
+        //   Return the old item as "popped" so the caller can free the old block.
+        const auto& [success, old_item] = lru_cache_.get(item.cache_key);
+        if (success && !old_item.is_complete && item.is_complete) {
+            lru_cache_.put(item.cache_key, item);
+            return {true, old_item};
+        }
         return {false, std::nullopt};
     }
 
@@ -54,7 +64,29 @@ std::pair<bool, std::optional<MemoryBlockCache::CacheItem>> MemoryBlockCache::pu
     return {true, popped_item};
 }
 
+std::optional<MemoryBlockCache::CacheItem> MemoryBlockCache::remove(CacheKeyType cache_key) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    CacheItem                           removed_item;
+    if (!lru_cache_.remove(cache_key, &removed_item)) {
+        return std::nullopt;
+    }
+    return removed_item;
+}
+
+std::optional<MemoryBlockCache::CacheItem> MemoryBlockCache::removeIfMatch(CacheKeyType cache_key,
+                                                                           BlockIdxType expected_block_index) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    const auto& [found, item] = lru_cache_.get(cache_key);
+    if (!found || item.block_index != expected_block_index) {
+        return std::nullopt;
+    }
+    CacheItem removed_item;
+    lru_cache_.remove(cache_key, &removed_item);
+    return removed_item;
+}
+
 std::vector<BlockIdxType> MemoryBlockCache::pop(int n) {
+    RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK_WITH_INFO(n > 0, "pop n should > 0, n = " + std::to_string(n));
     std::vector<BlockIdxType> pop_blocks;
 

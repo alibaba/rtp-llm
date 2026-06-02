@@ -12,13 +12,14 @@ public:
                                     const KVCacheConfig&                     kv_cache_config,
                                     const RuntimeConfig&                     runtime_config,
                                     const std::shared_ptr<KVCacheAllocator>& allocator,
-                                    rtp_llm::DeviceBase*                     device,
                                     const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr):
         KVCacheConnectorCoordinator(
-            cache_config, kv_cache_config, runtime_config, allocator, device, metrics_reporter) {}
+            cache_config, kv_cache_config, runtime_config, {}, {}, allocator, metrics_reporter) {}
     ~MockKVCacheConnectorCoordinator() override = default;
 
 public:
+    MOCK_METHOD(bool, hasActiveConnectors, (), (const, override));
+    MOCK_METHOD(bool, hasP2PConnector, (), (const, override));
     MOCK_METHOD(std::shared_ptr<AsyncContext>,
                 asyncRead,
                 (const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context),
@@ -29,7 +30,7 @@ public:
                 (override));
     MOCK_METHOD(std::shared_ptr<AsyncContext>,
                 asyncWriteByLayer,
-                (int layer_id, const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context),
+                (int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context),
                 (override));
     MOCK_METHOD(bool, executeFunction, (const FunctionRequestPB& request, FunctionResponsePB& response), (override));
 };

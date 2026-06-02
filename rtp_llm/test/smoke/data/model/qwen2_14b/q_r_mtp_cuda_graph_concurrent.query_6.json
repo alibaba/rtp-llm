@@ -1,0 +1,32 @@
+{
+  "response": "The `NameError: name 'screen_manager' is not defined` error occurs when you try to use a variable or object named `screen_manager` that hasn't been defined in your code. This is a common issue in Python, especially when working",
+  "response_alternatives": null,
+  "hidden_states": null,
+  "logits": null,
+  "loss": null,
+  "input_ids": null,
+  "output_ids": null,
+  "aux_info": {
+    "input_len": 31,
+    "prefix_len": 0,
+    "reuse_len": 0,
+    "local_reuse_len": 0,
+    "remote_reuse_len": 0,
+    "memory_reuse_len": 0,
+    "prefill_total_reuse_len": 0,
+    "prefill_local_reuse_len": 0,
+    "prefill_remote_reuse_len": 0,
+    "prefill_memory_reuse_len": 0,
+    "decode_total_reuse_len": 0,
+    "decode_local_reuse_len": 0,
+    "decode_remote_reuse_len": 0,
+    "decode_memory_reuse_len": 0,
+    "output_len": 50,
+    "step_output_len": 50,
+    "iter_count": 50,
+    "cum_log_probs": [],
+    "beam_responses": [],
+    "pd_sep": false,
+    "softmax_probs": []
+  }
+}

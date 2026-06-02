@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/LockedBlockBufferManager.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 #include <mutex>
 #include "rtp_llm/cpp/utils/TimeUtil.h"

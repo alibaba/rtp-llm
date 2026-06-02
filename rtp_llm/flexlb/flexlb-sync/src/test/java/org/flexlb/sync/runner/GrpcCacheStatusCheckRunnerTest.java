@@ -9,7 +9,6 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -28,8 +27,6 @@ class GrpcCacheStatusCheckRunnerTest {
 
     private final CacheAwareService localKvCacheAwareManager = Mockito.mock(CacheAwareService.class);
 
-    private final ConcurrentHashMap<String, WorkerStatus> workerStatuses = new ConcurrentHashMap<>();
-
     @Test
     void testGrpcCacheStatusCheckRunner() {
         // Arrange
@@ -37,18 +34,22 @@ class GrpcCacheStatusCheckRunnerTest {
         String ipPort = "127.0.0.1:8080";
         String site = "test-site";
 
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+        workerStatus.setPort(8080);
+
         EngineRpcService.CacheStatusPB cacheStatusPB = EngineRpcService.CacheStatusPB.newBuilder()
                 .setVersion(1)
                 .setAvailableKvCache(1000)
                 .setTotalKvCache(2000)
                 .setBlockSize(128)
                 .build();
-        when(engineGrpcService.getCacheStatus(anyString(), anyInt(), any(WorkerStatus.class), anyLong(), anyLong())).thenReturn(cacheStatusPB);
+        when(engineGrpcService.getCacheStatus(anyString(), anyInt(), any(WorkerStatus.class), anyLong(), anyLong(), eq(RoleType.PREFILL))).thenReturn(cacheStatusPB);
 
         // Act
         GrpcCacheStatusCheckRunner runner = new GrpcCacheStatusCheckRunner(
-                modelName, ipPort, site, RoleType.PREFILL, workerStatuses, engineHealthReporter, engineGrpcService, localKvCacheAwareManager, 20,
-                new LongAdder(), 50L);
+                modelName, ipPort, site, RoleType.PREFILL, workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
+                20, new LongAdder(), 50L);
         runner.run();
 
         // Give some time for async execution
@@ -59,6 +60,6 @@ class GrpcCacheStatusCheckRunnerTest {
         }
 
         // Assert
-        verify(engineGrpcService).getCacheStatus(eq("127.0.0.1"), eq(8081), any(WorkerStatus.class), eq(-1L), eq(20L));
+        verify(engineGrpcService).getCacheStatus(eq("127.0.0.1"), eq(8081), any(WorkerStatus.class), eq(-1L), eq(20L), eq(RoleType.PREFILL));
     }
 }

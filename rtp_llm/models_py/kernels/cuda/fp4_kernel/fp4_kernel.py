@@ -3,9 +3,9 @@ from typing import Optional, Tuple
 
 import torch
 
-from rtp_llm.models_py.utils.arch import is_cuda
+from rtp_llm.models_py.utils.arch import is_cuda, get_sm
 
-if is_cuda():
+if is_cuda() and get_sm()[0] >= 10:
     from rtp_llm.ops.compute_ops import (
         cutlass_scaled_fp4_mm,
         scaled_fp4_quant,

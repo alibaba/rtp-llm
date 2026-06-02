@@ -3,17 +3,42 @@
 namespace torch_ext {
 
 void registerPyOpDefs(pybind11::module& m) {
+    pybind11::enum_<rtp_llm::CacheGroupType>(m, "CacheGroupType")
+        .value("LINEAR", rtp_llm::CacheGroupType::LINEAR)
+        .value("FULL", rtp_llm::CacheGroupType::FULL)
+        .export_values();
+
+    pybind11::class_<LayerKVCache>(m, "LayerKVCache")
+        .def(pybind11::init<>())
+        .def_readwrite("kv_cache_base", &LayerKVCache::kv_cache_base, "Key/value cache tensor (per-layer view)")
+        .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
+        .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
+        .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id");
+
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())
-        .def_readwrite("kv_cache_base", &KVCache::kv_cache_base, "Key cache base tensor")
-        .def_readwrite("kv_scale_base", &KVCache::kv_scale_base, "Key cache scale tensor")
-        .def_readonly("seq_size_per_block", &KVCache::seq_size_per_block, "Sequence size per block")
-        .def_readonly("layer_id", &KVCache::layer_id, "kv cache layer id")
-        .def("get_layer_cache", &KVCache::getLayerCache);
+        .def_readwrite("kv_cache_base_by_layer", &KVCache::kv_cache_base_by_layer, "Per-layer KV cache tensors")
+        .def_readwrite("kv_scale_base_by_layer", &KVCache::kv_scale_base_by_layer, "Per-layer KV scale tensors")
+        .def_readwrite("seq_size_per_block", &KVCache::seq_size_per_block, "Physical (logical) block size in tokens")
+        .def_readwrite("kernel_seq_size_per_block",
+                       &KVCache::kernel_seq_size_per_block,
+                       "Kernel block size (0 = same as seq_size_per_block)")
+        .def_readwrite("num_kv_heads", &KVCache::num_kv_heads, "Number of KV heads per TP rank")
+        .def_readwrite("head_dim", &KVCache::head_dim, "Head dimension")
+        .def_readwrite("use_mla", &KVCache::use_mla, "Whether MLA cache layout is used")
+        .def_readwrite("kv_lora_rank", &KVCache::kv_lora_rank, "MLA KV LoRA rank")
+        .def_readwrite("rope_head_dim", &KVCache::rope_head_dim, "MLA RoPE head dimension")
+        .def_readwrite("layer_attn_types",
+                       &KVCache::layer_attn_types,
+                       "Per-layer attention type (CacheGroupType::FULL or LINEAR). "
+                       "Empty = all layers treated as FULL (backward compatibility).")
+        .def("get_layer_cache",
+             &KVCache::getLayerCache,
+             "Return a per-layer LayerKVCache for the given global layer id");
 
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
         .def(pybind11::init<>())
-        .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "kv cache");
+        .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "KV cache for all layers");
 
     pybind11::class_<caffe2::TypeMeta>(m, "TypeMeta").def(pybind11::init<>());
 
@@ -28,7 +53,6 @@ void registerPyOpDefs(pybind11::module& m) {
         "Convert TypeMeta to scalar type");
 
     pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs").def(pybind11::init<>());
-    pybind11::class_<PyCaptureMetaData>(m, "PyCaptureMetaData").def(pybind11::init<>());
 
     pybind11::class_<rtp_llm::ParamsBase, std::shared_ptr<rtp_llm::ParamsBase>>(m, "ParamsBase")
         .def(pybind11::init<>())
@@ -56,17 +80,35 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("max_seq_len", &PyPrefillCudaGaphCopyParams::max_seq_len)
         .def_readwrite("max_batch_size", &PyPrefillCudaGaphCopyParams::max_batch_size);
 
+    pybind11::class_<PyContextParallelParams>(m, "PyContextParallelParams")
+        .def(pybind11::init<>())
+        .def_readwrite("prefill_cp_padding_lengths", &PyContextParallelParams::prefill_cp_padding_lengths)
+        .def_readwrite("prefill_cp_chunk_lengths", &PyContextParallelParams::prefill_cp_chunk_lengths)
+        .def_readwrite("prefill_shuffle_indices", &PyContextParallelParams::prefill_shuffle_indices)
+        .def_readwrite("prefill_qkv_restore_indice", &PyContextParallelParams::prefill_qkv_restore_indice)
+        .def_readwrite("prefill_qkv_padding_mask", &PyContextParallelParams::prefill_qkv_padding_mask)
+        .def_readwrite("prefill_actual_input_lengths_cpu", &PyContextParallelParams::prefill_actual_input_lengths_cpu);
+
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
+        .def_readwrite("is_target_verify", &PyAttentionInputs::is_target_verify)
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)
         .def_readwrite("input_lengths", &PyAttentionInputs::input_lengths)
+        .def_readwrite("kv_cache_kernel_block_id_host", &PyAttentionInputs::kv_cache_kernel_block_id_host)
+        .def_readwrite("kv_cache_kernel_block_id_device", &PyAttentionInputs::kv_cache_kernel_block_id_device)
         .def_readwrite("kv_cache_block_id_host", &PyAttentionInputs::kv_cache_block_id_host)
         .def_readwrite("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
+        .def_readwrite("kv_cache_kernel_block_id_host_by_group",
+                       &PyAttentionInputs::kv_cache_kernel_block_id_host_by_group)
+        .def_readwrite("kv_cache_kernel_block_id_device_by_group",
+                       &PyAttentionInputs::kv_cache_kernel_block_id_device_by_group)
+        .def_readwrite("kv_cache_layer_to_group", &PyAttentionInputs::kv_cache_layer_to_group)
         .def_readwrite("dtype", &PyAttentionInputs::dtype)
         .def_readwrite("cu_seqlens", &PyAttentionInputs::cu_seqlens)
+        .def_readwrite("cu_seqlens_host", &PyAttentionInputs::cu_seqlens_host)
         .def_readwrite("cu_kv_seqlens", &PyAttentionInputs::cu_kv_seqlens)
         .def_readwrite("context_total_kv_length", &PyAttentionInputs::context_total_kv_length)
         .def_readwrite("total_tokens", &PyAttentionInputs::total_tokens)
@@ -77,9 +119,13 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("input_lengths_d", &PyAttentionInputs::input_lengths_d)
         .def_readwrite("decode_cu_seqlens_d", &PyAttentionInputs::decode_cu_seqlens_d)
         .def_readonly("decode_cu_seqlens_host", &PyAttentionInputs::decode_cu_seqlens_host)
+        .def_readwrite("position_ids", &PyAttentionInputs::position_ids)
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
+        .def_readwrite("context_parallel_info", &PyAttentionInputs::context_parallel_info)
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
-        .def_readwrite("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params);
+        .def_readwrite("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params)
+        .def_readwrite("headwise_config", &PyAttentionInputs::headwise_config)
+        .def("__copy__", [](const PyAttentionInputs& self) { return PyAttentionInputs(self); });
 
     pybind11::class_<BertEmbeddingInputs>(m, "BertEmbeddingInputs")
         .def(pybind11::init<>())

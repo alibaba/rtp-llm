@@ -1,5 +1,5 @@
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 preloaded_deps = [
     ":flashinfer_hdrs",

@@ -11,7 +11,7 @@ public class CommonConstants {
     public static final String TIMEOUT_HANDLER = "timeoutHandler";
 
     /**
-     * gRPC 超时的 message
+     * gRPC timeout message
      */
     public static final String DEADLINE_EXCEEDED_MESSAGE = "DEADLINE_EXCEEDED";
 

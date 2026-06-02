@@ -26,13 +26,12 @@ public class NettyUtils {
 
     public static <T> String readBody(HttpNettyChannelContext<T> nettyCtx) {
         byte[] mergedData = getBodyBytes(nettyCtx);
-        Optional.ofNullable(nettyCtx.getRequestCtx()).ifPresent(c -> c.setResBufferLength(mergedData.length));
         return new String(mergedData, StandardCharsets.UTF_8);
     }
 
     public static <T> byte[] getBodyBytes(HttpNettyChannelContext<T> nettyCtx) {
         List<HttpNettyChannelContext.ByteData> byteDataList = nettyCtx.getByteDataList();
-        // 如果只有一个 chunk, 那么不需要合并, 直接返回
+        // If only one chunk, no need to merge, return directly
         if (byteDataList.size() == 1) {
             return byteDataList.getFirst().getData();
         }

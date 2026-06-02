@@ -141,6 +141,7 @@ def copts():
         "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE",
     ]) + if_rocm([
         "-x", "rocm",
+        "-DUSE_C10D_NCCL",
     ])
 
 def cuda_copts():

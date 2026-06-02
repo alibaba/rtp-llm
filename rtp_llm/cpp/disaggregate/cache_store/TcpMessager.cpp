@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpMessager.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreLoadServiceClosure.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/TimerManager.h"

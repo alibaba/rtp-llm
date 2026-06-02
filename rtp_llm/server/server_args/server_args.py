@@ -30,6 +30,7 @@ from rtp_llm.server.server_args.jit_group_args import init_jit_group_args
 from rtp_llm.server.server_args.kv_cache_group_args import init_kv_cache_group_args
 from rtp_llm.server.server_args.load_group_args import init_load_group_args
 from rtp_llm.server.server_args.lora_group_args import init_lora_group_args
+from rtp_llm.server.server_args.master_group_args import init_master_group_args
 from rtp_llm.server.server_args.misc_group_args import init_misc_group_args
 from rtp_llm.server.server_args.model_group_args import init_model_group_args
 from rtp_llm.server.server_args.model_specific_group_args import (
@@ -56,7 +57,6 @@ from rtp_llm.server.server_args.server_group_args import init_server_group_args
 from rtp_llm.server.server_args.speculative_decoding_group_args import (
     init_speculative_decoding_group_args,
 )
-from rtp_llm.server.server_args.threefs_group_args import init_threefs_group_args
 from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
 
 _T = TypeVar("_T")
@@ -447,9 +447,9 @@ def init_all_group_args(
     init_generate_group_args(parser, py_env_configs.generate_env_config)
     init_hw_kernel_group_args(parser, py_env_configs.py_hw_kernel_config)
     init_kv_cache_group_args(parser, py_env_configs.kv_cache_config)
-    init_threefs_group_args(parser, py_env_configs.kv_cache_config)
     init_load_group_args(parser, py_env_configs.load_config, py_env_configs.model_args)
     init_lora_group_args(parser, py_env_configs.lora_config)
+    init_master_group_args(parser, py_env_configs.master_config)
     init_misc_group_args(parser, py_env_configs.misc_config)
     init_model_group_args(parser, py_env_configs.model_args)
     init_model_specific_group_args(parser, py_env_configs.model_specific_config)
@@ -463,6 +463,7 @@ def init_all_group_args(
         parser,
         py_env_configs.parallelism_config,
         py_env_configs.ffn_disaggregate_config,
+        py_env_configs.prefill_cp_config,
     )
     init_profile_debug_logging_group_args(
         parser, py_env_configs.profiling_debug_logging_config
@@ -494,5 +495,11 @@ def setup_args() -> PyEnvConfigs:
 
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args()
+
+    # Finalize: batch-level cache reuse is disabled unless explicitly enabled.
+    batch_reuse_val = getattr(parsed_args, "enable_reuse_cache_in_batch", None)
+    if batch_reuse_val is None:
+        batch_reuse_val = False
+    py_env_configs.kv_cache_config.enable_reuse_cache_in_batch = bool(batch_reuse_val)
 
     return py_env_configs

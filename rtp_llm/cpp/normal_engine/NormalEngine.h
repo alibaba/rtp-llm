@@ -7,14 +7,15 @@
 #include <thread>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
-#include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
+#include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/cache/WarmUpResult.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
-#include "rtp_llm/cpp/models/GptModel.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -44,6 +45,7 @@ public:
         }
     }
     bool updateEplbConfig(const EPLBConfig& config) override;
+    void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
 
 private:
     void                            initScheduler();
@@ -80,10 +82,8 @@ private:
     SpeculativeExecutionConfig                    sp_config;
     kmonitor::MetricsReporterPtr                  metrics_reporter_;
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
-    std::shared_ptr<CudaProfiler>                 profiler_;
-    int                                           profiler_step_     = 0;
-    bool                                          gen_timeline_sync_ = false;
-    int                                           reserve_step_      = 0;
+    StepWindowProfiler                            step_profiler_;
+    int                                           reserve_step_ = 0;
 };
 
 }  // namespace rtp_llm

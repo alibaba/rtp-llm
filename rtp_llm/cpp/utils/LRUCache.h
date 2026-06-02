@@ -52,6 +52,8 @@ public:
 
     bool contains(const KeyType& key) const;
 
+    bool remove(const KeyType& key, ValueType* removed_value = nullptr);
+
     void printCache() const;
 
     CacheIterator begin() {
@@ -161,6 +163,21 @@ template<typename KeyType, typename ValueType, typename Hash, typename Equal>
 bool LRUCache<KeyType, ValueType, Hash, Equal>::contains(const KeyType& key) const {
     auto it = cache_items_map_.find(key);
     return it != cache_items_map_.end();
+}
+
+template<typename KeyType, typename ValueType, typename Hash, typename Equal>
+bool LRUCache<KeyType, ValueType, Hash, Equal>::remove(const KeyType& key, ValueType* removed_value) {
+    auto it = cache_items_map_.find(key);
+    if (it == cache_items_map_.end()) {
+        return false;
+    }
+    if (removed_value) {
+        *removed_value = it->second->second;
+    }
+    items_list_.erase(it->second);
+    cache_items_map_.erase(it);
+    version++;
+    return true;
 }
 
 template<typename KeyType, typename ValueType, typename Hash, typename Equal>

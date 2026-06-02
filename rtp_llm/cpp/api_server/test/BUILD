@@ -1,6 +1,6 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "torch_deps")
-load("//rtp_llm/cpp/devices:device_defs.bzl", "device_impl_target", "device_test_envs")
+load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 test_copts = [
     "-fno-access-control",
@@ -14,7 +14,6 @@ cc_library(
 )
 
 test_deps = [
-    "//rtp_llm/cpp/devices/testing:device_test_utils",
     "//rtp_llm/cpp/models:models",
     "//rtp_llm/cpp/config:config_modules",
     ":test_headers",
@@ -41,10 +40,10 @@ py_test(
         ".",
     ],
     env = select({
-        "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM", "DEVICE_RESERVE_MEMORY_BYTES": "128"},
-        "//conditions:default": {"TEST_USING_DEVICE": "CUDA", "DEVICE_RESERVE_MEMORY_BYTES": "128"},
+        "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM"},
+        "//conditions:default": {"TEST_USING_DEVICE": "CUDA"},
     }),
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
 
 py_library(
@@ -63,6 +62,7 @@ cc_binary(
         ":api_server_unittest_lib",
         "//rtp_llm/cpp/pybind:th_compute_lib",
     ],
+    data = ["//:rtp_compute_ops"],
     linkshared = 1,
 )
 
@@ -79,7 +79,6 @@ cc_library(
         "mock/MockChatRender.h",
         "mock/MockTokenizer.h",
         "mock/MockOpenaiEndpoint.h",
-        "mock/MockLoraManager.h",
         "mock/MockWeightsLoader.h",
         "ErrorResponseTest.cc",
         "HealthServiceTest.cc",

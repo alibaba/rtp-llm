@@ -4,11 +4,11 @@ import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAType
+from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOpQKVOut,
     FusedRopeKVCachePrefillOpQOut,
-    KVCache,
+    LayerKVCache,
     PyAttentionInputs,
     TRTAttnOp,
     TRTPagedAttnOp,
@@ -20,7 +20,10 @@ from rtp_llm.ops.compute_ops import (
 class TRTMHAImpl(FMHAImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
@@ -51,7 +54,8 @@ class TRTMHAImpl(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
+        layer_idx: Optional[int] = 0,
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
@@ -77,6 +81,7 @@ class TRTMHAImpl(FMHAImplBase):
                 dtype=fmha_input.dtype,
                 device=fmha_input.device,
             )
+
             cuda_graph_copy_small2large(
                 fmha_input,
                 aligned_attn_buf,
@@ -91,7 +96,6 @@ class TRTMHAImpl(FMHAImplBase):
 
         # Execute FMHA forward
         res = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
-
         if self.prefill_cuda_graph_copy_params:
             # Infer hidden_size from res tensor shape
             hidden_size = res.shape[1]
@@ -108,6 +112,7 @@ class TRTMHAImpl(FMHAImplBase):
                 hidden_size,
                 self.cu_seq_lens,
             )
+
             res = compact_attn_buf
         return res
 
@@ -118,7 +123,10 @@ class TRTMHAImpl(FMHAImplBase):
 class TRTPagedMHAImpl(FMHAImplBase):
 
     def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
@@ -135,6 +143,9 @@ class TRTPagedMHAImpl(FMHAImplBase):
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
+    def support_cuda_graph(self) -> bool:
+        return False
+
     @classmethod
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
@@ -146,7 +157,8 @@ class TRTPagedMHAImpl(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
+        layer_idx: int,
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:

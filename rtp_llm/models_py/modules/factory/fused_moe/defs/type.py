@@ -12,6 +12,8 @@ class RouterType(Enum):
     DEEPEP_NORMAL = 2  # DeepEP normal mode
     DEEPEP_LOW_LATENCY = 4  # DeepEP low latency mode (best communication)
     PURE_TP = 5  # optimize when EP=TP, use all_reduce as gather
+    MORI_EP_INTRANODE = 6  # MORI intra-node EP router
+    MORI_EP_INTERNODE = 7  # MORI inter-node EP router
 
 
 class ExecutorType(Enum):
@@ -26,3 +28,11 @@ class ExecutorType(Enum):
     DEEPGEMM_MASKED = 2  # DeepGEMM masked executor
     CUTLASS_FP8 = 3  # Cutlass FP8 executor (specialized)
     CUTLASS_BATCHED_FP8 = 4  # Cutlass batched FP8 (most optimized)
+    CUTLASS_W4A8_INT4_PER_CHANNEL = (
+        5  # Cutlass W4A8 INT4 PER CHANNEL executor (specialized)
+    )
+    CUTLASS_BATCHED_W4A8_INT4_PER_CHANNEL = (
+        6  # Cutlass batched W4A8 INT4 PER CHANNEL (most optimized)
+    )
+    TRTLLM_FP4 = 7  # TRTLLM FP4 executor (specialized)
+    CUTEDSL_FP4 = 8  # CuteDSL FP4 executor (FP4 optimized)

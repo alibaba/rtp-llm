@@ -1,8 +1,5 @@
 
-test_envs = {
-    "DEVICE_RESERVE_MEMORY_BYTES": "512000000",  # 512MB
-    "LOAD_PYTHON_MODEL": "1",
-}
+test_envs = {}
 
 py_test (
     name = "qwen3_test",

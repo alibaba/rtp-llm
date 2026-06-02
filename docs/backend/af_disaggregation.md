@@ -13,7 +13,6 @@ LOAD_PYTHON_MODEL=1 /opt/conda310/bin/python3 -m rtp_llm.start_server \
 --world_size 2 \
 --dp_size 2 \
 --reserver_runtime_mem_mb 8000 \
---device_reserve_memory_bytes -8192000000 \
 --start_port 8088
 ```
 

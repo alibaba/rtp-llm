@@ -103,6 +103,8 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             self.quant_config.is_quantized
             and self.quant_config.quant_dtype == torch.float8_e4m3fn
         )
+        quant_method = MoeConfigResolver().get_quant_method(self.config)
+        use_fp4 = quant_method == "modelopt_fp4"
         if use_fp8:
             a1_quant, a1_scale_quant = self._do_quant(a1)
             assert a1_scale_quant is not None
@@ -167,7 +169,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             num_recv_tokens_per_expert_list, device=expert_x.device, dtype=torch.int32
         )
 
-        if recv_topk_idx.numel() != 0 and (not use_fp8):
+        if recv_topk_idx.numel() != 0 and (not use_fp8) and (not use_fp4):
             expert_topk_ids = torch.where(
                 recv_topk_idx == -1,
                 self.expert_num - 1 if self.rank_expert_offset == 0 else 0,
@@ -324,3 +326,46 @@ class DeepepNormalRouterFp8PerBlock(DeepepNormalRouterBase):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
+
+
+class DeepepNormalRouterW4a8Int4PerChannel(DeepepNormalRouterBase):
+    """DeepEP normal router with W4A8 INT4 per-channel quantization."""
+
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(config, quant_config, expert_alignment=1)
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        """Check if DeepepNormalRouterW4a8Int4PerChannel can handle the configuration"""
+        super().check_conditions(checker, config)
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(
+            quant_method
+            in ["W4A8_INT4_PER_CHANNEL", "W4A8_INT4_PER_CHANNEL_COMPRESSED"]
+        )
+
+
+class DeepepNormalRouterFp4PerGroup(DeepepNormalRouterBase):
+    """DeepEP normal router with FP4 per-group quantization."""
+
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(config, quant_config, expert_alignment=128)
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        """Check if DeepepNormalRouterFp4PerGroup can handle the configuration"""
+        super().check_conditions(checker, config)
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method == "modelopt_fp4")
+        checker.check(config.moe_config.use_deepep_moe)
+        checker.check(not config.moe_config.use_deepep_low_latency)

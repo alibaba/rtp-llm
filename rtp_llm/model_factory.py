@@ -9,8 +9,7 @@ import torch
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
-from rtp_llm.async_decoder_engine.base_engine import BaseEngine
-from rtp_llm.async_decoder_engine.engine_creator import create_engine
+import rtp_llm.models
 from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
@@ -24,8 +23,6 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.model_factory_register import _model_factory
-from rtp_llm.model_loader.load_config import LoadMethod
-from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparation
 from rtp_llm.utils.util import check_with_info
 
@@ -87,12 +84,12 @@ class ModelFactory:
             kv_cache_config=engine_config.kv_cache_config,
             fmha_config=engine_config.fmha_config,
             moe_config=engine_config.moe_config,
-            load_python_model=engine_config.model_specific_config.load_python_model,
             load_method=engine_config.load_config.load_method,
             max_generate_batch_size=engine_config.runtime_config.max_generate_batch_size,
             vit_config=vit_config,
             merge_lora=merge_lora,
             device_resource_config=engine_config.device_resource_config,
+            force_cpu_load_weights=engine_config.load_config.force_cpu_load_weights,
         )
         return model
 
@@ -117,6 +114,8 @@ class ModelFactory:
         sp_type = engine_config.sp_config.type  # Get SpeculativeType enum value
         if sp_type == SpeculativeType.NONE:
             return None
+
+        from rtp_llm.models.propose_model.propose_model import ProposeModel
 
         gen_num_per_circle = engine_config.sp_config.gen_num_per_cycle
 
@@ -145,6 +144,7 @@ class ModelFactory:
             model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
             # propose model's max seq len must be equal to score model's max seq len
             propose_model_config.max_seq_len = model_config.max_seq_len
+            propose_model_config.gen_num_per_cycle = model_config.gen_num_per_cycle
 
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,
@@ -153,7 +153,6 @@ class ModelFactory:
                 kv_cache_config=engine_config.kv_cache_config,
                 fmha_config=engine_config.fmha_config,
                 moe_config=engine_config.moe_config,
-                load_python_model=engine_config.model_specific_config.load_python_model,
                 load_method=engine_config.load_config.load_method,
                 max_generate_batch_size=engine_config.runtime_config.max_generate_batch_size,
                 device_resource_config=engine_config.device_resource_config,
@@ -178,7 +177,7 @@ class ModelFactory:
         vit_config: Optional[VitConfig] = None,
         merge_lora: bool = False,
         propose_model_config: Optional[ModelConfig] = None,
-    ) -> BaseEngine:
+    ):
         """Create engine from independent config objects, with optional propose model.
 
         All model metadata (template_type, model_name, lora_infos, mm_model_config) should be set in model_config before calling this method.
@@ -197,6 +196,10 @@ class ModelFactory:
         Returns:
             BaseEngine instance (RPCEngine or EmbeddingCppEngine)
         """
+        # Set gen_num_per_cycle on model_config so it flows to AttentionConfigs
+        # for RoPE cache sizing in speculative decoding
+        model_config.gen_num_per_cycle = engine_config.sp_config.gen_num_per_cycle
+
         model = ModelFactory._create_model(
             model_config=model_config,
             engine_config=engine_config,
@@ -224,6 +227,9 @@ class ModelFactory:
 
         # Create engine using create_engine function (replaces AsyncModel)
         alog_conf_path = engine_config.profiling_debug_logging_config.ft_alog_conf_path
+
+        from rtp_llm.async_decoder_engine.engine_creator import create_engine
+
         engine = create_engine(
             model=model,
             engine_config=engine_config,
@@ -358,15 +364,16 @@ class ModelFactory:
         if not sp_config.checkpoint_path:
             return None
 
-        if sp_config.use_new_sp_engine:
-            # only support mtp and eagle
-            if sp_config.type not in [SpeculativeType.MTP, SpeculativeType.EAGLE]:
-                logging.error(
-                    f"use_new_sp_engine only support mtp and eagle, but got {sp_config.type.name}"
-                )
-                raise ValueError(
-                    f"use_new_sp_engine only support mtp and eagle, but got {sp_config.type.name}"
-                )
+        # Current SP engine only supports MTP and EAGLE
+        if sp_config.type not in [SpeculativeType.MTP, SpeculativeType.EAGLE]:
+            logging.error(
+                "Speculative engine only supports MTP and EAGLE, but got %s",
+                sp_config.type.name,
+            )
+            raise ValueError(
+                "Speculative engine only supports MTP and EAGLE, but got %s"
+                % sp_config.type.name
+            )
 
         # Create ModelArgs for propose model (reuse main model args, but override ckpt_path)
         propose_model_args = ModelArgs()
@@ -375,6 +382,7 @@ class ModelFactory:
         propose_model_args.model_type = sp_config.model_type
         propose_model_args.act_type = model_args.act_type
         propose_model_args.mla_ops_type = model_args.mla_ops_type
+        propose_model_args.enable_fp32_lm_head = model_args.enable_fp32_lm_head
 
         # Create propose ModelConfig using _create_config
         propose_model_cls = ModelFactory.get_model_cls(sp_config.model_type)

@@ -1,8 +1,7 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
-#include <sstream>
-#include <string>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
@@ -24,22 +23,25 @@ public:
         resource_context_(resource_context),
         need_release_resource_(need_release_resource) {}
 
-    ~StreamCacheResource() {
-        releaseResource();
-    }
+    ~StreamCacheResource() = default;
 
     void                 init(int batch_size);
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
     absl::Status         initKVBlock(size_t reserve_step = 0);
     absl::Status         incrKVBlock(size_t reserve_step = 0);
-    void                 fakeInitKVBlock();
+    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
     int                  tryReleaseKVBlock(size_t nums);
     void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                 releaseResource();
+    bool                 asyncLoadCache();
+    bool                 loadCacheDone();
+
+    // swap all linear groups rhs and lhs
+    void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);
 
     // TODO, remove this after remove fallback
-    int singleBatchNeedBlocks(int seq_len) const;
+    int singleBatchNeedBlocks(int seq_len, int reserve_step) const;
 
     int curBlocksNum() const;
     int mallocFailedTimes() const;
@@ -93,10 +95,18 @@ public:
         need_release_resource_ = need_release_resource;
     }
 
+    bool isResourceReleased() const {
+        return resource_released_;
+    }
+
     bool reuseCache() const;
-    bool enable3FS() const;
-    bool enableDeviceCache() const;
     bool enableMemoryCache() const;
+    bool enableRemoteCache() const;
+    bool enableDeviceCache() const;
+    bool enableTieredMemoryCache() const;
+
+    void holdKVCacheForPDSep();
+    void releaseKVCacheForPDSep();
 
     void insertIntoCache();
 
@@ -105,8 +115,12 @@ public:
 private:
     void loadCacheSync();
     void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
-    void storeCacheAsync();
-    void waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
+    void updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context);
+    std::shared_ptr<AsyncContext> storeCacheAsync(const std::shared_ptr<BatchKVCacheResource>& batch_resource,
+                                                  bool                                         enable_memory_cache,
+                                                  bool                                         enable_remote_cache);
+    void                          evictDeviceCacheToMemory();
+    void                          waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
 
 private:
     GenerateStream*          stream_;
@@ -114,10 +128,20 @@ private:
     ResourceContext          resource_context_;
     std::vector<BlockIdPair> block_update_mapping_;
 
-    bool need_release_resource_ = true;
-    bool last_block_aligned_    = false;
-    int  malloc_failed_times_   = 0;
-    bool fake_inited_           = false;
+    bool                          need_release_resource_ = true;
+    bool                          last_block_aligned_    = false;
+    int                           malloc_failed_times_   = 0;
+    bool                          fake_inited_           = false;
+    bool                          resource_released_     = false;
+    std::shared_ptr<AsyncContext> load_cache_context_;
+    int                           load_cache_retry_count_ = 0;
+
+    // Connector reference counting for PD separation (RAII auto-release)
+    std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
+    /// Async connector load is gated to once per cache lifecycle: duplicate `initKVBlock` must
+    /// not re-issue async read (see tests). Reset in `releaseResource()` when blocks are cleared
+    /// so any future reuse of this resource can load again. Concurrent callers use `exchange`.
+    std::atomic<bool> load_cache_once_{false};
 };
 
 }  // namespace rtp_llm

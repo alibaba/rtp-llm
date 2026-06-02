@@ -18,6 +18,7 @@ from rtp_llm.config.model_config import (
 )
 from rtp_llm.embedding.embedding_endpoint import EmbeddingEndpoint
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
+from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_factory_register import _model_factory
@@ -139,7 +140,13 @@ class FrontendServer(object):
             kmonitor.report(
                 AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")}
             )
-            request[request_id_field_name] = self._global_controller.increment()
+            sequence = self._global_controller.increment() % 4096  # 12 bits
+            request[request_id_field_name] = generate_request_id(
+                self.py_env_configs.server_config.ip,
+                self.py_env_configs.server_config.server_port,
+                self.server_id,
+                sequence,
+            )
         except Exception as e:
             return self._handle_exception(request, e)
 
@@ -223,16 +230,13 @@ class FrontendServer(object):
             if isinstance(req, str):
                 req = json.loads(req)
             assert isinstance(req, dict)
-            if "master_info" in req:
-                request_id = req["master_info"].get("request_id")
-                check_with_info(
-                    request_id != None and isinstance(request_id, int),
-                    "request_id in master_info is None or not int",
-                )
-                req[request_id_field_name] = request_id
-                self._global_controller.increment()
-            else:
-                req[request_id_field_name] = self._global_controller.increment()
+            sequence = self._global_controller.increment() % 4096  # 12 bits
+            req[request_id_field_name] = generate_request_id(
+                self.py_env_configs.server_config.ip,
+                self.py_env_configs.server_config.server_port,
+                self.server_id,
+                sequence,
+            )
         except Exception as e:
             return self._handle_exception(req, e)
 
@@ -266,18 +270,13 @@ class FrontendServer(object):
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
-        try:
-            if request.master_info is not None:
-                request_id = request.master_info.get("request_id")
-                check_with_info(
-                    request_id != None and isinstance(request_id, int),
-                    "request_id in master_info is None or not int",
-                )
-                self._global_controller.increment()
-            else:
-                request_id = self._global_controller.increment()
-        except Exception as e:
-            return self._handle_exception(request, e)
+        sequence = self._global_controller.increment() % 4096  # 12 bits
+        request_id = generate_request_id(
+            self.py_env_configs.server_config.ip,
+            self.py_env_configs.server_config.server_port,
+            self.server_id,
+            sequence,
+        )
 
         def generate_call():
             assert self._openai_endpoint != None
@@ -301,6 +300,56 @@ class FrontendServer(object):
             self._global_controller.decrement()
 
         return rep
+
+    async def batch_chat_completion(self, request, raw_request: Request):
+        from rtp_llm.openai.api_datatype import BatchChatCompletionResponse
+
+        sequence = self._global_controller.increment() % 4096
+        request_id = generate_request_id(
+            self.py_env_configs.server_config.ip,
+            self.py_env_configs.server_config.server_port,
+            self.server_id,
+            sequence,
+        )
+        try:
+            assert self._openai_endpoint is not None
+            responses = await self._openai_endpoint.batch_chat_completion(
+                request_id, request
+            )
+            return ORJSONResponse(
+                content=BatchChatCompletionResponse(
+                    responses=[r.model_dump(exclude_none=True) for r in responses]
+                ).model_dump()
+            )
+        finally:
+            self._global_controller.decrement()
+
+    async def batch_infer(self, req: dict, raw_request: Request):
+        from rtp_llm.frontend.frontend_worker import BatchPipelineResponse
+
+        # Concurrency accounting: a batch counts as ONE scheduling unit because the engine
+        # atomically enqueues all prompts via BatchGenerateCall. Per-item counting would over-
+        # reject under the same concurrency_limit; the trade-off is that a large batch occupies
+        # only one slot regardless of N.
+        sequence = self._global_controller.increment() % 4096
+        request_id = generate_request_id(
+            self.py_env_configs.server_config.ip,
+            self.py_env_configs.server_config.server_port,
+            self.server_id,
+            sequence,
+        )
+        try:
+            assert self._frontend_worker is not None
+            prompts = req.get("prompt_batch", [])
+            generate_config = req.get("generate_config", {})
+            result = await self._frontend_worker.batch_infer(
+                prompts=prompts,
+                request_id=request_id,
+                generate_config=generate_config,
+            )
+            return ORJSONResponse(content=result.model_dump(exclude_none=True))
+        finally:
+            self._global_controller.decrement()
 
     async def chat_render(self, request: ChatCompletionRequest, raw_request: Request):
         try:

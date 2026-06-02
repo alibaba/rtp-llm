@@ -6,7 +6,7 @@ import lombok.Data;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 
-import java.util.List;
+import java.util.Map;
 
 /**
  * @author zjw
@@ -30,13 +30,19 @@ public class WorkerStatusResponse {
     private long waitingQueryLen;
 
     @JsonProperty("running_task_info")
-    private List<TaskInfo> runningTaskInfo;
+    private Map<String, TaskInfo> runningTaskInfo;
 
-    @JsonProperty("finished_task_list")
-    private List<TaskInfo> finishedTaskList;
+    @JsonProperty("waiting_task_info")
+    private Map<String, TaskInfo> waitingTaskInfo;
+
+    @JsonProperty("finished_task_info")
+    private Map<String, TaskInfo> finishedTaskInfo;
 
     @JsonProperty("status_version")
     private Long statusVersion = 0L;
+
+    @JsonProperty("latest_finished_version")
+    private Long latestFinishedVersion = 0L;
 
     @JsonProperty("cache_status")
     private CacheStatus cacheStatus;

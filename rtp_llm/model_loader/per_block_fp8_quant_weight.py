@@ -25,7 +25,6 @@ from rtp_llm.utils.model_weight import (
     W,
     concat_0,
     identity,
-    kv_split,
     merge_block_scale,
     merge_te_qkv,
     mla_pad,
@@ -36,6 +35,7 @@ from rtp_llm.utils.model_weight import (
     sp_0_w13,
     sp_head_gemm_a8,
     sp_head_s_gemm_a8_block,
+    sp_id,
     sp_neg1,
     stack_,
     stack_moe_w1,
@@ -149,14 +149,16 @@ def gemm_block_fp8_gpt_style_tp_strategy():
         W.ffn_s2: sp_neg1,
         # mla
         # W.mla_kv_a_w: sp_id,
-        W.mla_k_nope_w: sp_0,
-        W.mla_k_nope_s: sp_0,
-        W.mla_v_w: sp_0,
-        W.mla_v_s: sp_0,
+        W.mla_kv_b_w: sp_0,
+        W.mla_kv_b_s: sp_0,
         W.mla_q_b_w: sp_0,
         W.mla_q_b_s: sp_0,
         W.attn_gate_w: sp_0,
         W.attn_gate_s: sp_0,
+        W.mla_indexer_qb_w: sp_id,
+        W.mla_indexer_qb_s: sp_id,
+        W.mla_indexer_k_w: sp_id,
+        W.mla_indexer_k_s: sp_id,
     }
     tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
     tp_strategy.update(gemm_block_fp8_weight_tp_strategy)
@@ -206,19 +208,18 @@ def create_w8a8_fp8_per_block_weight(
         return W8A8Fp8PerBlockMoeAtomicWeight(*args, **kwargs)
     if isinstance(src_weight_info, FfnAtomicWeight):
         return W8A8Fp8PerBlockFfnAtomicWeight(*args, **kwargs)
-    if isinstance(src_weight_info, AtomicWeight):
-        return W8A8Fp8PerBlockAtomicWeight(*args, **kwargs)
     if isinstance(src_weight_info, LinearAttnAtomicWeight):
         return W8A8Fp8PerBlockLinearAttnAtomicWeight(*args, **kwargs)
+    if isinstance(src_weight_info, AtomicWeight):
+        return W8A8Fp8PerBlockAtomicWeight(*args, **kwargs)
     raise NotImplementedError(f"Unsupported weight type: {src_weight_info}")
 
 
 class PerBlockFp8Weight(CompositeWeight, QuantWeight):
-    w8a8_weight_list = {
+    w8a8_weight_list: Dict[str, str] = {
         W.attn_qkv_w: W.attn_qkv_s,
         W.attn_o_w: W.attn_o_s,
-        W.mla_k_nope_w: W.mla_k_nope_s,
-        W.mla_v_w: W.mla_v_s,
+        W.mla_kv_b_w: W.mla_kv_b_s,
         W.mla_kc: None,
         W.mla_vc: None,
         W.mla_q_b_w: W.mla_q_b_s,
@@ -232,6 +233,8 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         W.linear_attn_qkvz_w: W.linear_attn_qkvz_s,
         W.linear_attn_out_w: W.linear_attn_out_s,
         W.attn_gate_w: W.attn_gate_s,
+        W.mla_indexer_qb_w: W.mla_indexer_qb_s,
+        W.mla_indexer_k_w: W.mla_indexer_k_s,
     }
 
     @classmethod
@@ -255,7 +258,6 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         kernel: WeightModule
         scale: WeightModule
         self.group_size = quant_config.group_size()
-
         if src_weight_info.name == W.attn_qkv_w:
             kernel, scale = self._get_qkv_quant_weight(src_weight_info, self.group_size)
         elif src_weight_info.name == W.attn_o_w:
@@ -267,8 +269,8 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 kernel, scale = self._get_quant_weight_default(
                     src_weight_info, W.attn_o_w, W.attn_o_s
                 )
-        elif src_weight_info.name in [W.mla_k_nope_w, W.mla_v_w]:
-            kernel, scale = self._get_mla_kv_nope_quant_weight(
+        elif src_weight_info.name == W.mla_kv_b_w:
+            kernel, scale = self._get_mla_kv_b_quant_weight(
                 src_weight_info, self.group_size
             )
         elif src_weight_info.name in [W.mla_kc, W.mla_vc]:
@@ -283,19 +285,32 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             kernel, scale = self._get_moe_w1_quant_weight(src_weight_info)
         elif src_weight_info.name == W.moe_w2:
             kernel, scale = self._get_moe_w2_quant_weight(src_weight_info)
-        elif src_weight_info.name in [W.linear_attn_qkvz_w, W.linear_attn_out_w]:
-            pairs = {
-                W.linear_attn_qkvz_w: (W.linear_attn_qkvz_w, W.linear_attn_qkvz_s),
-                W.linear_attn_out_w: (W.linear_attn_out_w, W.linear_attn_out_s),
-            }
+        elif src_weight_info.name == W.linear_attn_qkvz_w:
+            if len(src_weight_info.weights) == 1:
+                kernel, scale = self._get_quant_weight_linear(
+                    src_weight_info,
+                    W.linear_attn_qkvz_w,
+                    W.linear_attn_qkvz_s,
+                )
+            else:
+                kernel, scale = self._get_quant_weight_linear_qkvz_qwen35(
+                    src_weight_info
+                )
+        elif src_weight_info.name == W.linear_attn_out_w:
             kernel, scale = self._get_quant_weight_linear(
                 src_weight_info,
-                pairs[src_weight_info.name][0],
-                pairs[src_weight_info.name][1],
+                W.linear_attn_out_w,
+                W.linear_attn_out_s,
             )
-        elif src_weight_info.name == W.attn_gate_w:
+        elif src_weight_info.name in [
+            W.attn_gate_w,
+            W.mla_indexer_qb_w,
+            W.mla_indexer_k_w,
+        ]:
             kernel, scale = self._get_quant_weight_default(
-                src_weight_info, W.attn_gate_w, W.attn_gate_s
+                src_weight_info,
+                src_weight_info.name,
+                PerBlockFp8Weight.w8a8_weight_list[src_weight_info.name],
             )
         else:
             raise ValueError(f"Unsupported weight name {src_weight_info.name}")
@@ -338,6 +353,40 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         )
         return [kernel, scale]
 
+    def _get_quant_weight_linear_qkvz_qwen35(
+        self,
+        src_weight_info: LinearAttnAtomicWeight,
+    ):
+        def merge_qkv_z(ts: List[torch.Tensor]) -> torch.Tensor:
+            qkv = ts[0]
+            z = ts[1]
+            return torch.cat([qkv, z], dim=0)
+
+        qkv_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
+        z_name = src_weight_info.weights[1].name[: -len(W_SUFFIX)]
+        kernel = W8A8Fp8PerBlockLinearAttnAtomicWeight(
+            W.linear_attn_qkvz_w,
+            [
+                CkptWeightInfo(qkv_name + QW_SUFFIX, identity),
+                CkptWeightInfo(z_name + QW_SUFFIX, identity),
+            ],
+            merge_qkv_z,
+            src_weight_info.config,
+            torch.float8_e4m3fn,
+        )
+
+        scale = W8A8Fp8PerBlockLinearAttnAtomicWeight(
+            W.linear_attn_qkvz_s,
+            [
+                CkptWeightInfo(qkv_name + QS_SUFFIX, identity),
+                CkptWeightInfo(z_name + QS_SUFFIX, identity),
+            ],
+            merge_qkv_z,
+            src_weight_info.config,
+            torch.float32,
+        )
+        return [kernel, scale]
+
     def _get_quant_weight_linear(
         self,
         src_weight_info: LinearAttnAtomicWeight,
@@ -365,7 +414,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
 
     def _get_quant_weight_default(
         self,
-        src_weight_info: AttnAtomicWeight,
+        src_weight_info: AtomicWeight,
         weight_key: str,
         scale_key: str,
     ):
@@ -410,7 +459,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             functools.partial(
                 mla_pad,
                 head_num=src_weight_info.config.head_num,
-                nope_head_dim=src_weight_info.nope_head_dim,
+                nope_head_dim=src_weight_info.v_head_dim,
                 rope_head_dim=0,
             ),
             data_type=torch.float8_e4m3fn,
@@ -423,7 +472,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             functools.partial(
                 mla_pad_scale,
                 head_num=src_weight_info.config.head_num,
-                nope_head_dim=src_weight_info.nope_head_dim,
+                nope_head_dim=src_weight_info.v_head_dim,
                 rope_head_dim=0,
                 group_size=group_size,
             ),
@@ -433,45 +482,28 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
 
         return [kernel, scale]
 
-    def _get_mla_kv_nope_quant_weight(
+    def _get_mla_kv_b_quant_weight(
         self, src_weight_info: MlaAttnAtomicWeight, group_size: int
     ):
-        is_k = src_weight_info.name == W.mla_k_nope_w
+        assert src_weight_info.name == W.mla_kv_b_w
         w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
-        if is_k:
-            w, s = [W.mla_k_nope_w, W.mla_k_nope_s]
-        else:
-            w, s = [W.mla_v_w, W.mla_v_s]
 
         kernel = create_w8a8_fp8_per_block_weight(
             src_weight_info,
-            w,
+            W.mla_kv_b_w,
             [CkptWeightInfo(w_name + QW_SUFFIX, identity)],
-            functools.partial(
-                kv_split,
-                kv_lora_rank=src_weight_info.kv_lora_rank,
-                nope_head_dim=src_weight_info.nope_head_dim,
-                v_head_dim=src_weight_info.v_head_dim,
-                idx=0 if is_k else 1,
-            ),
+            identity,
             data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
         )
         scale = create_w8a8_fp8_per_block_weight(
             src_weight_info,
-            s,
+            W.mla_kv_b_s,
             [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
-            functools.partial(
-                kv_split,
-                kv_lora_rank=src_weight_info.kv_lora_rank // group_size,
-                nope_head_dim=src_weight_info.nope_head_dim // group_size,
-                v_head_dim=src_weight_info.v_head_dim // group_size,
-                idx=0 if is_k else 1,
-            ),
+            identity,
             data_type=torch.float32,
             config=src_weight_info.config,
         )
-
         return [kernel, scale]
 
     def _get_mla_kv_c(self, src_weight_info: MlaAttnAtomicWeight):
@@ -714,19 +746,28 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
-        kernel_weight = (
-            kernel_weight.reshape(kernel_weight.shape[-1], -1)
-            if kernel_weight.dim() == 2
-            else kernel_weight
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+            is_deep_gemm_e8m0_used,
         )
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
+
+        # e8m0 not reshape, weight scale need be non contiguous
+        # TODO: rm reshape all time
+        if not is_deep_gemm_e8m0_used():
+            kernel_weight = (
+                kernel_weight.reshape(kernel_weight.shape[-1], -1)
+                if kernel_weight.dim() == 2
+                else kernel_weight
+            )
         processed_res[self.kernel.name] = kernel_weight
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
-            scale_weight = (
-                scale_weight.reshape(scale_weight.shape[-1], -1)
-                if scale_weight.dim() == 2
-                else scale_weight
-            )
+            if not is_deep_gemm_e8m0_used():
+                scale_weight = (
+                    scale_weight.reshape(scale_weight.shape[-1], -1)
+                    if scale_weight.dim() == 2
+                    else scale_weight
+                )
             kernel_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
                 "weight", kernel_weight
             )
@@ -734,6 +775,12 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 "scale", scale_weight
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
+
+            if is_deep_gemm_e8m0_used():
+                kernel_weight, scale_weight = requant_weight_ue8m0(
+                    kernel_weight, scale_weight
+                )
+
             processed_res[self.scale.name] = scale_weight
             processed_res[self.kernel.name] = kernel_weight
 
@@ -770,7 +817,7 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         scale_name = self.w8a8_weight_list.get(src_weight_info.name)
         scale = None
         if scale_name:
-            scale_params = copy.deepcopy(params)
+            scale_params = {**params}
             scale_params["name"] = scale_name
             scale: AtomicWeight = create_w8a8_fp8_per_block_weight(
                 src_weight_info, **scale_params

@@ -6,8 +6,8 @@ import torch.nn.functional as F
 from torch import nn
 
 from rtp_llm.config.quant_config import QuantizationConfig
-from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.base.common.norm import RMSNormTorch
+from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import AttentionConfigs
 from rtp_llm.utils.model_weight import W
 
@@ -275,15 +275,17 @@ class MlaAttentionRef(nn.Module):
 
         if self.q_lora_rank > 0:
             self.fused_qkv_a_proj = LinearFactory.create_linear_from_weights(
-                weights, W.mla_fusedqkrope_w, W.mla_fusedqkrope_s, None,
-                quant_config=quant_config
+                weights,
+                W.mla_fusedqkrope_w,
+                W.mla_fusedqkrope_s,
+                None,
+                quant_config=quant_config,
             )
             self.q_a_layernorm = RMSNormTorch(
                 weights.get(W.mla_q_a_ln_gamma, None), eps=layernorm_eps
             )
             self.q_b_proj = LinearFactory.create_linear_from_weights(
-                weights, W.mla_q_b_w, W.mla_q_b_s, None,
-                quant_config=quant_config
+                weights, W.mla_q_b_w, W.mla_q_b_s, None, quant_config=quant_config
             )
         else:
             self.fused_qkv_proj = LinearFactory.create_linear_from_weights(
@@ -291,7 +293,7 @@ class MlaAttentionRef(nn.Module):
                 W.mla_fusedqkrope_no_lora_w,
                 W.mla_fusedqkrope_no_lora_s,
                 None,
-                quant_config=quant_config
+                quant_config=quant_config,
             )
 
         self.kv_a_layernorm = RMSNormTorch(
@@ -299,8 +301,7 @@ class MlaAttentionRef(nn.Module):
         )
 
         self.o_proj = LinearFactory.create_linear_from_weights(
-            weights, W.attn_o_w, W.attn_o_s, W.attn_o_b,
-            quant_config=quant_config
+            weights, W.attn_o_w, W.attn_o_s, W.attn_o_b, quant_config=quant_config
         )
 
         self.rotary_emb = DeepseekV3YarnRotaryEmbedding(
@@ -375,13 +376,12 @@ class MlaAttentionRef(nn.Module):
         q_pe = q_pe.view(-1, self.num_heads, self.qk_rope_head_dim).to(q_nope.dtype)
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim).to(compressed_kv.dtype)
 
-        k_nope_weight = self.weights.get(W.mla_k_nope_w, None)
-        v_weight = self.weights.get(W.mla_v_w, None)
+        kv_b_weight = self.weights.get(W.mla_kv_b_w, None)
 
-        k_nope = F.linear(compressed_kv, k_nope_weight.transpose(0, 1), None)
-        k_nope = k_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
-        value_states = F.linear(compressed_kv, v_weight.transpose(0, 1), None)
-        value_states = value_states.view(-1, self.num_heads, self.qk_nope_head_dim)
+        kv = compressed_kv @ kv_b_weight
+        kv = kv.view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+        k_nope = kv[:, :, : self.qk_nope_head_dim].contiguous()
+        value_states = kv[:, :, self.qk_nope_head_dim :].contiguous()
 
         query_states = torch.cat((q_nope, q_pe), dim=-1)
         k = k_pe.new_empty(

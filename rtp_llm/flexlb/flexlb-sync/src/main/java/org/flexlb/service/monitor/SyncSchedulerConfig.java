@@ -14,9 +14,9 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 public class SyncSchedulerConfig {
 
     /**
-     * 使用 Spring Boot 定时任务 {@link org.springframework.scheduling.annotation.Scheduled} 的自定义线程池
+     * Custom thread pool for Spring Boot scheduled tasks {@link org.springframework.scheduling.annotation.Scheduled}
      *
-     * <p><b>NOTE:</b> 名字必须要为 {@code taskScheduler}</p>
+     * <p><b>NOTE:</b> Name must be {@code taskScheduler}</p>
      */
     @Bean(name = "taskScheduler")
     public ScheduledThreadPoolExecutor taskScheduler() {

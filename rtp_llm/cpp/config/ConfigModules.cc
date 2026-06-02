@@ -19,6 +19,34 @@ std::string NcclCommConfig::to_string() const {
     return oss.str();
 }
 
+// PrefillCPConfig
+std::string PrefillCPConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "method: ";
+    switch (method) {
+        case CPRotateMethod::DISABLED:
+            oss << "DISABLED";
+            break;
+        case CPRotateMethod::ALL_GATHER:
+            oss << "ALL_GATHER";
+            break;
+        case CPRotateMethod::ALL_GATHER_WITH_OVERLAP:
+            oss << "ALL_GATHER_WITH_OVERLAP";
+            break;
+        case CPRotateMethod::ALLTOALL:
+            oss << "ALLTOALL";
+            break;
+        case CPRotateMethod::PREFILL_CP:
+            oss << "PREFILL_CP";
+            break;
+        default:
+            oss << "UNKNOWN";
+            break;
+    }
+    oss << "\n comm_buffer_size: " << comm_buffer_size << "\n";
+    return oss.str();
+}
+
 // ParallelismConfig
 std::string ParallelismConfig::to_string() const {
     std::ostringstream oss;
@@ -38,7 +66,9 @@ std::string ParallelismConfig::to_string() const {
         << "ffn_tp_rank: " << ffn_tp_rank << "\n"
         << "enable_sp: " << enable_sp << "\n"
         << "ffn_disaggregate_config: {\n"
-        << ffn_disaggregate_config.to_string() << "\n}";
+        << ffn_disaggregate_config.to_string() << "\n}\n"
+        << "prefill_cp_config: {\n"
+        << prefill_cp_config.to_string() << "}\n";
     return oss.str();
 }
 
@@ -63,6 +93,7 @@ std::string FMHAConfig::to_string() const {
         << "enable_xqa: " << enable_xqa << "\n"
         << "use_aiter_pa: " << use_aiter_pa << "\n"
         << "use_asm_pa: " << use_asm_pa << "\n"
+        << "use_triton_pa: " << use_triton_pa << "\n"
         << "absorb_opt_len: " << absorb_opt_len << "\n";
     return oss.str();
 }
@@ -83,26 +114,26 @@ std::string KVCacheConfig::to_string() const {
         << "multi_task_prompt_str: " << multi_task_prompt_str << "\n"
         << "multi_task_prompt_tokens: " << (multi_task_prompt_tokens.empty() ? "empty" : "non-empty") << "\n"
         << "reserve_block_ratio: " << reserve_block_ratio << "\n"
-        << "enable_3fs: " << enable_3fs << "\n"
-        << "match_timeout_ms: " << match_timeout_ms << "\n"
-        << "rpc_get_cache_timeout_ms: " << rpc_get_cache_timeout_ms << "\n"
-        << "rpc_put_cache_timeout_ms: " << rpc_put_cache_timeout_ms << "\n"
-        << "threefs_read_timeout_ms: " << threefs_read_timeout_ms << "\n"
-        << "threefs_write_timeout_ms: " << threefs_write_timeout_ms << "\n"
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
-        << "threefs_read_iov_size: " << threefs_read_iov_size << "\n"
-        << "threefs_write_iov_size: " << threefs_write_iov_size << "\n"
         << "memory_cache_size_mb: " << memory_cache_size_mb << "\n"
         << "memory_cache_sync_timeout_ms: " << memory_cache_sync_timeout_ms << "\n"
+        << "linear_step: " << linear_step << "\n"
         << "int8_kv_cache: " << int8_kv_cache << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
+        << "ssm_state_dtype: " << ssm_state_dtype << "\n"
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
         << "seq_size_per_block: " << seq_size_per_block << "\n"
+        << "kernel_seq_size_per_block: " << kernel_seq_size_per_block << "\n"
         << "test_block_num: " << test_block_num << "\n"
         << "use_block_cache: " << use_block_cache << "\n"
         << "enable_device_cache: " << enable_device_cache << "\n"
         << "enable_memory_cache: " << enable_memory_cache << "\n"
-        << "write_cache_sync: " << write_cache_sync << "\n";
+        << "enable_remote_cache: " << enable_remote_cache << "\n"
+        << "enable_reuse_cache_in_batch: " << enable_reuse_cache_in_batch << "\n"
+        << "write_cache_sync: " << write_cache_sync << "\n"
+        << "enable_tiered_memory_cache: " << enable_tiered_memory_cache << "\n"
+        << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
+        << "load_cache_retry_times: " << load_cache_retry_times << "\n";
     return oss.str();
 }
 
@@ -110,7 +141,6 @@ std::string KVCacheConfig::to_string() const {
 std::string ProfilingDebugLoggingConfig::to_string() const {
     std::ostringstream oss;
     oss << "trace_memory: " << trace_memory << "\n"
-        << "trace_malloc_stack: " << trace_malloc_stack << "\n"
         << "enable_device_perf: " << enable_device_perf << "\n"
         << "ft_core_dump_on_exception: " << ft_core_dump_on_exception << "\n"
         << "ft_alog_conf_path: " << ft_alog_conf_path << "\n"
@@ -121,8 +151,7 @@ std::string ProfilingDebugLoggingConfig::to_string() const {
         << "hack_layer_num: " << hack_layer_num << "\n"
         << "debug_start_fake_process: " << debug_start_fake_process << "\n"
         << "enable_detail_log: " << enable_detail_log << "\n"
-        << "check_nan: " << check_nan << "\n"
-        << "enable_torch_alloc_profile: " << enable_torch_alloc_profile << "\n";
+        << "check_nan: " << check_nan << "\n";
     return oss.str();
 }
 
@@ -133,7 +162,9 @@ std::string LinearAttentionConfig::to_string() const {
         << "linear_key_head_dim: " << linear_key_head_dim << "\n"
         << "linear_num_key_heads: " << linear_num_key_heads << "\n"
         << "linear_num_value_heads: " << linear_num_value_heads << "\n"
-        << "linear_value_head_dim: " << linear_value_head_dim;
+        << "linear_value_head_dim: " << linear_value_head_dim << "\n"
+        << "ssm_state_dtype: " << getDataTypeStr(ssm_state_dtype) << "\n"
+        << "conv_state_dtype: " << getDataTypeStr(conv_state_dtype);
     return oss.str();
 }
 // HybridAttentionConfig
@@ -148,7 +179,6 @@ std::string HWKernelConfig::to_string() const {
     std::ostringstream oss;
     oss << "deep_gemm_num_sm: " << deep_gemm_num_sm << "\n"
         << "arm_gemm_use_kai: " << arm_gemm_use_kai << "\n"
-        << "enable_stable_scatter_add: " << enable_stable_scatter_add << "\n"
         << "enable_multi_block_mode: " << enable_multi_block_mode << "\n"
         << "ft_disable_custom_ar: " << ft_disable_custom_ar << "\n"
         << "rocm_hipblaslt_config: " << rocm_hipblaslt_config << "\n"
@@ -160,16 +190,14 @@ std::string HWKernelConfig::to_string() const {
         << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"
         << "decode_capture_batch_sizes size: " << decode_capture_batch_sizes.size() << "\n"
         << "disable_dpc_random: " << disable_dpc_random << "\n"
-        << "rocm_disable_custom_ag" << rocm_disable_custom_ag;
+        << "rocm_disable_custom_ag: " << rocm_disable_custom_ag;
     return oss.str();
 }
 
 // DeviceResourceConfig
 std::string DeviceResourceConfig::to_string() const {
     std::ostringstream oss;
-    oss << "device_reserve_memory_bytes: " << device_reserve_memory_bytes << "\n"
-        << "host_reserve_memory_bytes: " << host_reserve_memory_bytes << "\n"
-        << "overlap_math_sm_count: " << overlap_math_sm_count << "\n"
+    oss << "overlap_math_sm_count: " << overlap_math_sm_count << "\n"
         << "overlap_comm_type: " << overlap_comm_type << "\n"
         << "m_split: " << m_split << "\n"
         << "enable_comm_overlap: " << enable_comm_overlap << "\n"
@@ -184,20 +212,22 @@ std::string MoeConfig::to_string() const {
         << "use_deepep_internode: " << use_deepep_internode << "\n"
         << "use_deepep_low_latency: " << use_deepep_low_latency << "\n"
         << "use_deepep_p2p_low_latency: " << use_deepep_p2p_low_latency << "\n"
+        << "use_mori_ep: " << use_mori_ep << "\n"
         << "fake_balance_expert: " << fake_balance_expert << "\n"
         << "hack_moe_expert: " << hack_moe_expert << "\n"
         << "deep_ep_num_sm: " << deep_ep_num_sm << "\n"
-        << "max_moe_normal_masked_token_num: " << max_moe_normal_masked_token_num << "\n"
+        << "masked_max_token_num: " << masked_max_token_num << "\n"
         << "use_all_gather: " << use_all_gather << "\n"
-        << "ll_num_max_token: " << ll_num_max_token;
+        << "ll_num_max_token: " << ll_num_max_token << "\n"
+        << "moe_strategy: " << moe_strategy << "\n"
+        << "fp4_moe_op: " << fp4_moe_op;
     return oss.str();
 }
 
 // ModelSpecificConfig
 std::string ModelSpecificConfig::to_string() const {
     std::ostringstream oss;
-    oss << "max_lora_model_size: " << max_lora_model_size << "\n";
-    oss << "load_python_model:" << load_python_model << "\n";
+    // Empty struct — no fields remaining.
     return oss.str();
 }
 
@@ -250,8 +280,7 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "force_stream_sample: " << force_stream_sample << "\n"
         << "force_score_context_attention: " << force_score_context_attention << "\n"
         << "quantization: " << quantization << "\n"
-        << "checkpoint_path: " << checkpoint_path << "\n"
-        << "use_new_sp_engine: " << use_new_sp_engine;
+        << "checkpoint_path: " << checkpoint_path;
     return oss.str();
 }
 
@@ -289,7 +318,17 @@ std::string CacheStoreConfig::to_string() const {
         << "rdma_io_thread_count: " << rdma_io_thread_count << "\n"
         << "rdma_worker_thread_count: " << rdma_worker_thread_count << "\n"
         << "messager_io_thread_count: " << messager_io_thread_count << "\n"
-        << "messager_worker_thread_count: " << messager_worker_thread_count << "\n";
+        << "messager_worker_thread_count: " << messager_worker_thread_count << "\n"
+        << "rdma_max_block_pairs_per_connection: " << rdma_max_block_pairs_per_connection << "\n"
+        << "rdma_transfer_wait_timeout_ms: " << rdma_transfer_wait_timeout_ms << "\n"
+        << "p2p_read_steal_before_deadline_ms: " << p2p_read_steal_before_deadline_ms << "\n"
+        << "p2p_read_return_before_deadline_ms: " << p2p_read_return_before_deadline_ms << "\n"
+        << "p2p_transfer_not_done_resource_hold_ms: " << p2p_transfer_not_done_resource_hold_ms << "\n"
+        << "p2p_resource_store_timeout_check_interval_ms: " << p2p_resource_store_timeout_check_interval_ms << "\n"
+        << "p2p_layer_cache_buffer_store_timeout_ms: " << p2p_layer_cache_buffer_store_timeout_ms << "\n"
+        << "p2p_cancel_broadcast_timeout_ms: " << p2p_cancel_broadcast_timeout_ms << "\n"
+        << "cache_store_tcp_anet_rpc_thread_num: " << cache_store_tcp_anet_rpc_thread_num << "\n"
+        << "cache_store_tcp_anet_rpc_queue_num: " << cache_store_tcp_anet_rpc_queue_num << "\n";
     return oss.str();
 }
 
@@ -298,14 +337,6 @@ std::string MiscellaneousConfig::to_string() const {
     std::ostringstream oss;
     oss << "disable_pdl: " << disable_pdl << "\n"
         << "aux_string: " << aux_string << "\n";
-    return oss.str();
-}
-
-// SchedulerConfig
-std::string SchedulerConfig::to_string() const {
-    std::ostringstream oss;
-    oss << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
-        << "use_gather_batch_scheduler: " << use_gather_batch_scheduler;
     return oss.str();
 }
 
@@ -329,13 +360,11 @@ std::string FIFOSchedulerConfig::to_string() const {
 std::string RuntimeConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_generate_batch_size: " << max_generate_batch_size << "\n"
-        << "pre_allocate_op_mem: " << pre_allocate_op_mem << "\n"
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
         << "reserve_runtime_mem_mb: " << reserve_runtime_mem_mb << "\n"
         << "warm_up: " << warm_up << "\n"
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
         << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
-        << "use_gather_batch_scheduler: " << use_gather_batch_scheduler << "\n"
         << "batch_decode_scheduler_config: {\n"
         << batch_decode_scheduler_config.to_string() << "\n}\n"
         << "fifo_scheduler_config: {\n"
@@ -355,8 +384,7 @@ std::string RuntimeConfig::to_string() const {
             oss << ", ";
     }
     oss << "]\n"
-        << "specify_gpu_arch: " << specify_gpu_arch << "\n"
-        << "acext_gemm_config_dir: " << acext_gemm_config_dir;
+        << "specify_gpu_arch: " << specify_gpu_arch;
     return oss.str();
 }
 

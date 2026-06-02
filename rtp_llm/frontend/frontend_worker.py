@@ -159,6 +159,8 @@ class FrontendWorker:
             grpc_config=py_env_configs.grpc_config,
             vit_separation=vit_separation,
             extra_input_processor=extra_input_processor,
+            server_config=py_env_configs.server_config,
+            master_config=py_env_configs.master_config,
         )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         self.generate_env_config = py_env_configs.generate_env_config
@@ -175,6 +177,57 @@ class FrontendWorker:
         token_ids = [int(id) for id in token_ids]
         tokens = [self.pipeline.decode(id) for id in token_ids]
         return token_ids, tokens
+
+    async def batch_infer(
+        self, prompts: List[str], request_id: int, generate_config: dict
+    ) -> BatchPipelineResponse:
+        responses = await self.pipeline.batch_infer(
+            prompts=prompts,
+            base_request_id=request_id,
+            generate_config_json=generate_config,
+            generate_env_config=self.generate_env_config,
+        )
+        # Reconstruct GenerateConfig to check flags (aux_info, calculate_loss, etc.)
+        gc = self.pipeline.create_generate_config(
+            generate_config,
+            len(self.pipeline.tokenizer),
+            self.pipeline._special_tokens,
+            self.pipeline.tokenizer,
+            generate_env_config=self.generate_env_config,
+        )
+        pipeline_responses = []
+        for gen_response in responses:
+            out = gen_response.generate_outputs.generate_outputs[0]
+            generate_texts = gen_response.generate_texts
+            aux_info_dict: Dict[str, Any] = {}
+            if gc.aux_info:
+                aux = out.aux_info
+                if gc.has_num_beams():
+                    aux.beam_responses = generate_texts
+                aux_info_dict = asdict(aux)
+            pipeline_responses.append(
+                PipelineResponse(
+                    response=generate_texts[0],
+                    finished=out.finished,
+                    aux_info=aux_info_dict,
+                    hidden_states=(
+                        out.hidden_states.tolist()
+                        if gc.return_hidden_states and out.hidden_states is not None
+                        else None
+                    ),
+                    loss=(
+                        out.loss.tolist()
+                        if gc.calculate_loss and out.loss is not None
+                        else None
+                    ),
+                    logits=(
+                        out.logits.tolist()
+                        if gc.return_logits and out.logits is not None
+                        else None
+                    ),
+                )
+            )
+        return BatchPipelineResponse(response_batch=pipeline_responses)
 
     def inference(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
         default_generate_config = GenerateConfig()
@@ -208,6 +261,9 @@ class FrontendWorker:
             num_return_sequences = request.generate_configs[0].num_return_sequences
             generators: List[AsyncGenerator[Dict[str, Any], None]] = []
             # TODO temp fix sp with batch infer, will change request_id to str later
+            batch_group_size = len(request.input_texts)
+            # Use request.request_id as batch_group_id for all streams in the same batch
+            batch_group_id = request.request_id
             for i, (text, urls, generate_config) in enumerate(
                 zip(request.input_texts, request.input_urls, request.generate_configs)
             ):
@@ -217,6 +273,8 @@ class FrontendWorker:
                         text,
                         urls,
                         generate_config=generate_config,
+                        batch_group_size=batch_group_size,
+                        batch_group_id=batch_group_id,
                         **kwargs,
                     )
                 )
@@ -313,6 +371,8 @@ class FrontendWorker:
         text: str,
         urls: List[str],
         generate_config: GenerateConfig,
+        batch_group_size: int = 1,
+        batch_group_id: int = -1,
         **kwargs: Any,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         stream = self.pipeline.pipeline_async(
@@ -321,6 +381,8 @@ class FrontendWorker:
             urls=urls,
             generate_config=generate_config,
             generate_env_config=self.generate_env_config,
+            batch_group_size=batch_group_size,
+            batch_group_id=batch_group_id,
             **kwargs,
         )
         async for generate_response in stream:

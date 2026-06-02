@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "th_eplb_py_wrapper_test_lib",
@@ -35,5 +35,5 @@ py_test(
     deps = [
         "//rtp_llm:torch"
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )

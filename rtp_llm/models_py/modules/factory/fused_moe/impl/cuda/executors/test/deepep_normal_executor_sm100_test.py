@@ -6,12 +6,12 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     is_deep_gemm_e8m0_used,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.deepep_normal_executor_test import (
-    DeepGemmContinousExecutorTestBase,
+    DeepGemmHybridExecutorTestBase,
 )
 
 
-class DeepGemmContinousExecutorSM100Test(
-    DeepGemmContinousExecutorTestBase, unittest.TestCase
+class DeepGemmHybridExecutorSM100Test(
+    DeepGemmHybridExecutorTestBase, unittest.TestCase
 ):
     def test_sm100_arm(self):
         self.assertTrue(has_deep_gemm())

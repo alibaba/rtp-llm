@@ -46,8 +46,8 @@ protected:
             engine, nullptr, request_counter, tokenizer, render, model_config, metric_reporter);
 
         // mock OpenaiEndpoint 方便测试
-        mock_openai_endpoint_ = std::make_shared<MockOpenaiEndpoint>(tokenizer, render, model_config);
-        auto openai_endpoint  = std::dynamic_pointer_cast<OpenaiEndpoint>(mock_openai_endpoint_);
+        mock_openai_endpoint_           = std::make_shared<MockOpenaiEndpoint>(tokenizer, render, model_config);
+        auto openai_endpoint            = std::dynamic_pointer_cast<OpenaiEndpoint>(mock_openai_endpoint_);
         chat_service_->openai_endpoint_ = openai_endpoint;
 
         mock_writer_ = std::make_unique<http_server::MockHttpResponseWriter>();
@@ -81,12 +81,9 @@ protected:
         auto input             = std::make_shared<GenerateInput>();
         input->generate_config = std::make_shared<GenerateConfig>();
 
-        std::vector<size_t> shape = {data_.size()};
-        // 由于 Buffer 内部不负责管理传入的地址数据(只是使用), 所以数据必须具有较久的生命周期
-        input->input_ids = std::make_shared<rtp_llm::Buffer>(
-            rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, data_.data());
+        input->input_ids = torch::tensor(std::vector<int32_t>(data_.begin(), data_.end()), torch::kInt32);
 
-        ModelConfig model_config;
+        ModelConfig   model_config;
         RuntimeConfig runtime_config;
         model_config.max_seq_len = data_.size();
 
@@ -94,10 +91,8 @@ protected:
         return mock_stream;
     }
 
-    rtp_llm::ConstBufferPtr CreateBuffer() {
-        std::vector<size_t> shape = {data_.size()};
-        return std::make_shared<rtp_llm::Buffer>(
-            rtp_llm::MemoryType::MEMORY_CPU, rtp_llm::DataType::TYPE_INT32, shape, data_.data());
+    torch::Tensor CreateOutputIdsTensor() {
+        return torch::from_blob(data_.data(), {(int64_t)data_.size()}, torch::kInt32).clone();
     }
 
 protected:
@@ -241,8 +236,9 @@ TEST_F(ChatServiceTest, ChatCompletions) {
                                                                         bool is_streaming) {
             EXPECT_EQ(config, generate_config);
             EXPECT_EQ(is_streaming, true);
-            auto buffer_ptr         = resp.generate_outputs[0].output_ids;
-            auto output_tokens_list = rtp_llm::buffer2vector<int>(*buffer_ptr);
+            auto             output_ids_tensor = resp.generate_outputs[0].output_ids.contiguous();
+            std::vector<int> output_tokens_list(output_ids_tensor.data_ptr<int>(),
+                                                output_ids_tensor.data_ptr<int>() + output_ids_tensor.numel());
             EXPECT_EQ(output_tokens_list.size(), data.size());
             for (int i = 0; i < output_tokens_list.size(); ++i) {
                 EXPECT_EQ(output_tokens_list.at(i), data.at(i));
@@ -255,8 +251,9 @@ TEST_F(ChatServiceTest, ChatCompletions) {
                                                                         bool is_streaming) {
             EXPECT_EQ(config, generate_config);
             EXPECT_EQ(is_streaming, true);
-            auto buffer_ptr         = resp.generate_outputs[0].output_ids;
-            auto output_tokens_list = rtp_llm::buffer2vector<int>(*buffer_ptr);
+            auto             output_ids_tensor = resp.generate_outputs[0].output_ids.contiguous();
+            std::vector<int> output_tokens_list(output_ids_tensor.data_ptr<int>(),
+                                                output_ids_tensor.data_ptr<int>() + output_ids_tensor.numel());
             EXPECT_EQ(output_tokens_list.size(), data.size());
             for (int i = 0; i < output_tokens_list.size(); ++i) {
                 EXPECT_EQ(output_tokens_list.at(i), data.at(i));
@@ -265,8 +262,9 @@ TEST_F(ChatServiceTest, ChatCompletions) {
         }));
     EXPECT_CALL(*mock_ctx, render_stream_response_final)
         .WillOnce(Invoke([data = data_, json_response](const GenerateOutputs& resp) {
-            auto buffer_ptr         = resp.generate_outputs[0].output_ids;
-            auto output_tokens_list = rtp_llm::buffer2vector<int>(*buffer_ptr);
+            auto             output_ids_tensor = resp.generate_outputs[0].output_ids.contiguous();
+            std::vector<int> output_tokens_list(output_ids_tensor.data_ptr<int>(),
+                                                output_ids_tensor.data_ptr<int>() + output_ids_tensor.numel());
             EXPECT_EQ(output_tokens_list.size(), data.size());
             for (int i = 0; i < output_tokens_list.size(); ++i) {
                 EXPECT_EQ(output_tokens_list.at(i), data.at(i));
@@ -279,7 +277,7 @@ TEST_F(ChatServiceTest, ChatCompletions) {
     }));
 
     GenerateOutput output;
-    output.output_ids = CreateBuffer();
+    output.output_ids = CreateOutputIdsTensor();
     GenerateOutputs outputs;
     outputs.generate_outputs.push_back(output);
 

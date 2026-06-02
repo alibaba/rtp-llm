@@ -8,6 +8,7 @@ cc_library(
     ],
     deps = [
         "//:rtp_compute_ops",
+        "//rtp_llm/cpp/utils:tensor_debug_utils",
     ],
     visibility = ["//visibility:public"],
 )
@@ -50,6 +51,7 @@ cc_library(
         "logits_processor/LogitsProcessorStates.h",
         "logits_processor/ThinkModeLogitsProcessor.h",
         "logits_processor/TreeLogitsProcessor.h",
+        "logits_processor/RecommendationLogitsProcessor.h",
         "logits_processor/LogitsProcessorFactory.h",
     ],
     srcs = [
@@ -58,6 +60,7 @@ cc_library(
         "logits_processor/LogitsProcessorStates.cc",
         "logits_processor/ThinkModeLogitsProcessor.cc",
         "logits_processor/TreeLogitsProcessor.cc",
+        "logits_processor/RecommendationLogitsProcessor.cc",
         "logits_processor/LogitsProcessorFactory.cc",
     ],
     deps = [
@@ -67,21 +70,41 @@ cc_library(
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//rtp_llm/cpp/pybind:py_utils",
+        "//rtp_llm/cpp/utils:error_code",
+    ] + select({
+        "//:using_cuda": ["//rtp_llm/models_py/bindings/cuda/ops:standalone_ops"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+# Context Parallel Interface - base interface for context parallel processors
+cc_library(
+    name = "context_parallel_interface",
+    hdrs = [
+        "context_parallel/ContextParallelProcessorBase.h",
+    ],
+    deps = [
+        "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],
 )
 
-# LoRA - model fine-tuning
 cc_library(
-    name = "lora",
+    name = "context_parallel",
     hdrs = [
-        "lora/LoraManager.h",
+        "context_parallel/ZigzagProcessor.h",
     ],
     srcs = [
-        "lora/LoraManager.cc",
+        "context_parallel/ContextParallelProcessorBase.cc",
+        "context_parallel/ZigzagProcessor.cc",
+        "context_parallel/ContextParallelProcessorFactory.cc",
     ],
     deps = [
+        ":context_parallel_interface",
         "//:rtp_compute_ops",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
     visibility = ["//visibility:public"],
 )
@@ -98,9 +121,19 @@ cc_library(
         ":sample_infos",
         ":logits_processor",
         ":dfa_utils",
+        ":context_parallel",
         "//:rtp_compute_ops",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
+        "//rtp_llm/cpp/utils:debug_utils",
+        "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
+        "//rtp_llm/models_py/bindings/common:fuse_copy_op",
     ],
     visibility = ["//visibility:public"],
 )
@@ -138,6 +171,7 @@ cc_library(
         ":models",
         ":dfa_utils",
         "//rtp_llm/cpp/config:eplb_config",
+        "//rtp_llm/cpp/metrics",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/cache:cache_types",
     ],

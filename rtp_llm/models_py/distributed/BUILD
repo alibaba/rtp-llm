@@ -1,4 +1,4 @@
-load("//bazel:arch_select.bzl", "deep_ep_py_deps")
+load("@arch_config//:arch_select.bzl", "deep_ep_py_deps")
 
 deep_ep_py_deps()
 
@@ -6,6 +6,7 @@ py_library(
     name = "collective_torch",
     srcs = [
         "collective_torch.py",
+        "rocm_rccl.py",
         "symm_mem.py",
     ],
     deps = [
@@ -23,5 +24,23 @@ py_library(
         "@//:using_cuda12":["deep_ep_py"],
         "//conditions:default": [],
     }),
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "moriep_wrapper",
+    srcs = ["moriep_wrapper.py"],
+    deps = [
+        "//rtp_llm:torch",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "user_buffers",
+    srcs = ["user_buffers.py"],
+    deps = [
+        "//rtp_llm:torch",
+    ],
     visibility = ["//visibility:public"],
 )

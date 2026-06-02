@@ -48,22 +48,22 @@ struct StreamThinkInfo {
 
 class ThinkModeLogitsProcessor: public BaseLogitsProcessor {
 public:
-    ThinkModeLogitsProcessor(rtp_llm::DeviceBase* device);
-    ThinkModeLogitsProcessor(rtp_llm::DeviceBase* device, std::vector<StreamThinkInfo> think_infos);
+    ThinkModeLogitsProcessor() = default;
+    ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> think_infos);
     virtual ~ThinkModeLogitsProcessor() {}
 
 public:
-    static std::shared_ptr<ThinkModeLogitsProcessor>
-    fromGenerateInput(rtp_llm::DeviceBase* device, std::shared_ptr<GenerateInput> generate_input, int32_t num);
+    static std::shared_ptr<ThinkModeLogitsProcessor> fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,
+                                                                       int32_t                        num);
 
 public:
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
     void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
-    void updateStatus(const rtp_llm::BufferPtr& new_tokens, int32_t num_new_tokens) override;
+    void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
 
 private:
     void setVocabMask(std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr,
-                      rtp_llm::BufferPtr                             new_tokens_logits,
+                      const torch::Tensor&                           new_tokens_logits,
                       int                                            num_new_tokens,
                       std::vector<int>                               template_token_ids,
                       size_t                                         vocab_size,

@@ -7,38 +7,38 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * FlexMetricTags - 监控指标标签接口
+ * FlexMetricTags - Monitoring metric tags interface
  *
  * @author saichen.sm
  */
 public interface FlexMetricTags {
 
     /**
-     * 获取标签的键值对映射
+     * Get tag key-value map
      *
-     * @return 标签键值对Map
+     * @return Tag key-value map
      */
     Map<String, String> getTags();
 
     /**
-     * 检查标签是否为空
+     * Check if tags are empty
      *
-     * @return true表示为空，false表示不为空
+     * @return true if empty, false otherwise
      */
     boolean isEmpty();
 
     /**
-     * 不可变标签实现类
-     * 用于替代KMonitor的ImmutableMetricTags
+     * Immutable tags implementation class
+     * Used to replace KMonitor's ImmutableMetricTags
      */
     class ImmutableFlexMetricTags implements FlexMetricTags {
         @Getter
         private final Map<String, String> tags;
 
         /**
-         * 构造函数 - 通过Map创建
+         * Constructor - create from Map
          *
-         * @param tags 标签Map
+         * @param tags Tag map
          */
         public ImmutableFlexMetricTags(Map<String, String> tags) {
             if (tags == null || tags.isEmpty()) {
@@ -49,9 +49,9 @@ public interface FlexMetricTags {
         }
 
         /**
-         * 构造函数 - 通过键值对创建（支持多个键值对）
+         * Constructor - create from key-value pairs (supports multiple pairs)
          *
-         * @param keyValues 键值对，格式为key1, value1, key2, value2, ...
+         * @param keyValues Key-value pairs, format: key1, value1, key2, value2, ...
          */
         public ImmutableFlexMetricTags(String... keyValues) {
             if (keyValues == null || keyValues.length == 0) {
@@ -100,20 +100,20 @@ public interface FlexMetricTags {
     }
 
     /**
-     * 便捷工厂方法 - 创建不可变标签（通过Map）
+     * Factory method - create immutable tags from Map
      *
-     * @param tags 标签Map
-     * @return 不可变标签实例
+     * @param tags Tag map
+     * @return Immutable tags instance
      */
     static FlexMetricTags of(Map<String, String> tags) {
         return new ImmutableFlexMetricTags(tags);
     }
 
     /**
-     * 便捷工厂方法 - 创建不可变标签（通过键值对）
+     * Factory method - create immutable tags from key-value pairs
      *
-     * @param keyValues 键值对，格式为key1, value1, key2, value2, ...
-     * @return 不可变标签实例
+     * @param keyValues Key-value pairs, format: key1, value1, key2, value2, ...
+     * @return Immutable tags instance
      */
     static FlexMetricTags of(String... keyValues) {
         return new ImmutableFlexMetricTags(keyValues);

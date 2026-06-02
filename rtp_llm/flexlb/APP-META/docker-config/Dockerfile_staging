@@ -1,4 +1,4 @@
-FROM hub.docker.alibaba-inc.com/aone/flexlb_base:20251118234649075025
+FROM hub.docker.alibaba-inc.com/aone/flexlb_base:20260129144716996579
 
 ############# staging #################
 # 设置spring profile或者自定义的jvm参数。如果需要则打开下面的注释内容

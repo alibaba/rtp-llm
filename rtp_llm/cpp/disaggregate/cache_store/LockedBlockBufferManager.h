@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 
 namespace rtp_llm {

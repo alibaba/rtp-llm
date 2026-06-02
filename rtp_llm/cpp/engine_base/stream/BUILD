@@ -8,6 +8,7 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/config:role_types",
         "//rtp_llm/cpp/config:special_tokens",
+        "@havenask//aios/autil:json",
         "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],
@@ -33,6 +34,7 @@ cc_library(
     deps = [
         ":generate_types",
         ":generate_config",
+        "//rtp_llm/cpp/utils:error_code",
         "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],
@@ -57,6 +59,8 @@ cc_library(
         "//rtp_llm/cpp/models:dfa_utils",
         "@havenask//aios/autil:synchronized_queue",
         "//:rtp_compute_ops",
+        "//rtp_llm/cpp/utils:linear_blocks_util",
+        "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
     ],
     visibility = ["//visibility:public"],
 )

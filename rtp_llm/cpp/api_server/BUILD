@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "embedding_arpc_deps")
+load("@arch_config//:arch_select.bzl", "embedding_arpc_deps")
 
 embedding_arpc_deps()
 

@@ -7,7 +7,6 @@ import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import org.flexlb.dao.RequestContext;
 import reactor.core.publisher.FluxSink;
 
 import java.util.List;
@@ -16,7 +15,7 @@ import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
- * NettyChannel 的上下文信息
+ * NettyChannel context information
  *
  * @author lushirong
  */
@@ -27,27 +26,23 @@ import java.util.function.Consumer;
 public class HttpNettyChannelContext<T> {
 
     /**
-     * 客户请求上下文
-     */
-    private RequestContext requestCtx;
-    /**
-     * 客户自定义请求
+     * Client custom request
      */
     private Object request;
     /**
-     * 与模型服务连接的 channel，可用于通信
+     * Channel connected to model service, used for communication
      */
     private Channel channel;
     /**
-     * 流式调用中与用户交互的发射器
+     * Emitter for interaction with user in streaming calls
      */
     private FluxSink<T> sink;
     /**
-     * 请求模型服务的 http 响应
+     * HTTP response from model service
      */
     private HttpResponse httpResp;
     /**
-     * 流式调用中，缓存模型服务的 sse 响应，直到一次事件的结束
+     * Cache model service SSE response in streaming calls until end of event
      */
     private List<Byte> buffer;
 
@@ -56,23 +51,23 @@ public class HttpNettyChannelContext<T> {
     private LongAdder byteDataSize;
 
     /**
-     * netty 触发 read 事件时调用的回调函数
+     * Callback function invoked when netty triggers read event
      */
     private BiConsumer<HttpNettyChannelContext<T>, HttpObject> readCallback;
     /**
-     * netty channel 连接断开的回调函数
+     * Callback function invoked when netty channel disconnects
      */
     private Consumer<HttpNettyChannelContext<T>> channelInactiveCallback;
     /**
-     * netty 交互过程中抛出异常时调用的回调函数
+     * Callback function invoked when exception is thrown during netty interaction
      */
     private BiConsumer<HttpNettyChannelContext<T>, Throwable> errorCallback;
     /**
-     * netty channel 增强处理回调
+     * Netty channel enhancement processing callback
      */
     private Consumer<HttpNettyChannelContext<T>> channelEnhanceCallback;
     /**
-     * 处理是否结束
+     * Processing completion flag
      */
     private boolean finish;
 

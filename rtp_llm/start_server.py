@@ -210,7 +210,6 @@ def start_server(py_env_configs: PyEnvConfigs):
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
         monitor_interval=py_env_configs.server_config.monitor_interval,
     )
-
     # Initialize backend_process to None in case role_type is FRONTEND
     backend_process = None
 

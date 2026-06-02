@@ -8,14 +8,11 @@ namespace rtp_llm {
 
 class MockKVCacheAllocator: public KVCacheAllocator {
 public:
-    explicit MockKVCacheAllocator(const CacheConfig&   config,
-                                  rtp_llm::DeviceBase* device,
-                                  AllocationType       atype = AllocationType::DEVICE):
-        KVCacheAllocator(config, device, atype) {}
+    explicit MockKVCacheAllocator(const CacheConfig& config, AllocationType atype = AllocationType::DEVICE):
+        KVCacheAllocator(config, atype) {}
     ~MockKVCacheAllocator() override = default;
 
 public:
-    MOCK_METHOD(bool, init, (), (override));
     MOCK_METHOD(void, free, (const FreeInfo&), (override));
     MOCK_METHOD(void, insertIntoCache, (const InsertInfo&), (override));
     MOCK_METHOD(BlockAddrInfo, convertIndexToAddr, (int layer_id, int block_id), (const, override));
@@ -26,9 +23,9 @@ public:
                 (const, override));
     MOCK_METHOD(std::shared_ptr<KVCacheResource>,
                 incrKVCacheRef,
-                (const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys),
+                (const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector),
                 (override));
-    MOCK_METHOD(void, decrKVCacheRef, (const KVCacheResource& kvcache_resource), (override));
+    MOCK_METHOD(void, decrKVCacheRef, (const KVCacheResource& kvcache_resource, bool is_connector), (override));
     MOCK_METHOD(CacheLayerLayout, allLayerCacheBase, (), (const, override));
     MOCK_METHOD(bool,
                 updateKVBlock,
@@ -38,13 +35,13 @@ public:
                  std::vector<BlockIdPair>&      block_update_mapping),
                 (override));
     MOCK_METHOD(int, seqSizePerBlock, (), (const, override));
-    MOCK_METHOD((std::vector<std::pair<BufferPtr, size_t>>), getAllBuffers, (), (const, override));
     MOCK_METHOD(int,
                 singleBatchNeedBlocks,
-                (const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len),
+                (const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step),
                 (const, override));
 
 protected:
+    MOCK_METHOD(bool, doInit, (), (override));
     MOCK_METHOD(MallocResult, incrMalloc, (const MallocInfo&), (override));
     MOCK_METHOD(MallocResult, initMallocForCommonLen, (const MallocInfo&), (override));
     MOCK_METHOD(int, getNeedBlocks, (const MallocInfo&), (const, override));

@@ -2,8 +2,10 @@ from math import prod
 from typing import Any, Callable, Dict, Optional
 
 import torch
+from rtp_kernel.fp8_group_gemm import (
+    get_cutlass_batched_moe_mm_data,
+)
 
-import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     cutlass_moe_mm_fp8_scaled,
     get_best_config_swap_ab,
@@ -27,6 +29,7 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     cutlass_moe_pre_reorder,
     post_reorder_triton_kernel,
+    get_cutlass_moe_mm_without_permute_info,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -216,7 +219,7 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
             num_tokens=M,
             hidden_size=K,
         )
-        compute_ops.get_cutlass_moe_mm_without_permute_info(
+        get_cutlass_moe_mm_without_permute_info(
             topk_ids,
             expert_offsets,
             problem_sizes1,
@@ -281,6 +284,8 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
             topk_weights_ptr=topk_weights,
             topk=topk,
             hidden_size=K,
+            num_local_experts=E,
+            total_dst_tokens=c3.shape[0],
             BLOCK_SIZE=512,
         )
         return CombineForwardPayload(fused_expert_output=output)
@@ -443,7 +448,7 @@ class CutlassBatchedExpertsFp8(FusedMoeExpertExecutor):
             (self.local_num_experts, 3), dtype=torch.int32, device=expert_x.device
         )
 
-        compute_ops.get_cutlass_batched_moe_mm_data(
+        get_cutlass_batched_moe_mm_data(
             expert_offsets,
             problem_sizes1,
             problem_sizes2,

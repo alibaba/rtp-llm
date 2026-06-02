@@ -5,7 +5,7 @@ from typing import Any, Optional, Tuple
 import flashinfer.page as page
 import torch
 
-from rtp_llm.ops.compute_ops import KVCache
+from rtp_llm.ops.compute_ops import LayerKVCache
 
 
 class KVCacheWriteOp:
@@ -38,7 +38,7 @@ class KVCacheWriteOp:
         self,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
     ) -> None:
         """
         Write key and value tensors to paged KV cache.
@@ -51,7 +51,6 @@ class KVCacheWriteOp:
         if kv_cache is not None:
             # For real execution - use provided KV cache
             # KV cache has shape [num_pages, 2, num_kv_heads, page_size, head_dim] (HND layout)
-            # Split into K and V caches
             k_cache = kv_cache.kv_cache_base[
                 :, 0, :, :, :
             ]  # [num_pages, num_kv_heads, page_size, head_dim]

@@ -20,7 +20,8 @@ from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
     MlaFlashInferPrefillImpl,
 )
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
+from rtp_llm.ops import FMHAConfig
+from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -156,6 +157,7 @@ class MLABenchmark(TestCase):
         config.attn_config.v_head_dim = 128
         config.attn_config.q_lora_rank = 0
         config.attn_config.tokens_per_block = 64
+        config.attn_config.kernel_tokens_per_block = 64
         config.attn_config.softmax_extra_scale = 1.0
         config.attn_config.use_mla = True
         config.attn_config.size_per_head = 192
@@ -180,6 +182,9 @@ class MLABenchmark(TestCase):
         )
         attn_inputs.input_lengths = input_lengths_t
         attn_inputs.kv_cache_block_id_host = kvcache_block_id
+        attn_inputs.kv_cache_block_id_device = kvcache_block_id.to(device)
+        attn_inputs.kv_cache_kernel_block_id_host = kvcache_block_id
+        attn_inputs.kv_cache_kernel_block_id_device = kvcache_block_id.to(device)
 
         # 创建权重
         weights = self._create_weights(config, config.hidden_size)
@@ -218,11 +223,14 @@ class MLABenchmark(TestCase):
             device=device,
         )
 
-        kv_cache: Optional[KVCache] = KVCache()
+        kv_cache: Optional[LayerKVCache] = LayerKVCache()
         kv_cache.kv_cache_base = cache
 
         # 创建cos_sin_cache
         cos_sin_cache = create_cos_sin_cache()
+
+        fmha_config = FMHAConfig()
+        fmha_config.absorb_opt_len = absorb_opt_len
 
         # 预热阶段
         # print("Warming up...")
@@ -232,7 +240,7 @@ class MLABenchmark(TestCase):
                 attn_inputs,
                 layer_weights,
                 cos_sin_cache,
-                absorb_opt_len,
+                fmha_config=fmha_config,
                 quant_config=config.quant_config,
             )
             # fmha_impl.forward(q, compressed_kv, k_pe, kv_cache, 0)
@@ -252,7 +260,7 @@ class MLABenchmark(TestCase):
                 attn_inputs,
                 layer_weights,
                 cos_sin_cache,
-                absorb_opt_len,
+                fmha_config=fmha_config,
                 quant_config=config.quant_config,
             )
             # 开始计时
@@ -337,14 +345,12 @@ class MLABenchmark(TestCase):
             device=device,
         )
 
-        weights[W.mla_v_w] = torch.randn(
-            [config.attn_config.kv_lora_rank, hidden_size],
-            dtype=torch.bfloat16,
-            device=device,
-        )
-
-        weights[W.mla_k_nope_w] = torch.randn(
-            [config.attn_config.kv_lora_rank, hidden_size],
+        weights[W.mla_kv_b_w] = torch.randn(
+            [
+                config.attn_config.kv_lora_rank,
+                config.attn_config.head_num
+                * (config.attn_config.nope_head_dim + config.attn_config.v_head_dim),
+            ],
             dtype=torch.bfloat16,
             device=device,
         )

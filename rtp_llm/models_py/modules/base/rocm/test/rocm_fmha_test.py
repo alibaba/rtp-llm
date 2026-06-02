@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from aiter import dtypes
 from einops import rearrange, repeat
+from rtp_llm.ops.compute_ops import paged_attention_atrex
 
 
 def construct_local_mask(
@@ -448,6 +449,68 @@ def run_aiter(
     return output
 
 
+def run_atrex(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_tables: torch.Tensor,
+    seq_lens: torch.Tensor,
+    max_seq_len: int,
+    kv_cache_dtype: str,
+    num_kv_heads: int,
+    scale: float,
+    alibi_slopes: Optional[torch.Tensor],
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    tp_rank: int = 0,
+    blocksparse_local_blocks: int = 0,
+    blocksparse_vert_stride: int = 0,
+    blocksparse_block_size: int = 64,
+    blocksparse_head_sliding_step: int = 0,
+    fp8_out_scale=None,
+) -> torch.Tensor:
+    # Whether to use rocm custom paged attention or not
+    num_seqs, num_heads, head_size = query.shape
+    block_size = value_cache.shape[3]    
+    max_num_partitions = (
+        max_seq_len + _PARTITION_SIZE - 1
+    ) // _PARTITION_SIZE
+    assert _PARTITION_SIZE % block_size == 0
+    x = 16 // key_cache.element_size()
+    grp_size = num_heads // num_kv_heads
+    # init output
+    output = torch.empty_like(query).view((num_seqs, num_heads, head_size))
+    exp_sums = torch.empty(
+        size=(num_seqs, num_kv_heads, max_num_partitions, grp_size),
+        dtype=torch.float32,
+        device=output.device,
+    )
+    max_logits = torch.empty_like(exp_sums)
+    # init tmp_output
+    tmp_output = torch.empty(
+        size=(num_seqs, num_kv_heads, max_num_partitions, grp_size, head_size),
+        dtype=output.dtype,
+        device=output.device,
+    )
+    query = query.view((num_seqs, num_heads, head_size))
+    paged_attention_atrex(
+        output,
+        exp_sums,
+        max_logits,
+        tmp_output,
+        query,
+        key_cache,
+        value_cache,
+        seq_lens,
+        block_tables,
+        scale,
+        max_seq_len,
+        alibi_slopes,
+    )
+
+    return output
+
+
 def test_flash_attn_output(
     batch_size,
     nheads,
@@ -727,6 +790,21 @@ def test_paged_attention(
         v_scale,
     )
 
+    out_atrex = run_atrex(
+        query,
+        k_cache,
+        v_cache,
+        block_tables,
+        seq_lens,
+        max_seq_len,
+        kv_cache_dtype,
+        num_kv_heads,
+        scale,
+        alibi_slopes,
+        k_scale,
+        v_scale,
+    )
+
     out_native = run_native(
         query,
         k_cache,
@@ -749,6 +827,14 @@ def test_paged_attention(
         print(
             f"Output difference: max diff = {(out_native - out_aiter).abs().max().item()}"
         )
+
+    if torch.allclose(out_native, out_atrex, atol=1e-2, rtol=1e-2):
+        print("run_atrex test passed")
+    else:
+        print(
+            f"Output difference: max diff = {(out_native - out_atrex).abs().max().item()}"
+        )
+        return {"test_status": "failed"}
 
     # Test run_aiter_asm (only for bf16)
     # if dtype == dtypes.bf16:

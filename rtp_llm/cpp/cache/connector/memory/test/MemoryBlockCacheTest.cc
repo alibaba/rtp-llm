@@ -20,11 +20,13 @@ TEST(MemoryBlockCacheTest, match_ReturnNull_WhenKeyNotFoundAndCacheNonEmpty) {
     item.block_index = 70;
     item.block_size  = 7000;
     item.is_resident = false;
+    item.is_complete = true;
     ASSERT_TRUE(cache.put(item).first);
 
     auto mr = cache.match(999);  // not exist
     EXPECT_TRUE(isNullBlockIdx(mr.matched_index));
     EXPECT_EQ(mr.block_size, 0u);
+    EXPECT_FALSE(mr.is_complete);
 }
 
 TEST(MemoryBlockCacheTest, match_ReturnHit_WhenKeyExistsAndUpdatesRecency) {
@@ -36,6 +38,7 @@ TEST(MemoryBlockCacheTest, match_ReturnHit_WhenKeyExistsAndUpdatesRecency) {
         item.block_index                = 40 + i;
         item.block_size                 = 3000 + i;
         item.is_resident                = false;
+        item.is_complete                = true;
         auto [success, popped_item_opt] = cache.put(item);
         EXPECT_TRUE(success);
         EXPECT_FALSE(popped_item_opt.has_value());
@@ -59,6 +62,7 @@ TEST(MemoryBlockCacheTest, contains_ReturnTrue_WhenKeyExists) {
     item.block_index = 90;
     item.block_size  = 9000;
     item.is_resident = false;
+    item.is_complete = true;
     ASSERT_TRUE(cache.put(item).first);
 
     EXPECT_TRUE(cache.contains(900));
@@ -72,6 +76,7 @@ TEST(MemoryBlockCacheTest, contains_ReturnFalse_WhenKeyNotFoundAndCacheNonEmpty)
     item.block_index = 91;
     item.block_size  = 9001;
     item.is_resident = false;
+    item.is_complete = true;
     ASSERT_TRUE(cache.put(item).first);
 
     EXPECT_FALSE(cache.contains(999));
@@ -91,6 +96,7 @@ TEST(MemoryBlockCacheTest, contains_ReturnFalse_WhenContainsDoesNotUpdateRecency
         item.block_index = 10 + i;
         item.block_size  = 1;
         item.is_resident = false;
+        item.is_complete = true;
         ASSERT_TRUE(cache.put(item).first);
     }
 
@@ -109,6 +115,7 @@ TEST(MemoryBlockCacheTest, put_ReturnTrue_WhenInsertNewItem) {
     item.block_index = 7;
     item.block_size  = 1234;
     item.is_resident = false;
+    item.is_complete = true;
 
     auto [success, popped_item_opt] = cache.put(item);
     EXPECT_TRUE(success);
@@ -143,6 +150,7 @@ TEST(MemoryBlockCacheTest, put_ReturnFalse_WhenCacheKeyDuplicate) {
     item1.block_index               = 10;
     item1.block_size                = 4096;
     item1.is_resident               = false;
+    item1.is_complete               = true;
     auto [success, popped_item_opt] = cache.put(item1);
     EXPECT_TRUE(success);
     EXPECT_FALSE(popped_item_opt.has_value());
@@ -154,6 +162,7 @@ TEST(MemoryBlockCacheTest, put_ReturnFalse_WhenCacheKeyDuplicate) {
     item2.block_index                 = 11;
     item2.block_size                  = 8192;
     item2.is_resident                 = true;
+    item2.is_complete                 = true;
     auto [success2, popped_item_opt2] = cache.put(item2);
     EXPECT_FALSE(success2);
     EXPECT_FALSE(popped_item_opt2.has_value());
@@ -162,6 +171,61 @@ TEST(MemoryBlockCacheTest, put_ReturnFalse_WhenCacheKeyDuplicate) {
     auto mr = cache.match(200);
     EXPECT_EQ(mr.matched_index, 10);
     EXPECT_EQ(mr.block_size, 4096u);
+}
+
+TEST(MemoryBlockCacheTest, match_ReturnHit_WhenKeyExistsButIsSmall) {
+    MemoryBlockCache cache;
+
+    MemoryBlockCache::CacheItem item;
+    item.cache_key   = 777;
+    item.block_index = 77;
+    item.block_size  = 7777;
+    item.is_resident = false;
+    item.is_complete = false;  // partial KV
+    ASSERT_TRUE(cache.put(item).first);
+
+    auto mr = cache.match(777);
+    EXPECT_FALSE(isNullBlockIdx(mr.matched_index));
+    EXPECT_EQ(mr.matched_index, 77);
+    EXPECT_EQ(mr.block_size, 7777u);
+    EXPECT_FALSE(mr.is_complete);
+}
+
+TEST(MemoryBlockCacheTest, put_UpgradePartialToComplete_ReplacesAndReturnsOldItem) {
+    MemoryBlockCache cache;
+
+    MemoryBlockCache::CacheItem small;
+    small.cache_key   = 888;
+    small.block_index = 80;
+    small.block_size  = 1000;
+    small.is_resident = false;
+    small.is_complete = false;
+    {
+        auto [ok, popped] = cache.put(small);
+        EXPECT_TRUE(ok);
+        EXPECT_FALSE(popped.has_value());
+    }
+
+    MemoryBlockCache::CacheItem big;
+    big.cache_key   = 888;
+    big.block_index = 81;
+    big.block_size  = 2000;
+    big.is_resident = false;
+    big.is_complete = true;
+    {
+        auto [ok, popped] = cache.put(big);
+        EXPECT_TRUE(ok);
+        ASSERT_TRUE(popped.has_value());
+        EXPECT_EQ(popped->cache_key, 888);
+        EXPECT_EQ(popped->block_index, 80);
+        EXPECT_EQ(popped->block_size, 1000u);
+        EXPECT_FALSE(popped->is_complete);
+    }
+
+    auto mr = cache.match(888);
+    EXPECT_EQ(mr.matched_index, 81);
+    EXPECT_EQ(mr.block_size, 2000u);
+    EXPECT_TRUE(mr.is_complete);
 }
 
 TEST(MemoryBlockCacheTest, put_ReturnPoppedItem_WhenCacheFull) {
@@ -175,6 +239,7 @@ TEST(MemoryBlockCacheTest, put_ReturnPoppedItem_WhenCacheFull) {
     item1.block_index = 1;
     item1.block_size  = 111;
     item1.is_resident = false;
+    item1.is_complete = true;
     {
         auto [success, popped_item_opt] = cache.put(item1);
         EXPECT_TRUE(success);
@@ -187,6 +252,7 @@ TEST(MemoryBlockCacheTest, put_ReturnPoppedItem_WhenCacheFull) {
     item2.block_index = 2;
     item2.block_size  = 222;
     item2.is_resident = false;
+    item2.is_complete = true;
     {
         auto [success, popped_item_opt] = cache.put(item2);
         EXPECT_TRUE(success);
@@ -217,6 +283,7 @@ TEST(MemoryBlockCacheTest, put_ReturnFalse_WhenCacheFullButPopFailed) {
     item.block_index = 1;
     item.block_size  = 1;
     item.is_resident = false;
+    item.is_complete = true;
 
     auto [success, popped_item_opt] = cache.put(item);
     EXPECT_FALSE(success);
@@ -234,6 +301,7 @@ TEST(MemoryBlockCacheTest, pop_ReturnNonResidentBlocks_WhenSkipResident) {
         item.block_index                = 20 + i;
         item.block_size                 = 1000 + i;
         item.is_resident                = (i == 1);  // key=301 is resident
+        item.is_complete                = true;
         auto [success, popped_item_opt] = cache.put(item);
         EXPECT_TRUE(success);
         EXPECT_FALSE(popped_item_opt.has_value());
@@ -260,6 +328,86 @@ TEST(MemoryBlockCacheTest, pop_ReturnEmpty_WhenCacheEmpty) {
     EXPECT_TRUE(popped.empty());
 }
 
+TEST(MemoryBlockCacheTest, remove_ReturnCacheItem_WhenKeyExists) {
+    MemoryBlockCache cache;
+
+    MemoryBlockCache::CacheItem item;
+    item.cache_key   = 501;
+    item.block_index = 61;
+    item.block_size  = 123;
+    item.is_resident = false;
+    item.is_complete = true;
+    ASSERT_TRUE(cache.put(item).first);
+
+    auto removed = cache.remove(501);
+    ASSERT_TRUE(removed.has_value());
+    EXPECT_EQ(removed->cache_key, 501);
+    EXPECT_EQ(removed->block_index, 61);
+    EXPECT_FALSE(cache.contains(501));
+    EXPECT_EQ(cache.size(), 0u);
+}
+
+TEST(MemoryBlockCacheTest, remove_ReturnNullopt_WhenKeyMissing) {
+    MemoryBlockCache cache;
+
+    MemoryBlockCache::CacheItem item;
+    item.cache_key   = 601;
+    item.block_index = 71;
+    item.block_size  = 456;
+    item.is_resident = false;
+    item.is_complete = true;
+    ASSERT_TRUE(cache.put(item).first);
+
+    auto removed = cache.remove(999);
+    EXPECT_FALSE(removed.has_value());
+    EXPECT_TRUE(cache.contains(601));
+    EXPECT_EQ(cache.size(), 1u);
+}
+
+TEST(MemoryBlockCacheTest, removeIfMatch_Success_WhenBlockIndexMatches) {
+    MemoryBlockCache cache;
+
+    MemoryBlockCache::CacheItem item;
+    item.cache_key   = 701;
+    item.block_index = 81;
+    item.block_size  = 100;
+    item.is_resident = false;
+    item.is_complete = true;
+    ASSERT_TRUE(cache.put(item).first);
+
+    auto removed = cache.removeIfMatch(701, 81);
+    ASSERT_TRUE(removed.has_value());
+    EXPECT_EQ(removed->cache_key, 701);
+    EXPECT_EQ(removed->block_index, 81);
+    EXPECT_FALSE(cache.contains(701));
+    EXPECT_EQ(cache.size(), 0u);
+}
+
+TEST(MemoryBlockCacheTest, removeIfMatch_ReturnNullopt_WhenBlockIndexDiffers) {
+    MemoryBlockCache cache;
+
+    MemoryBlockCache::CacheItem item;
+    item.cache_key   = 801;
+    item.block_index = 91;
+    item.block_size  = 200;
+    item.is_resident = false;
+    item.is_complete = true;
+    ASSERT_TRUE(cache.put(item).first);
+
+    auto removed = cache.removeIfMatch(801, 999);
+    EXPECT_FALSE(removed.has_value());
+    EXPECT_TRUE(cache.contains(801));
+    EXPECT_EQ(cache.size(), 1u);
+}
+
+TEST(MemoryBlockCacheTest, removeIfMatch_ReturnNullopt_WhenKeyMissing) {
+    MemoryBlockCache cache;
+
+    auto removed = cache.removeIfMatch(999, 1);
+    EXPECT_FALSE(removed.has_value());
+    EXPECT_EQ(cache.size(), 0u);
+}
+
 TEST(MemoryBlockCacheTest, pop_ReturnThrow_WhenNumsNotPositive) {
     // Ensure CHECK throws instead of aborting.
     rtp_llm::StaticConfig::user_ft_core_dump_on_exception = false;
@@ -279,6 +427,7 @@ TEST(MemoryBlockCacheTest, pop_ReturnLimitedBlocks_WhenNumsLessThanSize) {
         item.block_index                = 30 + i;
         item.block_size                 = 2000 + i;
         item.is_resident                = false;
+        item.is_complete                = true;
         auto [success, popped_item_opt] = cache.put(item);
         EXPECT_TRUE(success);
         EXPECT_FALSE(popped_item_opt.has_value());
@@ -310,6 +459,7 @@ TEST(MemoryBlockCacheTest, pop_ReturnEmpty_WhenAllResident) {
         item.block_index                = 50 + i;
         item.block_size                 = 4000 + i;
         item.is_resident                = true;
+        item.is_complete                = true;
         auto [success, popped_item_opt] = cache.put(item);
         EXPECT_TRUE(success);
         EXPECT_FALSE(popped_item_opt.has_value());
@@ -329,6 +479,7 @@ TEST(MemoryBlockCacheTest, empty_ReturnTrue_WhenCacheEmpty) {
     auto mr = cache.match(42);
     EXPECT_TRUE(isNullBlockIdx(mr.matched_index));
     EXPECT_EQ(mr.block_size, 0u);
+    EXPECT_FALSE(mr.is_complete);
 }
 
 TEST(MemoryBlockCacheTest, cacheKeys_ReturnsKeysInMRUOrder) {

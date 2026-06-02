@@ -1,0 +1,133 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "what is ",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "task_id": 1,
+                    "return_cum_log_probs": true
+                },
+                "yield_generator": true,
+                "_prompt_source": "$prompt:s1[:8] (3 tokens)"
+            },
+            "result": {
+                "response": "1. Mathematics is like a lighthouse in the",
+                "iter_count": 10,
+                "finished": true,
+                "aux_info": {
+                    "input_len": 3,
+                    "reuse_len": 8,
+                    "prefix_len": 11,
+                    "iter_count": 10,
+                    "output_len": 10,
+                    "cum_log_probs": [
+                        0.0
+                    ]
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "what is ",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "task_id": 1
+                },
+                "yield_generator": true,
+                "_prompt_source": "$prompt:s1[:8] (3 tokens)"
+            },
+            "result": {
+                "response": "1. Mathematics is like a lighthouse in the",
+                "iter_count": 10,
+                "finished": true,
+                "aux_info": {
+                    "input_len": 3,
+                    "reuse_len": 8,
+                    "prefix_len": 11,
+                    "iter_count": 10,
+                    "output_len": 10
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "what is ",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "task_id": "1"
+                },
+                "yield_generator": true,
+                "_prompt_source": "$prompt:s1[:8] (3 tokens)"
+            },
+            "result": {
+                "response": "1. Mathematics is like a lighthouse in the",
+                "iter_count": 10,
+                "finished": true,
+                "aux_info": {
+                    "input_len": 3,
+                    "reuse_len": 8,
+                    "prefix_len": 11,
+                    "iter_count": 10,
+                    "output_len": 10
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "what is ",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                },
+                "yield_generator": true,
+                "_prompt_source": "$prompt:s1[:8] (3 tokens)"
+            },
+            "result": {
+                "response": "100\n\nExplanation: The number 1",
+                "iter_count": 10,
+                "finished": true,
+                "aux_info": {
+                    "input_len": 3,
+                    "prefix_len": 0,
+                    "reuse_len": 0,
+                    "output_len": 10,
+                    "iter_count": 10
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                },
+                "yield_generator": true,
+                "_prompt_source": "$prompt:s5"
+            },
+            "result": {
+                "response": " Flask is a lightweight web framework for Python, and",
+                "iter_count": 10,
+                "finished": true,
+                "aux_info": {
+                    "input_len": 13,
+                    "reuse_len": 0,
+                    "prefix_len": 0,
+                    "iter_count": 10,
+                    "output_len": 10
+                }
+            }
+        }
+    ]
+}

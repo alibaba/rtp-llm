@@ -1,30 +1,33 @@
-import logging
 from typing import Any, Dict, Optional
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
     DenseMLP,
     Embedding,
+    FakeBalanceExpert,
     FMHAImplBase,
     FusedMoeFactory,
     GroupTopK,
     LinearFactory,
     MlaAttention,
+    RMSNorm,
     RMSResNorm,
     SelectTopk,
+    SigmoidGateScaleAdd,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import KVCache, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -55,9 +58,17 @@ class GenericMoeLayer(nn.Module):
         self.gate = LinearFactory.create_linear_from_weights(
             weights, W.moe_gate, None, None, quant_config, hw_kernel_config
         )
-        self.select_topk = SelectTopk(
-            config, moe_config.fake_balance_expert, parallelism_config.dp_rank
-        )
+        self.select_topk = SelectTopk(config=config)
+        if moe_config.fake_balance_expert:
+            self.fake_balance_expert = FakeBalanceExpert(
+                expert_num=config.expert_num,
+                moe_k=config.moe_k,
+                dp_rank=parallelism_config.dp_rank,
+                dp_size=parallelism_config.dp_size,
+                ep_size=parallelism_config.ep_size,
+            )
+        else:
+            self.fake_balance_expert = None
         config_adapter = MoEConfigAdapter(
             model_config=config,
             parallelism_config=parallelism_config,
@@ -74,9 +85,15 @@ class GenericMoeLayer(nn.Module):
         ), "Weights w1 and w2 must be provided"
         self.num_local_experts = self.w1.shape[0]
         self.add_shared_expert = config.moe_style == 2
+        self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
+        self.ep_size = parallelism_config.ep_size
         if self.add_shared_expert:
             self.shared_expert = DenseMLP(
-                config.activation_type, parallelism_config, weights, quant_config
+                config.activation_type,
+                parallelism_config,
+                weights,
+                quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
         else:
             self.shared_expert = None
@@ -84,19 +101,17 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert_gate = LinearFactory.create_linear_from_weights(
                 weights, W.shared_expert_gate, None, None, config
             )
+            self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
         else:
             self.shared_expert_gate = None
+            self.sigmoid_gate_scale_add = None
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
-
         router_logits_fp32 = router_logits.float()
 
         topk_weights = torch.empty(
@@ -135,21 +150,48 @@ class GenericMoeLayer(nn.Module):
             # Top-K selection using C++ SelectTopkOp
             self.select_topk(router_logits_fp32, topk_ids, topk_weights)
 
+        if self.fake_balance_expert is not None:
+            self.fake_balance_expert(topk_ids, topk_weights)
+
+        is_ep_mode = self.ep_size > 1
+        # EP mode: routed expert output is already complete (EP combine handles it).
+        # Shared expert output is TP-partial and needs separate allreduce.
+        use_ep_shared_allreduce = (
+            self.shared_expert is not None and self.ffn_tp_size > 1 and is_ep_mode
+        )
+
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
         )
-
         if self.shared_expert is not None:
-            shared_expert_output = self.shared_expert(hidden_states)
-            if self.shared_expert_gate is not None:
-                shared_expert_output = (
-                    F.sigmoid(self.shared_expert_gate(hidden_states))
-                    * shared_expert_output
-                )
-            experts_output = experts_output + shared_expert_output
+            shared_expert_output = self.shared_expert(
+                hidden_states,
+                skip_allreduce=use_ep_shared_allreduce,
+            )
+            if use_ep_shared_allreduce:
+                # EP mode: routed expert output is already complete
+                # (EP combine via all_to_all / all_gather aggregated across ranks).
+                # Only the shared expert output is TP-partial and needs all_reduce.
+                if self.shared_expert_gate is not None:
+                    gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+                    shared_expert_output = (
+                        torch.sigmoid(gate_output) * shared_expert_output
+                    )
+                shared_expert_output = all_reduce(shared_expert_output, group=Group.TP)
+                experts_output = experts_output + shared_expert_output
+            else:
+                # TP-only mode: same as main - each component does its own allreduce.
+                if self.shared_expert_gate is not None:
+                    gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+                    # Fused: experts_output += sigmoid(gate_output) * shared_expert_output
+                    self.sigmoid_gate_scale_add(
+                        gate_output, shared_expert_output, experts_output
+                    )
+                else:
+                    experts_output = experts_output + shared_expert_output
 
         return experts_output
 
@@ -168,6 +210,7 @@ class GenericMoeDecoderLayer(nn.Module):
         config: ModelConfig,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        global_weights: Dict[str, torch.Tensor],
         layer_idx: int,
         moe_config: MoeConfig,
         max_generate_batch_size: int = 0,
@@ -188,9 +231,12 @@ class GenericMoeDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 quant_config,
                 hw_kernel_config,
+                global_weights=global_weights,
             )
         else:
-            attn_configs = config.getAttentionConfigs(parallelism_config.tp_size)
+            attn_configs = config.getAttentionConfigs(
+                parallelism_config.get_attn_tp_size()
+            )
             self.self_attn = CausalAttention(
                 attn_configs,
                 parallelism_config,
@@ -198,6 +244,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 quant_config,
                 hw_kernel_config,
+                layer_idx,
             )
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
@@ -213,6 +260,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 moe_config,
                 max_generate_batch_size,
                 enable_cuda_graph=enable_cuda_graph,
+                hw_kernel_config=hw_kernel_config,
             )
 
         # 使用 RMSResNorm 来 fuse residual add 和 layernorm
@@ -228,23 +276,16 @@ class GenericMoeDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
         fmha_impl: FMHAImplBase,
-        kv_cache: Optional[KVCache] = None,
+        kv_cache: Optional[LayerKVCache] = None,
     ) -> DecodeLayerOutput:
-        # equivalent to:
-        # residual = residual + hidden_states
-        # hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.input_layernorm(hidden_states, residual)
+        hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            fmha_impl=fmha_impl,
-            kv_cache=kv_cache,
+            hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
         )
 
-        # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
-        hidden_states = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
-        # MLP (Dense or MoE，shared expert 逻辑已经在 GenericMoeLayer 内部处理)
         hidden_states = self.mlp(hidden_states)
 
         return DecodeLayerOutput(hidden_states, residual)
@@ -289,6 +330,7 @@ class GenericMoeModel(GptModelBase):
                     model_config,
                     parallelism_config,
                     weights.weights[idx],
+                    weights.global_weights,
                     idx,
                     moe_config,
                     max_generate_batch_size,
@@ -304,21 +346,14 @@ class GenericMoeModel(GptModelBase):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
-
-        # 如果提供了 input_hiddens，优先使用它；否则使用 embed_tokens
-        if inputs.input_hiddens.numel() > 0:
-            hidden_states = inputs.input_hiddens
-        else:
-            inputs_embeds = self.embed_tokens(input_ids)
-            hidden_states = inputs_embeds
+        hidden_states = self.embed_tokens(input_ids)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(
                 inputs
             )  # pyright: ignore[reportUnreachable]
-
         residual = torch.zeros_like(hidden_states)
-
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
+            select_block_map_for_layer(inputs.attention_inputs, i)
             output = decoder_layer(
                 hidden_states,
                 residual,
@@ -328,12 +363,9 @@ class GenericMoeModel(GptModelBase):
             hidden_states = output.hidden_states
             residual = output.residual
 
-        hidden_states = self.norm(hidden_states, residual)
+        hidden_states, _ = self.norm(hidden_states, residual)
 
-        # 初始化 lm_output_indexes 为空，由调用者（如 tbstars_tse）根据实际输入长度设置
-        output = PyModelOutputs(hidden_states, fmha_impl.fmha_params)
-        output.lm_output_indexes = torch.empty(0)
-        return output
+        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
 
 
 __all__ = [

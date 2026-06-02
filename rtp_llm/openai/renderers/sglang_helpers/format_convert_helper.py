@@ -23,21 +23,37 @@ def streaming_parse_result_to_tool_calls(
     Returns:
         tuple[List[ToolCall], str]: (工具调用列表, 剩余的普通文本)
     """
-    # 构建 tool_calls 列表
-    tool_calls: List[ToolCall] = []
+    # Many detectors may emit multiple ToolCallItem entries for the same tool_index in
+    # a single chunk (e.g. "{" then "\"location\": " then "\"杭州"). For downstream
+    # consumers it's much easier (and matches common production assumptions) to have
+    # at most one ToolCall per index per chunk. We squash by tool_index and sort the
+    # output by tool_index, since tool_index represents the model's intended ordering.
+    tool_call_map: dict[int, ToolCall] = {}
+
     for call in result.calls:
-        # 只有当 name 不为空时才生成新的 ID
-        call_id = f"call_{uuid.uuid4().hex[:24]}" if call.name else None
+        tool_index = call.tool_index
+        tool_call = tool_call_map.get(tool_index)
+        if tool_call is None:
+            call_id = f"call_{uuid.uuid4().hex[:24]}" if call.name else None
+            tool_call = ToolCall(
+                index=tool_index,
+                id=call_id,
+                type="function",
+                function=FunctionCall(name=call.name, arguments=""),
+            )
+            tool_call_map[tool_index] = tool_call
+        else:
+            if call.name and not tool_call.function.name:
+                tool_call.function.name = call.name
+                if not tool_call.id:
+                    tool_call.id = f"call_{uuid.uuid4().hex[:24]}"
 
-        tool_call = ToolCall(
-            index=call.tool_index,
-            id=call_id,
-            type="function",
-            function=FunctionCall(name=call.name, arguments=call.parameters),
-        )
-        tool_calls.append(tool_call)
+        if call.parameters:
+            tool_call.function.arguments = (
+                tool_call.function.arguments or ""
+            ) + call.parameters
 
-    return tool_calls, result.normal_text
+    return [tool_call_map[i] for i in sorted(tool_call_map)], result.normal_text
 
 
 def rtp_tools_to_sglang_tools(rtp_tools: List[GPTToolDefinition]) -> List[Tool]:

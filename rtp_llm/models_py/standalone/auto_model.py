@@ -13,13 +13,13 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.ops.compute_ops import (
+    CacheGroupType,
     KVCache,
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
-    get_device,
     get_typemeta,
-    init_device,
+    init_exec_ctx,
 )
 from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
 from rtp_llm.utils.model_weight import W
@@ -81,22 +81,12 @@ class AutoModel:
         self.model = self.gpt_model.py_model
         self.model_config = self.gpt_model.model_config
 
-        # init device - use engine_config's configs and model_config's eplb_config
-        init_device(
-            parallelism_config=engine_config.parallelism_config,
-            model_config=model_config,
-            eplb_config=model_config.eplb_config,
-            fmha_config=engine_config.fmha_config,
-            device_resource_config=engine_config.device_resource_config,
-            moe_config=engine_config.moe_config,
-            sp_config=engine_config.sp_config,
-            misc_config=engine_config.misc_config,
-            profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
-            hw_kernel_config=engine_config.hw_kernel_config,
-            concurrency_config=engine_config.concurrency_config,
-            ffn_disaggregate_config=engine_config.parallelism_config.ffn_disaggregate_config,
-            runtime_config=engine_config.runtime_config,
-            model_specific_config=engine_config.model_specific_config,
+        pc = engine_config.parallelism_config
+        init_exec_ctx(
+            device_id=pc.world_rank % pc.local_world_size,
+            trace_memory=engine_config.profiling_debug_logging_config.trace_memory,
+            enable_comm_overlap=engine_config.device_resource_config.enable_comm_overlap,
+            mla_ops_type=int(model_config.mla_ops_type),
         )
         self.device = "cuda"
 
@@ -133,36 +123,33 @@ class AutoModel:
         # Create PyEnvConfigs to hold all configurations
         self.py_env_configs = PyEnvConfigs()
 
-        # Set ModelSpecificConfig.load_python_model = True (equivalent to LOAD_PYTHON_MODEL=1)
-        self.py_env_configs.model_specific_config.load_python_model = True
-
-        # Set DeviceResourceConfig.device_reserve_memory_bytes (equivalent to DEVICE_RESERVE_MEMORY_BYTES)
-        # Default: 2GB = 2 * 1024 * 1024 * 1024 bytes
-        if self.py_env_configs.device_resource_config.device_reserve_memory_bytes == 0:
-            self.py_env_configs.device_resource_config.device_reserve_memory_bytes = (
-                2 * 1024 * 1024 * 1024
-            )
-
     def _init_kv_cache(self):
         self.kv_cache = KVCache()
         self.layer_num = self.model_config.num_layers
         self.kv_head_num = self.model_config.attn_config.kv_head_num
         self.size_per_head = self.model_config.attn_config.size_per_head
         self.tokens_per_block = self.model_config.attn_config.tokens_per_block
-        kv_shape = [
-            self.layer_num,
+
+        self.kv_cache.seq_size_per_block = self.tokens_per_block
+        self.kv_cache.kernel_seq_size_per_block = self.tokens_per_block
+        self.kv_cache.num_kv_heads = self.kv_head_num
+        self.kv_cache.head_dim = self.size_per_head
+        # Explicitly mark every layer as full-attention.
+        self.kv_cache.layer_attn_types = [
+            CacheGroupType.FULL for _ in range(self.layer_num)
+        ]
+
+        per_layer_shape = [
             self.block_nums,
             2,
             self.kv_head_num,
             self.tokens_per_block,
             self.size_per_head,
         ]
-
-        kv_cache_total = torch.zeros(
-            kv_shape, dtype=self.compute_dtype, device=self.device
-        )
-        kv_cache_base = kv_cache_total
-        self.kv_cache.kv_cache_base = kv_cache_base
+        self.kv_cache.kv_cache_base_by_layer = [
+            torch.zeros(per_layer_shape, dtype=self.compute_dtype, device=self.device)
+            for _ in range(self.layer_num)
+        ]
 
     def _prepare_prefill_attention_inputs(self, input_length: int) -> PyAttentionInputs:
         need_block_nums = self._check_block_nums(input_length)
@@ -181,10 +168,16 @@ class AutoModel:
             dtype=torch.int32,
             device=self.device,
         )
+        attention_inputs.kv_cache_kernel_block_id_device = (
+            attention_inputs.kv_cache_block_id_device
+        )
         attention_inputs.kv_cache_block_id_host = torch.tensor(
             [[i for i in range(1, need_block_nums + 1)]], dtype=torch.int32
         )
-        attention_inputs.dtype = get_typemeta(self.kv_cache.kv_cache_base)
+        attention_inputs.kv_cache_kernel_block_id_host = (
+            attention_inputs.kv_cache_block_id_host
+        )
+        attention_inputs.dtype = get_typemeta(self.kv_cache.kv_cache_base_by_layer[0])
         attention_inputs.is_prefill = True
         return attention_inputs
 
@@ -214,10 +207,16 @@ class AutoModel:
             dtype=torch.int32,
             device=self.device,
         )
+        attention_inputs.kv_cache_kernel_block_id_device = (
+            attention_inputs.kv_cache_block_id_device
+        )
         attention_inputs.kv_cache_block_id_host = torch.tensor(
             [[i for i in range(1, need_block_nums + 1)]], dtype=torch.int32
         )
-        attention_inputs.dtype = get_typemeta(self.kv_cache.kv_cache_base)
+        attention_inputs.kv_cache_kernel_block_id_host = (
+            attention_inputs.kv_cache_block_id_host
+        )
+        attention_inputs.dtype = get_typemeta(self.kv_cache.kv_cache_base_by_layer[0])
         return attention_inputs
 
     def generate(
@@ -269,6 +268,8 @@ class AutoModel:
         self, model_outputs: PyModelOutputs, sampling_params: dict = None
     ) -> torch.Tensor:
         hidden_states = model_outputs.hidden_states[-1:, :]
-        logits = torch.matmul(hidden_states, self.lm_head_weight.t())
+        logits = torch.matmul(
+            hidden_states.to(self.lm_head_weight.dtype), self.lm_head_weight.t()
+        ).to(torch.float32)
         next_token_id = torch.argmax(logits, dim=-1)
         return next_token_id

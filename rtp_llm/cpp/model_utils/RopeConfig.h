@@ -23,17 +23,19 @@ struct RopeConfig {
     int       dim   = 0;
     int       base  = 10000;
 
-    float scale                = 1.0;
-    float factor1              = 1.0;  // beta_slow
-    float factor2              = 1.0;  // beta_fast
-    int   max_pos              = 0;    // original_max_position_embeddings
-    float extrapolation_factor = 1.0;
-    float mscale               = 1.0;
-    int   offset               = 0;
-    int   index_factor         = 1;
-    int   mrope_dim1           = 0;
-    int   mrope_dim2           = 0;
-    int   mrope_dim3           = 0;
+    float scale                 = 1.0;
+    float factor1               = 1.0;  // beta_slow
+    float factor2               = 1.0;  // beta_fast
+    int   max_pos               = 0;    // original_max_position_embeddings
+    float extrapolation_factor  = 1.0;
+    float mscale                = 1.0;
+    int   offset                = 0;
+    int   index_factor          = 1;
+    int   mrope_dim1            = 0;
+    int   mrope_dim2            = 0;
+    int   mrope_dim3            = 0;
+    bool  is_neox_style         = true;
+    bool  indexer_is_neox_style = true;
 
     std::string DebugRopeConfigStr() const;
 };

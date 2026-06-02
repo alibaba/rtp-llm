@@ -4,9 +4,11 @@ from rtp_llm.models_py.modules.base import (
     AddBiasResLayerNormTorch,
     Embedding,
     EmbeddingBert,
+    FakeBalanceExpert,
     FusedQKRMSNorm,
     FusedSiluAndMul,
     GroupTopK,
+    IndexerOp,
     LayerNorm,
     LayerNormTorch,
     QKRMSNorm,
@@ -15,6 +17,7 @@ from rtp_llm.models_py.modules.base import (
     RMSResNorm,
     RMSResNormTorch,
     SelectTopk,
+    SigmoidGateScaleAdd,
     WriteCacheStoreOp,
 )
 
@@ -46,7 +49,9 @@ __all__ = [
     "RMSResNorm",
     "SelectTopk",
     "GroupTopK",
+    "FakeBalanceExpert",
     "FusedSiluAndMul",
+    "IndexerOp",
     # Factory modules
     "FusedMoeFactory",
     "LinearFactory",
@@ -56,4 +61,6 @@ __all__ = [
     "CausalAttention",
     "MlaAttention",
     "DenseMLP",
+    # MoE gating ops
+    "SigmoidGateScaleAdd",
 ]

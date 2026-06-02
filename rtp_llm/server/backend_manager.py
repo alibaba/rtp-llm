@@ -1,17 +1,9 @@
-import asyncio
 import gc
-import json
 import logging
-import os
 import threading
 import time
-import traceback
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
 
-import requests
-import torch
-from fastapi import Request
-from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
@@ -20,14 +12,10 @@ from rtp_llm.config.engine_config import EngineConfig, update_worker_addrs
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
-from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
+from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
-from rtp_llm.server.misc import format_exception
-from rtp_llm.utils.concurrency_controller import (
-    ConcurrencyException,
-    get_global_controller,
-)
+from rtp_llm.utils.concurrency_controller import get_global_controller
 from rtp_llm.utils.fuser import _nfs_manager
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
@@ -81,7 +69,6 @@ class BackendManager(object):
             engine_config.parallelism_config,
             world_info,
         )
-
         # Build main model_config
         model_config = ModelFactory.create_model_config(
             model_args=self.py_env_configs.model_args,
@@ -94,23 +81,53 @@ class BackendManager(object):
             render_config=self.py_env_configs.render_config,
             eplb_config=self.py_env_configs.eplb_config,
         )
-
         # Let engine_config finalize based on model_config (e.g. scheduler config)
         ModelFactory.update_engine_config_from_model_config(
             engine_config=engine_config,
             model_config=model_config,
         )
 
-        # Initialize DeepEP wrapper if MOE model and DeepEP is enabled
+        # Initialize DeepEP/MoriEP wrapper if MOE model and EP is enabled
         if (
-            engine_config.model_specific_config.load_python_model
-            and engine_config.moe_config.use_deepep_moe
-            and model_config.expert_num > 0
+            model_config.expert_num > 0
             and engine_config.parallelism_config.world_size > 1
+            and not engine_config.moe_config.use_all_gather
         ):
-            from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
+            deepep_init_success = False
+            moriep_init_success = False
 
-            init_deepep_wrapper(engine_config, model_config)
+            # Initialize DeepEP if enabled
+            if engine_config.moe_config.use_deepep_moe:
+                try:
+                    from rtp_llm.models_py.distributed.deepep_wrapper import (
+                        init_deepep_wrapper,
+                    )
+
+                    init_deepep_wrapper(engine_config, model_config)
+                    deepep_init_success = True
+                except Exception as e:
+                    logging.error(f"Failed to initialize DeepEP wrapper: {e}")
+
+            # Initialize MoriEP if enabled (can be independent of DeepEP)
+            if engine_config.moe_config.use_mori_ep:
+                try:
+                    from rtp_llm.models_py.distributed.moriep_wrapper import (
+                        init_moriep_wrapper,
+                    )
+
+                    init_moriep_wrapper(engine_config, model_config)
+                    moriep_init_success = True
+                    logging.info("MoriEP wrapper initialized successfully")
+                except Exception as e:
+                    logging.error(f"Failed to initialize MoriEP wrapper: {e}")
+
+            # Raise if a requested EP backend failed to initialize
+            if engine_config.moe_config.use_deepep_moe and not deepep_init_success:
+                raise RuntimeError("DeepEP was requested but failed to initialize")
+            if engine_config.moe_config.use_mori_ep and not moriep_init_success:
+                raise RuntimeError(
+                    "use_mori_ep is set but MoriEP wrapper failed to initialize"
+                )
 
         # Optional propose model config
         propose_model_config = ModelFactory.create_propose_model_config(

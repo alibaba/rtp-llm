@@ -9,16 +9,18 @@ if [ $1 -a "$1" -gt 0 ] 2>/dev/null; then
 fi
 
 CURL_BIN=/usr/bin/curl
-SPACE_STR="..................................................................................................."
+SPACE_STR="........................................................................"
 
 OUTIF=`/sbin/route -n | tail -1  | sed -e 's/.* \([^ ]*$\)/\1/'`
 HTTP_IP="http://`/sbin/ifconfig | grep -A1 ${OUTIF} | grep inet | awk '{print $2}' | sed 's/addr://g'`:${CHECK_PORT}"
 
 #####################################
 checkpage() {
+    echo ""
     echo ${SPACE_STR}
-    echo "INFO: ${APP_NAME} checking status..."
+    echo "INFO: ${APP_NAME} checking status... $(date '+%Y-%m-%d %H:%M:%S')"
     echo ${SPACE_STR}
+    echo ""
     if [ ! -z "$SERVICE_PID" ]; then
         if [ -f "$SERVICE_PID" ]; then
             if [ -s "$SERVICE_PID" ]; then
@@ -26,8 +28,8 @@ checkpage() {
                     PID=`cat "$SERVICE_PID"`
                     ps -p $PID >/dev/null 2>&1
                     if [ $? -eq 0 ] ; then
-                        # Only check /health endpoint
-                        health_check "/health" "${APP_NAME}" "200"
+                        # Only check /hook/process_ok endpoint
+                        health_check "/hook/process_ok" "${APP_NAME}" "200"
                         if [ $? -eq 0 ]; then
                             echo "INFO: ${APP_NAME} health check passed"
                             echo ${SPACE_STR}

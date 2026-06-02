@@ -10,31 +10,15 @@ from packaging import version
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import (
-    AttentionConfigs,
-    ConcurrencyConfig,
-    DeviceResourceConfig,
-    EPLBConfig,
-    FfnDisAggregateConfig,
-    FMHAConfig,
-    HWKernelConfig,
-    KvCacheDataType,
-    MiscellaneousConfig,
-    ModelConfig,
-    ModelSpecificConfig,
-    MoeConfig,
-    ParallelismConfig,
-    ProfilingDebugLoggingConfig,
-    RuntimeConfig,
-    SpeculativeExecutionConfig,
-)
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ModelConfig
 
 # RTP-LLM imports
 from rtp_llm.ops.compute_ops import (
     KVCache,
+    LayerKVCache,
     PyAttentionInputs,
     get_typemeta,
-    init_device,
+    init_exec_ctx,
 )
 
 DTYPE_MAP = {
@@ -331,23 +315,14 @@ class TestXQABatchDecode(unittest.TestCase):
         model_config.attn_config.kv_head_num = 1
         model_config.attn_config.size_per_head = 128
         model_config.attn_config.tokens_per_block = 64
+        model_config.attn_config.kernel_tokens_per_block = 64
         model_config.max_seq_len = 2048
 
-        init_device(
-            parallelism_config=ParallelismConfig(),
-            model_config=model_config,
-            eplb_config=EPLBConfig(),
-            fmha_config=FMHAConfig(),
-            device_resource_config=DeviceResourceConfig(),
-            moe_config=MoeConfig(),
-            sp_config=SpeculativeExecutionConfig(),
-            misc_config=MiscellaneousConfig(),
-            profiling_debug_logging_config=ProfilingDebugLoggingConfig(),
-            hw_kernel_config=HWKernelConfig(),
-            concurrency_config=ConcurrencyConfig(),
-            ffn_disaggregate_config=FfnDisAggregateConfig(),
-            runtime_config=RuntimeConfig(),
-            model_specific_config=ModelSpecificConfig(),
+        init_exec_ctx(
+            device_id=0,
+            trace_memory=False,
+            enable_comm_overlap=False,
+            mla_ops_type=int(model_config.mla_ops_type),
         )
 
     def _test_xqa_decode_impl(
@@ -394,6 +369,7 @@ class TestXQABatchDecode(unittest.TestCase):
         attn_inputs.sequence_lengths = in_kv_lens
         attn_inputs.input_lengths = q_lens
         attn_inputs.kv_cache_block_id_device = page_table
+        attn_inputs.kv_cache_kernel_block_id_device = page_table
         attn_inputs.dtype = get_typemeta(q)
         attn_inputs.total_tokens = q.shape[0]
         attn_inputs.decode_cu_seqlens_d = generate_cumsum_lens(q_lens)
@@ -405,12 +381,13 @@ class TestXQABatchDecode(unittest.TestCase):
         attn_configs.kv_head_num = num_kv_heads
         attn_configs.size_per_head = head_dim
         attn_configs.tokens_per_block = page_size
+        attn_configs.kernel_tokens_per_block = page_size
         attn_configs.kv_cache_dtype = (
             KvCacheDataType.FP8 if kv_dtype == "fp8" else KvCacheDataType.BASE
         )
         attn_configs.dtype = q.dtype
 
-        kv_cache = KVCache()
+        kv_cache = LayerKVCache()
         kv_cache.kv_cache_base = kv_cache_tensor
 
         original_init = FMHAImplBase.__init__
@@ -426,7 +403,7 @@ class TestXQABatchDecode(unittest.TestCase):
 
         FMHAImplBase.__init__ = patched_init
         try:
-            attn_configs.need_rope_kv_cache = False            
+            attn_configs.need_rope_kv_cache = False
             xqa_impl = XQADecodeImpl(attn_configs, attn_inputs)
             # Prepare fmha_params with scale parameters
             if kv_dtype == "fp8":

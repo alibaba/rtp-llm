@@ -9,12 +9,12 @@ import torch
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
     QuantizationConfig,
+    W4a8Int4PerChannelQuantConfig,
     init_quant_config,
 )
-from rtp_llm.ops import KVCacheConfig, KvCacheDataType
+from rtp_llm.ops import DataType, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
 from rtp_llm.ops import TaskType
-from rtp_llm.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
 from rtp_llm.utils.util import get_config_from_path, to_torch_dtype
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
@@ -39,6 +39,17 @@ def kv_cache_dtype_to_torch_dtype(
         return data_type.to_torch_dtype()
 
 
+def ssm_state_dtype_str_to_data_type(ssm_state_dtype: str) -> DataType:
+    ssm_state_dtype = ssm_state_dtype.lower()
+    if ssm_state_dtype == "bf16":
+        return DataType.TYPE_BF16
+    if ssm_state_dtype == "fp16":
+        return DataType.TYPE_FP16
+    if ssm_state_dtype == "fp32":
+        return DataType.TYPE_FP32
+    raise ValueError(f"Unsupported ssm_state_dtype: {ssm_state_dtype}")
+
+
 class VitParameters:
     """Vit parameters for multimodal models."""
 
@@ -57,6 +68,7 @@ class ModelConfig(CppModelConfig):
     _python_fields = {
         "is_mtp",
         "normalize_lm_head_weight",
+        "enable_fp32_lm_head",
         "has_lm_head_bias",
         "tie_word_embeddings",
         "quantization",
@@ -71,6 +83,8 @@ class ModelConfig(CppModelConfig):
         "generate_env_config",
         "render_config",
         "phy2log_path",
+        "lora_infos",
+        "headwise_config",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -86,7 +100,6 @@ class ModelConfig(CppModelConfig):
         "eplb_config",
         "ckpt_path",
         "tokenizer_path",
-        "lora_infos",
         "position_ids_style",
         "pre_seq_len",
         "use_kvcache",
@@ -120,6 +133,7 @@ class ModelConfig(CppModelConfig):
         "use_norm_attn_out_residual",
         "input_vocab_size",
         "type_vocab_size",
+        "gen_num_per_cycle",
         "embedding_size",
         "moe_normalize_expert_scale",
         "scoring_func",
@@ -398,6 +412,39 @@ class ModelConfig(CppModelConfig):
         )
         return layer_weight_param_count
 
+    def moe_weight_param_count(self) -> int:
+        """Calculate parameter count for MoE expert weights only (routed experts).
+
+        Returns:
+            Parameter count for MoE expert weights. Returns 0 if no MoE is configured.
+        """
+        if self.expert_num <= 0:
+            return 0
+
+        hidden_size = self.hidden_size
+        ffn_expert_num = self.expert_num
+        ffn_w_count = 3 if self.isGatedActivation() else 2
+
+        if self.moe_style == 1:
+            # Pure MOE: all layers use routed experts
+            return (
+                self.num_layers
+                * self.moe_inter_size
+                * hidden_size
+                * ffn_w_count
+                * ffn_expert_num
+            )
+        elif self.moe_style == 2:
+            # Hybrid MOE: only routed expert weights (not shared experts)
+            return (
+                len(self.moe_layer_index)
+                * self.moe_inter_size
+                * hidden_size
+                * ffn_w_count
+                * ffn_expert_num
+            )
+        return 0
+
     def apply_rope_scaling_override(self, model_override_args: Dict[str, Any]) -> None:
         """
         Apply rope_scaling configuration from model_override_args.
@@ -476,6 +523,7 @@ class ModelConfig(CppModelConfig):
         # Additional Python-only fields
         self.is_mtp: bool = False
         self.normalize_lm_head_weight: bool = False
+        self.enable_fp32_lm_head: bool = True
         self.has_lm_head_bias: bool = False
         self.tie_word_embeddings: bool = False
         # Model loading related fields
@@ -493,6 +541,7 @@ class ModelConfig(CppModelConfig):
         self.model_name: str = (
             ""  # Model name (also set to engine_config.runtime_config.model_name)
         )
+        self.lora_infos: Dict[str, str] = {}  # Python-only (C++ lora code removed)
 
         # Model architecture fields
         self.inter_size: int = 0  # FFN intermediate size (for regular FFN layers)
@@ -594,6 +643,15 @@ class ModelConfig(CppModelConfig):
                 f"Overriding data_type from {original_data_type} to {data_type} "
                 f"because {quant_config.get_method()} quantization requires FP16"
             )
+        elif quant_config and isinstance(quant_config, W4a8Int4PerChannelQuantConfig):
+            if data_type not in [WEIGHT_TYPE.BF16, WEIGHT_TYPE.FP16]:
+                original_data_type = data_type
+                data_type = WEIGHT_TYPE.BF16
+                logging.info(
+                    f"Overriding data_type from {original_data_type} to {data_type} "
+                    f"because w4a8_int4_per_channel quantization only supports BF16/FP16, "
+                    "ACT_TYPE can be configured manually."
+                )
 
         # Set attn_config.kv_cache_dtype based on kv_cache_config
         if kv_cache_config is not None:
@@ -810,6 +868,15 @@ def build_model_config(
         kv_cache_config=kv_cache_config, act_type=model_args.act_type
     )
     model_config.attn_config.tokens_per_block = kv_cache_config.seq_size_per_block
+    model_config.attn_config.kernel_tokens_per_block = (
+        kv_cache_config.kernel_seq_size_per_block
+        if kv_cache_config.kernel_seq_size_per_block > 0
+        else kv_cache_config.seq_size_per_block
+    )
+    model_config.linear_attention_config.ssm_state_dtype = (
+        ssm_state_dtype_str_to_data_type(kv_cache_config.ssm_state_dtype)
+    )
+    model_config.linear_attention_config.conv_state_dtype = model_config.data_type
 
     model_config.use_kvcache = model_config.task_type == TaskType.LANGUAGE_MODEL
     logging.info(
@@ -821,14 +888,14 @@ def build_model_config(
             model_config.attn_config.size_per_head * model_config.attn_config.head_num
         )
 
-    # Load cutlass gemm config
-    load_cutlass_gemm_config(model_config.quant_algo)
-
     # Apply hack_layer_num if needed
     hack_layer_num = profiling_debug_logging_config.hack_layer_num
     if hack_layer_num:
         logging.info(f"hack layernum to {hack_layer_num}")
         model_config.num_layers = hack_layer_num
+
+    if model_args.enable_fp32_lm_head is not None:
+        model_config.enable_fp32_lm_head = model_args.enable_fp32_lm_head
 
     # Apply model override args
     if model_args.json_model_override_args:

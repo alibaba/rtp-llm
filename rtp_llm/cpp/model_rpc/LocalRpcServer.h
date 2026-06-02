@@ -7,10 +7,13 @@
 #include "grpc++/grpc++.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
+#include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/engine_base/EngineInitParams.h"
+#include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WorkerStatusInfo.h"
 #include "rtp_llm/cpp/cache/Types.h"
-#include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -40,6 +43,10 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer);
 
+    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response);
+
     grpc::Status CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response);
 
     grpc::Status UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response);
@@ -53,18 +60,17 @@ public:
 
     grpc::Status SetLogLevel(grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response);
 
+    grpc::Status StartProfile(grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response);
+
+    grpc::Status
+    StartProfileInternal(grpc::ServerContext* context, const StartProfileInternalRequestPB* request, EmptyPB* response);
+
     grpc::Status
     UpdateSchedulerInfo(grpc::ServerContext* context, const UpdateSchedulerInfoRequestPB* request, EmptyPB* response);
 
     KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version, bool need_cache_keys);
 
     WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version);
-
-    void addLora(const std::string&                        adapter_name,
-                 const rtp_llm::lora::loraLayerWeightsMap& lora_a_weights,
-                 const rtp_llm::lora::loraLayerWeightsMap& lora_b_weights);
-
-    void removeLora(const std::string& adapter_name);
 
     std::shared_ptr<EngineBase> getEngine() const {
         return engine_;
@@ -102,6 +108,13 @@ protected:
                                   WriterInterface*                 writer,
                                   std::shared_ptr<GenerateStream>& stream);
 
+    // Shared helpers for single and batch paths
+    ErrorInfo prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output);
+    ErrorInfo collectStreamOutput(grpc::ServerContext*                  context,
+                                  std::shared_ptr<GenerateStream>&      stream,
+                                  const std::shared_ptr<GenerateInput>& input,
+                                  GenerateOutputs&                      last_outputs);
+
 protected:
     std::shared_ptr<EngineBase>           engine_;
     std::shared_ptr<MultimodalProcessor>  mm_processor_;
@@ -111,6 +124,7 @@ protected:
     std::atomic<size_t>                   onflight_requests_{0};
     std::shared_ptr<RpcServerRuntimeMeta> meta_;
     py::object                            weight_manager_;
+    std::shared_ptr<BroadcastManager>     profile_broadcaster_;
 };
 
 }  // namespace rtp_llm

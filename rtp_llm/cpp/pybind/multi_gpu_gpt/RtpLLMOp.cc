@@ -14,9 +14,6 @@
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
-#include "rtp_llm/cpp/core/BufferHelper.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 
 using namespace std;
@@ -338,7 +335,6 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
 }
 
 void RtpLLMOp::startHttpServer(py::object model_weights_loader,
-                               py::object lora_infos,
                                py::object world_info,
                                py::object tokenizer,
                                py::object render) {
@@ -346,7 +342,7 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
         RTP_LLM_FAIL("normal HTTP Server nullptr error.");
         return;
     }
-    if (http_server_->start(model_weights_loader, lora_infos, world_info, tokenizer, render)) {
+    if (http_server_->start(model_weights_loader, world_info, tokenizer, render)) {
         RTP_LLM_LOG_INFO("normal HTTP Server listening on %s", http_server_->getListenAddr().c_str());
     } else {
         RTP_LLM_FAIL("normal HTTP Server start fail.");
@@ -413,7 +409,6 @@ void registerRtpLLMOp(const py::module& m) {
         .def("start_http_server",
              &RtpLLMOp::startHttpServer,
              py::arg("model_weights_loader"),
-             py::arg("lora_infos"),
              py::arg("world_info"),
              py::arg("tokenizer"),
              py::arg("render"))

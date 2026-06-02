@@ -1,7 +1,6 @@
 import gc
 import logging
 import os
-import time
 from collections import OrderedDict
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
@@ -10,8 +9,9 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.device import get_current_device
+from rtp_llm.config.quant_config import Fp8PerChannelCompressedQuantConfig
 from rtp_llm.lora.lora_weights import LoRAWeights
+from rtp_llm.model_loader.ffn_weight import iter_stacked_moe_weights
 from rtp_llm.model_loader.load_config import LoadConfig, LoadMethod
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
@@ -22,7 +22,7 @@ from rtp_llm.model_loader.tensor_source import DatabaseTensorSource, TensorColle
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight, WeightModule
 from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
-from rtp_llm.utils.model_weight import W, WeightStyle
+from rtp_llm.utils.model_weight import W, WeightStyle, identity
 from rtp_llm.utils.module_util import has_module
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import check_with_info
@@ -45,6 +45,7 @@ class ModelLoader:
         misc_weights_info: Optional[CustomAtomicWeight],
         database: BaseDatabase,
         load_method: LoadMethod = LoadMethod.AUTO,
+        force_cpu_load_weights: bool = False,
     ):
         self.model_config = model_config
         self._task_type = model_config.task_type
@@ -59,6 +60,8 @@ class ModelLoader:
         compute_dtype = model_config.compute_dtype
         logging.info(f"load use type {compute_dtype}")
 
+        from rtp_llm.device import get_current_device
+
         # Get is_attn_model flag from weights_info (calculated in ModelDeployWeightInfo constructor)
         self._is_attn_model = weights_info.is_attn_model
         self._py_eplb, self._phy2log = self.create_eplb()
@@ -67,6 +70,7 @@ class ModelLoader:
             database=database,
             phy2log=self._phy2log,
             exported_device=get_current_device(),
+            force_cpu_load_weights=force_cpu_load_weights,
         )
 
     def get_load_config(self) -> LoadConfig:
@@ -262,27 +266,162 @@ class ModelLoader:
             / max(self._load_config.ep_size, self._load_config.tp_size)
             / (1024.0**2)
         )
+        if self._is_online_ptpc():
+            # Online PTPC with inline FP8: MoE expert weights are quantized
+            # per-expert during loading (no BF16 peak for MoE), but dense
+            # weights (attention, embedding, shared experts) still load as
+            # BF16 then quantize to FP8, requiring ~2x peak for that portion.
+            moe_params = self._weights_info.model_config.moe_weight_param_count()
+            total_layer_params = self._weights_info.model_config.layer_weight_param_count()
+            if total_layer_params > 0 and moe_params > 0:
+                # dense_ratio: fraction of layer weights that are NOT inline-quantized MoE
+                dense_ratio = 1.0 - (moe_params / total_layer_params)
+                # Dense weights need 2x (BF16 loaded + FP8 quantized simultaneously),
+                # MoE weights only need 1x (quantized inline per-expert).
+                # Overall multiplier: dense_ratio * 2 + moe_ratio * 1
+                mem_multiplier = dense_ratio * 2.0 + (1.0 - dense_ratio) * 1.0
+                model_mem *= mem_multiplier
+                logging.info(
+                    f"online PTPC with inline FP8: MoE ratio={1.0 - dense_ratio:.2%}, "
+                    f"dense ratio={dense_ratio:.2%}, "
+                    f"memory multiplier={mem_multiplier:.2f}x (dense needs BF16 peak)"
+                )
+            else:
+                # No MoE weights detected, treat as full online quant
+                model_mem *= 2
+                logging.info(
+                    f"online PTPC but no MoE weights detected, "
+                    f"doubling model_mem estimate conservatively"
+                )
+        elif self._is_online_quant_without_inline():
+            # Non-inline online quantization: BF16 checkpoint loaded then
+            # quantized to FP8, so peak memory is roughly 2x FP8 model size.
+            model_mem *= 2
+            logging.info(
+                f"online quantization detected (BF16 checkpoint -> FP8), "
+                f"doubling model_mem estimate for fastsafetensor memory check"
+            )
         max_file_mem = max_file_size / (1024.0**2)
-        logging.debug(
-            f"free mem: {free_mem}, model mem: {model_mem}, max file mem: {max_file_mem}"
+        logging.info(
+            f"fastsafetensor memory check: free_mem={free_mem:.0f}MB, "
+            f"model_mem={model_mem:.0f}MB, max_file_mem={max_file_mem:.0f}MB, "
+            f"enough={(free_mem - model_mem) > (3 * max_file_mem)}"
         )
         return (free_mem - model_mem) > (3 * max_file_mem)
 
-    def _load_from_fastsafetensor(self, device: str):
-        all_tensors = self._load_config.database.fastsafetensors_weights_iterator(
-            device, True
+    @staticmethod
+    def _build_stacked_key_config(weight_info_list) -> dict:
+        """Build mapping: stacked ckpt key -> per-expert name template."""
+        stacked_key_config = {}
+        for wi in weight_info_list:
+            for moe_weight in iter_stacked_moe_weights(wi.weight):
+                for idx, ckpt_weight in enumerate(moe_weight.weights):
+                    if ckpt_weight.merge_fun is not identity:
+                        continue
+                    stacked_key = ckpt_weight.tensor_name(wi.layer_id)
+                    template = moe_weight._expert_key_pattern(idx).format(
+                        i=str(wi.layer_id),
+                        expert_id="{expert_id}",
+                    )
+                    if stacked_key not in stacked_key_config:
+                        stacked_key_config[stacked_key] = template
+        return stacked_key_config
+
+    def _is_online_ptpc(self) -> bool:
+        quant_config = getattr(self._weights_info, "_quant_config", None)
+        return (
+            quant_config is not None
+            and isinstance(quant_config, Fp8PerChannelCompressedQuantConfig)
+            and not quant_config.is_quanted()
         )
+
+    def _is_online_quant_without_inline(self) -> bool:
+        """Check if online quantization is active but NOT the inline PTPC path."""
+        quant_algo = self._weights_info.model_config.quant_algo
+        quant_config = getattr(self._weights_info, "_quant_config", None)
+        return (
+            quant_algo is not None
+            and quant_algo.getWeightBits() == 8
+            and quant_config is not None
+            and not quant_config.is_quanted()
+            and not self._is_online_ptpc()
+        )
+
+    def _should_inline_fp8_quantize(self, weight_info) -> bool:
+        from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight
+        from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
+            LoadQuantPerChannelFp8Weight,
+        )
+
+        weight = weight_info.weight
+        if not isinstance(weight, LoadQuantPerChannelFp8Weight):
+            return False
+        return isinstance(weight.kernel, MoeAtomicWeight) and weight.scale is not None
+
+    def _load_from_fastsafetensor(self, device: str):
         logging.info(f"load weight by device: {device}")
         model_weights = self._create_model_weights(device)
         tensor_to_weight_map, weight_info_list = self._generate_weight_info()
-        direct_io = self._load_config.exported_device.support_dio_load
+
+        stacked_key_config = self._build_stacked_key_config(weight_info_list)
+        if stacked_key_config:
+            logging.info(
+                f"fastsafetensors per-expert split enabled for {len(stacked_key_config)} stacked keys"
+            )
+
+        inline_fp8 = self._is_online_ptpc()
+        if inline_fp8:
+            from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
+                per_channel_cast_to_fp8,
+                per_channel_cast_to_fp8_expert,
+            )
+
+            logging.info(
+                "online PTPC detected: enabling inline FP8 quantization "
+                "during fastsafetensors loading to reduce peak GPU memory"
+            )
+
+        all_tensors = self._load_config.database.fastsafetensors_weights_iterator(
+            device,
+            True,
+            stacked_key_config=stacked_key_config,
+        )
+
+        _inline_count = 0
+        _total_count = 0
         for key, loaded_tensor in all_tensors:
             if key not in tensor_to_weight_map:
                 continue
             weight_info = tensor_to_weight_map[key]
-            complete = weight_info.collector.store_tensor(key, loaded_tensor)
+            _total_count += 1
+
+            if inline_fp8 and self._should_inline_fp8_quantize(weight_info):
+                if (
+                    loaded_tensor.dtype != torch.float8_e4m3fn
+                    and loaded_tensor.dim() == 2
+                ):
+                    fp8_tensor, scale = per_channel_cast_to_fp8_expert(loaded_tensor)
+                    complete = weight_info.collector.store_fp8_quantized(
+                        key, fp8_tensor, scale
+                    )
+                    del loaded_tensor, fp8_tensor, scale
+                    _inline_count += 1
+                else:
+                    complete = weight_info.collector.store_tensor(key, loaded_tensor)
+            else:
+                complete = weight_info.collector.store_tensor(key, loaded_tensor)
+
+            if inline_fp8 and _total_count % 500 == 0 and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if _total_count % 5000 == 0 and torch.cuda.is_available():
+                alloc_gb = torch.cuda.memory_allocated() / (1024**3)
+                reserved_gb = torch.cuda.memory_reserved() / (1024**3)
+                logging.info(
+                    f"fastsafetensor loading progress: {_total_count} tensors, "
+                    f"{_inline_count} inline-fp8, "
+                    f"GPU alloc={alloc_gb:.1f}GiB reserved={reserved_gb:.1f}GiB"
+                )
             if complete:
-                start = time.time()
                 tensors = weight_info.weight.load(
                     tensor_source=weight_info.collector,
                     layer_id=weight_info.layer_id,
@@ -296,15 +435,24 @@ class ModelLoader:
                         )
                     else:
                         model_weights.set_global_weight(name, tensor)
-                logging.debug(
-                    f"weight: {type(weight_info.weight).__name__} load cost {time.time() - start}"
-                )
                 weight_info.collector.clear()
+                if inline_fp8:
+                    torch.cuda.empty_cache()
+                    gc.collect()
 
+        _fallback_count = 0
         for weight_info in weight_info_list:
             weight_info.collector.clear()
             if weight_info.collector.is_collection_complete():
                 continue
+            _fallback_count += 1
+            weight_name = getattr(weight_info.weight, "name", "") or str(
+                type(weight_info.weight).__name__
+            )
+            logging.info(
+                f"fastsafetensor fallback: loading {weight_name} "
+                f"layer={weight_info.layer_id} from database (collector incomplete)"
+            )
             tensors = weight_info.weight.load(
                 tensor_source=DatabaseTensorSource(self._load_config.database),
                 layer_id=weight_info.layer_id,
@@ -359,22 +507,32 @@ class ModelLoader:
             for layer_id in range(self._load_config.num_layers):
                 layer_weights = self._model_weights_info.layer_weights[layer_id]
                 if isinstance(layer_weights, WeightModule):
-                    names = layer_weights.get_tensor_names(layer_id, self._load_config)
-                    collector = TensorCollector(names, self._load_config.database)
-                    weight_info = WeightInfo(
-                        weight=layer_weights, layer_id=layer_id, collector=collector
-                    )
-                    tensor_to_weight_map.update({k: weight_info for k in names})
-                    weight_info_list.append(weight_info)
-                else:
-                    for weight in layer_weights:
-                        names = weight.get_tensor_names(layer_id, self._load_config)
+                    # For CompositeWeight (e.g. MoeWithSharedWeight), split into
+                    # sub-components so each gets its own collector. This prevents
+                    # large stacked MoE tensors from accumulating in a single
+                    # collector waiting for all sub-weights to arrive.
+                    for component in layer_weights.get_components():
+                        names = component.get_tensor_names(layer_id, self._load_config)
                         collector = TensorCollector(names, self._load_config.database)
                         weight_info = WeightInfo(
-                            weight=weight, layer_id=layer_id, collector=collector
+                            weight=component, layer_id=layer_id, collector=collector
                         )
                         tensor_to_weight_map.update({k: weight_info for k in names})
                         weight_info_list.append(weight_info)
+                else:
+                    for weight in layer_weights:
+                        for component in weight.get_components():
+                            names = component.get_tensor_names(
+                                layer_id, self._load_config
+                            )
+                            collector = TensorCollector(
+                                names, self._load_config.database
+                            )
+                            weight_info = WeightInfo(
+                                weight=component, layer_id=layer_id, collector=collector
+                            )
+                            tensor_to_weight_map.update({k: weight_info for k in names})
+                            weight_info_list.append(weight_info)
         for weight in self._model_weights_info.weights:
             if self._maybe_skip_weight(weight):
                 continue
@@ -404,14 +562,78 @@ class ModelLoader:
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
+    @staticmethod
+    def force_clean_host_memory():
+        """清理host内存，包括Python垃圾回收和glibc malloc缓存"""
+        gc.collect()
+        # 尝试释放glibc的内存缓存（malloc arena）
+        # 这对于释放已经被Python释放但仍被glibc缓存的内存很重要
+        try:
+            import ctypes
+
+            libc = ctypes.CDLL("libc.so.6")
+            # malloc_trim(0) 会释放所有可以释放的内存回操作系统
+            libc.malloc_trim(0)
+        except Exception:
+            pass  # 某些系统（如macOS）可能不支持
+
+    @staticmethod
+    def force_clean_all_memory():
+        """清理所有内存（GPU显存和Host内存）"""
+        ModelLoader.force_clean_cuda_memory()
+        ModelLoader.force_clean_host_memory()
+
+    def cleanup_database(self):
+        """清理数据库资源，释放checkpoint加载过程中使用的host内存
+
+        在模型权重加载完成后调用此方法，可以释放以下资源：
+        1. CkptFileInfo 中的 metadata 字典（可能包含大量元信息）
+        2. pretrain_file_list 和 finetune_file_list 列表
+        3. LoRA 相关的缓存数据
+
+        注意：调用此方法后，将无法再从checkpoint加载新的权重，
+        但不影响已加载权重的使用和动态LoRA加载功能。
+        """
+        if self._load_config is None:
+            return
+
+        database = self._load_config.database
+        if database is None:
+            return
+
+        # 清理 CkptFileInfo 的元数据和缓存的 safetensors 句柄
+        if database.pretrain_file_list is not None:
+            for ckpt_file in database.pretrain_file_list:
+                ckpt_file.close_safetensor_handle()
+                if ckpt_file.metadata is not None:
+                    ckpt_file.metadata = None
+            database.pretrain_file_list.clear()
+
+        if database.finetune_file_list is not None:
+            for ckpt_file in database.finetune_file_list:
+                ckpt_file.close_safetensor_handle()
+                if ckpt_file.metadata is not None:
+                    ckpt_file.metadata = None
+            database.finetune_file_list.clear()
+
+        # 清理 tensor 索引
+        if hasattr(database, "_tensor_index"):
+            database._tensor_index.clear()
+
+        # 清理 LoRA 缓存
+        if database.lora_ckpt is not None:
+            database.lora_ckpt = None
+
+        logging.info("Cleaned up database resources to release host memory")
+
     def _create_model_weights(self, device):
         return ModelWeights(
             self._load_config.num_layers, device, self._load_config.compute_dtype
         )
 
     def _choose_weight_convert_device(self, current_device):
-        if "FORCE_CPU_LOAD_WEIGHTS" in os.environ:
-            logging.warning("FORCE_CPU_LOAD_WEIGHTS is set, load weights to cpu")
+        if self._load_config.force_cpu_load_weights:
+            logging.warning("force_cpu_load_weights is enabled, load weights to cpu")
             return "cpu"
         model_size = self._weights_info.model_config.eval_model_weight_size()
         device_mem_info = self._load_config.exported_device.get_mem_info()
@@ -452,7 +674,6 @@ class ModelLoader:
                 weights.set_layer_weight(layer_id, name, tensor)
             else:
                 weights.set_global_weight(name, tensor)
-            gc.collect()
         return weights
 
     def _load_layer_weights(self, layer_id: int, device: str):
@@ -607,19 +828,12 @@ def get_model_loader(
     misc_weights_info: Optional[CustomAtomicWeight],
     database: BaseDatabase,
     load_method: LoadMethod = LoadMethod.AUTO,
+    force_cpu_load_weights: bool = False,
 ) -> ModelLoader:
     if weights_info._head_num % weights_info.tp_size != 0:
         raise Exception(
             "invalid tp_size %d for config.head_num %d"
             % (weights_info.tp_size, weights_info._head_num)
-        )
-    if (
-        weights_info._head_num_kv % weights_info.tp_size != 0
-        and weights_info._head_num_kv != 1
-    ):
-        raise Exception(
-            "invalid tp_size %d for config.head_num_kv %d"
-            % (weights_info.tp_size, weights_info._head_num_kv)
         )
     return ModelLoader(
         model_config,
@@ -627,4 +841,5 @@ def get_model_loader(
         misc_weights_info,
         database,
         load_method=load_method,
+        force_cpu_load_weights=force_cpu_load_weights,
     )

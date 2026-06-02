@@ -243,6 +243,8 @@ class MoeReorderTest(TestCase):
             topk_weights_ptr=topk_weights,
             topk=top_k,
             hidden_size=hidden_dim,
+            num_local_experts=num_local_experts,
+            total_dst_tokens=num_tokens * top_k,
             BLOCK_SIZE=512,
         )
         self.assertTrue(torch.allclose(torch_out, cuda_out, atol=5e-2, rtol=5e-2))

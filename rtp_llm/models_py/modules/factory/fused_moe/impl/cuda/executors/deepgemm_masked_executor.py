@@ -8,7 +8,6 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     m_grouped_bf16_gemm_nt_masked,
     m_grouped_fp8_gemm_nt_masked,
 )
-from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -94,13 +93,8 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                 self._num_packed_scales = 1
                 self._scale_dtype = torch.float32
                 # Whether use fp8 block quantization with UE8M0 scale
+                # (requant_weight_ue8m0 is applied at weight load time in _postprocess)
                 if is_deep_gemm_e8m0_used():
-                    self._w1, self._w1_scale = requant_weight_ue8m0(
-                        self._w1, self._w1_scale
-                    )
-                    self._w2, self._w2_scale = requant_weight_ue8m0(
-                        self._w2, self._w2_scale
-                    )
                     self._num_packed_scales = 4
                     self._scale_dtype = torch.int32
                 assert (

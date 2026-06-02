@@ -5,20 +5,22 @@
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
 #include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
-#include "rtp_llm/models_py/bindings/cuda/FlashInferOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FlashInferMlaParams.h"
-#include "rtp_llm/models_py/bindings/cuda/FusedMoEOp.h"
 #include "rtp_llm/models_py/bindings/cuda/SelectTopkOp.h"
 #include "rtp_llm/models_py/bindings/cuda/GroupTopKOp.h"
 // RtpProcessGroup is deprecated, use rtp_llm.distribute.collective_torch instead
 // #include "rtp_llm/models_py/bindings/common/RtpProcessGroup.h"
 #include "rtp_llm/models_py/bindings/cuda/PerTokenGroupQuantFp8.h"
-#include "rtp_llm/models_py/bindings/cuda/MoETopkSoftmax.h"
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "rtp_llm/models_py/bindings/cuda/TrtFp8QuantOp.h"
 #include "rtp_llm/models_py/bindings/cuda/ReuseKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/cuda/MlaKMergeOp.h"
+#include "rtp_llm/models_py/bindings/cuda/FastTopkOp.h"
 #include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
+#include "rtp_llm/models_py/bindings/cuda/UserBuffersOp.h"
+#include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
+
+#include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
 
 using namespace rtp_llm;
 
@@ -140,14 +142,6 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("fuse_silu_and_mul"),
                   py::arg("masked_m"));
 
-    rtp_ops_m.def("moe_topk_softmax",
-                  &moe_topk_softmax,
-                  "MoE Topk Softmax kernel",
-                  py::arg("topk_weights"),
-                  py::arg("topk_indices"),
-                  py::arg("token_expert_indices"),
-                  py::arg("gating_output"));
-
     rtp_ops_m.def(
         "embedding", &embedding, "Embedding lookup kernel", py::arg("output"), py::arg("input"), py::arg("weight"));
     rtp_ops_m.def("embedding_bert",
@@ -206,16 +200,83 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("input_lengths"),
                   py::arg("hidden_size"),
                   py::arg("cu_seq_len"));
+
+    rtp_ops_m.def("fast_topk_v2",
+                  &fast_topk_v2,
+                  "Fast TopK v2 kernel",
+                  py::arg("score"),
+                  py::arg("indices"),
+                  py::arg("lengths"),
+                  py::arg("row_starts") = py::none());
+
+    rtp_ops_m.def("fast_topk_transform_fused",
+                  &fast_topk_transform_fused,
+                  "Fast TopK Transform Fused kernel",
+                  py::arg("score"),
+                  py::arg("lengths"),
+                  py::arg("dst_page_table"),
+                  py::arg("src_page_table") = py::none(),
+                  py::arg("cu_seqlens_q"),
+                  py::arg("row_starts") = py::none());
+
+    rtp_ops_m.def("fast_topk_transform_ragged_fused",
+                  &fast_topk_transform_ragged_fused,
+                  "Fast TopK Transform Ragged Fused kernel",
+                  py::arg("score"),
+                  py::arg("lengths"),
+                  py::arg("topk_indices_ragged"),
+                  py::arg("topk_indices_offset"),
+                  py::arg("row_starts") = py::none());
+
+    rtp_ops_m.def("indexer_k_quant_and_cache",
+                  &rtp_llm::indexer_k_quant_and_cache,
+                  "Indexer K quantization and cache kernel",
+                  py::arg("k"),
+                  py::arg("kv_cache"),
+                  py::arg("slot_mapping"),
+                  py::arg("quant_block_size"),
+                  py::arg("scale_fmt"));
+
+    rtp_ops_m.def("cp_gather_indexer_k_quant_cache",
+                  &rtp_llm::cp_gather_indexer_k_quant_cache,
+                  "Gather indexer K quantized cache kernel",
+                  py::arg("kv_cache"),
+                  py::arg("dst_k"),
+                  py::arg("dst_scale"),
+                  py::arg("block_table"),
+                  py::arg("cu_seq_lens"));
+
+    rtp_ops_m.def("cp_gather_and_upconvert_fp8_kv_cache",
+                  &rtp_llm::cp_gather_and_upconvert_fp8_kv_cache,
+                  "Gather and upconvert FP8 KV cache to BF16 workspace (MLA DeepSeek V3 layout)",
+                  py::arg("src_cache"),
+                  py::arg("dst_compressed_kv"),
+                  py::arg("dst_k_pe"),
+                  py::arg("block_table"),
+                  py::arg("seq_lens"),
+                  py::arg("workspace_starts"),
+                  py::arg("batch_size"));
+
+    rtp_ops_m.def("concat_and_cache_mla",
+                  &rtp_llm::concat_and_cache_mla,
+                  "Concat and cache MLA (Multi-Head Latent Attention) kernel",
+                  py::arg("kv_c"),
+                  py::arg("k_pe"),
+                  py::arg("kv_cache"),
+                  py::arg("slot_mapping"),
+                  py::arg("kv_cache_dtype"),
+                  py::arg("scale"));
 }
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {
     registerBasicCudaOps(rtp_ops_m);
-    registerFusedMoEOp(rtp_ops_m);
     registerSelectTopkOp(rtp_ops_m);
     registerGroupTopKOp(rtp_ops_m);
     // RtpProcessGroup is deprecated, use rtp_llm.distribute.collective_torch instead
     // registerRtpProcessGroup(rtp_ops_m);
     registerTrtFp8QuantOp(rtp_ops_m);
+    registerUserBuffersOp(rtp_ops_m);
+    registerFakeBalanceExpertOp(rtp_ops_m);
 }
 
 }  // namespace torch_ext

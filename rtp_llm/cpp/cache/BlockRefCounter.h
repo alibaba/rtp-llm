@@ -26,11 +26,6 @@ public:
         return ref_counter.at(block_index);
     }
 
-    int getRefCounterUnchecked(int block_index) const {
-        auto it = ref_counter.find(block_index);
-        return it != ref_counter.end() ? it->second : 0;
-    }
-
     void incrementRefCounter(const std::vector<int>& block_indices) {
         for (int index : block_indices) {
             ref_counter[index]++;

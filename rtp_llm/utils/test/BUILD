@@ -68,7 +68,7 @@ py_test(
         "//:th_transformer_config",
         "//:rtp_compute_ops",
     ],
-    exec_properties = {'gpu':'A10'}
+    exec_properties = {'gpu':'H20'}
 )
 
 py_test(
@@ -84,10 +84,10 @@ py_test(
         "//:th_transformer_config",
         "//:rtp_compute_ops",
     ],
-    exec_properties = {'gpu':'A10'}
+    exec_properties = {'gpu':'H20'}
 )
 
-load("//bazel:arch_select.bzl", "requirement")
+load("@arch_config//:arch_select.bzl", "requirement")
 
 requirement([
     "grpcio",
@@ -101,6 +101,24 @@ py_test(
     deps = [
         "//rtp_llm:utils",
         ":grpcio",
+    ],
+    data = [
+        "//:th_transformer",
+        "//:th_transformer_config",
+        "//:rtp_compute_ops",
+    ],
+    exec_properties = {'gpu':'H20'}
+)
+
+py_test(
+    name = "duplicated_kv_test",
+    srcs = [
+        "duplicated_kv_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:_ft_pickler",
     ],
     data = [
         "//:th_transformer",

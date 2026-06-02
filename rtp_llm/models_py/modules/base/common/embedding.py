@@ -28,6 +28,7 @@ class Embedding(nn.Module):
         self.weight = weight
         self.config = config
         self.parallelism_config = parallelism_config
+        self.tp_size = parallelism_config.get_attn_tp_size()
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tokens = input.size(0)
@@ -35,19 +36,16 @@ class Embedding(nn.Module):
         output = torch.empty(
             (tokens, hidden_size), dtype=self.weight.dtype, device=input.device
         )
-
         rtp_llm_ops.embedding(output, input, self.weight.data)
-
-        if self.parallelism_config.tp_size > 1:
+        if self.tp_size > 1:
             m, n = output.shape
             output = all_gather(output, group=Group.TP)
             output = (
-                output.reshape(self.parallelism_config.tp_size, m, n)
+                output.reshape(self.tp_size, m, n)
                 .transpose(0, 1)
                 .contiguous()
                 .reshape(m, -1)
             )
-
         return output
 
 
@@ -62,6 +60,7 @@ class EmbeddingBert(nn.Module):
         self.weight = weight
         self.config = config
         self.parallelism_config = parallelism_config
+        self.tp_size = parallelism_config.get_attn_tp_size()
 
     def forward(
         self,
@@ -89,11 +88,11 @@ class EmbeddingBert(nn.Module):
             input_embedding_scalar,
         )
 
-        if self.parallelism_config.tp_size > 1:
+        if self.tp_size > 1:
             m, n = output.shape
             output = all_gather(output, group=Group.TP)
             output = (
-                output.reshape(self.parallelism_config.tp_size, m, n)
+                output.reshape(self.tp_size, m, n)
                 .transpose(0, 1)
                 .contiguous()
                 .reshape(m, -1)

@@ -2,8 +2,8 @@ package org.flexlb.httpserver;
 
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.service.grace.strategy.HealthCheckUpdater;
-import org.flexlb.service.grace.strategy.QueryWarmer;
+import org.flexlb.service.grace.strategy.HealthCheckHooker;
+import org.flexlb.service.grace.strategy.QueryWarmerHooker;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -20,7 +20,7 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
 public class HealthCheckServer {
 
     /**
-     * 健康检查
+     * Health check
      */
     @Bean
     public RouterFunction<ServerResponse> healthCheck() {
@@ -31,13 +31,13 @@ public class HealthCheckServer {
     }
 
     public Mono<ServerResponse> healthHandler() {
-        // 如果收到关闭信号，则返回404
-        if (HealthCheckUpdater.isShutDownSignalReceived) {
+        // Return 404 if shutdown signal received
+        if (HealthCheckHooker.isShutDownSignalReceived) {
             log.info("health check failed, because shutdown signal received");
             return ServerResponse.status(404).body(Mono.just("shutdown received"), String.class);
         }
-        // 如果未完成预热，则返回404
-        if (!QueryWarmer.warmUpFinished) {
+        // Return 404 if warmup not completed
+        if (!QueryWarmerHooker.warmUpFinished) {
             return ServerResponse.status(404).body(Mono.just("warm not finish"), String.class);
         }
         return ServerResponse.ok().body(Mono.just("success"), String.class);

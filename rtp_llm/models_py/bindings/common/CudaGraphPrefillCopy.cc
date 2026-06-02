@@ -1,8 +1,8 @@
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
-#include "rtp_llm/cpp/core/Dispatch.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
-#include "rtp_llm/cpp/kernels/cuda_graph_copy_kernel.h"
+#include "rtp_llm/models_py/bindings/core/Dispatch.h"
+#include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
+#include "rtp_llm/models_py/bindings/common/kernels/cuda_graph_copy_kernel.h"
 #include <cstdint>
 #include <iostream>
 #include <type_traits>
@@ -23,9 +23,9 @@ void cuda_graph_copy_small2large(at::Tensor& input_tensor,
     CHECK_INPUT(output_tensor);
     CHECK_DIM(2, input_tensor);   // input: (total_elements, hidden_size)
     CHECK_DIM(2, output_tensor);  // output: (max_batch_size * max_seq_len, hidden_size)
-    CHECK_DIM(1, batch_size);     // batch_size: (1)
+    CHECK_DIM(1, batch_size);     // batch_size: (1), CPU pinned memory
     CHECK_DIM(1, input_lengths);  // input_lengths: (batch_size)
-    CHECK_DIM(1, cu_seq_len);     // cu_seq_len: (batch_size + 1)
+    CHECK_DIM(1, cu_seq_len);     // cu_seq_len: (batch_size + 1), CPU pinned memory
     auto       input_ptr         = input_tensor.data_ptr();
     auto       output_ptr        = output_tensor.data_ptr();
     auto       batch_size_ptr    = batch_size.data_ptr<int>();

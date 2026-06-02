@@ -5,6 +5,7 @@ from typing import Optional
 
 import aiter
 import torch
+from aiter.ops.gemm_op_a8w8 import gemm_a8w8_bpreshuffle_cktile
 
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 
@@ -26,7 +27,7 @@ class RocmFp8PTPCLinear(LinearBase):
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
-        """Handle FP8_PER_CHANNEL_COMPRESSED"""
+        """Handle FP8_PER_CHANNEL_COMPRESSED and FP8_PER_CHANNEL_QUARK"""
         if weight_scales is None or quant_config is None:
             return False
 
@@ -36,7 +37,7 @@ class RocmFp8PTPCLinear(LinearBase):
 
         # Check quantization method
         quant_method = quant_config.get_method()
-        return quant_method == "FP8_PER_CHANNEL_COMPRESSED"
+        return quant_method in ("FP8_PER_CHANNEL_COMPRESSED", "FP8_PER_CHANNEL_QUARK")
 
     def __init__(
         self,
@@ -70,9 +71,6 @@ class RocmFp8PTPCLinear(LinearBase):
         M = input_bf16.shape[0]
         N = self.output_size
 
-        # Pre-allocate output tensor
-        output = torch.empty((M, N), dtype=torch.bfloat16, device=input_bf16.device)
-
         quantization_eps = 1e-10
         # Use per-token quantization (not per-token-block)
         input_fp8, input_scales = rocm_per_token_quant_fp8(
@@ -86,14 +84,35 @@ class RocmFp8PTPCLinear(LinearBase):
         x_scales = input_scales
         w_scales = self.weight_scales
 
-        output = aiter.gemm_a8w8_bpreshuffle(
-            input_fp8,  # A_quant_tensor
-            self.weight,  # W_kernel_tensor (already reshaped to [n, k])
-            x_scales,  # A_quant_scale_tensor (M, 1)
-            w_scales,  # W_scale_tensor (reshaped)
-            None,
-            input_bf16.dtype,
-        )
+        K = input_fp8.shape[-1]
+        # Dispatch rules (validated on MI308X, sweep M=[1..16384], N={1024,2816}, K=1024):
+        # - K < 192                     : aiter cktile (small-K kernel)
+        # - K >= 192, M >= 1536         : aiter cktile FlatmmKernel (small-N crossover at M~1536)
+        # - K >= 192, M >= 512, N > 1536: aiter cktile (large-N crossover at M~512, +22%)
+        # - otherwise                   : aiter default (decode-friendly, protects M<=256)
+        #
+        # Rationale: cktile's 128x128x128 tile amortizes LDS setup cost only when
+        # there are enough output elements. The crossover M depends on N:
+        #   - N <= 1536 (small): cktile wins at M~1536 (+23% at N=1024)
+        #   - N >  1536 (large): cktile wins at M~512  (+22% at N=2816)
+        # M < 512 always stays on default to protect decode (M<=256, +40~97% regression).
+        use_cktile = K < 192 or M >= 1536 or (M >= 512 and N > 1536)
+        if use_cktile:
+            output = torch.empty(
+                (M, N), dtype=input_bf16.dtype, device=input_bf16.device
+            )
+            gemm_a8w8_bpreshuffle_cktile(
+                input_fp8, self.weight, x_scales, w_scales, output
+            )
+        else:
+            output = aiter.gemm_a8w8_bpreshuffle(
+                input_fp8,
+                self.weight,
+                x_scales,
+                w_scales,
+                None,
+                input_bf16.dtype,
+            )
 
         # Add bias if present
         if self.bias is not None:

@@ -48,7 +48,7 @@ class EngineConfig:
     # Parallelism and runtime configs
     parallelism_config: ParallelismConfig
     runtime_config: RuntimeConfig
-    # C++ initDevices uses this for NCCL ip/ports
+    # C++ uses this for NCCL ip/ports
     nccl_comm_config: NcclCommConfig
     # C++ reads rpc_server_port, embedding_rpc_server_port, http_port from this
     server_config: ServerConfig
@@ -209,7 +209,6 @@ class EngineConfig:
         distribute_config = py_env_configs.distribute_config
 
         parallelism_config = py_env_configs.parallelism_config
-
         runtime_config = py_env_configs.runtime_config
 
         # Directly use C++ binding objects from py_env_configs
@@ -286,8 +285,6 @@ class EngineConfig:
 # ============================================================================
 # EngineConfig setup and initialization functions
 # ============================================================================
-
-
 
 
 def update_worker_addrs(

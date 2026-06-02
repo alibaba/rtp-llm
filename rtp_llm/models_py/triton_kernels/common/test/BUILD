@@ -9,3 +9,25 @@ py_test (
     tags = ["H20"],
     exec_properties = {'gpu':'H20', 'gpu_count':'1'},
 )
+
+py_test(
+    name = "test_moe_gating",
+    srcs = ["test_moe_gating.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20"],
+    exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+)
+
+py_test(
+    name = "scatter_qkv_test",
+    srcs = ["scatter_qkv_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20"],
+    exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+)

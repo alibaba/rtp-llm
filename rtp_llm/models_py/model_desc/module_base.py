@@ -4,16 +4,15 @@ from typing import Any, Optional
 from torch import Tensor, nn
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.ops import DeviceResourceConfig
 from rtp_llm.ops.compute_ops import (
-    DeviceType,
     KVCache,
     PyModelInitResources,
     PyModelInputs,
     PyModelOutputs,
-    get_device,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -47,7 +46,7 @@ class GptModelBase(nn.Module):
         self.vocab_size: int = config.vocab_size
 
         self.kv_cache: Optional[KVCache] = None
-        self.device_type: DeviceType = get_device().get_device_type()
+        self.device_type: DeviceType = get_device_type()
 
         ## (batch_size -> fmha_params)
         self.params_dict: dict[int, Any] = {}
@@ -55,10 +54,19 @@ class GptModelBase(nn.Module):
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None:
+            num_layers = len(self.kv_cache.kv_cache_base_by_layer)
+            layer0_shape = (
+                self.kv_cache.kv_cache_base_by_layer[0].shape
+                if num_layers > 0
+                and self.kv_cache.kv_cache_base_by_layer[0] is not None
+                else None
+            )
+            num_scale_layers = len(self.kv_cache.kv_scale_base_by_layer)
             logging.info(
                 f"GptModelBase initialized with "
-                f"kv_cache_base={self.kv_cache.kv_cache_base.shape if self.kv_cache.kv_cache_base is not None else None}, "
-                f"kv_scale_base={self.kv_cache.kv_scale_base.shape if self.kv_cache.kv_scale_base is not None else None}, "
+                f"num_kv_layers={num_layers}, "
+                f"layer0_kv_cache_shape={layer0_shape}, "
+                f"num_scale_layers={num_scale_layers}, "
             )
         return True
 

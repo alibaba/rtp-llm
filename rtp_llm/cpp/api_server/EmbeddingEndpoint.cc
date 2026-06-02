@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/api_server/EmbeddingEndpoint.h"
 
 #include "rtp_llm/cpp/pybind/PyUtils.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingStream.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingScheduler.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingExecutor.h"
@@ -101,11 +100,11 @@ std::optional<MultimodalFeature> EmbeddingEndpoint::getMultimodalFeature(py::obj
     }
     std::optional<MultimodalFeature> multimodal_features = std::nullopt;
     if (mm_processor_ != nullptr && !mm_inputs.empty()) {
-        auto mm_res = mm_processor_->getMultimodalFeatures(rtp_llm::torchTensor2Buffer(token_ids), mm_inputs);
+        auto mm_res = mm_processor_->getMultimodalFeatures(token_ids, mm_inputs);
         if (!mm_res.ok()) {
             throw std::runtime_error(mm_res.status().ToString());
         }
-        token_ids = rtp_llm::Buffer2torchTensor(mm_res.value().expanded_ids, true);
+        token_ids = mm_res.value().expanded_ids;
         multimodal_features.emplace(mm_res.value());
     }
     return multimodal_features;

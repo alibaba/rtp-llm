@@ -6,7 +6,9 @@ Manages registration and selection of all MOE strategies.
 import logging
 from typing import List
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 
 from .defs.strategy_base import MoeStrategy
 
@@ -72,9 +74,9 @@ class StrategyRegistry:
             logger.error(
                 f"No suitable MOE strategy found. Config details: "
                 f"quant_config={config.model_config.quant_config}, "
-                f"ep_size={config.parallelism_config.ep_size}, "
-                f"world_size={config.parallelism_config.world_size}, "
-                f"tp_size={config.parallelism_config.tp_size}, "
+                f"ep_size={config.ep_size}, "
+                f"world_size={config.world_size}, "
+                f"tp_size={config.tp_size}, "
                 f"use_deepep_low_latency={config.moe_config.use_deepep_low_latency if config.moe_config else False}"
             )
             raise ValueError(

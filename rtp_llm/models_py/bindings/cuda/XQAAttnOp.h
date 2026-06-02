@@ -2,11 +2,10 @@
 
 #ifdef USING_CUDA12
 
+#include <torch/extension.h>
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaXqa.h"
-#include "rtp_llm/cpp/devices/cuda_impl/CudaDevice.h"
-#include "rtp_llm/cpp/devices/DeviceFactory.h"
+#include "rtp_llm/models_py/bindings/cuda/ops/CudaXqa.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace rtp_llm {
@@ -19,7 +18,7 @@ public:
     ParamsBasePtr prepare(torch_ext::PyAttentionInputs attn_inputs);
 
     torch::Tensor
-    forward(const torch::Tensor& input, std::optional<torch_ext::KVCache> kv_cache, const XQAParamsPtr& params);
+    forward(const torch::Tensor& input, std::optional<torch_ext::LayerKVCache> kv_cache, const XQAParamsPtr& params);
 
 protected:
     AttentionConfigs attn_configs_;

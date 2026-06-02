@@ -55,13 +55,9 @@ bool HttpApiServer::start() {
 }
 
 bool HttpApiServer::start(py::object model_weights_loader,
-                          py::object lora_infos,
                           py::object world_info,
                           py::object tokenizer,
                           py::object render) {
-    if (lora_infos.is_none() == false) {
-        lora_infos_ = lora_infos.cast<std::map<std::string, std::string>>();
-    }
     tokenizer_.reset(new Tokenizer(tokenizer));
     if (render.is_none() == false) {
         render_.reset(new ChatRender(render));

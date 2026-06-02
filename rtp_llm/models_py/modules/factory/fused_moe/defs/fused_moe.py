@@ -41,6 +41,7 @@ class ExpertForwardPayload:
     expert_tokens_meta: Optional[ExpertTokensMetadata] = None
     expert_topk_ids: Optional[torch.Tensor] = None
     expert_topk_weights: Optional[torch.Tensor] = None
+    expert_ids_are_local: bool = False
 
 
 @dataclass

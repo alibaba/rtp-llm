@@ -6,5 +6,5 @@ py_test(
         "//rtp_llm/server:server",
         "//rtp_llm:config_ops",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {'gpu':'H20'},
 )
