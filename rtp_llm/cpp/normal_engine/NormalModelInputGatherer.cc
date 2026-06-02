@@ -359,7 +359,7 @@ void NormalModelInputGatherer::gatherExtraInputIds(GptModelInputs&     model_inp
         for (auto i = 0; i < current_batch_size; ++i) {
             auto generate_input = stream->generateInput();
             if (generate_input && generate_input->extra_input_ids.has_value()) {
-                total_extra_input_ids_size += generate_input->extra_input_ids.value()->size();
+                total_extra_input_ids_size += generate_input->extra_input_ids.value().numel();
             }
         }
     }
@@ -383,9 +383,9 @@ void NormalModelInputGatherer::gatherExtraInputIds(GptModelInputs&     model_inp
         for (auto i = 0; i < current_batch_size; ++i) {
             auto generate_input = stream->generateInput();
             if (generate_input && generate_input->extra_input_ids.has_value()) {
-                auto   buffer = generate_input->extra_input_ids.value();
-                size_t len    = buffer->size();
-                std::memcpy(combo_ptr + offset, buffer->data(), len * sizeof(int32_t));
+                auto   buffer = generate_input->extra_input_ids.value().contiguous();
+                size_t len    = buffer.numel();
+                std::memcpy(combo_ptr + offset, buffer.data_ptr<int32_t>(), len * sizeof(int32_t));
                 lengths_ptr[context_batch_idx] = static_cast<int>(len);
                 locs_ptr[context_batch_idx]    = generate_input->extra_input_ids_loc;
                 offset += len;

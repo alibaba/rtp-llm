@@ -412,15 +412,14 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 
     // 从 py_model_outputs 中提取 lm_output_indexes（如果存在）
     // 优先使用 Python 模型返回的 lm_output_indexes（基于实际输入长度）
-    rtp_llm::BufferPtr lm_output_indexes = inputs.lm_output_indexes;
     if (py_model_outputs.size() > 0 && py_model_outputs[0].lm_output_indexes.defined()
         && py_model_outputs[0].lm_output_indexes.numel() > 0) {
-        DevicePerfWrapper wrapper(device_, "extract lm_output_indexes from py_model_outputs");
-        buffer_holder_.hold_host(py_model_outputs[0].lm_output_indexes);
-        lm_output_indexes = torchTensor2Buffer(py_model_outputs[0].lm_output_indexes);
+        GptModelInputs overridden_inputs   = inputs;
+        overridden_inputs.lm_output_indexes = py_model_outputs[0].lm_output_indexes;
+        return callForwardPostLayers(hidden_states, overridden_inputs, false);
     }
 
-    return callForwardPostLayers(hidden_states, inputs, false, lm_output_indexes);
+    return callForwardPostLayers(hidden_states, inputs, false);
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {

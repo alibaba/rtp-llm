@@ -52,7 +52,7 @@ public:
     std::optional<torch::Tensor>                text_tokens_mask;  // text part for 1 and multimodal part for 0
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
-    std::optional<rtp_llm::BufferPtr>           extra_input_ids;  // extra input ids (e.g., item_input for TBStarsTSE)
+    std::optional<torch::Tensor>                extra_input_ids;  // extra input ids (e.g., item_input for TBStarsTSE)
     int                                         extra_input_ids_loc =
         -1;  // extra_input_ids location in decoder input_ids (relative to single sequence), -1 means not exists
 

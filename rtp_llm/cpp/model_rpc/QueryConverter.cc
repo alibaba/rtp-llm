@@ -139,12 +139,11 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     }
 
     if (input->extra_input_ids_size() > 0) {
-        auto device = rtp_llm::DeviceFactory::getDefaultDevice();
-        generate_input->extra_input_ids = device->allocateBuffer(
-            {rtp_llm::DataType::TYPE_INT32, {(size_t)input->extra_input_ids_size()}, rtp_llm::AllocationType::HOST}, {});
-        memcpy(generate_input->extra_input_ids.value()->data(),
-               input->extra_input_ids().data(),
-               generate_input->extra_input_ids.value()->sizeBytes());
+        generate_input->extra_input_ids =
+            torch::from_blob(const_cast<int*>(input->extra_input_ids().data()),
+                             {(int64_t)input->extra_input_ids_size()},
+                             torch::kInt32)
+                .clone();
         generate_input->extra_input_ids_loc = input->extra_input_ids_loc();
     }
 

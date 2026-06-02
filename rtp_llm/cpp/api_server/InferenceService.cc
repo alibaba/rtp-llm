@@ -247,15 +247,10 @@ InferenceService::fillGenerateInput(int64_t                                reque
 
     // Store extra_input_ids and location if present
     if (result.extra_input_ids.has_value()) {
-        auto device = rtp_llm::DeviceFactory::getDefaultDevice();
-        // extra_input_ids buffer is stored as optional<BufferPtr> in GenerateInput
-        input->extra_input_ids = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                                         {static_cast<size_t>(result.extra_input_ids->size())},
-                                                         rtp_llm::AllocationType::HOST},
-                                                        {});
-        // optional<BufferPtr> → BufferPtr → Buffer
-        std::memcpy(
-            (*input->extra_input_ids)->data(), result.extra_input_ids->data(), (*input->extra_input_ids)->sizeBytes());
+        input->extra_input_ids = torch::from_blob(result.extra_input_ids->data(),
+                                                  {static_cast<int64_t>(result.extra_input_ids->size())},
+                                                  torch::kInt32)
+                                     .clone();
         // Store location information (relative to single sequence; later converted to global index)
         input->extra_input_ids_loc = result.extra_input_ids_loc;
     }
@@ -367,7 +362,6 @@ InferenceService::batchFillGenerateInputs(int64_t                               
     auto all_token_ids = token_processor_->batchEncode(texts);
 
     // Step 2: Process each input (no GIL needed - C++ processExtraInput)
-    auto                                        device = rtp_llm::DeviceFactory::getDefaultDevice();
     std::vector<std::shared_ptr<GenerateInput>> inputs;
     inputs.reserve(texts.size());
 
@@ -391,27 +385,20 @@ InferenceService::batchFillGenerateInputs(int64_t                               
                                              "mm_processor updateMultimodalFeatures failed: " + mm_res.ToString());
             }
         }
-        input->lora_id = engine_->getLoraManager()->getLoraId(input->generate_config->adapter_name);
-
         // Process extra input (pure C++, no GIL)
         auto& vec    = all_token_ids[i];
         auto  result = processExtraInput(vec);
         vec          = result.processed_input_ids;
 
         if (result.extra_input_ids.has_value()) {
-            input->extra_input_ids = device->allocateBuffer({rtp_llm::DataType::TYPE_INT32,
-                                                             {static_cast<size_t>(result.extra_input_ids->size())},
-                                                             rtp_llm::AllocationType::HOST},
-                                                            {});
-            std::memcpy((*input->extra_input_ids)->data(),
-                        result.extra_input_ids->data(),
-                        (*input->extra_input_ids)->sizeBytes());
+            input->extra_input_ids = torch::from_blob(result.extra_input_ids->data(),
+                                                      {static_cast<int64_t>(result.extra_input_ids->size())},
+                                                      torch::kInt32)
+                                         .clone();
             input->extra_input_ids_loc = result.extra_input_ids_loc;
         }
 
-        input->input_ids =
-            device->allocateBuffer({rtp_llm::DataType::TYPE_INT32, {vec.size()}, rtp_llm::AllocationType::HOST}, {});
-        memcpy(input->input_ids->data(), vec.data(), input->input_ids->sizeBytes());
+        input->input_ids = torch::from_blob(vec.data(), {(int64_t)vec.size()}, torch::kInt32).clone();
 
         inputs.push_back(input);
     }

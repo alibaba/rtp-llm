@@ -5,7 +5,6 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
-#include "rtp_llm/cpp/core/torch_utils/BufferTorchUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
@@ -473,7 +472,7 @@ void BlockPool::debugString() const {
     size_t           total_blocks        = totalBlocksNum();
     size_t           free_blocks         = free_block_ids_.size();
     size_t           available_blocks    = request_ref_counter_.freeBlockNum();
-    size_t           busy_blocks         = all_ref_counter_.busyBlockNum();
+    size_t           busy_blocks         = req_con_ref_counter_.busyBlockNum();
     size_t           request_busy_blocks = request_ref_counter_.busyBlockNum();
 
     RTP_LLM_LOG_INFO("BlockPool state: total_blocks = %zu, free_blocks = %zu, available_blocks = %zu, "
@@ -491,8 +490,8 @@ void BlockPool::debugString() const {
     const size_t max_print_count = 100;  // Limit output to avoid log flooding
 
     for (BlockIdxType block_id = 1; block_id < static_cast<BlockIdxType>(config_.block_num); ++block_id) {
-        int  all_ref_count     = all_ref_counter_.getRefCounterUnchecked(block_id);
-        int  request_ref_count = request_ref_counter_.getRefCounterUnchecked(block_id);
+        int  all_ref_count     = req_con_ref_counter_.getRefCounter(block_id);
+        int  request_ref_count = request_ref_counter_.getRefCounter(block_id);
         bool is_free           = free_block_ids_.find(block_id) != free_block_ids_.end();
 
         // Print all blocks or only non-zero reference count blocks (to reduce log size)
