@@ -128,6 +128,17 @@ def sm120_suites():
                 smoke_args="--seq_size_per_block 64 --embedding_model 1 --act_type BF16 --concurrency_limit 2 --enable_cuda_graph 1  --enable_cuda_graph_debug_mode 1 --prefill_capture_config '150,155,160,380,400' --task_type DENSE_EMBEDDING --reserver_runtime_mem_mb 3072",
                 gpu_type=["RTX_5000_PRO"],
             ),
+            # Qwen3.5 Dense 4B (hybrid: standard attention + GDN linear attention + causal conv1d)
+            # 首次在 sm120 上验证 qwen35_dense model_type + FLA Triton kernels
+            # --seq_size_per_block 2048: 增大 full-attn KV block 使 HybridConfigCreator
+            #   通过 full_block >= linear_block 约束（同 H20 qwen35 测试参数）
+            smoke_test(
+                name="qwen35_dense_bf16_sm120",
+                task_info="data/model/qwen35/qwen35_dense_bf16_sm120.json",
+                envs=["LOAD_PYTHON_MODEL=1"],
+                smoke_args="--act_type BF16 --seq_size_per_block 2048",
+                gpu_type=["RTX_5000_PRO"],
+            ),
         ],
     )
 
@@ -239,6 +250,15 @@ def sm120_suites():
                 task_info="data/model/qwen3/logits_index_fp8_sm120.json",
                 envs=["LOAD_PYTHON_MODEL=1"],
                 smoke_args="--quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0",
+                gpu_type=["RTX_5000_PRO"],
+            ),
+            # Qwen3.5 Dense 4B FP8_PER_BLOCK (hybrid attention + GDN + conv1d)
+            # BF16 case 在 smoke_sm120_basic 中通过后追加 FP8 量化路径验证
+            smoke_test(
+                name="qwen35_dense_fp8pb_sm120",
+                task_info="data/model/qwen35/qwen35_dense_fp8pb_sm120.json",
+                envs=["LOAD_PYTHON_MODEL=1"],
+                smoke_args="--quantization FP8_PER_BLOCK --act_type BF16 --seq_size_per_block 2048 --warm_up 0",
                 gpu_type=["RTX_5000_PRO"],
             ),
         ],
