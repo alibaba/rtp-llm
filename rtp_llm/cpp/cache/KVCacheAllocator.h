@@ -67,8 +67,7 @@ public:
     virtual int              seqSizePerBlock() const                                       = 0;
     virtual int              singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                    int                            seq_len,
-                                                   int                            reserve_step,
-                                                   const std::shared_ptr<CPSlotMapper>& cp_mapper = nullptr) const = 0;
+                                                   int                            reserve_step) const              = 0;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     virtual void blockCopy(int src_block_index, int dest_block_index);

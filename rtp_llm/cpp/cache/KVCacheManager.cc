@@ -60,8 +60,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     }
 
     // Page-level RR sharding context: one CPSlotMapper for the lifetime of the
-    // manager, broadcast into every malloc/insert via auto-injection in
-    // malloc()/insertIntoCache().  When kv_cache_sharded=false (or tp_size==1),
+    // manager and allocator. When kv_cache_sharded=false (or tp_size==1),
     // cp_slot_mapper_ stays nullptr and every call site stays bit-equal to the
     // pre-RR behaviour.
     const auto& cp_cfg = parallelism_config_.prefill_cp_config;
@@ -141,6 +140,7 @@ bool KVCacheManager::init() {
 
     allocator_->setCPSlotMapper(cp_slot_mapper_);
     allocator_->setSharedBlockCache(shared_cache);
+    allocator_->setCPSlotMapper(cp_slot_mapper_);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
 
     if (metrics_reporter_) {
@@ -173,46 +173,35 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
-    // Auto-inject cp_slot_mapper when CP sharding is active and the caller
-    // didn't supply one. Fast path: if cp_slot_mapper_ is null (sharding off)
-    // we use the original const-ref directly with no copy.
-    const MallocInfo* effective = &malloc_info;
-    MallocInfo        patched;
-    if (cp_slot_mapper_ && !malloc_info.cp_slot_mapper) {
-        patched                = malloc_info;
-        patched.cp_slot_mapper = cp_slot_mapper_;
-        effective              = &patched;
-    }
-
     // Cache-key computation is identical for CP and non-CP — we always have
     // the full sequence's token ids; rolling hash is at block_size granularity.
     const int seq_size_per_block = config_.seq_size_per_block;
-    if (!effective->batch_kv_cache_resource->curBlocksNum()) {
-        initCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, seq_size_per_block);
+    if (!malloc_info.batch_kv_cache_resource->curBlocksNum()) {
+        initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
     } else {
-        updateCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, seq_size_per_block);
+        updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
     }
 
-    auto result = allocator_->malloc(*effective);
+    auto result = allocator_->malloc(malloc_info);
 
     // CP invariant: blocks holds this rank's local share of logical KV pages.
     // cacheKeys can be shorter than logical blocks because an in-flight partial
     // tail is not always cacheable, so derive the expected count from seq_len.
-    if (result.success && effective->cp_slot_mapper && effective->cp_slot_mapper->isSharded()) {
-        const auto& res        = effective->batch_kv_cache_resource->cacheResource(0);
+    if (result.success && cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
+        const auto& res        = malloc_info.batch_kv_cache_resource->cacheResource(0);
         size_t      num_blocks = res.blocks().size();
-        size_t      expected   = expectedCPShardedLocalBlocks(*effective->cp_slot_mapper,
-                                                       effective->complete_token_ids->seqLength(),
-                                                       effective->complete_token_ids->getReserveStep());
+        size_t      expected   = expectedCPShardedLocalBlocks(*cp_slot_mapper_,
+                                                       malloc_info.complete_token_ids->seqLength(),
+                                                       malloc_info.complete_token_ids->getReserveStep());
         RTP_LLM_CHECK_WITH_INFO(num_blocks == expected,
                                 "CP invariant violated: blocks=%zu != expected_local_blocks=%zu "
                                 "(seq_len=%d, reserve_step=%d, cp_size=%d, block_size=%d, cacheKeys=%zu)",
                                 num_blocks,
                                 expected,
-                                effective->complete_token_ids->seqLength(),
-                                effective->complete_token_ids->getReserveStep(),
-                                effective->cp_slot_mapper->cpSize(),
-                                effective->cp_slot_mapper->blockSize(),
+                                malloc_info.complete_token_ids->seqLength(),
+                                malloc_info.complete_token_ids->getReserveStep(),
+                                cp_slot_mapper_->cpSize(),
+                                cp_slot_mapper_->blockSize(),
                                 res.cacheKeys().size());
     }
 
@@ -228,20 +217,14 @@ void KVCacheManager::free(const FreeInfo& free_info) {
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     RTP_LLM_PROFILE_FUNCTION();
     dropLastPartialBlock(insert_info.batch_kv_cache_resource);
-    if (cp_slot_mapper_ && !insert_info.cp_slot_mapper) {
-        InsertInfo patched     = insert_info;
-        patched.cp_slot_mapper = cp_slot_mapper_;
-        allocator_->insertIntoCache(patched);
-        return;
-    }
     allocator_->insertIntoCache(insert_info);
 }
 
 int KVCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                           int                            seq_len,
-                                          int                            reserve_step) const {
+    int                            reserve_step) const {
     RTP_LLM_CHECK_WITH_INFO(allocator_ != nullptr, "singleBatchNeedBlocks called before KVCacheManager initialized");
-    return allocator_->singleBatchNeedBlocks(batch_kv_cache_resource, seq_len, reserve_step, cp_slot_mapper_);
+    return allocator_->singleBatchNeedBlocks(batch_kv_cache_resource, seq_len, reserve_step);
 }
 
 // 块操作相关

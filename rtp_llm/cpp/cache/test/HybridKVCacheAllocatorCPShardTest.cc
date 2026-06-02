@@ -167,7 +167,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocHalvesFullGroup) {
     MallocInfo info{batch_res, tokens};
     info.enable_device_cache = false;
     info.reuse_cache         = false;
-    info.cp_slot_mapper      = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4);
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(batch_res->blocksNum(0, gid_full), 2)
@@ -204,7 +204,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ReuseHitOnLastRankCanonicalKey) {
     MallocInfo info{batch_res, tokens};
     info.enable_device_cache = true;
     info.reuse_cache         = true;
-    info.cp_slot_mapper      = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4);
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
@@ -234,7 +234,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocSkipsReuseWhenDisabled) {
     MallocInfo info{batch_res, tokens};
     info.enable_device_cache = false;
     info.reuse_cache         = false;
-    info.cp_slot_mapper      = std::make_shared<CPSlotMapper>(0, 2, 4);
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, 0);
@@ -262,7 +262,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, InsertIntoCacheUsesCanonicalKeysAndVir
     MallocInfo malloc_info{batch_res, tokens};
     malloc_info.enable_device_cache = false;
     malloc_info.reuse_cache         = false;
-    malloc_info.cp_slot_mapper      = std::make_shared<CPSlotMapper>(0, 2, 4);
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
     ASSERT_TRUE(allocator->malloc(malloc_info).success);
     ASSERT_EQ(batch_res->blocksNum(0, gid_full), 2);
 
@@ -270,7 +270,6 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, InsertIntoCacheUsesCanonicalKeysAndVir
     // full_blocks_num = floor(15/8) = 1. n = min(local_keys.size()=2, 1) = 1.
     // local_keys = {101, 103}; first key is 101.
     InsertInfo insert_info{batch_res, tokens, /*is_resident=*/false};
-    insert_info.cp_slot_mapper = malloc_info.cp_slot_mapper;
     allocator->insertIntoCache(insert_info);
 
     EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(101, gid_full)));
@@ -297,7 +296,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocCpSize4) {
     MallocInfo info{batch_res, tokens};
     info.enable_device_cache = false;
     info.reuse_cache         = false;
-    info.cp_slot_mapper      = std::make_shared<CPSlotMapper>(/*cp_rank=*/2, /*cp_size=*/4, /*block_size=*/4);
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/2, /*cp_size=*/4, /*block_size=*/4));
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(batch_res->blocksNum(0, gid_full), 2);  // ceil(8/4)=2

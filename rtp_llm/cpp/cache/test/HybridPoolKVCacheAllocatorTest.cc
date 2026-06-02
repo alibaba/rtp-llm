@@ -1297,11 +1297,11 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
     MallocInfo seed_malloc{seed_res, seed_tokens};
     seed_malloc.reuse_cache         = true;
     seed_malloc.enable_device_cache = false;
-    seed_malloc.cp_slot_mapper      = cp_mapper;
+    allocator->setCPSlotMapper(cp_mapper);
     ASSERT_TRUE(allocator->malloc(seed_malloc).success);
 
     InsertInfo insert_info{seed_res, seed_tokens, /*is_resident=*/false};
-    insert_info.cp_slot_mapper = cp_mapper;
+    allocator->setCPSlotMapper(cp_mapper);
     allocator->insertIntoCache(insert_info);
 
     FreeInfo seed_free{seed_res, seed_tokens};
@@ -1314,7 +1314,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
     MallocInfo hit_malloc{hit_res, hit_tokens};
     hit_malloc.reuse_cache         = true;
     hit_malloc.enable_device_cache = true;
-    hit_malloc.cp_slot_mapper      = cp_mapper;
+    allocator->setCPSlotMapper(cp_mapper);
     auto result                    = allocator->malloc(hit_malloc);
 
     ASSERT_TRUE(result.success);
