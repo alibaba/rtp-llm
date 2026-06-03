@@ -31,24 +31,24 @@ from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
 
-# Env key that flips the process into reverse-proxy mode. Read once at
-# ``start()`` entry so mode is decided at the process boundary — not re-probed
-# inside the gRPC server or servicer. Empty / unset -> inference mode.
+_PROXY_MODE_ENV_KEY = "DASH_SC_GRPC_PROXY_MODE"
 _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
 
-# Max time to construct proxy servicer on the gRPC owner loop before start()
-# reports failure to its parent. This mirrors gRPC server startup fail-fast
-# behavior instead of deferring outbound-channel errors to the first request.
 _PROXY_SERVICER_STARTUP_TIMEOUT_S = 30.0
 _SERVICER_CLOSE_TIMEOUT_S = 10.0
+
+
+def _is_proxy_mode_enabled() -> bool:
+    return os.environ.get(_PROXY_MODE_ENV_KEY, "").strip() == "1" or bool(
+        os.environ.get(_FORWARD_ENV_KEY, "").strip()
+    )
 
 
 async def _create_proxy_servicer_on_loop() -> DashScProxyServicer:
     """Construct proxy servicer inside the running asyncio owner loop.
 
-    ``grpc.aio.Channel`` objects are event-loop affine. The proxy servicer
-    builds outbound channels in its constructor, so construction must happen
-    on the same loop that will later run ``ModelStreamInfer`` and ``close``.
+    Outbound ``grpc.aio.Channel`` objects are event-loop affine, but the shared
+    channel cache builds them lazily when a request first uses an address.
     """
     return DashScProxyServicer()
 
@@ -170,14 +170,13 @@ class DashScApp:
     """Self-contained lifecycle for a per-rank DashSc gRPC server.
 
     Startup order (``start``):
-      1. Pick mode from ``DASH_SC_GRPC_FORWARD_ADDR`` (proxy if set,
+      1. Pick mode from ``DASH_SC_GRPC_PROXY_MODE`` (proxy if true,
          inference otherwise). Inference mode additionally builds
          ``ModelConfig`` + ``BackendRPCServerVisitor``; proxy mode skips both
-         since it only needs outbound channels to the configured backends.
+         since it only needs service discovery plus an outbound channel cache.
       2. In inference mode, build ``ModelConfig`` / tokenizer / servicer before
-         loop startup. In proxy mode, defer servicer construction until the
-         gRPC owner loop exists because outbound ``grpc.aio`` channels are
-         loop-affine.
+         loop startup. In proxy mode, initialize the servicer on the gRPC owner
+         loop for a consistent async lifecycle.
       3. Spin up a dedicated asyncio loop in a background thread — same loop
          hosts the aio gRPC server AND backend ``enqueue`` coroutines, so the
          request path never leaves this loop.
@@ -271,11 +270,11 @@ class DashScApp:
         servicer: Any = None
         try:
             port = self.server_config.dash_sc_grpc_server_port
-            is_proxy = bool(os.environ.get(_FORWARD_ENV_KEY, "").strip())
+            is_proxy = _is_proxy_mode_enabled()
 
             # Proxy mode skips model / weight loading / visitor construction;
-            # the servicer is created below on the owner loop so its outbound
-            # grpc.aio channels bind to the same loop that will use them.
+            # the servicer is opened below on the owner loop for a consistent
+            # async lifecycle.
             if not is_proxy:
                 model_config = ModelFactory.create_model_config(
                     model_args=self.py_env_configs.model_args,

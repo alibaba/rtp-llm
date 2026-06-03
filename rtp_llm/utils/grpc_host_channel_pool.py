@@ -1,9 +1,11 @@
 import asyncio
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import grpc
 from grpc import aio
+
+GrpcChannelOption = Tuple[str, Union[str, int]]
 
 
 class GrpcHostChannel:
@@ -21,7 +23,7 @@ class GrpcHostChannelPool:
 
     def __init__(
         self,
-        options: Optional[List[Tuple[str, str]]] = None,
+        options: Optional[List[GrpcChannelOption]] = None,
         cleanup_interval: int = 60,
     ):
         """

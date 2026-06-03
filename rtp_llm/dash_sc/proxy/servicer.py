@@ -1,24 +1,30 @@
 """gRPC→gRPC reverse-proxy servicer for predict_v2.proto (grpc.aio).
 
-Supports multiple backend addresses with round-robin selection across an
-optional per-addr HTTP/2 channel pool. Runs on grpc.aio — every servicer
-method is a coroutine or async generator so the whole proxy path stays on
-a single asyncio event loop.
+Supports multiple backend addresses with service discovery and a per-address
+HTTP/2 channel cache. Runs on grpc.aio - every servicer method is a coroutine
+or async generator so the whole proxy path stays on a single asyncio event loop.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-from typing import List, Optional
 
 import grpc
 
 from rtp_llm.dash_sc.codec import build_parameter_error_response, parse_sampling_params
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy.access_record import ForwardAccessRecord
-from rtp_llm.dash_sc.proxy.channel_pool import ForwardChannelPool
+from rtp_llm.dash_sc.proxy.service_route import create_service_discovery_from_env
+from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
+
+
+_FORWARD_CHANNEL_OPTS: list[tuple[str, int]] = [
+    ("grpc.keepalive_time_ms", 30000),
+    ("grpc.keepalive_timeout_ms", 10000),
+    ("grpc.keepalive_permit_without_calls", 0),
+    ("grpc.http2.max_pings_without_data", 0),
+]
+_CHANNEL_CLEANUP_INTERVAL_S = 60
 
 
 def _is_stream_done(resp: predict_v2_pb2.ModelStreamInferResponse) -> bool:
@@ -30,94 +36,6 @@ def _is_stream_done(resp: predict_v2_pb2.ModelStreamInferResponse) -> bool:
         if out.name == "finished" and i < len(infer.raw_output_contents):
             return infer.raw_output_contents[i] == b"\x01"
     return False
-
-
-_FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
-
-# Per-addr HTTP/2 connection pool size. The forwarder multiplexes every
-# outbound RPC over ``grpc.aio.insecure_channel(addr)``, which is one HTTP/2
-# connection. When that one connection fails (keepalive timeout, LBS RST,
-# backend GC stall) *every* concurrent stream on it aborts simultaneously —
-# the 14:19 cascade (22 × 1ms ``Exception iterating requests!`` inside 100ms)
-# is the exact signature. Opening N independent channels per addr partitions
-# the failure domain: one connection going bad only blasts ~1/N of in-flight
-# RPCs. Round-robin picks a channel per RPC — HTTP/2 multiplexing still
-# handles in-channel concurrency, the pool is about fault isolation, not
-# bandwidth.
-#
-# Default 1 is backward-compatible: set
-# ``DASH_SC_GRPC_FORWARD_CHANNELS_PER_ADDR=N`` in deployment to enable.
-_CHANNELS_PER_ADDR_ENV_KEY = "DASH_SC_GRPC_FORWARD_CHANNELS_PER_ADDR"
-_DEFAULT_CHANNELS_PER_ADDR = 1
-
-# Age-based channel recycling. The forward target is an L4 PVL VIP; a long-lived
-# HTTP/2 connection sticks to one backend machine and never rebalances, so
-# machines added behind the VIP later get no traffic. Periodically retiring an
-# aged channel forces a reconnect through the VIP, which hands us the current
-# machine set. Default 0 = OFF (pool built once, never recycled — unchanged
-# behavior). Set ``DASH_SC_GRPC_FORWARD_CHANNEL_MAX_AGE_MS=N`` to enable.
-_CHANNEL_MAX_AGE_MS_ENV_KEY = "DASH_SC_GRPC_FORWARD_CHANNEL_MAX_AGE_MS"
-_CHANNEL_RECYCLE_INTERVAL_MS_ENV_KEY = (
-    "DASH_SC_GRPC_FORWARD_CHANNEL_RECYCLE_INTERVAL_MS"
-)
-_CHANNEL_MAX_RECYCLE_PER_TICK_ENV_KEY = (
-    "DASH_SC_GRPC_FORWARD_CHANNEL_MAX_RECYCLE_PER_TICK"
-)
-
-# HTTP/2 keepalive for the forwarder -> real frontend channel. Production
-# topology places an LBS between the two with a 100s idle timeout; without
-# keepalive, any RPC whose downstream stalls >100s (cold prefill, PD handoff,
-# backend GC pause, etc.) gets its TCP connection RST by the LBS and the
-# access log records a mystifying ``UNAVAILABLE / recvmsg:Connection reset
-# by peer / resp_count=0``. Sending a PING every 30s keeps the LBS idle
-# counter pinned at ~0 so only real downstream failure shows up.
-#
-# ``permit_without_calls=0`` means PINGs only fire while an RPC is active —
-# idle channels don't burn anything. ``max_pings_without_data=0`` removes
-# the grpcio default cap of 2 consecutive data-less PINGs, which would
-# otherwise GOAWAY us after 60s of PING-only traffic on a slow stream.
-_FORWARD_CHANNEL_OPTS: list[tuple[str, int]] = [
-    ("grpc.keepalive_time_ms", 30000),
-    ("grpc.keepalive_timeout_ms", 10000),
-    ("grpc.keepalive_permit_without_calls", 0),
-    ("grpc.http2.max_pings_without_data", 0),
-]
-
-
-def _parse_forward_addrs(env_value: str) -> List[str]:
-    """Parse forward addresses from env value.
-
-    Supports formats:
-    - Single address: "10.0.0.1:8096"
-    - Comma separated: "10.0.0.1:8096,10.0.0.2:8096"
-    - JSON array: '["10.0.0.1:8096", "10.0.0.2:8096"]'
-    """
-    env_value = env_value.strip()
-    if not env_value:
-        return []
-
-    if env_value.startswith("["):
-        try:
-            addrs = json.loads(env_value)
-            if isinstance(addrs, list):
-                return [str(a).strip() for a in addrs if str(a).strip()]
-        except json.JSONDecodeError:
-            pass
-
-    return [a.strip() for a in env_value.split(",") if a.strip()]
-
-
-def _parse_channels_per_addr(env_value: str) -> int:
-    """Parse ``DASH_SC_GRPC_FORWARD_CHANNELS_PER_ADDR`` with safe defaults.
-
-    Non-integer / non-positive values fall back to ``_DEFAULT_CHANNELS_PER_ADDR``
-    rather than raising — misconfiguration should not prevent server startup.
-    """
-    try:
-        n = int(env_value.strip())
-    except (TypeError, ValueError, AttributeError):
-        return _DEFAULT_CHANNELS_PER_ADDR
-    return n if n >= 1 else _DEFAULT_CHANNELS_PER_ADDR
 
 
 def _invalid_max_new_tokens_message(request) -> str | None:
@@ -133,89 +51,28 @@ def _invalid_max_new_tokens_message(request) -> str | None:
     )
 
 
-def _parse_int_env(env_value: str, default: int) -> int:
-    """Parse a non-negative int env value, falling back to ``default``.
-
-    Misconfiguration must not prevent startup, so any non-integer / negative
-    value silently uses ``default``.
-    """
-    try:
-        n = int(env_value.strip())
-    except (TypeError, ValueError, AttributeError):
-        return default
-    return n if n >= 0 else default
-
-
 class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
-    """Pure transparent proxy (grpc.aio) with a channel pool across downstream addrs."""
+    """Pure transparent proxy (grpc.aio) across discovered downstream addrs."""
 
-    def __init__(
-        self,
-        forward_addrs: Optional[List[str]] = None,
-        channels_per_addr: Optional[int] = None,
-    ):
-        if forward_addrs is None:
-            env_value = os.environ.get(_FORWARD_ENV_KEY, "")
-            forward_addrs = _parse_forward_addrs(env_value)
-
-        if not forward_addrs:
-            raise ValueError(
-                f"No forward addresses provided. Set {_FORWARD_ENV_KEY} env or pass forward_addrs."
-            )
-
-        if channels_per_addr is None:
-            channels_per_addr = _parse_channels_per_addr(
-                os.environ.get(_CHANNELS_PER_ADDR_ENV_KEY, "")
-            )
-        elif channels_per_addr < 1:
-            channels_per_addr = _DEFAULT_CHANNELS_PER_ADDR
-
-        self._forward_addrs = forward_addrs
-        self._channels_per_addr = channels_per_addr
-
-        max_age_ms = _parse_int_env(os.environ.get(_CHANNEL_MAX_AGE_MS_ENV_KEY, ""), 0)
-        recycle_interval_ms = _parse_int_env(
-            os.environ.get(_CHANNEL_RECYCLE_INTERVAL_MS_ENV_KEY, ""), 0
+    def __init__(self):
+        self._channel_pool = GrpcHostChannelPool(
+            options=_FORWARD_CHANNEL_OPTS,
+            cleanup_interval=_CHANNEL_CLEANUP_INTERVAL_S,
         )
-        max_recycle_per_tick = _parse_int_env(
-            os.environ.get(_CHANNEL_MAX_RECYCLE_PER_TICK_ENV_KEY, ""), 1
-        )
-
-        # Channel/stub lifecycle, round-robin and in-flight accounting live in
-        # the pool. grpc.aio channels are loop-affine, so the pool builds them
-        # lazily on the running loop (via ``ensure_started``), never in __init__.
-        self._pool = ForwardChannelPool(
-            forward_addrs,
-            channels_per_addr,
-            stub_factory=predict_v2_pb2_grpc.GRPCInferenceServiceStub,
-            channel_factory=lambda addr: grpc.aio.insecure_channel(
-                addr, options=_FORWARD_CHANNEL_OPTS
-            ),
-            max_age_ms=max_age_ms,
-            recycle_interval_ms=recycle_interval_ms or None,
-            max_recycle_per_tick=max_recycle_per_tick,
-        )
-
-        logging.info(
-            "[DashScGrpc] DashScProxyServicer configured: %d addresses × %d channels/addr "
-            "(max_age_ms=%d): %s",
-            len(forward_addrs),
-            channels_per_addr,
-            max_age_ms,
-            forward_addrs,
-        )
+        self._discovery = create_service_discovery_from_env()
+        logging.info("[DashScGrpc] DashScProxyServicer configured")
 
     async def open(self) -> None:
-        """Build the outbound channel pool on the current running event loop."""
-        self._pool.ensure_started()
+        """Keep the proxy lifecycle hook explicit; channels are opened lazily."""
+        return
 
     async def close(self) -> None:
-        """Drain and close the channel pool. Safe to call multiple times.
+        """Drain and close channel-cache resources. Safe to call multiple times.
 
         Called after ``server.stop(grace)`` has let in-flight RPCs finish, so
-        the pool's force-close of any residue cannot interrupt a live RPC.
+        the cache's force-close of any residue cannot interrupt a live RPC.
         """
-        await self._pool.close()
+        await self._channel_pool.close()
 
     async def ModelStreamInfer(self, request_iterator, context):
         request_iter = request_iterator.__aiter__()
@@ -241,38 +98,36 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             async for req in request_iter:
                 yield req
 
-        self._pool.ensure_started()
-        pc = self._pool.acquire()
-        if pc is None:
-            # Shutdown race: ``close()`` cleared the pool after grpcio had
-            # already dispatched this RPC. ``context.abort`` raises
-            # ``grpc.aio.AbortError`` / ``grpc.RpcError`` here; the interceptor's
-            # ``_classify_rpc_exception`` records it as ``UNAVAILABLE`` (a bounded
-            # ``error_code`` bucket) instead of ``UNKNOWN_ZeroDivisionError``. No
-            # channel was acquired, so there is nothing to release.
-            await context.abort(grpc.StatusCode.UNAVAILABLE, "forwarder shutting down")
+        route_addr = self._discovery.resolve()
+        if route_addr is None:
+            msg = "service discovery returned no forward backend"
+            logging.warning("[DashScGrpc] proxy discovery unavailable: %s", msg)
+            await context.abort(grpc.StatusCode.UNAVAILABLE, msg)
             return
-        # ``release`` is synchronous and brackets the entire forward path, so the
-        # channel's in-flight count is decremented even on client cancel /
-        # GeneratorExit (the outer generator is ``aclose``'d). That count is what
-        # lets the pool close a retired channel only when it is truly idle.
-        try:
-            async for resp in self._forward(pc, validated_request_iter(), context):
-                yield resp
-        finally:
-            self._pool.release(pc)
 
-    async def _forward(self, pc, request_iterator, context):
-        stub = pc.stub
-        addr = pc.addr
-        idx = pc.addr_idx
+        grpc_target = route_addr.grpc_target
+        try:
+            channel = await self._channel_pool.get(grpc_target)
+        except RuntimeError as e:
+            msg = f"forward channel pool unavailable for backend {grpc_target}"
+            logging.warning("[DashScGrpc] proxy channel unavailable: %s: %s", msg, e)
+            await context.abort(grpc.StatusCode.UNAVAILABLE, msg)
+            return
+
+        stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
+        async for resp in self._forward(
+            stub, grpc_target, validated_request_iter(), context
+        ):
+            yield resp
+
+    async def _forward(self, stub, addr: str, request_iterator, context):
 
         # Grab the forward access record (installed by the access-log
         # interceptor) so proxy-path diagnostics land inline on the access log.
         access_record = ForwardAccessRecord.from_context(context)
         if access_record is not None:
             try:
-                access_record.mark_backend_call_start(addr, idx)
+                access_record.mark_backend_call_start(addr)
             except Exception:
                 pass
 
