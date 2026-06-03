@@ -313,9 +313,23 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         try:
             try:
                 async for resp in buffered:
-                    yield resp
+                    try:
+                        yield resp
+                    except BaseException:
+                        if access_record is not None:
+                            try:
+                                if access_record.buffered_stage == "waiting_second":
+                                    access_record.buffered_stage = (
+                                        "dropped_buffered_on_exception"
+                                    )
+                            except Exception:
+                                pass
+                        raise
             finally:
-                await buffered.aclose()
+                try:
+                    await buffered.aclose()
+                except Exception:
+                    pass
         finally:
             # Safety net. ``_close_downstream`` is also exposed as a public-ish
             # static method so any future code path that wants to tear down
@@ -449,6 +463,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             raise
         except BaseException:
             if buffered is not None:
+                _set_stage("dropped_buffered_on_exception")
                 try:
                     yield buffered
                     _set_stage("flushed_first_on_exception")

@@ -169,7 +169,7 @@ class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
 
     def _make_resp(self, tag: str) -> predict_v2_pb2.ModelStreamInferResponse:
         resp = _make_response()
-        resp.error_message = tag
+        resp.infer_response.id = tag
         return resp
 
     async def test_buffer_happy_path_holds_first_until_second(self) -> None:
@@ -191,7 +191,7 @@ class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual([r.error_message for r in out], ["a", "b", "c"])
+        self.assertEqual([r.infer_response.id for r in out], ["a", "b", "c"])
         self.assertEqual(yielded_marker, ["yielded_a", "yielded_b", "yielded_c"])
 
     async def test_buffer_single_chunk_flushes_on_stream_end(self) -> None:
@@ -204,7 +204,7 @@ class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
                 _request_gen(_make_request("req1")), MagicMock()
             )
         )
-        self.assertEqual([r.error_message for r in out], ["only"])
+        self.assertEqual([r.infer_response.id for r in out], ["only"])
 
     async def test_buffer_zero_chunk_returns_cleanly(self) -> None:
         self.mock_stub.ModelStreamInfer.return_value = _AsyncIter([])
@@ -232,7 +232,7 @@ class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
                 _request_gen(_make_request("req1")), MagicMock()
             ):
                 collected.append(r)
-        self.assertEqual([r.error_message for r in collected], ["a"])
+        self.assertEqual([r.infer_response.id for r in collected], ["a"])
 
     async def test_buffer_error_before_any_chunk_raises_cleanly(self) -> None:
         class FakeRpcError(grpc.RpcError):
@@ -288,7 +288,7 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
 
     def _make_resp(self, tag: str) -> predict_v2_pb2.ModelStreamInferResponse:
         resp = _make_response()
-        resp.error_message = tag
+        resp.infer_response.id = tag
         return resp
 
     def _patch_addr(self, idx: int) -> None:
@@ -386,7 +386,7 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
             async for r in self.servicer.ModelStreamInfer(
                 _request_gen(_make_request("req1")), ctx
             ):
-                got.append(r.error_message)
+                got.append(r.infer_response.id)
         self.assertEqual(got, ["a"])
         self.assertEqual(record.buffered_stage, "flushed_first_on_exception")
         self.assertEqual(record.backend_resp_count, 1)
@@ -409,7 +409,7 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         gen = self.servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
         # Consume first frame.
         first = await gen.__anext__()
-        self.assertEqual(first.error_message, "a")
+        self.assertEqual(first.infer_response.id, "a")
         # Simulate client handler dying — gRPC framework closes the generator,
         # which inside our ``yield buffered`` reads as ``athrow()``.
         with self.assertRaises(BaseException):
@@ -608,7 +608,7 @@ class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _make_token_resp(tag: str) -> predict_v2_pb2.ModelStreamInferResponse:
         resp = _make_response()
-        resp.error_message = tag
+        resp.infer_response.id = tag
         return resp
 
     @staticmethod
@@ -768,8 +768,6 @@ class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
         """``agg != None`` path — ``counting_response_iter`` wraps the call.
         Verifies the wrapper's ``aclose`` propagates the close to the inner
         ``upstream_iter`` synchronously."""
-        from rtp_llm.dash_sc.access_log import _RpcAggregate
-
         loop = asyncio.get_running_loop()
         finish_ts: list[float] = []
         close_ts: list[float] = []
@@ -792,9 +790,10 @@ class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
         import time as _time
 
         ctx = MagicMock()
-        ctx._dash_sc_access_agg = _RpcAggregate(
+        record = ForwardAccessRecord(
             method="/x.Svc/M", stream_type="bidi_stream", peer="", start_ts=_time.time()
         )
+        record.attach_to_context(ctx)
 
         collected = []
         async for resp in self.servicer.ModelStreamInfer(
