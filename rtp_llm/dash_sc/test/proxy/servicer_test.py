@@ -8,6 +8,7 @@ propagation, and the per-addr channel pool.
 from __future__ import annotations
 
 import asyncio
+import json
 import struct
 import unittest
 from unittest.mock import MagicMock, patch
@@ -140,6 +141,64 @@ class IteratorBehaviorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(responses), 2)
 
 
+class ParameterValidationTest(unittest.IsolatedAsyncioTestCase):
+    """Proxy rejects bad first-frame sampling params before forwarding."""
+
+    async def asyncSetUp(self) -> None:
+        self.channel_patcher = patch(
+            "grpc.aio.insecure_channel", return_value=MagicMock()
+        )
+        self.channel_patcher.start()
+
+        self.servicer = DashScProxyServicer(["127.0.0.1:1"])
+        self.mock_stub = MagicMock()
+        self.servicer._stubs = [self.mock_stub]
+
+    async def asyncTearDown(self) -> None:
+        await self.servicer.close()
+        self.channel_patcher.stop()
+
+    def _assert_parameter_error(self, responses) -> None:
+        self.assertEqual(len(responses), 1)
+        self.assertFalse(responses[0].error_message)
+        payload = json.loads(
+            responses[0].infer_response.parameters["__messages__"].string_param
+        )
+        self.assertEqual(payload["header"]["status_code"], 400)
+
+    async def test_max_completion_tokens_non_positive_rejected_without_forward(
+        self,
+    ) -> None:
+        for value in (-1, 0):
+            with self.subTest(value=value):
+                req = _make_request("req1")
+                req.parameters["max_completion_tokens"].int64_param = value
+
+                responses = await _drain(
+                    self.servicer.ModelStreamInfer(_request_gen(req), MagicMock())
+                )
+
+                self._assert_parameter_error(responses)
+                self.mock_stub.ModelStreamInfer.assert_not_called()
+                self.mock_stub.reset_mock()
+
+    async def test_max_new_tokens_non_positive_rejected_without_forward(
+        self,
+    ) -> None:
+        for value in (-1, 0):
+            with self.subTest(value=value):
+                req = _make_request("req1")
+                req.parameters["max_new_tokens"].int64_param = value
+
+                responses = await _drain(
+                    self.servicer.ModelStreamInfer(_request_gen(req), MagicMock())
+                )
+
+                self._assert_parameter_error(responses)
+                self.mock_stub.ModelStreamInfer.assert_not_called()
+                self.mock_stub.reset_mock()
+
+
 class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
     """First-chunk buffering preserves order, flushes on single-chunk end,
     re-raises cleanly on error."""
@@ -160,8 +219,12 @@ class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
 
     def _make_resp(self, tag: str) -> predict_v2_pb2.ModelStreamInferResponse:
         resp = _make_response()
-        resp.error_message = tag
+        resp.infer_response.parameters["tag"].string_param = tag
         return resp
+
+    @staticmethod
+    def _tags(responses) -> list[str]:
+        return [r.infer_response.parameters["tag"].string_param for r in responses]
 
     async def test_buffer_happy_path_holds_first_until_second(self) -> None:
         yielded_marker: list[str] = []
@@ -182,7 +245,7 @@ class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual([r.error_message for r in out], ["a", "b", "c"])
+        self.assertEqual(self._tags(out), ["a", "b", "c"])
         self.assertEqual(yielded_marker, ["yielded_a", "yielded_b", "yielded_c"])
 
     async def test_buffer_single_chunk_flushes_on_stream_end(self) -> None:
@@ -195,7 +258,7 @@ class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
                 _request_gen(_make_request("req1")), MagicMock()
             )
         )
-        self.assertEqual([r.error_message for r in out], ["only"])
+        self.assertEqual(self._tags(out), ["only"])
 
     async def test_buffer_zero_chunk_returns_cleanly(self) -> None:
         self.mock_stub.ModelStreamInfer.return_value = _AsyncIter([])
@@ -223,7 +286,7 @@ class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
                 _request_gen(_make_request("req1")), MagicMock()
             ):
                 collected.append(r)
-        self.assertEqual([r.error_message for r in collected], ["a"])
+        self.assertEqual(self._tags(collected), ["a"])
 
     async def test_buffer_error_before_any_chunk_raises_cleanly(self) -> None:
         class FakeRpcError(grpc.RpcError):
@@ -280,8 +343,12 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
 
     def _make_resp(self, tag: str) -> predict_v2_pb2.ModelStreamInferResponse:
         resp = _make_response()
-        resp.error_message = tag
+        resp.infer_response.parameters["tag"].string_param = tag
         return resp
+
+    @staticmethod
+    def _tag(resp: predict_v2_pb2.ModelStreamInferResponse) -> str:
+        return resp.infer_response.parameters["tag"].string_param
 
     def _patch_addr(self, idx: int) -> None:
         self.servicer._next_stub = lambda: (self.mock_stub, idx)
@@ -377,7 +444,7 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
             async for r in self.servicer.ModelStreamInfer(
                 _request_gen(_make_request("req1")), ctx
             ):
-                got.append(r.error_message)
+                got.append(self._tag(r))
         self.assertEqual(got, ["a"])
         self.assertEqual(agg.buffered_stage, "flushed_first_on_exception")
         self.assertEqual(agg.backend_resp_count, 1)
@@ -400,7 +467,7 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         gen = self.servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
         # Consume first frame.
         first = await gen.__anext__()
-        self.assertEqual(first.error_message, "a")
+        self.assertEqual(self._tag(first), "a")
         # Simulate client handler dying — gRPC framework closes the generator,
         # which inside our ``yield buffered`` reads as ``athrow()``.
         with self.assertRaises(BaseException):

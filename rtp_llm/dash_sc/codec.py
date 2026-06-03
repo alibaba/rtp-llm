@@ -513,9 +513,11 @@ def parse_sampling_params(request) -> SamplingParams:
     if v is not None:
         if v > 0:
             max_new_tokens = v
-            max_new_tokens_from_completion_alias = True
-        # Compatible-mode max_completion_tokens values <= 0 mean "unset".
-        # Keep the server default and do not fall through to legacy aliases.
+        else:
+            # Preserve the invalid alias value so dash-sc can reject it before
+            # it reaches the engine as max_new_tokens=0/-1 and becomes a 500.
+            max_new_tokens = v
+        max_new_tokens_from_completion_alias = True
     else:
         legacy_max_new_tokens = _parse_optional_scalar_int(request, "max_new_tokens")
         if legacy_max_new_tokens is None:

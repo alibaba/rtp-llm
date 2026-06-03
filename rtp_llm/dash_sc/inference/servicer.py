@@ -1205,10 +1205,13 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 await _send_partial_response_metadata(context)
                 partial_metadata_sent = True
 
-            if sampling is not None and sampling.max_new_tokens < 0:
+            if sampling is not None and sampling.max_new_tokens <= 0:
+                param_name = "max_completion_tokens" if getattr(
+                    sampling, "max_new_tokens_from_completion_alias", False
+                ) else "max_new_tokens"
                 yield build_parameter_error_response(
                     str(request.id),
-                    f"invalid max_new_tokens: {sampling.max_new_tokens}",
+                    f"invalid {param_name}: {sampling.max_new_tokens}; must be greater than 0",
                 )
                 return
 
