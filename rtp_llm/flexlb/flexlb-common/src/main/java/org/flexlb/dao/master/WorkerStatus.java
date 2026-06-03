@@ -79,9 +79,11 @@ public class WorkerStatus {
         TaskInfo taskInfo = localTaskMap.get(requestId);
         if (taskInfo != null) {
             safeDecrementQueueTime(runningQueueTime, taskInfo.estimatePrefillTime());
-            long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
-            decKvCacheFree(-needNewKvCacheLen);
-            addKvCacheUsed(-needNewKvCacheLen);
+            if (taskInfo.getTaskState() == TaskStateEnum.IN_TRANSIT) {
+                long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
+                decKvCacheFree(-needNewKvCacheLen);
+                addKvCacheUsed(-needNewKvCacheLen);
+            }
             localTaskMap.remove(requestId);
         }
     }

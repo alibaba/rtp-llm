@@ -102,12 +102,10 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
      */
     @Override
     public void rollBack(String ipPort, long requestId) {
-
         Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, null);
-        Logger.debug("Decode rollBack - ip: {}, requestId: {}",
-                ipPort, requestId);
+        Logger.debug("Decode rollBack - ip: {}, requestId: {}", ipPort, requestId);
 
-        WorkerStatus workerStatus = workerStatusMap.get(ipPort);
+        WorkerStatus workerStatus = workerStatusMap != null ? workerStatusMap.get(ipPort) : null;
         if (workerStatus != null) {
             workerStatus.removeLocalTask(requestId);
         }
@@ -141,15 +139,6 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
                 continue;
             }
             survivors.add(w);
-        }
-
-        if (survivors.isEmpty()) {
-            WorkerStatus leastUsed = eligible.stream()
-                    .min(Comparator.comparingLong(w -> w.getUsedKvCacheTokens().get()))
-                    .orElse(null);
-            if (leastUsed != null) {
-                survivors.add(leastUsed);
-            }
         }
 
         return survivors;
@@ -261,7 +250,6 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             taskInfo.setPrefixLength(prefixLength);
             taskInfo.setRequestId(requestId);
 
-            // Update local task state
             optimalWorker.putLocalTask(requestId, taskInfo);
 
             result.setSuccess(true);
