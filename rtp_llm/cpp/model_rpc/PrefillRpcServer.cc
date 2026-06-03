@@ -1443,25 +1443,30 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         }
     }
 
-    // ---- Phase C: Serial enqueue into engine ----
-    for (auto& slot : local_slots) {
-        auto& pfx_ctx = slot.prefill_context;
-        pfx_ctx->stat_info.nextStage();
-        enqueueRequest(*pfx_ctx);
-        refreshAsyncProducerCancelState(slot.cancel_state, pfx_ctx->client_context, pfx_ctx->getStream());
-        if (abort_if_context_cancelled(slot.index, slot.request_id, local_slots)) {
-            return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
+    // ---- Phase C: Batch enqueue into engine ----
+    {
+        std::vector<GenerateStreamPtr> all_streams;
+        all_streams.reserve(local_slots.size());
+        for (auto& slot : local_slots) {
+            slot.prefill_context->stat_info.nextStage();
+            auto stream = engine_->makeStream(slot.prefill_context->generate_input);
+            slot.prefill_context->setStream(stream);
+            all_streams.push_back(stream);
         }
+        engine_->batchEnqueue(all_streams);
+        for (auto& slot : local_slots) {
+            if (slot.prefill_context->refresh_cancel_state) {
+                slot.prefill_context->refresh_cancel_state(
+                    slot.prefill_context->client_context, slot.prefill_context->getStream());
+            }
+        }
+    }
+    if (abort_if_context_cancelled(local_slots.back().index, local_slots.back().request_id, local_slots)) {
+        return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
+    }
+    for (auto& slot : local_slots) {
         if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
             return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-        }
-        if (pfx_ctx->hasError()) {
-            setBatchAckError(response->mutable_acks(slot.index),
-                             slot.request_id,
-                             grpc::StatusCode::INTERNAL,
-                             pfx_ctx->error_info.ToString());
-            abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
-            return grpc::Status::OK;
         }
     }
 

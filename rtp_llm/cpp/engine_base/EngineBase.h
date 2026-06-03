@@ -54,6 +54,8 @@ public:
 
     virtual std::vector<GenerateStreamPtr> batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& inputs);
 
+    virtual void batchEnqueue(std::vector<GenerateStreamPtr>& streams);
+
     virtual std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input);
 
     virtual absl::Status stop() = 0;

@@ -519,6 +519,13 @@ std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<Gene
     return stream;
 }
 
+void NormalEngine::batchEnqueue(std::vector<GenerateStreamPtr>& streams) {
+    for (auto& stream : streams) {
+        stream->setReserveStep(reserve_step_);
+    }
+    (void)scheduler_->batchEnqueue(streams);
+}
+
 std::vector<std::shared_ptr<GenerateStream>>
 NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& inputs) {
     std::vector<std::shared_ptr<GenerateStream>> streams;

@@ -18,6 +18,12 @@ std::vector<GenerateStreamPtr> EngineBase::batchEnqueue(const std::vector<std::s
     throw std::runtime_error("not implemeted");
 }
 
+void EngineBase::batchEnqueue(std::vector<GenerateStreamPtr>& streams) {
+    for (auto& stream : streams) {
+        enqueue(stream);
+    }
+}
+
 std::shared_ptr<GenerateStream> EngineBase::makeStream(const std::shared_ptr<GenerateInput>& input) {
     throw std::runtime_error("not implemeted");
 }
