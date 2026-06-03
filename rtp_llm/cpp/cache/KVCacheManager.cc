@@ -20,6 +20,81 @@
 
 namespace rtp_llm {
 
+namespace {
+
+struct GlobalCacheMetricsSnapshot {
+    RtpLLMCacheMetricsCollector collector;
+    size_t                      total_blocks         = 0;
+    size_t                      available_blocks     = 0;
+    size_t                      request_ref_blocks   = 0;
+    size_t                      connector_ref_blocks = 0;
+};
+
+GlobalCacheMetricsSnapshot collectGlobalCacheMetrics(const KVCacheAllocatorPtr& allocator) {
+    GlobalCacheMetricsSnapshot snapshot;
+    auto                       shared_cache = allocator->sharedBlockCache();
+
+    snapshot.total_blocks         = allocator->totalBlocksNum();
+    snapshot.available_blocks     = allocator->availableBlocksNum();
+    snapshot.request_ref_blocks   = allocator->requestRefBlocksNum();
+    snapshot.connector_ref_blocks = allocator->connectorRefBlocksNum();
+
+    auto& collector = snapshot.collector;
+    collector.kv_cache_item_num             = shared_cache ? static_cast<int64_t>(shared_cache->size()) : 0;
+    collector.kv_cache_left_seq             = static_cast<int64_t>(allocator->availableTokensNum());
+    collector.kv_cache_available_blocks     = static_cast<int64_t>(snapshot.available_blocks);
+    collector.kv_cache_request_ref_blocks   = static_cast<int64_t>(snapshot.request_ref_blocks);
+    collector.kv_cache_connector_ref_blocks = static_cast<int64_t>(snapshot.connector_ref_blocks);
+    collector.kv_cache_free_blocks          = static_cast<int64_t>(allocator->freeBlocksNum());
+    collector.kv_cache_used_ratio =
+        (snapshot.total_blocks == 0) ?
+            0.0f :
+            static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
+                               / static_cast<double>(snapshot.total_blocks));
+    collector.mr_cost_time_ms = allocator->getMrCostTimeMs();
+
+    return snapshot;
+}
+
+void logGlobalCacheMetrics(const GlobalCacheMetricsSnapshot& snapshot) {
+    RTP_LLM_LOG_INFO("kvc raw global: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu items=%ld ratio=%.4f%%",
+                     snapshot.total_blocks,
+                     snapshot.available_blocks,
+                     snapshot.request_ref_blocks,
+                     snapshot.connector_ref_blocks,
+                     static_cast<size_t>(snapshot.collector.kv_cache_free_blocks),
+                     static_cast<long>(snapshot.collector.kv_cache_item_num),
+                     snapshot.collector.kv_cache_used_ratio);
+}
+
+void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter,
+                            const KVCachePoolMetricsSnapshot&   pool_snapshot,
+                            bool                                should_log) {
+    if (should_log) {
+        RTP_LLM_LOG_INFO("kvc raw pool[%zu]: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu ratio=%.4f%%",
+                         pool_snapshot.pool_index,
+                         pool_snapshot.total_blocks,
+                         pool_snapshot.available_blocks,
+                         pool_snapshot.request_ref_blocks,
+                         pool_snapshot.connector_ref_blocks,
+                         pool_snapshot.free_blocks,
+                         pool_snapshot.used_ratio);
+    }
+
+    RtpLLMCachePoolMetricsCollector pool_collector;
+    pool_collector.free_blocks          = static_cast<int64_t>(pool_snapshot.free_blocks);
+    pool_collector.available_blocks     = static_cast<int64_t>(pool_snapshot.available_blocks);
+    pool_collector.request_ref_blocks   = static_cast<int64_t>(pool_snapshot.request_ref_blocks);
+    pool_collector.connector_ref_blocks = static_cast<int64_t>(pool_snapshot.connector_ref_blocks);
+    pool_collector.total_blocks         = static_cast<int64_t>(pool_snapshot.total_blocks);
+    pool_collector.used_ratio           = pool_snapshot.used_ratio;
+
+    kmonitor::MetricsTags pool_tags("pool", std::to_string(pool_snapshot.pool_index));
+    metrics_reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&pool_tags, &pool_collector);
+}
+
+}  // namespace
+
 KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                bool                               warmup,
                                const kmonitor::MetricsReporterPtr metrics_reporter,
@@ -188,7 +263,7 @@ void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
 
 int KVCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                           int                            seq_len,
-    int                            reserve_step) const {
+                                          int                            reserve_step) const {
     RTP_LLM_CHECK_WITH_INFO(allocator_ != nullptr, "singleBatchNeedBlocks called before KVCacheManager initialized");
     return allocator_->singleBatchNeedBlocks(batch_kv_cache_resource, seq_len, reserve_step);
 }
@@ -617,68 +692,18 @@ void KVCacheManager::reportMetricsLoop() {
             continue;
         }
 
-        RtpLLMCacheMetricsCollector collector;
-
-        auto shared_cache = allocator_->sharedBlockCache();
-
-        const auto total_blocks         = allocator_->totalBlocksNum();
-        const auto available_blocks     = allocator_->availableBlocksNum();
-        const auto request_ref_blocks   = allocator_->requestRefBlocksNum();
-        const auto connector_ref_blocks = allocator_->connectorRefBlocksNum();
-
-        collector.kv_cache_item_num             = shared_cache ? static_cast<int64_t>(shared_cache->size()) : 0;
-        collector.kv_cache_left_seq             = static_cast<int64_t>(allocator_->availableTokensNum());
-        collector.kv_cache_available_blocks     = static_cast<int64_t>(available_blocks);
-        collector.kv_cache_request_ref_blocks   = static_cast<int64_t>(request_ref_blocks);
-        collector.kv_cache_connector_ref_blocks = static_cast<int64_t>(connector_ref_blocks);
-        collector.kv_cache_free_blocks          = static_cast<int64_t>(allocator_->freeBlocksNum());
-        collector.kv_cache_used_ratio =
-            (total_blocks == 0) ?
-                0.0f :
-                static_cast<float>(100.0 * (total_blocks - available_blocks) / static_cast<double>(total_blocks));
-        collector.mr_cost_time_ms = allocator_->getMrCostTimeMs();
-
-        metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &collector);
+        auto global_metrics = collectGlobalCacheMetrics(allocator_);
+        metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &global_metrics.collector);
 
         const auto now        = std::chrono::steady_clock::now();
         const bool should_log = (now - last_log_time) >= kLogInterval;
         if (should_log) {
             last_log_time = now;
-            RTP_LLM_LOG_INFO(
-                "kvc raw global: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu items=%ld ratio=%.4f%%",
-                total_blocks,
-                available_blocks,
-                request_ref_blocks,
-                connector_ref_blocks,
-                static_cast<size_t>(collector.kv_cache_free_blocks),
-                static_cast<long>(collector.kv_cache_item_num),
-                collector.kv_cache_used_ratio);
+            logGlobalCacheMetrics(global_metrics);
         }
 
         for (const auto& pool_snapshot : allocator_->poolMetricsSnapshots()) {
-            if (should_log) {
-                RTP_LLM_LOG_INFO(
-                    "kvc raw pool[%zu]: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu ratio=%.4f%%",
-                    pool_snapshot.pool_index,
-                    pool_snapshot.total_blocks,
-                    pool_snapshot.available_blocks,
-                    pool_snapshot.request_ref_blocks,
-                    pool_snapshot.connector_ref_blocks,
-                    pool_snapshot.free_blocks,
-                    pool_snapshot.used_ratio);
-            }
-
-            RtpLLMCachePoolMetricsCollector pool_collector;
-            pool_collector.free_blocks          = static_cast<int64_t>(pool_snapshot.free_blocks);
-            pool_collector.available_blocks     = static_cast<int64_t>(pool_snapshot.available_blocks);
-            pool_collector.request_ref_blocks   = static_cast<int64_t>(pool_snapshot.request_ref_blocks);
-            pool_collector.connector_ref_blocks = static_cast<int64_t>(pool_snapshot.connector_ref_blocks);
-            pool_collector.total_blocks         = static_cast<int64_t>(pool_snapshot.total_blocks);
-            pool_collector.used_ratio           = pool_snapshot.used_ratio;
-
-            kmonitor::MetricsTags pool_tags("pool", std::to_string(pool_snapshot.pool_index));
-            metrics_reporter_->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&pool_tags,
-                                                                                               &pool_collector);
+            reportPoolCacheMetrics(metrics_reporter_, pool_snapshot, should_log);
         }
 
         std::this_thread::sleep_for(std::chrono::seconds(1));  // 1s
@@ -688,9 +713,8 @@ void KVCacheManager::reportMetricsLoop() {
 void KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
                                 P2PConnectorStartLoadResponsePB&      response,
                                 std::function<bool()>                 is_cancelled) {
-    if (coordinator_) {
-        coordinator_->handleRead(request, response, is_cancelled);
-    }
+    RTP_LLM_CHECK_WITH_INFO(coordinator_ != nullptr, "handleRead called before KVCacheManager initialized");
+    coordinator_->handleRead(request, response, is_cancelled);
 }
 
 // Write one KV block (optionally per-layer) from host/device tensors for test
