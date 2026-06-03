@@ -59,8 +59,11 @@ class Block(nn.Module):
         tp_rank: int = 0,
         ep_size: int = 1,
         ep_rank: int = 0,
+        dp_size: int = 1,
+        dp_rank: int = 0,
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
+        fake_balance_expert: bool = False,
         fp8_kv_cache: bool = False,
     ):
         super().__init__()
@@ -111,8 +114,11 @@ class Block(nn.Module):
             layer_weights=layer_weights,
             ep_size=ep_size,
             ep_rank=ep_rank,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
+            fake_balance_expert=fake_balance_expert,
         )
         # Framework loader already casts norms to bf16 (compute_dtype) and
         # hc_* tensors to fp32 (descriptor data_type); pass refs straight

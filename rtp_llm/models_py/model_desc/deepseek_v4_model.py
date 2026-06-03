@@ -276,6 +276,10 @@ class DeepSeekV4Model(GptModelBase):
         else:
             # V4-Flash = 2048. config.inter_size = n_shared * 2048 = 2048 (since n_shared=1).
             args.moe_inter_dim = int(model_config.inter_size) or args.moe_inter_dim
+        if moe_config is not None:
+            args.fake_balance_expert = bool(
+                getattr(moe_config, "fake_balance_expert", False)
+            )
 
         # S7 scaffold: thread the framework's parallelism config into V4Args.
         # No behavior change at TP=1; the fields are read by future patches

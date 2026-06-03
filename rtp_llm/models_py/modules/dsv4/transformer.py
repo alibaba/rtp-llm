@@ -98,6 +98,7 @@ class V4Args:
     world_size: int = 1
     world_rank: int = 0
     is_decode_role: bool = False
+    fake_balance_expert: bool = False
     # KV-cache dtype switch.  True selects ``AttentionFP8`` (paged 584B
     # SWA/CSA/HCA pools, FlashMLA dual-pool decode); False keeps the BF16
     # ``Attention`` path. Resolved from
@@ -158,8 +159,11 @@ def _block_kwargs(
         tp_rank=args.tp_rank,
         ep_size=args.ep_size,
         ep_rank=args.ep_rank,
+        dp_size=args.dp_size,
+        dp_rank=args.dp_rank,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
+        fake_balance_expert=args.fake_balance_expert,
         fp8_kv_cache=args.fp8_kv_cache,
     )
 
@@ -268,11 +272,9 @@ class V4Transformer(nn.Module):
         if last_hidden_capacity is not None:
             last_hidden_capacity = int(last_hidden_capacity)
             assert last_hidden_capacity > 0, last_hidden_capacity
-            if (
-                self._mtp_last_hidden_buffer is None
-                or int(self._mtp_last_hidden_buffer.size(0))
-                < int(last_hidden_capacity)
-            ):
+            if self._mtp_last_hidden_buffer is None or int(
+                self._mtp_last_hidden_buffer.size(0)
+            ) < int(last_hidden_capacity):
                 self.register_buffer(
                     "_mtp_last_hidden_buffer",
                     torch.empty(

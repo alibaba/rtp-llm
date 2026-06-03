@@ -160,8 +160,11 @@ class MoE(nn.Module):
         layer_weights: Optional[Dict] = None,
         ep_size: int = 1,
         ep_rank: int = 0,
+        dp_size: int = 1,
+        dp_rank: int = 0,
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
+        fake_balance_expert: bool = False,
         strategy: Optional[str] = None,
     ):
         """``layer_weights`` is the framework's per-layer dict
@@ -192,6 +195,26 @@ class MoE(nn.Module):
         self.n_local_experts = n_routed_experts // max(ep_size, 1)
         self.local_expert_start = ep_rank * self.n_local_experts
         self.local_expert_end = self.local_expert_start + self.n_local_experts
+        self._fake_balance_expert = None
+        if fake_balance_expert:
+            import rtp_llm.ops.compute_ops as compute_ops
+
+            self._fake_balance_expert = compute_ops.FakeBalanceExpertOp(
+                n_routed_experts,
+                n_activated_experts,
+                dp_rank,
+                dp_size,
+                ep_size,
+            )
+            logging.info(
+                "[DSV4 MoE] fake_balance_expert enabled: layer=%d experts=%d topk=%d dp=%d/%d ep=%d",
+                layer_id,
+                n_routed_experts,
+                n_activated_experts,
+                dp_rank,
+                dp_size,
+                ep_size,
+            )
 
         from rtp_llm.utils.model_weight import W
 
@@ -279,6 +302,8 @@ class MoE(nn.Module):
     ) -> None:
         with record_function_range("dsv4.moe.gate"):
             weights, indices = self.gate(x, input_ids)
+            if self._fake_balance_expert is not None:
+                self._fake_balance_expert.forward(indices, weights)
 
         with record_function_range("dsv4.moe.shared_expert_start"):
             self._shared_executor.start(self.shared_experts, x)
@@ -306,9 +331,9 @@ class MoE(nn.Module):
         global _CHUNKED_MOE_LOGGED
         T = x.size(0)
         chunk_tokens = int(self.max_tokens_per_rank)
-        assert chunk_tokens > 0, (
-            f"max_tokens_per_rank must be positive, got {chunk_tokens}"
-        )
+        assert (
+            chunk_tokens > 0
+        ), f"max_tokens_per_rank must be positive, got {chunk_tokens}"
         if not _CHUNKED_MOE_LOGGED:
             _CHUNKED_MOE_LOGGED = True
             logging.info(
@@ -371,6 +396,8 @@ class MoE(nn.Module):
                 self.gate._dbg_prefix = f"L{self.layer_id:02d}_moe_gate"
             try:
                 weights, indices = self.gate(x, input_ids_flat)
+                if self._fake_balance_expert is not None:
+                    self._fake_balance_expert.forward(indices, weights)
             finally:
                 if _dbg:
                     self.gate._dbg_prefix = None
