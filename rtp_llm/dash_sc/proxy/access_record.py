@@ -223,7 +223,6 @@ class ForwardAccessRecord:
     # Proxy/backend diagnostics populated by DashScProxyServicer through the
     # context helpers in ``rtp_llm.dash_sc.proxy.context``.
     backend_addr: Optional[str] = None
-    backend_addr_index: Optional[int] = None
     backend_call_start_ts: Optional[float] = None
     backend_first_resp_ts: Optional[float] = None
     backend_done_ts: Optional[float] = None
@@ -344,9 +343,8 @@ class ForwardAccessRecord:
         if infer is not None:
             self._accumulate_client_frame(extract_forward_frame_stats(infer), now)
 
-    def mark_backend_call_start(self, addr: str, addr_index: int) -> None:
+    def mark_backend_call_start(self, addr: str) -> None:
         self.backend_addr = addr
-        self.backend_addr_index = addr_index
         if self.backend_call_start_ts is None:
             self.backend_call_start_ts = time.time()
 
@@ -444,7 +442,6 @@ class ForwardAccessRecord:
             "context_code": self.context_code,
             "context_active": self.context_active,
             "backend_addr": self.backend_addr,
-            "backend_addr_index": self.backend_addr_index,
             "backend_resp_count": self.backend_resp_count,
             "backend_call_start_ts_epoch_ms": epoch_ms(self.backend_call_start_ts),
             "backend_first_resp_ts_epoch_ms": epoch_ms(self.backend_first_resp_ts),
