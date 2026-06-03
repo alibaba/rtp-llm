@@ -562,14 +562,14 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
 
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)
-        self.prefix = "model.language_model."
         self._has_stacked_ckpt = False
 
     def _process_meta(self, meta_dict: Any, weight_keys: List[str]):
-        """Detect whether stackwd format is used.
-
-        Qwen3.5 bf16 uses stackwd moe weight while fp8 uses splited moe weights.
-        """
+        suffix = "layers.0.input_layernorm.weight"
+        for key in weight_keys:
+            if key.endswith(suffix):
+                self.prefix = key[: -len(suffix)]
+                break
         if self._contains(weight_keys, "layers.0.mlp.experts.gate_up_proj"):
             self._has_stacked_ckpt = True
 
