@@ -32,6 +32,35 @@ int SingleTypeKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) con
     return (batch_size <= 0) ? 0 : (need.common_blocks + batch_size * need.extra_blocks);
 }
 
+void SingleTypeKVCacheAllocator::checkCPShardedMallocResult(const MallocInfo& malloc_info) const {
+    if (!cp_slot_mapper_ || !cp_slot_mapper_->isSharded()) {
+        return;
+    }
+
+    const auto& kv_resource       = malloc_info.batch_kv_cache_resource;
+    const int   seq_len           = malloc_info.incrSeqLen();
+    const int   reserve_step      = malloc_info.complete_token_ids->getReserveStep();
+    const int   effective_seq_len = cp_slot_mapper_->effectiveSeqLenForAlloc(seq_len);
+    const int   expected_blocks   = full_kv_cache_group_->needBlocksNum(effective_seq_len, 0, reserve_step);
+
+    for (int batch_id = 0; batch_id < kv_resource->batchSize(); ++batch_id) {
+        const int actual_blocks = kv_resource->blocksNum(batch_id);
+        RTP_LLM_CHECK_WITH_INFO(actual_blocks == expected_blocks,
+                                "CP invariant violated: batch=%d blocks=%d != expected_local_blocks=%d "
+                                "(seq_len=%d, effective_seq_len=%d, reserve_step=%d, cp_size=%d, "
+                                "block_size=%d, cacheKeys=%zu)",
+                                batch_id,
+                                actual_blocks,
+                                expected_blocks,
+                                seq_len,
+                                effective_seq_len,
+                                reserve_step,
+                                cp_slot_mapper_->cpSize(),
+                                cp_slot_mapper_->blockSize(),
+                                kv_resource->cacheKeys(batch_id).size());
+    }
+}
+
 SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&                 config,
                                                        AllocationType                     allocation_type,
                                                        const kmonitor::MetricsReporterPtr metrics_reporter,

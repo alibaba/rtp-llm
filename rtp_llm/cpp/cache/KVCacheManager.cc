@@ -20,17 +20,6 @@
 
 namespace rtp_llm {
 
-namespace {
-
-size_t expectedCPShardedLocalBlocks(const CPSlotMapper& mapper, int seq_len, int reserve_step) {
-    const int effective_seq_len = mapper.effectiveSeqLenForAlloc(std::max(seq_len, 0));
-    const int block_size        = mapper.blockSize();
-    const int total_len         = effective_seq_len + std::max(reserve_step, 0);
-    return static_cast<size_t>((total_len + block_size - 1) / block_size);
-}
-
-}  // namespace
-
 KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                bool                               warmup,
                                const kmonitor::MetricsReporterPtr metrics_reporter,
@@ -182,30 +171,7 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
         updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
     }
 
-    auto result = allocator_->malloc(malloc_info);
-
-    // CP invariant: blocks holds this rank's local share of logical KV pages.
-    // cacheKeys can be shorter than logical blocks because an in-flight partial
-    // tail is not always cacheable, so derive the expected count from seq_len.
-    if (result.success && cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
-        const auto& res        = malloc_info.batch_kv_cache_resource->cacheResource(0);
-        size_t      num_blocks = res.blocks().size();
-        size_t      expected   = expectedCPShardedLocalBlocks(*cp_slot_mapper_,
-                                                       malloc_info.complete_token_ids->seqLength(),
-                                                       malloc_info.complete_token_ids->getReserveStep());
-        RTP_LLM_CHECK_WITH_INFO(num_blocks == expected,
-                                "CP invariant violated: blocks=%zu != expected_local_blocks=%zu "
-                                "(seq_len=%d, reserve_step=%d, cp_size=%d, block_size=%d, cacheKeys=%zu)",
-                                num_blocks,
-                                expected,
-                                malloc_info.complete_token_ids->seqLength(),
-                                malloc_info.complete_token_ids->getReserveStep(),
-                                cp_slot_mapper_->cpSize(),
-                                cp_slot_mapper_->blockSize(),
-                                res.cacheKeys().size());
-    }
-
-    return result;
+    return allocator_->malloc(malloc_info);
 }
 
 void KVCacheManager::free(const FreeInfo& free_info) {

@@ -82,11 +82,16 @@ MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
         return {false, 0};
     }
 
+    MallocResult result;
     if (malloc_info.batch_kv_cache_resource->curBlocksNum() == 0) {
-        return initMalloc(malloc_info);
+        result = initMalloc(malloc_info);
     } else {
-        return incrMalloc(malloc_info);
+        result = incrMalloc(malloc_info);
     }
+    if (result.success) {
+        checkCPShardedMallocResult(malloc_info);
+    }
+    return result;
 }
 
 uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {
