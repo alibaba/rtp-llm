@@ -2003,6 +2003,13 @@ class AttentionFP8(nn.Module):
             topk=self.window_size,
             extra_attn_type=None,
         )
+        # opt_flash_mla: pass the per-request SWA effective length so FlashMLA
+        # scans only ``min(window, seq_len)`` instead of the full window width.
+        swa_topk_length = (
+            attn_metadata.swa_topk_length[:bsz]
+            if attn_metadata.swa_topk_length is not None
+            else None
+        )
         return attn_fp8_swa_paged(
             q=q,
             swa_pool_3d=swa_pool_3d,
@@ -2011,6 +2018,7 @@ class AttentionFP8(nn.Module):
             swa_block_table=swa_pool_bt[:bsz],
             sched_meta=sched_meta,
             fp8_op=self._get_fp8_decode_op(),
+            topk_length=swa_topk_length,
         )
 
     def _forward_decode_csa(
@@ -2212,6 +2220,19 @@ class AttentionFP8(nn.Module):
             topk=win,
             extra_attn_type=cmp_attn_type,
         )
+        # opt_flash_mla: pass per-request effective lengths so FlashMLA scans
+        # only the true SWA / compressed widths. ``extra_topk_length`` keyed by
+        # this layer's compress_ratio (4=CSA capped at index_topk, 128=HCA dense)
+        # shrinks the HCA scan from the capture width (e.g. 8192) to seq_len//128.
+        swa_topk_length = (
+            attn_metadata.swa_topk_length[:bsz]
+            if attn_metadata.swa_topk_length is not None
+            else None
+        )
+        cmp_len_buf = attn_metadata.compressed_topk_length_by_ratio.get(
+            int(self.compress_ratio)
+        )
+        extra_topk_length = cmp_len_buf[:bsz] if cmp_len_buf is not None else None
         return attn_fp8_dual_paged(
             q=q,
             swa_pool_3d=swa_pool_3d,
@@ -2222,6 +2243,8 @@ class AttentionFP8(nn.Module):
             swa_block_table=swa_pool_bt[:bsz],
             sched_meta=sched_meta,
             fp8_op=self._get_fp8_decode_op(),
+            topk_length=swa_topk_length,
+            extra_topk_length=extra_topk_length,
         )
 
     # ==================================================================

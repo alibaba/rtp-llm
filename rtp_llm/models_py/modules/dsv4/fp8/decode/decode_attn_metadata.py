@@ -216,6 +216,29 @@ class DSv4DecodeAttnMetadataFP8:
     # (``CSA_KV`` / ``HCA_KV``) or ``None`` for single-pool SWA-only.
     sched_meta_cache: Dict[Tuple[int, Optional[int]], Any] = field(default_factory=dict)
 
+    # opt_flash_mla: graph-stable per-request effective lengths fed to FlashMLA
+    # sparse decode as ``topk_length`` / ``extra_topk_length``. Derived from the
+    # same ``start_pos`` that produces ``compressed_lens``, so the kernel only
+    # scans the real valid width instead of the CUDA-graph capture width (e.g.
+    # HCA 8192 -> the true ``(start_pos + q_len) // 128``).
+    # FlashMLA contract (flash_mla_interface.py:90): both are ``[B] int32`` and
+    # bound the leftmost indices processed; ``-1`` entries inside the bound are
+    # skipped (interface line 191), so the MTP ``q_len > 1`` step may safely use
+    # the last token's (largest) length for the whole request.
+    #   * swa_topk_length[b]                    = min(window_size, start_pos[b] + q_len)
+    #   * compressed_topk_length_by_ratio[r][b] = min(extra_index_width_r,
+    #                                                  (start_pos[b] + q_len) // r)
+    #       (r=4 width == index_topk  -> CSA indexer top-k cap;
+    #        r=128 width == HCA dense width -> no-op clamp, defensive)
+    # Left at ``None`` / empty when the paged read is not wired (warmup /
+    # non-paged); callers then pass ``None`` and FlashMLA keeps the legacy
+    # full-capture-width behavior. See
+    # ``opt_flash_mla/design/00_flash_mla_length_semantics.md``.
+    swa_topk_length: Optional[torch.Tensor] = None  # [B] int32
+    compressed_topk_length_by_ratio: Dict[int, torch.Tensor] = field(
+        default_factory=dict
+    )  # ratio -> [B] int32
+
 
 def get_or_build_sched_meta(
     metadata: "DSv4DecodeAttnMetadataFP8",
@@ -246,8 +269,38 @@ def get_or_build_sched_meta(
 
     Within one (B, extra_attn_type) bucket ``q_len / num_heads / topk`` are
     process-constants.
+
+    CUDA-graph + opt_flash_mla (effective ``topk_length``): FlashMLA builds its
+    tile schedule (``tile_scheduler_metadata`` / ``num_splits``) lazily on the
+    FIRST ``flash_mla_with_kvcache`` call for a sched_meta, keyed on the
+    ``topk_length`` / ``extra_topk_length`` VALUES, then freezes + reuses it
+    (``csrc/api/sparse_decode.h:420``; interface docstring line 80 — reuse is
+    only valid while those values stay the same). The capture harness runs two
+    eager WARMUP forwards before the captured forward
+    (``cuda_graph_runner.cc:880``); if the schedule is built there it is NOT
+    inside the graph, so every replay reuses a schedule frozen at the warmup
+    lengths -> stale -> IMA once per-request lengths vary. To keep the schedule
+    in sync with the replay lengths we DROP the warmup-built sched_meta the
+    moment the stream starts capturing, forcing the build kernel to be captured
+    inside the graph so it re-runs (with fresh ``topk_length`` values) on every
+    replay. See ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
     """
     from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
+
+    capturing = False
+    try:
+        capturing = (
+            torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+        )
+    except Exception:
+        capturing = False
+    # On the non-capturing -> capturing transition (entry into the captured
+    # forward, after the warmup forwards), discard every warmup-built sched_meta
+    # so the schedule build is (re)captured inside the graph.
+    if capturing and not getattr(metadata, "_sched_meta_capturing", False):
+        metadata.sched_meta_cache.clear()
+    if getattr(metadata, "_sched_meta_capturing", False) != capturing:
+        metadata._sched_meta_capturing = capturing
 
     key = (batch_size, extra_attn_type)
     sched_meta = metadata.sched_meta_cache.get(key)
@@ -640,6 +693,71 @@ def _compressed_index_width_for_ratio(
     return ((int(compressed_stride) + 63) // 64) * 64
 
 
+def _update_topk_lengths_in_place(
+    meta: "DSv4DecodeAttnMetadataFP8",
+    start_pos: torch.Tensor,
+    bs: int,
+    full_width: bool = False,
+) -> None:
+    """opt_flash_mla: fill the FlashMLA effective-length buffers in place.
+
+    Reuses the already-computed ``compressed_lens`` (written by
+    ``fused_update_decode_meta_pure`` just above the call site) so there is a
+    single source of truth shared with the eager builder
+    (:func:`build_decode_metadata_fp8`).
+
+    Graph-safe: every write is an in-place ``.copy_()`` into a pre-allocated
+    buffer (never rebinds the attribute), so a captured CUDA graph keeps reading
+    from the same address across replays.
+
+      * ``swa_topk_length[b]            = min(window_size, start_pos[b] + q_len)``
+      * ``compressed_topk_length_by_ratio[r][b] =
+            min(extra_index_width_r, compressed_lens[r][b])``
+        where ``extra_index_width_r = topk_total_by_ratio[r].shape[-1] - window``
+        (== ``index_topk`` for r=4, == HCA dense width for r=128).
+
+    ``full_width`` (CUDA-graph capture/warmup only): write the **maximum**
+    length (``window_size`` for SWA, ``extra_index_width_r`` for compressed)
+    instead of the seq-len-derived value. This is REQUIRED for graph capture.
+
+    FlashMLA builds its ``tile_scheduler_metadata`` / ``num_splits`` lazily on
+    the FIRST ``flash_mla_with_kvcache`` call (sparse_decode.h:420) keyed on the
+    ``topk_length`` VALUES, then freezes + reuses it. The capture harness
+    (cuda_graph_runner.cc:880-881) runs two WARMUP forwards before the captured
+    forward, so the schedule is built during warmup and is NOT re-captured into
+    the graph; every replay reuses that frozen schedule. If the schedule is
+    built for short warmup lengths, a longer real replay length over-runs it
+    (IMA). Writing the full width here makes the frozen schedule identical to the
+    ``topk_length is None`` (baseline) schedule — a valid superset for any real
+    replay length. The captured kernel still reads the per-replay REAL lengths
+    (written by ``prepare_cuda_graph`` -> ``full_width=False``) for per-query
+    masking, so the compute saving is preserved. See
+    ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
+    """
+    q_len = int(meta.q_len_per_req)
+    window_size = int(meta.window_size)
+    if meta.swa_topk_length is not None:
+        if full_width:
+            meta.swa_topk_length[:bs].fill_(window_size)
+        else:
+            swa_len = (start_pos.to(torch.int32) + q_len).clamp_(min=0, max=window_size)
+            meta.swa_topk_length[:bs].copy_(swa_len)
+    for r, out in meta.compressed_topk_length_by_ratio.items():
+        tt = meta.topk_total_by_ratio.get(r)
+        width_r = int(tt.shape[-1]) - window_size if tt is not None else None
+        if full_width:
+            if width_r is not None:
+                out[:bs].fill_(width_r)
+            continue
+        cmp_len = meta.compressed_lens.get(r)
+        if cmp_len is None:
+            continue
+        eff = cmp_len[:bs]
+        if width_r is not None:
+            eff = eff.clamp(max=width_r)
+        out[:bs].copy_(eff)
+
+
 def allocate_decode_metadata_fp8(
     max_batch_size: int,
     q_len: int,
@@ -691,6 +809,8 @@ def allocate_decode_metadata_fp8(
     compressed_lens_per_token: Dict[int, torch.Tensor] = {}
     compressed_buffer_stride_per_ratio: Dict[int, int] = {}
     topk_total_by_ratio: Dict[int, torch.Tensor] = {}
+    # opt_flash_mla: per-ratio FlashMLA ``extra_topk_length`` buffer (graph-stable).
+    compressed_topk_length_by_ratio: Dict[int, torch.Tensor] = {}
     for r in unique_ratios:
         stride = max_seq_len // r
         compressed_buffer_stride_per_ratio[r] = stride
@@ -713,6 +833,13 @@ def allocate_decode_metadata_fp8(
             dtype=torch.int32,
             device=device,
         )
+        compressed_topk_length_by_ratio[r] = torch.zeros(
+            B, dtype=torch.int32, device=device
+        )
+
+    # opt_flash_mla: SWA ``topk_length`` buffer (graph-stable). Filled in
+    # ``update_decode_metadata_in_place_fp8`` from ``start_pos`` each step.
+    swa_topk_length = torch.zeros(B, dtype=torch.int32, device=device)
 
     # Phase 2: paged pool block_table + write slot mapping buffers.
     # paged_pool_specs maps:
@@ -827,6 +954,8 @@ def allocate_decode_metadata_fp8(
         decode_cu_seq_per_req=decode_cu_seq_per_req_alloc,
         swa_global_slots=swa_global_slots_alloc,
         hca_cmp_global_slots=hca_cmp_global_slots_alloc,
+        swa_topk_length=swa_topk_length,
+        compressed_topk_length_by_ratio=compressed_topk_length_by_ratio,
     )
 
 
@@ -838,6 +967,7 @@ def update_decode_metadata_in_place_fp8(
     paged_block_tables: Optional[Dict[int, torch.Tensor]] = None,
     paged_pool_entries_per_block: Optional[Dict[int, int]] = None,
     paged_pool_tokens_per_block: Optional[Dict[int, int]] = None,
+    capture_full_width_lengths: bool = False,
 ) -> None:
     """Recompute every metadata buffer IN PLACE for new attention inputs.
 
@@ -910,6 +1040,10 @@ def update_decode_metadata_in_place_fp8(
             ptr_snap["swa_global_slots"] = meta.swa_global_slots.data_ptr()
         if meta.hca_cmp_global_slots is not None:
             ptr_snap["hca_cmp_global_slots"] = meta.hca_cmp_global_slots.data_ptr()
+        if meta.swa_topk_length is not None:
+            ptr_snap["swa_topk_length"] = meta.swa_topk_length.data_ptr()
+        for r, t in meta.compressed_topk_length_by_ratio.items():
+            ptr_snap[f"compressed_topk_length_by_ratio[{r}]"] = t.data_ptr()
 
     meta.position_ids[: bs * q_len].copy_(position_ids_flat)
     if meta.position_ids_long is not None:
@@ -923,6 +1057,16 @@ def update_decode_metadata_in_place_fp8(
     )
 
     fused_update_decode_meta_pure(meta, start_pos, meta.max_seq_len)
+
+    # opt_flash_mla: derive FlashMLA topk_length / extra_topk_length from the
+    # just-filled compressed_lens + start_pos, in place (graph-stable buffers).
+    # During CUDA-graph capture/warmup (capture_full_width_lengths=True) write
+    # the FULL width so FlashMLA's frozen tile schedule is max-provisioned and
+    # safe for any real replay length; real per-request lengths are written
+    # before each replay by prepare_cuda_graph(). See _update_topk_lengths_in_place.
+    _update_topk_lengths_in_place(
+        meta, start_pos, bs, full_width=capture_full_width_lengths
+    )
 
     # ------------------------------------------------------------------
     # Phase 2: paged write slot mappings (per attn_type).
@@ -1060,6 +1204,10 @@ def update_decode_metadata_in_place_fp8(
             cur["swa_global_slots"] = meta.swa_global_slots.data_ptr()
         if meta.hca_cmp_global_slots is not None:
             cur["hca_cmp_global_slots"] = meta.hca_cmp_global_slots.data_ptr()
+        if meta.swa_topk_length is not None:
+            cur["swa_topk_length"] = meta.swa_topk_length.data_ptr()
+        for r, t in meta.compressed_topk_length_by_ratio.items():
+            cur[f"compressed_topk_length_by_ratio[{r}]"] = t.data_ptr()
         for k, p_before in ptr_snap.items():
             assert cur[k] == p_before, (
                 f"update_decode_metadata_in_place_fp8(forbid_realloc=True) "
@@ -1143,6 +1291,23 @@ def build_decode_metadata_fp8(
         # (each request now has this many compressed entries).
         compressed_lens_per_token[r] = ((position_ids_2d + 1) // r).to(torch.int32)
         compressed_lens[r] = compressed_lens_per_token[r][:, -1].contiguous()
+
+    # opt_flash_mla: FlashMLA per-request effective lengths (eager path).
+    # Same formula / clamp width as ``_update_topk_lengths_in_place`` so eager
+    # and CUDA-graph paths produce numerically identical lengths.
+    #   swa_topk_length[b]            = min(window, last_token_pos + 1) = min(window, start_pos + q_len)
+    #   compressed_topk_length[r][b]  = min(extra_index_width_r, compressed_lens[r][b])
+    swa_topk_length = (
+        (position_ids_2d[:, -1] + 1).clamp(min=0, max=window_size).to(torch.int32)
+    )
+    compressed_topk_length_by_ratio: Dict[int, torch.Tensor] = {}
+    for r in unique_ratios:
+        width_r = _compressed_index_width_for_ratio(
+            r, compressed_buffer_stride_per_ratio[r], index_topk
+        )
+        compressed_topk_length_by_ratio[r] = (
+            compressed_lens[r].clamp(max=int(width_r)).to(torch.int32)
+        )
 
     # Indexer output buffer — pre-allocated; IndexerDecodeV4Op fills it.
     # Indexer is only present in compress_ratio==4 layers, so K=index_topk.
@@ -1382,4 +1547,6 @@ def build_decode_metadata_fp8(
         decode_cu_seq_per_req=decode_cu_seq_per_req,
         swa_global_slots=swa_global_slots,
         hca_cmp_global_slots=hca_cmp_global_slots,
+        swa_topk_length=swa_topk_length,
+        compressed_topk_length_by_ratio=compressed_topk_length_by_ratio,
     )
