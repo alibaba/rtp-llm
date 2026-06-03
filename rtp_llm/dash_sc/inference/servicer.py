@@ -1205,8 +1205,9 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             )
             input_ids_list, sampling, other = parse_dash_sc_grpc_request(request)
             if input_ids_list is None:
-                yield predict_v2_pb2.ModelStreamInferResponse(
-                    error_message="input_ids not found or raw_input_contents mismatch"
+                yield build_parameter_error_response(
+                    str(request.id),
+                    "input_ids not found or raw_input_contents mismatch",
                 )
                 return
             if (
@@ -1218,9 +1219,11 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 partial_metadata_sent = True
 
             if sampling is not None and sampling.max_new_tokens <= 0:
-                param_name = "max_completion_tokens" if getattr(
-                    sampling, "max_new_tokens_from_completion_alias", False
-                ) else "max_new_tokens"
+                param_name = (
+                    "max_completion_tokens"
+                    if getattr(sampling, "max_new_tokens_from_completion_alias", False)
+                    else "max_new_tokens"
+                )
                 yield build_parameter_error_response(
                     str(request.id),
                     f"invalid {param_name}: {sampling.max_new_tokens}; must be greater than 0",
