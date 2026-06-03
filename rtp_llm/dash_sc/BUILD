@@ -26,7 +26,8 @@ py_library(
         "proxy/__init__.py",
         "proxy/__main__.py",
         "proxy/access_record.py",
-        "proxy/channel_pool.py",
+        "proxy/service_route_config.py",
+        "proxy/service_route.py",
         "proxy/servicer.py",
         "server.py",
         "think.py",
@@ -37,8 +38,10 @@ py_library(
         "//rtp_llm/server:server",
         ":grpcio",
         "//rtp_llm/access_logger:access_logger",
+        "//rtp_llm:config",
         "//rtp_llm/dash_sc/proto:predict_v2_py_proto",
         "//rtp_llm/metrics:metrics",
+        "//rtp_llm:utils",
     ],
 )
 

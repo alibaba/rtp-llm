@@ -2,13 +2,14 @@
 
 Tests verify the async request_iterator is passed correctly to the backend
 stub, first-chunk buffering behavior, access-log diagnostic injection, metadata
-propagation, and the per-addr channel pool.
+propagation, and the per-addr channel cache.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import struct
 import unittest
 from unittest.mock import MagicMock, patch
@@ -17,11 +18,20 @@ import grpc
 
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.proxy.access_record import ForwardAccessRecord
+from rtp_llm.dash_sc.proxy.service_route_config import (
+    LEGACY_FORWARD_ENV_KEY,
+    SERVICE_ROUTE_ENV_KEY,
+    load_service_route_config_from_env,
+    parse_service_route_config,
+)
+from rtp_llm.dash_sc.proxy.service_route import (
+    BackendAddr,
+    VipServerServiceDiscovery,
+)
 from rtp_llm.dash_sc.proxy.servicer import (
     DashScProxyServicer,
-    _parse_channels_per_addr,
-    _parse_forward_addrs,
 )
+from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
 
 def _make_request(
@@ -69,6 +79,18 @@ class _AsyncIter:
         return x
 
 
+class _FakeChannel:
+    def __init__(self, addr: str = ""):
+        self.addr = addr
+        self.closed = False
+
+    def get_state(self, try_to_connect: bool = False):
+        return grpc.ChannelConnectivity.READY
+
+    async def close(self):
+        self.closed = True
+
+
 async def _drain(aiter):
     return [x async for x in aiter]
 
@@ -79,35 +101,161 @@ async def _request_gen(*reqs):
 
 
 def _install_mock_stub(servicer, mock_stub) -> None:
-    """Point every pooled channel's stub at ``mock_stub`` after ``open()``."""
-    for pc in servicer._pool._active:
-        pc.stub = mock_stub
+    """Make downstream stub construction return ``mock_stub`` in a test."""
+    patcher = patch(
+        "rtp_llm.dash_sc.proto.predict_v2_pb2_grpc.GRPCInferenceServiceStub",
+        return_value=mock_stub,
+    )
+    patcher.start()
+    servicer._test_stub_patcher = patcher
 
 
-class ParseForwardAddrsTest(unittest.TestCase):
-    def test_single_address(self) -> None:
-        result = _parse_forward_addrs("10.0.0.1:8096")
-        self.assertEqual(result, ["10.0.0.1:8096"])
+def _stop_mock_stub(servicer) -> None:
+    patcher = getattr(servicer, "_test_stub_patcher", None)
+    if patcher is not None:
+        patcher.stop()
+        servicer._test_stub_patcher = None
 
-    def test_comma_separated(self) -> None:
-        result = _parse_forward_addrs("10.0.0.1:8096,10.0.0.2:8096")
-        self.assertEqual(result, ["10.0.0.1:8096", "10.0.0.2:8096"])
 
-    def test_json_array(self) -> None:
-        result = _parse_forward_addrs('["10.0.0.1:8096", "10.0.0.2:8096"]')
-        self.assertEqual(result, ["10.0.0.1:8096", "10.0.0.2:8096"])
+def _servicer_pool(servicer):
+    return servicer._channel_pool
 
-    def test_empty_string(self) -> None:
-        result = _parse_forward_addrs("")
-        self.assertEqual(result, [])
 
-    def test_whitespace_only(self) -> None:
-        result = _parse_forward_addrs("   ")
-        self.assertEqual(result, [])
+def _make_servicer(
+    forward_addrs: list[str],
+) -> DashScProxyServicer:
+    address = ";".join(forward_addrs)
+    saved_route = os.environ.get(SERVICE_ROUTE_ENV_KEY)
+    try:
+        os.environ[SERVICE_ROUTE_ENV_KEY] = json.dumps(
+            {"type": "ip_port_list", "address": address}
+        )
+        return DashScProxyServicer()
+    finally:
+        if saved_route is None:
+            os.environ.pop(SERVICE_ROUTE_ENV_KEY, None)
+        else:
+            os.environ[SERVICE_ROUTE_ENV_KEY] = saved_route
 
-    def test_comma_with_spaces(self) -> None:
-        result = _parse_forward_addrs("10.0.0.1:8096 , 10.0.0.2:8096 ")
-        self.assertEqual(result, ["10.0.0.1:8096", "10.0.0.2:8096"])
+
+class ServiceRouteConfigTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._saved_route = os.environ.pop(SERVICE_ROUTE_ENV_KEY, None)
+        self._saved_legacy = os.environ.pop(LEGACY_FORWARD_ENV_KEY, None)
+
+    def tearDown(self) -> None:
+        if self._saved_route is None:
+            os.environ.pop(SERVICE_ROUTE_ENV_KEY, None)
+        else:
+            os.environ[SERVICE_ROUTE_ENV_KEY] = self._saved_route
+        if self._saved_legacy is None:
+            os.environ.pop(LEGACY_FORWARD_ENV_KEY, None)
+        else:
+            os.environ[LEGACY_FORWARD_ENV_KEY] = self._saved_legacy
+
+    def test_parse_supported_route_types(self) -> None:
+        cfg = parse_service_route_config(
+            '{"type": "ip_port_list", "address": '
+            '"10.0.0.1:8096;10.0.0.2:8096"}'
+        )
+        self.assertEqual(
+            (cfg.type, cfg.address),
+            ("ip_port_list", "10.0.0.1:8096;10.0.0.2:8096"),
+        )
+
+        cfg = parse_service_route_config(
+            '{"type": "vipserver", "address": "com.example.svc"}'
+        )
+        self.assertEqual((cfg.type, cfg.address), ("vipserver", "com.example.svc"))
+
+        with self.assertRaisesRegex(RuntimeError, "unsupported 'type': 'ip_port'"):
+            parse_service_route_config(
+                '{"type": "ip_port", "address": "10.0.0.1:8096"}'
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "unsupported 'type': 'host_port'"):
+            parse_service_route_config(
+                '{"type": "host_port", "address": "frontend.example:8096"}'
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "'type' and 'address'"):
+            parse_service_route_config(
+                '{"type": "ip_port_list", "address": '
+                '["10.0.0.1:8096", "10.0.0.2:8096"]}'
+            )
+
+    def test_legacy_forward_addr_converts_to_ip_port_list(self) -> None:
+        os.environ[LEGACY_FORWARD_ENV_KEY] = "10.0.0.1:8096, 10.0.0.2:8096"
+
+        cfg = load_service_route_config_from_env()
+
+        self.assertEqual(cfg.type, "ip_port_list")
+        self.assertEqual(cfg.address, "10.0.0.1:8096;10.0.0.2:8096")
+
+    def test_legacy_forward_addr_json_array_converts_to_ip_port_list(self) -> None:
+        os.environ[LEGACY_FORWARD_ENV_KEY] = (
+            '["10.0.0.1:8096", "10.0.0.2:8096", "10.0.0.1:8096"]'
+        )
+
+        cfg = load_service_route_config_from_env()
+
+        self.assertEqual(cfg.type, "ip_port_list")
+        self.assertEqual(cfg.address, "10.0.0.1:8096;10.0.0.2:8096")
+
+    def test_service_route_wins_over_legacy_forward_addr(self) -> None:
+        os.environ[SERVICE_ROUTE_ENV_KEY] = (
+            '{"type": "vipserver", "address": "com.example.svc"}'
+        )
+        os.environ[LEGACY_FORWARD_ENV_KEY] = "10.0.0.1:8096"
+
+        cfg = load_service_route_config_from_env()
+
+        self.assertEqual(cfg.type, "vipserver")
+        self.assertEqual(cfg.address, "com.example.svc")
+
+    def test_vipserver_discovery_resolves_one_host_from_resolver(self) -> None:
+        fake_host = MagicMock(ip="10.0.0.1", port=8096)
+        discovery = VipServerServiceDiscovery(
+            "com.example.svc",
+            resolver=lambda _domain: fake_host,
+        )
+
+        addr = discovery.resolve()
+        self.assertIsNotNone(addr)
+        assert addr is not None
+        self.assertEqual(addr.ip, "10.0.0.1")
+        self.assertEqual(addr.http_port, 8096)
+        self.assertEqual(addr.grpc_port, 8104)
+        self.assertEqual(addr.grpc_target, "10.0.0.1:8104")
+
+    def test_vipserver_discovery_logs_resolver_error(self) -> None:
+        def resolver(_domain: str):
+            raise RuntimeError("vipserver failed")
+
+        discovery = VipServerServiceDiscovery("com.example.svc", resolver=resolver)
+
+        with self.assertLogs(level="WARNING") as logs:
+            self.assertIsNone(discovery.resolve())
+
+        self.assertTrue(
+            any("vipserver resolve failed" in msg for msg in logs.output),
+            logs.output,
+        )
+
+    def test_servicer_reads_service_route_env(self) -> None:
+        os.environ[SERVICE_ROUTE_ENV_KEY] = (
+            '{"type": "ip_port_list", "address": '
+            '"10.0.0.1:8096;10.0.0.2:8096"}'
+        )
+        servicer = DashScProxyServicer()
+        self.assertEqual(
+            [addr.http_target for addr in servicer._discovery._addrs],
+            ["10.0.0.1:8096", "10.0.0.2:8096"],
+        )
+        self.assertEqual(
+            [addr.grpc_target for addr in servicer._discovery._addrs],
+            ["10.0.0.1:8104", "10.0.0.2:8104"],
+        )
 
 
 class IteratorBehaviorTest(unittest.IsolatedAsyncioTestCase):
@@ -115,17 +263,19 @@ class IteratorBehaviorTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.channel_patcher = patch(
-            "grpc.aio.insecure_channel", return_value=MagicMock()
+            "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
+            side_effect=lambda addr, **_kwargs: _FakeChannel(addr),
         )
         self.channel_patcher.start()
 
-        self.servicer = DashScProxyServicer(["127.0.0.1:1"])
+        self.servicer = _make_servicer(["127.0.0.1:1"])
         await self.servicer.open()
         self.mock_stub = MagicMock()
         _install_mock_stub(self.servicer, self.mock_stub)
 
     async def asyncTearDown(self) -> None:
         await self.servicer.close()
+        _stop_mock_stub(self.servicer)
         self.channel_patcher.stop()
 
     async def test_iterator_passed_not_list(self) -> None:
@@ -154,16 +304,18 @@ class ParameterValidationTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.channel_patcher = patch(
-            "grpc.aio.insecure_channel", return_value=MagicMock()
+            "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
+            side_effect=lambda addr, **_kwargs: _FakeChannel(addr),
         )
         self.channel_patcher.start()
 
-        self.servicer = DashScProxyServicer(["127.0.0.1:1"])
+        self.servicer = _make_servicer(["127.0.0.1:1"])
         self.mock_stub = MagicMock()
-        self.servicer._stubs = [self.mock_stub]
+        _install_mock_stub(self.servicer, self.mock_stub)
 
     async def asyncTearDown(self) -> None:
         await self.servicer.close()
+        _stop_mock_stub(self.servicer)
         self.channel_patcher.stop()
 
     def _assert_parameter_error(self, responses) -> None:
@@ -218,17 +370,19 @@ class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.channel_patcher = patch(
-            "grpc.aio.insecure_channel", return_value=MagicMock()
+            "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
+            side_effect=lambda addr, **_kwargs: _FakeChannel(addr),
         )
         self.channel_patcher.start()
 
-        self.servicer = DashScProxyServicer(["127.0.0.1:1"])
+        self.servicer = _make_servicer(["127.0.0.1:1"])
         await self.servicer.open()
         self.mock_stub = MagicMock()
         _install_mock_stub(self.servicer, self.mock_stub)
 
     async def asyncTearDown(self) -> None:
         await self.servicer.close()
+        _stop_mock_stub(self.servicer)
         self.channel_patcher.stop()
 
     def _make_resp(self, tag: str) -> predict_v2_pb2.ModelStreamInferResponse:
@@ -324,17 +478,19 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.channel_patcher = patch(
-            "grpc.aio.insecure_channel", return_value=MagicMock()
+            "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
+            side_effect=lambda addr, **_kwargs: _FakeChannel(addr),
         )
         self.channel_patcher.start()
 
-        self.servicer = DashScProxyServicer(["10.0.0.1:8096", "10.0.0.2:8096"])
+        self.servicer = _make_servicer(["10.0.0.1:8096", "10.0.0.2:8096"])
         await self.servicer.open()
         self.mock_stub = MagicMock()
         _install_mock_stub(self.servicer, self.mock_stub)
 
     async def asyncTearDown(self) -> None:
         await self.servicer.close()
+        _stop_mock_stub(self.servicer)
         self.channel_patcher.stop()
 
     def _ctx_with_record(self) -> tuple[MagicMock, ForwardAccessRecord]:
@@ -356,8 +512,12 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         return resp
 
     def _patch_addr(self, idx: int) -> None:
-        # Force round-robin to pick the pooled channel for addr ``idx`` next.
-        self.servicer._pool._rr_idx = idx
+        # Force discovery to resolve the backend address used by this test.
+        addrs = (
+            BackendAddr.from_http_target("10.0.0.1:8096"),
+            BackendAddr.from_http_target("10.0.0.2:8096"),
+        )
+        self.servicer._discovery._addrs = (addrs[idx],)
 
     async def test_backend_addr_set_to_chosen_backend(self) -> None:
         self._patch_addr(1)
@@ -369,7 +529,7 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         await _drain(
             self.servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
         )
-        self.assertEqual(record.backend_addr, "10.0.0.2:8096")
+        self.assertEqual(record.backend_addr, "10.0.0.2:8104")
 
     async def test_backend_resp_count_tracks_upstream_frames(self) -> None:
         self._patch_addr(0)
@@ -486,16 +646,18 @@ class MetadataPropagationTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.channel_patcher = patch(
-            "grpc.aio.insecure_channel", return_value=MagicMock()
+            "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
+            side_effect=lambda addr, **_kwargs: _FakeChannel(addr),
         )
         self.channel_patcher.start()
-        self.servicer = DashScProxyServicer(["127.0.0.1:1"])
+        self.servicer = _make_servicer(["127.0.0.1:1"])
         await self.servicer.open()
         self.mock_stub = MagicMock()
         _install_mock_stub(self.servicer, self.mock_stub)
 
     async def asyncTearDown(self) -> None:
         await self.servicer.close()
+        _stop_mock_stub(self.servicer)
         self.channel_patcher.stop()
 
     async def test_client_metadata_forwarded_to_downstream_stub(self) -> None:
@@ -547,12 +709,15 @@ class ChannelLoopAffinityTest(unittest.TestCase):
 
             return _Channel()
 
-        with patch("grpc.aio.insecure_channel", side_effect=make_channel) as mock_ch:
+        with patch(
+            "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
+            side_effect=make_channel,
+        ) as mock_ch:
             with patch(
                 "rtp_llm.dash_sc.proto.predict_v2_pb2_grpc.GRPCInferenceServiceStub",
                 return_value=mock_stub,
             ):
-                servicer = DashScProxyServicer(["127.0.0.1:1"])
+                servicer = _make_servicer(["127.0.0.1:1"])
                 self.assertEqual(mock_ch.call_count, 0)
 
                 async def invoke():
@@ -573,49 +738,92 @@ class ChannelLoopAffinityTest(unittest.TestCase):
 
 
 class ChannelPoolTest(unittest.IsolatedAsyncioTestCase):
-    """Per-addr channel pool: N channels/addr, round-robin over all stubs."""
+    """Dash SC reuses the shared lazy per-address gRPC channel cache."""
 
-    async def test_default_one_channel_per_addr(self) -> None:
-        with patch("grpc.aio.insecure_channel", return_value=MagicMock()) as mock_ch:
-            servicer = DashScProxyServicer(["10.0.0.1:8096", "10.0.0.2:8096"])
-            self.assertEqual(servicer._pool.stats()[0], 0)
+    async def test_open_does_not_prewarm_configured_addrs(self) -> None:
+        with patch(
+            "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
+            side_effect=lambda addr, **_kwargs: _FakeChannel(addr),
+        ) as mock_ch:
+            servicer = _make_servicer(["10.0.0.1:8096", "10.0.0.2:8096"])
+            self.assertEqual(_servicer_pool(servicer)._channels, {})
             self.assertEqual(mock_ch.call_count, 0)
             await servicer.open()
-        self.assertEqual(servicer._pool.stats()[0], 2)
+            self.assertEqual(_servicer_pool(servicer)._channels, {})
+            self.assertEqual(mock_ch.call_count, 0)
+            await servicer.close()
+
+    async def test_servicer_uses_grpc_port_for_channel_target(self) -> None:
+        with patch(
+            "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
+            side_effect=lambda addr, **_kwargs: _FakeChannel(addr),
+        ) as mock_ch:
+            servicer = _make_servicer(["10.0.0.1:8096"])
+            await servicer.open()
+            mock_stub = MagicMock()
+            _install_mock_stub(servicer, mock_stub)
+            try:
+                mock_stub.ModelStreamInfer.return_value = _AsyncIter([_make_response()])
+
+                await _drain(
+                    servicer.ModelStreamInfer(
+                        _request_gen(_make_request("req1")), MagicMock()
+                    )
+                )
+
+                self.assertEqual(mock_ch.call_args[0][0], "10.0.0.1:8104")
+            finally:
+                _stop_mock_stub(servicer)
+                await servicer.close()
+
+    async def test_shared_pool_reuses_cached_channel_by_addr(self) -> None:
+        pool = GrpcHostChannelPool(cleanup_interval=60)
+        with patch(
+            "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
+            side_effect=lambda addr, **_kwargs: _FakeChannel(addr),
+        ) as mock_ch:
+            ch1 = await pool.get("10.0.0.1:8096")
+            ch2 = await pool.get("10.0.0.1:8096")
+            ch3 = await pool.get("10.0.0.2:8096")
+
+        self.assertIs(ch1, ch2)
+        self.assertIsNot(ch1, ch3)
         self.assertEqual(mock_ch.call_count, 2)
-        await servicer.close()
+        await pool.close()
 
-    async def test_pool_round_robin_over_addrs(self) -> None:
-        with patch("grpc.aio.insecure_channel", return_value=MagicMock()):
-            servicer = DashScProxyServicer(
-                ["10.0.0.1:8096", "10.0.0.2:8096"], channels_per_addr=3
-            )
-            await servicer.open()
-        self.assertEqual(servicer._pool.stats()[0], 6)
-        self.assertEqual(
-            [pc.addr_idx for pc in servicer._pool._active], [0, 0, 0, 1, 1, 1]
+    async def test_vipserver_discovery_delegates_each_resolve_to_resolver(self) -> None:
+        snapshots = [
+            MagicMock(ip="10.0.0.1", port=8096),
+            MagicMock(ip="10.0.0.2", port=8096),
+        ]
+
+        def resolver(_domain: str):
+            return snapshots.pop(0)
+
+        discovery = VipServerServiceDiscovery(
+            "com.example.svc",
+            resolver=resolver,
         )
-        seq = [servicer._pool.acquire().addr_idx for _ in range(7)]
-        self.assertEqual(seq, [0, 0, 0, 1, 1, 1, 0])
-        await servicer.close()
 
-    def test_parse_channels_per_addr_fallback(self) -> None:
-        self.assertEqual(_parse_channels_per_addr(""), 1)
-        self.assertEqual(_parse_channels_per_addr("abc"), 1)
-        self.assertEqual(_parse_channels_per_addr("0"), 1)
-        self.assertEqual(_parse_channels_per_addr("-4"), 1)
-        self.assertEqual(_parse_channels_per_addr("4"), 4)
+        first = discovery.resolve()
+        second = discovery.resolve()
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        assert first is not None
+        assert second is not None
+        self.assertEqual(first.http_target, "10.0.0.1:8096")
+        self.assertEqual(first.grpc_target, "10.0.0.1:8104")
+        self.assertEqual(second.http_target, "10.0.0.2:8096")
+        self.assertEqual(second.grpc_target, "10.0.0.2:8104")
 
-    async def test_acquire_returns_none_after_close(self) -> None:
-        """Shutdown race: after ``close()`` the pool is empty and
-        ``acquire`` returns ``None``; ``ModelStreamInfer`` translates
-        that into a proper UNAVAILABLE abort.
-        """
-        with patch("grpc.aio.insecure_channel", return_value=MagicMock()):
-            servicer = DashScProxyServicer(["10.0.0.1:8096"])
+    async def test_closed_pool_aborts_with_unavailable(self) -> None:
+        with patch(
+            "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
+            side_effect=lambda addr, **_kwargs: _FakeChannel(addr),
+        ):
+            servicer = _make_servicer(["10.0.0.1:8096"])
             await servicer.open()
         await servicer.close()
-        self.assertIsNone(servicer._pool.acquire())
 
         ctx = MagicMock()
 
@@ -630,6 +838,10 @@ class ChannelPoolTest(unittest.IsolatedAsyncioTestCase):
             )
         ctx.abort.assert_called_once()
         self.assertEqual(ctx.abort.call_args[0][0], grpc.StatusCode.UNAVAILABLE)
+        self.assertEqual(
+            ctx.abort.call_args[0][1],
+            "forward channel pool unavailable for backend 10.0.0.1:8104",
+        )
 
 
 class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
@@ -656,17 +868,19 @@ class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.channel_patcher = patch(
-            "grpc.aio.insecure_channel", return_value=MagicMock()
+            "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
+            side_effect=lambda addr, **_kwargs: _FakeChannel(addr),
         )
         self.channel_patcher.start()
 
-        self.servicer = DashScProxyServicer(["127.0.0.1:1"])
+        self.servicer = _make_servicer(["127.0.0.1:1"])
         await self.servicer.open()
         self.mock_stub = MagicMock()
         _install_mock_stub(self.servicer, self.mock_stub)
 
     async def asyncTearDown(self) -> None:
         await self.servicer.close()
+        _stop_mock_stub(self.servicer)
         self.channel_patcher.stop()
 
     @staticmethod

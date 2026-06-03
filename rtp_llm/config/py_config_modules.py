@@ -39,10 +39,11 @@ DEFAULT_START_PORT = 8088
 COORDINATOR_INFO_PORT_NUM = 11
 MIN_WORKER_INFO_PORT_NUM = 9
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
+DASH_SC_GRPC_SERVER_PORT_OFFSET = 8
 
 
 class ServerConfig:
-    """Port layout : base = start_port + rank_id * worker_info_port_num, then +0..+8."""
+    """Port layout: base = start_port + rank_id * worker_info_port_num."""
 
     def __init__(self):
         self.frontend_server_count = 4
@@ -87,8 +88,8 @@ class ServerConfig:
 
     @property
     def dash_sc_grpc_server_port(self) -> int:
-        """DashSc gRPC listen port (ModelStreamInfer, wire: predict_v2.proto); base + 8."""
-        return self._server_base() + 8
+        """DashSc gRPC listen port (ModelStreamInfer, wire: predict_v2.proto)."""
+        return self._server_base() + DASH_SC_GRPC_SERVER_PORT_OFFSET
 
     def set_local_rank(self, local_rank: int):
         """Update rank_id in place; server_port-related properties reflect new values."""

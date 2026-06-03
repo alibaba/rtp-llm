@@ -21,6 +21,7 @@ from typing import Any
 
 import grpc
 
+from rtp_llm.config.py_config_modules import DASH_SC_GRPC_SERVER_PORT_OFFSET
 from rtp_llm.dash_sc.codec import SamplingParams
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
@@ -290,7 +291,8 @@ def build_dash_sc_grpc_client_argparser() -> argparse.ArgumentParser:
         default="127.0.0.1:8096",
         help=(
             "gRPC server address (host:port); default matches rank0 "
-            "ServerConfig.dash_sc_grpc_server_port (8088 + 8)"
+            f"ServerConfig.dash_sc_grpc_server_port "
+            f"(8088 + {DASH_SC_GRPC_SERVER_PORT_OFFSET})"
         ),
     )
     parser.add_argument(
