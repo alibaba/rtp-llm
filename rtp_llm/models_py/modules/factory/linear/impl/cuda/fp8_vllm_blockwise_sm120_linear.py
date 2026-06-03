@@ -87,8 +87,10 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
 
         self.K, self.N = self.weight.shape
         self.scale_K, self.scale_N = self.weight_scales.shape
-        self.weight = self.weight.reshape(self.N, self.K)
-        self.weight_scales = self.weight_scales.reshape(self.scale_N, self.scale_K)
+        self.weight = self.weight.reshape(self.N, self.K).contiguous()
+        self.weight_scales = self.weight_scales.reshape(
+            self.scale_N, self.scale_K
+        ).contiguous()
 
         if (self.N + 127) // 128 != self.scale_N or (
             self.K + 127
@@ -142,13 +144,17 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         )
 
         output = torch.empty(M, self.N, dtype=torch.bfloat16, device=input.device)
+        # Bias is fused into the GEMM epilogue (per-output-channel add) instead
+        # of a separate elementwise add kernel.
+        bias = None
+        if self.bias is not None:
+            bias = self.bias.reshape(-1).to(dtype=output.dtype, device=output.device)
         cutlass_scaled_mm_blockwise_sm120_fp8(
             output,
             input_fp8,
             self.weight,
             input_scales,
             self.weight_scales,
+            bias,
         )
-        if self.bias is not None:
-            output = output + self.bias.to(output.dtype)
         return output
