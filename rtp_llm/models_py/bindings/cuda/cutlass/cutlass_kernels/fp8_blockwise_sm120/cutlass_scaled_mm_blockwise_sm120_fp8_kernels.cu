@@ -127,10 +127,19 @@ struct cutlass_3x_gemm_fp8_blockwise {
     using ArchTag       = cutlass::arch::Sm120;
     using OperatorClass = cutlass::arch::OpClassTensorOp;
 
-    static constexpr auto RoundStyle = cutlass::FloatRoundStyle::round_to_nearest;
-    using ElementScalar              = float;
-    using DefaultOperation =
-        cutlass::epilogue::fusion::LinearCombination<ElementD, ElementCompute, ElementC, ElementScalar, RoundStyle>;
+    static constexpr auto RoundStyle   = cutlass::FloatRoundStyle::round_to_nearest;
+    using ElementScalar                = float;
+    static constexpr int AlignmentBias = 128 / cutlass::sizeof_bits<ElementD>::value;
+    // Fuse optional per-output-channel (per-N) bias into the epilogue.
+    // swap_ab computes the transposed problem (N, M), so the per-N bias is
+    // per-row there; the normal path has it per-column. bias_ptr=nullptr at
+    // runtime makes the broadcast contribute 0 (i.e. no bias).
+    using DefaultOperation = std::conditional_t<
+        swap_ab,
+        cutlass::epilogue::fusion::
+            LinCombPerRowBias<ElementD, ElementCompute, ElementD, ElementC, ElementScalar, AlignmentBias, RoundStyle>,
+        cutlass::epilogue::fusion::
+            LinCombPerColBias<ElementD, ElementCompute, ElementD, ElementC, ElementScalar, AlignmentBias, RoundStyle>>;
 
     using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
         ArchTag,
@@ -235,6 +244,7 @@ void launch_one(torch::Tensor&       D,
                 torch::Tensor const& B,
                 torch::Tensor const& A_sf,
                 torch::Tensor const& B_sf,
+                torch::Tensor const* bias,
                 int                  M,
                 int                  N,
                 int                  K,
@@ -289,6 +299,9 @@ void launch_one(torch::Tensor&       D,
 
     auto                                   cd = static_cast<ElementD*>(D.data_ptr());
     typename GemmKernel::EpilogueArguments epilogue_args{{}, cd, c_stride, cd, c_stride};
+    if (bias != nullptr) {
+        epilogue_args.thread.bias_ptr = static_cast<ElementD const*>(bias->const_data_ptr());
+    }
 
     cutlass::KernelHardwareInfo    hw_info;
     typename GemmKernel::Arguments args{
@@ -313,6 +326,7 @@ void dispatch_blockwise_sm120(torch::Tensor&       D,
                               torch::Tensor const& B,
                               torch::Tensor const& A_sf,
                               torch::Tensor const& B_sf,
+                              torch::Tensor const* bias,
                               int                  M,
                               int                  N,
                               int                  K,
@@ -321,13 +335,14 @@ void dispatch_blockwise_sm120(torch::Tensor&       D,
     if (!swap_ab) {
         if (M <= 256) {
             launch_one<typename sm120_blockwise_fp8_config_pingpong<OutType>::Gemm>(
-                D, A, B, A_sf, B_sf, M, N, K, stream);
+                D, A, B, A_sf, B_sf, bias, M, N, K, stream);
         } else {
             launch_one<typename sm120_blockwise_fp8_config_default<OutType>::Gemm>(
-                D, A, B, A_sf, B_sf, M, N, K, stream);
+                D, A, B, A_sf, B_sf, bias, M, N, K, stream);
         }
     } else {
-        launch_one<typename sm120_blockwise_fp8_config_swapab<OutType>::Gemm>(D, A, B, A_sf, B_sf, M, N, K, stream);
+        launch_one<typename sm120_blockwise_fp8_config_swapab<OutType>::Gemm>(
+            D, A, B, A_sf, B_sf, bias, M, N, K, stream);
     }
 }
 
@@ -335,11 +350,12 @@ void dispatch_blockwise_sm120(torch::Tensor&       D,
 
 #endif  // CUTLASS_ARCH_MMA_SM120_SUPPORTED
 
-void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&       D,
-                                           torch::Tensor const& A,
-                                           torch::Tensor const& B,
-                                           torch::Tensor const& A_sf,
-                                           torch::Tensor const& B_sf) {
+void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&                      D,
+                                           torch::Tensor const&                A,
+                                           torch::Tensor const&                B,
+                                           torch::Tensor const&                A_sf,
+                                           torch::Tensor const&                B_sf,
+                                           std::optional<torch::Tensor> const& bias) {
 #if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED)
     TORCH_CHECK(A.dtype() == torch::kFloat8_e4m3fn, "A must be float8_e4m3fn");
     TORCH_CHECK(B.dtype() == torch::kFloat8_e4m3fn, "B must be float8_e4m3fn");
@@ -363,14 +379,23 @@ void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&       D,
     TORCH_CHECK(
         D.size(0) == M && D.size(1) == N, "D shape (", D.size(0), ",", D.size(1), ") must be (M=", M, ", N=", N, ")");
 
+    torch::Tensor const* bias_ptr = nullptr;
+    torch::Tensor        bias_contig;
+    if (bias.has_value()) {
+        bias_contig = bias->contiguous();
+        TORCH_CHECK(bias_contig.dtype() == D.dtype(), "bias dtype must match D dtype");
+        TORCH_CHECK(bias_contig.numel() == N, "bias must have N (", N, ") elements, got ", bias_contig.numel());
+        bias_ptr = &bias_contig;
+    }
+
     at::cuda::CUDAGuard device_guard{(char)A.get_device()};
     cudaStream_t        stream = at::cuda::getCurrentCUDAStream(A.get_device());
 
     auto out_dtype = D.dtype();
     if (out_dtype == at::ScalarType::BFloat16) {
-        dispatch_blockwise_sm120<cutlass::bfloat16_t>(D, A, B, A_sf, B_sf, M, N, K, stream);
+        dispatch_blockwise_sm120<cutlass::bfloat16_t>(D, A, B, A_sf, B_sf, bias_ptr, M, N, K, stream);
     } else if (out_dtype == at::ScalarType::Half) {
-        dispatch_blockwise_sm120<cutlass::half_t>(D, A, B, A_sf, B_sf, M, N, K, stream);
+        dispatch_blockwise_sm120<cutlass::half_t>(D, A, B, A_sf, B_sf, bias_ptr, M, N, K, stream);
     } else {
         TORCH_CHECK(false, "Unsupported output dtype for fp8 blockwise sm120: ", out_dtype);
     }
