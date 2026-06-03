@@ -230,12 +230,12 @@ class CostBasedPrefillStrategyTest {
 
         // Batch of 2: req1=(1000,200) req2=(500,100)
         // c1=800, p1=200, c2=400, p2=100
-        // Σc=1200, max(640+80, 160+20)=720, max(p)=200, bs=2
-        // = 10 + 0.5*1200 + 720 + 0.2*200 + 5*2 = 1380
+        // Σc=1200, Σ(640+80, 160+20)=900, Σp=300, bs=2
+        // = 10 + 0.5*1200 + 900 + 0.2*300 + 5*2 = 1580
         long batch = predictor.predictBatchMs(List.of(
                 new RequestProfile(1000, 200),
                 new RequestProfile(500, 100)));
-        assertEquals(1380, batch);
+        assertEquals(1580, batch);
 
         assertEquals(0, predictor.predictBatchMs(List.of()));
     }

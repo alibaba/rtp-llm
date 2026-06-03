@@ -58,6 +58,9 @@ class FlexlbBatchSchedulerTest {
         config.setScheduleWorkerSize(1);
         config.setFlexlbBatchSizeMax(2);
         config.setFlexlbBatchWindowMs(10_000);
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchFillThreshold(1.0);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
@@ -201,6 +204,99 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
+    void processQueue_drops_expired_request() throws Exception {
+        config.setCostSloMs(0L);
+        config.setCostSloRiskMarginMs(0L);
+        config.setFlexlbBatchFillThreshold(2.0);
+        config.setFlexlbBatchSizeMax(10000);
+
+        CompletableFuture<Response> future = scheduler.submit(context(100));
+
+        assertThrows(Exception.class, () -> future.get(2, TimeUnit.SECONDS));
+        verify(grpcClient, never()).batchEnqueue(anyString(), anyInt(), any(), anyLong());
+    }
+
+    @Test
+    void processQueue_dispatches_urgent_request_alone() throws Exception {
+        config.setCostSloMs(5000L);
+        config.setCostSloRiskMarginMs(10000L);
+        config.setFlexlbBatchSizeMax(8);
+
+        CompletableFuture<Response> f1 = scheduler.submit(context(201));
+        assertFalse(f1.isDone());
+        CompletableFuture<Response> f2 = scheduler.submit(context(202));
+
+        assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
+
+        assertEquals(2, sentBatches.size());
+        assertEquals(1, sentBatches.get(0).getInputsCount());
+        assertEquals(1, sentBatches.get(1).getInputsCount());
+    }
+
+    @Test
+    void processQueue_binary_search_limits_batch_by_token_budget() throws Exception {
+        config.setCostSloMs(7500L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchSizeMax(8);
+        config.setFlexlbBatchFillThreshold(2.0);
+
+        CompletableFuture<Response> f1 = scheduler.submit(contextWithSeqLen(301, 2000));
+        CompletableFuture<Response> f2 = scheduler.submit(contextWithSeqLen(302, 2000));
+        CompletableFuture<Response> f3 = scheduler.submit(contextWithSeqLen(303, 2000));
+        Thread.sleep(50);
+
+        config.setFlexlbBatchFillThreshold(0.3);
+
+        f1.get(3, TimeUnit.SECONDS);
+        f2.get(3, TimeUnit.SECONDS);
+        f3.get(3, TimeUnit.SECONDS);
+
+        assertTrue(sentBatches.stream().anyMatch(b -> b.getInputsCount() == 2),
+                "Budget allows ~5450 tokens: 2 items of 2000 = 4000 fits, 3 items = 6000 exceeds");
+        int totalInputs = sentBatches.stream()
+                .mapToInt(EngineRpcService.BatchEnqueueRequestPB::getInputsCount).sum();
+        assertEquals(3, totalInputs);
+    }
+
+    @Test
+    void processQueue_waits_when_fill_below_threshold() throws Exception {
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchSizeMax(1000);
+        config.setFlexlbBatchFillThreshold(0.9);
+
+        CompletableFuture<Response> future = scheduler.submit(context(401));
+
+        Thread.sleep(100);
+        assertFalse(future.isDone(), "Should wait when fill ratio is below threshold");
+
+        config.setFlexlbBatchFillThreshold(0.001);
+        assertTrue(future.get(2, TimeUnit.SECONDS).isSuccess());
+    }
+
+    @Test
+    void processQueue_dispatches_when_batch_size_reached() throws Exception {
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchSizeMax(4);
+        config.setFlexlbBatchFillThreshold(0.99);
+
+        CompletableFuture<Response> f1 = scheduler.submit(context(501));
+        CompletableFuture<Response> f2 = scheduler.submit(context(502));
+        CompletableFuture<Response> f3 = scheduler.submit(context(503));
+        CompletableFuture<Response> f4 = scheduler.submit(context(504));
+
+        assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f3.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f4.get(2, TimeUnit.SECONDS).isSuccess());
+
+        assertTrue(sentBatches.stream().anyMatch(b -> b.getInputsCount() == 4),
+                "Should dispatch when picked.size() reaches batchSizeMax despite low fill ratio");
+    }
+
+    @Test
     void mismatched_generate_input_request_id_fails_before_batch_enqueue() {
         config.setFlexlbBatchSizeMax(1);
 
@@ -233,6 +329,21 @@ class FlexlbBatchSchedulerTest {
         request.setNumBeams(1);
         request.setModel("test-model");
         request.setGenerateInputPbB64(generateInput(generateInputRequestId));
+
+        BalanceContext ctx = new BalanceContext();
+        ctx.setRequest(request);
+        ctx.setConfig(new FlexlbConfig());
+        return ctx;
+    }
+
+    private static BalanceContext contextWithSeqLen(long requestId, long seqLen) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(seqLen);
+        request.setMaxNewTokens(8);
+        request.setNumBeams(1);
+        request.setModel("test-model");
+        request.setGenerateInputPbB64(generateInput(requestId));
 
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);

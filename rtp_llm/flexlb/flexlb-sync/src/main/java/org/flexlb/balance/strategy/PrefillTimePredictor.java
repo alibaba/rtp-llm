@@ -3,7 +3,7 @@ package org.flexlb.balance.strategy;
 import java.util.List;
 
 /**
- * α₀ + α₁·Σcᵢ + max_i(α₂·cᵢ² + α₃·cᵢ·pᵢ) + α₄·max(pᵢ) + α₅·bs
+ * α₀ + α₁·Σcᵢ + α₂·Σcᵢ² + α₃·Σ(cᵢ·pᵢ) + α₄·Σpᵢ + α₅·bs
  *
  * where cᵢ = inputLen - hitCacheTokens (compute tokens), pᵢ = hitCacheTokens, bs = batch size.
  */
@@ -30,17 +30,17 @@ public class PrefillTimePredictor {
         }
         int bs = requests.size();
         long sumC = 0;
-        double maxQuadratic = 0;
-        long maxP = 0;
+        double sumQuadratic = 0;
+        long sumP = 0;
 
         for (RequestProfile r : requests) {
             long c = r.computeTokens();
             long p = r.hitCacheTokens();
             sumC += c;
-            maxQuadratic = Math.max(maxQuadratic, a2 * c * c + a3 * c * p);
-            maxP = Math.max(maxP, p);
+            sumQuadratic += a2 * c * c + a3 * c * p;
+            sumP += p;
         }
 
-        return (long) (a0 + a1 * sumC + maxQuadratic + a4 * maxP + a5 * bs);
+        return (long) (a0 + a1 * sumC + sumQuadratic + a4 * sumP + a5 * bs);
     }
 }
