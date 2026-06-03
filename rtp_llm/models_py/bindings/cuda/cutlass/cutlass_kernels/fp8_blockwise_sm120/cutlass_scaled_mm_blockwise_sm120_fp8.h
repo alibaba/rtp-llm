@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include <torch/all.h>
 
 // FP8 PER_BLOCK GEMM for sm_120 family (consumer Blackwell: RTX 5090 / RTX PRO
@@ -19,8 +21,12 @@
 //         scale_tma_aligned=False)
 //   B_sf: per-block weight scale, K-major layout (shape (N/128, K/128) ->
 //         flattened consistently with cutlass Sm120BlockwiseScaleConfig)
-void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&       D,
-                                           torch::Tensor const& A,
-                                           torch::Tensor const& B,
-                                           torch::Tensor const& A_sf,
-                                           torch::Tensor const& B_sf);
+//   bias: optional per-output-channel bias (N,) same dtype as D. When present
+//         it is added in the GEMM epilogue (per-column bias), avoiding a
+//         separate elementwise add kernel.
+void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&                      D,
+                                           torch::Tensor const&                A,
+                                           torch::Tensor const&                B,
+                                           torch::Tensor const&                A_sf,
+                                           torch::Tensor const&                B_sf,
+                                           std::optional<torch::Tensor> const& bias = std::nullopt);

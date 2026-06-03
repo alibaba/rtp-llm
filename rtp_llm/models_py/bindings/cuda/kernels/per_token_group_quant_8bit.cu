@@ -6,11 +6,12 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/Float8_e4m3fn.h>
 #include <cmath>
+#include <type_traits>
 
 namespace rtp_llm {
 
-__device__ __forceinline__ float GroupReduceMax(float val, const int tid) {
-    unsigned mask = 0xffff;
+__device__ __forceinline__ float GroupReduceMax(float val) {
+    const unsigned mask = __activemask();
 
     val = fmaxf(val, __shfl_xor_sync(mask, val, 8));
     val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
@@ -68,9 +69,20 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
 
     const int32_t num_vec_elems = group_size / vec_size;
 
+    // Each of the 16 lanes strides by 16 over num_vec_elems. When num_vec_elems
+    // <= 16 (the common case: bf16 + group_size=128 -> 16 vecs, 1 per lane), the
+    // single loaded vector can be cached in registers and reused in the quantize
+    // pass, eliminating a second HBM read of the activations. For larger groups
+    // we fall back to re-loading.
+    const bool                  can_cache = (num_vec_elems <= 16);
+    rtp_llm::vec_t<T, vec_size> cached_vec;
+
     for (int32_t i = lane_id; i < num_vec_elems; i += 16) {
         rtp_llm::vec_t<T, vec_size> input_vec;
         input_vec.cast_load(group_input + i * vec_size);
+        if (can_cache) {
+            cached_vec = input_vec;
+        }
 
 #pragma unroll
         for (uint32_t j = 0; j < vec_size; ++j) {
@@ -80,7 +92,7 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
         }
     }
 
-    local_absmax = GroupReduceMax(local_absmax, lane_id);
+    local_absmax = GroupReduceMax(local_absmax);
 
     float y_s = local_absmax / max_8bit;
     if constexpr (SCALE_UE8M0) {
@@ -101,13 +113,29 @@ __global__ void per_token_group_quant_8bit_kernel(const T* __restrict__ input,
 
     for (int32_t i = lane_id; i < num_vec_elems; i += 16) {
         rtp_llm::vec_t<T, vec_size> input_vec;
-        input_vec.cast_load(group_input + i * vec_size);
+        if (can_cache) {
+            input_vec = cached_vec;
+        } else {
+            input_vec.cast_load(group_input + i * vec_size);
+        }
 
+        if constexpr (std::is_same_v<DST_DTYPE, __nv_fp8_e4m3>) {
+            // Build the 8 fp8 outputs into a vector and emit a single packed store.
+            rtp_llm::vec_t<DST_DTYPE, vec_size> out_vec;
 #pragma unroll
-        for (uint32_t j = 0; j < vec_size; ++j) {
-            float val                      = static_cast<float>(input_vec[j]);
-            float q_val                    = fminf(fmaxf(val / y_s, min_8bit), max_8bit);
-            group_output[i * vec_size + j] = DST_DTYPE(q_val);
+            for (uint32_t j = 0; j < vec_size; ++j) {
+                float val   = static_cast<float>(input_vec[j]);
+                float q_val = fminf(fmaxf(val / y_s, min_8bit), max_8bit);
+                out_vec[j]  = DST_DTYPE(q_val);
+            }
+            out_vec.store(group_output + i * vec_size);
+        } else {
+#pragma unroll
+            for (uint32_t j = 0; j < vec_size; ++j) {
+                float val                      = static_cast<float>(input_vec[j]);
+                float q_val                    = fminf(fmaxf(val / y_s, min_8bit), max_8bit);
+                group_output[i * vec_size + j] = DST_DTYPE(q_val);
+            }
         }
     }
 }
@@ -148,10 +176,11 @@ void per_token_group_quant_8bit(torch::Tensor input,
     const int num_blocks  = num_groups / groups_per_block;
     const int num_threads = groups_per_block * THREADS_PER_GROUP;
 
-    const bool is_column_major    = output_s.stride(0) < output_s.stride(1);
-    const int  hidden_dim         = input.size(input.dim() - 1);
-    const int  num_groups_per_row = hidden_dim / group_size;
-    const int  scale_stride       = output_s.stride(1);
+    const bool is_column_major = output_s.stride(0) < output_s.stride(1);
+    TORCH_CHECK(!scale_ue8m0 || is_column_major, "scale_ue8m0 requires column-major output scales");
+    const int hidden_dim         = input.size(input.dim() - 1);
+    const int num_groups_per_row = hidden_dim / group_size;
+    const int scale_stride       = output_s.stride(1);
 
 #define LAUNCH_KERNEL(T, DST_DTYPE)                                                                                    \
     do {                                                                                                               \
@@ -186,7 +215,6 @@ void per_token_group_quant_8bit(torch::Tensor input,
                                                  scale_stride);                                                        \
             }                                                                                                          \
         } else {                                                                                                       \
-            assert(!scale_ue8m0);                                                                                      \
             per_token_group_quant_8bit_kernel<T, DST_DTYPE, false>                                                     \
                 <<<grid, block, 0, stream>>>(static_cast<T*>(input.data_ptr()),                                        \
                                              output_q.data_ptr(),                                                      \

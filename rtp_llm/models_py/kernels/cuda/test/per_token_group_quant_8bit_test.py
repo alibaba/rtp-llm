@@ -269,18 +269,16 @@ def sglang_per_token_group_quant_8bit(
 
 
 class PerTokenGroupQuantTest(TestCase):
-    # NUM_TOKENS = [127, 128, 512, 1024, 4096, 8192]
-    # HIDDEN_DIMS = [256, 512, 1024, 2048, 4096]
-    # GROUP_SIZES = [8, 16, 32, 64, 128]
-    # DST_DTYPES = [torch.int8, fp8_type_]
-    # COLUMN_MAJOR_SCALES = [False, True]
-    # SCALE_TMA_ALIGNED = [False, True]
-    NUM_TOKENS = [127]
+    NUM_TOKENS = [7]
     HIDDEN_DIMS = [256]
-    GROUP_SIZES = [8]
-    DST_DTYPES = [fp8_type_]
-    COLUMN_MAJOR_SCALES = [False]
-    SCALE_TMA_ALIGNED = [False]
+    GROUP_SIZES = [128, 256]
+    INPUT_DTYPES = [torch.float16, torch.bfloat16]
+    DST_DTYPES = [torch.int8, fp8_type_]
+    SCALE_LAYOUTS = [
+        (False, False),
+        (True, False),
+        (True, True),
+    ]
 
     def setUp(self):
         if not torch.cuda.is_available():
@@ -292,18 +290,14 @@ class PerTokenGroupQuantTest(TestCase):
         num_tokens,
         hidden_dim,
         group_size,
+        input_dtype,
         dst_dtype,
         column_major_scales,
         scale_tma_aligned,
     ):
-        if not column_major_scales and scale_tma_aligned:
-            self.skipTest(
-                "Invalid flag: scale_tma_aligned=True but column_major_scales=False"
-            )
         torch.manual_seed(0)
-        x = torch.randn(num_tokens, hidden_dim, device="cuda", dtype=torch.float16)
+        x = torch.randn(num_tokens, hidden_dim, device="cuda", dtype=input_dtype)
 
-        # 调用triton和sglang的量化算子
         x_q_triton, x_s_triton = triton_per_token_group_quant_8bit(
             x,
             group_size,
@@ -321,29 +315,53 @@ class PerTokenGroupQuantTest(TestCase):
             column_major_scales=column_major_scales,
             scale_tma_aligned=scale_tma_aligned,
         )
-        print(f"x_q_triton = {x_q_triton}")
-        print(f"x_s_triton = {x_s_triton}")
-        print(f"x_q_sglang = {x_q_sglang}")
-        print(f"x_s_sglang = {x_s_sglang}")
+
+        torch.testing.assert_close(x_s_sglang, x_s_triton, rtol=1e-5, atol=1e-6)
+        if dst_dtype == torch.int8:
+            # BF16-to-int8 rounding can differ by one between CUDA and Triton.
+            torch.testing.assert_close(x_q_sglang, x_q_triton, rtol=0, atol=1)
+        else:
+            self.assertTrue(
+                torch.equal(x_q_sglang, x_q_triton),
+                "quantized values differ from the Triton reference",
+            )
+        self.assertEqual(x_s_sglang.shape, x_s_triton.shape)
+        self.assertEqual(x_s_sglang.stride(), x_s_triton.stride())
 
     def test_per_token_group_quant(self):
         for params in itertools.product(
             self.NUM_TOKENS,
             self.HIDDEN_DIMS,
             self.GROUP_SIZES,
+            self.INPUT_DTYPES,
             self.DST_DTYPES,
-            self.COLUMN_MAJOR_SCALES,
-            self.SCALE_TMA_ALIGNED,
+            self.SCALE_LAYOUTS,
         ):
+            column_major_scales, scale_tma_aligned = params[5]
             with self.subTest(
                 num_tokens=params[0],
                 hidden_dim=params[1],
                 group_size=params[2],
-                dst_dtype=params[3],
-                column_major_scales=params[4],
-                scale_tma_aligned=params[5],
+                input_dtype=params[3],
+                dst_dtype=params[4],
+                column_major_scales=column_major_scales,
+                scale_tma_aligned=scale_tma_aligned,
             ):
-                self._run_quant_test(*params)
+                self._run_quant_test(
+                    *params[:5], column_major_scales, scale_tma_aligned
+                )
+
+    def test_reject_ue8m0_with_row_major_scales(self):
+        x = torch.randn(2, 128, dtype=torch.bfloat16, device="cuda")
+        output_q = torch.empty_like(x, dtype=fp8_type_)
+        output_s = torch.empty(2, 1, dtype=torch.int32, device="cuda")
+
+        with self.assertRaisesRegex(
+            RuntimeError, "scale_ue8m0 requires column-major output scales"
+        ):
+            per_token_group_quant_fp8(
+                x, output_q, output_s, 128, 1e-10, -448.0, 448.0, True
+            )
 
 
 if __name__ == "__main__":

@@ -22,6 +22,10 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear im
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
     CudaFp8GEMMLinear,
 )
+from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_vllm_blockwise_sm120_linear import (
+    CudaFp8VllmBlockwiseLinear,
+    cutlass_scaled_mm_blockwise_sm120_fp8,
+)
 from rtp_llm.test.utils.bench_util import bench
 from rtp_llm.test.utils.numeric_util import calc_diff, per_block_cast_to_fp8
 
@@ -1044,6 +1048,74 @@ class CudaFp8GEMMDispatchTest(CudaFp8LinearTestBase, unittest.TestCase):
             self.assertIsInstance(linear._flashinfer_linear, CudaFp8FlashinferLinear)
         else:
             self.assertIsNone(linear._flashinfer_linear)
+
+
+@unittest.skipIf(
+    cutlass_scaled_mm_blockwise_sm120_fp8 is None,
+    "SM120 FP8 blockwise op is only available on sm12x CUDA builds",
+)
+class CudaFp8VllmBlockwiseSM120BoundaryTest(unittest.TestCase):
+
+    def setUp(self):
+        if not torch.cuda.is_available():
+            self.skipTest("SM120 FP8 blockwise tests require CUDA")
+        torch.manual_seed(42)
+        torch.cuda.manual_seed(42)
+        self.device = "cuda"
+        self.M = 8
+        self.K = 128
+        self.N = 128
+
+    def _make_op_inputs(self):
+        input_tensor = torch.randn(
+            self.M, self.K, dtype=torch.bfloat16, device=self.device
+        ).contiguous()
+        weight_bf16 = (
+            torch.randn((self.N, self.K), dtype=torch.bfloat16, device=self.device)
+            * 0.1
+        ).contiguous()
+        A, A_sf = sgl_per_token_group_quant_fp8(
+            input_tensor,
+            group_size=128,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=False,
+            scale_ue8m0=False,
+        )
+        B, B_sf = per_block_cast_to_fp8(weight_bf16, use_ue8m0=False)
+        D = torch.empty(self.M, self.N, dtype=torch.bfloat16, device=self.device)
+        return D, A, B, A_sf, B_sf
+
+    def test_rejects_wrong_input_scale_stride(self):
+        D, A, B, A_sf, B_sf = self._make_op_inputs()
+        bad_A_sf = A_sf.contiguous()
+        with self.assertRaisesRegex(RuntimeError, "A_sf must use MN-major"):
+            cutlass_scaled_mm_blockwise_sm120_fp8(D, A, B, bad_A_sf, B_sf)
+
+    def test_rejects_cpu_bias_at_pybind_boundary(self):
+        D, A, B, A_sf, B_sf = self._make_op_inputs()
+        bias = torch.randn(self.N, dtype=torch.bfloat16)
+        with self.assertRaisesRegex(RuntimeError, "bias must be a CUDA tensor"):
+            cutlass_scaled_mm_blockwise_sm120_fp8(D, A, B, A_sf, B_sf, bias)
+
+    def test_wrapper_moves_cpu_bias_to_output_device(self):
+        weight = torch.randn(
+            self.K, self.N, dtype=torch.float32, device=self.device
+        ).to(torch.float8_e4m3fn)
+        weight_scales = torch.rand(
+            (self.K + 127) // 128,
+            (self.N + 127) // 128,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        bias = torch.randn(self.N, dtype=torch.bfloat16)
+        linear = CudaFp8VllmBlockwiseLinear(weight, weight_scales, bias=bias)
+        input_tensor = torch.randn(
+            self.M, self.K, dtype=torch.bfloat16, device=self.device
+        )
+        output = linear(input_tensor)
+        self.assertEqual(output.shape, (self.M, self.N))
+        self.assertEqual(output.device.type, "cuda")
 
 
 CudaFp8DeepGEMMLinearTestBase = CudaFp8GEMMLinearTestBase
