@@ -719,6 +719,7 @@ class _StubCompressor:
         self,
         positions,
         b_idx,
+        has_prefix,
         is_batched=False,
         seq_start_per_req=None,
         cu_seq_per_req=None,
@@ -727,6 +728,7 @@ class _StubCompressor:
             dict(
                 positions=positions,
                 b_idx=b_idx,
+                has_prefix=has_prefix,
                 is_batched=is_batched,
                 seq_start_per_req=seq_start_per_req,
                 cu_seq_per_req=cu_seq_per_req,
@@ -763,6 +765,7 @@ class _StubIndexer:
         position_ids=None,
         req_id_per_token=None,
         max_seqlen_q=0,
+        has_prefix=False,
     ):
         self.calls.append(
             dict(
@@ -780,6 +783,7 @@ class _StubIndexer:
                 position_ids=position_ids,
                 req_id_per_token=req_id_per_token,
                 max_seqlen_q=max_seqlen_q,
+                has_prefix=has_prefix,
             )
         )
         return f"indexer_meta_call_{len(self.calls)}"
@@ -923,9 +927,14 @@ class BuildCompressorMetaTest(unittest.TestCase):
                 position_ids=positions,
                 req_id_per_token=req_id,
                 max_seqlen_q=int(il.max().item()),
+                has_prefix=any(v > 0 for v in prefix_lengths),
             )
         return stub._build_compressor_meta(
-            seqlen=seqlen, sp_int=sp_int, device=self.device, use_varlen=False
+            seqlen=seqlen,
+            sp_int=sp_int,
+            device=self.device,
+            use_varlen=False,
+            has_prefix=sp_int > 0,
         )
 
     def test_use_varlen_false_uses_single_request_positions(self) -> None:
@@ -1024,6 +1033,7 @@ class BuildCompressorMetaTest(unittest.TestCase):
             position_ids=positions,
             req_id_per_token=req_id,
             max_seqlen_q=10,
+            has_prefix=True,
         )
         call = stub.compressor.calls[0]
         # Varlen branch — kernel-native batched dispatch even at B==1.
@@ -1089,6 +1099,7 @@ class BuildCsaPrefillMetaTest(unittest.TestCase):
                 position_ids=positions,
                 req_id_per_token=req_id,
                 max_seqlen_q=int(il.max().item()),
+                has_prefix=any(v > 0 for v in prefix_lengths),
             )
 
     def test_b1_varlen_indexer_and_compressor_args(self) -> None:
@@ -1271,6 +1282,7 @@ class BuildHcaPrefillMetaTest(unittest.TestCase):
             position_ids=positions,
             req_id_per_token=req_id,
             max_seqlen_q=int(il.max().item()),
+            has_prefix=any(v > 0 for v in prefix_lengths),
         )
 
     def test_b1_varlen_compressor_call(self) -> None:

@@ -492,6 +492,7 @@ def test_decode_strided_kv_score_matches_contiguous_path() -> None:
     meta_strided = cmp_strided.prepare_metadata(
         positions,
         b_idx,
+        has_prefix=True,
         is_batched=True,
         seq_start_per_req=seq_start,
         cu_seq_per_req=cu_seq,
@@ -516,6 +517,7 @@ def test_decode_strided_kv_score_matches_contiguous_path() -> None:
     meta_contig = cmp_contig.prepare_metadata(
         positions,
         b_idx,
+        has_prefix=True,
         is_batched=True,
         seq_start_per_req=seq_start,
         cu_seq_per_req=cu_seq,

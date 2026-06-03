@@ -189,6 +189,7 @@ class CompressorVarlenRawPathTest(unittest.TestCase):
         meta_a = cmp_a.prepare_metadata(
             positions,
             b_idx,
+            has_prefix=any(sp > 0 for sp in sps),
             is_batched=True,
             seq_start_per_req=sp_per_req,
             cu_seq_per_req=cu_seqlens,
@@ -233,6 +234,7 @@ class CompressorVarlenRawPathTest(unittest.TestCase):
             meta_b = cmp_b.prepare_metadata(
                 pos_b,
                 bidx_b,
+                has_prefix=sps[b] > 0,
                 seq_start_per_req=torch.tensor(
                     [sps[b]], dtype=torch.int64, device=DEVICE
                 ),

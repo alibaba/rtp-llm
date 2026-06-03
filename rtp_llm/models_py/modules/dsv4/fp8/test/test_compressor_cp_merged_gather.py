@@ -96,6 +96,7 @@ class CompressorFP8CPMergedGatherTest(unittest.TestCase):
             state_slots=torch.zeros(cp_ctx.seq_len_full, dtype=torch.long),
             kv_slots=torch.zeros(cp_ctx.seq_len_full, dtype=torch.long),
             token_to_req=torch.zeros(cp_ctx.seq_len_full, dtype=torch.int32),
+            has_prefix=False,
             is_batched=True,
             seq_start_per_req=torch.tensor([0], dtype=torch.int32),
             cu_seq_per_req=torch.tensor([0, cp_ctx.seq_len_full], dtype=torch.int32),
