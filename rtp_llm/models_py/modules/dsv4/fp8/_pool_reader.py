@@ -118,6 +118,50 @@ class CPShardConfig:
     block_size: int
     total_local_kv: int
     owner_block_size: int = 0
+    local_seq_lens_padded: Optional[torch.Tensor] = None
+    local_seq_lens_actual: Optional[torch.Tensor] = None
+    max_local_seq_len_padded: int = 0
+    has_local_seq_len_actual: Optional[bool] = None
+
+    def __post_init__(self) -> None:
+        owner_block_size = int(self.owner_block_size or self.block_size)
+        self.owner_block_size = owner_block_size
+
+        device = self.per_req_total_kv_lens.device
+        if self.local_seq_lens_padded is None:
+            self.local_seq_lens_padded = cp_padded_local_kv_lens(
+                self.per_req_total_kv_lens,
+                self.cp_ctx.cp_size,
+                owner_block_size,
+            ).to(device=device, dtype=torch.int32)
+        else:
+            self.local_seq_lens_padded = self.local_seq_lens_padded.to(
+                device=device, dtype=torch.int32
+            )
+
+        if self.local_seq_lens_actual is None:
+            self.local_seq_lens_actual = cp_actual_owned_kv_lens(
+                self.per_req_total_kv_lens,
+                self.cp_ctx.cp_size,
+                owner_block_size,
+                self.cp_ctx.cp_rank,
+            ).to(device=device, dtype=torch.int32)
+        else:
+            self.local_seq_lens_actual = self.local_seq_lens_actual.to(
+                device=device, dtype=torch.int32
+            )
+
+        if self.max_local_seq_len_padded == 0 and self.local_seq_lens_padded.numel():
+            if self.local_seq_lens_padded.numel() == 1:
+                self.max_local_seq_len_padded = int(self.total_local_kv)
+            else:
+                self.max_local_seq_len_padded = int(
+                    self.local_seq_lens_padded.max().item()
+                )
+        if self.has_local_seq_len_actual is None and self.local_seq_lens_actual.numel():
+            self.has_local_seq_len_actual = (
+                int(self.local_seq_lens_actual.max().item()) > 0
+            )
 
 
 class CPShardedPoolReader(CompressedKPoolReader):
@@ -161,16 +205,14 @@ class CPShardedPoolReader(CompressedKPoolReader):
         #     cp_rank), AND the last owned block may be partial. Reading
         #     past `actual` lands on uninitialized FP8 bytes that decode to
         #     NaN and propagate through all_gather → restore → workspace.
-        owner_block_size = int(cfg.owner_block_size or cfg.block_size)
-        local_seq_lens_padded = cp_padded_local_kv_lens(
-            cfg.per_req_total_kv_lens, cp_ctx.cp_size, owner_block_size
-        ).to(device=device, dtype=torch.int32)
-        local_seq_lens_actual = cp_actual_owned_kv_lens(
-            cfg.per_req_total_kv_lens,
-            cp_ctx.cp_size,
-            owner_block_size,
-            cp_ctx.cp_rank,
-        ).to(device=device, dtype=torch.int32)
+        local_seq_lens_padded = cfg.local_seq_lens_padded
+        local_seq_lens_actual = cfg.local_seq_lens_actual
+        assert local_seq_lens_padded is not None
+        assert local_seq_lens_actual is not None
+        if local_seq_lens_padded.device != device:
+            local_seq_lens_padded = local_seq_lens_padded.to(device=device)
+        if local_seq_lens_actual.device != device:
+            local_seq_lens_actual = local_seq_lens_actual.to(device=device)
         # Use the rank's existing block_table directly — Stage 5a guarantees
         # block_table[r, :] holds this rank's local entries in compact form.
         # zeros() (not empty()) so the [actual, padded) tail of each request
@@ -178,17 +220,13 @@ class CPShardedPoolReader(CompressedKPoolReader):
         local_packed = torch.zeros(
             (
                 int(local_seq_lens_padded.shape[0]),
-                (
-                    int(local_seq_lens_padded.max().item())
-                    if local_seq_lens_padded.numel()
-                    else 0
-                ),
+                cfg.max_local_seq_len_padded,
                 ENTRY_BYTES,
             ),
             dtype=torch.uint8,
             device=device,
         )
-        if local_packed.shape[1] > 0 and int(local_seq_lens_actual.max().item()) > 0:
+        if local_packed.shape[1] > 0 and bool(cfg.has_local_seq_len_actual):
             gather_k_cache_packed(
                 out=local_packed,
                 k_cache=k_cache,
@@ -249,6 +287,8 @@ def _pack_padded_to_flat(
     device = padded.device
     lens_l = lens.to(device=device, dtype=torch.int64)
     B = int(lens_l.shape[0])
+    if B == 1:
+        return padded[0, :total, :].contiguous()
     b_idx = torch.repeat_interleave(
         torch.arange(B, device=device, dtype=torch.int64), lens_l
     )
@@ -276,6 +316,9 @@ def _scatter_flat_to_workspace(
     device = restored.device
     seq_lens_l = seq_lens.to(device=device, dtype=torch.int64)
     B = int(seq_lens_l.shape[0])
+    if B == 1:
+        out[0, offset : offset + total, :].copy_(restored)
+        return
     b_idx = torch.repeat_interleave(
         torch.arange(B, device=device, dtype=torch.int64), seq_lens_l
     )
@@ -329,7 +372,19 @@ def make_compressed_k_pool_reader(
     local_lens = cp_padded_local_kv_lens(
         per_req_total_kv_lens, cp_ctx.cp_size, owner_bs
     )
+    local_actual_lens = cp_actual_owned_kv_lens(
+        per_req_total_kv_lens, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
+    )
     total_local = int(local_lens.sum().item())
+    if not local_lens.numel():
+        max_local = 0
+    elif local_lens.numel() == 1:
+        max_local = total_local
+    else:
+        max_local = int(local_lens.max().item())
+    has_actual = (
+        int(local_actual_lens.max().item()) > 0 if local_actual_lens.numel() else False
+    )
     return CPShardedPoolReader(
         CPShardConfig(
             cp_ctx=cp_ctx,
@@ -338,5 +393,9 @@ def make_compressed_k_pool_reader(
             block_size=block_size,
             total_local_kv=total_local,
             owner_block_size=owner_bs,
+            local_seq_lens_padded=local_lens,
+            local_seq_lens_actual=local_actual_lens,
+            max_local_seq_len_padded=max_local,
+            has_local_seq_len_actual=has_actual,
         )
     )

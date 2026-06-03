@@ -119,6 +119,9 @@ class BatchPerfImpl(object):
         profile: bool = True,
         generate_config: Optional[Dict[str, Any]] = None,
         profile_trace_name: str = "",
+        warmup_runs: Optional[int] = None,
+        measure_runs: Optional[int] = None,
+        profile_runs: Optional[int] = None,
     ):
         self.base_port = base_port
         self.dp_size = dp_size
@@ -144,12 +147,53 @@ class BatchPerfImpl(object):
         self.profile = profile
         self.generate_config = generate_config or {}
         self.profile_trace_name = profile_trace_name
+        self.warmup_runs = (
+            int(os.environ.get("PERF_FORMAL_WARMUP_RUNS", "1"))
+            if warmup_runs is None
+            else int(warmup_runs)
+        )
+        self.measure_runs = (
+            int(os.environ.get("PERF_MEASURE_RUNS", "1"))
+            if measure_runs is None
+            else int(measure_runs)
+        )
+        self.profile_runs = (
+            int(os.environ.get("PERF_PROFILE_RUNS", "1" if profile else "0"))
+            if profile_runs is None
+            else int(profile_runs)
+        )
 
-    # 3 runs: warmup (JIT compile), measure timing, profile (optional, torch profiler affects accuracy)
+    # warmup (JIT compile), measure timing, profile (optional, torch profiler affects accuracy)
     def run(self):
         self._set_concurrency()
-        _ = self._curl_server()
-        results = self._curl_server()
+        for i in range(self.warmup_runs):
+            logging.info(
+                "[PERF_WARMUP_RUN] %d/%d trace=%s",
+                i + 1,
+                self.warmup_runs,
+                self.profile_trace_name,
+            )
+            _ = self._curl_server()
+
+        all_measure_responses: List[ResponseInfo] = []
+        for i in range(self.measure_runs):
+            responses = self._curl_server_responses()
+            metric = analyze_results(responses)
+            logging.info(
+                "[PERF_MEASURE_RUN] %d/%d trace=%s success=%d/%d "
+                "avg_prefill_ms=%.3f avg_total_ms=%.3f avg_wait_ms=%.3f",
+                i + 1,
+                self.measure_runs,
+                self.profile_trace_name,
+                metric.success_requests,
+                metric.total_requests,
+                metric.avg_prefill_time,
+                metric.avg_total_time,
+                metric.avg_wait_time,
+            )
+            all_measure_responses.extend(responses)
+        results = analyze_results(all_measure_responses)
+
         if self.profile:
             # Pre-arm via /start_profile with enable_all_rank=true so that
             # all TP/DP ranks profile the upcoming request.  Requires the
@@ -181,7 +225,14 @@ class BatchPerfImpl(object):
                     time.sleep(arm_sleep)
                 except Exception as e:
                     logging.warning(f"[PERF_PREARM_PROFILE] failed: {e}")
-            _ = self._curl_server(True)
+            for i in range(self.profile_runs):
+                logging.info(
+                    "[PERF_PROFILE_RUN] %d/%d trace=%s",
+                    i + 1,
+                    self.profile_runs,
+                    self.profile_trace_name,
+                )
+                _ = self._curl_server(True)
             time.sleep(int(os.environ.get("PERF_PROFILE_FLUSH_SLEEP", "60")))
         return results
 
@@ -219,7 +270,7 @@ class BatchPerfImpl(object):
             time.sleep(3)
         raise Exception(f"failed to set concurrency after retries: {last_error}")
 
-    def _curl_server(self, profile: bool = False) -> TestResultMetrics:
+    def _curl_server_responses(self, profile: bool = False) -> List[ResponseInfo]:
         request_batches: List[List[int]] = []
         for i in range(0, self.batch_size, self.max_requests_per_process):
             batch_indices = list(
@@ -249,7 +300,10 @@ class BatchPerfImpl(object):
         for future in futures:
             all_responses.extend(future.result())
 
-        return analyze_results(all_responses)
+        return all_responses
+
+    def _curl_server(self, profile: bool = False) -> TestResultMetrics:
+        return analyze_results(self._curl_server_responses(profile))
 
     def dump_results(self, results: List[Dict[str, Any]]):
         for result in results:
