@@ -168,13 +168,16 @@ class ParameterValidationTest(unittest.IsolatedAsyncioTestCase):
 
     def _assert_parameter_error(self, responses) -> None:
         self.assertEqual(len(responses), 1)
-        error = json.loads(responses[0].error_message)
-        self.assertEqual(error["status_code"], 400)
-        self.assertEqual(error["status_name"], "InvalidParameter")
-        payload = json.loads(
-            responses[0].infer_response.parameters["__messages__"].string_param
+        self.assertFalse(responses[0].error_message)
+        infer = responses[0].infer_response
+        self.assertEqual(infer.parameters["status_code"].int64_param, 400)
+        self.assertEqual(
+            infer.parameters["status_name"].string_param,
+            "InvalidParameter",
         )
+        payload = json.loads(infer.parameters["__messages__"].string_param)
         self.assertEqual(payload["header"]["status_code"], 400)
+        self.assertEqual(payload["header"]["status_name"], "InvalidParameter")
 
     async def test_max_completion_tokens_non_positive_rejected_without_forward(
         self,
