@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from tqdm import tqdm
@@ -41,10 +42,11 @@ class GridRunner:
         self._title = "Decode Result" if is_decode else "Prefill Result"
 
     def warmup(self) -> None:
+        warmup_runs = int(os.environ.get("PERF_GRID_WARMUP_RUNS", "1"))
         logging.info(
             f"in warmup, base_port: {self._port}, dp_size: {self._dp_size}, "
             f"batch_size: {1 * self._dp_size}, "
-            f"input_len: {self._input_len_list[0]}"
+            f"input_len: {self._input_len_list[0]}, runs: {warmup_runs}"
         )
         BatchPerfImpl(
             self._port,
@@ -56,6 +58,9 @@ class GridRunner:
             self._decode_test_length,
             False,
             self._generate_config,
+            warmup_runs=0,
+            measure_runs=warmup_runs,
+            profile_runs=0,
         ).run()
 
     def run(self) -> List[MetricState]:
