@@ -25,7 +25,7 @@ class AllFakeModelTest(TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             tokenizer_path = self._create_qwen35_tokenizer(Path(temp_dir))
 
-            for model_type in ["qwen35_dense", "qwen35_moe"]:
+            for model_type in ["qwen35_dense", "qwen35_moe", "qwen35_moe_mtp"]:
                 with self.subTest(model_type=model_type):
                     tokenizer = TokenizerFactory.create(
                         str(tokenizer_path), str(tokenizer_path), model_type
@@ -80,8 +80,68 @@ class AllFakeModelTest(TestCase):
                     tokenize=False,
                     add_generation_prompt=True,
                 ),
-                "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n",
+                "<|im_start|>user\nhello<|im_end|>\n"
+                "<|im_start|>assistant\n<think>\n",
             )
+
+    def test_qwen35_default_chat_template_preserves_tool_context(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tokenizer_path = self._create_qwen35_tokenizer(
+                Path(temp_dir), chat_template=None
+            )
+
+            tokenizer = TokenizerFactory.create(
+                str(tokenizer_path), str(tokenizer_path), "qwen35_dense"
+            )
+
+            rendered_prompt = tokenizer.apply_chat_template(
+                [
+                    {"role": "user", "content": "weather"},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "arguments": {"city": "Hangzhou"},
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "content": '{"temperature": 30}',
+                        "tool_call_id": "call_1",
+                    },
+                ],
+                tokenize=False,
+                add_generation_prompt=True,
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "description": "Get weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                                "required": ["city"],
+                            },
+                        },
+                    }
+                ],
+            )
+
+            self.assertIn("get_weather", rendered_prompt)
+            self.assertIn("<function=get_weather>", rendered_prompt)
+            self.assertIn("<parameter=city>", rendered_prompt)
+            self.assertIn("Hangzhou", rendered_prompt)
+            self.assertIn('{"temperature": 30}', rendered_prompt)
+            self.assertIn("<tool_call>", rendered_prompt)
+            self.assertIn("<tool_response>", rendered_prompt)
+            self.assertNotIn("None", rendered_prompt)
 
     def _create_qwen35_tokenizer(
         self, temp_dir: Path, chat_template: str | None = "default"

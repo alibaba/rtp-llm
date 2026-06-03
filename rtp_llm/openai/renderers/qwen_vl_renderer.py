@@ -1,5 +1,5 @@
 import copy
-from typing import List
+from typing import Any, List
 
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -83,8 +83,11 @@ class Qwen2VLRenderer(CustomChatRenderer):
     ):
         super().__init__(tokenizer, renderer_params, generate_env_config, render_config, ckpt_path, misc_config, vit_config)
 
+    def _format_tool_call_arguments(self, arguments: Any) -> Any:
+        return arguments
+
     def _render_messages(
-        self, messages: List[ChatMessage], add_vision_id: bool
+        self, request: ChatCompletionRequest, add_vision_id: bool
     ) -> PromptWithMMInput:
         urls = []
         types = []
@@ -102,13 +105,10 @@ class Qwen2VLRenderer(CustomChatRenderer):
                 max_frames=config.max_frames or -1,
             )
 
-        for message in messages:
-            if isinstance(message.content, str):
-                final_messages.append(
-                    {"role": message.role.value, "content": message.content}
-                )
-            elif isinstance(message.content, list):
-                now_message = {"role": message.role.value}
+        for message in request.messages:
+            msg_dict = {"role": message.role.value}
+
+            if isinstance(message.content, list):
                 now_content = []
                 for content_part in message.content:
                     if content_part.type == ContentPartTypeEnum.text:
@@ -134,16 +134,54 @@ class Qwen2VLRenderer(CustomChatRenderer):
                                 get_preprocess_config(content_part.preprocess_config)
                             )
                         now_content.append(
-                            {"type": "video", "image": content_part.video_url.url}
+                            {"type": "video", "video": content_part.video_url.url}
                         )
-                now_message["content"] = now_content
-                final_messages.append(now_message)
+                msg_dict["content"] = now_content
+            else:
+                msg_dict["content"] = message.content
 
+            if message.tool_calls:
+                msg_dict["tool_calls"] = [
+                    {
+                        "type": "function",
+                        "id": tc.id,
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": self._format_tool_call_arguments(
+                                tc.function.arguments
+                            ),
+                        },
+                    }
+                    for tc in message.tool_calls
+                ]
+            if message.tool_call_id:
+                msg_dict["tool_call_id"] = message.tool_call_id
+
+            final_messages.append(msg_dict)
+
+        final_tools = []
+        if request.tools:
+            for tool in request.tools:
+                final_tools.append(
+                    {
+                        "type": tool.type,
+                        "function": tool.function.model_dump(
+                            exclude_none=True, mode="json"
+                        ),
+                    }
+                )
+
+        chat_template_kwargs = {
+            "tokenize": False,
+            "add_generation_prompt": True,
+            "add_vision_id": add_vision_id,
+            "tools": final_tools,
+        }
+        request_chat_template_kwargs = request.get_chat_template_kwargs()
+        if request_chat_template_kwargs is not None:
+            chat_template_kwargs.update(request_chat_template_kwargs)
         prompt = self.tokenizer.apply_chat_template(
-            final_messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            add_vision_id=add_vision_id,
+            final_messages, **chat_template_kwargs
         )
 
         return PromptWithMMInput(
@@ -154,9 +192,8 @@ class Qwen2VLRenderer(CustomChatRenderer):
         )
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        messages = copy.deepcopy(request.messages)
         prompt_and_mm_input = self._render_messages(
-            messages,
+            request,
             request.extra_configs.add_vision_id if request.extra_configs else True,
         )
         input_ids = self.tokenizer.encode(prompt_and_mm_input.prompt)
