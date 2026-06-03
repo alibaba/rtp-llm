@@ -142,13 +142,17 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         )
 
         output = torch.empty(M, self.N, dtype=torch.bfloat16, device=input.device)
+        # Bias is fused into the GEMM epilogue (per-output-channel add) instead
+        # of a separate elementwise add kernel.
+        bias = None
+        if self.bias is not None:
+            bias = self.bias.reshape(-1).to(output.dtype)
         cutlass_scaled_mm_blockwise_sm120_fp8(
             output,
             input_fp8,
             self.weight,
             input_scales,
             self.weight_scales,
+            bias,
         )
-        if self.bias is not None:
-            output = output + self.bias.to(output.dtype)
         return output
