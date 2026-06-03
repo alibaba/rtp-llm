@@ -139,7 +139,17 @@ class DSv4DecodeFmhaImplFP8:
         return paged_block_tables or None
 
     def prepare(self, attn_inputs: Any, forbid_realloc: bool = False) -> None:
-        """Update persistent metadata and paged block-table snapshots."""
+        """Update persistent metadata and paged block-table snapshots.
+
+        Called once at construction (before the capture harness runs its two
+        warmup forwards + the captured forward). FlashMLA freezes its sparse
+        tile schedule on the first warmup forward keyed on the ``topk_length``
+        VALUES present now, and that schedule is reused for every replay. So we
+        write FULL-WIDTH effective lengths here (``capture_full_width_lengths``)
+        to max-provision the frozen schedule; the real per-request lengths are
+        written before each replay by :meth:`prepare_cuda_graph`. See
+        ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
+        """
         paged_block_tables = self._extract_paged_block_tables(attn_inputs)
         update_decode_metadata_in_place_fp8(
             self.metadata,
@@ -148,11 +158,21 @@ class DSv4DecodeFmhaImplFP8:
             paged_block_tables=paged_block_tables,
             paged_pool_entries_per_block=self._paged_entries_per_block,
             paged_pool_tokens_per_block=self._paged_tokens_per_block,
+            capture_full_width_lengths=True,
         )
 
     def prepare_cuda_graph(self, attn_inputs: Any) -> None:
         """Called by ``CudaGraphRunner::prepareInputs`` between every
-        replay."""
+        replay.
+
+        Writes the REAL per-request effective lengths
+        (``capture_full_width_lengths=False``, the default): the captured
+        FlashMLA kernel reads these for per-query masking so the sparse decode
+        only scans ``min(window, seq_len)`` / ``seq_len // ratio`` instead of
+        the full capture width, while the frozen (full-width) tile schedule from
+        :meth:`prepare` stays a safe superset. See
+        ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
+        """
         paged_block_tables = self._extract_paged_block_tables(attn_inputs)
         if self._paged_entries_per_block and paged_block_tables is None:
             raise RuntimeError(
