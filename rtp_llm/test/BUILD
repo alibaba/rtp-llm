@@ -306,3 +306,17 @@ py_test(
     imports=[],
     exec_properties={"gpu": "H20"},
 )
+
+py_test(
+    name="test_transformers_imports",
+    srcs=[
+        "test_transformers_imports.py",
+    ],
+    data=[
+        "//rtp_llm:sdk",
+        "//rtp_llm/test/smoke:smoke_model_configs",
+    ],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "H20"},
+)
