@@ -110,15 +110,16 @@ py_test(
         "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--batch_size", "1",
-        "--input_len", "65536,173921,349287,612734,887451,1048575",
+        "--input_len", "65536,173921,349287,612734,887451",
         "--partial", "2",
         "--decode_test_length", "2",
-        "--seq_size_per_block", "256",
+        "--seq_size_per_block", "8192",
+        "--kernel_seq_size_per_block", "128",
         "--tp_size", "4",
         "--dp_size", "1",
         "--ep_size", "4",
         "--world_size", "4",
-        "--max_seq_len", "1048576",
+        "--max_seq_len", "887453",
         "--cp_rotate_method", "ALL_GATHER",
         "--use_deepep_moe", "1",
         "--use_deepep_low_latency", "0",
@@ -129,6 +130,7 @@ py_test(
         "--enable_cuda_graph", "0",
         "--reserver_runtime_mem_mb", "122880",
         "--max_context_batch_size", "1",
+        "--frontend_server_count", "1",
     ],
     env = {
         "WORLD_SIZE": "4",
@@ -138,6 +140,63 @@ py_test(
         "PERF_PROFILE_NUM_STEPS": "4",
         "PERF_PROFILE_ARM_SLEEP": "2",
         "PERF_PROFILE_FLUSH_SLEEP": "120",
+        "DSV4_USE_MEGA_MOE": "1",
+        "ENABLE_FP32_LM_HEAD": "0",
+        "RTP_LLM_STREAM_ASYNC": "1",
+        "RTP_LLM_DROP_BROAD_SYNC": "1",
+        "RTP_LLM_DEVICE_INPUT": "1",
+    },
+    tags = ["manual"],
+)
+
+# V4-Flash CP=4 + EP=4 prefill profile sweep with CP page-RR KV sharding.
+py_test(
+    name = "v4_flash_cp4_ep4_prefill_64k_page_rr_perf",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "deepseek_v4",
+        "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--batch_size", "1",
+        "--input_len", "65536,173921,349287,612734,887451",
+        "--partial", "2",
+        "--decode_test_length", "2",
+        "--seq_size_per_block", "8192",
+        "--kernel_seq_size_per_block", "128",
+        "--tp_size", "4",
+        "--dp_size", "1",
+        "--ep_size", "4",
+        "--world_size", "4",
+        "--max_seq_len", "887453",
+        "--cp_rotate_method", "ALL_GATHER",
+        "--use_deepep_moe", "1",
+        "--use_deepep_low_latency", "0",
+        "--act_type", "BF16",
+        "--fp8_kv_cache", "1",
+        "--load_method", "fastsafetensors",
+        "--concurrency_limit", "1",
+        "--enable_cuda_graph", "0",
+        "--reserver_runtime_mem_mb", "122880",
+        "--max_context_batch_size", "1",
+        "--frontend_server_count", "1",
+    ],
+    env = {
+        "WORLD_SIZE": "4",
+        "DG_JIT_CPP_STANDARD": "20",
+        "GEN_TIMELINE_SYNC": "1",
+        "PERF_PREARM_PROFILE": "1",
+        "PERF_PROFILE_NUM_STEPS": "4",
+        "PERF_PROFILE_ARM_SLEEP": "2",
+        "PERF_PROFILE_FLUSH_SLEEP": "120",
+        "PREFILL_CP_KV_CACHE_SHARDED": "1",
         "DSV4_USE_MEGA_MOE": "1",
         "ENABLE_FP32_LM_HEAD": "0",
         "RTP_LLM_STREAM_ASYNC": "1",
@@ -767,6 +826,7 @@ test_suite(
 
 # DeepSeek V4-Flash perf coverage on SM100 (B300 / GB200).
 #   v4_flash_cp4_ep4_prefill_64k_perf       → CP=4 EP=4 64k prefill timeline
+#   v4_flash_cp4_ep4_prefill_64k_page_rr_perf → CP=4 EP=4 64k prefill + page-RR KV sharding
 #   v4_flash_cp4_ep4_prefill_200k_perf      → CP=4 EP=4 200k prefill timeline
 #   v4_flash_dp4_decode_grid_perf           → DP=4 EP=4 captured-graph decode grid
 #   v4_flash_dp4_decode_bs128_64k_perf      → DP=4 EP=4 fixed bs=128/input=64K (perf-tuning canonical)
@@ -775,6 +835,7 @@ test_suite(
     name = "perf_dsv4_v4_flash",
     tests = [
         ":v4_flash_cp4_ep4_prefill_64k_perf",
+        ":v4_flash_cp4_ep4_prefill_64k_page_rr_perf",
         ":v4_flash_cp4_ep4_prefill_200k_perf",
         ":v4_flash_dp4_decode_grid_perf",
         ":v4_flash_dp4_decode_bs128_64k_perf",

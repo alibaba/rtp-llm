@@ -155,6 +155,7 @@ class CompressorDisableRawPathTest(unittest.TestCase):
         meta = cmp.prepare_metadata(
             positions,
             b_idx,
+            has_prefix=sp > 0,
             seq_start_per_req=seq_start_per_req,
             cu_seq_per_req=cu_seq_per_req,
         )

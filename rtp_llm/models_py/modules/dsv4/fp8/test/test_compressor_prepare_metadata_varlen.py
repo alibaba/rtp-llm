@@ -137,7 +137,11 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
             prefix_lengths, input_lengths, self.device  # type: ignore[arg-type]
         )
         return stub.prepare_metadata(
-            positions, b_idx, seq_start_per_req=seq_start, cu_seq_per_req=cu_seq
+            positions,
+            b_idx,
+            has_prefix=any(v > 0 for v in prefix_lengths),
+            seq_start_per_req=seq_start,
+            cu_seq_per_req=cu_seq,
         )
 
     # ------------------------------------------------------------------
@@ -182,6 +186,7 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         req_id = torch.zeros((1, S), dtype=torch.int32, device=self.device)
         args = build_prepare_metadata_args(
             use_varlen=True,
+            has_prefix=True,
             device=self.device,
             sp_int=12,
             seqlen=S,

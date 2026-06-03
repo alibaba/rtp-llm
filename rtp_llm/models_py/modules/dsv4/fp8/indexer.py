@@ -644,6 +644,7 @@ class IndexerFP8(PoolBackedModule):
         position_ids: Optional[torch.Tensor] = None,
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
+        has_prefix: bool,
     ) -> _IndexerFP8PrefillMeta:
         """Build per-call FP8 prefill metadata.
 
@@ -877,6 +878,7 @@ class IndexerFP8(PoolBackedModule):
                             compressor_meta = compressor.prepare_metadata(
                                 cp_positions,
                                 cp_b_idx,
+                                has_prefix=has_prefix,
                                 is_batched=True,
                                 seq_start_per_req=cp_seq_start_per_req,
                                 cu_seq_per_req=cp_cu_seq_per_req,
@@ -889,6 +891,7 @@ class IndexerFP8(PoolBackedModule):
                     ):
                         cmp_args = build_prepare_metadata_args(
                             use_varlen=use_varlen,
+                            has_prefix=has_prefix,
                             device=device,
                             sp_int=sp_int,
                             seqlen=seqlen,
