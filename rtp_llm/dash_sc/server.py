@@ -68,15 +68,39 @@ _SERVER_KEEPALIVE_OPTS: list[tuple[str, int]] = [
     ("grpc.http2.max_pings_without_data", 0),
 ]
 
+# Low-latency tuning for the dash_sc gRPC server side. The proxy hot path
+# emits a final DATA frame (the business ``finished`` response) immediately
+# followed by trailers + END_STREAM; the gateway / LBS races our trailers
+# against the upstream client's "I saw finished, I'm closing" signal, and
+# logs the RPC as a client cancel whenever the client's close arrives first.
+# The settings below tell grpc-core to prefer prompt small-message delivery
+# over batching for throughput, shrinking the on-wire gap between those two
+# frames.
+#
+# - ``grpc.optimization_target=latency`` tunes a cluster of internal knobs
+#   (chttp2 write coalescing window, deadline check cadence, etc.) toward
+#   the latency end of the latency / throughput tradeoff. String value.
+# - ``grpc.http2.write_buffer_size=0`` disables chttp2's accumulator that
+#   coalesces small writes into one syscall — at our message sizes (a few
+#   hundred bytes) the accumulator's only effect is delaying the trailers
+#   one event-loop tick behind the finished DATA frame.
+_SERVER_LATENCY_OPTS: list[tuple[str, object]] = [
+    ("grpc.optimization_target", "latency"),
+    ("grpc.http2.write_buffer_size", 0),
+]
+
 
 def _merge_server_keepalive(
-    opts: list[tuple[str, int]],
-) -> list[tuple[str, int]]:
-    """Add keepalive defaults to ``opts`` without overriding explicit config."""
-    merged = dict(opts)
+    opts: list[tuple[str, object]],
+) -> list[tuple[str, object]]:
+    """Add keepalive + latency defaults to ``opts`` without overriding
+    anything an operator has explicitly set via ``DashScGrpcConfig``."""
+    merged: dict[str, object] = dict(opts)
     for k, v in _SERVER_KEEPALIVE_OPTS:
         merged.setdefault(k, v)
-    return sorted(merged.items())
+    for k, v in _SERVER_LATENCY_OPTS:
+        merged.setdefault(k, v)
+    return sorted(merged.items(), key=lambda kv: kv[0])
 
 
 class DashScGrpcServer:

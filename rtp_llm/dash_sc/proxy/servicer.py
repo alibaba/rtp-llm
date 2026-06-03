@@ -262,12 +262,23 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         # ``except GeneratorExit`` (responsible for the
         # ``dropped_buffered_on_exception`` stage) would never fire. Wrapping
         # in try/finally + aclose() makes the close deterministic.
+        #
+        # Happy-path skip: ``async for`` exiting via natural ``StopAsyncIteration``
+        # means ``buffered`` is already in DONE state — calling aclose on it is
+        # a no-op but the ``await`` still costs an event-loop hop and a coroutine
+        # frame, both of which sit on the critical path between yielding the
+        # finished DATA frame and returning so grpc.aio can flush trailers. The
+        # ``buffered_drained`` flag lets the finally cover only the exception /
+        # client-disconnect paths where aclose actually has work to do.
         buffered = self._buffered_iter(downstream_iter, agg)
+        buffered_drained = False
         try:
             async for resp in buffered:
                 yield resp
+            buffered_drained = True
         finally:
-            await buffered.aclose()
+            if not buffered_drained:
+                await buffered.aclose()
 
     @staticmethod
     async def _buffered_iter(downstream_iter, diag_agg=None):
