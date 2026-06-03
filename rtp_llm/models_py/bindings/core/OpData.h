@@ -196,11 +196,10 @@ struct CacheStoreInputs {
     int               layer_id    = 0;
     KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
 
-    // CP-page-RR sharding context. ``cp_size > 1`` means FULL groups have
-    // their kv_cache_offset compacted to ``ceil(total/cp_size)`` per rank;
-    // the writer must re-pair (cache_keys[r + i*cp_size], offset[i]) instead
-    // of the legacy (cache_keys[i], offset[i]). Defaults of (0, 1) preserve
-    // the non-sharded path. See ``buildCacheStoreBlockPlan``.
+    // CP-page-RR sharding context. ``cp_size > 1`` means FULL groups and DSV4
+    // fixed/SWA regions use compact rank-local/virtual offsets; the writer
+    // must re-pair those offsets with their canonical full cache key. Defaults
+    // of (0, 1) preserve the non-sharded path. See ``buildCacheStoreBlockPlan``.
     int cp_rank = 0;
     int cp_size = 1;
 

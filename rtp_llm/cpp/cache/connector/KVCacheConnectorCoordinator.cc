@@ -24,6 +24,13 @@ CacheGroupType groupTypeForConnector(const CacheConfig& cache_config, int group_
     return CacheGroupType::FULL;
 }
 
+KVCacheRegionName groupRegionForConnector(const CacheConfig& cache_config, int group_id) {
+    if (group_id >= 0 && static_cast<size_t>(group_id) < cache_config.group_region_names.size()) {
+        return cache_config.group_region_names[static_cast<size_t>(group_id)];
+    }
+    return KVCacheRegionName::DEFAULT;
+}
+
 bool selectedLastRankKeysAreAligned(const KVCacheResource& source, int cp_size) {
     if (source.lastBlockAligned()) {
         return true;
@@ -73,9 +80,11 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
         BlockIndicesType dst_blocks;
         dst_blocks.reserve(selected_keys.size());
 
-        if (group_types[static_cast<size_t>(gid)] == CacheGroupType::FULL) {
-            // FULL groups are physically RR-sharded: blocks are rank-local and
-            // compact, keyed by the canonical last-rank key sequence.
+        const auto group_type  = group_types[static_cast<size_t>(gid)];
+        const auto region_name = groupRegionForConnector(cache_config, gid);
+        if (usesCpVirtualBlockSlots(group_type, region_name)) {
+            // FULL and DSV4 fixed/SWA groups are already compact in the
+            // canonical last-rank key namespace.
             for (size_t i = 0; i < selected_keys.size(); ++i) {
                 dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
             }

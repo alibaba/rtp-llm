@@ -709,6 +709,12 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         return region_name == KVCacheRegionName::INDEXER_STATE || region_name == KVCacheRegionName::CSA_STATE
                || region_name == KVCacheRegionName::HCA_STATE || region_name == KVCacheRegionName::SWA_KV;
     };
+    auto cacheKeyIndexForLoad = [&](CacheGroupType group_type, KVCacheRegionName region_name, size_t block_pos) {
+        if (is_page_level_rr && group_type != CacheGroupType::FULL && isCpSlicedFixedRegion(region_name)) {
+            return (block_pos + 1) * static_cast<size_t>(load_context.prefill_cp_size) - 1;
+        }
+        return block_pos;
+    };
     auto shouldLoadGroupFromPeer = [&](CacheGroupType group_type, KVCacheRegionName region_name, int peer_idx) {
         if (!is_page_level_rr) {
             return true;
@@ -783,17 +789,17 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             const size_t     data_bytes          = local_entries * kSwaTokenDataBytes;
             const size_t     scale_bytes         = local_entries * kSwaTokenScaleBytes;
             const size_t     data_offset         = data_bytes * static_cast<size_t>(peer_idx);
-            const size_t     scale_region_offset =
-                static_cast<size_t>(state_spec->entries_per_block) * kSwaTokenDataBytes;
-            const size_t scale_offset = scale_region_offset + scale_bytes * static_cast<size_t>(peer_idx);
-            RTP_LLM_CHECK_WITH_INFO(scale_offset + scale_bytes <= block.size_bytes,
-                                    "Dsv4 SWA_KV DATA/SCALE slice exceeds block bytes: data=[%zu,%zu) scale=[%zu,%zu) block=%zu gid=%zu",
-                                    data_offset,
-                                    data_offset + data_bytes,
-                                    scale_offset,
-                                    scale_offset + scale_bytes,
-                                    block.size_bytes,
-                                    gid);
+            const size_t scale_region_offset = static_cast<size_t>(state_spec->entries_per_block) * kSwaTokenDataBytes;
+            const size_t scale_offset        = scale_region_offset + scale_bytes * static_cast<size_t>(peer_idx);
+            RTP_LLM_CHECK_WITH_INFO(
+                scale_offset + scale_bytes <= block.size_bytes,
+                "Dsv4 SWA_KV DATA/SCALE slice exceeds block bytes: data=[%zu,%zu) scale=[%zu,%zu) block=%zu gid=%zu",
+                data_offset,
+                data_offset + data_bytes,
+                scale_offset,
+                scale_offset + scale_bytes,
+                block.size_bytes,
+                gid);
             BlockInfo data_block   = block;
             BlockInfo scale_block  = block;
             data_block.addr        = static_cast<void*>(static_cast<char*>(block.addr) + data_offset);
@@ -866,8 +872,20 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     if (isNullBlockIdx(block_id)) {
                         continue;
                     }
+                    const auto key_index = cacheKeyIndexForLoad(group_type, region_name, block_pos);
+                    if (key_index >= load_context.cache_keys.size()) {
+                        RTP_LLM_LOG_DEBUG("skip cache load because key index is out of range: request_id=%ld "
+                                          "gid=%zu region=%d block_pos=%zu key_index=%zu cache_keys=%zu",
+                                          load_context.request_id,
+                                          gid,
+                                          static_cast<int>(region_name),
+                                          block_pos,
+                                          key_index,
+                                          load_context.cache_keys.size());
+                        continue;
+                    }
                     auto cache_key = makeCacheKey(
-                        model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id, region_name);
+                        model_id, std::to_string(load_context.cache_keys[key_index]), layer_id, region_name);
 
                     const int local_part_cnt = is_page_level_rr ? 1 : peer_cnt;
                     const int local_part_id  = is_page_level_rr ? 0 : i;
@@ -1003,8 +1021,21 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 if (isNullBlockIdx(block_id)) {
                                     continue;
                                 }
+                                const auto key_index = cacheKeyIndexForLoad(group_type, region_name, block_pos);
+                                if (key_index >= load_context.cache_keys.size()) {
+                                    RTP_LLM_LOG_DEBUG("skip mtp cache load because key index is out of range: "
+                                                      "request_id=%ld gid=%zu region=%d block_pos=%zu key_index=%zu "
+                                                      "cache_keys=%zu",
+                                                      load_context.request_id,
+                                                      gid,
+                                                      static_cast<int>(region_name),
+                                                      block_pos,
+                                                      key_index,
+                                                      load_context.cache_keys.size());
+                                    continue;
+                                }
                                 auto       cache_key      = makeCacheKey(model_id,
-                                                              std::to_string(load_context.cache_keys[block_pos]),
+                                                              std::to_string(load_context.cache_keys[key_index]),
                                                               layer_id,
                                                               region_name);
                                 const bool mtp_use_mla    = mtp_cache_cfg.use_mla;

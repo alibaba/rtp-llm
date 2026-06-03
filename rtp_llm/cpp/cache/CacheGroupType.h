@@ -42,4 +42,8 @@ inline bool skipReuseCacheRegion(KVCacheRegionName region_name) {
     return region_name == KVCacheRegionName::HCA_STATE;
 }
 
+inline bool usesCpVirtualBlockSlots(CacheGroupType group_type, KVCacheRegionName region_name) {
+    return group_type == CacheGroupType::FULL || isDsv4FixedRegion(region_name);
+}
+
 }  // namespace rtp_llm

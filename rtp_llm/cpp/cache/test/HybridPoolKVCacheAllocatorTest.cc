@@ -164,14 +164,14 @@ static ModelConfig makeProModelConfig() {
 }
 
 // Build a DSV4 7-pool CacheConfig (uses use_independent_block_pools=true).
-static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
+static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200, uint32_t seq_size_per_block = 128) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
-    kv_cache_config.seq_size_per_block     = 128;
+    kv_cache_config.seq_size_per_block     = seq_size_per_block;
     kv_cache_config.dsv4_fixed_pool_blocks = block_num;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
-    config.block_num         = block_num;
+    auto config                            = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+    config.block_num                       = block_num;
     return config;
 }
 
@@ -939,7 +939,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumul
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block     = 128;
     kv_cache_config.dsv4_fixed_pool_blocks = 200;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+    auto config                            = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
 
     ASSERT_EQ(config.groupNums(), 7);
     ASSERT_EQ(config.group_region_names.size(), 7u);
@@ -970,7 +970,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumul
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesFixedPoolBlocks) {
-    auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
+    auto config                       = makeDSV4HybridPoolConfig(/*block_num=*/50);
     config.fixed_pool_uses_pinned_cpu = true;
 
     RuntimeConfig rt;  // unused inside finalizeBlockNums today
@@ -1015,7 +1015,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesConfiguredFixedB
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4PinnedFixedPoolExcludesFixedReserve) {
-    auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
+    auto config                       = makeDSV4HybridPoolConfig(/*block_num=*/50);
     config.fixed_pool_uses_pinned_cpu = true;  // env>0 simulation
 
     RuntimeConfig rt;
@@ -1053,8 +1053,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedPoolBlocksFallbackFollowsLinearS
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block = 128;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
-    config.linear_step       = 4;
+    auto config                        = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+    config.linear_step                 = 4;
 
     RuntimeConfig rt;
     config.finalizeBlockNums(/*global_block_num=*/128, rt);
@@ -1222,6 +1222,41 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
 
     FreeInfo hit_free{hit_res, hit_tokens};
     allocator->free(hit_free);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CpPageRrUsesVirtualSlotsForFixedRegions) {
+    auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64, /*seq_size_per_block=*/1024);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    const int spb     = static_cast<int>(config.seq_size_per_block);
+    const int cp_size = 8;
+    const int seq_len = spb * cp_size;
+
+    CacheKeysType cache_keys;
+    for (int i = 0; i < cp_size; ++i) {
+        cache_keys.push_back(100 + i);
+    }
+
+    auto cp_mapper = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, cp_size, spb);
+    auto resource  = makeBatchResource(/*batch_size=*/1, config);
+    resource->setBatchCacheKeys(0, cache_keys);
+    auto tokens = makeCompleteTokenIds(/*batch_size=*/1, seq_len, spb);
+
+    MallocInfo malloc_info{resource, tokens};
+    malloc_info.reuse_cache         = true;
+    malloc_info.enable_device_cache = false;
+    malloc_info.cp_slot_mapper      = cp_mapper;
+    ASSERT_TRUE(allocator->malloc(malloc_info).success);
+
+    ASSERT_EQ(config.groupNums(), 7);
+    for (int gid = 0; gid < config.groupNums(); ++gid) {
+        EXPECT_EQ(resource->blocksNum(0, gid), 1)
+            << "gid=" << gid << " region=" << static_cast<int>(config.group_region_names[gid]);
+    }
+
+    FreeInfo free_info{resource, tokens};
+    allocator->free(free_info);
 }
 
 }  // namespace test

@@ -225,6 +225,7 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/cpp/models:stats",
         "//rtp_llm/cpp/models/models_weight:weights_define",
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "//rtp_llm/cpp/utils:core_utils",

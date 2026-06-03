@@ -27,23 +27,37 @@ std::vector<size_t> blockPositionsForCacheTransfer(size_t         block_num,
     return block_pos_list;
 }
 
-std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_logical_blocks,
-                                                          size_t         reuse_block_size,
-                                                          bool           use_hybrid,
-                                                          CacheGroupType group_type,
-                                                          int            cp_rank,
-                                                          int            cp_size) {
+std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t            total_logical_blocks,
+                                                          size_t            reuse_block_size,
+                                                          bool              use_hybrid,
+                                                          CacheGroupType    group_type,
+                                                          KVCacheRegionName region_name,
+                                                          int               cp_rank,
+                                                          int               cp_size) {
+    const bool   sharded       = (cp_size > 1) && usesCpVirtualBlockSlots(group_type, region_name);
+    const bool   fixed_sharded = sharded && isDsv4FixedRegion(region_name);
+    const size_t planner_block_num =
+        fixed_sharded ? total_logical_blocks / static_cast<size_t>(cp_size) : total_logical_blocks;
+    const size_t planner_reuse_block_size =
+        fixed_sharded ? reuse_block_size / static_cast<size_t>(cp_size) : reuse_block_size;
     auto positions = blockPositionsForCacheTransfer(
-        total_logical_blocks, reuse_block_size, use_hybrid, group_type, /*hybrid_full_from_begin=*/true);
+        planner_block_num, planner_reuse_block_size, use_hybrid, group_type, /*hybrid_full_from_begin=*/true);
 
     std::vector<CacheStoreBlockPair> plan;
     plan.reserve(positions.size());
 
-    const bool sharded = (cp_size > 1) && (group_type == CacheGroupType::FULL);
     if (!sharded) {
         for (auto pos : positions) {
             const int p = static_cast<int>(pos);
             plan.push_back({p, p});
+        }
+        return plan;
+    }
+    if (isDsv4FixedRegion(region_name)) {
+        for (auto pos : positions) {
+            const int p         = static_cast<int>(pos);
+            const int key_index = (p + 1) * cp_size - 1;
+            plan.push_back({key_index, p});
         }
         return plan;
     }

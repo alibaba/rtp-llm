@@ -118,6 +118,21 @@ cc_test(
     env = {},
 )
 
+cc_test(
+    name = "kv_cache_transfer_planner_test",
+    srcs = [
+        "KVCacheTransferPlannerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
 cc_library(
     name = "block_pool_test_helper",
     hdrs = [
