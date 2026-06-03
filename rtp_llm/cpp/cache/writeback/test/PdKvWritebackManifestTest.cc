@@ -21,7 +21,7 @@ TEST(PdKvWritebackManifestTest, DropsFinalPartialBlock) {
     EXPECT_EQ(manifest.value().group_block_ids[0], BlockIndicesType({1, 2}));
 }
 
-TEST(PdKvWritebackManifestTest, KeepsDecodeContinuedFullBlock) {
+TEST(PdKvWritebackManifestTest, KeepsOnlyDecodeCompletedBlocksAfterPrefill) {
     PdKvWritebackSnapshot snapshot;
     snapshot.seq_size_per_block  = 16;
     snapshot.final_token_count   = 48;
@@ -32,10 +32,10 @@ TEST(PdKvWritebackManifestTest, KeepsDecodeContinuedFullBlock) {
     auto manifest = buildPdKvWritebackManifest(snapshot);
 
     ASSERT_TRUE(manifest.ok()) << manifest.status();
-    EXPECT_EQ(manifest.value().reusable_block_count, 3);
-    EXPECT_EQ(manifest.value().cache_keys, CacheKeysType({201, 202, 203}));
+    EXPECT_EQ(manifest.value().reusable_block_count, 2);
+    EXPECT_EQ(manifest.value().cache_keys, CacheKeysType({202, 203}));
     ASSERT_EQ(manifest.value().group_block_ids.size(), 1);
-    EXPECT_EQ(manifest.value().group_block_ids[0], BlockIndicesType({11, 12, 13}));
+    EXPECT_EQ(manifest.value().group_block_ids[0], BlockIndicesType({12, 13}));
 }
 
 TEST(PdKvWritebackManifestTest, RejectsMultimodalOverlap) {

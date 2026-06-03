@@ -63,7 +63,8 @@ private:
                                       int64_t                                 deadline_ms,
                                       const std::vector<AsymmetricTPContext>& tp_partition_ctxs,
                                       const std::string&                      target_source,
-                                      int                                     expected_layer_count = -1);
+                                      int                                     expected_layer_count = -1,
+                                      const std::string&                      checksum_stage       = "");
 
     struct SendTransferResult {
         std::atomic<int>        done_count{0};
@@ -79,6 +80,8 @@ private:
     int dispatchPendingLayerTransfers(const std::shared_ptr<ComputedLayerCacheBuffer>& computed_buffer,
                                       const std::vector<AsymmetricTPContext>&          tp_partition_ctxs,
                                       const std::string&                               unique_key,
+                                      int64_t                                          request_id,
+                                      const std::string&                               checksum_stage,
                                       int64_t                                          return_deadline_ms,
                                       const std::shared_ptr<std::atomic<bool>>&        cancel_flag,
                                       const std::shared_ptr<SendTransferResult>&       transfer_result,
@@ -88,6 +91,8 @@ private:
     int sendLayerToPartitions(const std::shared_ptr<LayerCacheBuffer>&   layer_cache_buffer,
                               const std::vector<AsymmetricTPContext>&    tp_partition_ctxs,
                               const std::string&                         unique_key,
+                              int64_t                                    request_id,
+                              const std::string&                         checksum_stage,
                               int64_t                                    transfer_deadline_ms,
                               const std::shared_ptr<SendTransferResult>& transfer_result);
 

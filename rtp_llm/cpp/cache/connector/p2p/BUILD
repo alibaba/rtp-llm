@@ -10,6 +10,8 @@ exports_files([
     "P2PConnectorWorkerDecode.h",
     "P2PConnectorWorkerPrefill.cc",
     "P2PConnectorWorkerPrefill.h",
+    "P2PWritebackDebugUtil.cc",
+    "P2PWritebackDebugUtil.h",
 ])
 
 cc_library(
@@ -116,6 +118,7 @@ cc_library(
         "P2PConnectorWorker.cc",
         "P2PConnectorWorkerPrefill.cc",
         "P2PConnectorWorkerDecode.cc",
+        "P2PWritebackDebugUtil.cc",
         "P2PConnector.cc",
     ],
     hdrs = [
@@ -127,6 +130,7 @@ cc_library(
         "P2PConnectorWorker.h",
         "P2PConnectorWorkerPrefill.h",
         "P2PConnectorWorkerDecode.h",
+        "P2PWritebackDebugUtil.h",
         "P2PConnector.h",
         "P2PKeyUtil.h",
     ],
@@ -141,6 +145,8 @@ cc_library(
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:cuda_copy_util",
+        "@havenask//aios/autil:env_util",
         "@havenask//aios/autil:thread",
         "@havenask//aios/autil:net",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:backend_factory",

@@ -17,6 +17,7 @@ py_test(
         "//rtp_llm/test/smoke:defs.bzl",
         "//rtp_llm/test/smoke:entry.py",
         "//rtp_llm/test/smoke:data/model/qwen3/q_r_h20_pd_writeback_reuse.json",
+        "//rtp_llm/test/smoke:data/model/qwen3/q_r_rocm_pd_writeback_boundary.json",
         "//rtp_llm/test/smoke:data/model/qwen3/q_r_rocm_pd_writeback_reuse.json",
         "//rtp_llm/test/smoke:smoke_framework_srcs",
         "//rtp_llm/test/smoke:suites_h20_oss.bzl",

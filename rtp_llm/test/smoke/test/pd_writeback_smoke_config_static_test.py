@@ -5,12 +5,44 @@ import unittest
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
 SMOKE_ROOT = REPO_ROOT / "rtp_llm" / "test" / "smoke"
 TASK_INFO = SMOKE_ROOT / "data" / "model" / "qwen3" / "q_r_h20_pd_writeback_reuse.json"
-ROCM_TASK_INFO = SMOKE_ROOT / "data" / "model" / "qwen3" / "q_r_rocm_pd_writeback_reuse.json"
+ROCM_TASK_INFO = (
+    SMOKE_ROOT / "data" / "model" / "qwen3" / "q_r_rocm_pd_writeback_reuse.json"
+)
+ROCM_BOUNDARY_TASK_INFO = (
+    SMOKE_ROOT / "data" / "model" / "qwen3" / "q_r_rocm_pd_writeback_boundary.json"
+)
 SUITE = SMOKE_ROOT / "suites_h20_oss.bzl"
 ROCM_SUITE = SMOKE_ROOT / "suites_rocm_oss.bzl"
 DEFS = SMOKE_ROOT / "defs.bzl"
 ENTRY = SMOKE_ROOT / "entry.py"
 CASE_RUNNER = SMOKE_ROOT / "case_runner.py"
+P2P_WRITEBACK_DEBUG_UTIL_CC = (
+    REPO_ROOT
+    / "rtp_llm"
+    / "cpp"
+    / "cache"
+    / "connector"
+    / "p2p"
+    / "P2PWritebackDebugUtil.cc"
+)
+P2P_WORKER_PREFILL_CC = (
+    REPO_ROOT
+    / "rtp_llm"
+    / "cpp"
+    / "cache"
+    / "connector"
+    / "p2p"
+    / "P2PConnectorWorkerPrefill.cc"
+)
+P2P_WORKER_DECODE_CC = (
+    REPO_ROOT
+    / "rtp_llm"
+    / "cpp"
+    / "cache"
+    / "connector"
+    / "p2p"
+    / "P2PConnectorWorkerDecode.cc"
+)
 
 
 class PdWritebackSmokeConfigStaticTest(unittest.TestCase):
@@ -87,38 +119,59 @@ class PdWritebackSmokeConfigStaticTest(unittest.TestCase):
         task = json.loads(ROCM_TASK_INFO.read_text())
 
         self.assertIn('name="rocm_pd_qwen3_8b_tp1_to_tp1_tcp_writeback_reuse"', suite)
-        self.assertIn('name="rocm_pd_qwen3_8b_tp2_to_tp2_tcp_writeback_reuse_single"', suite)
+        self.assertIn(
+            'name="rocm_pd_qwen3_8b_tp2_to_tp2_tcp_writeback_reuse_single"', suite
+        )
         self.assertIn('name="rocm_pd_qwen3_8b_tp2_to_tp2_tcp_writeback_reuse"', suite)
         self.assertIn('name="rocm_pd_qwen3_8b_tp2_to_tp2_rdma_stress"', suite)
         self.assertIn('name = "smoke_rocm_pd_stress"', suite)
         pd_suite = suite[
-            suite.index('name = "smoke_rocm_pd"'):suite.index('name = "smoke_rocm_pd_stress"')
+            suite.index('name = "smoke_rocm_pd"') : suite.index(
+                'name = "smoke_rocm_pd_stress"'
+            )
         ]
         self.assertNotIn('name="rocm_pd_qwen3_8b_tp2_to_tp2_rdma_stress"', pd_suite)
 
-        tcp_case_block = _case_block(suite, "rocm_pd_qwen3_8b_tp1_to_tp1_tcp_writeback_reuse")
-        self.assertIn('task_info="data/model/qwen3/q_r_rocm_pd_writeback_reuse.json"', tcp_case_block)
+        tcp_case_block = _case_block(
+            suite, "rocm_pd_qwen3_8b_tp1_to_tp1_tcp_writeback_reuse"
+        )
+        self.assertIn(
+            'task_info="data/model/qwen3/q_r_rocm_pd_writeback_reuse.json"',
+            tcp_case_block,
+        )
         self.assertIn("--tp_size 1 --world_size 1", tcp_case_block)
         self.assertIn("--cache_store_rdma_mode 0", tcp_case_block)
         self.assertIn("concurrency_request_count=4", tcp_case_block)
         self.assertIn("stability_repeat=2", tcp_case_block)
 
-        tcp_tp2_single_case_block = _case_block(suite, "rocm_pd_qwen3_8b_tp2_to_tp2_tcp_writeback_reuse_single")
-        self.assertIn('task_info="data/model/qwen3/q_r_rocm_pd_writeback_reuse.json"', tcp_tp2_single_case_block)
+        tcp_tp2_single_case_block = _case_block(
+            suite, "rocm_pd_qwen3_8b_tp2_to_tp2_tcp_writeback_reuse_single"
+        )
+        self.assertIn(
+            'task_info="data/model/qwen3/q_r_rocm_pd_writeback_reuse.json"',
+            tcp_tp2_single_case_block,
+        )
         self.assertIn("--tp_size 2 --world_size 2", tcp_tp2_single_case_block)
         self.assertIn("--cache_store_rdma_mode 0", tcp_tp2_single_case_block)
         self.assertNotIn("concurrency_test=True", tcp_tp2_single_case_block)
         self.assertIn("read_transfer_not_done", tcp_tp2_single_case_block)
 
-        tcp_tp2_case_block = _case_block(suite, "rocm_pd_qwen3_8b_tp2_to_tp2_tcp_writeback_reuse")
-        self.assertIn('task_info="data/model/qwen3/q_r_rocm_pd_writeback_reuse.json"', tcp_tp2_case_block)
+        tcp_tp2_case_block = _case_block(
+            suite, "rocm_pd_qwen3_8b_tp2_to_tp2_tcp_writeback_reuse"
+        )
+        self.assertIn(
+            'task_info="data/model/qwen3/q_r_rocm_pd_writeback_reuse.json"',
+            tcp_tp2_case_block,
+        )
         self.assertIn("--tp_size 2 --world_size 2", tcp_tp2_case_block)
         self.assertIn("--cache_store_rdma_mode 0", tcp_tp2_case_block)
         self.assertIn("concurrency_request_count=4", tcp_tp2_case_block)
         self.assertIn("stability_repeat=2", tcp_tp2_case_block)
 
         case_block = _case_block(suite, "rocm_pd_qwen3_8b_tp2_to_tp2_rdma_stress")
-        self.assertIn('task_info="data/model/qwen3/q_r_rocm_pd_writeback_reuse.json"', case_block)
+        self.assertIn(
+            'task_info="data/model/qwen3/q_r_rocm_pd_writeback_reuse.json"', case_block
+        )
         self.assertIn("concurrency_test=True", case_block)
         self.assertIn("concurrency_request_count=16", case_block)
         self.assertIn("concurrency_workers=16", case_block)
@@ -159,11 +212,99 @@ class PdWritebackSmokeConfigStaticTest(unittest.TestCase):
             self.assertIn(token, case_runner)
 
         self.assertIn("STABILITY_REPEAT", case_runner)
-        self.assertIn("ThreadPoolExecutor(max_workers=self.concurrency_workers)", case_runner)
+        self.assertIn(
+            "ThreadPoolExecutor(max_workers=self.concurrency_workers)", case_runner
+        )
         self.assertIn("range(self.concurrency_request_count)", case_runner)
         self.assertIn("read_transfer_not_done", case_runner)
         self.assertIn("P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE", case_runner)
         self.assertIn("TEST_UNDECLARED_OUTPUTS_DIR", case_runner)
+
+    def test_rocm_pd_writeback_boundary_cases_compare_output_with_and_without_writeback(
+        self,
+    ):
+        suite = ROCM_SUITE.read_text()
+        task = json.loads(ROCM_BOUNDARY_TASK_INFO.read_text())
+
+        enabled_case = _case_block(
+            suite, "rocm_pd_qwen3_8b_tp2_to_tp2_tcp_writeback_boundary"
+        )
+        disabled_case = _case_block(
+            suite, "rocm_pd_qwen3_8b_tp2_to_tp2_tcp_writeback_boundary_disabled"
+        )
+        rdma_enabled_case = _case_block(
+            suite, "rocm_pd_qwen3_8b_tp2_to_tp2_rdma_writeback_boundary"
+        )
+        rdma_disabled_case = _case_block(
+            suite, "rocm_pd_qwen3_8b_tp2_to_tp2_rdma_writeback_boundary_disabled"
+        )
+        self.assertIn(
+            'task_info="data/model/qwen3/q_r_rocm_pd_writeback_boundary.json"',
+            enabled_case,
+        )
+        self.assertIn(
+            'task_info="data/model/qwen3/q_r_rocm_pd_writeback_boundary.json"',
+            disabled_case,
+        )
+        self.assertIn(
+            'task_info="data/model/qwen3/q_r_rocm_pd_writeback_boundary.json"',
+            rdma_enabled_case,
+        )
+        self.assertIn(
+            'task_info="data/model/qwen3/q_r_rocm_pd_writeback_boundary.json"',
+            rdma_disabled_case,
+        )
+        self.assertIn("ENABLE_PD_KV_CACHE_WRITEBACK=1", enabled_case)
+        self.assertNotIn("ENABLE_PD_KV_CACHE_WRITEBACK=1", disabled_case)
+        self.assertIn("ENABLE_PD_KV_CACHE_WRITEBACK=1", rdma_enabled_case)
+        self.assertNotIn("ENABLE_PD_KV_CACHE_WRITEBACK=1", rdma_disabled_case)
+        self.assertIn("PD_KV_WRITEBACK_DEBUG_CHECKSUM=1", enabled_case)
+        self.assertIn("PD_KV_WRITEBACK_DEBUG_CHECKSUM=1", disabled_case)
+        self.assertIn("PD_KV_WRITEBACK_DEBUG_CHECKSUM=1", rdma_enabled_case)
+        self.assertIn("PD_KV_WRITEBACK_DEBUG_CHECKSUM=1", rdma_disabled_case)
+        self.assertIn("--tp_size 2 --world_size 2", enabled_case)
+        self.assertIn("--cache_store_rdma_mode 0", enabled_case)
+        self.assertIn("--cache_store_rdma_mode 1", rdma_enabled_case)
+        self.assertIn("CACHE_STORE_RDMA_MODE=1", rdma_enabled_case)
+        self.assertIn("RDMA_CONNECT_RETRY_TIMES=2", rdma_enabled_case)
+        self.assertIn("--seq_size_per_block 16", enabled_case)
+
+        self.assertEqual(task["model_type"], "qwen_3")
+        self.assertEqual(task["model_path"], "/mnt/data3/zhenyun.yzy/hf/Qwen3-8B")
+        self.assertEqual(len(task["query_result"]), 6)
+        case_names = [item["case_name"] for item in task["query_result"]]
+        self.assertEqual(
+            case_names,
+            [
+                "partial_tail_no_full_seed",
+                "partial_tail_no_full_probe",
+                "mixed_block_seed",
+                "mixed_block_probe",
+                "mixed_plus_pure_blocks_seed",
+                "mixed_plus_pure_blocks_probe",
+            ],
+        )
+
+        for index in [1, 3, 5]:
+            query_result = task["query_result"][index]
+            self.assertNotEqual(
+                query_result["aux_info_assertions"].get("mode"), "aux_info_only"
+            )
+            self.assertIn(
+                "aux_info.pd_sep", query_result["aux_info_assertions"]["fields"]
+            )
+            self.assertIn("response", query_result["result"])
+
+    def test_writeback_checksum_debug_logging_is_env_gated(self):
+        debug_util_cc = P2P_WRITEBACK_DEBUG_UTIL_CC.read_text()
+        prefill_cc = P2P_WORKER_PREFILL_CC.read_text()
+        decode_cc = P2P_WORKER_DECODE_CC.read_text()
+
+        self.assertIn("PD_KV_WRITEBACK_DEBUG_CHECKSUM", debug_util_cc)
+        self.assertIn("PD KV writeback checksum", debug_util_cc)
+        self.assertIn("sampled_bytes", debug_util_cc)
+        self.assertIn("decode_send_source", prefill_cc)
+        self.assertIn("prefill_receive_destination", decode_cc)
 
 
 def _case_block(suite: str, case_name: str) -> str:

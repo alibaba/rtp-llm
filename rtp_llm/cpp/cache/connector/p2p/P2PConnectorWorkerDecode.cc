@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PKeyUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWritebackDebugUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -228,7 +229,17 @@ ErrorInfo P2PConnectorWorkerDecode::receiveDecodeToPrefillWriteback(const PdKvWr
         return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
                          "writeback destination layer buffers are empty");
     }
-    return read(plan.request_id, plan.request_key, plan.deadline_ms, layer_cache_buffers, plan.remote_tp_size);
+    auto read_result =
+        read(plan.request_id, plan.request_key, plan.deadline_ms, layer_cache_buffers, plan.remote_tp_size);
+    if (read_result.ok()) {
+        logPdKvWritebackChecksum("prefill_receive_destination",
+                                 plan.request_id,
+                                 plan.request_key,
+                                 layer_block_converter_,
+                                 layer_cache_buffers,
+                                 calculateRecvPartitionCount(plan.remote_tp_size));
+    }
+    return read_result;
 }
 
 P2PConnectorWorkerDecode::RecvResultInfo

@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PKeyUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWritebackDebugUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -96,6 +97,8 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
     const std::shared_ptr<ComputedLayerCacheBuffer>& computed_buffer,
     const std::vector<AsymmetricTPContext>&          tp_partition_ctxs,
     const std::string&                               unique_key,
+    int64_t                                          request_id,
+    const std::string&                               checksum_stage,
     int64_t                                          return_deadline_ms,
     const std::shared_ptr<std::atomic<bool>>&        cancel_flag,
     const std::shared_ptr<SendTransferResult>&       transfer_result,
@@ -122,8 +125,13 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
                 continue;
             }
             sent_layer_ids.insert(layer_id);
-            sent_count += sendLayerToPartitions(
-                layer_cache_buffer, tp_partition_ctxs, unique_key, return_deadline_ms, transfer_result);
+            sent_count += sendLayerToPartitions(layer_cache_buffer,
+                                                tp_partition_ctxs,
+                                                unique_key,
+                                                request_id,
+                                                checksum_stage,
+                                                return_deadline_ms,
+                                                transfer_result);
         }
 
         if (ready_layer_buffers.empty()) {
@@ -136,6 +144,8 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
 int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<LayerCacheBuffer>&   layer_cache_buffer,
                                                      const std::vector<AsymmetricTPContext>&    tp_partition_ctxs,
                                                      const std::string&                         unique_key,
+                                                     int64_t                                    request_id,
+                                                     const std::string&                         checksum_stage,
                                                      int64_t                                    transfer_deadline_ms,
                                                      const std::shared_ptr<SendTransferResult>& transfer_result) {
     int       count    = 0;
@@ -146,6 +156,15 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
                                                                         layer_cache_buffer,
                                                                         partition_ctx.local_partition_count,
                                                                         partition_ctx.local_partition_id);
+        if (!checksum_stage.empty()) {
+            logPdKvWritebackChecksum(checksum_stage,
+                                     request_id,
+                                     unique_key,
+                                     layer_block_converter_,
+                                     layer_cache_buffer,
+                                     partition_ctx.local_partition_count,
+                                     partition_ctx.local_partition_id);
+        }
 
         std::string partition_layer_key =
             P2PKeyUtil::makePartitionLayerKey(unique_key, layer_id, partition_ctx.remote_partition_id);
@@ -226,7 +245,8 @@ ErrorInfo P2PConnectorWorkerPrefill::sendKVCacheToPartitions(int64_t            
                                                              int64_t                                 deadline_ms,
                                                              const std::vector<AsymmetricTPContext>& tp_partition_ctxs,
                                                              const std::string&                      target_source,
-                                                             int expected_layer_count) {
+                                                             int                expected_layer_count,
+                                                             const std::string& checksum_stage) {
     // D（deadline_ms）为 RPC 语义截止；return_deadline_ms = D - return_before，与 decode recv_req.deadline_ms 对齐。
     const int64_t return_before_ms   = config_.p2p_read_return_before_deadline_ms;
     const int64_t return_deadline_ms = deadline_ms - return_before_ms;
@@ -270,6 +290,8 @@ ErrorInfo P2PConnectorWorkerPrefill::sendKVCacheToPartitions(int64_t            
     const int     sent_transfer_count  = dispatchPendingLayerTransfers(computed_layer_cache_buffer,
                                                                   tp_partition_ctxs,
                                                                   unique_key,
+                                                                  request_id,
+                                                                  checksum_stage,
                                                                   return_deadline_ms,
                                                                   cancel_flag,
                                                                   transfer_result,
@@ -372,11 +394,17 @@ ErrorInfo P2PConnectorWorkerPrefill::sendDecodeToPrefillWriteback(const PdKvWrit
                                        plan.deadline_ms,
                                        tp_partition_ctxs,
                                        "writeback_topology",
-                                       valid_layer_count);
+                                       valid_layer_count,
+                                       "decode_send_source");
     }
     auto tp_partition_ctxs = asymmetric_tp_util_->handleAsymmetricTP(plan.prefill_transfer_servers);
-    return sendKVCacheToPartitions(
-        plan.request_id, plan.request_key, plan.deadline_ms, tp_partition_ctxs, "asymmetric_tp", valid_layer_count);
+    return sendKVCacheToPartitions(plan.request_id,
+                                   plan.request_key,
+                                   plan.deadline_ms,
+                                   tp_partition_ctxs,
+                                   "asymmetric_tp",
+                                   valid_layer_count,
+                                   "decode_send_source");
 }
 
 P2PConnectorWorkerPrefill::SendResultInfo

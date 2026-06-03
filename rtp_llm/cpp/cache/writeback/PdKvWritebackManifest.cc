@@ -38,10 +38,16 @@ absl::StatusOr<PdKvWritebackManifest> buildPdKvWritebackManifest(const PdKvWrite
     if (snapshot.final_token_count < 0) {
         return absl::InvalidArgumentError("final_token_count must be non-negative");
     }
+    if (snapshot.prefill_token_count < 0) {
+        return absl::InvalidArgumentError("prefill_token_count must be non-negative");
+    }
 
     const int64_t full_blocks = snapshot.final_token_count / snapshot.seq_size_per_block;
     const int64_t limited_blocks =
         std::min<int64_t>(firstBlockedByMultimodal(snapshot, full_blocks), snapshot.cache_keys.size());
+    const int64_t prefill_full_blocks = snapshot.prefill_token_count / snapshot.seq_size_per_block;
+    const int64_t start_block         = std::min(prefill_full_blocks, limited_blocks);
+    const int64_t reusable_blocks     = limited_blocks - start_block;
 
     PdKvWritebackManifest manifest;
     manifest.request_id = snapshot.request_id;
@@ -49,15 +55,16 @@ absl::StatusOr<PdKvWritebackManifest> buildPdKvWritebackManifest(const PdKvWrite
         snapshot.request_key.empty() ? "pd_kv_writeback_" + std::to_string(snapshot.request_id) : snapshot.request_key;
     manifest.seq_size_per_block   = snapshot.seq_size_per_block;
     manifest.final_token_count    = snapshot.final_token_count;
-    manifest.reusable_block_count = limited_blocks;
-    manifest.cache_keys.assign(snapshot.cache_keys.begin(), snapshot.cache_keys.begin() + limited_blocks);
+    manifest.reusable_block_count = reusable_blocks;
+    manifest.cache_keys.assign(snapshot.cache_keys.begin() + start_block, snapshot.cache_keys.begin() + limited_blocks);
 
     manifest.group_block_ids.reserve(snapshot.group_block_ids.size());
     for (const auto& group_blocks : snapshot.group_block_ids) {
         if (static_cast<int64_t>(group_blocks.size()) < limited_blocks) {
             return absl::InvalidArgumentError("group block count is smaller than reusable block count");
         }
-        manifest.group_block_ids.emplace_back(group_blocks.begin(), group_blocks.begin() + limited_blocks);
+        manifest.group_block_ids.emplace_back(group_blocks.begin() + start_block,
+                                              group_blocks.begin() + limited_blocks);
     }
 
     return manifest;

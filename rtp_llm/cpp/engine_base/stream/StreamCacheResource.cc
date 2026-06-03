@@ -385,11 +385,13 @@ void StreamCacheResource::maybeLaunchPdKvWriteback() {
         return;
     }
     const auto& manifest_ref = manifest.value();
-    RTP_LLM_LOG_INFO("PD KV writeback launch, stream=%ld, final_tokens=%ld, reusable_blocks=%ld, cache_keys=%zu",
-                     stream_->streamId(),
-                     manifest_ref.final_token_count,
-                     manifest_ref.reusable_block_count,
-                     manifest_ref.cache_keys.size());
+    RTP_LLM_LOG_INFO(
+        "PD KV writeback launch, stream=%ld, prefill_tokens=%ld, final_tokens=%ld, reusable_blocks=%ld, cache_keys=%zu",
+        stream_->streamId(),
+        snapshot.prefill_token_count,
+        manifest_ref.final_token_count,
+        manifest_ref.reusable_block_count,
+        manifest_ref.cache_keys.size());
 
     const auto& cache_config = resource_context_.cache_manager->cacheConfig();
     auto        compatibility =
