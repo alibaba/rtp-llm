@@ -424,7 +424,8 @@ public class FlexlbBatchScheduler {
         long hitCache = prefill.getDebugInfo() != null ? prefill.getDebugInfo().getHitCacheLen() : 0;
         PrefillTimePredictor predictor = createPredictor(cfg);
         long predMs = predictor.estimateMs(seqLen, hitCache);
-        return System.currentTimeMillis() + Math.max(0, cfg.getCostSloMs() - predMs);
+        long sloMs = cfg.resolveSloMs(seqLen);
+        return System.currentTimeMillis() + Math.max(0, sloMs - predMs);
     }
 
     private static PrefillTimePredictor createPredictor(FlexlbConfig cfg) {

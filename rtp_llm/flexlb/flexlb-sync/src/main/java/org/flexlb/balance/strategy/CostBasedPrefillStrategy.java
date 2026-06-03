@@ -114,7 +114,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
 
     private List<WorkerStatus> applyHardFilters(List<WorkerStatus> eligible, String model, long seqLen,
                                                 FlexlbConfig config, PrefillTimePredictor predictor) {
-        long sloMs = config.getCostSloMs();
+        long sloMs = config.resolveSloMs(seqLen);
         long sloRiskMarginMs = config.getCostSloRiskMarginMs();
         double hotspotMultiplier = config.getCostHotspotMultiplier();
         double imbalanceMultiplier = config.getCostImbalanceMultiplier();
@@ -168,7 +168,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         long waitMs;
         if (snap.queueSize() == 0) {
             long predMs = predictor.estimateMs(seqLen, cacheHit);
-            waitMs = Math.max(0, config.getCostSloMs() - predMs - config.getCostSloRiskMarginMs());
+            waitMs = Math.max(0, config.resolveSloMs(seqLen) - predMs - config.getCostSloRiskMarginMs());
         } else {
             waitMs = Math.max(0, snap.headDeadlineMs() - System.currentTimeMillis() - config.getCostSloRiskMarginMs());
         }

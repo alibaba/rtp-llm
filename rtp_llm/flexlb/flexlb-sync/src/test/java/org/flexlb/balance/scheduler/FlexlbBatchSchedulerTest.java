@@ -297,6 +297,62 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
+    void resolveSloMs_uses_buckets_when_configured() {
+        FlexlbConfig cfg = new FlexlbConfig();
+        cfg.setCostSloMs(500L);
+        cfg.setCostSloBuckets("4096:2000,32768:10000,131072:30000,524288:60000");
+
+        assertEquals(2000L, cfg.resolveSloMs(100));
+        assertEquals(2000L, cfg.resolveSloMs(4096));
+        assertEquals(10000L, cfg.resolveSloMs(4097));
+        assertEquals(10000L, cfg.resolveSloMs(32768));
+        assertEquals(30000L, cfg.resolveSloMs(32769));
+        assertEquals(30000L, cfg.resolveSloMs(131072));
+        assertEquals(60000L, cfg.resolveSloMs(131073));
+        assertEquals(60000L, cfg.resolveSloMs(1000000));
+    }
+
+    @Test
+    void resolveSloMs_falls_back_to_costSloMs_when_no_buckets() {
+        FlexlbConfig cfg = new FlexlbConfig();
+        cfg.setCostSloMs(500L);
+        cfg.setCostSloBuckets("");
+
+        assertEquals(500L, cfg.resolveSloMs(100));
+        assertEquals(500L, cfg.resolveSloMs(100000));
+    }
+
+    @Test
+    void resolveSloMs_handles_unsorted_bucket_input() {
+        FlexlbConfig cfg = new FlexlbConfig();
+        cfg.setCostSloBuckets("131072:30000,4096:2000,32768:10000");
+
+        assertEquals(2000L, cfg.resolveSloMs(1000));
+        assertEquals(10000L, cfg.resolveSloMs(5000));
+        assertEquals(30000L, cfg.resolveSloMs(50000));
+    }
+
+    @Test
+    void dynamic_slo_prevents_drop_for_requests_exceeding_fixed_slo() throws Exception {
+        // With default costSloMs=500 and alpha1=1.0, a 600-token request has
+        // predMs=600 > sloMs=500 → budget=0 → immediate drop.
+        // With buckets "1000:5000,...", sloMs=5000 → budget=4400 → enough to batch.
+        config.setCostSloBuckets("1000:5000,100000:50000");
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchSizeMax(2);
+        config.setFlexlbBatchFillThreshold(1.0);
+
+        CompletableFuture<Response> f1 = scheduler.submit(contextWithSeqLen(601, 600));
+        CompletableFuture<Response> f2 = scheduler.submit(contextWithSeqLen(602, 600));
+
+        assertTrue(f1.get(3, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f2.get(3, TimeUnit.SECONDS).isSuccess());
+
+        assertEquals(1, sentBatches.size());
+        assertEquals(2, sentBatches.getFirst().getInputsCount());
+    }
+
+    @Test
     void mismatched_generate_input_request_id_fails_before_batch_enqueue() {
         config.setFlexlbBatchSizeMax(1);
 
