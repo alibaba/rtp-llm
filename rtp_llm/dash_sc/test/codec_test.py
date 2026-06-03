@@ -163,6 +163,88 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
         self.assertEqual(json.loads(sp.response_format), {"type": "json_object"})
 
+    def _assert_guided_json_response_format(self, response_format, schema) -> None:
+        self.assertEqual(
+            json.loads(response_format),
+            {"type": "json_schema", "json_schema": {"schema": schema}},
+        )
+
+    def test_parse_sampling_guided_json_list_sets_response_format_json_schema(
+        self,
+    ) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "人物": {"type": "array", "items": {"type": "string"}},
+                "其他实体": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "enum": ["我国", "社会主义事业", "两个文明建设"],
+                },
+            },
+            "required": ["人物", "其他实体"],
+        }
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["guided_json"].string_param = json.dumps(
+            [schema], ensure_ascii=False
+        )
+
+        sp = parse_sampling_params(req)
+        config = sp.to_generate_config()
+
+        self._assert_guided_json_response_format(sp.response_format, schema)
+        self._assert_guided_json_response_format(config.response_format, schema)
+        self.assertIsNone(config.json_schema)
+
+    def test_parse_sampling_guided_json_list_string_sets_response_format_json_schema(
+        self,
+    ) -> None:
+        schema = {
+            "type": "object",
+            "properties": {"地点": {"type": "array", "items": {"type": "string"}}},
+            "required": ["地点"],
+        }
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["guided_json"].string_param = json.dumps(
+            [json.dumps(schema, ensure_ascii=False)], ensure_ascii=False
+        )
+
+        sp = parse_sampling_params(req)
+        config = sp.to_generate_config()
+
+        self._assert_guided_json_response_format(sp.response_format, schema)
+        self._assert_guided_json_response_format(config.response_format, schema)
+        self.assertIsNone(config.json_schema)
+
+    def test_parse_sampling_guided_json_overrides_response_format(self) -> None:
+        schema = {"type": "array", "items": {"type": "string"}}
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["response_format"].string_param = json.dumps(
+            {"type": "json_object"}
+        )
+        req.parameters["guided_json"].string_param = json.dumps([schema])
+
+        sp = parse_sampling_params(req)
+        config = sp.to_generate_config()
+
+        self._assert_guided_json_response_format(sp.response_format, schema)
+        self._assert_guided_json_response_format(config.response_format, schema)
+        self.assertIsNone(config.json_schema)
+
+    def test_parse_sampling_guided_json_from_nested_dash_parameters(self) -> None:
+        schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"parameters": {"guided_json": [schema]}}
+        )
+
+        sp = parse_sampling_params(req)
+        config = sp.to_generate_config()
+
+        self._assert_guided_json_response_format(sp.response_format, schema)
+        self._assert_guided_json_response_format(config.response_format, schema)
+        self.assertIsNone(config.json_schema)
+
     def test_parse_sampling_response_format_from_nested_dash_parameters(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["ds_header_attributes"].string_param = json.dumps(
