@@ -712,6 +712,45 @@ int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
     return common_blocks_total + batch_size * extra_blocks_total;
 }
 
+void HybridKVCacheAllocator::checkCPShardedMallocResult(const MallocInfo& malloc_info) const {
+    if (!cp_slot_mapper_ || !cp_slot_mapper_->isSharded()) {
+        return;
+    }
+
+    const auto& kv_resource  = malloc_info.batch_kv_cache_resource;
+    const int   seq_len      = malloc_info.incrSeqLen();
+    const int   reserve_step = malloc_info.complete_token_ids->getReserveStep();
+
+    for (int batch_id = 0; batch_id < kv_resource->batchSize(); ++batch_id) {
+        for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
+            const auto group_type = static_cast<size_t>(gid) < config_.group_types.size() ?
+                                        config_.group_types[static_cast<size_t>(gid)] :
+                                        CacheGroupType::FULL;
+            if (!cpShardThisGroup(cp_slot_mapper_, group_type)) {
+                continue;
+            }
+            const int effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, group_type, seq_len);
+            const int expected_blocks =
+                kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(effective_seq_len, 0, reserve_step);
+            const int actual_blocks = kv_resource->blocksNum(batch_id, gid);
+            RTP_LLM_CHECK_WITH_INFO(actual_blocks == expected_blocks,
+                                    "CP invariant violated: batch=%d group=%d blocks=%d != expected_local_blocks=%d "
+                                    "(seq_len=%d, effective_seq_len=%d, reserve_step=%d, cp_size=%d, "
+                                    "block_size=%d, cacheKeys=%zu)",
+                                    batch_id,
+                                    gid,
+                                    actual_blocks,
+                                    expected_blocks,
+                                    seq_len,
+                                    effective_seq_len,
+                                    reserve_step,
+                                    cp_slot_mapper_->cpSize(),
+                                    cp_slot_mapper_->blockSize(),
+                                    kv_resource->cacheKeys(batch_id).size());
+        }
+    }
+}
+
 int HybridKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                   int                            seq_len,
                                                   int                            reserve_step) const {

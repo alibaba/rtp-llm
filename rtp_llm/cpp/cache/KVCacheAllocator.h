@@ -133,6 +133,7 @@ protected:
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)                                          = 0;
     virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info)                              = 0;
     virtual int          getNeedBlocks(const MallocInfo& malloc_info) const                                 = 0;
+    virtual void         checkCPShardedMallocResult(const MallocInfo&) const {}
     virtual void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) = 0;
     bool                 cpShardThisGroupForCapacity(size_t gid) const;
     size_t               logicalSeqSizePerBlockForCapacity(size_t gid) const;
