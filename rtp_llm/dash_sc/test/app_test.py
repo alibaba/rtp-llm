@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from unittest import TestCase, main
 from unittest.mock import patch
 
 from rtp_llm.dash_sc import app as bg_app
-from rtp_llm.dash_sc.app import _create_proxy_servicer_on_loop, _derive_echo_prefix_ids
+from rtp_llm.dash_sc.app import (
+    _create_proxy_servicer_on_loop,
+    _derive_echo_prefix_ids,
+    _is_proxy_mode_enabled,
+)
 
 
 class _EnvCfg:
@@ -79,6 +84,34 @@ class CreateProxyServicerOnLoopTest(TestCase):
         loop, servicer = asyncio.run(run())
         self.assertIs(servicer, sentinel)
         self.assertEqual(created_loops, [loop])
+
+
+class ProxyModeEnvTest(TestCase):
+    def test_service_route_alone_does_not_enable_proxy_mode(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "SERVICE_ROUTE": (
+                    '{"type": "ip_port_list", "address": "127.0.0.1:1"}'
+                )
+            },
+            clear=True,
+        ):
+            self.assertFalse(_is_proxy_mode_enabled())
+
+    def test_proxy_mode_enabled_only_by_one(self) -> None:
+        with patch.dict(os.environ, {"DASH_SC_GRPC_PROXY_MODE": "1"}, clear=True):
+            self.assertTrue(_is_proxy_mode_enabled())
+        with patch.dict(os.environ, {"DASH_SC_GRPC_PROXY_MODE": "true"}, clear=True):
+            self.assertFalse(_is_proxy_mode_enabled())
+
+    def test_legacy_forward_addr_still_enables_proxy_mode(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"DASH_SC_GRPC_FORWARD_ADDR": "127.0.0.1:1"},
+            clear=True,
+        ):
+            self.assertTrue(_is_proxy_mode_enabled())
 
 
 class CloseServicerOnLoopTest(TestCase):
