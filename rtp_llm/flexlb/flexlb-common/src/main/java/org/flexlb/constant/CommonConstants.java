@@ -20,4 +20,12 @@ public class CommonConstants {
      */
     public static final int GRPC_PORT_OFFSET = 1;
 
+    /**
+     * Port offset between HTTP port and ARPC port = HTTP port + ARPC_PORT_OFFSET.
+     * Embedding/BERT workers expose MainseBertRpcService over ARPC on rpc_server_port (= base+1),
+     * while http_port = base+5 in the rtp_llm ServerConfig port layout, so ARPC = http_port - 4.
+     * Kept as a named constant (not a magic number) since the layout has shifted before.
+     */
+    public static final int ARPC_PORT_OFFSET = -4;
+
 }

@@ -152,6 +152,7 @@ public class RoundRobinLoadBalancer implements BatchLoadBalancer {
         target.setServerIp(worker.getIp());
         target.setHttpPort(worker.getPort());
         target.setGrpcPort(CommonUtils.toGrpcPort(worker.getPort()));
+        target.setArpcPort(CommonUtils.toArpcPort(worker.getPort()));
         target.setRole(roleType);
         return target;
     }

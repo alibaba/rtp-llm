@@ -26,4 +26,14 @@ public final class CommonUtils {
     public static int toHttpPort(int grpcPort) {
         return grpcPort - CommonConstants.GRPC_PORT_OFFSET;
     }
+
+    /**
+     * Convert HTTP port to ARPC port (embedding/BERT MainseBertRpcService)
+     *
+     * @param httpPort http port
+     * @return ARPC port
+     */
+    public static int toArpcPort(int httpPort) {
+        return httpPort + CommonConstants.ARPC_PORT_OFFSET;
+    }
 }
