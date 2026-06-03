@@ -16,6 +16,7 @@ from typing import List, Optional
 
 import grpc
 
+from rtp_llm.dash_sc.codec import build_parameter_error_response, parse_sampling_params
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 
 
@@ -102,6 +103,19 @@ def _parse_channels_per_addr(env_value: str) -> int:
     except (TypeError, ValueError, AttributeError):
         return _DEFAULT_CHANNELS_PER_ADDR
     return n if n >= 1 else _DEFAULT_CHANNELS_PER_ADDR
+
+
+def _invalid_max_new_tokens_message(request) -> str | None:
+    sampling = parse_sampling_params(request)
+    if sampling.max_new_tokens > 0:
+        return None
+    param_name = "max_completion_tokens" if getattr(
+        sampling, "max_new_tokens_from_completion_alias", False
+    ) else "max_new_tokens"
+    return (
+        f"invalid {param_name}: {sampling.max_new_tokens}; "
+        "must be greater than 0"
+    )
 
 
 class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
@@ -198,24 +212,38 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         self._stubs.clear()
 
     async def ModelStreamInfer(self, request_iterator, context):
-        stub, idx = self._next_stub()
-        if stub is None:
-            # Shutdown race: ``close()`` cleared ``_stubs`` after grpcio had
-            # already dispatched this RPC. ``context.abort`` raises
-            # ``grpc.aio.AbortError`` / ``grpc.RpcError`` here, the interceptor's
-            # ``_classify_rpc_exception`` picks the code up as ``UNAVAILABLE``
-            # (bounded ``error_code`` bucket) instead of
-            # ``UNKNOWN_ZeroDivisionError``.
-            await context.abort(grpc.StatusCode.UNAVAILABLE, "forwarder shutting down")
-            return
-        addr = self._forward_addrs[idx]
-
         # Grab the access-log aggregate (installed by the access-log
         # interceptor) so proxy-path diagnostics land inline on the access
         # log line — ``backend_addr`` / ``backend_resp_count`` /
         # ``buffered_stage`` are what lets an operator triage a
         # ``resp_count=0`` RPC without cross-grepping the proxy debug log.
         agg = getattr(context, "_dash_sc_access_agg", None)
+
+        request_iter = request_iterator.__aiter__()
+        try:
+            first_request = await request_iter.__anext__()
+        except StopAsyncIteration:
+            return
+
+        invalid_message = _invalid_max_new_tokens_message(first_request)
+        if invalid_message is not None:
+            logging.warning("[DashScGrpc] proxy parameter error: %s", invalid_message)
+            try:
+                aclose = getattr(request_iter, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+            except Exception:
+                pass
+            yield build_parameter_error_response(str(first_request.id), invalid_message)
+            return
+
+        stub, idx = self._next_stub()
+        if stub is None:
+            # Shutdown race: ``close()`` cleared ``_stubs`` after grpcio had
+            # already dispatched this RPC. Translate it to UNAVAILABLE.
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "forwarder shutting down")
+            return
+        addr = self._forward_addrs[idx]
         if agg is not None:
             try:
                 agg.backend_addr = addr
@@ -232,7 +260,12 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         except Exception:
             md = ()
 
-        upstream_iter = stub.ModelStreamInfer(request_iterator, metadata=md)
+        async def validated_request_iter():
+            yield first_request
+            async for req in request_iter:
+                yield req
+
+        upstream_iter = stub.ModelStreamInfer(validated_request_iter(), metadata=md)
 
         # Cancel propagation under grpc.aio is implicit: when the inbound RPC
         # is cancelled by the client, the grpc.aio framework cancels the

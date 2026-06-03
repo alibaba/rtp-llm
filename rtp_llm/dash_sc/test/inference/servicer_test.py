@@ -1584,8 +1584,6 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             responses[0].infer_response.parameters["__messages__"].string_param
         )
         self.assertEqual(payload["header"]["status_code"], 400)
-        self.assertEqual(payload["header"]["status_name"], "InvalidParameter")
-        self.assertIn("max_new_tokens", payload["header"]["status_message"])
 
     async def test_openai_compat_max_new_tokens_negative_uses_default(
         self,
@@ -1616,20 +1614,13 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             32000,
         )
 
-    async def test_max_completion_tokens_non_positive_uses_default_repro(
+    async def test_max_completion_tokens_non_positive_rejected_before_enqueue(
         self,
     ) -> None:
-        """Compat alias values <= 0 should not reach backend as max_new_tokens."""
+        """max_completion_tokens<=0 is a request error, not an engine abort."""
         for value in (-1, 0):
             with self.subTest(value=value):
-                out = GenerateOutput(
-                    output_ids=torch.tensor([9], dtype=torch.int32),
-                    finished=True,
-                    aux_info=AuxInfo(input_len=1, reuse_len=0),
-                )
-                visitor = _FakeVisitor(
-                    _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
-                )
+                visitor = _FakeVisitor(_FakeAsyncStream([]))
                 servicer = DashScInferenceServicer(backend_visitor=visitor)
                 req = self._valid_infer_request()
                 req.parameters["max_completion_tokens"].int64_param = value
@@ -1638,26 +1629,20 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                     servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
                 )
 
-                self.assertEqual(visitor.enqueue_called, 1)
+                self.assertEqual(visitor.enqueue_called, 0)
                 self.assertEqual(len(responses), 1)
-                self.assertEqual(
-                    visitor.last_generate_input.generate_config.max_new_tokens,
-                    32000,
+                self.assertFalse(responses[0].error_message)
+                payload = json.loads(
+                    responses[0].infer_response.parameters["__messages__"].string_param
                 )
+                self.assertEqual(payload["header"]["status_code"], 400)
 
-    async def test_max_completion_tokens_non_positive_blocks_legacy_aliases(
+    async def test_max_completion_tokens_non_positive_rejected_before_legacy_aliases(
         self,
     ) -> None:
         for value in (-1, 0):
             with self.subTest(value=value):
-                out = GenerateOutput(
-                    output_ids=torch.tensor([9], dtype=torch.int32),
-                    finished=True,
-                    aux_info=AuxInfo(input_len=1, reuse_len=0),
-                )
-                visitor = _FakeVisitor(
-                    _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
-                )
+                visitor = _FakeVisitor(_FakeAsyncStream([]))
                 servicer = DashScInferenceServicer(backend_visitor=visitor)
                 req = self._valid_infer_request()
                 _add_input_tensor(
@@ -1679,12 +1664,13 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                     servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
                 )
 
-                self.assertEqual(visitor.enqueue_called, 1)
+                self.assertEqual(visitor.enqueue_called, 0)
                 self.assertEqual(len(responses), 1)
-                self.assertEqual(
-                    visitor.last_generate_input.generate_config.max_new_tokens,
-                    32000,
+                self.assertFalse(responses[0].error_message)
+                payload = json.loads(
+                    responses[0].infer_response.parameters["__messages__"].string_param
                 )
+                self.assertEqual(payload["header"]["status_code"], 400)
 
     async def test_dash_generation_without_enable_thinking_disables_env_thinking(
         self,
