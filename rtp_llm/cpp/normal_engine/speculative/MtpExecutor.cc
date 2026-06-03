@@ -2039,13 +2039,34 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input, cons
 }
 
 GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input) {
-    const bool use_sp_prefill_cuda_graph = sp_prefill_draft_model_ && !model_input.is_fake_stream;
+    // FIX: always use sp_prefill_draft_model_ when it exists (Method B), so
+    // every DP rank dispatches mega_moe on the SAME cloned _mega_buf B every
+    // step. The previous gate `!model_input.is_fake_stream` sent fake-stream
+    // ranks down draft_model_ (original _mega_buf A) while real-stream peers
+    // went down sp_prefill_draft_model_ (cloned _mega_buf B), and the
+    // peer-symmetric NVLink barrier in
+    // deep_gemm/include/deep_gemm/comm/barrier.cuh trapped after timeout
+    // because each rank's counter advanced on a buffer the other rank never
+    // touched.
+    //
+    // Fake decode streams are constructed with propose_step+1 tokens — the
+    // same shape as a real target-verify output — so the captured CUDA graph
+    // for seq_len=propose_step+1 replays correctly for both fake and real
+    // inputs. No per-step cross-rank synchronization is required: each
+    // mega_moe call is itself a NVLink collective on buf B and provides its
+    // own intra-kernel barrier between peers.
+    //
+    // See glm5_pd_sep_mtp_nvlink_barrier_crash_debug.md §12 for the
+    // empirical trace and earlier Method 6.1 (DP AllReduce) attempt.
+    const bool use_sp_prefill_cuda_graph = sp_prefill_draft_model_ != nullptr;
+    const bool any_fake_in_dp            = model_input.is_fake_stream;  // diagnostic only
     RTP_LLM_PROFILE_SCOPE_DYNAMIC(
-        "executor.mtp.decode_step(draft_model_forward,use_sp=%d,sp_cg=%d,sp_prefill_cg=%d,is_fake=%d)",
+        "executor.mtp.decode_step(draft_model_forward,use_sp=%d,sp_cg=%d,sp_prefill_cg=%d,is_fake=%d,any_fake_dp=%d)",
         static_cast<int>(use_sp_prefill_cuda_graph),
         static_cast<int>(sp_prefill_draft_model_ ? sp_prefill_draft_model_->cudaGraphEnabled() : false),
         static_cast<int>(sp_prefill_draft_model_ ? sp_prefill_draft_model_->prefillCudaGraphMode() : false),
-        static_cast<int>(model_input.is_fake_stream));
+        static_cast<int>(model_input.is_fake_stream),
+        static_cast<int>(any_fake_in_dp));
     maybePrintModelInput(model_input, "decode post draft model");
     ensureModelInputsOnCuda(model_input, "decode.draft_prefill_forward");
     logMtpDecodeModelInput("draft_prefill_forward_input", model_input);
@@ -2056,19 +2077,13 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     if (draft_prefill_choice_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
         RTP_LLM_LOG_INFO(
             "[MTP decode] draft prefill model choice use_sp_prefill=%d sp_exists=%d sp_cg=%d "
-            "sp_prefill_cg=%d is_fake_stream=%d",
+            "sp_prefill_cg=%d is_fake_stream=%d any_fake_in_dp=%d",
             static_cast<int>(use_sp_prefill_cuda_graph),
             static_cast<int>(sp_prefill_draft_model_ != nullptr),
             static_cast<int>(sp_prefill_draft_model_ ? sp_prefill_draft_model_->cudaGraphEnabled() : false),
             static_cast<int>(sp_prefill_draft_model_ ? sp_prefill_draft_model_->prefillCudaGraphMode() : false),
-            static_cast<int>(model_input.is_fake_stream));
-    }
-    if (sp_prefill_draft_model_ && model_input.is_fake_stream) {
-        static std::atomic<int> fake_prefill_log_budget{4};
-        if (fake_prefill_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-            RTP_LLM_LOG_INFO("[MTP decode] fake stream draft prefill uses eager draft model; real streams still use "
-                             "sp_prefill CUDA graph");
-        }
+            static_cast<int>(model_input.is_fake_stream),
+            static_cast<int>(any_fake_in_dp));
     }
     if (use_sp_prefill_cuda_graph) {
         draft_prefill_model_output = sp_prefill_draft_model_->forward(model_input);
