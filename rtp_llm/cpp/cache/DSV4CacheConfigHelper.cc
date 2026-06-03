@@ -116,8 +116,8 @@ uint32_t maybeAdjustFixedEntriesForCpSharding(uint32_t                 entries,
         return entries;
     }
 
-    // CP-aligned fixed/SWA entries are the real ring capacity, not dead padding.
-    // Prefill stores one CP slice of that ring; decode stores the complete ring.
+    // CP-aligned entries are the real ring capacity, not dead padding. Prefill
+    // stores one CP slice of that ring; decode stores the complete ring.
     const auto ring_capacity_entries = alignUpToMultiple(entries, cp_size);
     const bool prefill_sliced        = isPrefillCpSliced(parallelism_config);
     const auto entries_per_block     = prefill_sliced ? ring_capacity_entries / cp_size : ring_capacity_entries;

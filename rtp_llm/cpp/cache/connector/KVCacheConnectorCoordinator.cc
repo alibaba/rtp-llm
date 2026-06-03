@@ -54,7 +54,7 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
                         cache_config.kernelBlocksPerKvBlock(),
                         group_types,
                         cache_config.layer_region_to_group_id);
-    selected.cacheKeys()        = selected_keys;
+    selected.setCacheKeys(selected_keys);
     const bool selected_aligned = selectedLastRankKeysAreAligned(source, cp_size);
     selected.setLastBlockAligned(selected_aligned);
 
@@ -65,6 +65,7 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
     // contract discards the dummy, not the usable selected key.
     if (!source.lastBlockAligned() && selected_aligned && !source.cacheKeys().empty()) {
         selected.cacheKeys().push_back(source.cacheKeys().back());
+        selected.rebuildLinearBlockDependencies();
         selected.setLastBlockAligned(false);
     }
 
@@ -202,15 +203,17 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
     CacheKeysType   ref_keys     = kvcache_resource.cacheKeys();
     KVCacheResource ref_resource = kvcache_resource;
     if (cp_size > 1) {
-        ref_keys = kvcache_resource.localCacheKeys(cp_size - 1, cp_size);
-        // Short requests (< cp_size logical blocks) have no complete virtual
-        // block, so the canonical last-rank-key namespace is empty by design.
-        // Skip silently — connector activity for these is a no-op anyway.
-        if (ref_keys.empty()) {
-            return nullptr;
+        if (!kvcache_resource.cacheKeysAreCpCanonical()) {
+            ref_keys = kvcache_resource.localCacheKeys(cp_size - 1, cp_size);
+            // Short requests (< cp_size logical blocks) have no complete virtual
+            // block, so the canonical last-rank-key namespace is empty by design.
+            // Skip silently — connector activity for these is a no-op anyway.
+            if (ref_keys.empty()) {
+                return nullptr;
+            }
+            ref_resource = makeCpShardedConnectorResource(kvcache_resource, cache_config_, ref_keys, cp_size);
+            ref_keys     = ref_resource.cacheKeys();
         }
-        ref_resource = makeCpShardedConnectorResource(kvcache_resource, cache_config_, ref_keys, cp_size);
-        ref_keys     = ref_resource.cacheKeys();
     }
     auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
     if (!resource) {
@@ -254,12 +257,14 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
     CacheKeysType   ref_keys     = kvcache_resource.cacheKeys();
     KVCacheResource ref_resource = kvcache_resource;
     if (cp_size > 1) {
-        ref_keys = kvcache_resource.localCacheKeys(cp_size - 1, cp_size);
-        if (ref_keys.empty()) {
-            return nullptr;  // request shorter than one virtual block — nothing to write
+        if (!kvcache_resource.cacheKeysAreCpCanonical()) {
+            ref_keys = kvcache_resource.localCacheKeys(cp_size - 1, cp_size);
+            if (ref_keys.empty()) {
+                return nullptr;  // request shorter than one virtual block — nothing to write
+            }
+            ref_resource = makeCpShardedConnectorResource(kvcache_resource, cache_config_, ref_keys, cp_size);
+            ref_keys     = ref_resource.cacheKeys();
         }
-        ref_resource = makeCpShardedConnectorResource(kvcache_resource, cache_config_, ref_keys, cp_size);
-        ref_keys     = ref_resource.cacheKeys();
     }
     auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
     if (!resource) {

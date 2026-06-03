@@ -10,6 +10,7 @@
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
@@ -127,18 +128,18 @@ bool HybridPoolKVCacheAllocator::doInit() {
         auto        spec = config_.cache_specs[static_cast<size_t>(gid)];
 
         KVCacheGroupPtr group;
-        if (group_type == CacheGroupType::LINEAR) {
-            group =
-                std::make_shared<LinearKVCacheGroup>(ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw);
-            linear_group_ids_.push_back(gid);
-        } else if (group_type == CacheGroupType::SWA) {
-            group =
-                std::make_shared<SWAKVCacheGroup>(ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw);
-            swa_group_ids_.push_back(gid);
-        } else {
-            group = std::make_shared<FullKVCacheGroup>(ids, spec, group_pool, gid, shared_cache_raw);
-            full_group_ids_.push_back(gid);
-        }
+	        if (group_type == CacheGroupType::LINEAR) {
+	            group = std::make_shared<LinearKVCacheGroup>(
+	                ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw, metrics_reporter_);
+	            linear_group_ids_.push_back(gid);
+	        } else if (group_type == CacheGroupType::SWA) {
+	            group = std::make_shared<SWAKVCacheGroup>(
+	                ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw, metrics_reporter_);
+	            swa_group_ids_.push_back(gid);
+	        } else {
+	            group = std::make_shared<FullKVCacheGroup>(ids, spec, group_pool, gid, shared_cache_raw, metrics_reporter_);
+	            full_group_ids_.push_back(gid);
+	        }
 
         RTP_LLM_CHECK_WITH_INFO(group->init(), "Failed to initialize KVCacheGroup gid %d", gid);
         group_block_pools_.push_back(group_pool);
@@ -407,6 +408,17 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
     if (evict_result.evicted_keys.empty()) {
         return nullptr;
     }
+    if (metrics_reporter_) {
+        for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
+            RtpLLMCacheEvictionMetricsCollector collector;
+            collector.lifetime_ms = lifetime_ms;
+            kmonitor::MetricsTags tags("scope", "gpu");
+            tags.AddTag("kind", evict_result.evicted_state_only_group.count(cache_key) ? "state_swa_kv" : "chain");
+            tags.AddTag("backing", "device");
+            metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
+                                                                                                       &collector);
+        }
+    }
 
     auto batch_resource = std::make_shared<BatchKVCacheResource>();
     batch_resource->resetBatchSize(1);
@@ -422,16 +434,38 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
         batch_resource->mutableBlockIds(0, gid).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
     }
 
+    CacheKeysType         evicted_keys;
+    BlockDependenciesType evicted_dependencies;
+    evicted_keys.reserve(evict_result.evicted_keys.size());
+    evicted_dependencies.reserve(evict_result.evicted_keys.size());
     for (size_t evicted_idx = 0; evicted_idx < evict_result.evicted_keys.size(); ++evicted_idx) {
         const auto  cache_key = evict_result.evicted_keys[evicted_idx];
         const auto& slots     = evict_result.evicted_slots.at(cache_key);
-        batch_resource->pushBackCacheKey(0, cache_key);
+        evicted_keys.push_back(cache_key);
+        auto dep_it = evict_result.evicted_dependencies.find(cache_key);
+        if (dep_it != evict_result.evicted_dependencies.end()) {
+            evicted_dependencies.push_back(dep_it->second);
+        } else {
+            BlockDependency dependency;
+            dependency.ordinal = static_cast<uint32_t>(evicted_idx);
+            if (evicted_idx > 0) {
+                dependency.has_parent = true;
+                dependency.parent_key = evict_result.evicted_keys[evicted_idx - 1];
+            }
+            evicted_dependencies.push_back(dependency);
+        }
         for (int gid = 0; gid < static_cast<int>(slots.size()) && gid < config_.groupNums(); ++gid) {
             if (!isNullBlockIdx(slots[gid])) {
                 batch_resource->mutableBlockIds(0, gid).setAt(evicted_idx, slots[gid]);
             }
         }
     }
+    batch_resource->cacheResource(0).setCacheKeys(std::move(evicted_keys));
+    batch_resource->cacheResource(0).setBlockDependencies(std::move(evicted_dependencies));
+    // Evicted keys already come from the GPU cache's actual key namespace.
+    // Under CP this can be a mixed batch of canonical paged keys and logical
+    // state/SWA keys, so coordinator must not remap the whole batch again.
+    batch_resource->cacheResource(0).setCacheKeysAreCpCanonical(true);
     return batch_resource;
 }
 
