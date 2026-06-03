@@ -1076,21 +1076,45 @@ def build_finish_reason_done_response(
     return stream_resp
 
 
+def build_error_response(
+    request_id: str,
+    message: str,
+    *,
+    status_code: int,
+    status_name: str,
+) -> predict_v2_pb2.ModelStreamInferResponse:
+    """Build a structured error for DashLLM and turbo clients."""
+    error_payload = {
+        "service_id": "",
+        "status_code": status_code,
+        "status_name": status_name,
+        "status_message": message,
+    }
+    dashscope_frame = {
+        "header": {
+            "status_code": status_code,
+            "status_name": status_name,
+            "status_message": message,
+            "finished": True,
+            "request_id": request_id,
+        },
+        "payload": {},
+    }
+
+    resp = predict_v2_pb2.ModelStreamInferResponse()
+    resp.error_message = json.dumps(error_payload)
+    resp.infer_response.parameters["__messages__"].string_param = json.dumps(
+        dashscope_frame
+    )
+    return resp
+
+
 def build_parameter_error_response(
     request_id: str, message: str, *, status_code: int = 400
 ) -> predict_v2_pb2.ModelStreamInferResponse:
-    """Build a DashLLM-protocol error via ``__messages__`` (gateway reads status_code from here)."""
-    resp = predict_v2_pb2.ModelStreamInferResponse()
-    resp.infer_response.parameters["__messages__"].string_param = json.dumps(
-        {
-            "header": {
-                "status_code": status_code,
-                "status_name": "InvalidParameter",
-                "status_message": message,
-                "finished": True,
-                "request_id": request_id,
-            },
-            "payload": {},
-        }
+    return build_error_response(
+        request_id,
+        message,
+        status_code=status_code,
+        status_name="InvalidParameter",
     )
-    return resp
