@@ -70,6 +70,8 @@ void invokePrepareSparseMlaTargetVerifyParams(const int32_t* input_lengths,
                                               int32_t        batch_size,
                                               int32_t        max_blocks_per_batch,
                                               int32_t        seq_size_per_block,
+                                              int32_t        captured_batch_capacity,
+                                              int32_t        captured_total_tokens,
                                               cudaStream_t   stream);
 
 }  // namespace rtp_llm
