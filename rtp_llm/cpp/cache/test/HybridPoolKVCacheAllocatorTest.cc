@@ -196,6 +196,12 @@ static BatchKVCacheResourcePtr makeBatchResource(int batch_size, const CacheConf
     return res;
 }
 
+static size_t validBlockCount(const BlockIndicesType& blocks) {
+    return static_cast<size_t>(std::count_if(blocks.begin(), blocks.end(), [](BlockIdxType block) {
+        return !isNullBlockIdx(block);
+    }));
+}
+
 // Create HybridPoolKVCacheAllocator with SharedBlockCache injected (required before init()).
 static HybridPoolKVCacheAllocatorPtr makeAllocator(const CacheConfig& config, RoleType role_type = RoleType::PDFUSION) {
     auto allocator =
@@ -931,6 +937,38 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedRegionPoolsOnGpuWhenFixedPoolMem
         EXPECT_EQ(allocator->groupBlockPools()[gid]->where(), MemoryType::MEMORY_GPU)
             << "gid=" << gid << " region=" << static_cast<int>(config.group_region_names[gid]);
     }
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4HCAStateReuseEnabledAllocatesTailOnly) {
+    auto config       = makeDSV4HybridPoolConfig(/*block_num=*/200);
+    config.linear_step = 4;
+    auto allocator    = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    constexpr int hca_state_gid = 5;
+    ASSERT_GT(config.group_region_names.size(), static_cast<size_t>(hca_state_gid));
+    ASSERT_EQ(config.group_region_names[hca_state_gid], KVCacheRegionName::HCA_STATE);
+    ASSERT_GT(allocator->groupBlockPools().size(), static_cast<size_t>(hca_state_gid));
+
+    const size_t hca_free_before = allocator->groupBlockPools()[hca_state_gid]->freeBlocksNum();
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 104, 105, 106, 107, 108, 109});
+    auto token_ids = makeCompleteTokenIds(
+        /*batch_size=*/1, /*seq_length=*/10 * static_cast<int>(config.seq_size_per_block), config.seq_size_per_block);
+
+    MallocInfo malloc_info{batch_res, token_ids};
+    malloc_info.enable_device_cache = false;
+    malloc_info.reuse_cache         = true;
+    auto result                     = allocator->malloc(malloc_info);
+    ASSERT_TRUE(result.success);
+
+    const auto& hca_blocks = batch_res->blocks(0, hca_state_gid);
+    ASSERT_EQ(hca_blocks.size(), 10u);
+    EXPECT_EQ(validBlockCount(hca_blocks), 2u);
+    EXPECT_FALSE(isNullBlockIdx(hca_blocks[8]));
+    EXPECT_FALSE(isNullBlockIdx(hca_blocks[9]));
+    EXPECT_EQ(hca_free_before - allocator->groupBlockPools()[hca_state_gid]->freeBlocksNum(), 2u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumulator) {

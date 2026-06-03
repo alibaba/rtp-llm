@@ -48,6 +48,14 @@ bool SWAKVCacheGroup::shouldCheckSWATailBlockIds() const {
     return true;
 }
 
+bool SWAKVCacheGroup::effectiveReuseCacheForAllocation(bool enable_reuse_cache) const {
+    if (!enable_reuse_cache) {
+        return false;
+    }
+    const auto dsv4_state_spec = std::dynamic_pointer_cast<DSV4StateSpec>(kvcache_spec_);
+    return dsv4_state_spec == nullptr || !skipReuseCacheRegion(dsv4_state_spec->cache_type);
+}
+
 void SWAKVCacheGroup::checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const {
     if (!shouldCheckSWATailBlockIds()) {
         return;
@@ -88,7 +96,8 @@ int SWAKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_
 NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
     (void)common_seq_len;
-    const int step = std::max(1, linear_step_);
+    const int  step                    = std::max(1, linear_step_);
+    const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(reuse_enabled);
 
     NeedBlocksInfo info;
 
@@ -97,7 +106,7 @@ NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
 
     info.common_blocks = 0;
     for (int i = reuse_blocks_len; i < seq_slots; ++i) {
-        if (shouldAllocateBlock(i, seq_slots, /*reserve_step=*/0, step, reuse_enabled)) {
+        if (shouldAllocateBlock(i, seq_slots, /*reserve_step=*/0, step, effective_reuse_enabled)) {
             ++info.extra_blocks;
         }
     }
@@ -126,10 +135,11 @@ MatchResult SWAKVCacheGroup::match(const CacheKeysType& cache_keys) {
 }
 
 bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
-    const int step               = std::max(1, linear_step_);
-    const int current_blocks_len = static_cast<int>(block_ids.blocksNum());
-    const int seq_slots          = needBlocksNum(seq_len, 0, 0);
-    const int new_blocks_len     = needBlocksNum(seq_len, current_blocks_len, reserve_step);
+    const int  step                    = std::max(1, linear_step_);
+    const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(enable_reuse_cache);
+    const int  current_blocks_len      = static_cast<int>(block_ids.blocksNum());
+    const int  seq_slots               = needBlocksNum(seq_len, 0, 0);
+    const int  new_blocks_len          = needBlocksNum(seq_len, current_blocks_len, reserve_step);
 
     if (new_blocks_len == 0) {
         checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::malloc");
@@ -138,7 +148,7 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
 
     int need_alloc_blocks = 0;
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
-        if (shouldAllocateBlock(i, seq_slots, reserve_step, step, enable_reuse_cache)) {
+        if (shouldAllocateBlock(i, seq_slots, reserve_step, step, effective_reuse_enabled)) {
             need_alloc_blocks++;
         }
     }
@@ -170,7 +180,7 @@ bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse
     new_ids.reserve(static_cast<size_t>(new_blocks_len));
     size_t allocated_idx = 0;
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
-        const bool should_alloc = shouldAllocateBlock(i, seq_slots, reserve_step, step, enable_reuse_cache);
+        const bool should_alloc = shouldAllocateBlock(i, seq_slots, reserve_step, step, effective_reuse_enabled);
         if (should_alloc) {
             new_ids.push_back(allocated_blocks[allocated_idx++]);
         } else {
@@ -192,8 +202,9 @@ void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
         checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
         return;
     }
-    const int step       = std::max(1, linear_step_);
-    const int block_size = static_cast<int>(block_indices.size());
+    const int  step                    = std::max(1, linear_step_);
+    const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(enable_reuse_cache);
+    const int  block_size              = static_cast<int>(block_indices.size());
 
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
@@ -201,7 +212,7 @@ void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
         if (isNullBlockIdx(block_indices[i])) {
             break;
         }
-        if (enable_reuse_cache && ((i + 1) % step) == 0) {
+        if (effective_reuse_enabled && ((i + 1) % step) == 0) {
             continue;
         }
         blocks_to_free.push_back(block_indices[i]);
