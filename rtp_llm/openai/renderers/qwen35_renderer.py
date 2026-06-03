@@ -1,18 +1,26 @@
 import json
-from typing import List, Optional
+from typing import Any
 
-from typing_extensions import override
-
-from rtp_llm.openai.api_datatype import ChatCompletionRequest, ContentPartTypeEnum
+from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.basic_renderer import PromptWithMMInput
 from rtp_llm.openai.renderers.custom_renderer import RenderedInputs
-from rtp_llm.openai.renderers.llava_renderer import get_preprocess_config
 from rtp_llm.openai.renderers.qwen3_code_renderer import Qwen3CoderRenderer
 from rtp_llm.openai.renderers.qwen_vl_renderer import Qwen2VLRenderer
 
 
 class Qwen35Renderer(Qwen3CoderRenderer, Qwen2VLRenderer):
+    def _format_tool_call_arguments(self, arguments: Any) -> Any:
+        if isinstance(arguments, dict):
+            return arguments
+        if not isinstance(arguments, str):
+            return {}
+        try:
+            parsed_arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            return {}
+        return parsed_arguments if isinstance(parsed_arguments, dict) else {}
+
     def _render_messages(
         self, request: ChatCompletionRequest, add_vision_id: bool
     ) -> PromptWithMMInput:

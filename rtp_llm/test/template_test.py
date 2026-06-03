@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Any, List
 from unittest import TestCase, main
 
+from jinja2 import Environment
 from transformers import AutoTokenizer
 from typing_extensions import override
 
@@ -23,9 +24,33 @@ from rtp_llm.openai.api_datatype import (
     RoleEnum,
 )
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
+from rtp_llm.openai.renderers.qwen35_renderer import Qwen35Renderer
 from rtp_llm.openai.renderers.qwen_agent_renderer import QwenAgentRenderer
 from rtp_llm.openai.renderers.qwen_agent_tool_renderer import QwenAgentToolRenderer
 from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
+
+
+class _Qwen35ItemsTemplateTokenizer:
+    path = ""
+    chat_template = """
+{%- for message in messages -%}
+{%- for tool_call in message.tool_calls or [] -%}
+{%- for key, value in tool_call.function.arguments|items -%}
+{{ tool_call.function.name }}:{{ key }}={{ value }}
+{%- endfor -%}
+{%- endfor -%}
+{%- endfor -%}
+"""
+
+    def apply_chat_template(self, messages, **kwargs):
+        template = Environment().from_string(self.chat_template)
+        return template.render(messages=messages, **kwargs)
+
+    def encode(self, prompt):
+        return list(range(len(prompt)))
+
+    def decode(self, token_ids):
+        return ""
 
 
 class BaseRendererTestMixin(ABC):
@@ -243,6 +268,47 @@ class TemplateTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.test_data_path = os.path.join(os.getcwd(), "rtp_llm/test")
+
+    def test_qwen35_parses_tool_call_arguments_for_items_filter(self):
+        tokenizer = _Qwen35ItemsTemplateTokenizer()
+        renderer = Qwen35Renderer(
+            tokenizer,
+            RendererParams(
+                model_type="qwen35_dense",
+                max_seq_len=1024,
+                eos_token_id=0,
+                stop_word_ids_list=[],
+            ),
+            GenerateEnvConfig(),
+            RenderConfig(),
+        )
+        request = ChatCompletionRequest(
+            messages=[
+                ChatMessage(role=RoleEnum.user, content="What's the weather?"),
+                ChatMessage(
+                    **{
+                        "role": RoleEnum.assistant,
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_current_temperature",
+                                    "arguments": '{"location": "San Francisco, CA, USA"}',
+                                },
+                            }
+                        ],
+                    }
+                ),
+            ],
+        )
+
+        rendered_prompt = renderer.render_chat(request).rendered_prompt
+
+        assert (
+            rendered_prompt == "get_current_temperature:location=San Francisco, CA, USA"
+        )
 
     def test_qwen_agent(self):
         tokenizer = QWenTokenizer(
