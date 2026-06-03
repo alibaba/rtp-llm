@@ -2,7 +2,7 @@ import argparse
 import json
 import logging
 
-DEFAULT_GRPC_MAX_SERVER_POLLERS = 4
+DEFAULT_GRPC_MAX_SERVER_POLLERS = 16
 DEFAULT_DASH_SC_GRPC_MAX_SERVER_WORKERS = 4
 
 # Model RPC: receive / metadata limits (C++ GenerateStreamCall path).
@@ -77,7 +77,7 @@ def init_model_grpc_group_args(parser, grpc_config):
         help=(
             "Model RPC gRPC JSON: "
             '{"client_config": {...}, "server_config": {...}, '
-            '"max_server_pollers": <int, default 4>}. '
+            '"max_server_pollers": <int, default 16>}. '
             "max_server_pollers>0 sets C++ sync server SetSyncServerOption(MAX_POLLERS, value) "
             "(per completion queue)."
         ),

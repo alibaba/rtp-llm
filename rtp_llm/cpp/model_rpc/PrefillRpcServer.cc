@@ -22,6 +22,7 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <future>
 #include <thread>
 #include <unordered_set>
 #include <utility>
@@ -1312,6 +1313,8 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
     auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms;
 
     try {
+
+    // ---- Phase A: Setup all PrefillGenerateContexts (serial, fast) ----
     for (auto& slot : local_slots) {
         if (abort_if_context_cancelled(slot.index, slot.request_id, local_slots)) {
             return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
@@ -1351,8 +1354,13 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
             return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
         }
+    }
 
-        bool alloc_ok = false;
+    // ---- Phase B: Parallel prepareAllocateResource ----
+    // Each slot's allocate is independent (own PrefillGenerateContext, own gRPC client stream).
+    // Running them in parallel reduces total blocking time from N*T to max(T).
+    auto allocate_one_slot = [this, context, max_retry_times, max_retry_timeout_ms](LocalSlot& slot) {
+        auto& pfx_ctx = slot.prefill_context;
         try {
             int64_t begin_time_us = currentTimeUs();
             auto    stage         = pfx_ctx->stat_info.saveStage();
@@ -1360,8 +1368,8 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                 if (context && context->IsCancelled()) {
                     break;
                 }
-                if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
-                    return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
+                if (slot.entry->cancelled.load()) {
+                    break;
                 }
                 pfx_ctx->reset();
                 pfx_ctx->stat_info.restoreStage(stage);
@@ -1370,12 +1378,11 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                 if (context && context->IsCancelled()) {
                     break;
                 }
-                if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
-                    return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
+                if (slot.entry->cancelled.load()) {
+                    break;
                 }
                 if (pfx_ctx->ok()) {
-                    alloc_ok = true;
-                    break;
+                    return;
                 }
                 auto cost_time_us           = currentTimeUs() - begin_time_us;
                 pfx_ctx->retry_cost_time_ms = cost_time_us / 1000;
@@ -1385,38 +1392,60 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                 usleep(1000);
             }
         } catch (const std::exception& e) {
-            setBatchAckError(response->mutable_acks(slot.index),
-                             slot.request_id,
-                             grpc::StatusCode::INTERNAL,
-                             "prepareAllocateResource exception: " + std::string(e.what()));
-            abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
-            return grpc::Status::OK;
+            pfx_ctx->error_info   = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                                              "prepareAllocateResource exception: " + std::string(e.what()));
+            pfx_ctx->error_status = grpc::Status(grpc::StatusCode::INTERNAL,
+                                                 "prepareAllocateResource exception: " + std::string(e.what()));
         } catch (...) {
-            setBatchAckError(response->mutable_acks(slot.index),
-                             slot.request_id,
-                             grpc::StatusCode::INTERNAL,
-                             "prepareAllocateResource unknown exception");
-            abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
-            return grpc::Status::OK;
+            pfx_ctx->error_info   = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                                              "prepareAllocateResource unknown exception");
+            pfx_ctx->error_status = grpc::Status(grpc::StatusCode::INTERNAL,
+                                                 "prepareAllocateResource unknown exception");
         }
+    };
 
-        refreshAsyncProducerCancelState(slot.cancel_state, pfx_ctx->client_context, pfx_ctx->getStream());
-        if (abort_if_context_cancelled(slot.index, slot.request_id, local_slots)) {
-            return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
+    if (local_slots.size() <= 1) {
+        for (auto& slot : local_slots) {
+            allocate_one_slot(slot);
         }
+    } else {
+        std::vector<std::future<void>> alloc_futures;
+        alloc_futures.reserve(local_slots.size());
+        for (auto& slot : local_slots) {
+            alloc_futures.push_back(std::async(std::launch::async, [&allocate_one_slot, &slot]() {
+                allocate_one_slot(slot);
+            }));
+        }
+        for (auto& f : alloc_futures) {
+            f.get();
+        }
+    }
+
+    // ---- Phase B check: collect results ----
+    if (context && context->IsCancelled()) {
+        abort_batch(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller", local_slots);
+        return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
+    }
+    for (auto& slot : local_slots) {
+        refreshAsyncProducerCancelState(slot.cancel_state,
+                                        slot.prefill_context->client_context,
+                                        slot.prefill_context->getStream());
         if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
             return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
         }
-
-        if (!alloc_ok) {
+        if (!slot.prefill_context->ok()) {
             setBatchAckError(response->mutable_acks(slot.index),
                              slot.request_id,
                              grpc::StatusCode::INTERNAL,
-                             pfx_ctx->error_info.ToString());
+                             slot.prefill_context->error_info.ToString());
             abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
             return grpc::Status::OK;
         }
+    }
 
+    // ---- Phase C: Serial enqueue into engine ----
+    for (auto& slot : local_slots) {
+        auto& pfx_ctx = slot.prefill_context;
         pfx_ctx->stat_info.nextStage();
         enqueueRequest(*pfx_ctx);
         refreshAsyncProducerCancelState(slot.cancel_state, pfx_ctx->client_context, pfx_ctx->getStream());
