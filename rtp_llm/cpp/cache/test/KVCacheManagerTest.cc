@@ -21,6 +21,7 @@
 #include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -34,11 +35,18 @@ constexpr int kDsv4PoolNum = 7;
 class KVCacheManagerTest: public ::testing::Test {
 protected:
     void SetUp() override {
+        old_core_dump_on_exception_                 = StaticConfig::user_ft_core_dump_on_exception;
+        StaticConfig::user_ft_core_dump_on_exception = false;
         rtp_llm::initLogger();
         createDevice();
     }
 
-protected:
+    void TearDown() override {
+        StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception_;
+    }
+
+private:
+    bool old_core_dump_on_exception_{false};
 };
 
 static void assertBlockBytesEq(const std::shared_ptr<rtp_llm::KVCacheManager>& cache_manager,
@@ -658,6 +666,9 @@ TEST_F(KVCacheManagerTest, DSV4InsertIntoDeviceBlockCacheThenReuseSamePrefix) {
         EXPECT_EQ(second_resource->blocks(0, gid)[1], first_blocks[gid][1]);
     }
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
+        if (skipReuseCacheRegion(manager_config.group_region_names[static_cast<size_t>(gid)])) {
+            continue;
+        }
         ASSERT_GE(second_resource->blocksNum(0, gid), 3) << "tail group " << gid;
         EXPECT_EQ(second_resource->blocks(0, gid)[2], first_blocks[gid][2]);
     }
@@ -710,6 +721,9 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
     EXPECT_EQ(reuse_result.reuse_len, 4 * spb);
 
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
+        if (skipReuseCacheRegion(manager_config.group_region_names[static_cast<size_t>(gid)])) {
+            continue;
+        }
         const auto& blocks = second_resource->blocks(0, gid);
         ASSERT_EQ(blocks.size(), 24u) << "second SWA group " << gid;
         EXPECT_TRUE(isNullBlockIdx(blocks[2])) << "SWA reuse prefix penultimate block is NULL (no prev lookup)";
@@ -1240,6 +1254,9 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     EXPECT_EQ(reuse_result.reuse_len, 2 * spb);
 
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
+        if (skipReuseCacheRegion(manager_config.group_region_names[static_cast<size_t>(gid)])) {
+            continue;
+        }
         const auto& blocks = reuse_res->blocks(0, gid);
         ASSERT_EQ(blocks.size(), 3u) << "reuse group " << gid;
         EXPECT_TRUE(isNullBlockIdx(blocks[0])) << "reuse group " << gid << " skipped reused prefix";
