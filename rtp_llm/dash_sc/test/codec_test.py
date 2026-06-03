@@ -244,17 +244,17 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(sp.max_new_tokens, 32000)
         self.assertFalse(sp.max_new_tokens_from_completion_alias)
 
-    def test_parse_sampling_max_completion_tokens_non_positive_uses_default_repro(
+    def test_parse_sampling_max_completion_tokens_non_positive_preserves_error_repro(
         self,
     ) -> None:
-        """DashScope/OpenAI compat treats non-positive max_completion_tokens as unset."""
+        """Non-positive max_completion_tokens must be rejected before enqueue."""
         for value in (-1, 0):
             with self.subTest(value=value):
                 req = predict_v2_pb2.ModelInferRequest()
                 req.parameters["max_completion_tokens"].int64_param = value
                 sp = parse_sampling_params(req)
-                self.assertEqual(sp.max_new_tokens, 32000)
-                self.assertFalse(sp.max_new_tokens_from_completion_alias)
+                self.assertEqual(sp.max_new_tokens, value)
+                self.assertTrue(sp.max_new_tokens_from_completion_alias)
 
     def test_parse_sampling_max_completion_tokens_non_positive_blocks_legacy_aliases(
         self,
@@ -279,8 +279,8 @@ class DashScGrpcRequestTest(TestCase):
 
                 sp = parse_sampling_params(req)
 
-                self.assertEqual(sp.max_new_tokens, 32000)
-                self.assertFalse(sp.max_new_tokens_from_completion_alias)
+                self.assertEqual(sp.max_new_tokens, value)
+                self.assertTrue(sp.max_new_tokens_from_completion_alias)
 
     def test_completion_alias_thinking_budget_keeps_backend_limit(
         self,
