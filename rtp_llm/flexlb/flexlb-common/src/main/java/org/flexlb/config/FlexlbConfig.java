@@ -230,6 +230,33 @@ public class FlexlbConfig {
     private double costAlpha4 = 0.3;
     private double costAlpha5 = 0;
 
+    /**
+     * Comma-separated shorthand for the 6 predictor coefficients.
+     * Accepts 3 values (α₀,α₁,α₂) or 6 values (α₀–α₅).
+     * Overrides the individual costAlpha* fields when set.
+     * Example: "290,0.0116,1.21e-8" or "290,0.0116,1.21e-8,1.21e-8,0,0"
+     */
+    public void setPrefillCoefficients(String csv) {
+        if (csv == null || csv.isBlank()) {
+            return;
+        }
+        String[] parts = csv.split(",");
+        if (parts.length >= 3) {
+            costAlpha0 = Double.parseDouble(parts[0].trim());
+            costAlpha1 = Double.parseDouble(parts[1].trim());
+            costAlpha2 = Double.parseDouble(parts[2].trim());
+        }
+        if (parts.length >= 6) {
+            costAlpha3 = Double.parseDouble(parts[3].trim());
+            costAlpha4 = Double.parseDouble(parts[4].trim());
+            costAlpha5 = Double.parseDouble(parts[5].trim());
+        } else if (parts.length >= 3) {
+            costAlpha3 = 0;
+            costAlpha4 = 0;
+            costAlpha5 = 0;
+        }
+    }
+
     // ========== SLO-Budget Batcher Configuration ==========
 
     private double flexlbBatchFillThreshold = 0.5;

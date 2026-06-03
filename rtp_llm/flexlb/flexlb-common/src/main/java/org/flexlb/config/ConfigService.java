@@ -19,6 +19,7 @@ import java.util.Map;
 public class ConfigService {
 
     private static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
+    private static final String PREFILL_COEFFICIENTS_ENV = "PREFILL_COEFFICIENTS";
     private static final String TRAFFIC_POLICY_CONFIG_ENV = "TRAFFIC_POLICY_CONFIG";
     private static final String TRAFFIC_POLICY_CONFIG_FILE_ENV = "TRAFFIC_POLICY_CONFIG_FILE";
 
@@ -41,6 +42,7 @@ public class ConfigService {
         // If corresponding advanced environment variables exist, override and update
         applyEnvironmentOverrides(config, environment);
         applyTrafficPolicyOverride(config, environment);
+        applyPrefillCoefficientsOverride(config, environment);
 
         this.flexlbConfig = config;
     }
@@ -116,6 +118,15 @@ public class ConfigService {
         TrafficPolicyConfig trafficPolicy = JsonUtils.toObject(trafficPolicyConfig, TrafficPolicyConfig.class);
         config.setTrafficPolicy(trafficPolicy);
         log.warn("Traffic policy loaded from standalone config: {}", JsonUtils.toStringOrEmpty(trafficPolicy));
+    }
+
+    private void applyPrefillCoefficientsOverride(FlexlbConfig config, Map<String, String> environment) {
+        String csv = environment.get(PREFILL_COEFFICIENTS_ENV);
+        if (StringUtils.isBlank(csv)) {
+            return;
+        }
+        config.setPrefillCoefficients(csv);
+        log.warn("Prefill coefficients loaded from {}: {}", PREFILL_COEFFICIENTS_ENV, csv);
     }
 
     private String readConfigFile(String filePath) {
