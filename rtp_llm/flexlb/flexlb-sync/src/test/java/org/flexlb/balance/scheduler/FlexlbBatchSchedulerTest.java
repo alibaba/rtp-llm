@@ -163,6 +163,44 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
+    void submit_rejects_when_global_inflight_limit_reached() throws Exception {
+        config.setFlexlbBatchSizeMax(1);
+        config.setFlexlbBatchMaxInflight(1);
+
+        CountDownLatch batchBlocked = new CountDownLatch(1);
+        CountDownLatch releaseBlock = new CountDownLatch(1);
+        when(grpcClient.batchEnqueue(anyString(), anyInt(), any(EngineRpcService.BatchEnqueueRequestPB.class), anyLong()))
+                .thenAnswer(inv -> {
+                    batchBlocked.countDown();
+                    assertTrue(releaseBlock.await(5, TimeUnit.SECONDS));
+                    EngineRpcService.BatchEnqueueRequestPB request = inv.getArgument(2);
+                    return ackFor(request);
+                });
+
+        scheduler.submit(context(41));
+        assertTrue(batchBlocked.await(2, TimeUnit.SECONDS));
+
+        Response rejected = scheduler.submit(context(42)).get(1, TimeUnit.SECONDS);
+        assertFalse(rejected.isSuccess());
+        assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), rejected.getCode());
+
+        releaseBlock.countDown();
+    }
+
+    @Test
+    void batcher_rejects_when_queue_full() throws Exception {
+        config.setFlexlbBatchQueueMaxSize(1);
+        config.setFlexlbBatchFillThreshold(1.0);
+
+        CompletableFuture<Response> first = scheduler.submit(context(51));
+        assertFalse(first.isDone());
+
+        Response rejected = scheduler.submit(context(52)).get(1, TimeUnit.SECONDS);
+        assertFalse(rejected.isSuccess());
+        assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), rejected.getCode());
+    }
+
+    @Test
     void mismatched_generate_input_request_id_fails_before_batch_enqueue() {
         config.setFlexlbBatchSizeMax(1);
 

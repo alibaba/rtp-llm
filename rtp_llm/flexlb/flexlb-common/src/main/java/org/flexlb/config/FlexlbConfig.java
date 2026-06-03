@@ -233,6 +233,24 @@ public class FlexlbConfig {
     private int flexlbBatchScanAhead = 64;
 
     /**
+     * Maximum queue depth per WorkerBatcher. Requests beyond this limit are
+     * rejected with QUEUE_FULL.
+     */
+    private int flexlbBatchQueueMaxSize = 64;
+
+    /**
+     * Maximum total in-flight requests across all batchers. Acts as a global
+     * admission control gate at the FlexlbBatchScheduler entry.
+     */
+    private int flexlbBatchMaxInflight = 100000;
+
+    // ========== Decode Load Balance Hard Filter Configuration ==========
+
+    private double decodeHotspotMultiplier = 3.0;
+
+    private double decodeImbalanceMultiplier = 3.0;
+
+    /**
      * Get load balancing strategy for a role type
      * This method handles the logic of selecting the appropriate strategy based on role type and configuration
      *

@@ -82,6 +82,12 @@ public class FlexlbBatchScheduler {
                 return future;
             }
 
+            int maxInflight = configService.loadBalanceConfig().getFlexlbBatchMaxInflight();
+            if (maxInflight > 0 && inflight.size() >= maxInflight) {
+                future.complete(Response.error(StrategyErrorType.QUEUE_FULL));
+                return future;
+            }
+
             Response routeResponse = router.route(ctx);
             if (routeResponse == null || !routeResponse.isSuccess()) {
                 future.complete(routeResponse != null ? routeResponse : Response.error(StrategyErrorType.NO_AVAILABLE_WORKER));
@@ -532,6 +538,12 @@ public class FlexlbBatchScheduler {
                 if (stopped) {
                     rollback(item.routeResponse);
                     item.future.completeExceptionally(new IllegalStateException("FlexLB batcher stopped"));
+                    return;
+                }
+                int maxSize = configService.loadBalanceConfig().getFlexlbBatchQueueMaxSize();
+                if (maxSize > 0 && queue.size() >= maxSize) {
+                    rollback(item.routeResponse);
+                    item.future.complete(Response.error(StrategyErrorType.QUEUE_FULL));
                     return;
                 }
                 queue.add(item);

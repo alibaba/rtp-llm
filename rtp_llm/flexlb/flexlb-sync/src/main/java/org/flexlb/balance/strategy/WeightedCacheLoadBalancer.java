@@ -79,8 +79,9 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        // Implement weighted random selection algorithm
-        WorkerStatus selectedWorker = weightedRandomSelection(workerStatusList);
+        List<WorkerStatus> survivors = applyHardFilters(workerStatusList, seqLen, config);
+
+        WorkerStatus selectedWorker = weightedRandomSelection(survivors);
 
         if (selectedWorker != null) {
             long prefixLength = calcPrefixMatchLength(selectedWorker.getCacheStatus(), balanceContext.getRequest().getBlockCacheKeys());
@@ -110,6 +111,48 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         if (workerStatus != null) {
             workerStatus.removeLocalTask(requestId);
         }
+    }
+
+    private List<WorkerStatus> applyHardFilters(List<WorkerStatus> eligible, long seqLen, FlexlbConfig config) {
+        double hotspotMultiplier = config.getDecodeHotspotMultiplier();
+        double imbalanceMultiplier = config.getDecodeImbalanceMultiplier();
+
+        long sumLocalTasks = 0;
+        long sumCacheUsed = 0;
+        for (WorkerStatus w : eligible) {
+            sumLocalTasks += w.getLocalTaskMap().size();
+            sumCacheUsed += w.getUsedKvCacheTokens().get();
+        }
+        long avgLocalTasks = sumLocalTasks / eligible.size();
+        long avgCacheUsed = sumCacheUsed / eligible.size();
+
+        List<WorkerStatus> survivors = new ArrayList<>(eligible.size());
+        for (WorkerStatus w : eligible) {
+            long totalKv = w.getUsedKvCacheTokens().get() + w.getAvailableKvCacheTokens().get();
+            if (totalKv > 0 && w.getAvailableKvCacheTokens().get() < seqLen) {
+                continue;
+            }
+            if (hotspotMultiplier > 0 && avgLocalTasks > 0
+                    && w.getLocalTaskMap().size() > avgLocalTasks * hotspotMultiplier) {
+                continue;
+            }
+            if (imbalanceMultiplier > 0 && avgCacheUsed > 0
+                    && w.getUsedKvCacheTokens().get() > avgCacheUsed * imbalanceMultiplier) {
+                continue;
+            }
+            survivors.add(w);
+        }
+
+        if (survivors.isEmpty()) {
+            WorkerStatus leastUsed = eligible.stream()
+                    .min(Comparator.comparingLong(w -> w.getUsedKvCacheTokens().get()))
+                    .orElse(null);
+            if (leastUsed != null) {
+                survivors.add(leastUsed);
+            }
+        }
+
+        return survivors;
     }
 
     private long calcPrefixMatchLength(CacheStatus cacheStatus, List<Long> promptCacheKeys) {

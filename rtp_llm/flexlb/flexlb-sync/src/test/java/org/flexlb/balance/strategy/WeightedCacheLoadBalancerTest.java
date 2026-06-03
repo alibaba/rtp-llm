@@ -5,9 +5,11 @@ import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -185,9 +187,11 @@ class WeightedCacheLoadBalancerTest {
         // Normalized values are -500 and +500
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
         worker1.getUsedKvCacheTokens().set(500);  // Below average 1000, normalizedValue = -500
+        worker1.getAvailableKvCacheTokens().set(9500);
 
         WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
         worker2.getUsedKvCacheTokens().set(1500); // Above average 1000, normalizedValue = +500
+        worker2.getAvailableKvCacheTokens().set(8500);
 
         decodeMap.put("127.0.0.1:8080", worker1);
         decodeMap.put("127.0.0.2:8080", worker2);
@@ -240,5 +244,125 @@ class WeightedCacheLoadBalancerTest {
 
         log.info("Exponential decay weight distribution verification: worker1={} ({}%), worker2={} ({}%), weight ratio: {}",
                 worker1Count, worker1Ratio * 100, worker2Count, worker2Ratio * 100, "%.2f".formatted(ratio));
+    }
+
+    @Test
+    void should_skip_worker_with_insufficient_kv_cache_capacity() {
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+
+        WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
+        worker1.getUsedKvCacheTokens().set(900);
+        worker1.getAvailableKvCacheTokens().set(100);
+
+        WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
+        worker2.getUsedKvCacheTokens().set(200);
+        worker2.getAvailableKvCacheTokens().set(800);
+
+        decodeMap.put("127.0.0.1:8080", worker1);
+        decodeMap.put("127.0.0.2:8080", worker2);
+
+        Request req = new Request();
+        req.setSeqLen(500);
+        req.setRequestId(2000L);
+
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
+
+        BalanceContext balanceContext = new BalanceContext();
+        balanceContext.setRequest(req);
+        balanceContext.setConfig(configService.loadBalanceConfig());
+
+        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
+
+        Assertions.assertTrue(status.isSuccess());
+        Assertions.assertEquals("127.0.0.2", status.getServerIp());
+    }
+
+    @Test
+    void should_fallback_to_least_used_when_all_workers_filtered() {
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+
+        WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
+        worker1.getUsedKvCacheTokens().set(950);
+        worker1.getAvailableKvCacheTokens().set(50);
+
+        WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
+        worker2.getUsedKvCacheTokens().set(900);
+        worker2.getAvailableKvCacheTokens().set(100);
+
+        decodeMap.put("127.0.0.1:8080", worker1);
+        decodeMap.put("127.0.0.2:8080", worker2);
+
+        Request req = new Request();
+        req.setSeqLen(200);
+        req.setRequestId(3000L);
+
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
+
+        BalanceContext balanceContext = new BalanceContext();
+        balanceContext.setRequest(req);
+        balanceContext.setConfig(configService.loadBalanceConfig());
+
+        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
+
+        Assertions.assertTrue(status.isSuccess());
+        Assertions.assertEquals("127.0.0.2", status.getServerIp());
+    }
+
+    @Test
+    void should_skip_hotspot_worker_with_disproportionate_local_tasks() {
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+
+        WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
+        worker1.getUsedKvCacheTokens().set(500);
+        worker1.getAvailableKvCacheTokens().set(500);
+        for (long i = 1; i <= 10; i++) {
+            TaskInfo task = new TaskInfo();
+            task.setRequestId(i);
+            task.setInputLength(50);
+            worker1.getLocalTaskMap().put(i, task);
+        }
+
+        WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
+        worker2.getUsedKvCacheTokens().set(500);
+        worker2.getAvailableKvCacheTokens().set(500);
+        TaskInfo singleTask = new TaskInfo();
+        singleTask.setRequestId(100L);
+        singleTask.setInputLength(50);
+        worker2.getLocalTaskMap().put(100L, singleTask);
+
+        decodeMap.put("127.0.0.1:8080", worker1);
+        decodeMap.put("127.0.0.2:8080", worker2);
+
+        Request req = new Request();
+        req.setSeqLen(100);
+        req.setRequestId(4000L);
+
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
+
+        FlexlbConfig testConfig = configService.loadBalanceConfig();
+        testConfig.setDecodeHotspotMultiplier(1.5);
+        BalanceContext balanceContext = new BalanceContext();
+        balanceContext.setRequest(req);
+        balanceContext.setConfig(testConfig);
+
+        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
+
+        Assertions.assertTrue(status.isSuccess());
+        Assertions.assertEquals("127.0.0.2", status.getServerIp());
     }
 }
