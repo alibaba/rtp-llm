@@ -1777,6 +1777,41 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             json.loads(generate_config.response_format), {"type": "json_object"}
         )
 
+    async def test_dash_generation_guided_json_with_enable_thinking_sets_response_format(
+        self,
+    ) -> None:
+        schema = {
+            "type": "object",
+            "properties": {"其他实体": {"type": "array", "items": {"type": "string"}}},
+            "required": ["其他实体"],
+        }
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+        req = self._valid_infer_request()
+        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["guided_json"].string_param = json.dumps(
+            [schema], ensure_ascii=False
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertTrue(generate_config.in_think_mode)
+        self.assertEqual(generate_config.end_think_token_ids, [128822, 271])
+        self.assertEqual(
+            json.loads(generate_config.response_format),
+            {"type": "json_schema", "json_schema": {"schema": schema}},
+        )
+        self.assertIsNone(generate_config.json_schema)
+
     async def test_dash_generation_budget_aliases_without_enable_thinking_keep_thinking(
         self,
     ) -> None:
