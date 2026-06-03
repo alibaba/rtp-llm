@@ -149,6 +149,7 @@ class RingWriteMaskTest(unittest.TestCase):
         meta = stub.prepare_metadata(
             positions,
             b_idx,
+            has_prefix=prefix_len > 0,
             is_batched=True,
             seq_start_per_req=torch.tensor(
                 [prefix_len], dtype=torch.int32, device=self.device
@@ -254,6 +255,7 @@ class RingWriteMaskTest(unittest.TestCase):
         meta = stub.prepare_metadata(
             positions,
             b_idx,
+            has_prefix=any(p > 0 for p in prefix_lengths),
             is_batched=True,
             seq_start_per_req=seq_start,
             cu_seq_per_req=cu_seqlens,

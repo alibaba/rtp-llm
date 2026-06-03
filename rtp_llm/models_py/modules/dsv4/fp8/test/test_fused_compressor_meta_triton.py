@@ -105,6 +105,7 @@ def _prepare_python_reference(
         ),
         kv_slots=cmp._compute_kv_slot_mapping(positions, b_idx),
         token_to_req=b_idx.to(torch.int32),
+        has_prefix=any(v > 0 for v in start_pos_values),
         is_batched=q_len > 1,
         seq_start_per_req=seq_start_per_req,
         cu_seq_per_req=cu_seq_per_req,
@@ -151,6 +152,7 @@ def _compare_default_fused_to_python(
     fused = cmp.prepare_metadata(
         positions,
         b_idx,
+        has_prefix=any(v > 0 for v in start_pos_values),
         is_batched=q_len > 1,
         seq_start_per_req=seq_start_per_req,
         cu_seq_per_req=cu_seq_per_req,

@@ -1995,6 +1995,7 @@ class AttentionFP8(nn.Module):
             state_slots=state_slots[:T],
             kv_slots=kv_slots[:T],
             token_to_req=attn_metadata.req_id_per_token[:T],
+            has_prefix=True,
             is_batched=q_len > 1,
             seq_start_per_req=attn_metadata.decode_seq_start_per_req[:bsz],
             cu_seq_per_req=attn_metadata.decode_cu_seq_per_req[: bsz + 1],
@@ -3686,6 +3687,7 @@ class AttentionFP8(nn.Module):
                     position_ids=position_ids,
                     req_id_per_token=req_id_per_token,
                     max_seqlen_q=max_seqlen_q,
+                    has_prefix=any_cont,
                 )
         elif self.compress_ratio == 128:
             with record_function_range("dsv4.fp8.meta.hca"):
@@ -3702,6 +3704,7 @@ class AttentionFP8(nn.Module):
                     position_ids=position_ids,
                     req_id_per_token=req_id_per_token,
                     max_seqlen_q=max_seqlen_q,
+                    has_prefix=any_cont,
                 )
 
         return PrefillMeta(
@@ -3748,6 +3751,7 @@ class AttentionFP8(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
+        has_prefix: bool,
     ) -> CsaPrefillMeta:
         """Build CSA-layer per-call metadata: indexer prepare + main CSA
         compressor prepare_metadata.
@@ -3803,6 +3807,7 @@ class AttentionFP8(nn.Module):
                 position_ids=position_ids,
                 req_id_per_token=req_id_per_token,
                 max_seqlen_q=max_seqlen_q,
+                has_prefix=has_prefix,
             )
         cp_ctx_local = getattr(self, "_cp_ctx", None)
         cp_active = cp_ctx_local is not None and cp_ctx_local.cp_size > 1
@@ -3823,6 +3828,7 @@ class AttentionFP8(nn.Module):
                 compressor_meta = self.compressor.prepare_metadata(
                     cp_positions,
                     cp_b_idx,
+                    has_prefix=has_prefix,
                     is_batched=True,
                     seq_start_per_req=cp_seq_start_per_req,
                     cu_seq_per_req=cp_cu_seq_per_req,
@@ -3834,6 +3840,7 @@ class AttentionFP8(nn.Module):
             with record_function_range("dsv4.fp8.meta.csa.compressor_prepare"):
                 cmp_args = build_prepare_metadata_args(
                     use_varlen=use_varlen,
+                    has_prefix=has_prefix,
                     device=device,
                     sp_int=sp_int,
                     seqlen=seqlen,
@@ -3883,6 +3890,7 @@ class AttentionFP8(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
+        has_prefix: bool,
     ) -> HcaPrefillMeta:
         """Build HCA-layer per-call metadata: main HCA compressor
         prepare_metadata."""
@@ -3904,6 +3912,7 @@ class AttentionFP8(nn.Module):
                     compressor_meta = self.compressor.prepare_metadata(
                         cp_positions,
                         cp_b_idx,
+                        has_prefix=has_prefix,
                         is_batched=True,
                         seq_start_per_req=cp_seq_start_per_req,
                         cu_seq_per_req=cp_cu_seq_per_req,
@@ -3925,6 +3934,7 @@ class AttentionFP8(nn.Module):
                     position_ids=position_ids,
                     req_id_per_token=req_id_per_token,
                     max_seqlen_q=max_seqlen_q,
+                    has_prefix=has_prefix,
                 )
         with record_function_range("dsv4.fp8.meta.hca.workspace"):
             workspace_meta = self._build_workspace_meta(
@@ -4347,6 +4357,7 @@ class AttentionFP8(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
+        has_prefix: bool,
     ):
         """Run the main compressor's ``prepare_metadata`` with its pool
         context temporarily bound. Returns ``CompressorMeta``. The pool
@@ -4366,6 +4377,7 @@ class AttentionFP8(nn.Module):
 
         cmp_args = build_prepare_metadata_args(
             use_varlen=use_varlen,
+            has_prefix=has_prefix,
             device=device,
             sp_int=sp_int,
             seqlen=seqlen,

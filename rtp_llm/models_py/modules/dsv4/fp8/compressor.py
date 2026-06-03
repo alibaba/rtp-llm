@@ -154,9 +154,7 @@ def _cp_sliced_state_read_needed(
         return False
     if not getattr(cp_ctx, "kv_cache_sharded", False):
         return False
-    if meta.seq_start_per_req is None:
-        return False
-    return bool(torch.any(meta.seq_start_per_req > 0).item())
+    return bool(meta.has_prefix)
 
 
 @dataclass(frozen=True)
@@ -186,6 +184,7 @@ class CompressorMeta:
     state_slots: torch.Tensor
     kv_slots: torch.Tensor
     token_to_req: torch.Tensor
+    has_prefix: bool
     is_batched: bool = False
     # Phase-3a part 4c — varlen raw path. Populated when is_batched;
     # otherwise the legacy scalar-seq_start path is used.
@@ -392,6 +391,7 @@ class CompressorFP8(PoolBackedModule):
         self,
         positions: torch.Tensor,  # [N] int64
         b_idx: torch.Tensor,  # [N] int64
+        has_prefix: bool,
         is_batched: bool = False,
         seq_start_per_req: Optional[torch.Tensor] = None,
         cu_seq_per_req: Optional[torch.Tensor] = None,
@@ -422,6 +422,7 @@ class CompressorFP8(PoolBackedModule):
                 state_slots=None,
                 kv_slots=None,
                 token_to_req=b_idx.to(torch.int32),
+                has_prefix=has_prefix,
                 is_batched=is_batched,
                 seq_start_per_req=seq_start_per_req,
                 cu_seq_per_req=cu_seq_per_req,
@@ -468,6 +469,7 @@ class CompressorFP8(PoolBackedModule):
                 state_slots=state_slots,
                 kv_slots=kv_slots,
                 token_to_req=token_to_req,
+                has_prefix=has_prefix,
                 is_batched=is_batched,
                 seq_start_per_req=seq_start_per_req,
                 cu_seq_per_req=cu_seq_per_req,
@@ -487,6 +489,7 @@ class CompressorFP8(PoolBackedModule):
             state_slots=state_slots,
             kv_slots=kv_slots,
             token_to_req=token_to_req,
+            has_prefix=has_prefix,
             is_batched=is_batched,
             seq_start_per_req=seq_start_per_req,
             cu_seq_per_req=cu_seq_per_req,
@@ -913,7 +916,9 @@ class CompressorFP8(PoolBackedModule):
                 positions, b_idx = _build_prefill_positions(
                     pending.sp, pending.bsz, pending.seqlen, device
                 )
-                meta = self.prepare_metadata(positions, b_idx)
+                meta = self.prepare_metadata(
+                    positions, b_idx, has_prefix=pending.sp > 0
+                )
 
         seq_start = None if meta.is_batched else pending.sp
         with record_function_range("dsv4.fp8.compressor.prefill.launch"):
@@ -1024,6 +1029,7 @@ class CompressorFP8(PoolBackedModule):
                 meta = self.prepare_metadata(
                     positions,
                     b_idx,
+                    has_prefix=sp > 0,
                     seq_start_per_req=torch.tensor(
                         [sp], dtype=torch.int32, device=device
                     ),
@@ -1081,6 +1087,7 @@ class CompressorFP8(PoolBackedModule):
                 meta = self.prepare_metadata(
                     positions,
                     b_idx,
+                    has_prefix=True,
                     seq_start_per_req=positions,
                     cu_seq_per_req=cu_seq_per_req,
                 )
@@ -1103,6 +1110,7 @@ class CompressorFP8(PoolBackedModule):
                 meta = self.prepare_metadata(
                     positions,
                     b_idx,
+                    has_prefix=True,
                     is_batched=q_len > 1,
                     seq_start_per_req=position_ids_2d[:, 0]
                     .to(torch.int32)
@@ -1145,6 +1153,7 @@ def build_prefill_metadata(
     return compressor.prepare_metadata(
         positions,
         b_idx,
+        has_prefix=sp > 0,
         seq_start_per_req=torch.tensor([sp], dtype=torch.int32, device=device),
         cu_seq_per_req=torch.tensor([0, seqlen], dtype=torch.int32, device=device),
     )
@@ -1153,6 +1162,7 @@ def build_prefill_metadata(
 def build_prepare_metadata_args(
     *,
     use_varlen: bool,
+    has_prefix: bool,
     device: torch.device,
     sp_int: int,
     seqlen: int,
@@ -1193,6 +1203,7 @@ def build_prepare_metadata_args(
             b_idx=req_id_per_token.to(device=device, dtype=torch.long)
             .reshape(-1)
             .contiguous(),
+            has_prefix=has_prefix,
             is_batched=True,
             seq_start_per_req=seq_start_per_req.to(device=device, dtype=torch.int32)
             .reshape(-1)
@@ -1205,6 +1216,7 @@ def build_prepare_metadata_args(
     return dict(
         positions=positions,
         b_idx=b_idx,
+        has_prefix=has_prefix,
         is_batched=False,
         seq_start_per_req=None,
         cu_seq_per_req=None,
@@ -1219,5 +1231,9 @@ def build_decode_metadata(
     b_idx = torch.arange(bsz, device=device, dtype=torch.long)
     cu_seq_per_req = torch.arange(0, bsz + 1, device=device, dtype=torch.int64)
     return compressor.prepare_metadata(
-        positions, b_idx, seq_start_per_req=positions, cu_seq_per_req=cu_seq_per_req
+        positions,
+        b_idx,
+        has_prefix=True,
+        seq_start_per_req=positions,
+        cu_seq_per_req=cu_seq_per_req,
     )
