@@ -159,6 +159,33 @@ def _finish_reason(chunk) -> int | None:
     return None
 
 
+def _assert_parameter_error_response(
+    testcase, resp, expected_message_part: str
+) -> None:
+    testcase.assertFalse(resp.error_message)
+    infer = resp.infer_response
+    testcase.assertEqual(infer.parameters["status_code"].int64_param, 400)
+    testcase.assertEqual(
+        infer.parameters["status_name"].string_param,
+        "InvalidParameter",
+    )
+    testcase.assertIn(
+        expected_message_part,
+        infer.parameters["status_message"].string_param,
+    )
+    payload = json.loads(infer.parameters["__messages__"].string_param)
+    header = payload["header"]
+    testcase.assertEqual(header["status_code"], 400)
+    testcase.assertEqual(header["status_name"], "InvalidParameter")
+    testcase.assertEqual(
+        header["status_message"],
+        infer.parameters["status_message"].string_param,
+    )
+    testcase.assertTrue(header["finished"])
+    testcase.assertEqual(_finish_reason(resp), 1000)
+    testcase.assertEqual(_gen_ids(resp), [])
+
+
 class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
     def _minimal_request(self) -> predict_v2_pb2.ModelInferRequest:
         req = predict_v2_pb2.ModelInferRequest()
@@ -1518,14 +1545,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             servicer.ModelStreamInfer(_areq_iter([bad]), MagicMock())
         )
         self.assertEqual(len(responses), 1)
-        error = json.loads(responses[0].error_message)
-        self.assertEqual(error["status_code"], 400)
-        self.assertEqual(error["status_name"], "InvalidParameter")
-        self.assertIn("input_ids", error["status_message"])
-        payload = json.loads(
-            responses[0].infer_response.parameters["__messages__"].string_param
-        )
-        self.assertEqual(payload["header"]["status_code"], 400)
+        _assert_parameter_error_response(self, responses[0], "input_ids")
 
     async def test_real_mode_uses_enqueue(self) -> None:
         out = GenerateOutput(
@@ -1585,13 +1605,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(visitor.enqueue_called, 0)
         self.assertEqual(len(responses), 1)
-        error = json.loads(responses[0].error_message)
-        self.assertEqual(error["status_code"], 400)
-        self.assertEqual(error["status_name"], "InvalidParameter")
-        payload = json.loads(
-            responses[0].infer_response.parameters["__messages__"].string_param
-        )
-        self.assertEqual(payload["header"]["status_code"], 400)
+        _assert_parameter_error_response(self, responses[0], "max_new_tokens")
 
     async def test_openai_compat_max_new_tokens_negative_uses_default(
         self,
@@ -1639,13 +1653,9 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(visitor.enqueue_called, 0)
                 self.assertEqual(len(responses), 1)
-                error = json.loads(responses[0].error_message)
-                self.assertEqual(error["status_code"], 400)
-                self.assertEqual(error["status_name"], "InvalidParameter")
-                payload = json.loads(
-                    responses[0].infer_response.parameters["__messages__"].string_param
+                _assert_parameter_error_response(
+                    self, responses[0], "max_completion_tokens"
                 )
-                self.assertEqual(payload["header"]["status_code"], 400)
 
     async def test_max_completion_tokens_non_positive_rejected_before_legacy_aliases(
         self,
@@ -1676,13 +1686,9 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(visitor.enqueue_called, 0)
                 self.assertEqual(len(responses), 1)
-                error = json.loads(responses[0].error_message)
-                self.assertEqual(error["status_code"], 400)
-                self.assertEqual(error["status_name"], "InvalidParameter")
-                payload = json.loads(
-                    responses[0].infer_response.parameters["__messages__"].string_param
+                _assert_parameter_error_response(
+                    self, responses[0], "max_completion_tokens"
                 )
-                self.assertEqual(payload["header"]["status_code"], 400)
 
     async def test_dash_generation_without_enable_thinking_disables_env_thinking(
         self,

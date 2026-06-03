@@ -26,6 +26,7 @@ FINISH_REASON_LENGTH = 1
 FINISH_REASON_STOP_ENGINE_PARAM = 8
 FINISH_REASON_ABORT = 10
 FINISH_REASON_STOP_TIMEOUT = 13
+FINISH_REASON_USE_PARAMETER_STATUS = 1000
 
 # ----------------------------------------------------------------------------
 # Low-level tensor decoding helpers (shared by request parsing and access log)
@@ -1083,13 +1084,7 @@ def build_error_response(
     status_code: int,
     status_name: str,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
-    """Build a structured error for DashLLM and turbo clients."""
-    error_payload = {
-        "service_id": "",
-        "status_code": status_code,
-        "status_name": status_name,
-        "status_message": message,
-    }
+    """Build a business error frame without using the gRPC hard-error channel."""
     dashscope_frame = {
         "header": {
             "status_code": status_code,
@@ -1102,9 +1097,21 @@ def build_error_response(
     }
 
     resp = predict_v2_pb2.ModelStreamInferResponse()
-    resp.error_message = json.dumps(error_payload)
-    resp.infer_response.parameters["__messages__"].string_param = json.dumps(
-        dashscope_frame
+    infer = resp.infer_response
+    infer.id = request_id
+    _append_generated_ids_output(infer, [])
+    _append_finish_reason_output(
+        infer,
+        finished=True,
+        finish_reason_override=FINISH_REASON_USE_PARAMETER_STATUS,
+    )
+    _append_finished_output(infer, finished=True)
+    infer.parameters["incremental_output"].int64_param = 1
+    infer.parameters["status_code"].int64_param = int(status_code)
+    infer.parameters["status_name"].string_param = status_name
+    infer.parameters["status_message"].string_param = message
+    infer.parameters["__messages__"].string_param = json.dumps(
+        dashscope_frame, ensure_ascii=False, separators=(",", ":")
     )
     return resp
 
