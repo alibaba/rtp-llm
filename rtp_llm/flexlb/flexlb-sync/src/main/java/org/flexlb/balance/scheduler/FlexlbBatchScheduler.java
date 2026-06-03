@@ -4,6 +4,7 @@ import com.google.protobuf.Int32Value;
 import com.google.protobuf.Int64Value;
 import com.google.protobuf.InvalidProtocolBufferException;
 import org.flexlb.balance.strategy.BatcherSnapshot;
+import org.flexlb.balance.strategy.PredictorFactory;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.balance.strategy.RequestProfile;
 import org.flexlb.config.ConfigService;
@@ -427,9 +428,7 @@ public class FlexlbBatchScheduler {
     }
 
     private static PrefillTimePredictor createPredictor(FlexlbConfig cfg) {
-        return new PrefillTimePredictor(
-                cfg.getCostAlpha0(), cfg.getCostAlpha1(), cfg.getCostAlpha2(),
-                cfg.getCostAlpha3(), cfg.getCostAlpha4(), cfg.getCostAlpha5());
+        return PredictorFactory.create(cfg);
     }
 
     private static long seqLenOf(BatchItem item) {

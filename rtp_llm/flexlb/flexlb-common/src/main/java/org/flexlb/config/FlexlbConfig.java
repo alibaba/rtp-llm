@@ -222,6 +222,10 @@ public class FlexlbConfig {
     private double costAlpha4 = 0.3;
     private double costAlpha5 = 0;
 
+    private String prefillPredictorType = "polynomial";
+
+    private String prefillGridTable = "";
+
     /**
      * Comma-separated shorthand for the 6 predictor coefficients.
      * Accepts 3 values (α₀,α₁,α₂) or 6 values (α₀–α₅).

@@ -220,7 +220,7 @@ class CostBasedPrefillStrategyTest {
 
     @Test
     void predictorUsesPolynomialFormula() {
-        PrefillTimePredictor predictor = new PrefillTimePredictor(10, 0.5, 0.001, 0.0005, 0.2, 5);
+        PolynomialPredictor predictor = new PolynomialPredictor(10, 0.5, 0.001, 0.0005, 0.2, 5);
 
         // Single request: n=1000, p=200 → c=800, bs=1
         // = 10 + 0.5*800 + (0.001*640000 + 0.0005*160000) + 0.2*200 + 5*1

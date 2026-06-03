@@ -193,9 +193,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
     }
 
     private PrefillTimePredictor createPredictor(FlexlbConfig config) {
-        return new PrefillTimePredictor(
-                config.getCostAlpha0(), config.getCostAlpha1(), config.getCostAlpha2(),
-                config.getCostAlpha3(), config.getCostAlpha4(), config.getCostAlpha5());
+        return PredictorFactory.create(config);
     }
 
     private List<WorkerStatus> getAvailableWorkers(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
