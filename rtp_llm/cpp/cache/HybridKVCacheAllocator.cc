@@ -613,7 +613,8 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
         return nullptr;
     }
 
-    selected_resource->cacheKeys() = std::move(selected_keys);
+    selected_resource->setCacheKeys(std::move(selected_keys));
+    selected_resource->setCacheKeysAreCpCanonical(kvcache_resource.cacheKeysAreCpCanonical());
     selected_resource->setBlockDependencies(std::move(selected_dependencies));
     for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
         BlockIndicesType valid;

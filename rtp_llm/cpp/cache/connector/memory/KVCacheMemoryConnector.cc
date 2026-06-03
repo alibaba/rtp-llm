@@ -94,6 +94,21 @@ static size_t memoryConnectorReuseUnitTokens(const CacheConfig& config, const Pa
     return static_cast<size_t>(config.seq_size_per_block) * cp_size;
 }
 
+static BlockDependency dependencyForIndex(const CacheKeysType&         cache_keys,
+                                          const BlockDependenciesType& dependencies,
+                                          size_t                       index) {
+    if (index < dependencies.size()) {
+        return dependencies[index];
+    }
+    BlockDependency dependency;
+    dependency.ordinal = static_cast<uint32_t>(index);
+    if (index > 0 && index - 1 < cache_keys.size()) {
+        dependency.has_parent = true;
+        dependency.parent_key = cache_keys[index - 1];
+    }
+    return dependency;
+}
+
 KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
                                                const KVCacheConfig&                     kv_cache_config,
                                                const ParallelismConfig&                 parallelism_config,
@@ -1233,16 +1248,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
                     }
                 }
                 if (success) {
-                    const auto& dependencies = resource_copy->blockDependencies();
                     for (auto& copy_info : copy_plan->copy_infos) {
-                        const auto pos = static_cast<size_t>(std::find(resource_copy->cacheKeys().begin(),
-                                                                        resource_copy->cacheKeys().end(),
-                                                                        copy_info.cache_key)
-                                                             - resource_copy->cacheKeys().begin());
-                        const auto dependency =
-                            pos < dependencies.size() ? dependencies[pos] :
-                                                        BlockDependency{false, 0, static_cast<uint32_t>(pos)};
-                        putPrefixToCache(copy_info, dependency, slots);
+                        putPrefixToCache(copy_info, copy_info.dependency, slots);
                     }
                 }
                 resource_copy.reset();
@@ -1440,6 +1447,7 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForWrite(const CacheKeysType&        
             copy_info.mem_block   = NULL_BLOCK_IDX;
             copy_info.block_size  = prefixKindBlockSize(kind, slots);
             copy_info.is_complete = true;
+            copy_info.dependency  = dependencyForIndex(cache_keys, dependencies, static_cast<size_t>(i));
             copy_info.slot_valid_mask = slot_valid_mask;
             copy_info.gpu_blocks.reserve(slots.size());
             for (const auto& slot : slots) {
@@ -1466,7 +1474,6 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForWrite(const CacheKeysType&        
         }
         return nullptr;
     }
-    (void)dependencies;
     return createCopyPlan(copy_infos, CopyDirection::D2H);
 }
 

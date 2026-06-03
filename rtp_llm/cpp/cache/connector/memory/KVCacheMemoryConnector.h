@@ -89,6 +89,7 @@ private:
         bool                      request_released{false};
         uint64_t                  generation{0};
         uint64_t                  src_generation{0};
+        BlockDependency           dependency;
     };
     enum class CopyDirection {
         H2D = 0,
