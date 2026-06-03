@@ -1518,7 +1518,14 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             servicer.ModelStreamInfer(_areq_iter([bad]), MagicMock())
         )
         self.assertEqual(len(responses), 1)
-        self.assertIn("input_ids", responses[0].error_message)
+        error = json.loads(responses[0].error_message)
+        self.assertEqual(error["status_code"], 400)
+        self.assertEqual(error["status_name"], "InvalidParameter")
+        self.assertIn("input_ids", error["status_message"])
+        payload = json.loads(
+            responses[0].infer_response.parameters["__messages__"].string_param
+        )
+        self.assertEqual(payload["header"]["status_code"], 400)
 
     async def test_real_mode_uses_enqueue(self) -> None:
         out = GenerateOutput(
@@ -1566,8 +1573,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
     async def test_max_new_tokens_negative_rejected_before_enqueue_repro_p3(
         self,
     ) -> None:
-        """max_new_tokens=-1 must return 400 via __messages__ (DashLLM protocol),
-        not 500 via error_message."""
+        """max_new_tokens=-1 returns 400 through __messages__ and error_message."""
         visitor = _FakeVisitor(_FakeAsyncStream([]))
         servicer = DashScInferenceServicer(backend_visitor=visitor)
         req = self._valid_infer_request()
@@ -1579,7 +1585,9 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(visitor.enqueue_called, 0)
         self.assertEqual(len(responses), 1)
-        self.assertFalse(responses[0].error_message)
+        error = json.loads(responses[0].error_message)
+        self.assertEqual(error["status_code"], 400)
+        self.assertEqual(error["status_name"], "InvalidParameter")
         payload = json.loads(
             responses[0].infer_response.parameters["__messages__"].string_param
         )
@@ -1631,7 +1639,9 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(visitor.enqueue_called, 0)
                 self.assertEqual(len(responses), 1)
-                self.assertFalse(responses[0].error_message)
+                error = json.loads(responses[0].error_message)
+                self.assertEqual(error["status_code"], 400)
+                self.assertEqual(error["status_name"], "InvalidParameter")
                 payload = json.loads(
                     responses[0].infer_response.parameters["__messages__"].string_param
                 )
@@ -1666,7 +1676,9 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(visitor.enqueue_called, 0)
                 self.assertEqual(len(responses), 1)
-                self.assertFalse(responses[0].error_message)
+                error = json.loads(responses[0].error_message)
+                self.assertEqual(error["status_code"], 400)
+                self.assertEqual(error["status_name"], "InvalidParameter")
                 payload = json.loads(
                     responses[0].infer_response.parameters["__messages__"].string_param
                 )

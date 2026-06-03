@@ -168,7 +168,9 @@ class ParameterValidationTest(unittest.IsolatedAsyncioTestCase):
 
     def _assert_parameter_error(self, responses) -> None:
         self.assertEqual(len(responses), 1)
-        self.assertFalse(responses[0].error_message)
+        error = json.loads(responses[0].error_message)
+        self.assertEqual(error["status_code"], 400)
+        self.assertEqual(error["status_name"], "InvalidParameter")
         payload = json.loads(
             responses[0].infer_response.parameters["__messages__"].string_param
         )
@@ -230,7 +232,6 @@ class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
         resp = _make_response()
         resp.infer_response.id = tag
         return resp
-
 
     async def test_buffer_happy_path_holds_first_until_second(self) -> None:
         yielded_marker: list[str] = []
@@ -350,7 +351,6 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         resp = _make_response()
         resp.infer_response.id = tag
         return resp
-
 
     def _patch_addr(self, idx: int) -> None:
         # Force round-robin to pick the pooled channel for addr ``idx`` next.
