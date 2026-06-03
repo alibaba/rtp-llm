@@ -10,8 +10,10 @@ import torch
 
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
+    FINISH_REASON_USE_PARAMETER_STATUS,
     OtherParams,
     SamplingParams,
+    build_error_response,
     build_stream_response_from_generate_outputs,
     parse_dash_sc_grpc_request,
     parse_input_ids_from_request,
@@ -531,6 +533,41 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             4,
         )
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 10)
+
+    def test_error_response_uses_business_status_frame(self) -> None:
+        resp = build_error_response(
+            "req-error",
+            "invalid max_new_tokens: 0; must be greater than 0",
+            status_code=400,
+            status_name="InvalidParameter",
+        )
+
+        self.assertFalse(resp.error_message)
+        infer = resp.infer_response
+        self.assertEqual(infer.id, "req-error")
+        self.assertEqual(infer.parameters["status_code"].int64_param, 400)
+        self.assertEqual(
+            infer.parameters["status_name"].string_param,
+            "InvalidParameter",
+        )
+        self.assertIn(
+            "max_new_tokens",
+            infer.parameters["status_message"].string_param,
+        )
+        payload = json.loads(infer.parameters["__messages__"].string_param)
+        self.assertEqual(payload["header"]["status_code"], 400)
+        self.assertEqual(payload["header"]["status_name"], "InvalidParameter")
+        self.assertTrue(payload["header"]["finished"])
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(list(infer.outputs[0].shape), [1, 0])
+        self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [])
+        self.assertEqual(
+            _unpack_int64_le(by_name["finish_reason"]),
+            [FINISH_REASON_USE_PARAMETER_STATUS],
+        )
 
     def test_finish_reason_length_override_repro_p1(self) -> None:
         """P1 repro: when generation finishes because ``max_new_tokens`` was

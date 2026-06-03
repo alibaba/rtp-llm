@@ -26,6 +26,7 @@ FINISH_REASON_LENGTH = 1
 FINISH_REASON_STOP_ENGINE_PARAM = 8
 FINISH_REASON_ABORT = 10
 FINISH_REASON_STOP_TIMEOUT = 13
+FINISH_REASON_USE_PARAMETER_STATUS = 1000
 
 # ----------------------------------------------------------------------------
 # Low-level tensor decoding helpers (shared by request parsing and access log)
@@ -341,6 +342,62 @@ def _normalize_response_format_value(value: Any) -> str | None:
     return _jsonable_to_string(parsed)
 
 
+def _normalize_guided_json_response_format(value: Any) -> str | None:
+    """Normalize Dash/dashllm guided_json to response_format json_schema."""
+    if value is None:
+        return None
+    schema = value
+    if isinstance(schema, str):
+        s = schema.strip()
+        if not s:
+            return None
+        try:
+            schema = json.loads(s)
+        except Exception:
+            schema = s
+    if isinstance(schema, list):
+        if not schema:
+            return None
+        schema = schema[0]
+        if isinstance(schema, str):
+            s = schema.strip()
+            if not s:
+                return None
+            try:
+                schema = json.loads(s)
+            except Exception:
+                schema = s
+    response_format = {"type": "json_schema", "json_schema": {"schema": schema}}
+    return json.dumps(response_format, ensure_ascii=False, separators=(",", ":"))
+
+
+def _parse_json_format_controls(request) -> tuple[str | None, bool]:
+    response_format = _parse_optional_parameter_string(request, "response_format")
+    guided_json = _parse_optional_parameter_string(request, "guided_json")
+    json_format_value = _parse_optional_parameter_bool(request, "json_format")
+    ds_attrs = _parse_ds_header_attributes(request)
+
+    response_format = _normalize_response_format_value(response_format)
+    if response_format is None:
+        response_format = _normalize_response_format_value(
+            _lookup_ds_request_control(ds_attrs, "response_format")
+        )
+
+    guided_response_format = _normalize_guided_json_response_format(guided_json)
+    if guided_response_format is None:
+        guided_response_format = _normalize_guided_json_response_format(
+            _lookup_ds_request_control(ds_attrs, "guided_json")
+        )
+    if guided_response_format is not None:
+        response_format = guided_response_format
+
+    if json_format_value is None:
+        json_format_value = _parse_optional_bool(
+            _lookup_ds_request_control(ds_attrs, "json_format")
+        )
+    return response_format, bool(json_format_value)
+
+
 def _parse_stop_words_list_input(request) -> tuple[tuple[int, ...], ...] | None:
     """Input name ``stop_words_list`` -> ``GenerateConfig.stop_words_list`` (groups of token ids)."""
     inp, raw = _find_input_raw(request, "stop_words_list")
@@ -498,8 +555,6 @@ def parse_sampling_params(request) -> SamplingParams:
     max_new_think_tokens: int | None = None
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
     openai_compatible_request = _is_openai_compatible_request(request)
-    response_format: str | None = None
-    json_format = False
 
     v = _parse_optional_scalar_int(request, "max_tokens")
     if v is None:
@@ -594,19 +649,7 @@ def parse_sampling_params(request) -> SamplingParams:
     if sw is not None:
         stop_words_list = sw
 
-    response_format = _parse_optional_parameter_string(request, "response_format")
-    json_format_value = _parse_optional_parameter_bool(request, "json_format")
-    ds_attrs = _parse_ds_header_attributes(request)
-    response_format = _normalize_response_format_value(response_format)
-    if response_format is None:
-        response_format = _normalize_response_format_value(
-            _lookup_ds_request_control(ds_attrs, "response_format")
-        )
-    if json_format_value is None:
-        json_format_value = _parse_optional_bool(
-            _lookup_ds_request_control(ds_attrs, "json_format")
-        )
-    json_format = bool(json_format_value)
+    response_format, json_format = _parse_json_format_controls(request)
 
     return SamplingParams(
         max_new_tokens=max_new_tokens,
@@ -1034,21 +1077,51 @@ def build_finish_reason_done_response(
     return stream_resp
 
 
+def build_error_response(
+    request_id: str,
+    message: str,
+    *,
+    status_code: int,
+    status_name: str,
+) -> predict_v2_pb2.ModelStreamInferResponse:
+    """Build a business error frame without using the gRPC hard-error channel."""
+    dashscope_frame = {
+        "header": {
+            "status_code": status_code,
+            "status_name": status_name,
+            "status_message": message,
+            "finished": True,
+            "request_id": request_id,
+        },
+        "payload": {},
+    }
+
+    resp = predict_v2_pb2.ModelStreamInferResponse()
+    infer = resp.infer_response
+    infer.id = request_id
+    _append_generated_ids_output(infer, [])
+    _append_finish_reason_output(
+        infer,
+        finished=True,
+        finish_reason_override=FINISH_REASON_USE_PARAMETER_STATUS,
+    )
+    _append_finished_output(infer, finished=True)
+    infer.parameters["incremental_output"].int64_param = 1
+    infer.parameters["status_code"].int64_param = int(status_code)
+    infer.parameters["status_name"].string_param = status_name
+    infer.parameters["status_message"].string_param = message
+    infer.parameters["__messages__"].string_param = json.dumps(
+        dashscope_frame, ensure_ascii=False, separators=(",", ":")
+    )
+    return resp
+
+
 def build_parameter_error_response(
     request_id: str, message: str, *, status_code: int = 400
 ) -> predict_v2_pb2.ModelStreamInferResponse:
-    """Build a DashLLM-protocol error via ``__messages__`` (gateway reads status_code from here)."""
-    resp = predict_v2_pb2.ModelStreamInferResponse()
-    resp.infer_response.parameters["__messages__"].string_param = json.dumps(
-        {
-            "header": {
-                "status_code": status_code,
-                "status_name": "InvalidParameter",
-                "status_message": message,
-                "finished": True,
-                "request_id": request_id,
-            },
-            "payload": {},
-        }
+    return build_error_response(
+        request_id,
+        message,
+        status_code=status_code,
+        status_name="InvalidParameter",
     )
-    return resp
