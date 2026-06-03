@@ -542,6 +542,8 @@ void SparseMlaParams::fillTargetVerifyCudaGraphParams(torch::Tensor input_length
 
     const int batch_size           = static_cast<int>(input_lengths_d.size(0));
     const int max_blocks_per_batch = static_cast<int>(kv_cache_block_id_device.size(1));
+    const int cap_batch            = kvlen_d.defined() ? static_cast<int>(kvlen_d.size(0)) : batch_size;
+    const int cap_tokens           = batch_indice_d.defined() ? static_cast<int>(batch_indice_d.size(0)) : batch_size;
 
     cudaStream_t stream = GET_CURRENT_STREAM();
 
@@ -564,6 +566,8 @@ void SparseMlaParams::fillTargetVerifyCudaGraphParams(torch::Tensor input_length
                                              batch_size,
                                              max_blocks_per_batch,
                                              seq_size_per_block,
+                                             cap_batch,
+                                             cap_tokens,
                                              stream);
 
     int total_tokens = target_verify_total_tokens_;
