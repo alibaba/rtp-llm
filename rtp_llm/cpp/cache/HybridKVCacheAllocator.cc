@@ -35,10 +35,9 @@ inline int cpVirtualBlockSize(const std::shared_ptr<CPSlotMapper>& mapper, int b
     return (mapper && mapper->isSharded()) ? mapper->virtualBlockSize() : block_size;
 }
 
-// Per-group gate: only RR-shard groups that participate in cache_keys reuse
-// (paged FULL groups). Non-paged groups (SWA / STATE pools with
-// fixed_blocks_per_req) keep raw seq_len semantics — sharing the cp shrink
-// would shrink their per-request block count incorrectly.
+// Per-group gate: only paged FULL groups are RR-sharded by changing the
+// sequence length fed into their allocator. Fixed/SWA groups use their own
+// group seq_size_per_block, which may already be CP-compact.
 inline bool cpShardThisGroup(const std::shared_ptr<CPSlotMapper>& mapper, CacheGroupType group_type) {
     return mapper && mapper->isSharded() && group_type == CacheGroupType::FULL;
 }
@@ -51,6 +50,13 @@ cpEffectiveSeqLenForGroup(const std::shared_ptr<CPSlotMapper>& mapper, CacheGrou
 inline int
 cpVirtualBlockSizeForGroup(const std::shared_ptr<CPSlotMapper>& mapper, CacheGroupType group_type, int block_size) {
     return cpShardThisGroup(mapper, group_type) ? mapper->virtualBlockSize() : block_size;
+}
+
+inline size_t groupSeqSize(const CacheConfig& config, int gid, size_t fallback) {
+    return (gid >= 0 && static_cast<size_t>(gid) < config.group_seq_size_per_block.size()
+            && config.group_seq_size_per_block[static_cast<size_t>(gid)] > 0) ?
+               config.group_seq_size_per_block[static_cast<size_t>(gid)] :
+               fallback;
 }
 
 BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) {
@@ -72,6 +78,15 @@ BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) 
 bool HybridKVCacheAllocator::skipReuseCacheGroup(int gid) const {
     return static_cast<size_t>(gid) < config_.group_region_names.size()
            && skipReuseCacheRegion(config_.group_region_names[static_cast<size_t>(gid)]);
+}
+
+bool HybridKVCacheAllocator::cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const {
+    if (!mapper || !mapper->isSharded() || gid < 0 || static_cast<size_t>(gid) >= config_.group_types.size()
+        || config_.group_types[static_cast<size_t>(gid)] != CacheGroupType::SWA) {
+        return false;
+    }
+    const auto row_tokens = groupSeqSize(config_, gid, seqSizePerBlock());
+    return row_tokens == static_cast<size_t>(mapper->virtualBlockSize());
 }
 
 HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&                 config,
@@ -168,13 +183,14 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     }
     for (size_t i = 0; i < swa_group_ids_.size(); ++i) {
         const int gid = swa_group_ids_[i];
+        const int group_reuse_len = cpCompactSwaGroup(gid, cp_mapper) ? reuse_blocks_len : logical_reuse_len;
         kv_resource.mutableBlockIds(0, gid).assign(
-            BlockIndicesType(static_cast<size_t>(logical_reuse_len), NULL_BLOCK_IDX));
+            BlockIndicesType(static_cast<size_t>(group_reuse_len), NULL_BLOCK_IDX));
         if (skipReuseCacheGroup(gid)) {
             continue;
         }
         const size_t tail_begin =
-            static_cast<size_t>(std::max(logical_reuse_len - static_cast<int>(swa_tail_blocks[i].size()), 0));
+            static_cast<size_t>(std::max(group_reuse_len - static_cast<int>(swa_tail_blocks[i].size()), 0));
         for (size_t j = 0; j < swa_tail_blocks[i].size(); ++j) {
             kv_resource.mutableBlockIds(0, gid).setAt(tail_begin + j, swa_tail_blocks[i][j]);
         }
@@ -428,7 +444,8 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                                                      config_.group_types[static_cast<size_t>(gid)] :
                                                      CacheGroupType::FULL;
             const bool           gp_sharded    = cpShardThisGroup(cp_mapper, group_type);
-            const CacheKeysType& src_keys      = gp_sharded ? cp_keys : full_keys;
+            const bool           compact_swa   = cpCompactSwaGroup(gid, cp_mapper);
+            const CacheKeysType& src_keys      = (gp_sharded || compact_swa) ? cp_keys : full_keys;
             if (src_keys.empty()) {
                 continue;
             }

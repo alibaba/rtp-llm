@@ -213,6 +213,7 @@ CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     layout.layer_region_to_group_id = config_.layer_region_to_group_id;
     layout.group_types              = config_.group_types;
     layout.group_region_names       = config_.group_region_names;
+    layout.group_seq_size_per_block = config_.group_seq_size_per_block;
     layout.layer_group_types        = config_.layer_group_types;
 
     const bool has_typed_mapping = !config_.layer_region_to_group_id.empty();

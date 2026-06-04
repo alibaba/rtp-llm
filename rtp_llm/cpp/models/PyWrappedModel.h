@@ -205,6 +205,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
         kv_cache.layer_group_types             = layout.layer_group_types;
         kv_cache.group_region_names            = layout.group_region_names;
+        kv_cache.group_seq_size_per_block.clear();
+        kv_cache.group_seq_size_per_block.reserve(layout.group_seq_size_per_block.size());
+        for (auto value : layout.group_seq_size_per_block) {
+            kv_cache.group_seq_size_per_block.push_back(static_cast<int>(value));
+        }
         kv_cache.layer_region_to_group_id      = layout.layer_region_to_group_id;
         kv_cache.kv_cache_base_by_layer_region = layout.layers_to_kv_buffer_ptrs_by_attn;
         kv_cache.kv_scale_base_by_layer_region = layout.layers_to_scale_buffer_ptrs_by_attn;

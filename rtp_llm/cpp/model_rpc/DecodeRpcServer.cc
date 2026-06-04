@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <mutex>
 #include <memory>
 #include <unistd.h>
@@ -815,6 +816,67 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         block.size_bytes = slice_bytes;
         return parts;
     };
+    auto isCompactFixedBlockTable = [&](const CacheConfig& cfg, KVCacheRegionName region_name, size_t gid) {
+        if (!is_page_level_rr || !isCpSlicedFixedRegion(region_name) || load_context.prefill_cp_size <= 1
+            || gid >= cfg.group_seq_size_per_block.size()) {
+            return false;
+        }
+        const auto group_tokens = cfg.group_seq_size_per_block[gid];
+        return group_tokens > 0
+               && group_tokens == cfg.seq_size_per_block * static_cast<size_t>(load_context.prefill_cp_size);
+    };
+    auto blockPositionsForLoad = [&](size_t            block_num,
+                                     const CacheConfig& cfg,
+                                     bool               cfg_use_hybrid,
+                                     CacheGroupType     group_type,
+                                     KVCacheRegionName  region_name,
+                                     size_t             gid) {
+        if (!is_page_level_rr || !isCpSlicedFixedRegion(region_name) || load_context.prefill_cp_size <= 1) {
+            return blockPositionsForCacheTransfer(block_num,
+                                                  load_context.reuse_block_size,
+                                                  cfg_use_hybrid,
+                                                  group_type,
+                                                  /*hybrid_full_from_begin=*/true);
+        }
+        if (isCompactFixedBlockTable(cfg, region_name, gid)) {
+            return blockPositionsForCacheTransfer(block_num,
+                                                  load_context.reuse_block_size,
+                                                  cfg_use_hybrid,
+                                                  group_type,
+                                                  /*hybrid_full_from_begin=*/true);
+        }
+
+        std::vector<size_t> block_pos_list;
+        if (block_num == 0) {
+            return block_pos_list;
+        }
+        const size_t cp_size        = static_cast<size_t>(load_context.prefill_cp_size);
+        const size_t compact_blocks = (block_num + cp_size - 1) / cp_size;
+        const size_t reuse_blocks   = static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0));
+        const size_t start          = cfg_use_hybrid ? (compact_blocks > 2 ? compact_blocks - 2 : 0) :
+                                                       std::min(reuse_blocks, compact_blocks);
+        block_pos_list.reserve(compact_blocks - start);
+        for (size_t compact_pos = start; compact_pos < compact_blocks; ++compact_pos) {
+            block_pos_list.push_back(std::min((compact_pos + 1) * cp_size - 1, block_num - 1));
+        }
+        return block_pos_list;
+    };
+    auto cacheKeyIndexForBlock = [&](const CacheConfig& cfg,
+                                     KVCacheRegionName region_name,
+                                     size_t            gid,
+                                     size_t            block_pos,
+                                     size_t            cache_key_count,
+                                     size_t&           cache_key_index) {
+        if (cache_key_count == 0) {
+            return false;
+        }
+        cache_key_index = block_pos;
+        if (isCompactFixedBlockTable(cfg, region_name, gid)) {
+            cache_key_index =
+                std::min((block_pos + 1) * static_cast<size_t>(load_context.prefill_cp_size) - 1, cache_key_count - 1);
+        }
+        return cache_key_index < cache_key_count;
+    };
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
@@ -849,11 +911,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 }
                 CacheGroupType group_type = groupType(cache_config, use_hybrid, gid);
 
-                auto block_pos_list = blockPositionsForCacheTransfer(block_num,
-                                                                     load_context.reuse_block_size,
-                                                                     use_hybrid,
-                                                                     group_type,
-                                                                     /*hybrid_full_from_begin=*/true);
+                auto block_pos_list =
+                    blockPositionsForLoad(block_num, cache_config, use_hybrid, group_type, region_name, gid);
 
                 if (!shouldLoadGroupFromPeer(group_type, region_name, i)) {
                     continue;
@@ -866,8 +925,13 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     if (isNullBlockIdx(block_id)) {
                         continue;
                     }
+                    size_t cache_key_index = 0;
+                    if (!cacheKeyIndexForBlock(
+                            cache_config, region_name, gid, block_pos, load_context.cache_keys.size(), cache_key_index)) {
+                        continue;
+                    }
                     auto cache_key = makeCacheKey(
-                        model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id, region_name);
+                        model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, region_name);
 
                     const int local_part_cnt = is_page_level_rr ? 1 : peer_cnt;
                     const int local_part_id  = is_page_level_rr ? 0 : i;
@@ -986,11 +1050,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 region_name = mtp_cache_cfg.group_region_names[gid];
                             }
                             CacheGroupType group_type     = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
-                            auto           block_pos_list = blockPositionsForCacheTransfer(block_num,
-                                                                                 load_context.reuse_block_size,
-                                                                                 mtp_use_hybrid,
-                                                                                 group_type,
-                                                                                 /*hybrid_full_from_begin=*/true);
+                            auto block_pos_list =
+                                blockPositionsForLoad(
+                                    block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, region_name, gid);
 
                             if (!shouldLoadGroupFromPeer(group_type, region_name, i)) {
                                 continue;
@@ -1003,8 +1065,17 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 if (isNullBlockIdx(block_id)) {
                                     continue;
                                 }
+                                size_t cache_key_index = 0;
+                                if (!cacheKeyIndexForBlock(mtp_cache_cfg,
+                                                           region_name,
+                                                           gid,
+                                                           block_pos,
+                                                           load_context.cache_keys.size(),
+                                                           cache_key_index)) {
+                                    continue;
+                                }
                                 auto       cache_key      = makeCacheKey(model_id,
-                                                              std::to_string(load_context.cache_keys[block_pos]),
+                                                              std::to_string(load_context.cache_keys[cache_key_index]),
                                                               layer_id,
                                                               region_name);
                                 const bool mtp_use_mla    = mtp_cache_cfg.use_mla;

@@ -470,6 +470,7 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
 
     auto layout = manager->getMainModelCacheLayerLayout();
     ASSERT_EQ(layout.group_region_names.size(), static_cast<size_t>(kDsv4PoolNum));
+    ASSERT_EQ(layout.group_seq_size_per_block, manager_config.group_seq_size_per_block);
     EXPECT_EQ(layout.layers_to_kv_buffer_ptrs_by_attn.size(), static_cast<size_t>(manager_config.layer_num));
 
     const int csa_layer = manager_config.global_layer_ids[0][0];

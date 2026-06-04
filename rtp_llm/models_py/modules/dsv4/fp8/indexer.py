@@ -374,6 +374,7 @@ class IndexerFP8(PoolBackedModule):
             self._state_eb,
             state_tokens_per_block=self._state_tokens_per_block,
             kv_tokens_per_block=self._kv_tokens_per_block,
+            kv_owner_tokens_per_block=self._kv_owner_tokens_per_block,
         )
 
     def _clear_nested_pool(self) -> None:
