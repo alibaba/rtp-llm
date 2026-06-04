@@ -1,6 +1,7 @@
 from typing import List
 
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseMultiModalMixin,
     BaseVitWeights,
@@ -32,6 +33,10 @@ from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.image_processing_qwen2_vl imp
 )
 from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VisionTransformerPretrainedModel,
+)
+from rtp_llm.multimodal.vit_metrics import (
+    record_vit_preprocess_value,
+    vit_preprocess_timer,
 )
 
 IMAGE_FACTOR = 28
@@ -124,7 +129,9 @@ class Qwen2_VLImageEmbedding(MultiModalEmbeddingInterface):
 
     @staticmethod
     def load_image(data, configs, **kwargs):
-        image = Image.open(data).convert("RGB")
+        tags = {"model": "qwen2_vl", "mm_type": "image"}
+        with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC, tags):
+            image = Image.open(data).convert("RGB")
         size_factor = IMAGE_FACTOR
         if configs.height != -1 and configs.width != -1:
             resized_height, resized_width = smart_resize(
@@ -143,11 +150,18 @@ class Qwen2_VLImageEmbedding(MultiModalEmbeddingInterface):
                 min_pixels=min_pixels,
                 max_pixels=max_pixels,
             )
-        image = image.resize((resized_width, resized_height))
+        with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, tags):
+            image = image.resize((resized_width, resized_height))
+        record_vit_preprocess_value(
+            GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC,
+            resized_width * resized_height,
+            tags,
+        )
         return image
 
     @staticmethod
     def load_video(data, configs, **kwargs):
+        tags = {"model": "qwen2_vl", "mm_type": "video"}
         vr = VideoReader(data, ctx=cpu(0), num_threads=1)
         frames = len(vr)
 
@@ -192,12 +206,18 @@ class Qwen2_VLImageEmbedding(MultiModalEmbeddingInterface):
                 max_pixels=max_pixels,
             )
 
-        video = transforms.functional.resize(
-            video,
-            [resized_height, resized_width],
-            interpolation=InterpolationMode.BICUBIC,
-            antialias=True,
-        ).float()
+        with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, tags):
+            video = transforms.functional.resize(
+                video,
+                [resized_height, resized_width],
+                interpolation=InterpolationMode.BICUBIC,
+                antialias=True,
+            ).float()
+        record_vit_preprocess_value(
+            GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC,
+            resized_width * resized_height,
+            tags,
+        )
         return video
 
     def get_position_ids(self, grid_thw: torch.Tensor = None) -> torch.Tensor:
@@ -247,18 +267,27 @@ class Qwen2_VLImageEmbedding(MultiModalEmbeddingInterface):
         assert len(mm_inputs) == 1
         mm_input = mm_inputs[0]
         mm_type = mm_input.mm_type
-        data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
+        tags = {"model": "qwen2_vl"}
+        with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, tags):
+            data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
         if mm_type == MMUrlType.DEFAULT or mm_type == MMUrlType.IMAGE:
             data = Qwen2_VLImageEmbedding.load_image(
                 data, mm_input.mm_preprocess_config
             )
-            res = processor(images=data, videos=None, return_tensors="pt")
+            with vit_preprocess_timer(
+                GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, tags
+            ):
+                res = processor(images=data, videos=None, return_tensors="pt")
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
             data = Qwen2_VLImageEmbedding.load_video(
                 data, mm_input.mm_preprocess_config
             )
-            res = processor(images=None, videos=data, return_tensors="pt")
+            with vit_preprocess_timer(
+                GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC,
+                {"model": "qwen2_vl", "mm_type": "video"},
+            ):
+                res = processor(images=None, videos=data, return_tensors="pt")
             return res["pixel_values_videos"], res["video_grid_thw"]
 
     def get_preprocess_params(self):
