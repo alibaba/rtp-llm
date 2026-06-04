@@ -48,6 +48,10 @@ STARTUP_REAL_WARMUP_MAX_NEW_TOKENS = 1
 STARTUP_REAL_WARMUP_TOKEN_ID = 100
 
 
+class StartupRealWarmupAddressResolutionError(RuntimeError):
+    pass
+
+
 def check_server_health(server_port, path="/health"):
     try:
         response = requests.get(f"http://localhost:{server_port}{path}", timeout=60)
@@ -345,16 +349,44 @@ def _role_is_prefill(py_env_configs: PyEnvConfigs) -> bool:
     return role_is_prefill
 
 
+def _is_startup_real_warmup_entry_rank(py_env_configs: PyEnvConfigs) -> bool:
+    parallelism_config = py_env_configs.parallelism_config
+    world_rank = int(getattr(parallelism_config, "world_rank", 0) or 0)
+    world_size = int(getattr(parallelism_config, "world_size", 1) or 1)
+    tp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
+    if world_size <= 1:
+        return True
+    if tp_size <= 0:
+        raise ValueError(
+            f"parallelism_config.tp_size should be positive, got {tp_size}"
+        )
+    return world_rank % tp_size == 0
+
+
 def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     flag = os.environ.get("DSV4_STARTUP_REAL_WARMUP", "auto").strip().lower()
     if flag in ("0", "false", "off", "no"):
         return False
 
-    model_type = getattr(py_env_configs.model_args, "model_type", "")
     role_is_prefill = _role_is_prefill(py_env_configs)
+    if not role_is_prefill:
+        return False
+
+    if not _is_startup_real_warmup_entry_rank(py_env_configs):
+        parallelism_config = py_env_configs.parallelism_config
+        logging.info(
+            "skip DSV4 startup real warmup on non-entry rank, "
+            "world_rank=%s, tp_size=%s, world_size=%s",
+            getattr(parallelism_config, "world_rank", None),
+            getattr(parallelism_config, "tp_size", None),
+            getattr(parallelism_config, "world_size", None),
+        )
+        return False
+
+    model_type = getattr(py_env_configs.model_args, "model_type", "")
     if flag in ("1", "true", "on", "yes", "force"):
-        return role_is_prefill
-    return model_type == "deepseek_v4" and role_is_prefill
+        return True
+    return model_type == "deepseek_v4"
 
 
 def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs):
@@ -548,24 +580,38 @@ def _get_startup_real_warmup_token_lens(py_env_configs: PyEnvConfigs):
 
 
 def _get_startup_real_warmup_grpc_addresses(py_env_configs: PyEnvConfigs):
+    parallelism_config = py_env_configs.parallelism_config
+    resolve_trace = None
     try:
         world_info = get_world_info(
             server_config=py_env_configs.server_config,
             distribute_config=py_env_configs.distribute_config,
-            parallelism_config=py_env_configs.parallelism_config,
+            parallelism_config=parallelism_config,
         )
-        addrs = get_dp_addrs_from_world_info(
-            world_info, py_env_configs.parallelism_config
-        )
+        addrs = get_dp_addrs_from_world_info(world_info, parallelism_config)
         if addrs:
             return addrs
     except Exception:
+        resolve_trace = traceback.format_exc()
+
+    world_size = int(getattr(parallelism_config, "world_size", 1) or 1)
+    if world_size > 1:
+        if resolve_trace:
+            logging.warning(
+                "failed to resolve DSV4 startup real warmup grpc addrs from world info, "
+                "trace=%s",
+                resolve_trace,
+            )
+        raise StartupRealWarmupAddressResolutionError(
+            "failed to resolve DSV4 startup real warmup grpc entry address "
+            "in multi-rank mode; refusing to fallback to local rpc_server_port"
+        )
+    if resolve_trace:
         logging.warning(
             "failed to resolve DSV4 startup real warmup grpc addrs from world info, "
             "fallback to local rpc_server_port, trace=%s",
-            traceback.format_exc(),
+            resolve_trace,
         )
-
     return [f"127.0.0.1:{int(py_env_configs.server_config.rpc_server_port)}"]
 
 
@@ -775,6 +821,12 @@ def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     try:
         _run_startup_real_warmup_async(_run_startup_real_warmup_grpc(py_env_configs))
         return True
+    except StartupRealWarmupAddressResolutionError:
+        logging.error(
+            "DSV4 startup real warmup address resolution failed, trace: %s",
+            traceback.format_exc(),
+        )
+        raise
     except Exception:
         logging.error(
             "DSV4 startup real warmup failed, trace: %s",
