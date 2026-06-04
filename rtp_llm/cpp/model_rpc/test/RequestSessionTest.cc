@@ -397,4 +397,218 @@ TEST(SessionManagerTest, StartStopGc) {
     mgr.stopGc();
 }
 
+// ========================== Lookup ALREADY_ATTACHED ==========================
+
+TEST(SessionManagerTest, LookupAlreadyAttached) {
+    SessionManager mgr;
+    auto session = std::make_shared<RequestSession>(100, 1, 0);
+    mgr.registerSession(100, session);
+    session->acquireLease();
+
+    auto [result, found] = mgr.lookup(100);
+    EXPECT_EQ(result, LookupResult::ALREADY_ATTACHED);
+    EXPECT_EQ(found.get(), session.get());
+
+    session->releaseLease();
+    auto [result2, found2] = mgr.lookup(100);
+    EXPECT_EQ(result2, LookupResult::RUNNING);
+}
+
+// ========================== Lookup GONE ==========================
+
+TEST(SessionManagerTest, LookupGoneAfterGc) {
+    SessionManager mgr(/*terminal_ttl_us=*/500, /*attach_deadline_us=*/1000000, /*tombstone_ttl_us=*/500000);
+    auto session = std::make_shared<RequestSession>(100, 1, 0);
+    mgr.registerSession(100, session);
+    session->markFinished();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    mgr.gcOnce();
+
+    auto [result, found] = mgr.lookup(100);
+    EXPECT_EQ(result, LookupResult::GONE);
+    EXPECT_EQ(found, nullptr);
+}
+
+// ========================== Cancel then Lookup ==========================
+
+TEST(SessionManagerTest, CancelThenLookupReturnsFinishedInTTL) {
+    SessionManager mgr;
+    auto session = std::make_shared<RequestSession>(100, 1, 0);
+    mgr.registerSession(100, session);
+
+    mgr.cancelSession(100, CancelReason::EXPLICIT_CANCEL);
+
+    auto [result, found] = mgr.lookup(100);
+    EXPECT_EQ(result, LookupResult::FINISHED_IN_TTL);
+    EXPECT_EQ(found->state(), SessionState::CANCELLED);
+}
+
+// ========================== BoundedRelay: cap=0 rejects push ==========================
+
+TEST(BoundedRelayTest, ZeroCapRejectsPush) {
+    BoundedRelay relay(0);
+    GenerateOutputsPB output;
+
+    std::atomic<bool> push_returned{false};
+    bool push_result = true;
+    std::thread pusher([&] {
+        push_result = relay.push(output);
+        push_returned.store(true);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_FALSE(push_returned.load());
+
+    relay.close();
+    pusher.join();
+    EXPECT_TRUE(push_returned.load());
+    EXPECT_FALSE(push_result);
+}
+
+// ========================== RequestSession: markError state ==========================
+
+TEST(RequestSessionTest, MarkErrorThenCancelNoOverwrite) {
+    auto session = std::make_shared<RequestSession>(1, 1, 0);
+    session->markError("engine failure");
+    EXPECT_EQ(session->state(), SessionState::ERROR);
+
+    session->cancel(CancelReason::EXPLICIT_CANCEL);
+    EXPECT_EQ(session->state(), SessionState::ERROR);
+}
+
+// ========================== RequestSession: cancel closes relay ==========================
+
+TEST(RequestSessionTest, CancelClosesRelay) {
+    auto session = std::make_shared<RequestSession>(1, 1, 0, /*is_pd=*/true);
+    EXPECT_FALSE(session->getRelay().isClosed());
+
+    session->cancel(CancelReason::SLO_DEADLINE);
+    EXPECT_TRUE(session->getRelay().isClosed());
+    EXPECT_EQ(session->cancelReason(), CancelReason::SLO_DEADLINE);
+}
+
+// ========================== RequestSession: PD relay cap ==========================
+
+TEST(RequestSessionTest, PdSessionHasRelayCap) {
+    auto pd_session = std::make_shared<RequestSession>(1, 1, 0, /*is_pd=*/true);
+    auto local_session = std::make_shared<RequestSession>(2, 1, 0, /*is_pd=*/false);
+
+    EXPECT_TRUE(pd_session->isPd());
+    EXPECT_FALSE(local_session->isPd());
+
+    GenerateOutputsPB output;
+    EXPECT_TRUE(pd_session->getRelay().push(output));
+    EXPECT_EQ(pd_session->getRelay().size(), 1);
+}
+
+// ========================== Concurrent lease: two threads race ==========================
+
+TEST(RequestSessionTest, ConcurrentLeaseRace) {
+    auto session = std::make_shared<RequestSession>(1, 1, 0);
+    std::atomic<int> winners{0};
+
+    auto try_lease = [&] {
+        if (session->acquireLease()) {
+            winners.fetch_add(1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            session->releaseLease();
+        }
+    };
+
+    std::thread t1(try_lease);
+    std::thread t2(try_lease);
+    t1.join();
+    t2.join();
+
+    EXPECT_GE(winners.load(), 1);
+    EXPECT_LE(winners.load(), 2);
+}
+
+// ========================== Relay: push unblocked by close during backpressure ==========================
+
+TEST(BoundedRelayTest, PushUnblockedByCloseUnderBackpressure) {
+    BoundedRelay relay(1);
+    GenerateOutputsPB fill;
+    relay.push(fill);
+
+    std::atomic<bool> push2_done{false};
+    bool push2_result = true;
+    std::thread pusher([&] {
+        GenerateOutputsPB o;
+        push2_result = relay.push(o);
+        push2_done.store(true);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_FALSE(push2_done.load());
+
+    relay.close();
+    pusher.join();
+    EXPECT_TRUE(push2_done.load());
+    EXPECT_FALSE(push2_result);
+}
+
+// ========================== RelayWriter ==========================
+
+TEST(RelayWriterTest, WritePushesToRelay) {
+    BoundedRelay relay(10);
+    RelayWriter writer(&relay);
+
+    GenerateOutputsPB output;
+    output.set_request_id(42);
+    EXPECT_TRUE(writer.Write(output, grpc::WriteOptions()));
+    EXPECT_EQ(relay.size(), 1);
+
+    GenerateOutputsPB popped;
+    EXPECT_TRUE(relay.tryPop(&popped));
+    EXPECT_EQ(popped.request_id(), 42);
+}
+
+TEST(RelayWriterTest, WriteReturnsFalseWhenClosed) {
+    BoundedRelay relay(10);
+    RelayWriter writer(&relay);
+
+    relay.close();
+
+    GenerateOutputsPB output;
+    EXPECT_FALSE(writer.Write(output, grpc::WriteOptions()));
+}
+
+// ========================== Reaper skips terminal sessions ==========================
+
+TEST(SessionManagerTest, ReapSkipsTerminalSession) {
+    SessionManager mgr(/*terminal_ttl_us=*/1000000, /*attach_deadline_us=*/1000);
+    int64_t now = autil::TimeUtility::currentTimeInMicroSeconds();
+    auto session = std::make_shared<RequestSession>(100, 1, now);
+    mgr.registerSession(100, session);
+    session->markFinished();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    EXPECT_EQ(mgr.reapAttachDeadline(), 0);
+}
+
+// ========================== Tombstone independent TTL ==========================
+
+TEST(SessionManagerTest, TombstoneIndependentTtl) {
+    SessionManager mgr(/*terminal_ttl_us=*/500, /*attach_deadline_us=*/1000000, /*tombstone_ttl_us=*/2000);
+    auto session = std::make_shared<RequestSession>(100, 1, 0);
+    mgr.registerSession(100, session);
+    session->markFinished();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    mgr.gcOnce();
+    auto [r1, _1] = mgr.lookup(100);
+    EXPECT_EQ(r1, LookupResult::GONE);
+
+    mgr.gcOnce();
+    auto [r2, _2] = mgr.lookup(100);
+    EXPECT_EQ(r2, LookupResult::GONE);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    mgr.gcOnce();
+    auto [r3, _3] = mgr.lookup(100);
+    EXPECT_EQ(r3, LookupResult::NOT_FOUND);
+}
+
 }  // namespace rtp_llm::test
