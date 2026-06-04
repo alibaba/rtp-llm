@@ -136,6 +136,23 @@ def test_build_plan_uses_owner_block_size_for_restore_lengths():
     assert plan.restore_indices.numel() == 16
 
 
+def test_build_plan_tracks_actual_partial_owner_lengths():
+    plan = A.build_indexer_cp_chunk_plan(
+        cp_ctx=_ctx(4, 3),
+        per_req_total_kv_lens=torch.tensor([25, 9], dtype=torch.int64),
+        block_size=2,
+        owner_block_size=8,
+        device=torch.device("cpu"),
+    )
+    # Padded local is uniform across ranks: ceil(T / (owner_bs * cp)) * owner_bs.
+    assert torch.equal(plan.per_req_local_kv_lens, torch.tensor([8, 8]))
+    # Rank 3 owns logical block 3. For T=25 only token 24 exists in that
+    # owner block; for T=9 rank 3 owns nothing.
+    assert torch.equal(plan.per_req_actual_local_kv_lens, torch.tensor([1, 0]))
+    assert plan.total_local_T == 16
+    assert plan.total_actual_local_T == 1
+
+
 def test_build_local_cu_kv_seqlens():
     plan = A.build_indexer_cp_chunk_plan(
         cp_ctx=_ctx(2, 0),
@@ -146,6 +163,52 @@ def test_build_local_cu_kv_seqlens():
     cu = A.build_local_cu_kv_seqlens(plan)
     assert cu.dtype == torch.int32
     assert torch.equal(cu, torch.tensor([0, 4, 12, 12], dtype=torch.int32))
+
+
+def test_build_actual_local_cu_kv_seqlens():
+    plan = A.build_indexer_cp_chunk_plan(
+        cp_ctx=_ctx(4, 3),
+        per_req_total_kv_lens=torch.tensor([25, 9, 64], dtype=torch.int64),
+        block_size=2,
+        owner_block_size=8,
+        device=torch.device("cpu"),
+    )
+    cu = A.build_actual_local_cu_kv_seqlens(plan)
+    assert cu.dtype == torch.int32
+    assert torch.equal(cu, torch.tensor([0, 1, 1, 17], dtype=torch.int32))
+
+
+def test_copy_actual_indexer_k_to_padded_inserts_per_request_gaps():
+    plan = A.build_indexer_cp_chunk_plan(
+        cp_ctx=_ctx(4, 3),
+        per_req_total_kv_lens=torch.tensor([25, 9, 64], dtype=torch.int64),
+        block_size=2,
+        owner_block_size=8,
+        device=torch.device("cpu"),
+    )
+    assert torch.equal(plan.per_req_local_kv_lens, torch.tensor([8, 8, 16]))
+    assert torch.equal(plan.per_req_actual_local_kv_lens, torch.tensor([1, 0, 16]))
+    actual_q = torch.arange(17 * 2, dtype=torch.uint8).reshape(17, 2) + 1
+    actual_s = torch.arange(17, dtype=torch.uint8).reshape(17, 1) + 101
+    padded_q = torch.zeros((32, 2), dtype=torch.uint8)
+    padded_s = torch.zeros((32, 1), dtype=torch.uint8)
+
+    A.copy_actual_indexer_k_to_padded(
+        plan=plan,
+        actual_k_quant=actual_q,
+        actual_k_scale=actual_s,
+        padded_k_quant=padded_q,
+        padded_k_scale=padded_s,
+    )
+
+    expected_q = torch.zeros((32, 2), dtype=torch.uint8)
+    expected_s = torch.zeros((32, 1), dtype=torch.uint8)
+    expected_q[0:1] = actual_q[0:1]
+    expected_s[0:1] = actual_s[0:1]
+    expected_q[16:32] = actual_q[1:17]
+    expected_s[16:32] = actual_s[1:17]
+    assert torch.equal(padded_q, expected_q)
+    assert torch.equal(padded_s, expected_s)
 
 
 def test_assemble_indexer_k_cp1_passthrough():
