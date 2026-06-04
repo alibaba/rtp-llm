@@ -374,6 +374,7 @@ class MasterConfig:
         self.master_queue_reject_threshold: int = 100000
         self.master_default_timeout_ms: int = 3600000
         self.master_max_connect_pool_size: int = 100000
+        self.master_connector_limit_per_host: int = 0
         # Session total timeout in seconds. If < 0: auto (3600 when queue mode, 0.5 otherwise).
         self.master_session_timeout_s: float = -1
 
@@ -382,6 +383,7 @@ class MasterConfig:
             f"master_queue_reject_threshold: {self.master_queue_reject_threshold}\n"
             f"master_default_timeout_ms: {self.master_default_timeout_ms}\n"
             f"master_max_connect_pool_size: {self.master_max_connect_pool_size}\n"
+            f"master_connector_limit_per_host: {self.master_connector_limit_per_host}\n"
             f"master_session_timeout_s: {self.master_session_timeout_s}"
         )
 

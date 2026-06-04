@@ -30,6 +30,15 @@ def init_master_group_args(parser, master_config):
     )
 
     master_group.add_argument(
+        "--master_connector_limit_per_host",
+        env_name="MASTER_CONNECTOR_LIMIT_PER_HOST",
+        bind_to=(master_config, "master_connector_limit_per_host"),
+        type=int,
+        default=0,
+        help="Max HTTP connections per master host (0 = use default 30)",
+    )
+
+    master_group.add_argument(
         "--master_session_timeout_s",
         env_name="MASTER_SESSION_TIMEOUT_S",
         bind_to=(master_config, "master_session_timeout_s"),

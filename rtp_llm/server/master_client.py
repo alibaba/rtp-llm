@@ -24,7 +24,7 @@ SCHEDULE_PATH = "/rtp_llm/schedule"
 DEFAULT_REQUEST_TIMEOUT_SEC = 0.5
 SUCCESS_CODE = 200
 DEFAULT_REQUEST_PRIORITY = 100
-CONNECTOR_LIMIT_PER_HOST = 30
+DEFAULT_CONNECTOR_LIMIT_PER_HOST = 30
 CONNECTOR_KEEPALIVE_TIMEOUT_SEC = 30
 
 
@@ -116,6 +116,8 @@ class MasterClient:
         )
         self.host_service: Optional[HostService] = host_service
         self.max_connect_pool_size = self.master_config.master_max_connect_pool_size
+        limit = self.master_config.master_connector_limit_per_host
+        self.connector_limit_per_host = limit if limit > 0 else DEFAULT_CONNECTOR_LIMIT_PER_HOST
         self._session: Optional[aiohttp.ClientSession] = None
         self.latest_queue_length: int = 0
         self.session_timeout_s = self._get_session_timeout_s()
@@ -142,7 +144,7 @@ class MasterClient:
             timeout = ClientTimeout(total=self.session_timeout_s)
             connector = aiohttp.TCPConnector(
                 limit=self.max_connect_pool_size,
-                limit_per_host=CONNECTOR_LIMIT_PER_HOST,
+                limit_per_host=self.connector_limit_per_host,
                 keepalive_timeout=CONNECTOR_KEEPALIVE_TIMEOUT_SEC,
                 enable_cleanup_closed=True,
             )
