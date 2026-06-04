@@ -297,6 +297,153 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
+    void processQueue_park_converges_to_urgent_dispatch() throws Exception {
+        // budget = sloMs(300) - predMs(128) = 172ms, margin = 100ms
+        // fillThreshold=2.0 → fillRatio can never reach it (max 1.0)
+        // batchSizeMax=1000 → single request can't trigger size condition
+        // So request parks, budget shrinks each 1ms iteration, after ~72ms budget < margin → urgent dispatch
+        config.setCostSloMs(300L);
+        config.setCostSloRiskMarginMs(100L);
+        config.setFlexlbBatchFillThreshold(2.0);
+        config.setFlexlbBatchSizeMax(1000);
+
+        CompletableFuture<Response> future = scheduler.submit(context(901));
+
+        assertTrue(future.get(2, TimeUnit.SECONDS).isSuccess());
+        assertEquals(1, sentBatches.size());
+        assertEquals(1, sentBatches.getFirst().getInputsCount());
+    }
+
+    @Test
+    void processQueue_fillRatio_triggers_dispatch() throws Exception {
+        // budget = sloMs(500) - predMs(128) = 372ms, margin = 50ms
+        // binary search: lo=128, hi=500, converges to ~322 → batchMaxTokens ≈ 322
+        // fillRatio = 128/322 ≈ 0.40 >= threshold(0.3) → dispatches immediately via fillRatio
+        // batchSizeMax=1000 ensures size condition is NOT the trigger
+        config.setCostSloMs(500L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchMaxCapacity(500);
+        config.setFlexlbBatchFillThreshold(0.3);
+        config.setFlexlbBatchSizeMax(1000);
+
+        CompletableFuture<Response> future = scheduler.submit(context(1001));
+
+        assertTrue(future.get(1, TimeUnit.SECONDS).isSuccess());
+        assertEquals(1, sentBatches.size());
+        assertEquals(1, sentBatches.getFirst().getInputsCount());
+    }
+
+    @Test
+    void processQueue_binary_search_lo_equals_hi() throws Exception {
+        // headTokens(500) > maxCapacity(100) → lo > hi, binary search loop never executes
+        // batchMaxTokens = max(headTokens, lo) = 500
+        // greedy: 500 + 50 = 550 > 500 → second request doesn't fit
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchMaxCapacity(100);
+        config.setFlexlbBatchFillThreshold(2.0);
+        config.setFlexlbBatchSizeMax(100);
+
+        CompletableFuture<Response> f1 = scheduler.submit(contextWithSeqLen(1101, 500));
+        CompletableFuture<Response> f2 = scheduler.submit(contextWithSeqLen(1102, 50));
+        Thread.sleep(50);
+        config.setFlexlbBatchFillThreshold(0.01);
+
+        assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
+        assertEquals(2, sentBatches.size());
+        assertEquals(1, sentBatches.get(0).getInputsCount(),
+                "Head alone — headTokens exceeds maxCapacity so no room for others");
+        assertEquals(1, sentBatches.get(1).getInputsCount());
+    }
+
+    @Test
+    void processQueue_maxScan_limits_greedy_fill() throws Exception {
+        // scanAhead=1: greedy only checks 1 candidate beyond head
+        // 3 requests queued, but only head + 1 scanned → first batch has 2 inputs, not 3
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchScanAhead(1);
+        config.setFlexlbBatchSizeMax(100);
+        config.setFlexlbBatchFillThreshold(2.0);
+
+        CompletableFuture<Response> f1 = scheduler.submit(context(1201));
+        CompletableFuture<Response> f2 = scheduler.submit(context(1202));
+        CompletableFuture<Response> f3 = scheduler.submit(context(1203));
+        Thread.sleep(50);
+        config.setFlexlbBatchFillThreshold(0.001);
+
+        assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f3.get(2, TimeUnit.SECONDS).isSuccess());
+
+        assertEquals(2, sentBatches.size(), "maxScan=1 splits 3 requests into 2 batches");
+        assertEquals(2, sentBatches.get(0).getInputsCount(),
+                "First batch: head + 1 scanned candidate");
+        assertEquals(1, sentBatches.get(1).getInputsCount());
+    }
+
+    @Test
+    void processQueue_greedy_skips_oversized_and_picks_smaller() throws Exception {
+        // Head=150tok, candidates: 120tok (too large: 150+120=270>200) and 50tok (fits: 150+50=200≤200)
+        // Greedy skips 120-token and picks 50-token regardless of PQ iteration order
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchMaxCapacity(200);
+        config.setFlexlbBatchScanAhead(10);
+        config.setFlexlbBatchSizeMax(100);
+        config.setFlexlbBatchFillThreshold(2.0);
+
+        CompletableFuture<Response> f1 = scheduler.submit(contextWithSeqLen(1301, 150));
+        CompletableFuture<Response> f2 = scheduler.submit(contextWithSeqLen(1302, 120));
+        CompletableFuture<Response> f3 = scheduler.submit(contextWithSeqLen(1303, 50));
+        Thread.sleep(50);
+        config.setFlexlbBatchFillThreshold(0.01);
+
+        assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f3.get(2, TimeUnit.SECONDS).isSuccess());
+
+        assertEquals(2, sentBatches.size());
+        EngineRpcService.BatchEnqueueRequestPB firstBatch = sentBatches.get(0);
+        assertEquals(2, firstBatch.getInputsCount(), "Head(150) + small(50) fit; large(120) skipped");
+
+        long[] ids = firstBatch.getInputsList().stream().mapToLong(EngineRpcService.GenerateInputPB::getRequestId).sorted().toArray();
+        assertEquals(1301, ids[0], "150-token head in first batch");
+        assertEquals(1303, ids[1], "50-token picked over 120-token");
+
+        assertEquals(1, sentBatches.get(1).getInputsCount());
+        assertEquals(1302, sentBatches.get(1).getInputs(0).getRequestId(),
+                "Skipped 120-token dispatches alone in second batch");
+    }
+
+    @Test
+    void processQueue_bsIter_exhaustion_uses_conservative_bound() throws Exception {
+        // bsIter=1 with huge maxCapacity: binary search does only 1 step
+        // mid ≈ 50050, estimateMs(50050) >> budget(350) → hi drops, lo stays at headTokens(100)
+        // batchMaxTokens = 100, so second 100-token request doesn't fit (100+100=200>100)
+        config.setCostSloMs(500L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setFlexlbBatchSearchIter(1);
+        config.setFlexlbBatchMaxCapacity(100000);
+        config.setFlexlbBatchFillThreshold(2.0);
+        config.setFlexlbBatchSizeMax(100);
+
+        CompletableFuture<Response> f1 = scheduler.submit(contextWithSeqLen(1401, 100));
+        CompletableFuture<Response> f2 = scheduler.submit(contextWithSeqLen(1402, 100));
+        Thread.sleep(50);
+        config.setFlexlbBatchFillThreshold(0.5);
+
+        assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
+
+        assertEquals(2, sentBatches.size(),
+                "bsIter=1 yields conservative batchMaxTokens=headTokens, preventing batching");
+        assertEquals(1, sentBatches.get(0).getInputsCount());
+        assertEquals(1, sentBatches.get(1).getInputsCount());
+    }
+
+    @Test
     void resolveSloMs_uses_buckets_when_configured() {
         FlexlbConfig cfg = new FlexlbConfig();
         cfg.setCostSloMs(500L);
