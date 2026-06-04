@@ -58,6 +58,17 @@ public:
         return prefill_server_->FetchResponse(context, request, writer);
     }
 
+    grpc::Status AttachStream(grpc::ServerContext*                   context,
+                              const AttachStreamRequestPB*           request,
+                              grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        if (!prefill_server_) {
+            auto error_msg = "server not implement AttachStream";
+            RTP_LLM_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
+        }
+        return prefill_server_->AttachStream(context, request, writer);
+    }
+
     grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response) override {
         if (!prefill_server_) {
             auto error_msg = "server not implement Cancel";

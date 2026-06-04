@@ -276,6 +276,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     response->set_latest_finished_version(status_info.latest_finished_version);
     response->set_alive(status_info.alive);
     response->set_precision(status_info.precision);
+    response->set_attach_stream_supported(status_info.attach_stream_supported);
     reportWorkerStatusTime(request_begin_time_us, request_after_ws_time_us);
     return grpc::Status::OK;
 }
@@ -344,6 +345,13 @@ WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_ver
         default:
             RTP_LLM_LOG_ERROR("unknown quant method: %d", static_cast<int>(quant_method));
             status_info.precision = "UNKNOWN";
+    }
+    {
+        const char* value = std::getenv("FLEXLB_ATTACH_STREAM");
+        status_info.attach_stream_supported =
+            value != nullptr
+            && (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0
+                || strcasecmp(value, "on") == 0 || strcasecmp(value, "yes") == 0);
     }
     return status_info;
 }

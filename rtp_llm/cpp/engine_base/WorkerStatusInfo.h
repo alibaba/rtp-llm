@@ -21,6 +21,7 @@ struct WorkerStatusInfo {
     int32_t            tp_size;
     int32_t            dp_rank;
     std::string        precision;
+    bool               attach_stream_supported{false};
 };
 
 }  // namespace rtp_llm

@@ -10,6 +10,7 @@ from grpc import StatusCode
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    AttachStreamRequestPB,
     CancelRequestPB,
     ErrorDetailsPB,
     FetchRequestPB,
@@ -449,9 +450,12 @@ class ModelRpcClient(object):
         input_pb = trans_input(input_py)
         response_iterator = None
         stream_state = StreamState()
-        use_fetch_response = bool(getattr(input_py, "enqueued_by_master", False))
+        enqueued_by_master = bool(getattr(input_py, "enqueued_by_master", False))
+        attach_stream_negotiated = bool(getattr(input_py, "attach_stream_negotiated", False))
+        use_attach_stream = enqueued_by_master and attach_stream_negotiated
+        use_fetch_response = enqueued_by_master and not use_attach_stream
 
-        if use_fetch_response:
+        if enqueued_by_master:
             address_list = [
                 role_addr.ip + ":" + str(role_addr.grpc_port)
                 for role_addr in input_py.generate_config.role_addrs
@@ -494,7 +498,11 @@ class ModelRpcClient(object):
             stub = RpcServiceStub(channel)
 
             grpc_kwargs = {"timeout": effective_ms / 1000.0} if effective_ms > 0 else {}
-            if use_fetch_response:
+            if use_attach_stream:
+                response_iterator = stub.AttachStream(
+                    AttachStreamRequestPB(request_id=input_pb.request_id), **grpc_kwargs
+                )
+            elif use_fetch_response:
                 response_iterator = stub.FetchResponse(
                     FetchRequestPB(request_id=input_pb.request_id), **grpc_kwargs
                 )
@@ -503,7 +511,7 @@ class ModelRpcClient(object):
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
                 output = trans_output(input_py, response, stream_state)
-                if use_fetch_response and _is_finished_response(response):
+                if (use_fetch_response or use_attach_stream) and _is_finished_response(response):
                     terminal_seen = True
                 yield output
             stream_done = True
@@ -541,12 +549,13 @@ class ModelRpcClient(object):
             logging.error(f"rpc unknown error:{str(e)}")
             raise e
         finally:
+            decoupled_rpc = use_fetch_response or use_attach_stream
             should_cancel = not stream_done and not (
-                use_fetch_response and terminal_seen
+                decoupled_rpc and terminal_seen
             )
             if response_iterator and should_cancel:
                 response_iterator.cancel()
-            if use_fetch_response and stub is not None and should_cancel:
+            if decoupled_rpc and stub is not None and should_cancel:
                 try:
                     await stub.Cancel(
                         CancelRequestPB(request_id=input_pb.request_id),

@@ -430,6 +430,7 @@ message WorkerStatusPB {
     bool alive = 13;
     string precision = 14;
     int64 latest_finished_version = 15;
+    bool attach_stream_supported = 16;
 }
 
 message EmbeddingInputPB {
@@ -658,6 +659,11 @@ message FetchRequestPB {
     int64 request_id = 1;
 }
 
+message AttachStreamRequestPB {
+    int64 request_id = 1;
+    int64 fetch_wait_timeout_ms = 2;
+}
+
 message CancelRequestPB {
     int64 request_id = 1;
 }
@@ -690,6 +696,7 @@ service RpcService {
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
     rpc BatchEnqueue(BatchEnqueueRequestPB) returns (BatchEnqueueResponsePB);
     rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
+    rpc AttachStream(AttachStreamRequestPB) returns (stream GenerateOutputsPB);
     rpc Cancel(CancelRequestPB) returns (EmptyPB);
 }
 

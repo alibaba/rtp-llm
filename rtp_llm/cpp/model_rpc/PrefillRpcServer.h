@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
 #include "rtp_llm/cpp/model_rpc/RecentCacheKeyWindow.h"
 #include "rtp_llm/cpp/model_rpc/ResponseBuffer.h"
+#include "rtp_llm/cpp/model_rpc/RequestSession.h"
 
 namespace rtp_llm {
 
@@ -33,6 +34,10 @@ public:
     grpc::Status FetchResponse(grpc::ServerContext*                   context,
                                const FetchRequestPB*                  request,
                                grpc::ServerWriter<GenerateOutputsPB>* writer);
+
+    grpc::Status AttachStream(grpc::ServerContext*                   context,
+                              const AttachStreamRequestPB*           request,
+                              grpc::ServerWriter<GenerateOutputsPB>* writer);
 
     grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response);
 
@@ -60,6 +65,7 @@ private:
 private:
     std::string                           decode_cluster_name_;
     std::unique_ptr<RecentCacheKeyWindow> prefill_recent_cache_key_window_;
+    SessionManager                        session_manager_;
     ResponseBufferRegistry                response_registry_;
     std::atomic<bool>                     response_gc_stop_{false};
     std::mutex                            response_gc_mu_;

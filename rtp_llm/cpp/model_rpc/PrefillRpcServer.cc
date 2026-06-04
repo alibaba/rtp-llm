@@ -88,6 +88,14 @@ bool prefillCacheDebugLogEnabled() {
     return enabled;
 }
 
+bool attachStreamEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("FLEXLB_ATTACH_STREAM");
+        return envValueIsTrue(value);
+    }();
+    return enabled;
+}
+
 bool prefillTheoryHitLogEnabled() {
     static const bool enabled = []() {
         const char* value = std::getenv("PREFILL_THEORY_HIT_LOG_ENABLED");
@@ -1622,6 +1630,72 @@ grpc::Status PrefillRpcServer::FetchResponse(grpc::ServerContext*               
             return terminal_status;
         }
     }
+}
+
+grpc::Status PrefillRpcServer::AttachStream(grpc::ServerContext*                   context,
+                                            const AttachStreamRequestPB*           request,
+                                            grpc::ServerWriter<GenerateOutputsPB>* writer) {
+    RTP_LLM_PROFILE_FUNCTION();
+    const auto request_id          = request->request_id();
+    const auto fetch_wait_timeout  = request->fetch_wait_timeout_ms() > 0
+                                         ? std::chrono::milliseconds(request->fetch_wait_timeout_ms())
+                                         : std::chrono::milliseconds(30000);
+
+    auto [result, session] = session_manager_.lookup(request_id);
+
+    switch (result) {
+        case LookupResult::NOT_FOUND:
+            return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                                "request [" + std::to_string(request_id) + "] not found");
+        case LookupResult::GONE:
+            return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                                "request [" + std::to_string(request_id) + "] already expired (GONE)");
+        case LookupResult::ALREADY_ATTACHED:
+            return grpc::Status(grpc::StatusCode::ALREADY_EXISTS,
+                                "request [" + std::to_string(request_id) + "] already attached");
+        case LookupResult::FINISHED_IN_TTL:
+        case LookupResult::RUNNING:
+            break;
+    }
+
+    if (!session->acquireLease()) {
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS,
+                            "request [" + std::to_string(request_id) + "] already attached by another consumer");
+    }
+    ScopeExit lease_guard([&] { session->releaseLease(); });
+
+    auto stream = session->getStream();
+    if (!stream) {
+        return grpc::Status(grpc::StatusCode::INTERNAL,
+                            "request [" + std::to_string(request_id) + "] has no stream");
+    }
+
+    auto state = session->deriveState();
+
+    if (state == SessionState::FINISHED || state == SessionState::ERROR || state == SessionState::CANCELLED) {
+        // terminal — drain any remaining relay data
+        std::vector<GenerateOutputsPB> remaining;
+        session->getRelay().drainTo(&remaining);
+        for (auto& output : remaining) {
+            if (!writer->Write(output)) {
+                return grpc::Status(grpc::StatusCode::CANCELLED, "client writer closed");
+            }
+        }
+        if (state == SessionState::CANCELLED) {
+            return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
+        }
+        return grpc::Status::OK;
+    }
+
+    // ADMITTED or RUNNING — poll from the engine's generate_outputs_queue_ via pollStreamOutput
+    auto request_key = std::to_string(request_id);
+    auto poll_status = pollStreamOutput(context, request_key, writer, stream);
+
+    if (poll_status.ok()) {
+        session->markFinished();
+    }
+
+    return poll_status;
 }
 
 grpc::Status PrefillRpcServer::Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response) {
