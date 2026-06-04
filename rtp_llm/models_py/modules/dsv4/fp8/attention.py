@@ -1562,6 +1562,11 @@ class AttentionFP8(nn.Module):
                 if kv_at is not None
                 else 0
             )
+            kv_owner_tpb = (
+                int(getattr(self._kv_cache, "seq_size_per_block", 0))
+                if kv_at is not None and self._kv_cache is not None
+                else 0
+            )
             state_tpb = (
                 _dsv4_pool_tokens_per_block(self._kv_cache, region=state_at)
                 if state_at is not None
@@ -1576,6 +1581,7 @@ class AttentionFP8(nn.Module):
                 state_eb,
                 state_tokens_per_block=state_tpb,
                 kv_tokens_per_block=kv_tpb,
+                kv_owner_tokens_per_block=kv_owner_tpb,
             )
 
         if self.indexer is not None:
@@ -1587,6 +1593,7 @@ class AttentionFP8(nn.Module):
             state_bt = bt_by_type.get(INDEXER_STATE) if bt_by_type is not None else None
             state_eb = self._pool_entries_per_block(INDEXER_STATE)
             kv_tpb = _dsv4_pool_tokens_per_block(self._kv_cache, region=INDEXER_KV)
+            kv_owner_tpb = int(getattr(self._kv_cache, "seq_size_per_block", 0))
             state_tpb = _dsv4_pool_tokens_per_block(
                 self._kv_cache, region=INDEXER_STATE
             )
@@ -1599,6 +1606,7 @@ class AttentionFP8(nn.Module):
                 state_eb,
                 state_tokens_per_block=state_tpb,
                 kv_tokens_per_block=kv_tpb,
+                kv_owner_tokens_per_block=kv_owner_tpb,
             )
 
     def _clear_compressor_pool_context(self) -> None:
@@ -4188,9 +4196,9 @@ class AttentionFP8(nn.Module):
             ).contiguous()
         cmp_owner_block_size: Optional[int] = None
         if kv_cache_sharded and ratio > 0 and self._kv_cache is not None:
-            state_tpb = _dsv4_pool_tokens_per_block(self._kv_cache, region=state_at)
-            if state_tpb % ratio == 0:
-                cmp_owner_block_size = state_tpb // ratio
+            kv_owner_tpb = int(getattr(self._kv_cache, "seq_size_per_block", 0))
+            if kv_owner_tpb > 0 and kv_owner_tpb % ratio == 0:
+                cmp_owner_block_size = kv_owner_tpb // ratio
         cmp_reader = make_compressed_k_pool_reader(
             cp_ctx=cp_ctx_local,
             kv_cache_sharded=kv_cache_sharded,

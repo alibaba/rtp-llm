@@ -35,6 +35,7 @@ struct CacheStoreBlockPair {
 // To register the right key with the right buffer the planner emits:
 //   * (pos, pos)                              — non-CP / non-FULL groups
 //   * (cp_rank + i*cp_size, i) for owned i    — CP-sharded FULL groups
+//   * ((i+1)*cp_size-1, i)                    — CP-compact SWA/fixed groups
 //
 // Without this re-pairing the prefill side advertises ``cache_keys[i]``
 // (== key for logical position i) attached to data from logical position

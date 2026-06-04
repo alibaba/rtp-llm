@@ -9,6 +9,7 @@ from rtp_llm.models_py.modules.dsv4.decode.forward import build_paged_pool_specs
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
+from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import cp_kv_slot_mapping
 from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
     translate_local_to_global_slots,
 )
@@ -28,6 +29,47 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
         self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), group=1), 16384)
         self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), region=1), 128)
         self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), region=7), 16384)
+
+    def test_require_pool_tokens_per_block_prefers_group_override(self) -> None:
+        class FakeKVCache:
+            group_region_names = [int(HCA_KV), int(SWA_KV)]
+            group_seq_size_per_block = [256, 1024]
+            seq_size_per_block = 256
+            kernel_seq_size_per_block = 256
+
+        self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), group=0), 256)
+        self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), group=1), 1024)
+        self.assertEqual(require_pool_tokens_per_block(FakeKVCache(), region=int(SWA_KV)), 1024)
+
+    def test_cp_kv_owner_uses_full_physical_block_not_compact_state_block(self) -> None:
+        positions = torch.tensor([3, 259, 515, 771], dtype=torch.int64)
+        b_idx = torch.zeros_like(positions)
+
+        rank0 = cp_kv_slot_mapping(
+            positions,
+            torch.tensor([[10]], dtype=torch.int64),
+            b_idx,
+            tokens_per_block=256,
+            kv_eb=64,
+            ratio=4,
+            cp_size=4,
+            cp_rank=0,
+            owner_tokens_per_block=256,
+        )
+        rank3 = cp_kv_slot_mapping(
+            positions,
+            torch.tensor([[13]], dtype=torch.int64),
+            b_idx,
+            tokens_per_block=256,
+            kv_eb=64,
+            ratio=4,
+            cp_size=4,
+            cp_rank=3,
+            owner_tokens_per_block=256,
+        )
+
+        torch.testing.assert_close(rank0, torch.tensor([640, -1, -1, -1], dtype=torch.int64))
+        torch.testing.assert_close(rank3, torch.tensor([-1, -1, -1, 832], dtype=torch.int64))
 
     def test_build_paged_pool_specs_uses_dsv4_pool_tokens(self) -> None:
         class FakeKVCache:
