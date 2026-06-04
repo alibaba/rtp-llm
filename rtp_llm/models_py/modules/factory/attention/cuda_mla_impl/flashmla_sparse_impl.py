@@ -417,7 +417,10 @@ class SparseMlaFp8Op(SparseMlaOp):
 
         # Request-local topk → workspace offset (ws_starts[req] + local_pos)
         offsets = ws.workspace_starts[self.mla_params.batch_indice_d]
-        global_indices = (_topk_2d(topk_indices) + offsets.unsqueeze(1)).unsqueeze(1)
+        topk_2d = _topk_2d(topk_indices)
+        padding_mask = topk_2d < 0
+        raw_global = topk_2d + offsets.unsqueeze(1)
+        global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
 
         out, _, _ = flash_mla_sparse_fwd(
             q,
