@@ -187,6 +187,8 @@ private:
     ParallelismConfig                                                        parallelism_config_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>
+        wall_tps_reporter_;
     std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
     size_t                                                                   vocab_size_;
 

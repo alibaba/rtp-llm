@@ -470,6 +470,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
         params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
+    wall_tps_reporter_(WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
+        params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type),
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
@@ -1767,6 +1769,8 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     MtpMetricsCollector metrics_collector;
     auto                tps_active_guard =
         tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && !streams.empty());
+    auto wall_tps_active_guard =
+        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && !streams.empty());
 
     std::list<GenerateStreamPtr> prefill_streams;
     std::list<GenerateStreamPtr> decode_streams;
@@ -1806,6 +1810,7 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
         metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(
             nullptr, &metrics_collector.executor_collector);
         tps_reporter_.report(&metrics_collector.tps_collector);
+        wall_tps_reporter_.report(&metrics_collector.tps_collector);
         metrics_reporter_->report<RtpLLMSpeculativeEngineMetrics, RtpLLMSpeculativeEngineMetricsCollector>(
             nullptr, &metrics_collector.sp_engine_collector);
     }

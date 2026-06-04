@@ -20,6 +20,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMDeviceCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMTokenPSMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMWallClockTokenPSMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMEngineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMKernelMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSpeculativeEngineMetrics);
@@ -447,6 +448,25 @@ void RtpLLMTokenPSMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMToken
     if (collector->hasTotalTPS()) {
         REPORT_MUTABLE_METRIC(total_tps_metric, collector->totalTPS());
     }
+}
+
+bool RtpLLMWallClockTokenPSMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(context_wall_tps_metric, "rtp_llm_context_wall_tps");
+    REGISTER_GAUGE_MUTABLE_METRIC(context_wall_tps_with_cache_metric, "rtp_llm_context_wall_tps_with_cache");
+    REGISTER_GAUGE_MUTABLE_METRIC(wall_tps_report_interval_us_metric, "rtp_llm_wall_tps_report_interval_us");
+    return true;
+}
+
+void RtpLLMWallClockTokenPSMetrics::report(const kmonitor::MetricsTags*   tags,
+                                           RtpLLMTokenPSMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(wall_tps_report_interval_us_metric, collector->reportWindowUs());
+    if (collector->reportZeroTPS()) {
+        REPORT_MUTABLE_METRIC(context_wall_tps_metric, 0.0);
+        REPORT_MUTABLE_METRIC(context_wall_tps_with_cache_metric, 0.0);
+        return;
+    }
+    REPORT_MUTABLE_METRIC(context_wall_tps_metric, collector->contextWallTPS());
+    REPORT_MUTABLE_METRIC(context_wall_tps_with_cache_metric, collector->contextWallTPSWithCache());
 }
 
 bool RtpLLMCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {

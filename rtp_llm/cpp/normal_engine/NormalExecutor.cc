@@ -70,6 +70,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
         params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
+    wall_tps_reporter_(WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
+        params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
     is_propose_(is_propose),
     propose_model_index_(propose_model_index),
     profile_step_start_(std::move(profile_step_start)),
@@ -176,6 +178,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     RtpLLMTokenPSMetricsCollector  tps_collector;
     auto                           tps_active_guard =
         tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && !streams.empty());
+    auto wall_tps_active_guard =
+        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && !streams.empty());
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
@@ -381,6 +385,7 @@ void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups
                                    stream_groups.modelExecuteTokenSize(),
                                    tps_execute_time_us);
         tps_reporter_.report(&tps_collector);
+        wall_tps_reporter_.report(&tps_collector);
     }
 }
 

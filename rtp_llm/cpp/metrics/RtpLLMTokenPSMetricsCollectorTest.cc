@@ -121,4 +121,32 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, MergeKeepsIdleZeroOnlyForEmptyMetrics) {
     EXPECT_FALSE(merged.reportZeroTPS());
 }
 
+TEST(RtpLLMTokenPSMetricsCollectorTest, ReportsContextWallTpsByReportWindow) {
+    RtpLLMTokenPSMetricsCollector collector;
+
+    collector.addTokenSize(1000, 1500, 0, 1000, 100 * 1000);
+    collector.setReportWindowUs(200 * 1000);
+
+    EXPECT_NEAR(collector.contextTPS(), 10000.0, 1e-6);
+    EXPECT_NEAR(collector.contextTPSWithCache(), 15000.0, 1e-6);
+    EXPECT_NEAR(collector.contextWallTPS(), 5000.0, 1e-6);
+    EXPECT_NEAR(collector.contextWallTPSWithCache(), 7500.0, 1e-6);
+    EXPECT_EQ(collector.reportWindowUs(), 200 * 1000);
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, WallTpsUsesMergedTokens) {
+    RtpLLMTokenPSMetricsCollector first;
+    RtpLLMTokenPSMetricsCollector second;
+    RtpLLMTokenPSMetricsCollector merged;
+
+    first.addTokenSize(1000, 1500, 0, 1000, 100 * 1000);
+    second.addTokenSize(3000, 4500, 0, 3000, 100 * 1000);
+    merged.merge(&first);
+    merged.merge(&second);
+    merged.setReportWindowUs(1 * 1000 * 1000);
+
+    EXPECT_NEAR(merged.contextWallTPS(), 4000.0, 1e-6);
+    EXPECT_NEAR(merged.contextWallTPSWithCache(), 6000.0, 1e-6);
+}
+
 }  // namespace rtp_llm

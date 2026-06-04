@@ -3,6 +3,7 @@
 #include "autil/Log.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <thread>
@@ -396,6 +397,22 @@ public:
         return calcTps(context_token_num_with_cache_, context_time_us_with_cache_);
     }
 
+    double contextWallTPS() const {
+        return calcTps(context_token_num_, report_window_us_);
+    }
+
+    double contextWallTPSWithCache() const {
+        return calcTps(context_token_num_with_cache_, report_window_us_);
+    }
+
+    void setReportWindowUs(int64_t report_window_us) {
+        report_window_us_ = report_window_us;
+    }
+
+    int64_t reportWindowUs() const {
+        return report_window_us_;
+    }
+
     double generateTPS() const {
         return generate_token_num_;
     }
@@ -449,6 +466,7 @@ private:
     int64_t context_time_us_with_cache_   = 0;
     int64_t generate_token_num_           = 0;
     int64_t total_token_num_              = 0;
+    int64_t report_window_us_             = 0;
     bool    report_zero_tps_              = false;
 };
 
@@ -462,6 +480,20 @@ public:
     kmonitor::MutableMetric* context_tps_with_cache_metric = nullptr;
     kmonitor::MutableMetric* generate_tps_metric           = nullptr;
     kmonitor::MutableMetric* total_tps_metric              = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMWallClockTokenPSMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* context_wall_tps_metric            = nullptr;
+    kmonitor::MutableMetric* context_wall_tps_with_cache_metric = nullptr;
+    kmonitor::MutableMetric* wall_tps_report_interval_us_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -570,6 +602,129 @@ private:
     int                          interval_ms_ = 1000;
     std::thread                  metrics_reporter_thread_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
+};
+
+template<typename MetricsType, typename CollectType>
+class WallClockMetricsLoopReporter {
+public:
+    explicit WallClockMetricsLoopReporter(const kmonitor::MetricsReporterPtr metrics_reporter, int interval_ms = 1000):
+        collector_(CollectType()),
+        interval_ms_(interval_ms),
+        last_report_time_(std::chrono::steady_clock::now()),
+        metrics_reporter_(metrics_reporter) {
+        if (metrics_reporter_) {
+            metrics_reporter_thread_ =
+                std::thread(&WallClockMetricsLoopReporter<MetricsType, CollectType>::reportLoop, this);
+        }
+    }
+
+    ~WallClockMetricsLoopReporter() {
+        stop_.store(true, std::memory_order_release);
+        if (metrics_reporter_thread_.joinable()) {
+            metrics_reporter_thread_.join();
+        }
+    }
+
+    class ActiveGuard {
+    public:
+        ActiveGuard() = default;
+        explicit ActiveGuard(WallClockMetricsLoopReporter* reporter): reporter_(reporter) {
+            if (reporter_) {
+                reporter_->beginActive();
+            }
+        }
+        ActiveGuard(const ActiveGuard&)            = delete;
+        ActiveGuard& operator=(const ActiveGuard&) = delete;
+        ActiveGuard(ActiveGuard&& other): reporter_(other.reporter_) {
+            other.reporter_ = nullptr;
+        }
+        ActiveGuard& operator=(ActiveGuard&& other) {
+            if (this != &other) {
+                release();
+                reporter_       = other.reporter_;
+                other.reporter_ = nullptr;
+            }
+            return *this;
+        }
+        ~ActiveGuard() {
+            release();
+        }
+
+    private:
+        void release() {
+            if (reporter_) {
+                reporter_->endActive();
+                reporter_ = nullptr;
+            }
+        }
+
+    private:
+        WallClockMetricsLoopReporter* reporter_ = nullptr;
+    };
+
+    ActiveGuard makeActiveGuard(bool active = true) {
+        return ActiveGuard(active ? this : nullptr);
+    }
+
+    void report(const CollectType* collector) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        collector_.merge(collector);
+    }
+
+private:
+    void beginActive() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++active_count_;
+    }
+
+    void endActive() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (active_count_ > 0) {
+            --active_count_;
+        }
+    }
+
+    bool takeReportCollector(const std::chrono::steady_clock::time_point& now, CollectType& report_collector) {
+        auto window_us   = std::chrono::duration_cast<std::chrono::microseconds>(now - last_report_time_).count();
+        report_collector = collector_;
+        report_collector.setReportWindowUs(window_us);
+        collector_        = CollectType();
+        last_report_time_ = now;
+        return true;
+    }
+
+    void reportLoop() {
+        while (metrics_reporter_ && !stop_.load(std::memory_order_acquire)) {
+            bool        should_report = false;
+            CollectType report_collector;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                auto                        now = std::chrono::steady_clock::now();
+                if (collector_.hasMetrics()) {
+                    should_report = takeReportCollector(now, report_collector);
+                } else if (active_count_ == 0) {
+                    // Idle service reports 0 wall TPS. In-flight long steps stay silent so their eventual
+                    // wall window includes the full in-flight time since the last wall report.
+                    collector_.markIdleWindow();
+                    should_report = takeReportCollector(now, report_collector);
+                }
+            }
+            if (should_report) {
+                metrics_reporter_->report<MetricsType, CollectType>(nullptr, &report_collector);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
+        }
+    }
+
+private:
+    std::mutex                            mutex_;
+    std::atomic_bool                      stop_{false};
+    CollectType                           collector_;
+    int                                   active_count_ = 0;
+    int                                   interval_ms_  = 1000;
+    std::chrono::steady_clock::time_point last_report_time_;
+    std::thread                           metrics_reporter_thread_;
+    kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
 };
 
 class RtpLLMExecutorMetricsCollector final {
