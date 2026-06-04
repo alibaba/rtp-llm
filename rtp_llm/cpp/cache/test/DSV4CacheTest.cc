@@ -1175,6 +1175,68 @@ TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
     allocator->free(free_info);
 }
 
+TEST_F(DSV4AllocatorTest, CpPageRrHcaStateRestoresPreviousTailForPdTransfer) {
+    constexpr uint32_t cp_size = 2;
+    auto               config  = makeDSV4CpAllocatorConfig(cp_size);
+    auto               allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto               shared_cache = std::make_shared<SharedBlockCache>();
+    allocator->setSharedBlockCache(shared_cache);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool = allocator->getBlockPool();
+
+    CacheKeysType full_keys = {100, 101, 102, 103, 104, 105, 106};
+    CacheKeysType cp_keys   = {101, 103, 105};
+    std::vector<std::vector<BlockIdxType>> cached_blocks(7);
+    for (int gid = 0; gid < 7; ++gid) {
+        auto blocks = block_pool->malloc(static_cast<int>(cp_keys.size()));
+        ASSERT_EQ(blocks.size(), cp_keys.size());
+        for (size_t i = 0; i < cp_keys.size(); ++i) {
+            std::vector<BlockIdxType> group_slots(7, NULL_BLOCK_IDX);
+            group_slots[static_cast<size_t>(gid)] = blocks[i];
+            shared_cache->put(cp_keys[i], group_slots, true);
+        }
+        cached_blocks[static_cast<size_t>(gid)] = blocks;
+        block_pool->requestFree(blocks);
+    }
+
+    auto batch_res = std::make_shared<BatchKVCacheResource>();
+    batch_res->resetBatchSize(1);
+    batch_res->initGroups(7,
+                          static_cast<int>(config.layer_all_num),
+                          config.layer_to_group_id,
+                          config.kernelBlocksPerKvBlock(),
+                          config.group_types,
+                          config.layer_region_to_group_id);
+    batch_res->setBatchCacheKeys(0, full_keys);
+
+    const int spb     = allocator->seqSizePerBlock();
+    const int seq_len = static_cast<int>(cp_size) * spb * 3 + 1;
+    auto      cti     = std::make_shared<CompleteTokenIds>(1, 1, seq_len + spb, spb);
+    auto      gi      = std::make_shared<GenerateInput>();
+    gi->input_ids       = torch::arange(seq_len, torch::kInt32);
+    gi->generate_config = std::make_shared<GenerateConfig>();
+    cti->init(gi);
+
+    MallocInfo info{batch_res, cti};
+    info.enable_device_cache = true;
+    info.reuse_cache         = true;
+    info.cp_slot_mapper      = std::make_shared<CPSlotMapper>(0, static_cast<int>(cp_size), spb);
+
+    auto result = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+    EXPECT_GT(result.reuse_len, 0);
+
+    const auto& hca_state_blocks = batch_res->blocks(0, 5);
+    ASSERT_GE(hca_state_blocks.size(), 4u);
+    EXPECT_EQ(hca_state_blocks[2], cached_blocks[5][2])
+        << "previous HCA_STATE tail must be restored so decode can load the last two state blocks";
+    EXPECT_FALSE(isNullBlockIdx(hca_state_blocks[3])) << "current prefill tail HCA_STATE block must be allocated";
+
+    FreeInfo free_info{batch_res};
+    allocator->free(free_info);
+}
+
 TEST_F(DSV4AllocatorTest, FlashInitAndBasicProperties) {
     auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
@@ -1407,7 +1469,8 @@ TEST_F(DSV4AllocatorTest, FlashMallocAndFree) {
 }
 
 // ============================================================
-// Prefix cache: insertIntoCache skips HCA_STATE but keeps other groups reusable.
+// Prefix cache: HCA_STATE is excluded from reuse decisions, but its tail blocks
+// are still cached so PD decode can load them when a prefix is reused.
 // ============================================================
 
 TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
@@ -1446,19 +1509,13 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     InsertInfo insert_info{batch_res, complete_token_ids, /*is_resident=*/false};
     allocator->insertIntoCache(insert_info);
 
-    // With manually populated non-null block IDs, every reusable group inserts
-    // the corresponding full-block cache keys. HCA_STATE (group 5) is runtime
-    // scratch state and must not be persisted as reusable prefix cache.
+    // With manually populated non-null block IDs, every group inserts the
+    // corresponding full-block cache keys. HCA_STATE is needed for PD decode's
+    // last-two-block transfer when the previous tail is device-reused.
     for (int gid = 0; gid < 3; gid++) {
         EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(200, gid))) << "group " << gid << " should be cached";
     }
     for (int gid = 3; gid < 7; gid++) {
-        if (gid == 5) {
-            EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(200, gid))) << "HCA_STATE should skip key 200";
-            EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(201, gid))) << "HCA_STATE should skip tail key 201";
-            EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(202, gid))) << "HCA_STATE should skip tail key 202";
-            continue;
-        }
         EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(200, gid)))
             << "SWA group " << gid << " should cache key 200";
         EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(201, gid)))
@@ -1475,7 +1532,7 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
 }
 
 // ============================================================
-// Prefix cache: Flash config insertIntoCache skips HCA_STATE.
+// Prefix cache: Flash config keeps the same HCA_STATE tail-transfer behavior.
 // ============================================================
 
 TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
@@ -1511,21 +1568,14 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     InsertInfo insert_info{batch_res, complete_token_ids, /*is_resident=*/false};
     allocator->insertIntoCache(insert_info);
 
-    // With manually populated non-null block IDs, every reusable group inserts
-    // the corresponding full-block cache keys. HCA_STATE (group 5) is skipped.
+    // With manually populated non-null block IDs, every group inserts the
+    // corresponding full-block cache keys. HCA_STATE participates in tail
+    // transfer even though FULL groups determine prefix length.
     for (int gid = 0; gid < 3; gid++) {
         EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(300, gid)))
             << "Flash group " << gid << " should be cached";
     }
     for (int gid = 3; gid < 7; gid++) {
-        if (gid == 5) {
-            EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(300, gid))) << "Flash HCA_STATE should skip key 300";
-            EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(301, gid)))
-                << "Flash HCA_STATE should skip tail key 301";
-            EXPECT_TRUE(isNullBlockIdx(shared_cache->matchGroup(302, gid)))
-                << "Flash HCA_STATE should skip tail key 302";
-            continue;
-        }
         EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(300, gid)))
             << "Flash SWA group " << gid << " should cache key 300";
         EXPECT_FALSE(isNullBlockIdx(shared_cache->matchGroup(301, gid)))
@@ -1601,10 +1651,6 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
         ASSERT_GE(out_blocks.size(), 3u) << "group " << gid << " should have tail slots";
         EXPECT_TRUE(isNullBlockIdx(out_blocks[1]))
             << "group " << gid << " previous matched tail is evicted after new tail allocation";
-        if (gid == 5) {
-            EXPECT_TRUE(isNullBlockIdx(out_blocks[2])) << "HCA_STATE should not reuse a cached tail block";
-            continue;
-        }
         EXPECT_EQ(out_blocks[2], cached_blocks[gid][2]) << "group " << gid << " last matched tail block should remain";
     }
 
@@ -1710,8 +1756,10 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
-    EXPECT_GT(result.reuse_len, 0) << "HCA_STATE miss should not veto DSV4 prefix reuse";
-    EXPECT_TRUE(isNullBlockIdx(batch_res->blocks(0, 5).at(2))) << "HCA_STATE should remain non-reused";
+    EXPECT_GT(result.reuse_len, 0) << "HCA_STATE tail miss should not veto DSV4 prefix reuse";
+    EXPECT_TRUE(isNullBlockIdx(batch_res->blocks(0, 5).at(2)))
+        << "missing HCA_STATE previous tail stays null, but does not decide reuse";
+    EXPECT_FALSE(isNullBlockIdx(batch_res->blocks(0, 5).at(3))) << "current HCA_STATE tail should be allocated";
     EXPECT_EQ(batch_res->blocks(0, 6).at(2), cached_blocks[6][2]) << "SWA_KV tail should still gate reuse";
 
     FreeInfo free_info{batch_res};
@@ -1822,10 +1870,6 @@ TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
         ASSERT_GE(out_blocks.size(), 3u) << "Flash group " << gid;
         EXPECT_TRUE(isNullBlockIdx(out_blocks[1]))
             << "Flash group " << gid << " previous matched tail is evicted after new tail allocation";
-        if (gid == 5) {
-            EXPECT_TRUE(isNullBlockIdx(out_blocks[2])) << "Flash HCA_STATE should not reuse a cached tail block";
-            continue;
-        }
         EXPECT_EQ(out_blocks[2], cached_blocks[gid][2])
             << "Flash group " << gid << " last matched tail block should remain";
     }
