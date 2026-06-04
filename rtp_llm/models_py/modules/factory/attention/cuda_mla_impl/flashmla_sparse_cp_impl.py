@@ -533,7 +533,15 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             ws.total_kv_len,
         )
         offsets = ws.workspace_starts[self.precomputed_req_ids]
-        global_indices = (_topk_2d(topk) + offsets.unsqueeze(1)).unsqueeze(1)
+        topk_2d = _topk_2d(topk)
+        # FIX: topk_2d contains -1 as padding (invalid KV position).
+        # Adding offsets to -1 turns it into a large positive index that
+        # points into another request's KV region in fused_kv, causing
+        # cross-request KV pollution → gibberish / repeat output.
+        # Preserve -1 so flash_mla_sparse_fwd skips these positions.
+        padding_mask = topk_2d < 0
+        raw_global = topk_2d + offsets.unsqueeze(1)
+        global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
         out, _, _ = flash_mla_sparse_fwd(
             q0,
             ws.fused_kv.unsqueeze(1),
