@@ -57,13 +57,24 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
     eplb_config(params.eplb_config) {
+    auto description = Executor::genModelDescription(model_config_, parallelism_config, eplb_config, params.moe_config);
     GptModelInitParams model_init_params({
         params.gpt_weights,
-        Executor::genModelDescription(model_config_, parallelism_config, eplb_config, params.moe_config),
+        description,
         nullopt,  // no kv cache buffer for embedding executor
         0,
         parallelism_config,
+        params.hw_kernel_config,
+        params.profiling_debug_logging_config,
+        params.runtime_config,
+        params.concurrency_config,
     });
+    model_init_params.device_resource_config  = params.device_resource_config;
+    model_init_params.max_seq_len             = model_config_.max_seq_len;
+    model_init_params.hidden_size             = model_config_.hidden_size;
+    model_init_params.tokens_per_block        = std::max<size_t>(description.attention_conf.tokens_per_block, 1);
+    model_init_params.kernel_tokens_per_block = std::max<size_t>(
+        description.attention_conf.kernel_tokens_per_block, model_init_params.tokens_per_block);
 
     RTP_LLM_CHECK_WITH_INFO(!params.py_model.is_none(), "py_model must be provided, legacy C++ GptModel path removed");
     RTP_LLM_LOG_INFO("init executor with python model");

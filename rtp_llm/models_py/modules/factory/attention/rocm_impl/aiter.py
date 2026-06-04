@@ -1373,8 +1373,41 @@ class AiterPrefillImplAsm(FMHAImplBase):
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.attn_inputs = attn_inputs
-        self.fmha_params = self.paged_fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+
+        # Ensure embedding KV cache exists (created during capture warmup)
+        if hasattr(self, '_emb_kv_ready') and self._emb_kv_ready:
+            # Inject our block table into attn_inputs so _update_prefill_params
+            # picks it up instead of raising "requires kv cache block ids"
+            attn_inputs.kv_cache_kernel_block_id_device = self._emb_block_table
+
+        # Update fmha_params IN PLACE (same memory addresses as capture time)
+        # Reuse AiterPrefillImplPaged's update logic
+        input_lengths = attn_inputs.input_lengths
+        fmha_params = self.fmha_params
+        expected_batch = fmha_params.cu_seqlens_q.numel() - 1
+
+        q_lengths = input_lengths.to(
+            device=fmha_params.cu_seqlens_q.device, dtype=torch.int32
+        )
+        fmha_params.cu_seqlens_q.zero_()
+        fmha_params.cu_seqlens_q[1:].copy_(torch.cumsum(q_lengths, dim=0))
+        fmha_params.cu_seqlens_k.copy_(fmha_params.cu_seqlens_q)
+
+        fmha_params.max_seq_len = int(q_lengths.max()) if expected_batch > 0 else 0
+        fmha_params.max_seqlen_q = fmha_params.max_seq_len
+        fmha_params.max_seqlen_k = fmha_params.max_seq_len
+        fmha_params.token_q_num = int(q_lengths.sum())
+        fmha_params.token_kv_num = fmha_params.token_q_num
+        fmha_params.prefill_seqlen_k_int32 = q_lengths.to(torch.int32)
+
+        if hasattr(self, '_emb_block_table'):
+            fmha_params.kv_cache_block_id_device = self._emb_block_table
+
+        self.paged_fmha_impl.prepare_cuda_graph(self.fmha_params, attn_inputs)
+
+        prepare_in_place = getattr(self.rope_params, "prepare_in_place", None)
+        if callable(prepare_in_place):
+            prepare_in_place(attn_inputs)
 
     def _ensure_embedding_kv_cache(self, device, dtype):
         """Lazy-init temporary paged KV cache + block table for embedding models."""
