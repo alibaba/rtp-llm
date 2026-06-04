@@ -150,6 +150,15 @@ public class FlexlbBatchScheduler {
         }
     }
 
+    public void onRequestsFinished(List<Long> requestIds) {
+        if (requestIds == null || requestIds.isEmpty()) {
+            return;
+        }
+        for (Long requestId : requestIds) {
+            inflight.remove(requestId);
+        }
+    }
+
     @Scheduled(fixedRate = 60000L)
     public void cleanupInflight() {
         long now = System.currentTimeMillis();
@@ -745,7 +754,14 @@ public class FlexlbBatchScheduler {
             for (BatchItem item : items) {
                 inflight.put(item.requestId(), new InflightEntry(item, prefill));
             }
-            dispatchExecutor.execute(() -> dispatch(items, prefill));
+            try {
+                dispatchExecutor.execute(() -> dispatch(items, prefill));
+            } catch (java.util.concurrent.RejectedExecutionException e) {
+                Logger.warn("FlexLB batch dispatch rejected (executor shutdown), failing {} items", items.size());
+                for (BatchItem item : items) {
+                    failAck(item, e);
+                }
+            }
         }
 
         private void dropItem(BatchItem item) {

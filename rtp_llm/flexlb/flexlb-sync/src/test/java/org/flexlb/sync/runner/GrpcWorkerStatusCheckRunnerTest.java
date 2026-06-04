@@ -51,7 +51,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 modelName, ipPort, site,
                 RoleType.PREFILL,
-                group, workerStatus, engineHealthReporter, engineGrpcService, 20);
+                group, workerStatus, engineHealthReporter, engineGrpcService, 20, null);
         runner.run();
 
         // Assert

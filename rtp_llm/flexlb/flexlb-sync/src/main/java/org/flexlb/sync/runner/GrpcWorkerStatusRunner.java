@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -14,6 +15,7 @@ import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
@@ -32,6 +34,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final WorkerStatus workerStatus;
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
+    private final FlexlbBatchScheduler batchScheduler;
     private final String ip;
     private final int grpcPort;
     private final long createTimeUs = System.nanoTime() / 1000;
@@ -42,7 +45,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   WorkerStatus workerStatus,
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
-                                  long syncRequestTimeoutMs) {
+                                  long syncRequestTimeoutMs,
+                                  FlexlbBatchScheduler batchScheduler) {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
         this.ip = split[0];
@@ -55,6 +59,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
+        this.batchScheduler = batchScheduler;
     }
 
     @Override
@@ -132,7 +137,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 Map<String, TaskInfo> waitingTaskInfo = newWorkerStatus.getWaitingTaskInfo();
                 Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
                 Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
-                workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
+                List<Long> finished = workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
+                notifyBatchSchedulerFinished(finished);
 
                 // Report success even when version is not updated
                 engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
@@ -160,7 +166,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setRunningTaskList(runningTaskInfo);
 
             // Update local task state (including checking lost, updating running, and cleaning completed)
-            workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
+            List<Long> finished2 = workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
+            notifyBatchSchedulerFinished(finished2);
 
             // Correct running queue total wait time
             workerStatus.updateRunningQueueTime();
@@ -181,6 +188,12 @@ public class GrpcWorkerStatusRunner implements Runnable {
         } catch (Throwable e) {
             log("engine worker status check via gRPC exception, msg: " + e.getMessage());
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, ip, roleType);
+        }
+    }
+
+    private void notifyBatchSchedulerFinished(List<Long> finishedRequestIds) {
+        if (batchScheduler != null && finishedRequestIds != null && !finishedRequestIds.isEmpty()) {
+            batchScheduler.onRequestsFinished(finishedRequestIds);
         }
     }
 
