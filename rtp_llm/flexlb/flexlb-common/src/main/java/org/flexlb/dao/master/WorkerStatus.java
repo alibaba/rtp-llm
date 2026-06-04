@@ -39,6 +39,7 @@ public class WorkerStatus {
     private AtomicLong latestFinishedTaskVersion = new AtomicLong(-1L);
 
     private ConcurrentHashMap<Long/*requestId*/, TaskInfo> localTaskMap = new ConcurrentHashMap<>();
+    private AtomicLong predictedQueueTimeMs = new AtomicLong();
     private double stepLatencyMs;
     private long iterateCount;
     private long dpSize;
@@ -64,6 +65,7 @@ public class WorkerStatus {
 
         // Local incremental queue time update
         this.addRunningQueueTime(taskInfo.estimatePrefillTime());
+        predictedQueueTimeMs.addAndGet(taskInfo.getPredictedMs());
         // Local incremental KV cache tokens update
         long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
         this.decKvCacheFree(needNewKvCacheLen);
@@ -81,9 +83,12 @@ public class WorkerStatus {
         TaskInfo taskInfo = localTaskMap.get(requestId);
         if (taskInfo != null) {
             safeDecrementQueueTime(runningQueueTime, taskInfo.estimatePrefillTime());
-            long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
-            decKvCacheFree(-needNewKvCacheLen);
-            addKvCacheUsed(-needNewKvCacheLen);
+            safeDecrementQueueTime(predictedQueueTimeMs, taskInfo.getPredictedMs());
+            if (taskInfo.getTaskState() == TaskStateEnum.IN_TRANSIT) {
+                long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
+                decKvCacheFree(-needNewKvCacheLen);
+                addKvCacheUsed(-needNewKvCacheLen);
+            }
             localTaskMap.remove(requestId);
         }
     }
@@ -130,6 +135,7 @@ public class WorkerStatus {
                     long delta = finishedTask.estimatePrefillTime();
                     safeDecrementQueueTime(runningQueueTime, delta);
                 }
+                safeDecrementQueueTime(predictedQueueTimeMs, localTask.getPredictedMs());
                 Logger.debug("Task {} finished and removed", requestId);
                 finishedRequestIds.add(requestId);
                 iterator.remove();
@@ -191,19 +197,25 @@ public class WorkerStatus {
         int localTaskMapSize = localTaskMap.size();
         if (localTaskMapSize == 0) {
             runningQueueTime.getAndSet(0);
+            predictedQueueTimeMs.getAndSet(0);
             return;
         }
         long rectifiedEstimateRunningTime = 0;
+        long rectifiedPredictedMs = 0;
         for (Entry<Long, TaskInfo> entry : localTaskMap.entrySet()) {
             TaskInfo taskInfo = entry.getValue();
             // Recalculate based on accurate cache hit count, rectify local task running queue time
             rectifiedEstimateRunningTime += taskInfo.estimatePrefillTime();
+            rectifiedPredictedMs += taskInfo.getPredictedMs();
         }
         if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
             // Only update when rectified time is less than estimated time, because engine layer returned running_list may include queuing tasks where prefixLength=0
             if (runningQueueTime.get() > rectifiedEstimateRunningTime) {
                 runningQueueTime.getAndSet(rectifiedEstimateRunningTime);
             }
+        }
+        if (predictedQueueTimeMs.get() > rectifiedPredictedMs) {
+            predictedQueueTimeMs.getAndSet(rectifiedPredictedMs);
         }
     }
 

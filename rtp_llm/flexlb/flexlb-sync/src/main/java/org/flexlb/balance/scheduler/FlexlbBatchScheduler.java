@@ -454,7 +454,24 @@ public class FlexlbBatchScheduler {
         PrefillTimePredictor predictor = createPredictor(cfg);
         long predMs = predictor.estimateMs(seqLen, hitCache);
         long sloMs = cfg.resolveSloMs(seqLen);
-        return System.currentTimeMillis() + Math.max(0, sloMs - predMs);
+        long workerQueueMs = getWorkerPredictedQueueTimeMs(prefill);
+        return System.currentTimeMillis() + Math.max(0, sloMs - predMs - workerQueueMs);
+    }
+
+    private long getWorkerPredictedQueueTimeMs(ServerStatus prefill) {
+        if (prefill == null || prefill.getRole() == null) {
+            return 0;
+        }
+        Map<String, WorkerStatus> workerStatusMap =
+                engineWorkerStatus.selectModelWorkerStatus(prefill.getRole(), prefill.getGroup());
+        if (workerStatusMap == null) {
+            return 0;
+        }
+        WorkerStatus workerStatus = workerStatusMap.get(prefill.getServerIp() + ":" + prefill.getHttpPort());
+        if (workerStatus == null) {
+            return 0;
+        }
+        return workerStatus.getPredictedQueueTimeMs().get();
     }
 
     private static PrefillTimePredictor createPredictor(FlexlbConfig cfg) {

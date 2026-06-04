@@ -25,6 +25,8 @@ public class TaskInfo {
     @JsonProperty("dp_rank")
     private long dpRank;
 
+    private long predictedMs;
+
     // Task state related fields
     private TaskStateEnum taskState = TaskStateEnum.CREATED;
     private long lastActiveTimeUs = System.nanoTime() / 1000;
