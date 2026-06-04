@@ -112,7 +112,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
 
         Logger.debug("Starting shortest TTFT selection for role: {}", roleType);
 
-        // Get available worker list
+        // Get available worker list (alive + resource check)
         FlexlbConfig config = balanceContext.getConfig();
         List<WorkerStatus> availableWorkers = getAvailableWorkers(roleType, group, config.getResourceMeasureIndicator(roleType));
         if (CollectionUtils.isEmpty(availableWorkers)) {
@@ -123,6 +123,15 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         // Calculate cache match results for each engine
         Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
 
+        // SLO filter: reject workers whose estimated TTFT exceeds SLO
+        long sloMs = config.resolveSloMs(seqLen);
+        PrefillTimePredictor predictor = PredictorFactory.create(config);
+        availableWorkers = filterBySlo(availableWorkers, cacheMatchResults, seqLen, sloMs, predictor);
+        if (CollectionUtils.isEmpty(availableWorkers)) {
+            Logger.warn("No workers within SLO for role: {}, sloMs: {}", roleType.getCode(), sloMs);
+            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+        }
+
         List<ScoredWorker> scoredWorkers = scoreWorkers(availableWorkers, cacheMatchResults, seqLen);
 
         ScoredWorker bestWorker = selectBestWorker(scoredWorkers);
@@ -131,7 +140,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        return finalizeWorkerSelection(bestWorker, balanceContext, roleType, requestId, seqLen);
+        return finalizeWorkerSelection(bestWorker, balanceContext, roleType, requestId, seqLen, predictor);
     }
 
     /**
@@ -158,6 +167,21 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         return new ArrayList<>(workerStatusMap.values()).stream()
                 .filter(WorkerStatus::isAlive)
                 .filter(resourceMeasure::isResourceAvailable)
+                .toList();
+    }
+
+    private List<WorkerStatus> filterBySlo(List<WorkerStatus> workers, Map<String, Integer> cacheMatchResults,
+                                            long seqLen, long sloMs, PrefillTimePredictor predictor) {
+        if (sloMs <= 0) {
+            return workers;
+        }
+        return workers.stream()
+                .filter(w -> {
+                    long hitCacheTokens = calculatePrefixMatchLength(w, cacheMatchResults);
+                    long prefillMs = predictor.estimateMs(seqLen, hitCacheTokens);
+                    long queueMs = w.getPredictedQueueTimeMs().get();
+                    return queueMs + prefillMs <= sloMs;
+                })
                 .toList();
     }
 
@@ -219,13 +243,15 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                                                  BalanceContext balanceContext,
                                                  RoleType roleType,
                                                  long requestId,
-                                                 long seqLen) {
+                                                 long seqLen,
+                                                 PrefillTimePredictor predictor) {
         WorkerStatus workerStatus = selectedWorker.worker();
 
         logWorkerSelection(selectedWorker, roleType);
         reportCacheHitMetrics(roleType, workerStatus.getIp(), selectedWorker.hitCacheTokens(), seqLen);
 
         TaskInfo task = createTaskInfo(requestId, balanceContext.getRequest().getSeqLen(), selectedWorker.hitCacheTokens());
+        task.setPredictedMs(predictor.estimateMs(seqLen, selectedWorker.hitCacheTokens()));
         workerStatus.putLocalTask(requestId, task);
 
         return buildServerStatus(selectedWorker, roleType, requestId);
