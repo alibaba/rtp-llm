@@ -21,6 +21,7 @@ void CudaGraphRunner::capturePrefill() {
         if (is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ == max_seq_len_) {
             // embedding model, without kv cache
             inputs.attention_inputs.prefix_lengths.fill_(0);
+            inputs.attention_inputs.zero_swa_write_skip_lengths.fill_(0);
             // Must set cu_seqlens/cu_kv_seqlens/input_lengths to match actual seq_len,
             // otherwise FlashInfer plans for max_seq_len tokens but q/k/v only have seq_len tokens
             inputs.attention_inputs.cu_seqlens_host[0] = 0;
@@ -38,6 +39,7 @@ void CudaGraphRunner::capturePrefill() {
             // Active batches get real input tokens, inactive batches get 0 input tokens.
             inputs.attention_inputs.input_lengths.fill_(0);
             inputs.attention_inputs.prefix_lengths.fill_(prefix_len);
+            inputs.attention_inputs.zero_swa_write_skip_lengths.fill_(0);
             auto& input_lengths = inputs.attention_inputs.input_lengths;
             for (int b = 0; b < active_bs; b++) {
                 int tokens           = (b < active_bs - 1) ? num_tokens_per_bs_ : (seq_len - b * num_tokens_per_bs_);

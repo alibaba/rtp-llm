@@ -277,6 +277,7 @@ struct PyAttentionInputs {
     bool          is_prefill{false};
     bool          is_target_verify{false};
     torch::Tensor prefix_lengths;
+    torch::Tensor zero_swa_write_skip_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor input_lengths;
     // Kernel-granularity block IDs for attention compute.

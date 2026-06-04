@@ -87,7 +87,8 @@ HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&               
 
 int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
                                        BatchKVCacheResource&                kv_resource,
-                                       const std::shared_ptr<CPSlotMapper>& cp_mapper) {
+                                       const std::shared_ptr<CPSlotMapper>& cp_mapper,
+                                       int                                  seq_len) {
     // Under cp shard, FULL groups index block_ids by cp-virtual-block units
     // (one entry covers cp_size physical blocks). LINEAR/SWA groups index by
     // raw block_size logical blocks. So when populating tail blocks for
@@ -105,14 +106,17 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
 
     const int reuse_unit_tokens = cpVirtualBlockSize(cp_mapper, seqSizePerBlock());
     const int capped_full_reuse_blocks =
-        capReuseBlocksForZeroSwaCaching(config_, min_full_reuse_blocks, reuse_unit_tokens);
+        capReuseBlocksForZeroSwaCaching(config_, min_full_reuse_blocks, reuse_unit_tokens, seq_len);
+    const int zero_swa_restore_blocks_to_drop = std::max(min_full_reuse_blocks - capped_full_reuse_blocks, 0);
     if (config_.dsv4_zero_swa_caching && min_full_reuse_blocks != capped_full_reuse_blocks) {
         RTP_LLM_LOG_DEBUG("zero SWA caching caps device reuse blocks: full_matched=%d capped=%d "
-                          "restore_tokens=%llu reuse_unit_tokens=%d",
+                          "restore_tokens=%llu reuse_unit_tokens=%d seq_len=%d drop_blocks=%d",
                           min_full_reuse_blocks,
                           capped_full_reuse_blocks,
                           static_cast<unsigned long long>(zeroSwaRestoreWindowTokens(config_)),
-                          reuse_unit_tokens);
+                          reuse_unit_tokens,
+                          seq_len,
+                          zero_swa_restore_blocks_to_drop);
     }
 
     int                           pos = capped_full_reuse_blocks - 1;
@@ -180,6 +184,7 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
                                 min_full_reuse_blocks,
                                 capped_full_reuse_blocks);
         }
+        kv_resource.cacheResource(0).setZeroSwaFullReuseTokenNum(0);
         return 0;
     }
 
@@ -194,9 +199,7 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     // Python compressor write-skip engage as ONE unit. Default path (trim off) -> restore_blocks
     // is 0 -> full_cover == reuse_blocks_len -> byte-identical to the capped reuse below.
     const bool extend_full    = config_.dsv4_zero_swa_trim;
-    const int  restore_blocks = extend_full ? static_cast<int>(zeroSwaRestoreWindowBlocks(
-                                                  config_, static_cast<size_t>(reuse_unit_tokens))) :
-                                               0;
+    const int  restore_blocks = extend_full ? zero_swa_restore_blocks_to_drop : 0;
     const int full_cover = std::min(reuse_blocks_len + std::max(restore_blocks, 0), min_full_reuse_blocks);
     if (extend_full && full_cover != reuse_blocks_len) {
         RTP_LLM_LOG_DEBUG("zero SWA trim FULL coverage: reuse_blocks_len=%d full_cover=%d restore_blocks=%d",
@@ -204,6 +207,7 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
                           full_cover,
                           restore_blocks);
     }
+    kv_resource.cacheResource(0).setZeroSwaFullReuseTokenNum(static_cast<size_t>(full_cover) * reuse_unit_tokens);
     for (int gid : full_group_ids_) {
         BlockIndicesType full_blocks = full_matched_blocks[static_cast<size_t>(gid)];
         if (static_cast<int>(full_blocks.size()) > full_cover) {
@@ -272,7 +276,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         CacheKeysType match_keys(cp_keys.begin(),
                                  cp_active ? cp_keys.end() : (cp_keys.empty() ? cp_keys.end() : cp_keys.end() - 1));
         auto          begin_us = currentTimeUs();
-        reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper);
+        reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper, common_seq_len);
         match_cost_time_us     = currentTimeUs() - begin_us;
 
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
@@ -733,16 +737,14 @@ int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
     const bool  reuse_enabled      = malloc_info.reuse_cache;
     int         reuse_blocks_len   = reuse_enabled ? malloc_info.batch_kv_cache_resource->curBlocksNum() : 0;
     if (reuse_enabled && config_.dsv4_zero_swa_trim) {
-        // After reuseCache extended FULL coverage to the restore window, curBlocksNum() reflects
-        // the FULL groups (full_cover). The SWA/STATE ring pools only reused the capped tail, so
-        // size their reserve need against the capped boundary -- otherwise the precheck would
-        // under-count by restore_blocks per SWA/STATE group (the dangerous direction). Subtracting
-        // restore_blocks makes FULL over-count instead (safe; the real malloc rolls back if it
-        // exceeds the reserve). Trim-off path is untouched (byte-identical).
-        const int reuse_unit_tokens = cpVirtualBlockSize(cp_mapper, seqSizePerBlock());
-        const int restore_blocks =
-            static_cast<int>(zeroSwaRestoreWindowBlocks(config_, static_cast<size_t>(reuse_unit_tokens)));
-        reuse_blocks_len = std::max(reuse_blocks_len - restore_blocks, 0);
+        // After reuseCache may extend FULL coverage into the restore window, curBlocksNum()
+        // reflects the FULL groups (full_cover). The SWA/STATE ring pools only reuse the
+        // returned prefix boundary, so size their reserve need against reuseBlockNum().
+        const int capped_boundary =
+            static_cast<int>(malloc_info.batch_kv_cache_resource->cacheResource(0).reuseBlockNum());
+        if (capped_boundary > 0) {
+            reuse_blocks_len = std::min(reuse_blocks_len, capped_boundary);
+        }
     }
 
     int common_blocks_total = 0;

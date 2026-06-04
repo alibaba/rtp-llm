@@ -504,9 +504,23 @@ def forward_layers(
                 prefix_lengths = pl.to(
                     device=positions.device, dtype=torch.int32
                 ).contiguous()
-        write_skip_restore_window = _dsv4_zero_swa_write_skip_window(
-            v4, kv_cache, cp_ctx
-        )
+        write_skip_restore_window = None
+        if attn_inputs is not None:
+            write_skip_restore_window = getattr(
+                attn_inputs, "zero_swa_write_skip_lengths", None
+            )
+            if (
+                write_skip_restore_window is not None
+                and (
+                    not torch.is_tensor(write_skip_restore_window)
+                    or write_skip_restore_window.numel() == 0
+                )
+            ):
+                write_skip_restore_window = None
+        if write_skip_restore_window is None:
+            write_skip_restore_window = _dsv4_zero_swa_write_skip_window(
+                v4, kv_cache, cp_ctx
+            )
         meta_by_ratio = build_and_propagate_prefill_meta_fp8(
             v4,
             h,
@@ -533,7 +547,11 @@ def forward_layers(
         # front rows). When any guard fails, trim_k_start stays None and the
         # loop runs the existing uniform body — byte-identical to before.
         trim_on = (
-            write_skip_restore_window > 0
+            (
+                bool((write_skip_restore_window > 0).any().item())
+                if torch.is_tensor(write_skip_restore_window)
+                else write_skip_restore_window > 0
+            )
             and cp_ctx is None
             and batch_size == 1
             and not _rt_on
@@ -544,6 +562,11 @@ def forward_layers(
             and len(v4.layers) > 1
         )
         if trim_on:
+            trim_restore_window = (
+                int(write_skip_restore_window.reshape(-1)[0].item())
+                if torch.is_tensor(write_skip_restore_window)
+                else int(write_skip_restore_window)
+            )
             nwin = int(getattr(v4.args, "window_size", 0) or 0) or 128
             kernel_block = int(
                 getattr(kv_cache, "kernel_seq_size_per_block", 0) or 0
@@ -551,7 +574,7 @@ def forward_layers(
             trim_k_start, _trim_tail = _dsv4_zero_swa_trim_offsets(
                 n_layers=len(v4.layers),
                 nwin=nwin,
-                restore_window=write_skip_restore_window,
+                restore_window=trim_restore_window,
                 total_tokens=int(input_ids.size(0)),
                 kernel_block=kernel_block if kernel_block > 0 else 128,
                 device=positions.device,

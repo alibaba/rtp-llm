@@ -156,6 +156,16 @@ TEST(HybridPoolConfigCreatorTest, ZeroSwaRestoreWindowAlignsToOne8192TokenBlock)
     EXPECT_EQ(zeroSwaRestoreWindowBlocks(config, config.seq_size_per_block), 1u);
     EXPECT_EQ(capReuseBlocksForZeroSwaCaching(config, 4, static_cast<int>(config.seq_size_per_block)), 3);
     EXPECT_EQ(capReuseBlocksForZeroSwaCaching(config, 1, static_cast<int>(config.seq_size_per_block)), 0);
+    EXPECT_EQ(capReuseBlocksForZeroSwaCaching(config,
+                                              1,
+                                              static_cast<int>(config.seq_size_per_block),
+                                              static_cast<int>(config.seq_size_per_block + zeroSwaRestoreWindowTokens(config))),
+              1);
+    EXPECT_EQ(capReuseBlocksForZeroSwaCaching(config,
+                                              1,
+                                              static_cast<int>(config.seq_size_per_block),
+                                              static_cast<int>(config.seq_size_per_block + zeroSwaRestoreWindowTokens(config) - 1)),
+              0);
 }
 
 TEST(HybridPoolConfigCreatorTest, ZeroSwaRestoreWindowUsesCpVirtualBlockUnit) {
@@ -173,6 +183,11 @@ TEST(HybridPoolConfigCreatorTest, ZeroSwaRestoreWindowUsesCpVirtualBlockUnit) {
     EXPECT_EQ(zeroSwaRestoreWindowBlocks(config, cp2_virtual_block_tokens), 1u);
     EXPECT_EQ(capReuseBlocksForZeroSwaCaching(config, 4u, cp2_virtual_block_tokens), 3u);
     EXPECT_EQ(capReuseBlocksForZeroSwaCaching(config, 1u, cp2_virtual_block_tokens), 0u);
+    EXPECT_EQ(capReuseBlocksForZeroSwaCaching(config,
+                                              1u,
+                                              cp2_virtual_block_tokens,
+                                              cp2_virtual_block_tokens + zeroSwaRestoreWindowTokens(config)),
+              1u);
 }
 
 TEST(HybridPoolConfigCreatorTest, ZeroSwaRestoreWindowCoversRuntimeActiveTail) {
@@ -1725,7 +1740,7 @@ TEST_F(DSV4AllocatorTest, ZeroSwaCachingSkipsSwaKvTailAndRecomputesWindow) {
     const int spb       = allocator->seqSizePerBlock();
     auto      cti       = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
     auto      gi        = std::make_shared<GenerateInput>();
-    gi->input_ids       = torch::arange(3 * spb + 1, torch::kInt32);
+    gi->input_ids       = torch::arange(3 * spb, torch::kInt32);
     gi->generate_config = std::make_shared<GenerateConfig>();
     cti->init(gi);
 
@@ -1807,7 +1822,7 @@ TEST_F(DSV4AllocatorTest, ZeroSwaTrimExtendsFullCoverageButCapsReturn) {
     const int spb       = allocator->seqSizePerBlock();
     auto      cti       = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
     auto      gi        = std::make_shared<GenerateInput>();
-    gi->input_ids       = torch::arange(3 * spb + 1, torch::kInt32);
+    gi->input_ids       = torch::arange(3 * spb, torch::kInt32);
     gi->generate_config = std::make_shared<GenerateConfig>();
     cti->init(gi);
 
@@ -1847,6 +1862,62 @@ TEST_F(DSV4AllocatorTest, ZeroSwaTrimExtendsFullCoverageButCapsReturn) {
         EXPECT_TRUE(isNullBlockIdx(out_blocks[0]));
         EXPECT_TRUE(isNullBlockIdx(out_blocks[1]));
     }
+
+    FreeInfo free_info{batch_res};
+    allocator->free(free_info);
+}
+
+TEST_F(DSV4AllocatorTest, ZeroSwaTrimDoesNotDropWhenUnmatchedSuffixCoversRestoreWindow) {
+    auto config                  = makeDSV4AllocatorConfig();
+    config.dsv4_zero_swa_caching = true;
+    config.dsv4_zero_swa_trim    = true;
+    config.swa_window_size       = 1;
+    config.layer_num             = 1;
+    auto allocator               = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto shared_cache            = std::make_shared<SharedBlockCache>();
+    allocator->setSharedBlockCache(shared_cache);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool = allocator->getBlockPool();
+
+    constexpr int group_num = 7;
+    CacheKeysType cached_keys{100, 101, 102};
+    for (int gid = 0; gid < group_num; gid++) {
+        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
+        ASSERT_EQ(blocks.size(), cached_keys.size());
+        for (size_t i = 0; i < cached_keys.size(); ++i) {
+            if (gid == 6) {
+                continue;
+            }
+            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
+            group_slots[gid] = blocks[i];
+            shared_cache->put(cached_keys[i], group_slots, true);
+        }
+        block_pool->requestFree(blocks);
+    }
+
+    auto batch_res = std::make_shared<BatchKVCacheResource>();
+    batch_res->resetBatchSize(1);
+    batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
+
+    const int spb = allocator->seqSizePerBlock();
+    auto      cti = std::make_shared<CompleteTokenIds>(1, 1, 4096, spb);
+    auto      gi  = std::make_shared<GenerateInput>();
+    // The one-token suffix after the matched full blocks already covers the
+    // one-token restore window, so zero-SWA must not drop an extra full block.
+    gi->input_ids       = torch::arange(3 * spb + 1, torch::kInt32);
+    gi->generate_config = std::make_shared<GenerateConfig>();
+    cti->init(gi);
+
+    MallocInfo info{batch_res, cti};
+    info.enable_device_cache = true;
+    info.reuse_cache         = true;
+    auto result              = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+
+    EXPECT_EQ(result.reuse_len, 3 * spb);
+    EXPECT_EQ(batch_res->cacheResource(0).zeroSwaFullReuseTokenNum(), static_cast<size_t>(3 * spb));
 
     FreeInfo free_info{batch_res};
     allocator->free(free_info);

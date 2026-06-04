@@ -42,7 +42,8 @@ protected:
 
     int reuseCache(const CacheKeysType&                 cache_keys,
                    BatchKVCacheResource&                kv_resource,
-                   const std::shared_ptr<CPSlotMapper>& cp_mapper);
+                   const std::shared_ptr<CPSlotMapper>& cp_mapper,
+                   int                                  seq_len);
 
     virtual void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const = 0;
     virtual void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false)            = 0;

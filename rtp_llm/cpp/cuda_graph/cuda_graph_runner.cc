@@ -285,6 +285,11 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                               state.current_batch_size,
                                               max_bs_,
                                               0);
+                addCudaGraphPrepareFillRegion(fill_params,
+                                              py_model_inputs_.attention_inputs.zero_swa_write_skip_lengths,
+                                              state.current_batch_size,
+                                              max_bs_,
+                                              0);
                 addCudaGraphPrepareFillRegion(
                     fill_params, py_model_inputs_.attention_inputs.input_lengths, state.current_batch_size, max_bs_, 0);
             }
@@ -330,6 +335,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     addD2DCopy(d2d_copies,
                inputs.attention_inputs.prefix_lengths,
                py_model_inputs_.attention_inputs.prefix_lengths,
+               state.current_batch_size * sizeof(int));
+    addD2DCopy(d2d_copies,
+               inputs.attention_inputs.zero_swa_write_skip_lengths,
+               py_model_inputs_.attention_inputs.zero_swa_write_skip_lengths,
                state.current_batch_size * sizeof(int));
     // Strided 2D D2D copy for flat kv_cache_block_id
     addStridedD2DCopy(strided_d2d_copies,
@@ -688,8 +697,10 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     if (is_target_verify_) {
         inputs.attention_inputs.prefix_lengths =
             torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs_, options_cuda_int32_);
+        inputs.attention_inputs.zero_swa_write_skip_lengths = torch::zeros({int(max_bs_)}, options_cuda_int32_);
     } else if (is_prefill_cuda_graph_mode_) {
         inputs.attention_inputs.prefix_lengths = torch::zeros({int(max_bs_)}, options_cuda_int32_);
+        inputs.attention_inputs.zero_swa_write_skip_lengths = torch::zeros({int(max_bs_)}, options_cuda_int32_);
     }
     // padding_offset [max_num_token_, int32] (for attention padding)
     inputs.attention_inputs.padding_offset            = torch::zeros({int(max_seq_len_ * max_bs_)}, options_cpu_int32_);
@@ -841,6 +852,11 @@ void CudaGraphRunner::initCapture() {
                 inputs.attention_inputs.prefix_lengths =
                     capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.slice(0, 0, 1);
             }
+            if (capture_mem_hold_.py_model_inputs_.attention_inputs.zero_swa_write_skip_lengths.defined()
+                && capture_mem_hold_.py_model_inputs_.attention_inputs.zero_swa_write_skip_lengths.numel() > 0) {
+                inputs.attention_inputs.zero_swa_write_skip_lengths =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.zero_swa_write_skip_lengths.slice(0, 0, 1);
+            }
             inputs.attention_inputs.kv_cache_kernel_block_id_device =
                 capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.slice(0, 0, 1);
             inputs.attention_inputs.kv_cache_kernel_block_id_host =
@@ -969,6 +985,11 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         && capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.numel() > 0) {
         inputs.attention_inputs.prefix_lengths =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.slice(0, 0, batch_size);
+    }
+    if (capture_mem_hold_.py_model_inputs_.attention_inputs.zero_swa_write_skip_lengths.defined()
+        && capture_mem_hold_.py_model_inputs_.attention_inputs.zero_swa_write_skip_lengths.numel() > 0) {
+        inputs.attention_inputs.zero_swa_write_skip_lengths =
+            capture_mem_hold_.py_model_inputs_.attention_inputs.zero_swa_write_skip_lengths.slice(0, 0, batch_size);
     }
     inputs.attention_inputs.sequence_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, batch_size);

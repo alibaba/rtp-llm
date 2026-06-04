@@ -353,6 +353,14 @@ void KVCacheResource::setDeviceReuseBlockNum(size_t device_reuse_blocks_num) {
     device_reuse_block_num_ = device_reuse_blocks_num;
 }
 
+size_t KVCacheResource::zeroSwaFullReuseTokenNum() const {
+    return zero_swa_full_reuse_token_num_;
+}
+
+void KVCacheResource::setZeroSwaFullReuseTokenNum(size_t zero_swa_full_reuse_token_num) {
+    zero_swa_full_reuse_token_num_ = zero_swa_full_reuse_token_num;
+}
+
 size_t KVCacheResource::memoryReuseBlockNum() const {
     return memory_reuse_block_num_;
 }

@@ -184,22 +184,26 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     };
 
     const auto    prefix_lengths_src   = inputs.prefix_lengths;
+    const auto    zero_swa_write_skip_lengths_src = inputs.zero_swa_write_skip_lengths;
     const auto    sequence_lengths_src = inputs.sequence_lengths;
     const auto    input_lengths_src    = inputs.input_lengths;
     torch::Tensor prefix_lengths;
+    torch::Tensor zero_swa_write_skip_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor input_lengths;
     {
         RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs(lengths_to_device)");
-        prefix_lengths   = to_device_i32(prefix_lengths_src);
-        sequence_lengths = to_device_i32(sequence_lengths_src);
-        input_lengths    = to_device_i32(input_lengths_src);
+        prefix_lengths                  = to_device_i32(prefix_lengths_src);
+        zero_swa_write_skip_lengths     = to_device_i32(zero_swa_write_skip_lengths_src);
+        sequence_lengths                = to_device_i32(sequence_lengths_src);
+        input_lengths                   = to_device_i32(input_lengths_src);
     }
     const auto cuda_i32 = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
 
     // Keep all length tensors device-resident on the model boundary. Legacy CPU
     // consumers must opt in to an explicit .cpu() with TODO(async) at the call site.
     py_attn_inputs.prefix_lengths   = prefix_lengths;
+    py_attn_inputs.zero_swa_write_skip_lengths = zero_swa_write_skip_lengths;
     py_attn_inputs.sequence_lengths = sequence_lengths;
     py_attn_inputs.input_lengths    = input_lengths;
 
@@ -1066,6 +1070,8 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
         fake_inputs.input_lengths     = torch::ones({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         fake_inputs.sequence_lengths  = torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         fake_inputs.prefix_lengths    = torch::zeros({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        fake_inputs.zero_swa_write_skip_lengths =
+            torch::zeros({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         micro_batch_inputs.push_back(fake_inputs);
     } else {
         for (size_t i = 0; i < micro_batch_plan.batch_infos.size(); ++i) {
@@ -1091,6 +1097,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     sliceKvCacheBlockIdByBatch(inputs.kv_cache_kernel_block_id, sliced_batch_idx, total_batch_size);
                 micro_model_inputs.prefix_lengths =
                     inputs.prefix_lengths.narrow(0, prefill_batch_idx, p_micro_batch_size);
+                micro_model_inputs.zero_swa_write_skip_lengths =
+                    inputs.zero_swa_write_skip_lengths.defined() ?
+                        inputs.zero_swa_write_skip_lengths.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
                 micro_model_inputs.attention_mask =
                     inputs.attention_mask.defined() ?
                         inputs.attention_mask.narrow(0, sliced_batch_idx, total_batch_size) :
@@ -1147,6 +1157,8 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     sliceKvCacheBlockIdByBatch(inputs.kv_cache_kernel_block_id, sliced_batch_idx, d_micro_batch_size);
                 micro_model_inputs.prefix_lengths =
                     torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+                micro_model_inputs.zero_swa_write_skip_lengths =
+                    torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_batch_idx, d_micro_batch_size);
 
@@ -1172,6 +1184,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     sliceKvCacheBlockIdByBatch(inputs.kv_cache_kernel_block_id, sliced_batch_idx, p_micro_batch_size);
                 micro_model_inputs.prefix_lengths =
                     inputs.prefix_lengths.narrow(0, prefill_batch_idx, p_micro_batch_size);
+                micro_model_inputs.zero_swa_write_skip_lengths =
+                    inputs.zero_swa_write_skip_lengths.defined() ?
+                        inputs.zero_swa_write_skip_lengths.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
                 micro_model_inputs.attention_mask =
                     inputs.attention_mask.defined() ?
                         inputs.attention_mask.narrow(0, sliced_batch_idx, p_micro_batch_size) :
@@ -1218,6 +1234,7 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
     buffer_holder_.hold_host(inputs.sequence_lengths);
     buffer_holder_.hold_host(inputs.lm_output_indexes);
     buffer_holder_.hold_host(inputs.prefix_lengths);
+    buffer_holder_.hold_host(inputs.zero_swa_write_skip_lengths);
 
     buffer_holder_.hold_host(inputs.combo_position_ids);
     buffer_holder_.hold_host(inputs.combo_tokens_type_ids);

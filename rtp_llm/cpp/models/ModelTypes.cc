@@ -30,6 +30,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.sequence_lengths.defined() ? inputs.sequence_lengths.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::prefixLengths] =
         inputs.prefix_lengths.defined() ? inputs.prefix_lengths.numel() : 0;
+    shape_hints_ptr[GptModelInputIndex::zeroSwaWriteSkipLengths] =
+        inputs.zero_swa_write_skip_lengths.defined() ? inputs.zero_swa_write_skip_lengths.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch] =
         inputs.kv_cache_kernel_block_id.defined() ? inputs.kv_cache_kernel_block_id.size(2) : 0;
     shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch] =
@@ -85,6 +87,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         if (inputs.prefix_lengths.defined() && inputs.prefix_lengths.is_cuda()) {
             device_bits |= GptModelInputDeviceBit::kDeviceBitPrefixLengths;
+        }
+        if (inputs.zero_swa_write_skip_lengths.defined() && inputs.zero_swa_write_skip_lengths.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitZeroSwaWriteSkipLengths;
         }
         if (inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.is_cuda()) {
             device_bits |= GptModelInputDeviceBit::kDeviceBitLmOutputIndexes;
@@ -169,6 +174,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.prefix_lengths   = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                            {context_batch_size},
                                          pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
+        inputs.zero_swa_write_skip_lengths =
+            allocBuf(rtp_llm::DataType::TYPE_INT32,
+                     {(size_t)shape_hints_ptr[GptModelInputIndex::zeroSwaWriteSkipLengths]},
+                     pickAlloc(GptModelInputDeviceBit::kDeviceBitZeroSwaWriteSkipLengths));
         if (max_kernel_blocks != 0) {
             // kv_cache_kernel_block_id is now device-resident on the producer (rank 0). Allocate
             // the matching buffer on CUDA for non-root ranks so the gpu_packed branch below
@@ -243,6 +252,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.input_lengths);
     collect(inputs.sequence_lengths);
     collect(inputs.prefix_lengths);
+    collect(inputs.zero_swa_write_skip_lengths);
     if (max_kernel_blocks || max_blocks) {
         collect(inputs.kv_cache_kernel_block_id);
         collect(inputs.kv_cache_block_id);

@@ -243,7 +243,7 @@ def build_and_propagate_prefill_meta_fp8(
     position_ids: Optional[torch.Tensor] = None,
     req_id_per_token: Optional[torch.Tensor] = None,
     max_seqlen_q: int = 0,
-    write_skip_restore_window: int = 0,
+    write_skip_restore_window: Any = 0,
 ) -> Dict[int, "PrefillMeta"]:
     """Build the layer-invariant prefill meta once per ``compress_ratio``
     bucket and broadcast each bucket's meta to its layers'

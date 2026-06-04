@@ -136,6 +136,24 @@ class ApplyWriteSkipTest(unittest.TestCase):
             else:
                 self.assertEqual(out[i].item(), kv[i].item(), msg=f"idx {i}")
 
+    def test_tensor_windows_are_per_request(self):
+        # C++ now passes the exact FULL-cache write-skip span per request. A
+        # zero span means the unmatched suffix already covers the zero-SWA
+        # restore window, so freshly allocated suffix KV must be written.
+        pos = torch.tensor([16, 17, 18, 19, 20, 32, 33, 34, 35], dtype=torch.int64)
+        bidx = torch.tensor([0, 0, 0, 0, 0, 1, 1, 1, 1], dtype=torch.int64)
+        kv = torch.arange(400, 400 + pos.numel(), dtype=torch.int64)
+        sp = torch.tensor([16, 32], dtype=torch.int64)
+        windows = torch.tensor([0, 2], dtype=torch.int32)
+        out = _apply_zero_swa_write_skip(kv, pos, bidx, sp, windows)
+
+        expected_skip = [False, False, False, False, False, True, True, False, False]
+        for i, want in enumerate(expected_skip):
+            if want:
+                self.assertEqual(out[i].item(), -1, msg=f"idx {i}")
+            else:
+                self.assertEqual(out[i].item(), kv[i].item(), msg=f"idx {i}")
+
     def test_does_not_mutate_input(self):
         kv = torch.arange(8, dtype=torch.int64)
         kv_copy = kv.clone()

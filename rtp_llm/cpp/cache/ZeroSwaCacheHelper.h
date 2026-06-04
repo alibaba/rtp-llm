@@ -73,6 +73,26 @@ inline size_t zeroSwaRestoreWindowBlocks(const CacheConfig& config, size_t reuse
                                / static_cast<uint64_t>(reuse_unit_tokens));
 }
 
+inline size_t zeroSwaRestoreBlocksToDrop(const CacheConfig& config,
+                                         size_t             matched_blocks,
+                                         size_t             reuse_unit_tokens,
+                                         size_t             seq_len_tokens) {
+    const uint64_t restore_tokens = zeroSwaRestoreWindowTokens(config);
+    if (matched_blocks == 0 || restore_tokens == 0 || reuse_unit_tokens == 0) {
+        return 0;
+    }
+    const uint64_t matched_tokens = static_cast<uint64_t>(matched_blocks) * static_cast<uint64_t>(reuse_unit_tokens);
+    const uint64_t suffix_tokens =
+        seq_len_tokens > matched_tokens ? static_cast<uint64_t>(seq_len_tokens) - matched_tokens : 0;
+    if (suffix_tokens >= restore_tokens) {
+        return 0;
+    }
+    const uint64_t missing_tokens = restore_tokens - suffix_tokens;
+    const uint64_t drop_blocks =
+        (missing_tokens + static_cast<uint64_t>(reuse_unit_tokens) - 1) / static_cast<uint64_t>(reuse_unit_tokens);
+    return std::min<size_t>(matched_blocks, static_cast<size_t>(drop_blocks));
+}
+
 inline int capReuseBlocksForZeroSwaCaching(const CacheConfig& config, int matched_blocks, int reuse_unit_tokens) {
     if (matched_blocks <= 0 || reuse_unit_tokens <= 0) {
         return std::max(matched_blocks, 0);
@@ -90,6 +110,26 @@ inline size_t capReuseBlocksForZeroSwaCaching(const CacheConfig& config,
         return matched_blocks;
     }
     return matched_blocks > restore_blocks ? matched_blocks - restore_blocks : 0;
+}
+
+inline int
+capReuseBlocksForZeroSwaCaching(const CacheConfig& config, int matched_blocks, int reuse_unit_tokens, int seq_len_tokens) {
+    if (matched_blocks <= 0 || reuse_unit_tokens <= 0 || seq_len_tokens <= 0) {
+        return std::max(matched_blocks, 0);
+    }
+    const auto drop_blocks = static_cast<int>(zeroSwaRestoreBlocksToDrop(config,
+                                                                         static_cast<size_t>(matched_blocks),
+                                                                         static_cast<size_t>(reuse_unit_tokens),
+                                                                         static_cast<size_t>(seq_len_tokens)));
+    return std::max(matched_blocks - drop_blocks, 0);
+}
+
+inline size_t capReuseBlocksForZeroSwaCaching(const CacheConfig& config,
+                                              size_t             matched_blocks,
+                                              size_t             reuse_unit_tokens,
+                                              size_t             seq_len_tokens) {
+    const size_t drop_blocks = zeroSwaRestoreBlocksToDrop(config, matched_blocks, reuse_unit_tokens, seq_len_tokens);
+    return matched_blocks > drop_blocks ? matched_blocks - drop_blocks : 0;
 }
 
 }  // namespace rtp_llm

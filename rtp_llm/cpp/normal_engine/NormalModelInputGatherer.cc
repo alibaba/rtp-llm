@@ -398,6 +398,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     // on host here, then publish only a CUDA tensor in GptModelInputs.
     auto prefix_lengths_host =
         torch::empty({context_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+    auto zero_swa_write_skip_lengths_host =
+        torch::zeros({context_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
     auto ctx                = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
     ctx.prefix_lengths_host = prefix_lengths_host.data_ptr<int32_t>();
 
@@ -432,6 +434,13 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
             ctx.input_lengths[ctx.batch_idx]           = input_tokens.size();
             ctx.prefix_lengths_host[prefill_batch_idx] = stream->prefixLength();
+            auto& cache_resource = kv_cache.cacheResource(i);
+            const auto zero_swa_full_reuse_token_num = cache_resource.zeroSwaFullReuseTokenNum();
+            const auto prefix_len = static_cast<size_t>(std::max(stream->prefixLength(), 0));
+            zero_swa_write_skip_lengths_host.data_ptr<int32_t>()[prefill_batch_idx] =
+                zero_swa_full_reuse_token_num > prefix_len ?
+                    static_cast<int32_t>(zero_swa_full_reuse_token_num - prefix_len) :
+                    0;
             gatherMultimodalFeaturesForContextBatch(stream, ctx, gathered_mm_features, host_holder);
 
             if (ctx.need_cal_position_id) {
@@ -468,6 +477,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
     model_input.prefix_lengths = publishInt32ToCuda(prefix_lengths_host, host_holder);
+    model_input.zero_swa_write_skip_lengths = publishInt32ToCuda(zero_swa_write_skip_lengths_host, host_holder);
     return absl::OkStatus();
 }
 

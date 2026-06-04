@@ -140,6 +140,9 @@ public:
     size_t deviceReuseBlockNum() const;
     void   setDeviceReuseBlockNum(size_t device_reuse_blocks_num);
 
+    size_t zeroSwaFullReuseTokenNum() const;
+    void   setZeroSwaFullReuseTokenNum(size_t zero_swa_full_reuse_token_num);
+
     size_t memoryReuseBlockNum() const;
     void   setMemoryReuseBlockNum(size_t memory_reuse_blocks_num);
 
@@ -168,6 +171,7 @@ private:
     bool cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
+    size_t zero_swa_full_reuse_token_num_{0};
     size_t memory_reuse_block_num_{0};
     size_t remote_reuse_block_num_{0};
     bool   last_block_aligned_{false};

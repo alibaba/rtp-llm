@@ -403,7 +403,7 @@ class CompressorFP8(PoolBackedModule):
         is_batched: bool = False,
         seq_start_per_req: Optional[torch.Tensor] = None,
         cu_seq_per_req: Optional[torch.Tensor] = None,
-        write_skip_restore_window: int = 0,
+        write_skip_restore_window: Any = 0,
     ) -> CompressorMeta:
         """Compute slot mappings + token_to_req from current pool context.
 
@@ -1178,7 +1178,7 @@ def _apply_zero_swa_write_skip(
     positions: torch.Tensor,
     b_idx: torch.Tensor,
     seq_start_per_req: Optional[torch.Tensor],
-    write_skip_restore_window: int,
+    write_skip_restore_window: Any,
 ) -> Optional[torch.Tensor]:
     """Zero-SWA inverted-triangle write-skip guardian (Stage B).
 
@@ -1202,14 +1202,26 @@ def _apply_zero_swa_write_skip(
     restore_blocks`` extension exactly. A fresh request (``seq_start == 0``)
     reused nothing, so the skip is a no-op there.
     """
-    if (
-        write_skip_restore_window <= 0
-        or kv_slots is None
-        or seq_start_per_req is None
-    ):
+    if kv_slots is None or seq_start_per_req is None:
         return kv_slots
+    if torch.is_tensor(write_skip_restore_window):
+        if write_skip_restore_window.numel() == 0:
+            return kv_slots
+        window = write_skip_restore_window.to(device=positions.device, dtype=torch.long)
+        window = window.reshape(-1).contiguous()
+        if bool((window <= 0).all().item()):
+            return kv_slots
+    else:
+        if int(write_skip_restore_window) <= 0:
+            return kv_slots
+        window = torch.full(
+            (seq_start_per_req.numel(),),
+            int(write_skip_restore_window),
+            dtype=torch.long,
+            device=positions.device,
+        )
     seq_start = seq_start_per_req.to(device=positions.device, dtype=torch.long)
-    end = seq_start + int(write_skip_restore_window)
+    end = seq_start + window[: seq_start.numel()]
     # Fresh requests (no prefix reuse, no shared FULL blocks) must not skip.
     end = torch.where(seq_start > 0, end, torch.zeros_like(end))
     end_per_token = end.index_select(0, b_idx.to(torch.long))
@@ -1227,7 +1239,7 @@ def build_prepare_metadata_args(
     req_id_per_token: Optional[torch.Tensor] = None,
     seq_start_per_req: Optional[torch.Tensor] = None,
     cu_seqlens: Optional[torch.Tensor] = None,
-    write_skip_restore_window: int = 0,
+    write_skip_restore_window: Any = 0,
 ) -> Dict[str, Any]:
     """Return the kwargs dict for ``CompressorFP8.prepare_metadata``,
     branching on ``use_varlen``. Single source of truth for the three

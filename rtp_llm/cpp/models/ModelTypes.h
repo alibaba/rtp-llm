@@ -64,6 +64,7 @@ enum GptModelInputIndex : size_t {
     inputLengths,
     sequenceLengths,
     prefixLengths,
+    zeroSwaWriteSkipLengths,
     maxKernelBlocksPerBatch,
     maxBlocksPerBatch,
     kvCacheGroupNum,
@@ -96,7 +97,8 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitInputLengths    = 1u << 1,
     kDeviceBitSequenceLengths = 1u << 2,
     kDeviceBitPrefixLengths   = 1u << 3,
-    kDeviceBitLmOutputIndexes = 1u << 4,
+    kDeviceBitZeroSwaWriteSkipLengths = 1u << 4,
+    kDeviceBitLmOutputIndexes         = 1u << 5,
 };
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);

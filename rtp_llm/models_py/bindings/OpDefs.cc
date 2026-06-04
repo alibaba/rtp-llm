@@ -142,6 +142,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
         .def_readwrite("is_target_verify", &PyAttentionInputs::is_target_verify)
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
+        .def_readwrite("zero_swa_write_skip_lengths", &PyAttentionInputs::zero_swa_write_skip_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)
         .def_readwrite("input_lengths", &PyAttentionInputs::input_lengths)
         .def_readwrite("kv_cache_kernel_block_id_host", &PyAttentionInputs::kv_cache_kernel_block_id_host)

@@ -98,6 +98,7 @@ void debugPrintPyModelInputs(const torch_ext::PyModelInputs& inputs) {
     std::cout << "  is_prefill: " << inputs.attention_inputs.is_prefill << std::endl;
 
     printTensorInfo("prefix_lengths", inputs.attention_inputs.prefix_lengths);
+    printTensorInfo("zero_swa_write_skip_lengths", inputs.attention_inputs.zero_swa_write_skip_lengths);
     printTensorInfo("sequence_lengths", inputs.attention_inputs.sequence_lengths);
     printTensorInfo("input_lengths", inputs.attention_inputs.input_lengths);
     printTensorInfo("kv_cache_block_id_host", inputs.attention_inputs.kv_cache_block_id_host, 40);
