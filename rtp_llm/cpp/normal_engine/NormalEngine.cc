@@ -569,8 +569,10 @@ absl::Status NormalEngine::step() {
         status = executor_->process(streams, tps_schedule_time_us);
     }
 
-    // report step metrics
-    if (parallelism_config.tp_rank == 0) {
+    // loop() is a no-sleep tight loop and with TP>1 every iteration enters
+    // process() to drive the collective tpSync even with empty streams —
+    // without this gate the gauge gets diluted to ~0 by idle iterations.
+    if (parallelism_config.tp_rank == 0 && !streams.empty()) {
         RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
         auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
         reportMetrics({step_latency});
