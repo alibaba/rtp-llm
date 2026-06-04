@@ -14,6 +14,18 @@ PdKvWritebackCompatibility pdKvWritebackCompatibilityFromPB(const PdKvWritebackC
     return compatibility;
 }
 
+PdKvWritebackReceiveStage pdKvWritebackReceiveStageFromPB(PdKvWritebackReceiveStagePB stage) {
+    switch (stage) {
+        case PdKvWritebackReceiveStagePB::PD_KV_WRITEBACK_COMMIT:
+            return PdKvWritebackReceiveStage::Commit;
+        case PdKvWritebackReceiveStagePB::PD_KV_WRITEBACK_ABORT:
+            return PdKvWritebackReceiveStage::Abort;
+        case PdKvWritebackReceiveStagePB::PD_KV_WRITEBACK_PREPARE:
+        default:
+            return PdKvWritebackReceiveStage::Prepare;
+    }
+}
+
 }  // namespace
 
 PdKvWritebackLaunchRequest pdKvWritebackLaunchRequestFromPB(const PdKvWritebackRequestPB& pb) {
@@ -33,7 +45,8 @@ PdKvWritebackLaunchRequest pdKvWritebackLaunchRequestFromPB(const PdKvWritebackR
                                              pb.source_prefill_grpc_addrs().end());
     request.decode_worker_addrs.assign(pb.decode_worker_addrs().begin(), pb.decode_worker_addrs().end());
     request.prefill_worker_addrs.assign(pb.prefill_worker_addrs().begin(), pb.prefill_worker_addrs().end());
-    request.deadline_ms = pb.deadline_us() > 0 ? pb.deadline_us() / 1000 : 0;
+    request.deadline_ms   = pb.deadline_us() > 0 ? pb.deadline_us() / 1000 : 0;
+    request.receive_stage = pdKvWritebackReceiveStageFromPB(pb.receive_stage());
     return request;
 }
 

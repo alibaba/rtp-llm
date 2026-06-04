@@ -11,11 +11,15 @@ ROCM_TASK_INFO = (
 ROCM_BOUNDARY_TASK_INFO = (
     SMOKE_ROOT / "data" / "model" / "qwen3" / "q_r_rocm_pd_writeback_boundary.json"
 )
+ROCM_TOKEN_DIFF_TASK_INFO = (
+    SMOKE_ROOT / "data" / "model" / "qwen3" / "q_r_rocm_pd_writeback_token_diff.json"
+)
 SUITE = SMOKE_ROOT / "suites_h20_oss.bzl"
 ROCM_SUITE = SMOKE_ROOT / "suites_rocm_oss.bzl"
 DEFS = SMOKE_ROOT / "defs.bzl"
 ENTRY = SMOKE_ROOT / "entry.py"
 CASE_RUNNER = SMOKE_ROOT / "case_runner.py"
+NORMAL_COMPARER = SMOKE_ROOT / "normal_comparer.py"
 P2P_WRITEBACK_DEBUG_UTIL_CC = (
     REPO_ROOT
     / "rtp_llm"
@@ -212,9 +216,8 @@ class PdWritebackSmokeConfigStaticTest(unittest.TestCase):
             self.assertIn(token, case_runner)
 
         self.assertIn("STABILITY_REPEAT", case_runner)
-        self.assertIn(
-            "ThreadPoolExecutor(max_workers=self.concurrency_workers)", case_runner
-        )
+        self.assertIn("ThreadPoolExecutor(", case_runner)
+        self.assertIn("max_workers=self.concurrency_workers", case_runner)
         self.assertIn("range(self.concurrency_request_count)", case_runner)
         self.assertIn("read_transfer_not_done", case_runner)
         self.assertIn("P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE", case_runner)
@@ -294,6 +297,89 @@ class PdWritebackSmokeConfigStaticTest(unittest.TestCase):
                 "aux_info.pd_sep", query_result["aux_info_assertions"]["fields"]
             )
             self.assertIn("response", query_result["result"])
+
+    def test_rocm_pd_writeback_token_diff_case_compares_tcp_writeback_on_off(self):
+        suite = ROCM_SUITE.read_text()
+        defs = DEFS.read_text()
+        entry = ENTRY.read_text()
+        case_runner = CASE_RUNNER.read_text()
+        multi_inst_runner = (SMOKE_ROOT / "multi_inst_case_runner.py").read_text()
+        normal_comparer = NORMAL_COMPARER.read_text()
+        task = json.loads(ROCM_TOKEN_DIFF_TASK_INFO.read_text())
+
+        case_block = _case_block(
+            suite, "rocm_pd_qwen3_8b_tp1_to_tp1_tcp_writeback_token_diff"
+        )
+        self.assertIn(
+            'task_info="data/model/qwen3/q_r_rocm_pd_writeback_token_diff.json"',
+            case_block,
+        )
+        self.assertIn("--tp_size 1 --world_size 1", case_block)
+        self.assertIn("--cache_store_rdma_mode 0", case_block)
+        self.assertIn("--seq_size_per_block 16", case_block)
+        self.assertIn("ENABLE_PD_KV_CACHE_WRITEBACK=1", case_block)
+        self.assertIn("paired_baseline_envs", case_block)
+        self.assertIn("USE_CACHE_STORE=1", case_block)
+        self.assertIn("CACHE_STORE_RDMA_MODE=0", case_block)
+        baseline_block = case_block[case_block.index("paired_baseline_envs") :]
+        self.assertNotIn("ENABLE_PD_KV_CACHE_WRITEBACK=1", baseline_block)
+        self.assertIn("concurrency_test=True", case_block)
+        self.assertIn("concurrency_request_count=8", case_block)
+        self.assertIn("concurrency_workers=8", case_block)
+
+        self.assertIn("paired_baseline_envs=[]", defs)
+        self.assertIn("--paired_baseline_envs", defs)
+        self.assertIn("--paired_baseline_envs", entry)
+        self.assertIn("paired_baseline_envs", case_runner)
+        self.assertIn("collect_actual_results", case_runner)
+        self.assertIn("task_info: Optional[TaskInfo] = None", case_runner)
+        self.assertIn("task_info = task_info or self.task_info", case_runner)
+        self.assertIn("self.curl_server(curl_server_mgr, task_info)", multi_inst_runner)
+        self.assertIn("token index", normal_comparer)
+
+        self.assertEqual(task["model_type"], "qwen_3")
+        self.assertEqual(task["model_path"], "/mnt/data3/zhenyun.yzy/hf/Qwen3-8B")
+        self.assertEqual(len(task["query_result"]), 3)
+        self.assertIn("1到300", task["query_result"][0]["query"]["prompt"])
+        self.assertIn("继续输出421到900", task["query_result"][2]["query"]["prompt"])
+        self.assertGreaterEqual(
+            task["query_result"][2]["query"]["generate_config"]["max_new_tokens"],
+            768,
+        )
+        for query_result in task["query_result"]:
+            generate_config = query_result["query"]["generate_config"]
+            self.assertGreaterEqual(generate_config["max_new_tokens"], 256)
+            self.assertEqual(generate_config["temperature"], 0.0)
+            self.assertEqual(generate_config["top_k"], 1)
+            self.assertEqual(generate_config["top_p"], 0.1)
+            self.assertTrue(generate_config["return_output_ids"])
+            self.assertNotEqual(
+                query_result.get("aux_info_assertions", {}).get("mode"),
+                "aux_info_only",
+            )
+            self.assertIn("response", query_result["result"])
+            self.assertIn("output_ids", query_result["result"])
+
+    def test_rocm_pd_writeback_token_diff_has_tp2_tcp_case(self):
+        suite = ROCM_SUITE.read_text()
+
+        case_block = _case_block(
+            suite, "rocm_pd_qwen3_8b_tp2_to_tp2_tcp_writeback_token_diff"
+        )
+        self.assertIn(
+            'task_info="data/model/qwen3/q_r_rocm_pd_writeback_token_diff.json"',
+            case_block,
+        )
+        self.assertIn("--tp_size 2 --world_size 2", case_block)
+        self.assertIn("--cache_store_rdma_mode 0", case_block)
+        self.assertIn("--seq_size_per_block 16", case_block)
+        self.assertIn("ENABLE_PD_KV_CACHE_WRITEBACK=1", case_block)
+        self.assertIn("paired_baseline_envs", case_block)
+        baseline_block = case_block[case_block.index("paired_baseline_envs") :]
+        self.assertNotIn("ENABLE_PD_KV_CACHE_WRITEBACK=1", baseline_block)
+        self.assertNotIn("concurrency_test=True", case_block)
+        self.assertNotIn("concurrency_request_count=8", case_block)
+        self.assertNotIn("concurrency_workers=8", case_block)
 
     def test_writeback_checksum_debug_logging_is_env_gated(self):
         debug_util_cc = P2P_WRITEBACK_DEBUG_UTIL_CC.read_text()

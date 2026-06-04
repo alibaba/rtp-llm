@@ -39,12 +39,17 @@ class PdSeperationCaseRunner(CaseRunner):
         ):
             raise Exception("env_args in PdSeperationCaseRunner should not empty")
 
-    # override
-    def run(self):
+    def _run_pd_cluster(
+        self,
+        env_args: Dict[str, List[str]],
+        task_info: TaskInfo,
+        collect_actual_results: bool = False,
+    ):
         frontend_server_manager = None
         frontend_envs = {}
-        prefill_envs = self.create_env_from_args(self.env_args[PREFILL_ROLE_NAME])
-        decode_envs = self.create_env_from_args(self.env_args[DECODE_ROLE_NAME])
+        actual_results = []
+        prefill_envs = self.create_env_from_args(env_args[PREFILL_ROLE_NAME])
+        decode_envs = self.create_env_from_args(env_args[DECODE_ROLE_NAME])
         prefill_args = self.smoke_args.get(PREFILL_ROLE_NAME, "")
         decode_args = self.smoke_args.get(DECODE_ROLE_NAME, "")
         prefill_enable_remote_cache = self._extract_bool_arg(
@@ -90,8 +95,8 @@ class PdSeperationCaseRunner(CaseRunner):
             service_id="test", role_endpoints=[group_endpoint], use_local=True
         )
 
-        if FRONTEND_ROLE_NAME in self.env_args:
-            frontend_envs = self.create_env_from_args(self.env_args[FRONTEND_ROLE_NAME])
+        if FRONTEND_ROLE_NAME in env_args:
+            frontend_envs = self.create_env_from_args(env_args[FRONTEND_ROLE_NAME])
             frontend_port = MagaServerManager.get_free_port()
             task_states = TaskStates()
 
@@ -99,7 +104,7 @@ class PdSeperationCaseRunner(CaseRunner):
             frontend_server_manager = self.start_server(
                 frontend_envs,
                 task_states,
-                self.task_info,
+                task_info,
                 port=frontend_port,
                 role_name="frontend",
             )
@@ -116,13 +121,13 @@ class PdSeperationCaseRunner(CaseRunner):
         server_configs = [
             {
                 "env_dict": decode_envs,
-                "task_info": self.task_info,
+                "task_info": task_info,
                 "port": decode_port,
                 "role_name": "decode",
             },
             {
                 "env_dict": prefill_envs,
-                "task_info": self.task_info,
+                "task_info": task_info,
                 "port": prefill_port,
                 "role_name": "prefill",
             },
@@ -143,7 +148,7 @@ class PdSeperationCaseRunner(CaseRunner):
             decode_task_states.err_msg = (
                 "decode server start failed, " + decode_task_states.err_msg
             )
-            return decode_task_states
+            return decode_task_states, actual_results
         assert (
             decode_server_manager is not None
         ), "decode server manager should not be None"
@@ -153,7 +158,7 @@ class PdSeperationCaseRunner(CaseRunner):
                 "prefill server start failed, " + prefill_task_states.err_msg
             )
             decode_server_manager.stop_server()
-            return prefill_task_states
+            return prefill_task_states, actual_results
         assert (
             prefill_server_manager is not None
         ), "prefill server manager should not be None"
@@ -164,7 +169,12 @@ class PdSeperationCaseRunner(CaseRunner):
             else frontend_server_manager
         )
 
-        task_states = self.curl_server(curl_server_mgr)
+        if collect_actual_results:
+            task_states, actual_results = self.collect_actual_results(
+                curl_server_mgr, task_info
+            )
+        else:
+            task_states = self.curl_server(curl_server_mgr, task_info)
         prefill_server_manager.stop_server()
         decode_server_manager.stop_server()
 
@@ -174,6 +184,37 @@ class PdSeperationCaseRunner(CaseRunner):
             self.remote_kvcm_server.stop_server()
             self.remote_kvcm_server.copy_logs()
         self.assert_no_log_patterns_absent(task_states)
+        return task_states, actual_results
+
+    # override
+    def run(self):
+        if self.paired_baseline_envs:
+            baseline_states, baseline_results = self._run_pd_cluster(
+                self.paired_baseline_envs,
+                self.task_info,
+                collect_actual_results=True,
+            )
+            if baseline_states.ret != True:
+                baseline_states.err_msg = (
+                    "paired baseline server run failed, " + baseline_states.err_msg
+                )
+                return baseline_states
+
+            paired_task_info = self.task_info_with_paired_results(
+                self.task_info, baseline_results
+            )
+            task_states, _ = self._run_pd_cluster(
+                self.env_args,
+                paired_task_info,
+                collect_actual_results=False,
+            )
+            return task_states
+
+        task_states, _ = self._run_pd_cluster(
+            self.env_args,
+            self.task_info,
+            collect_actual_results=False,
+        )
         return task_states
 
 

@@ -83,6 +83,30 @@ public:
         return rpc_status;
     }
 
+    absl::Status requestPrefillCommit(const PdKvWritebackLaunchRequest& request,
+                                      const PdKvWritebackTopologyPlan&  topology) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        events_->push_back("prefill_commit_rpc");
+        last_request = request;
+        prefill_targets.clear();
+        for (const auto& mapping : topology.mappings) {
+            prefill_targets.push_back(mapping.prefill_grpc_addr);
+        }
+        return rpc_status;
+    }
+
+    absl::Status requestPrefillAbort(const PdKvWritebackLaunchRequest& request,
+                                     const PdKvWritebackTopologyPlan&  topology) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        events_->push_back("prefill_abort_rpc");
+        last_request = request;
+        prefill_targets.clear();
+        for (const auto& mapping : topology.mappings) {
+            prefill_targets.push_back(mapping.prefill_grpc_addr);
+        }
+        return rpc_status;
+    }
+
     absl::Status requestDecodeSend(const PdKvWritebackLaunchRequest& request,
                                    const PdKvWritebackTopologyPlan&  topology) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -121,6 +145,26 @@ public:
         return absl::OkStatus();
     }
 
+    absl::Status requestPrefillCommit(const PdKvWritebackLaunchRequest& request,
+                                      const PdKvWritebackTopologyPlan&  topology) override {
+        (void)request;
+        (void)topology;
+        std::lock_guard<std::mutex> lock(mutex_);
+        prefill_commit_started = true;
+        cv_.notify_all();
+        return absl::OkStatus();
+    }
+
+    absl::Status requestPrefillAbort(const PdKvWritebackLaunchRequest& request,
+                                     const PdKvWritebackTopologyPlan&  topology) override {
+        (void)request;
+        (void)topology;
+        std::lock_guard<std::mutex> lock(mutex_);
+        prefill_abort_started = true;
+        cv_.notify_all();
+        return absl::OkStatus();
+    }
+
     absl::Status requestDecodeSend(const PdKvWritebackLaunchRequest& request,
                                    const PdKvWritebackTopologyPlan&  topology) override {
         (void)request;
@@ -137,10 +181,12 @@ public:
         cv_.notify_all();
     }
 
-    bool prefill_started       = false;
-    bool local_decode_started  = false;
-    bool remote_decode_started = false;
-    bool prefill_timed_out     = false;
+    bool prefill_started        = false;
+    bool prefill_commit_started = false;
+    bool prefill_abort_started  = false;
+    bool local_decode_started   = false;
+    bool remote_decode_started  = false;
+    bool prefill_timed_out      = false;
 
 private:
     std::mutex              mutex_;
@@ -255,10 +301,11 @@ TEST(PdKvWritebackManagerTest, LaunchTpEqualSendsLocalRankToPrefillAndUsesLocalD
     EXPECT_EQ(result.status, PdKvWritebackLaunchStatus::Started);
     manager.waitForWritebackTasksForTest();
 
-    ASSERT_EQ(events.size(), 3);
+    ASSERT_EQ(events.size(), 4);
     EXPECT_NE(std::find(events.begin(), events.end(), "prefill_rpc"), events.end());
     EXPECT_NE(std::find(events.begin(), events.end(), "transfer"), events.end());
     EXPECT_NE(std::find(events.begin(), events.end(), "decode_rpc"), events.end());
+    EXPECT_NE(std::find(events.begin(), events.end(), "prefill_commit_rpc"), events.end());
     EXPECT_EQ(transfer_client->last_plan.request_key, request.manifest.request_key);
     EXPECT_EQ(transfer_client->last_plan.decode_group_block_ids, request.manifest.group_block_ids);
     EXPECT_EQ(transfer_client->last_plan.prefill_transfer_servers.size(), 4);
@@ -350,6 +397,8 @@ TEST(PdKvWritebackManagerTest, LaunchStartsDecodeSendWhilePrefillReceiveIsWaitin
     EXPECT_TRUE(rpc_client->prefill_started);
     EXPECT_TRUE(rpc_client->local_decode_started);
     EXPECT_TRUE(rpc_client->remote_decode_started);
+    EXPECT_TRUE(rpc_client->prefill_commit_started);
+    EXPECT_FALSE(rpc_client->prefill_abort_started);
     EXPECT_FALSE(rpc_client->prefill_timed_out);
 }
 
@@ -442,6 +491,30 @@ TEST(PdKvWritebackManagerTest, ReceiveCommitsOnlyAfterTransferSucceeds) {
     EXPECT_EQ(events, std::vector<std::string>({"malloc", "transfer", "commit", "free"}));
     EXPECT_EQ(transfer_client.last_plan.decode_group_block_ids, std::vector<BlockIndicesType>({{4, 5}}));
     EXPECT_EQ(transfer_client.last_plan.prefill_group_block_ids, std::vector<BlockIndicesType>({{7, 8}}));
+}
+
+TEST(PdKvWritebackManagerTest, PrepareReceiveKeepsBlocksPendingUntilCommit) {
+    PDSepConfig pd_config;
+    pd_config.enable_pd_kv_cache_writeback = true;
+    std::vector<std::string> events;
+    RecordingCacheWriter     cache_writer(&events);
+    RecordingTransferClient  transfer_client(&events);
+    PdKvWritebackManager     manager(pd_config, &cache_writer, &transfer_client);
+
+    auto destination_resource           = std::make_shared<BatchKVCacheResource>();
+    auto request                        = makeReceiveRequest();
+    request.destination.partition_count = 2;
+    request.source.partition_count      = 2;
+
+    auto prepare_status = manager.prepareReceiveOnPrefill(request, destination_resource);
+
+    EXPECT_TRUE(prepare_status.ok()) << prepare_status;
+    EXPECT_EQ(events, std::vector<std::string>({"malloc", "transfer"}));
+
+    auto commit_status = manager.commitReceiveOnPrefill(request);
+
+    EXPECT_TRUE(commit_status.ok()) << commit_status;
+    EXPECT_EQ(events, std::vector<std::string>({"malloc", "transfer", "commit", "free"}));
 }
 
 TEST(PdKvWritebackManagerTest, ReceiveFreesAllocatedBlocksWhenTransferFails) {

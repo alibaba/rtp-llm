@@ -123,6 +123,10 @@ std::string compactMissingLayers(const std::vector<int>& missing_layers) {
     return result;
 }
 
+std::string pendingReceiveKey(const PdKvWritebackLaunchRequest& request) {
+    return std::to_string(request.manifest.request_id) + ":" + request.manifest.request_key;
+}
+
 absl::Status validateWritebackSourceComplete(const PdKvWritebackLaunchRequest& request,
                                              const BatchKVCacheResourcePtr&    source_resource) {
     if (!source_resource || source_resource->batchSize() != 1) {
@@ -529,6 +533,21 @@ PdKvWritebackLaunchResult PdKvWritebackManager::launchFromDecode(const PdKvWrite
                                         request_copy.manifest.request_id,
                                         send_status.ToString().c_str());
                 }
+                if (receive_status.ok() && remote_decode_status.ok() && send_status.ok()) {
+                    auto commit_status = rpc_client->requestPrefillCommit(request_copy, topology);
+                    if (!commit_status.ok()) {
+                        RTP_LLM_LOG_WARNING("PD KV writeback prefill commit fanout failed, request_id=%ld, error=%s",
+                                            request_copy.manifest.request_id,
+                                            commit_status.ToString().c_str());
+                    }
+                } else {
+                    auto abort_status = rpc_client->requestPrefillAbort(request_copy, topology);
+                    if (!abort_status.ok()) {
+                        RTP_LLM_LOG_WARNING("PD KV writeback prefill abort fanout failed, request_id=%ld, error=%s",
+                                            request_copy.manifest.request_id,
+                                            abort_status.ToString().c_str());
+                    }
+                }
             }));
     }
     report_launch(PdKvWritebackLaunchStatus::Started, "started");
@@ -571,6 +590,19 @@ size_t PdKvWritebackManager::completedWritebackTaskCountForTest() const {
 
 absl::Status PdKvWritebackManager::receiveOnPrefill(const PdKvWritebackLaunchRequest& request,
                                                     const BatchKVCacheResourcePtr&    destination_resource) {
+    auto prepare_status = prepareReceiveOnPrefill(request, destination_resource);
+    if (!prepare_status.ok()) {
+        return prepare_status;
+    }
+    auto commit_status = commitReceiveOnPrefill(request);
+    if (!commit_status.ok()) {
+        abortReceiveOnPrefill(request).IgnoreError();
+    }
+    return commit_status;
+}
+
+absl::Status PdKvWritebackManager::prepareReceiveOnPrefill(const PdKvWritebackLaunchRequest& request,
+                                                           const BatchKVCacheResourcePtr&    destination_resource) {
     const int64_t                 receive_begin_us = currentTimeUs();
     PdKvWritebackMetricsCollector collector;
     collector.receive_qps = true;
@@ -642,14 +674,73 @@ absl::Status PdKvWritebackManager::receiveOnPrefill(const PdKvWritebackLaunchReq
         report_receive("failed", "transfer_failed");
         return transfer_status;
     }
-    const int64_t commit_begin_us = currentTimeUs();
-    cache_writer_->commitWritebackBlocks(destination_resource, request.manifest.cache_keys, false);
-    collector.commit_latency_us = currentTimeUs() - commit_begin_us;
-    cache_writer_->freeWritebackBlocks(destination_resource);
-    RTP_LLM_LOG_INFO("PD KV writeback receive commit, request_id=%ld, reusable_blocks=%ld",
+
+    const auto pending_key = pendingReceiveKey(request);
+    {
+        std::lock_guard<std::mutex> lock(pending_receives_mutex_);
+        auto inserted = pending_receives_.emplace(pending_key, PendingReceive{request, destination_resource});
+        if (!inserted.second) {
+            cache_writer_->freeWritebackBlocks(destination_resource);
+            report_receive("failed", "duplicate_pending_receive");
+            return absl::AlreadyExistsError("duplicate pending writeback receive");
+        }
+    }
+    RTP_LLM_LOG_INFO("PD KV writeback receive prepared, request_id=%ld, reusable_blocks=%ld",
                      request.manifest.request_id,
                      request.manifest.reusable_block_count);
     report_receive("success", "ok");
+    return absl::OkStatus();
+}
+
+absl::Status PdKvWritebackManager::commitReceiveOnPrefill(const PdKvWritebackLaunchRequest& request) {
+    if (!pd_config_.enable_pd_kv_cache_writeback) {
+        return absl::FailedPreconditionError("disabled");
+    }
+    if (!cache_writer_) {
+        return absl::FailedPreconditionError("cache_writer is null");
+    }
+
+    PendingReceive pending;
+    const auto     pending_key = pendingReceiveKey(request);
+    {
+        std::lock_guard<std::mutex> lock(pending_receives_mutex_);
+        auto                        it = pending_receives_.find(pending_key);
+        if (it == pending_receives_.end()) {
+            return absl::NotFoundError("pending writeback receive not found");
+        }
+        pending = std::move(it->second);
+        pending_receives_.erase(it);
+    }
+
+    const int64_t commit_begin_us = currentTimeUs();
+    cache_writer_->commitWritebackBlocks(pending.destination_resource, pending.request.manifest.cache_keys, false);
+    cache_writer_->freeWritebackBlocks(pending.destination_resource);
+    RTP_LLM_LOG_INFO("PD KV writeback receive commit, request_id=%ld, reusable_blocks=%ld, cost_us=%ld",
+                     pending.request.manifest.request_id,
+                     pending.request.manifest.reusable_block_count,
+                     currentTimeUs() - commit_begin_us);
+    return absl::OkStatus();
+}
+
+absl::Status PdKvWritebackManager::abortReceiveOnPrefill(const PdKvWritebackLaunchRequest& request) {
+    if (!cache_writer_) {
+        return absl::FailedPreconditionError("cache_writer is null");
+    }
+    PendingReceive pending;
+    const auto     pending_key = pendingReceiveKey(request);
+    {
+        std::lock_guard<std::mutex> lock(pending_receives_mutex_);
+        auto                        it = pending_receives_.find(pending_key);
+        if (it == pending_receives_.end()) {
+            return absl::OkStatus();
+        }
+        pending = std::move(it->second);
+        pending_receives_.erase(it);
+    }
+    cache_writer_->freeWritebackBlocks(pending.destination_resource);
+    RTP_LLM_LOG_INFO("PD KV writeback receive abort, request_id=%ld, reusable_blocks=%ld",
+                     pending.request.manifest.request_id,
+                     pending.request.manifest.reusable_block_count);
     return absl::OkStatus();
 }
 

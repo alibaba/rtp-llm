@@ -277,6 +277,12 @@ message PdKvWritebackCompatibilityPB {
     repeated int32 group_types = 6;
 }
 
+enum PdKvWritebackReceiveStagePB {
+    PD_KV_WRITEBACK_PREPARE = 0;
+    PD_KV_WRITEBACK_COMMIT = 1;
+    PD_KV_WRITEBACK_ABORT = 2;
+}
+
 message PdKvWritebackRequestPB {
     int64 request_id = 1;
     string request_key = 2;
@@ -290,6 +296,7 @@ message PdKvWritebackRequestPB {
     PdKvWritebackCompatibilityPB destination = 10;
     int64 deadline_us = 11;
     repeated string source_prefill_grpc_addrs = 12;
+    PdKvWritebackReceiveStagePB receive_stage = 13;
 }
 
 message PdKvWritebackResponsePB {

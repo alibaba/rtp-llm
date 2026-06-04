@@ -118,6 +118,18 @@ PdKvWritebackRequestPB buildPdKvWritebackRequestPB(const PdKvWritebackLaunchRequ
     fillPdKvWritebackCompatibilityPB(request.source, pb.mutable_source());
     fillPdKvWritebackCompatibilityPB(request.destination, pb.mutable_destination());
     pb.set_deadline_us(request.deadline_ms * 1000);
+    switch (request.receive_stage) {
+        case PdKvWritebackReceiveStage::Commit:
+            pb.set_receive_stage(PdKvWritebackReceiveStagePB::PD_KV_WRITEBACK_COMMIT);
+            break;
+        case PdKvWritebackReceiveStage::Abort:
+            pb.set_receive_stage(PdKvWritebackReceiveStagePB::PD_KV_WRITEBACK_ABORT);
+            break;
+        case PdKvWritebackReceiveStage::Prepare:
+        default:
+            pb.set_receive_stage(PdKvWritebackReceiveStagePB::PD_KV_WRITEBACK_PREPARE);
+            break;
+    }
     return pb;
 }
 
@@ -163,7 +175,23 @@ public:
 
     absl::Status requestPrefillReceive(const PdKvWritebackLaunchRequest& request,
                                        const PdKvWritebackTopologyPlan&  topology) override {
-        return fanoutPdKvWriteback(request, topology, false);
+        auto stage_request          = request;
+        stage_request.receive_stage = PdKvWritebackReceiveStage::Prepare;
+        return fanoutPdKvWriteback(stage_request, topology, false);
+    }
+
+    absl::Status requestPrefillCommit(const PdKvWritebackLaunchRequest& request,
+                                      const PdKvWritebackTopologyPlan&  topology) override {
+        auto stage_request          = request;
+        stage_request.receive_stage = PdKvWritebackReceiveStage::Commit;
+        return fanoutPdKvWriteback(stage_request, topology, false);
+    }
+
+    absl::Status requestPrefillAbort(const PdKvWritebackLaunchRequest& request,
+                                     const PdKvWritebackTopologyPlan&  topology) override {
+        auto stage_request          = request;
+        stage_request.receive_stage = PdKvWritebackReceiveStage::Abort;
+        return fanoutPdKvWriteback(stage_request, topology, false);
     }
 
     absl::Status requestDecodeSend(const PdKvWritebackLaunchRequest& request,

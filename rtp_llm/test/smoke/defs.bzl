@@ -91,7 +91,7 @@ def get_aiter_envs(name, envs):
 def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_args="",
                kvcm_envs=[], sleep_time_qr=0, kill_remote=False, concurrency_test=False,
                concurrency_request_count=5, concurrency_workers=10, stability_repeat=0,
-               assert_no_log_patterns=[]):
+               assert_no_log_patterns=[], paired_baseline_envs=[]):
     path = '/'.join(task_info.split('/')[:-1])
     data = data + native.glob([path + '/*.pt',
                                path + '/*.jpg',
@@ -119,6 +119,24 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
         gpu_count += world_size
         env_str = "[" + ",".join(["\\\"" + x + "\\\"" for x in envs_list]) +  "]"
         data.extend(extract_data(envs_list))
+
+    paired_baseline_envs_str = "[]"
+    if paired_baseline_envs:
+        if type(smoke_args) == 'dict':
+            part_env_list = []
+            for k, role_args in smoke_args.items():
+                v = paired_baseline_envs.get(k, []) if type(paired_baseline_envs) == "dict" else []
+                world_size = get_world_size_from_smoke_args(role_args)
+                v = v + ['WORLD_SIZE=' + str(world_size)]
+                part_env_list.append("\"" + k + "\": " + "[" + ",".join(["\"" + x + "\"" for x in v]) +  "]")
+                data.extend(extract_data(v))
+            paired_baseline_envs_str = "'{" + ','.join(part_env_list) + "}'"
+        else:
+            baseline_envs_list = paired_baseline_envs if type(paired_baseline_envs) == "list" else []
+            world_size = get_world_size_from_smoke_args(smoke_args)
+            baseline_envs_list = baseline_envs_list + ['WORLD_SIZE=' + str(world_size)]
+            paired_baseline_envs_str = "[" + ",".join(["\\\"" + x + "\\\"" for x in baseline_envs_list]) +  "]"
+            data.extend(extract_data(baseline_envs_list))
 
     if type(smoke_args) == 'string':
         smoke_args_str = "\"" + smoke_args + "\""
@@ -192,6 +210,7 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
             "--concurrency_workers", str(concurrency_workers),
             "--stability_repeat", str(stability_repeat),
             "--assert_no_log_patterns", assert_no_log_patterns_str,
+            "--paired_baseline_envs", paired_baseline_envs_str,
         ],
         exec_properties = {
             'gpu':gpu_type[0],

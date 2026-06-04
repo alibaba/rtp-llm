@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "absl/status/status.h"
@@ -20,6 +21,12 @@ enum class PdKvWritebackLaunchStatus {
     Started,
     Skipped,
     Failed,
+};
+
+enum class PdKvWritebackReceiveStage {
+    Prepare,
+    Commit,
+    Abort,
 };
 
 struct PdKvWritebackCompatibility {
@@ -40,6 +47,7 @@ struct PdKvWritebackLaunchRequest {
     std::vector<std::string>   prefill_worker_addrs;
     int64_t                    deadline_ms   = 0;
     int32_t                    local_tp_rank = 0;
+    PdKvWritebackReceiveStage  receive_stage = PdKvWritebackReceiveStage::Prepare;
     KVCacheResourcePtr         held_resource;
 };
 
@@ -70,6 +78,10 @@ public:
     virtual ~PdKvWritebackRpcClient()                                                     = default;
     virtual absl::Status requestPrefillReceive(const PdKvWritebackLaunchRequest& request,
                                                const PdKvWritebackTopologyPlan&  topology) = 0;
+    virtual absl::Status requestPrefillCommit(const PdKvWritebackLaunchRequest& request,
+                                              const PdKvWritebackTopologyPlan&  topology)  = 0;
+    virtual absl::Status requestPrefillAbort(const PdKvWritebackLaunchRequest& request,
+                                             const PdKvWritebackTopologyPlan&  topology)   = 0;
     virtual absl::Status requestDecodeSend(const PdKvWritebackLaunchRequest& request,
                                            const PdKvWritebackTopologyPlan&  topology)     = 0;
 };
@@ -97,6 +109,10 @@ public:
     PdKvWritebackLaunchResult launchFromDecode(const PdKvWritebackLaunchRequest& request) const override;
     absl::Status              receiveOnPrefill(const PdKvWritebackLaunchRequest& request,
                                                const BatchKVCacheResourcePtr&    destination_resource);
+    absl::Status              prepareReceiveOnPrefill(const PdKvWritebackLaunchRequest& request,
+                                                      const BatchKVCacheResourcePtr&    destination_resource);
+    absl::Status              commitReceiveOnPrefill(const PdKvWritebackLaunchRequest& request);
+    absl::Status              abortReceiveOnPrefill(const PdKvWritebackLaunchRequest& request);
     absl::Status              sendOnDecode(const PdKvWritebackLaunchRequest& request,
                                            const BatchKVCacheResourcePtr&    source_resource) const;
     void                      waitForWritebackTasksForTest() const;
@@ -109,16 +125,24 @@ private:
                                                 const BatchKVCacheResourcePtr&    destination_resource) const;
 
 private:
-    PDSepConfig                                  pd_config_;
-    PdKvWritebackCacheWriter*                    cache_writer_    = nullptr;
-    PdKvWritebackTransferClient*                 transfer_client_ = nullptr;
-    PdKvWritebackRpcClient*                      rpc_client_      = nullptr;
-    std::shared_ptr<PdKvWritebackTransferClient> owned_transfer_client_;
-    std::shared_ptr<PdKvWritebackRpcClient>      owned_rpc_client_;
-    std::vector<std::string>                     decode_worker_grpc_addrs_;
-    kmonitor::MetricsReporterPtr                 metrics_reporter_;
-    mutable std::mutex                           writeback_tasks_mutex_;
-    mutable std::vector<std::future<void>>       writeback_tasks_;
+    struct PendingReceive {
+        PdKvWritebackLaunchRequest request;
+        BatchKVCacheResourcePtr    destination_resource;
+    };
+
+private:
+    PDSepConfig                                     pd_config_;
+    PdKvWritebackCacheWriter*                       cache_writer_    = nullptr;
+    PdKvWritebackTransferClient*                    transfer_client_ = nullptr;
+    PdKvWritebackRpcClient*                         rpc_client_      = nullptr;
+    std::shared_ptr<PdKvWritebackTransferClient>    owned_transfer_client_;
+    std::shared_ptr<PdKvWritebackRpcClient>         owned_rpc_client_;
+    std::vector<std::string>                        decode_worker_grpc_addrs_;
+    kmonitor::MetricsReporterPtr                    metrics_reporter_;
+    mutable std::mutex                              writeback_tasks_mutex_;
+    mutable std::vector<std::future<void>>          writeback_tasks_;
+    std::mutex                                      pending_receives_mutex_;
+    std::unordered_map<std::string, PendingReceive> pending_receives_;
 };
 
 using PdKvWritebackManagerPtr  = std::shared_ptr<PdKvWritebackManager>;

@@ -1,0 +1,90 @@
+{
+    "model_type": "qwen_3",
+    "model_path": "/mnt/data3/zhenyun.yzy/hf/Qwen3-8B",
+    "query_result": [
+        {
+            "case_name": "writeback_token_diff_seed",
+            "query": {
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n请只输出从1到300的阿拉伯数字，使用英文逗号分隔，不要空格，不要解释。<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                "generate_config": {
+                    "max_new_tokens": 512,
+                    "temperature": 0.0,
+                    "top_p": 0.1,
+                    "top_k": 1,
+                    "return_output_ids": true
+                }
+            },
+            "aux_info_assertions": {
+                "fields": {
+                    "aux_info.pd_sep": {
+                        "eq": true
+                    }
+                }
+            },
+            "result": {
+                "response": "",
+                "output_ids": []
+            }
+        },
+        {
+            "case_name": "writeback_token_diff_probe",
+            "query": {
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n请只输出从1到300的阿拉伯数字，使用英文逗号分隔，不要空格，不要解释。<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120<|im_end|>\n<|im_start|>user\n继续输出301到420，仍然只用英文逗号分隔。<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                "generate_config": {
+                    "max_new_tokens": 256,
+                    "temperature": 0.0,
+                    "top_p": 0.1,
+                    "top_k": 1,
+                    "return_output_ids": true
+                }
+            },
+            "aux_info_assertions": {
+                "fields": {
+                    "aux_info.pd_sep": {
+                        "eq": true
+                    },
+                    "aux_info.reuse_len": {
+                        "ge": 16
+                    },
+                    "aux_info.prefill_local_reuse_len": {
+                        "ge": 16
+                    }
+                }
+            },
+            "result": {
+                "response": "",
+                "output_ids": []
+            }
+        },
+        {
+            "case_name": "writeback_token_diff_multi_turn_probe",
+            "query": {
+                "prompt": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n请只输出从1到300的阿拉伯数字，使用英文逗号分隔，不要空格，不要解释。<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120<|im_end|>\n<|im_start|>user\n继续输出301到420，仍然只用英文逗号分隔。<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n301,302,303,304,305,306,307,308,309,310,311,312,313,314,315,316,317,318,319,320,321,322,323,324,325,326,327,328,329,330,331,332,333,334,335,336,337,338,339,340,341,342,343,344,345,346,347,348,349,350,351,352,353,354,355,356,357,358,359,360<|im_end|>\n<|im_start|>user\n继续输出421到900，仍然只用英文逗号分隔。<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                "generate_config": {
+                    "max_new_tokens": 768,
+                    "temperature": 0.0,
+                    "top_p": 0.1,
+                    "top_k": 1,
+                    "return_output_ids": true
+                }
+            },
+            "aux_info_assertions": {
+                "fields": {
+                    "aux_info.pd_sep": {
+                        "eq": true
+                    },
+                    "aux_info.reuse_len": {
+                        "ge": 16
+                    },
+                    "aux_info.prefill_local_reuse_len": {
+                        "ge": 16
+                    }
+                }
+            },
+            "result": {
+                "response": "",
+                "output_ids": []
+            }
+        }
+    ]
+}

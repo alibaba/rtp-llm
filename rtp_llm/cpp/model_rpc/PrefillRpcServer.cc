@@ -232,9 +232,21 @@ grpc::Status PrefillRpcServer::PdKvWriteback(grpc::ServerContext*          conte
         return grpc::Status::OK;
     }
 
-    auto launch_request       = pdKvWritebackLaunchRequestFromPB(*request);
-    auto destination_resource = std::make_shared<BatchKVCacheResource>();
-    auto status               = writeback_manager_->receiveOnPrefill(launch_request, destination_resource);
+    auto         launch_request       = pdKvWritebackLaunchRequestFromPB(*request);
+    auto         destination_resource = std::make_shared<BatchKVCacheResource>();
+    absl::Status status;
+    switch (launch_request.receive_stage) {
+        case PdKvWritebackReceiveStage::Commit:
+            status = writeback_manager_->commitReceiveOnPrefill(launch_request);
+            break;
+        case PdKvWritebackReceiveStage::Abort:
+            status = writeback_manager_->abortReceiveOnPrefill(launch_request);
+            break;
+        case PdKvWritebackReceiveStage::Prepare:
+        default:
+            status = writeback_manager_->prepareReceiveOnPrefill(launch_request, destination_resource);
+            break;
+    }
     response->mutable_error_info()->set_error_code(status.ok() ? ErrorCodePB::NONE_ERROR : ErrorCodePB::UNKNOWN_ERROR);
     response->mutable_error_info()->set_error_message(status.ok() ? "" : std::string(status.message()));
     response->set_accepted(status.ok());

@@ -31,6 +31,11 @@ class PdKvWritebackRpcStaticTest(unittest.TestCase):
         self.assertIn("repeated string peer_grpc_addrs = 12;", proto)
         self.assertIn("message PdKvWritebackRequestPB", proto)
         self.assertIn("message PdKvWritebackResponsePB", proto)
+        self.assertIn("enum PdKvWritebackReceiveStagePB", proto)
+        self.assertIn("PD_KV_WRITEBACK_PREPARE", proto)
+        self.assertIn("PD_KV_WRITEBACK_COMMIT", proto)
+        self.assertIn("PD_KV_WRITEBACK_ABORT", proto)
+        self.assertIn("PdKvWritebackReceiveStagePB receive_stage = 13;", proto)
         self.assertIn(
             "rpc PdKvWriteback(PdKvWritebackRequestPB) returns (PdKvWritebackResponsePB);",
             proto,
@@ -43,8 +48,12 @@ class PdKvWritebackRpcStaticTest(unittest.TestCase):
         self.assertIn("resource_.grpc_workers", prefill_cc)
         self.assertIn("PdKvWriteback(", prefill_h)
         self.assertIn("PrefillRpcServer::PdKvWriteback", prefill_cc)
+        self.assertIn("prepareReceiveOnPrefill", prefill_cc)
+        self.assertIn("commitReceiveOnPrefill", prefill_cc)
+        self.assertIn("abortReceiveOnPrefill", prefill_cc)
         self.assertIn("pdKvWritebackLaunchRequestFromPB", rpc_util_h)
         self.assertIn("pdKvWritebackLaunchRequestFromPB", rpc_util_cc)
+        self.assertIn("pdKvWritebackReceiveStageFromPB", rpc_util_cc)
         self.assertIn("PdKvWritebackRpcUtil.h", prefill_cc)
 
         self.assertIn("PdKvWriteback(", remote_impl_h)
@@ -63,7 +72,9 @@ class PdKvWritebackRpcStaticTest(unittest.TestCase):
         self.assertIn("generate_config->unique_key", query_converter_cc)
         self.assertIn("config_proto->unique_key()", query_converter_cc)
         self.assertIn("input->generate_config->unique_key.empty()", decode_cc)
-        self.assertIn("input->generate_config->unique_key = decode_context.request_key", decode_cc)
+        self.assertIn(
+            "input->generate_config->unique_key = decode_context.request_key", decode_cc
+        )
 
     def test_writeback_p2p_transfer_plans_keep_manifest_request_key(self):
         manifest_cc = (
@@ -79,7 +90,9 @@ class PdKvWritebackRpcStaticTest(unittest.TestCase):
             manifest_cc,
         )
         self.assertGreaterEqual(
-            manager_cc.count("plan.request_key              = request.manifest.request_key"),
+            manager_cc.count(
+                "plan.request_key              = request.manifest.request_key"
+            ),
             2,
         )
         self.assertIn("request.manifest.request_key", manager_cc)
