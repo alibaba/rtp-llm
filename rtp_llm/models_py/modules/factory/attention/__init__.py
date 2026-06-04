@@ -45,6 +45,15 @@ if device_type == DeviceType.ROCm:
     DECODE_MHA_IMPS.append(AiterDecodeImplTriton)
     DECODE_MHA_IMPS.append(AiterDecodeImplAsm)
     DECODE_MHA_IMPS.append(AiterDecodeImplNonAsm)
+
+    # Torch-native MLA impls (ROCm has no native MLA kernel registered).
+    from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter_mla import (
+        RocmMlaDecodeImpl,
+        RocmMlaPrefillImpl,
+    )
+
+    PREFILL_MLA_IMPS.append(RocmMlaPrefillImpl)
+    DECODE_MLA_IMPS.append(RocmMlaDecodeImpl)
 else:
     # currently append early means impl has higher priority
     if device_type == DeviceType.Cuda:
