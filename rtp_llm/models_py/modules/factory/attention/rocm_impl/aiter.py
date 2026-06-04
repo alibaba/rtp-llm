@@ -1348,14 +1348,20 @@ class AiterPrefillImplAsm(FMHAImplBase):
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = AiterPrefillAttnOp(attn_configs)
+        self.paged_fmha_impl = AiterPrefillAttnOpPaged(attn_configs)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpAsm(attn_configs)
         self.rope_kvcache_impl.use_paged_fmha = True
+
+        # Store config for temporary KV cache allocation
+        self.head_num_kv = attn_configs.kv_head_num
+        self.head_dim = attn_configs.size_per_head
+        self.tokens_per_block = attn_configs.kernel_tokens_per_block
 
         # Store input info
         self.attn_inputs = attn_inputs
 
         # Create params
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        self.fmha_params = self.paged_fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
@@ -1365,6 +1371,43 @@ class AiterPrefillImplAsm(FMHAImplBase):
     ) -> bool:
         return True
 
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        self.attn_inputs = attn_inputs
+        self.fmha_params = self.paged_fmha_impl.prepare(attn_inputs)
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+
+    def _ensure_embedding_kv_cache(self, device, dtype):
+        """Lazy-init temporary paged KV cache + block table for embedding models."""
+        if hasattr(self, '_emb_kv_ready'):
+            return
+        max_seq = self.fmha_params.max_seqlen_q
+        batch_size = self.fmha_params.cu_seqlens_q.shape[0] - 1 if self.fmha_params.cu_seqlens_q is not None else 1
+        blocks_per_seq = (max_seq + self.tokens_per_block - 1) // self.tokens_per_block
+        num_blocks = blocks_per_seq * batch_size
+
+        # Create temporary paged KV cache buffer
+        self._emb_kv_buf = LayerKVCache()
+        self._emb_kv_buf.kv_cache_base = torch.zeros(
+            (num_blocks, 2, self.head_num_kv, self.tokens_per_block, self.head_dim),
+            dtype=dtype, device=device
+        )
+        self._emb_kv_buf.kv_scale_base = torch.empty(0, device=device)
+
+        # Create sequential block table
+        self._emb_block_table = torch.arange(
+            num_blocks, dtype=torch.int32, device=device
+        ).reshape(batch_size, blocks_per_seq)
+
+        # Set block table on fmha_params
+        self.fmha_params.kv_cache_block_id_device = self._emb_block_table
+
+        # Re-prepare RoPE params with block table so the kernel knows where to write
+        self.attn_inputs.kv_cache_kernel_block_id_device = self._emb_block_table
+        self.attn_inputs.kv_cache_kernel_block_id_host = self._emb_block_table.cpu().pin_memory()
+        self.rope_params = self.rope_kvcache_impl.prepare(self.attn_inputs)
+
+        self._emb_kv_ready = True
+
     def forward(
         self,
         qkv: torch.Tensor,
@@ -1372,14 +1415,21 @@ class AiterPrefillImplAsm(FMHAImplBase):
         layer_idx: int = 0,
     ) -> torch.Tensor:
         if kv_cache is None:
-            # Embedding models still need positional encoding even without a KV cache.
+            # Embedding path: use mha_batch_prefill with temporary paged KV cache.
+            # RoPE writes K/V into the page buffer (store_cache=true), then
+            # mha_batch_prefill reads from it — same path as normal LLM prefill.
+            self._ensure_embedding_kv_cache(qkv.device, qkv.dtype)
+
             if self.need_rope_kv_cache:
                 fmha_input = self.rope_kvcache_impl.forward(
-                    qkv, kv_cache, self.rope_params
+                    qkv, self._emb_kv_buf, self.rope_params
                 )
             else:
                 fmha_input = qkv
-            return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+
+            return self.paged_fmha_impl.forward(
+                fmha_input, self._emb_kv_buf, self.fmha_params
+            )
 
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
@@ -1424,6 +1474,11 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
         return True
+
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        self.attn_inputs = attn_inputs
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
 
     def forward(
         self,
