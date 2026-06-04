@@ -263,6 +263,11 @@ class _IndexerFP8PrefillMeta(NamedTuple):
     # F.linear SGEMM and ``run_save_partial_states``. ``None`` during
     # warmup (pool not bound); forward then falls back to in-band rebuild.
     compressor_meta: Optional[CompressorMeta]
+    # CP-sharded INDEXER_KV gather metadata. Hoisted out of the per-layer
+    # gather hot path so the rank-local length / restore plan is built once
+    # with the rest of prefill metadata.
+    indexer_cp_plan: Optional[Any]
+    indexer_cp_local_cu: Optional[torch.Tensor]
 
 
 class IndexerFP8(PoolBackedModule):
@@ -425,30 +430,12 @@ class IndexerFP8(PoolBackedModule):
             )
             return
 
-        from rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler import (
-            assemble_indexer_k,
-            build_actual_local_cu_kv_seqlens,
-            build_indexer_cp_chunk_plan,
-            copy_actual_indexer_k_to_padded,
-        )
+        from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
 
-        cu = attention_inputs.cu_kv_seqlens.to(torch.int64)
-        per_req_T = (cu[1:] - cu[:-1]).contiguous()
-        owner_block_size = self._kv_eb
-        if (
-            self.compress_ratio > 0
-            and self._state_tokens_per_block > 0
-            and self._state_tokens_per_block % self.compress_ratio == 0
-        ):
-            owner_block_size = self._state_tokens_per_block // self.compress_ratio
-        plan = build_indexer_cp_chunk_plan(
-            cp_ctx=cp_ctx,
-            per_req_total_kv_lens=per_req_T,
-            block_size=self._kv_eb,
-            device=k_quant_flat.device,
-            owner_block_size=owner_block_size,
-        )
-        actual_cu = build_actual_local_cu_kv_seqlens(plan)
+        plan = attention_inputs.indexer_cp_plan
+        actual_cu = attention_inputs.indexer_cp_local_cu
+        assert plan is not None, "CP-sharded indexer gather requires prebuilt plan"
+        assert actual_cu is not None, "CP-sharded indexer gather requires local cu"
         local_q = torch.zeros(
             (plan.total_local_T, k_quant_flat.shape[-1]),
             dtype=k_quant_flat.dtype,
@@ -477,14 +464,14 @@ class IndexerFP8(PoolBackedModule):
                 attention_inputs.block_table_i32,
                 actual_cu,
             )
-            copy_actual_indexer_k_to_padded(
+            asm.copy_actual_indexer_k_to_padded(
                 plan=plan,
                 actual_k_quant=actual_q,
                 actual_k_scale=actual_s,
                 padded_k_quant=local_q,
                 padded_k_scale=local_s,
             )
-        assemble_indexer_k(
+        asm.assemble_indexer_k(
             plan=plan,
             local_k_quant=local_q,
             local_k_scale=local_s,
@@ -849,6 +836,40 @@ class IndexerFP8(PoolBackedModule):
             # field as ``None`` to skip the launch entirely on the legacy path.
             cu_kv_per_token = None
 
+        indexer_cp_plan: Optional[Any] = None
+        indexer_cp_local_cu: Optional[torch.Tensor] = None
+        if (
+            cp_active
+            and bool(getattr(cp_ctx, "kv_cache_sharded", False))
+            and kv_block_table is not None
+            and kv_eb > 0
+            and T > 0
+        ):
+            from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
+
+            with record_function_range("dsv4.fp8.indexer.prepare.cp_gather_plan"):
+                cu = cu_kv_seqlens.to(torch.int64)
+                per_req_T = (cu[1:] - cu[:-1]).contiguous()
+                owner_block_size = kv_eb
+                if (
+                    self.compress_ratio > 0
+                    and self._state_tokens_per_block > 0
+                    and self._state_tokens_per_block % self.compress_ratio == 0
+                ):
+                    owner_block_size = (
+                        self._state_tokens_per_block // self.compress_ratio
+                    )
+                indexer_cp_plan = asm.build_indexer_cp_chunk_plan(
+                    cp_ctx=cp_ctx,
+                    per_req_total_kv_lens=per_req_T,
+                    block_size=kv_eb,
+                    device=device,
+                    owner_block_size=owner_block_size,
+                )
+                indexer_cp_local_cu = asm.build_actual_local_cu_kv_seqlens(
+                    indexer_cp_plan
+                )
+
         # Hoist the nested CompressorFP8's slot-mapping metadata. The
         # IndexerFP8's pool context is bound by Attention's
         # ``_set_compressor_pool_context`` BEFORE ``_build_csa_prefill_meta``
@@ -939,6 +960,8 @@ class IndexerFP8(PoolBackedModule):
             cu_kv_seqlens=cu_kv_seqlens,
             cu_kv_per_token=cu_kv_per_token,
             compressor_meta=compressor_meta,
+            indexer_cp_plan=indexer_cp_plan,
+            indexer_cp_local_cu=indexer_cp_local_cu,
         )
 
     # --------------------------------------------------------------

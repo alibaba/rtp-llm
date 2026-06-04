@@ -93,6 +93,8 @@ def _make_meta(device: torch.device, *, T: int) -> _IndexerFP8PrefillMeta:
         cu_kv_seqlens=torch.tensor([0, 0], dtype=torch.int32, device=device),
         cu_kv_per_token=torch.tensor([0, 0], dtype=torch.int32, device=device),
         compressor_meta=SimpleNamespace(),
+        indexer_cp_plan=None,
+        indexer_cp_local_cu=None,
     )
 
 
@@ -195,10 +197,9 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         self.assertEqual(ind._kv_eb, 0)
         ind.compressor.clear_pool_context.assert_called_once()
 
-    def test_gather_prefill_k_cache_uses_sharded_assembler(self) -> None:
+    def test_gather_prefill_k_cache_requires_prebuilt_sharded_plan(self) -> None:
         ind = _make_indexer_stub(bind_pool=True, device=self.device)
-        cp_ctx = SimpleNamespace(cp_size=2, kv_cache_sharded=True)
-        ind._cp_ctx = cp_ctx
+        ind._cp_ctx = SimpleNamespace(cp_size=2, kv_cache_sharded=True)
         meta = _make_meta(self.device, T=5)._replace(
             block_table_i32=torch.ones(2, 3, dtype=torch.int32, device=self.device),
             cu_kv_seqlens=torch.tensor(
@@ -207,8 +208,26 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         )
         k_quant_flat = torch.empty(5, INDEXER_HEAD_DIM, dtype=torch.uint8)
         k_scale_buf = torch.empty(5, 4, dtype=torch.uint8)
-        plan = SimpleNamespace(total_local_T=4)
-        local_cu = torch.tensor([0, 2, 4], dtype=torch.int32)
+
+        with self.assertRaisesRegex(AssertionError, "requires prebuilt plan"):
+            ind._gather_prefill_k_cache(meta, k_quant_flat, k_scale_buf)
+
+    def test_gather_prefill_k_cache_reuses_prebuilt_sharded_plan(self) -> None:
+        ind = _make_indexer_stub(bind_pool=True, device=self.device)
+        cp_ctx = SimpleNamespace(cp_size=2, kv_cache_sharded=True)
+        ind._cp_ctx = cp_ctx
+        plan = SimpleNamespace(total_local_T=4, total_actual_local_T=3)
+        actual_cu = torch.tensor([0, 1, 3], dtype=torch.int32)
+        meta = _make_meta(self.device, T=5)._replace(
+            block_table_i32=torch.ones(2, 3, dtype=torch.int32, device=self.device),
+            cu_kv_seqlens=torch.tensor(
+                [0, 3, 5], dtype=torch.int32, device=self.device
+            ),
+            indexer_cp_plan=plan,
+            indexer_cp_local_cu=actual_cu,
+        )
+        k_quant_flat = torch.empty(5, INDEXER_HEAD_DIM, dtype=torch.uint8)
+        k_scale_buf = torch.empty(5, 4, dtype=torch.uint8)
         cpp_calls = []
 
         def fake_cpp(pool, out_q, out_s, block_table, cu):
@@ -218,6 +237,11 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
 
         def fake_assemble(**kwargs):
             assemble_calls.append(kwargs)
+
+        copy_calls = []
+
+        def fake_copy(**kwargs):
+            copy_calls.append(kwargs)
 
         import rtp_llm.models_py.modules.dsv4.fp8.indexer as indexer_mod
 
@@ -230,12 +254,14 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
             ),
             patch(
                 "rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler.build_indexer_cp_chunk_plan",
-                return_value=plan,
             ) as build_plan,
             patch(
-                "rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler.build_local_cu_kv_seqlens",
-                return_value=local_cu,
-            ) as build_local_cu,
+                "rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler.build_actual_local_cu_kv_seqlens",
+            ) as build_actual_cu,
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler.copy_actual_indexer_k_to_padded",
+                side_effect=fake_copy,
+            ),
             patch(
                 "rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler.assemble_indexer_k",
                 side_effect=fake_assemble,
@@ -243,24 +269,26 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         ):
             ind._gather_prefill_k_cache(meta, k_quant_flat, k_scale_buf)
 
-        build_plan.assert_called_once()
-        build_kwargs = build_plan.call_args.kwargs
-        self.assertIs(build_kwargs["cp_ctx"], cp_ctx)
-        self.assertEqual(build_kwargs["block_size"], ind._kv_eb)
-        self.assertTrue(
-            torch.equal(
-                build_kwargs["per_req_total_kv_lens"],
-                torch.tensor([3, 2], dtype=torch.int64),
-            )
-        )
-        build_local_cu.assert_called_once_with(plan)
-
+        build_plan.assert_not_called()
+        build_actual_cu.assert_not_called()
         self.assertEqual(len(cpp_calls), 1)
-        _, local_q, local_s, block_table, cu = cpp_calls[0]
+        _, actual_q, actual_s, block_table, cu = cpp_calls[0]
+        self.assertEqual(
+            tuple(actual_q.shape), (plan.total_actual_local_T, INDEXER_HEAD_DIM)
+        )
+        self.assertEqual(tuple(actual_s.shape), (plan.total_actual_local_T, 4))
+        self.assertIs(block_table, meta.block_table_i32)
+        self.assertIs(cu, actual_cu)
+
+        self.assertEqual(len(copy_calls), 1)
+        copy_kwargs = copy_calls[0]
+        self.assertIs(copy_kwargs["plan"], plan)
+        self.assertIs(copy_kwargs["actual_k_quant"], actual_q)
+        self.assertIs(copy_kwargs["actual_k_scale"], actual_s)
+        local_q = copy_kwargs["padded_k_quant"]
+        local_s = copy_kwargs["padded_k_scale"]
         self.assertEqual(tuple(local_q.shape), (plan.total_local_T, INDEXER_HEAD_DIM))
         self.assertEqual(tuple(local_s.shape), (plan.total_local_T, 4))
-        self.assertIs(block_table, meta.block_table_i32)
-        self.assertIs(cu, local_cu)
 
         self.assertEqual(len(assemble_calls), 1)
         assemble_kwargs = assemble_calls[0]
