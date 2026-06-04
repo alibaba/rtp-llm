@@ -211,6 +211,37 @@ def test_copy_actual_indexer_k_to_padded_inserts_per_request_gaps():
     assert torch.equal(padded_s, expected_s)
 
 
+def test_copy_actual_indexer_k_to_padded_single_request_prefix_copy():
+    plan = A.build_indexer_cp_chunk_plan(
+        cp_ctx=_ctx(4, 3),
+        per_req_total_kv_lens=torch.tensor([25], dtype=torch.int64),
+        block_size=2,
+        owner_block_size=8,
+        device=torch.device("cpu"),
+    )
+    assert torch.equal(plan.per_req_local_kv_lens, torch.tensor([8]))
+    assert torch.equal(plan.per_req_actual_local_kv_lens, torch.tensor([1]))
+    actual_q = torch.tensor([[7, 8]], dtype=torch.uint8)
+    actual_s = torch.tensor([[9]], dtype=torch.uint8)
+    padded_q = torch.zeros((8, 2), dtype=torch.uint8)
+    padded_s = torch.zeros((8, 1), dtype=torch.uint8)
+
+    A.copy_actual_indexer_k_to_padded(
+        plan=plan,
+        actual_k_quant=actual_q,
+        actual_k_scale=actual_s,
+        padded_k_quant=padded_q,
+        padded_k_scale=padded_s,
+    )
+
+    expected_q = torch.zeros((8, 2), dtype=torch.uint8)
+    expected_s = torch.zeros((8, 1), dtype=torch.uint8)
+    expected_q[0:1] = actual_q
+    expected_s[0:1] = actual_s
+    assert torch.equal(padded_q, expected_q)
+    assert torch.equal(padded_s, expected_s)
+
+
 def test_assemble_indexer_k_cp1_passthrough():
     """cp_size=1 + identity gather → restore is identity → out == local."""
     plan = A.build_indexer_cp_chunk_plan(
