@@ -1558,12 +1558,13 @@ grpc::Status PrefillRpcServer::AttachStream(grpc::ServerContext*                
     auto state = session->deriveState();
 
     if (state == SessionState::FINISHED || state == SessionState::ERROR || state == SessionState::CANCELLED) {
-        // terminal — drain any remaining relay data (FINISHED_IN_TTL idempotent read)
-        std::vector<GenerateOutputsPB> remaining;
-        session->getRelay().drainTo(&remaining);
-        for (auto& output : remaining) {
-            if (!writer->Write(output)) {
-                return grpc::Status(grpc::StatusCode::CANCELLED, "client writer closed");
+        if (session->isPd()) {
+            std::vector<GenerateOutputsPB> remaining;
+            session->getRelay().drainTo(&remaining);
+            for (auto& output : remaining) {
+                if (!writer->Write(output)) {
+                    return grpc::Status(grpc::StatusCode::CANCELLED, "client writer closed");
+                }
             }
         }
         if (state == SessionState::CANCELLED) {

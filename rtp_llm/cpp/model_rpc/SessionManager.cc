@@ -4,8 +4,8 @@
 
 namespace rtp_llm {
 
-SessionManager::SessionManager(int64_t terminal_ttl_us, int64_t attach_deadline_us):
-    terminal_ttl_us_(terminal_ttl_us), attach_deadline_us_(attach_deadline_us) {}
+SessionManager::SessionManager(int64_t terminal_ttl_us, int64_t attach_deadline_us, int64_t tombstone_ttl_us):
+    terminal_ttl_us_(terminal_ttl_us), attach_deadline_us_(attach_deadline_us), tombstone_ttl_us_(tombstone_ttl_us) {}
 
 SessionManager::~SessionManager() {
     stopGc();
@@ -27,6 +27,9 @@ std::pair<LookupResult, std::shared_ptr<RequestSession>> SessionManager::lookup(
         auto& session = it->second;
         if (session->isTerminal()) {
             return {LookupResult::FINISHED_IN_TTL, session};
+        }
+        if (session->hasConsumer()) {
+            return {LookupResult::ALREADY_ATTACHED, session};
         }
         return {LookupResult::RUNNING, session};
     }
@@ -102,7 +105,7 @@ size_t SessionManager::gcOnce() {
     }
 
     for (auto it = tombstones_.begin(); it != tombstones_.end();) {
-        if ((now_us - it->second) >= terminal_ttl_us_ * 2) {
+        if ((now_us - it->second) >= tombstone_ttl_us_) {
             it = tombstones_.erase(it);
             ++swept;
         } else {
@@ -132,6 +135,7 @@ size_t SessionManager::reapAttachDeadline() {
         }
     }
 
+    // cancel() 是幂等的：已终态的 session 直接 return，不会覆盖已有的 cancel_reason_
     for (auto& session : to_cancel) {
         session->cancel(CancelReason::ATTACH_DEADLINE);
     }

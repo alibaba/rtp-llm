@@ -101,7 +101,7 @@ public:
     int64_t                             admittedAtUs() const { return admitted_at_us_; }
     int64_t                             finishedAtUs() const { return finished_at_us_.load(); }
     SessionState                        state() const { return state_.load(); }
-    CancelReason                        cancelReason() const { return cancel_reason_; }
+    CancelReason                        cancelReason() const { return cancel_reason_.load(); }
     bool                                hasConsumer() const { return consumer_taken_.load(); }
     bool                                isPd() const { return is_pd_; }
 
@@ -120,7 +120,7 @@ private:
     BoundedRelay                               relay_;
     std::atomic<bool>                          consumer_taken_{false};
     std::atomic<SessionState>                  state_{SessionState::ADMITTED};
-    CancelReason                               cancel_reason_{CancelReason::EXPLICIT_CANCEL};
+    std::atomic<CancelReason>                  cancel_reason_{CancelReason::EXPLICIT_CANCEL};
     int64_t                                    admitted_at_us_;
     std::atomic<int64_t>                       finished_at_us_{0};
     std::mutex                                 mu_;
@@ -130,7 +130,8 @@ private:
 class SessionManager {
 public:
     explicit SessionManager(int64_t terminal_ttl_us = 10LL * 60 * 1000 * 1000,
-                            int64_t attach_deadline_us = 30LL * 1000 * 1000);
+                            int64_t attach_deadline_us = 30LL * 1000 * 1000,
+                            int64_t tombstone_ttl_us = 20LL * 60 * 1000 * 1000);
     ~SessionManager();
 
     bool registerSession(int64_t request_id, std::shared_ptr<RequestSession> session);
@@ -162,6 +163,7 @@ private:
 
     int64_t terminal_ttl_us_;
     int64_t attach_deadline_us_;
+    int64_t tombstone_ttl_us_;
 };
 
 }  // namespace rtp_llm

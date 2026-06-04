@@ -11,8 +11,9 @@ BoundedRelay::BoundedRelay(size_t cap): cap_(cap) {}
 
 bool BoundedRelay::push(GenerateOutputsPB output) {
     std::unique_lock<std::mutex> lock(mu_);
-    // 短超时轮询：不无限阻塞，每秒检查一次 closed_ 状态
-    // 避免 reaper 还没到时 driver 线程被长时间卡住
+    // 1s 轮询而非无限阻塞：close() 的 notify_all 可能在 wait_for 返回后、
+    // 下一轮条件检查前到达，最坏情况 cancel 后多等 1s——可接受的延迟换取
+    // 不依赖 reaper 及时到达的鲁棒性
     while (queue_.size() >= cap_ && !closed_) {
         cv_.wait_for(lock, std::chrono::seconds(1));
     }
@@ -81,7 +82,8 @@ bool BoundedRelay::isClosed() const {
 // ---- RequestSession ----
 
 RequestSession::RequestSession(int64_t request_id, int64_t batch_id, int64_t admitted_at_us, bool is_pd):
-    request_id_(request_id), batch_id_(batch_id), is_pd_(is_pd), admitted_at_us_(admitted_at_us) {}
+    request_id_(request_id), batch_id_(batch_id), is_pd_(is_pd),
+    relay_(is_pd ? 1000 : 0), admitted_at_us_(admitted_at_us) {}
 
 void RequestSession::cancel(CancelReason reason) {
     std::lock_guard<std::mutex> lock(mu_);
@@ -89,7 +91,7 @@ void RequestSession::cancel(CancelReason reason) {
     if (current == SessionState::FINISHED || current == SessionState::CANCELLED || current == SessionState::ERROR) {
         return;
     }
-    cancel_reason_ = reason;
+    cancel_reason_.store(reason);
     state_.store(SessionState::CANCELLED);
     finished_at_us_.store(autil::TimeUtility::currentTimeInMicroSeconds());
 
@@ -97,16 +99,14 @@ void RequestSession::cancel(CancelReason reason) {
         stream_->reportError(ErrorCode::CANCELLED, "session cancelled");
     }
     if (cancel_state_) {
-        bool expected = false;
-        if (cancel_state_->cancelled.compare_exchange_strong(expected, true)) {
-            std::shared_ptr<grpc::ClientContext> client_ctx;
-            {
-                std::lock_guard<std::mutex> state_lock(cancel_state_->mu);
-                client_ctx = cancel_state_->client_context.lock();
-            }
-            if (client_ctx) {
-                client_ctx->TryCancel();
-            }
+        cancel_state_->cancelled.store(true);
+        std::shared_ptr<grpc::ClientContext> client_ctx;
+        {
+            std::lock_guard<std::mutex> state_lock(cancel_state_->mu);
+            client_ctx = cancel_state_->client_context.lock();
+        }
+        if (client_ctx) {
+            client_ctx->TryCancel();
         }
     }
     relay_.close();
