@@ -2,9 +2,7 @@ from math import prod
 from typing import Any, Callable, Dict, Optional
 
 import torch
-from rtp_kernel.fp8_group_gemm import (
-    get_cutlass_batched_moe_mm_data,
-)
+from rtp_kernel.fp8_group_gemm import get_cutlass_batched_moe_mm_data
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     cutlass_moe_mm_fp8_scaled,
@@ -28,8 +26,8 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 )
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     cutlass_moe_pre_reorder,
-    post_reorder_triton_kernel,
     get_cutlass_moe_mm_without_permute_info,
+    post_reorder_triton_kernel,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -47,12 +45,14 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
         )
+        from rtp_llm.models_py.utils.arch import is_sm12x
 
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(
             quant_method in ["FP8_PER_TENSOR_COMPRESSED", "FP8_DYNAMIC_PER_TENSOR"]
         )
+        checker.check(not is_sm12x())
 
     def __init__(
         self,
@@ -302,12 +302,14 @@ class CutlassBatchedExpertsFp8(FusedMoeExpertExecutor):
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
         )
+        from rtp_llm.models_py.utils.arch import is_sm12x
 
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(
             quant_method in ["FP8_PER_TENSOR_COMPRESSED", "FP8_DYNAMIC_PER_TENSOR"]
         )
+        checker.check(not is_sm12x())
 
     def __init__(
         self,
