@@ -1617,7 +1617,8 @@ grpc::Status PrefillRpcServer::AttachStream(grpc::ServerContext*                
         }
     }
 
-    // Local (non-PD) path: poll directly from engine's generate_outputs_queue_
+    // Local (non-PD) path — currently unreachable: BatchEnqueue always creates PD sessions.
+    // Kept for completeness in case non-PD AttachStream is added in the future.
     auto request_key = std::to_string(request_id);
     auto poll_status = pollStreamOutput(context, request_key, writer, stream);
 

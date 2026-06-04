@@ -611,4 +611,70 @@ TEST(SessionManagerTest, TombstoneIndependentTtl) {
     EXPECT_EQ(r3, LookupResult::NOT_FOUND);
 }
 
+// ========================== drainTo after close still returns residual data ==========================
+
+TEST(BoundedRelayTest, DrainAfterCloseReturnsResidual) {
+    BoundedRelay relay(10);
+    GenerateOutputsPB o1, o2;
+    o1.set_request_id(1);
+    o2.set_request_id(2);
+    relay.push(o1);
+    relay.push(o2);
+
+    relay.close();
+    EXPECT_TRUE(relay.isClosed());
+
+    std::vector<GenerateOutputsPB> drained;
+    EXPECT_EQ(relay.drainTo(&drained), 2);
+    EXPECT_EQ(drained[0].request_id(), 1);
+    EXPECT_EQ(drained[1].request_id(), 2);
+    EXPECT_TRUE(relay.empty());
+}
+
+// ========================== Concurrent cancel + drain ==========================
+
+TEST(RequestSessionTest, ConcurrentCancelAndDrain) {
+    auto session = std::make_shared<RequestSession>(1, 1, 0, /*is_pd=*/true);
+    auto& relay = session->getRelay();
+
+    for (int i = 0; i < 100; i++) {
+        GenerateOutputsPB output;
+        output.set_request_id(i);
+        relay.push(output);
+    }
+
+    std::vector<GenerateOutputsPB> drained;
+    std::atomic<bool> cancel_done{false};
+
+    std::thread canceller([&] {
+        session->cancel(CancelReason::EXPLICIT_CANCEL);
+        cancel_done.store(true);
+    });
+
+    std::thread drainer([&] {
+        while (!cancel_done.load() || !relay.empty()) {
+            std::vector<GenerateOutputsPB> batch;
+            relay.drainTo(&batch);
+            for (auto& item : batch) {
+                drained.push_back(std::move(item));
+            }
+            if (batch.empty() && !cancel_done.load()) {
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+        }
+        std::vector<GenerateOutputsPB> tail;
+        relay.drainTo(&tail);
+        for (auto& item : tail) {
+            drained.push_back(std::move(item));
+        }
+    });
+
+    canceller.join();
+    drainer.join();
+
+    EXPECT_TRUE(session->isTerminal());
+    EXPECT_TRUE(relay.isClosed());
+    EXPECT_EQ(drained.size(), 100);
+}
+
 }  // namespace rtp_llm::test

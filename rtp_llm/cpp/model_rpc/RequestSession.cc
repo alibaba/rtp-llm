@@ -99,6 +99,9 @@ void RequestSession::cancel(CancelReason reason) {
         stream_->reportError(ErrorCode::CANCELLED, "session cancelled");
     }
     if (cancel_state_) {
+        // store 在 cancel_state_->mu 之外是安全的：refreshAsyncProducerCancelState
+        // 在释放 mu 后才读 cancelled，cancel() 在获取 mu 前已设标志，
+        // 保证 TryCancel 至少被调用一次（见时间线分析 A/B/C）
         cancel_state_->cancelled.store(true);
         std::shared_ptr<grpc::ClientContext> client_ctx;
         {
