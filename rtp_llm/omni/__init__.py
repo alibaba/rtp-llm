@@ -16,3 +16,5 @@ from rtp_llm.omni.engine import (
     StageOutput,
     StageProcessorBase,
 )
+
+import rtp_llm.omni.models  # noqa: F401

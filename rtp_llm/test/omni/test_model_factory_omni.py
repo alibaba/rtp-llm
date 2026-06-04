@@ -1,5 +1,6 @@
 import unittest
 
+from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.omni.config.pipeline_registry import OmniPipelineRegistry
 from rtp_llm.omni.config.stage_config import (
     OmniPipelineConfig,
@@ -9,10 +10,18 @@ from rtp_llm.omni.config.stage_config import (
 from rtp_llm.omni.engine.omni_engine import OmniEngine
 
 
+class _FakeThinker:
+    pass
+
+
 class TestModelFactoryOmniDetection(unittest.TestCase):
     def setUp(self):
         OmniPipelineRegistry._registry.clear()
         OmniPipelineRegistry._arch_registry.clear()
+        _model_factory["TestThinker"] = _FakeThinker
+
+    def tearDown(self):
+        _model_factory.pop("TestThinker", None)
 
     def test_registry_lookup_for_omni_model(self):
         pipeline = OmniPipelineConfig(
