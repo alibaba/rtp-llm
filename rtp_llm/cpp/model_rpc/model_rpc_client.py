@@ -13,7 +13,6 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     AttachStreamRequestPB,
     CancelRequestPB,
     ErrorDetailsPB,
-    FetchRequestPB,
     GenerateInputPB,
     GenerateOutputsPB,
     MultimodalInputPB,
@@ -450,22 +449,14 @@ class ModelRpcClient(object):
         input_pb = trans_input(input_py)
         response_iterator = None
         stream_state = StreamState()
-        enqueued_by_master = bool(getattr(input_py, "enqueued_by_master", False))
-        attach_stream_negotiated = bool(getattr(input_py, "attach_stream_negotiated", False))
-        use_attach_stream = enqueued_by_master and attach_stream_negotiated
-        use_fetch_response = enqueued_by_master and not use_attach_stream
+        use_attach_stream = bool(getattr(input_py, "enqueued_by_master", False))
 
-        if enqueued_by_master:
+        if use_attach_stream:
             address_list = [
                 role_addr.ip + ":" + str(role_addr.grpc_port)
                 for role_addr in input_py.generate_config.role_addrs
                 if role_addr.role == RoleType.PREFILL and role_addr.ip
             ]
-            if os.environ.get("FLEXLB_EXPECT_FETCH_RESPONSE") == "1":
-                logging.info(
-                    "FLEXLB_EXPECT_FETCH_RESPONSE request_id=%s using FetchResponse",
-                    input_pb.request_id,
-                )
         else:
             address_list = self._addresses
             for role_addr in input_py.generate_config.role_addrs:
@@ -502,16 +493,12 @@ class ModelRpcClient(object):
                 response_iterator = stub.AttachStream(
                     AttachStreamRequestPB(request_id=input_pb.request_id), **grpc_kwargs
                 )
-            elif use_fetch_response:
-                response_iterator = stub.FetchResponse(
-                    FetchRequestPB(request_id=input_pb.request_id), **grpc_kwargs
-                )
             else:
                 response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
                 output = trans_output(input_py, response, stream_state)
-                if (use_fetch_response or use_attach_stream) and _is_finished_response(response):
+                if use_attach_stream and _is_finished_response(response):
                     terminal_seen = True
                 yield output
             stream_done = True
@@ -549,13 +536,12 @@ class ModelRpcClient(object):
             logging.error(f"rpc unknown error:{str(e)}")
             raise e
         finally:
-            decoupled_rpc = use_fetch_response or use_attach_stream
             should_cancel = not stream_done and not (
-                decoupled_rpc and terminal_seen
+                use_attach_stream and terminal_seen
             )
             if response_iterator and should_cancel:
                 response_iterator.cancel()
-            if decoupled_rpc and stub is not None and should_cancel:
+            if use_attach_stream and stub is not None and should_cancel:
                 try:
                     await stub.Cancel(
                         CancelRequestPB(request_id=input_pb.request_id),

@@ -43,7 +43,6 @@ PrefillRpcServer::~PrefillRpcServer() {
     session_manager_.cancelAll();
     session_manager_.stopGc();
     stopAsyncResponseWorkers();
-    stopResponseRegistryGc();
 }
 
 namespace {
@@ -87,14 +86,6 @@ bool prefillTraceLogEnabled() {
 
 bool prefillCacheDebugLogEnabled() {
     const bool enabled = prefillTraceLogEnabled();
-    return enabled;
-}
-
-bool attachStreamEnabled() {
-    static const bool enabled = []() {
-        const char* value = std::getenv("FLEXLB_ATTACH_STREAM");
-        return envValueIsTrue(value);
-    }();
     return enabled;
 }
 
@@ -210,24 +201,6 @@ public:
 private:
     std::function<void()> fn_;
 };
-
-void cancelResponseEntry(const std::shared_ptr<ResponseBufferEntry>& entry) {
-    if (!entry) {
-        return;
-    }
-    std::function<void()> cancel_producer;
-    {
-        std::lock_guard<std::mutex> lock(entry->mu);
-        entry->cancelled.store(true);
-        entry->last_activity_us = currentTimeUs();
-        cancel_producer         = entry->cancel_producer;
-        entry->cancel_producer  = nullptr;
-    }
-    if (cancel_producer) {
-        cancel_producer();
-    }
-    entry->cv.notify_all();
-}
 
 class TheoryHitStats {
 public:
@@ -609,33 +582,6 @@ void fillPrefillTheoryHitMetricsCollector(PrefillRecentCacheKeyMetricsCollector&
         return;                                                                                                        \
     }
 
-void PrefillRpcServer::startResponseRegistryGc() {
-    if (response_gc_thread_.joinable()) {
-        return;
-    }
-    response_gc_stop_.store(false);
-    response_gc_thread_ = std::thread([this] {
-        std::unique_lock<std::mutex> lock(response_gc_mu_);
-        while (!response_gc_stop_.load()) {
-            response_gc_cv_.wait_for(lock, std::chrono::minutes(1), [this] { return response_gc_stop_.load(); });
-            if (response_gc_stop_.load()) {
-                break;
-            }
-            lock.unlock();
-            response_registry_.gc(std::chrono::minutes(10));
-            lock.lock();
-        }
-    });
-}
-
-void PrefillRpcServer::stopResponseRegistryGc() {
-    response_gc_stop_.store(true);
-    response_gc_cv_.notify_all();
-    if (response_gc_thread_.joinable()) {
-        response_gc_thread_.join();
-    }
-}
-
 bool PrefillRpcServer::tryStartAsyncResponseWorker() {
     std::lock_guard<std::mutex> lock(response_worker_mu_);
     if (response_worker_stop_.load()) {
@@ -660,7 +606,6 @@ void PrefillRpcServer::stopAsyncResponseWorkers() {
         std::lock_guard<std::mutex> lock(response_worker_mu_);
         response_worker_stop_.store(true);
     }
-    response_registry_.cancelAll();
 
     std::unique_lock<std::mutex> lock(response_worker_mu_);
     response_worker_cv_.wait(lock, [this] { return response_worker_count_ == 0; });
@@ -680,10 +625,7 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
     } else {
         RTP_LLM_LOG_INFO("prefill recent-cache-key metrics disabled by PREFILL_CACHE_HIT_METRIC_ENABLE");
     }
-    startResponseRegistryGc();
-    if (attachStreamEnabled()) {
-        session_manager_.startGc();
-    }
+    session_manager_.startGc();
     return grpc::Status::OK;
 }
 
@@ -1234,17 +1176,16 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
     struct LocalSlot {
         int                                     index = 0;
         std::shared_ptr<GenerateInputPB>          input;
-        std::shared_ptr<ResponseBufferEntry>      entry;
         std::shared_ptr<RPCContext>               rpc_context;
         std::shared_ptr<PrefillGenerateContext>   prefill_context;
         AtomicGuardPtr                            request_guard;
         int64_t                                   request_id = 0;
+        bool                                      cancelled = false;
     };
 
     auto cancel_reserved_slots = [this](std::vector<LocalSlot>& slots) {
         for (auto& slot : slots) {
-            cancelResponseEntry(slot.entry);
-            response_registry_.erase(slot.request_id);
+            session_manager_.cancelSession(slot.request_id, CancelReason::EXPLICIT_CANCEL);
         }
     };
     auto abort_batch = [&](int64_t code, const std::string& message, std::vector<LocalSlot>& slots) {
@@ -1269,8 +1210,8 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         return true;
     };
     auto abort_if_entry_cancelled = [&](int index, int64_t request_id, std::vector<LocalSlot>& slots) {
-        auto entry = response_registry_.get(request_id);
-        if (entry && !entry->cancelled.load()) {
+        auto [result, session] = session_manager_.lookup(request_id);
+        if (session && !session->isTerminal()) {
             return false;
         }
         setBatchAckError(response->mutable_acks(index),
@@ -1303,14 +1244,14 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         }
 
         auto input_copy = std::make_shared<GenerateInputPB>(input);
-        auto entry      = response_registry_.reserve(request_id);
-        if (!entry) {
+        auto [lr, _] = session_manager_.lookup(request_id);
+        if (lr != LookupResult::NOT_FOUND) {
             setBatchAckError(ack, request_id, grpc::StatusCode::ALREADY_EXISTS, "request already enqueued");
             abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
             return grpc::Status::OK;
         }
 
-        local_slots.push_back({i, input_copy, entry, nullptr, nullptr, nullptr, request_id});
+        local_slots.push_back({i, input_copy, nullptr, nullptr, nullptr, request_id});
         if (abort_if_entry_cancelled(i, request_id, local_slots)) {
             return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
         }
@@ -1349,11 +1290,7 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         pfx_ctx->loading_cache_requests = loading_cache_requests_;
         auto guard                      = std::make_shared<AtomicGuard>(onflight_requests_);
         auto cancel_state               = std::make_shared<AsyncProducerCancelState>();
-        {
-            std::lock_guard<std::mutex> lock(slot.entry->mu);
-            cancel_state->cancelled.store(slot.entry->cancelled.load());
-            slot.entry->cancel_producer = makeAsyncProducerCancelCallback(cancel_state);
-        }
+        cancel_state->cancelled.store(slot.cancelled);
 
         slot.rpc_context     = rpc_ctx;
         slot.prefill_context = pfx_ctx;
@@ -1377,7 +1314,7 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                 if (context && context->IsCancelled()) {
                     break;
                 }
-                if (slot.entry->cancelled.load()) {
+                if (slot.cancelled) {
                     break;
                 }
                 pfx_ctx->reset();
@@ -1387,7 +1324,7 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                 if (context && context->IsCancelled()) {
                     break;
                 }
-                if (slot.entry->cancelled.load()) {
+                if (slot.cancelled) {
                     break;
                 }
                 if (pfx_ctx->ok()) {
@@ -1492,26 +1429,14 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
             return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
         }
 
-        auto entry  = slot.entry;
-        bool use_attach = attachStreamEnabled();
-
-        std::shared_ptr<RequestSession> session;
-        std::shared_ptr<RelayWriter>    relay_writer;
-        std::shared_ptr<ResponseBufferWriter> buffer_writer;
-
-        if (use_attach) {
-            session = std::make_shared<RequestSession>(
-                slot.request_id, request->batch_id(), currentTimeUs(), /*is_pd=*/true);
-            session->setStream(pfx_ctx->getStream());
-            session->setCancelState(pfx_ctx->cancel_state);
-            session_manager_.registerSession(slot.request_id, session);
-            relay_writer = std::make_shared<RelayWriter>(&session->getRelay());
-            pfx_ctx->rpc_context.writer = relay_writer.get();
-            pfx_ctx->session_owns_stream = true;
-        } else {
-            buffer_writer = std::make_shared<ResponseBufferWriter>(entry);
-            pfx_ctx->rpc_context.writer = buffer_writer.get();
-        }
+        auto session = std::make_shared<RequestSession>(
+            slot.request_id, request->batch_id(), currentTimeUs(), /*is_pd=*/true);
+        session->setStream(pfx_ctx->getStream());
+        session->setCancelState(pfx_ctx->cancel_state);
+        session_manager_.registerSession(slot.request_id, session);
+        auto relay_writer = std::make_shared<RelayWriter>(&session->getRelay());
+        pfx_ctx->rpc_context.writer = relay_writer.get();
+        pfx_ctx->session_owns_stream = true;
 
         if (!tryStartAsyncResponseWorker()) {
             setBatchAckError(ack, slot.request_id, grpc::StatusCode::UNAVAILABLE, "BatchEnqueue server is stopping");
@@ -1524,16 +1449,12 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                                 pfx_ctx = slot.prefill_context,
                                 rpc_ctx = slot.rpc_context,
                                 input = slot.input,
-                                buffer_writer,
                                 relay_writer,
-                                entry,
                                 session,
                                 guard = slot.request_guard,
-                                request_id = slot.request_id,
-                                use_attach]() mutable {
+                                request_id = slot.request_id]() mutable {
                 (void)rpc_ctx;
                 (void)input;
-                (void)buffer_writer;
                 (void)relay_writer;
                 (void)guard;
                 ScopeExit worker_finish_guard([this] { finishAsyncResponseWorker(); });
@@ -1541,9 +1462,7 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                     pfx_ctx.reset();
                     rpc_ctx.reset();
                     input.reset();
-                    buffer_writer.reset();
                     relay_writer.reset();
-                    entry.reset();
                     session.reset();
                     guard.reset();
                 });
@@ -1563,24 +1482,10 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                 } catch (...) {
                     finish_status = grpc::Status(grpc::StatusCode::INTERNAL, "finishStream unknown exception");
                 }
-                if (use_attach) {
-                    if (finish_status.ok()) {
-                        session->markFinished();
-                    } else {
-                        session->markError(finish_status.error_message());
-                    }
+                if (finish_status.ok()) {
+                    session->markFinished();
                 } else {
-                    if (!finish_status.ok()) {
-                        std::lock_guard<std::mutex> lock(entry->mu);
-                        entry->error_status = finish_status;
-                    }
-                    {
-                        std::lock_guard<std::mutex> lock(entry->mu);
-                        entry->done.store(true);
-                        entry->last_activity_us = currentTimeUs();
-                        entry->cancel_producer  = nullptr;
-                    }
-                    entry->cv.notify_all();
+                    session->markError(finish_status.error_message());
                 }
                 RTP_LLM_LOG_DEBUG("BatchEnqueue request [%ld] finishStream done, ok=%d", request_id, finish_status.ok());
             });
@@ -1609,63 +1514,7 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         return grpc::Status::OK;
     }
 
-    response_registry_.gc(std::chrono::minutes(10));
-
     return grpc::Status::OK;
-}
-
-grpc::Status PrefillRpcServer::FetchResponse(grpc::ServerContext*                   context,
-                                             const FetchRequestPB*                  request,
-                                             grpc::ServerWriter<GenerateOutputsPB>* writer) {
-    RTP_LLM_PROFILE_FUNCTION();
-    const auto request_id = request->request_id();
-    auto       entry      = response_registry_.get(request_id);
-    if (!entry) {
-        return grpc::Status(grpc::StatusCode::NOT_FOUND,
-                            "request [" + std::to_string(request_id) + "] not found in response registry");
-    }
-
-    while (true) {
-        if (context && context->IsCancelled()) {
-            cancelResponseEntry(entry);
-            response_registry_.erase(request_id);
-            return grpc::Status(grpc::StatusCode::CANCELLED, "fetch response cancelled by client");
-        }
-
-        std::deque<GenerateOutputsPB> drained;
-        grpc::Status                  terminal_status = grpc::Status::OK;
-        bool                          terminal        = false;
-        {
-            std::unique_lock<std::mutex> lock(entry->mu);
-            entry->cv.wait_for(lock, std::chrono::milliseconds(100), [&] {
-                return !entry->queue.empty() || entry->done.load() || entry->cancelled.load()
-                       || entry->error_status.has_value();
-            });
-            drained.swap(entry->queue);
-            if (entry->cancelled.load()) {
-                terminal        = true;
-                terminal_status = grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
-            } else if (entry->error_status.has_value()) {
-                terminal        = true;
-                terminal_status = *entry->error_status;
-            } else if (entry->done.load()) {
-                terminal = true;
-            }
-        }
-
-        for (auto& output : drained) {
-            if (!writer->Write(output)) {
-                cancelResponseEntry(entry);
-                response_registry_.erase(request_id);
-                return grpc::Status(grpc::StatusCode::CANCELLED, "client writer closed");
-            }
-        }
-
-        if (terminal) {
-            response_registry_.erase(request_id);
-            return terminal_status;
-        }
-    }
 }
 
 grpc::Status PrefillRpcServer::AttachStream(grpc::ServerContext*                   context,
@@ -1782,17 +1631,7 @@ grpc::Status PrefillRpcServer::Cancel(grpc::ServerContext* context, const Cancel
     (void)context;
     (void)response;
     RTP_LLM_PROFILE_FUNCTION();
-    const auto request_id = request->request_id();
-
-    // AttachStream path: cancel via session
-    session_manager_.cancelSession(request_id, CancelReason::EXPLICIT_CANCEL);
-
-    // FetchResponse path: cancel via response registry (legacy)
-    auto entry = response_registry_.get(request_id);
-    if (entry) {
-        cancelResponseEntry(entry);
-        response_registry_.erase(request_id);
-    }
+    session_manager_.cancelSession(request->request_id(), CancelReason::EXPLICIT_CANCEL);
     return grpc::Status::OK;
 }
 

@@ -9,7 +9,6 @@
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
 #include "rtp_llm/cpp/model_rpc/RecentCacheKeyWindow.h"
-#include "rtp_llm/cpp/model_rpc/ResponseBuffer.h"
 #include "rtp_llm/cpp/model_rpc/RequestSession.h"
 
 namespace rtp_llm {
@@ -30,10 +29,6 @@ public:
 
     grpc::Status
     BatchEnqueue(grpc::ServerContext* context, const BatchEnqueueRequestPB* request, BatchEnqueueResponsePB* response);
-
-    grpc::Status FetchResponse(grpc::ServerContext*                   context,
-                               const FetchRequestPB*                  request,
-                               grpc::ServerWriter<GenerateOutputsPB>* writer);
 
     grpc::Status AttachStream(grpc::ServerContext*                   context,
                               const AttachStreamRequestPB*           request,
@@ -56,8 +51,6 @@ private:
     void         remoteGenerate(PrefillGenerateContext& prefill_context);
     void         pollRemoteOutput(PrefillGenerateContext& prefill_context);
     void         reportPrefillRecentCacheKeyMetricsOnce(PrefillGenerateContext& prefill_context);
-    void         startResponseRegistryGc();
-    void         stopResponseRegistryGc();
     bool         tryStartAsyncResponseWorker();
     void         finishAsyncResponseWorker();
     void         stopAsyncResponseWorkers();
@@ -66,11 +59,6 @@ private:
     std::string                           decode_cluster_name_;
     std::unique_ptr<RecentCacheKeyWindow> prefill_recent_cache_key_window_;
     SessionManager                        session_manager_;
-    ResponseBufferRegistry                response_registry_;
-    std::atomic<bool>                     response_gc_stop_{false};
-    std::mutex                            response_gc_mu_;
-    std::condition_variable               response_gc_cv_;
-    std::thread                           response_gc_thread_;
     std::atomic<bool>                     response_worker_stop_{false};
     std::mutex                            response_worker_mu_;
     std::condition_variable               response_worker_cv_;
