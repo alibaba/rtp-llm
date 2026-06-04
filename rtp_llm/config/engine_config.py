@@ -8,8 +8,6 @@ import torch
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.py_config_modules import (
-    MIN_WORKER_INFO_PORT_NUM,
-    WORKER_INFO_PORT_NUM,
     LoadConfig,
     PyEnvConfigs,
     ServerConfig,
@@ -365,11 +363,40 @@ def setup_pd_sep_config(
         distribute_config.cache_store_rdma_connect_port
     )
     pd_sep_config.remote_rpc_server_port = distribute_config.remote_rpc_server_port
-    pd_sep_config.worker_port_offset = WORKER_INFO_PORT_NUM
+    pd_sep_config.worker_port_offset = server_config.worker_info_port_num
 
-    # Override with values from other sources
-    if pd_sep_config.role_type in [RoleType.PREFILL, RoleType.DECODE]:
-        pd_sep_config.cache_store_rdma_mode = cache_store_config.cache_store_rdma_mode
+    # Always sync cache_store_rdma_mode between cache_store_config and
+    # pd_sep_config, regardless of role_type. The two fields drive different
+    # downstream consumers but must agree on whether RDMA is in use:
+    #   * PDSepConfig.cache_store_rdma_mode (C++ default true)
+    #     -> P2PConnectorWorker selects TransferBackend
+    #        (kBarexRdma vs kTcp) for the decode_entrance push path;
+    #     -> server_config_setup gates ACCL env hints; also referenced
+    #        by RemoteRpcServer::initCacheStore and other PDSep RDMA-port wiring.
+    #   * CacheStoreConfig.cache_store_rdma_mode (C++ default false)
+    #     -> only used for non-P2P CacheStore paths (decode_entrance=0).
+    # The C++ defaults disagree, so without an unconditional sync we can
+    # end up with PDSepConfig=true while CacheStoreConfig=false or vice versa.
+    # CACHE_STORE_RDMA_MODE env binds to cache_store_config.* via argparse,
+    # so cache_store_config is the source of truth.
+    pd_sep_before = pd_sep_config.cache_store_rdma_mode
+    pd_sep_config.cache_store_rdma_mode = cache_store_config.cache_store_rdma_mode
+    # Always log so any future divergence (or anyone reading the boot log)
+    # can see whether the sync ran and what values it observed. The 5/25
+    # incident showed CacheStoreConfig=0 + PDSepConfig=1 in the same
+    # process, which is impossible if this log appears with both values
+    # equal — so logging here pins down whether setup_pd_sep_config was
+    # actually called on the live config instances.
+    logging.info(
+        "[PDSep-RdmaSync] role_type=%s, "
+        "cache_store_config.cache_store_rdma_mode=%s (source of truth, "
+        "from CACHE_STORE_RDMA_MODE env / --cache_store_rdma_mode cmdline), "
+        "pd_sep_config.cache_store_rdma_mode: %s -> %s",
+        pd_sep_config.role_type,
+        cache_store_config.cache_store_rdma_mode,
+        pd_sep_before,
+        pd_sep_config.cache_store_rdma_mode,
+    )
 
 
 def finalize_scheduler_config(

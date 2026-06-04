@@ -8,7 +8,11 @@
 #include <google/protobuf/unknown_field_set.h>
 #include <grpc++/grpc++.h>
 #include <chrono>
+#include <condition_variable>
 #include <limits>
+#include <list>
+#include <mutex>
+#include <thread>
 
 namespace rtp_llm {
 
@@ -107,6 +111,104 @@ bool extractLegacyStartLoadPayload(const P2PConnectorStartLoadResponsePB& respon
     return found_legacy_field;
 }
 
+/// Process-wide lazy-started background drainer for abandoned CompletionQueues.
+///
+/// Triggered by PrefillLoadCaller::Result::shutdownAndDrainCompletionQueue when the
+/// 100ms in-line drain budget elapses without SHUTDOWN. Holds the shared_ptr<Result>
+/// to keep CompletionQueue + ClientContext + reader alive (gRPC requires fully draining
+/// the CQ before destruction, otherwise UB).
+///
+/// Background loop: every 100ms, attempt AsyncNext with 1s budget on each pending entry;
+/// on SHUTDOWN, drop the entry (Result destructor then runs as a no-op since
+/// completion_queue_shutdown_drained_ is already set).
+class DeferredCompletionQueueDrainer {
+public:
+    static DeferredCompletionQueueDrainer& instance() {
+        static DeferredCompletionQueueDrainer drainer;
+        return drainer;
+    }
+
+    void enqueue(std::shared_ptr<PrefillLoadCaller::Result> result) {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (stop_ || !result) {
+            return;
+        }
+        pending_.push_back(std::move(result));
+        if (!started_) {
+            started_ = true;
+            thread_  = std::thread([this] { run(); });
+        }
+        cv_.notify_one();
+    }
+
+    size_t pendingCountForTest() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return pending_.size();
+    }
+
+    ~DeferredCompletionQueueDrainer() {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+        // pending_ entries destructed here. If any still hold undrained CQs, the
+        // ~Result path will attempt one more bounded drain; if it fails again,
+        // shared_from_this in the dtor context throws and we accept the gRPC leak
+        // (only happens at process shutdown).
+    }
+
+private:
+    DeferredCompletionQueueDrainer() = default;
+
+    void run() {
+        while (true) {
+            std::list<std::shared_ptr<PrefillLoadCaller::Result>> local;
+            {
+                std::unique_lock<std::mutex> lock(mu_);
+                cv_.wait_for(lock, std::chrono::milliseconds(100), [this] { return stop_ || !pending_.empty(); });
+                if (stop_ && pending_.empty()) {
+                    return;
+                }
+                local.splice(local.end(), pending_);
+            }
+
+            std::list<std::shared_ptr<PrefillLoadCaller::Result>> remaining;
+            for (auto& result : local) {
+                if (!result || !result->completion_queue) {
+                    continue;
+                }
+                void*      tag      = nullptr;
+                bool       ok       = false;
+                const auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(1);
+                auto       status   = result->completion_queue->AsyncNext(&tag, &ok, deadline);
+                if (status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+                    // Fully drained. Mark and drop ref; ~Result runs as no-op via the drained flag.
+                    result->completion_queue_shutdown_drained_ = true;
+                    continue;
+                }
+                // TIMEOUT or GOT_EVENT — keep trying next round.
+                remaining.push_back(std::move(result));
+            }
+
+            if (!remaining.empty()) {
+                std::lock_guard<std::mutex> lock(mu_);
+                pending_.splice(pending_.end(), remaining);
+            }
+        }
+    }
+
+    mutable std::mutex                                    mu_;
+    std::condition_variable                               cv_;
+    std::list<std::shared_ptr<PrefillLoadCaller::Result>> pending_;
+    bool                                                  stop_    = false;
+    bool                                                  started_ = false;
+    std::thread                                           thread_;
+};
+
 }  // namespace
 
 PrefillLoadCaller::PrefillLoadCaller(const std::vector<std::string>& worker_addrs): worker_addrs_(worker_addrs) {
@@ -141,7 +243,20 @@ std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t      
     auto result         = std::make_shared<Result>();
     result->server_addr = prefill_ip + ":" + std::to_string(prefill_port);
 
-    auto conn_status = rpc_pool_->getConnection(result->server_addr);
+    // [PD-DIAG] Measure getConnection separately. RpcPool::getConnection holds a
+    // pool-wide mutex and may synchronously trigger gRPC channel reconnection
+    // (channel->GetState(true)) when the cached connection is in TRANSIENT_FAILURE,
+    // which can serialize all callers behind the slow reconnect of one peer.
+    const int64_t get_conn_start_us = currentTimeUs();
+    auto          conn_status       = rpc_pool_->getConnection(result->server_addr);
+    const int64_t get_conn_cost_us  = currentTimeUs() - get_conn_start_us;
+    if (get_conn_cost_us >= 100000) {
+        RTP_LLM_LOG_WARNING(
+            "[PD-DIAG] PrefillLoadCaller::load slow getConnection, addr: %s, cost_us=%ld, unique_key: %s",
+            result->server_addr.c_str(),
+            get_conn_cost_us,
+            unique_key.c_str());
+    }
     if (!conn_status.ok()) {
         RTP_LLM_LOG_WARNING("PrefillLoadCaller load failed: getConnection failed, addr: %s",
                             result->server_addr.c_str());
@@ -157,8 +272,17 @@ std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t      
     result->request_id      = request_id;
     result->generate_stream = generate_stream;
 
+    const int64_t build_rpc_start_us = currentTimeUs();
     if (!buildAndStartAsyncRpc(result, unique_key, deadline_ms, request_id)) {
         return nullptr;
+    }
+    const int64_t build_rpc_cost_us = currentTimeUs() - build_rpc_start_us;
+    if (build_rpc_cost_us >= 100000) {
+        RTP_LLM_LOG_WARNING(
+            "[PD-DIAG] PrefillLoadCaller::load slow buildAndStartAsyncRpc, addr: %s, cost_us=%ld, unique_key: %s",
+            result->server_addr.c_str(),
+            build_rpc_cost_us,
+            unique_key.c_str());
     }
 
     RTP_LLM_LOG_DEBUG("PrefillLoadCaller load started, unique_key: %s, addr: %s, deadline_ms: %lld, timeout ms: %d",
@@ -216,12 +340,47 @@ void PrefillLoadCaller::Result::shutdownAndDrainCompletionQueue() {
         return;
     }
     completion_queue->Shutdown();
+
+    // Bounded drain. If we exceed kDrainBudgetMs without SHUTDOWN, hand the CQ + reader
+    // + context off to DeferredCompletionQueueDrainer (a background thread that keeps
+    // shared_ptr<Result> alive until SHUTDOWN). This unblocks the caller (typically the
+    // checker thread holding async_contexts_mutex_) — see DingTalk doc §7 for the
+    // production 8-min stall we are fixing.
+    constexpr int64_t kDrainBudgetMs = 100;
+    const auto        deadline       = std::chrono::system_clock::now() + std::chrono::milliseconds(kDrainBudgetMs);
+
     void* tag = nullptr;
     bool  ok  = false;
-    while (completion_queue->Next(&tag, &ok)) {
-        // Drain Finish / cancellation notifications; tag is the request_id we passed to Finish().
+    while (true) {
+        auto next_status = completion_queue->AsyncNext(&tag, &ok, deadline);
+        if (next_status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+            completion_queue_shutdown_drained_ = true;
+            return;
+        }
+        if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
+            RTP_LLM_LOG_WARNING(
+                "[PD-DIAG] PrefillLoadCaller drain abandoned to deferred drainer; "
+                "server_addr=%s, unique_key=%s, budget_ms=%ld",
+                server_addr.c_str(),
+                unique_key.c_str(),
+                kDrainBudgetMs);
+            // Mark drained BEFORE handing off so ~Result is a no-op when the drainer drops its ref.
+            completion_queue_shutdown_drained_ = true;
+            try {
+                DeferredCompletionQueueDrainer::instance().enqueue(shared_from_this());
+            } catch (const std::bad_weak_ptr&) {
+                // Called outside a shared_ptr (e.g. from ~Result when count is already 0).
+                // Falling through leaks the CQ resources; this only happens in shutdown corner
+                // cases and is preferable to the prior unbounded Next() that caused the stall.
+                RTP_LLM_LOG_WARNING(
+                    "[PD-DIAG] PrefillLoadCaller drain abandoned but cannot hand off "
+                    "(shared_from_this failed); leaking CQ for server_addr=%s",
+                    server_addr.c_str());
+            }
+            return;
+        }
+        // GOT_EVENT: drained one tag, loop again until SHUTDOWN or TIMEOUT.
     }
-    completion_queue_shutdown_drained_ = true;
 }
 
 void PrefillLoadCaller::Result::cancel() {
@@ -342,14 +501,12 @@ void PrefillLoadCaller::Result::checkDone() {
     }
     bool poll_ok = pollCompletionQueue();
     if (!poll_ok) {
-        // error already set in pollCompletionQueue
         return;
     }
     if (!done_) {
         return;  // TIMEOUT — not finished yet
     }
 
-    RTP_LLM_LOG_DEBUG("PrefillLoadCaller::Result::checkDone: response success");
     updateStreamFromResponse();
     success_           = true;
     done_              = true;

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/model_rpc/PrefillServerCallerContext.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
@@ -258,9 +259,17 @@ void PrefillServerCallerContext::checkDone() {
             status_ = grpc::Status(grpc::StatusCode::CANCELLED, "prefill request cancelled");
         }
         if (!status_.ok() && !cancel_requested_) {
-            error_info_ = ErrorInfo(status_.error_code() == grpc::StatusCode::CANCELLED ? ErrorCode::CANCELLED :
-                                                                                          ErrorCode::UNKNOWN_ERROR,
-                                    status_.error_message());
+            ErrorCode resolved_code = ErrorCode::UNKNOWN_ERROR;
+            if (!status_.error_details().empty()) {
+                ErrorDetailsPB error_details;
+                if (error_details.ParseFromString(status_.error_details())) {
+                    resolved_code = static_cast<ErrorCode>(error_details.error_code());
+                }
+            }
+            if (resolved_code == ErrorCode::UNKNOWN_ERROR) {
+                resolved_code = transGrpcStatusToErrorCode(status_.error_code());
+            }
+            error_info_ = ErrorInfo(resolved_code, status_.error_message());
         }
         if (!status_.ok()) {
             RTP_LLM_LOG_WARNING(

@@ -38,6 +38,7 @@ int64_t getDeviceId();
 
 void runtimeSyncAndCheck();
 void cudaSyncAndCheck();
+void cudaCurrentStreamSyncAndCheck();
 void cudaCheckLastError();
 void cudaPreRun(int device_id);
 

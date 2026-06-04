@@ -65,6 +65,21 @@ public:
 
     void setPrefillReuseLensSnapshotForTest(const ReuseLensSnapshot& snapshot);
 
+    bool hasFirstResponse() const {
+        std::shared_lock<std::shared_mutex> lock(state_mutex_);
+        return response_received_ && !first_response_consumed_;
+    }
+
+    bool takeFirstResponse(GenerateOutputsPB& output) {
+        std::unique_lock<std::shared_mutex> lock(state_mutex_);
+        if (!response_received_ || first_response_consumed_) {
+            return false;
+        }
+        output.Swap(&response_);
+        first_response_consumed_ = true;
+        return true;
+    }
+
     // Cancel the ongoing RPC call
     void cancel();
 
@@ -98,8 +113,9 @@ private:
     bool              finished_          = false;
     bool              response_received_ = false;
     bool              finish_started_    = false;
-    bool              cancel_requested_  = false;
-    bool              reuse_lens_valid_  = false;
+    bool              cancel_requested_      = false;
+    bool              first_response_consumed_ = false;
+    bool              reuse_lens_valid_      = false;
     ReuseLensSnapshot reuse_lens_snapshot_;
 
     mutable std::shared_mutex state_mutex_;

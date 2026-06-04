@@ -94,6 +94,8 @@ private:
 
     bool executeCancelHandleRead(const std::string& unique_key, FunctionResponsePB& response);
 
+    bool executeQueryLeaseStatus(const std::string& unique_key, FunctionResponsePB& response);
+
 private:
     const P2PConnectorConfig             config_;
     std::shared_ptr<LayerBlockConverter> layer_block_converter_;

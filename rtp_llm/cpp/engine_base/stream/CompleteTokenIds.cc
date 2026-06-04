@@ -40,12 +40,13 @@ CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, in
     }
 }
 
-void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input, size_t extra_reserve_token_num) {
+bool CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input, size_t extra_reserve_token_num) {
     RTP_LLM_CHECK(generate_input != nullptr);
 
     seq_length_ = generate_input->inputLength();
-    RTP_LLM_CHECK_WITH_INFO(
-        (seq_length_ <= max_seq_len_), "seq_length[%d] must be less than max_seq_len[%d]", seq_length_, max_seq_len_);
+    if (seq_length_ > max_seq_len_) {
+        return false;
+    }
 
     common_len_ = max_batch_size_ == 1 ? seq_length_ : seq_length_ / seq_size_per_block_ * seq_size_per_block_;
 
@@ -61,6 +62,7 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     }
 
     RTP_LLM_LOG_DEBUG("complete tokenids init done, %s", showStatus(0).c_str());
+    return true;
 }
 
 int CompleteTokenIds::maxBatchSize() {

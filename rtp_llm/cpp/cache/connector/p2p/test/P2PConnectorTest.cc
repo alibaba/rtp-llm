@@ -60,6 +60,7 @@ protected:
         PDSepConfig pd_sep_config;
         pd_sep_config.role_type                      = RoleType::PREFILL;
         pd_sep_config.cache_store_listen_port        = 0;
+        pd_sep_config.cache_store_rdma_mode          = false;
         pd_sep_config.decode_polling_call_prefill_ms = 30;
 
         config_ = P2PConnectorConfig::create(
@@ -118,18 +119,17 @@ protected:
     /// P2P 路由所需字段（unique_key, request_id, deadline_ms），返回 owning shared_ptr。
     /// timeout_ms 是超时毫秒数（相对值），begin_time_us 是当前微秒时间戳，
     /// deadlineMs() = timeout_ms + begin_time_us/1000。
-    std::shared_ptr<GenerateStream> createGenerateStream(const std::string& unique_key,
-                                                         int64_t            request_id,
-                                                         int64_t            timeout_ms) {
-        auto config         = std::make_shared<GenerateConfig>();
-        config->unique_key  = unique_key;
-        config->timeout_ms  = static_cast<int>(timeout_ms);  // timeout in milliseconds (relative)
+    std::shared_ptr<GenerateStream>
+    createGenerateStream(const std::string& unique_key, int64_t request_id, int64_t timeout_ms) {
+        auto config        = std::make_shared<GenerateConfig>();
+        config->unique_key = unique_key;
+        config->timeout_ms = static_cast<int>(timeout_ms);  // timeout in milliseconds (relative)
 
-        auto input                 = std::make_shared<GenerateInput>();
-        input->request_id          = request_id;
-        input->generate_config     = config;
-        input->input_ids           = torch::zeros({1}, torch::kInt32);
-        input->begin_time_us       = currentTimeUs();  // Set begin_time_us to current time
+        auto input             = std::make_shared<GenerateInput>();
+        input->request_id      = request_id;
+        input->generate_config = config;
+        input->input_ids       = torch::zeros({1}, torch::kInt32);
+        input->begin_time_us   = currentTimeUs();  // Set begin_time_us to current time
 
         return std::make_shared<MockGenerateStream>(input);
     }

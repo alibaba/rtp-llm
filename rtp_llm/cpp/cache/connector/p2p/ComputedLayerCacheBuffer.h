@@ -46,6 +46,7 @@ public:
 
 public:
     /// @brief 按 request_id 获取或创建对应的 ComputedLayerCacheBuffer 并追加首层数据
+    /// @return nullptr if request_id has been removed (late-arriving layers are rejected)
     std::shared_ptr<ComputedLayerCacheBuffer>
     addBuffer(int64_t request_id, const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer, int64_t deadline_ms);
 
@@ -58,6 +59,9 @@ private:
     // stores layer cache buffer already computed
     mutable std::mutex                                                     computed_buffers_mutex_;
     std::unordered_map<int64_t, std::shared_ptr<ComputedLayerCacheBuffer>> computed_buffers_;
+
+    // request_ids that have been explicitly removed; late addBuffer calls are rejected
+    std::unordered_map<int64_t, int64_t> removed_request_ids_;  // request_id -> removal_timestamp_ms
 };
 
 }  // namespace rtp_llm

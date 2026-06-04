@@ -67,7 +67,7 @@ public:
     }
     void reportError(ErrorCode error_code, const std::string& error_msg) override {
         if (generate_stream_) {
-            generate_stream_->reportError(error_code, error_msg);
+            generate_stream_->reportErrorWithoutLock(error_code, error_msg);
         }
     }
 
@@ -453,7 +453,8 @@ bool StreamCacheResource::asyncLoadCache() {
     if (load_cache_context_) {
         return true;  // 已有进行中的 load 任务（幂等）
     }
-    auto meta = std::make_shared<MetaImpl>(
+    async_load_cache_start_us_ = currentTimeUs();
+    auto meta                  = std::make_shared<MetaImpl>(
         reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
     meta->generate_stream_ = stream_;
     meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
@@ -470,6 +471,12 @@ bool StreamCacheResource::loadCacheDone() {
         return false;  // coordinator 后台线程尚未处理完
     }
     // 加载完成（无论成功失败），更新 reuse lengths
+    auto load_cache_cost_us = currentTimeUs() - async_load_cache_start_us_;
+    RTP_LLM_LOG_DEBUG("loadCacheDone, stream=%ld, success=%d, cost_us=%ld, retry_count=%d",
+                      stream_->streamId(),
+                      load_cache_context_->success(),
+                      load_cache_cost_us,
+                      load_cache_retry_count_);
     waitLoadCacheDone(load_cache_context_);
     if (!load_cache_context_->success()) {
         // 区分匹配失败和传输失败
@@ -510,8 +517,7 @@ bool StreamCacheResource::loadCacheDone() {
                 RTP_LLM_LOG_WARNING("load cache failed after %d retries (transfer error), stream: [%ld]",
                                     load_cache_retry_count_,
                                     stream_->streamId());
-                stream_->reportEventWithoutLock(StreamEvents::Error,
-                                                ErrorCode::LOAD_CACHE_TIMEOUT,
+                stream_->reportErrorWithoutLock(ErrorCode::LOAD_CACHE_TIMEOUT,
                                                 "load cache failed after " + std::to_string(max_retry)
                                                     + " retries (transfer error)");
                 releaseResource();
@@ -620,7 +626,7 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
         RTP_LLM_LOG_WARNING(
             "load cache done but not success, stream: [%ld], error: %s", stream_->streamId(), error.ToString().c_str());
         if (error.hasError()) {
-            stream_->reportError(error.code(), error.ToString());
+            stream_->reportErrorWithoutLock(error.code(), error.ToString());
         }
         return;
     }

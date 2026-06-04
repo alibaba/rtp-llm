@@ -143,8 +143,12 @@ class WriteCacheLayerContext: public KVCacheConnectorLayerContext {
 public:
     WriteCacheLayerContext(std::shared_ptr<KVCacheResource> resource,
                            int64_t                          request_id,
-                           std::shared_ptr<torch::Event>    attention_event):
-        resource_(std::move(resource)), request_id_(request_id), attention_event_(std::move(attention_event)) {}
+                           std::shared_ptr<torch::Event>    attention_event,
+                           int64_t                          deadline_ms):
+        resource_(std::move(resource)),
+        request_id_(request_id),
+        attention_event_(std::move(attention_event)),
+        deadline_ms_(deadline_ms) {}
 
     const KVCacheResource& kvCacheResource() const override {
         return *resource_;
@@ -162,10 +166,15 @@ public:
         return attention_event_;
     }
 
+    int64_t deadlineMs() const override {
+        return deadline_ms_;
+    }
+
 private:
     std::shared_ptr<KVCacheResource> resource_;
     int64_t                          request_id_;
     std::shared_ptr<torch::Event>    attention_event_;
+    int64_t                          deadline_ms_;
 };
 
 std::shared_ptr<torch::Event> makeConnectorEvent(const std::shared_ptr<torch::Event>& event) {
@@ -317,8 +326,16 @@ void writeCacheToConnector(const CacheStoreInputs& param, IKVCacheConnectorCoord
         }
 
         auto event = param.pre_created_event ? param.pre_created_event : runtimeCreateEvent();
+        // Per-context-request absolute business deadline (ms since epoch).
+        // INT64_MAX means "no deadline set" — P2P workers fall back to their
+        // configured store_wait_timeout in that case.
+        const int64_t deadline_ms =
+            (param.request_deadline_ms.defined()
+             && static_cast<size_t>(param.request_deadline_ms.numel()) > batch_id) ?
+                *(param.request_deadline_ms.data_ptr<int64_t>() + batch_id) :
+                std::numeric_limits<int64_t>::max();
         auto layer_context =
-            std::make_shared<WriteCacheLayerContext>(held_resource, request_id, makeConnectorEvent(event));
+            std::make_shared<WriteCacheLayerContext>(held_resource, request_id, makeConnectorEvent(event), deadline_ms);
         connector_coordinator->asyncWriteByLayer(global_layer_id, layer_context);
     }
 }
@@ -512,6 +529,18 @@ torch::Tensor preprocessWeightScale(torch::Tensor weight, torch::Tensor scale) {
 
 void cudaSyncAndCheck() {
     runtimeSyncAndCheck();
+}
+
+void cudaCurrentStreamSyncAndCheck() {
+#if USING_CUDA
+    auto stream = at::cuda::getCurrentCUDAStream();
+    check_cuda_value(cudaStreamSynchronize(stream));
+    check_cuda_error();
+#elif USING_ROCM
+    auto stream = at::cuda::getCurrentCUDAStream();
+    ROCM_CHECK(hipStreamSynchronize(stream));
+    ROCM_CHECK_ERROR();
+#endif
 }
 
 void cudaCheckLastError() {

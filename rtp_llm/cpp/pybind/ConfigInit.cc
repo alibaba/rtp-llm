@@ -748,6 +748,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("p2p_cancel_broadcast_timeout_ms", &CacheStoreConfig::p2p_cancel_broadcast_timeout_ms)
         .def_readwrite("cache_store_tcp_anet_rpc_thread_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_thread_num)
         .def_readwrite("cache_store_tcp_anet_rpc_queue_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_queue_num)
+        .def_readwrite("cache_store_tcp_worker_queue_size", &CacheStoreConfig::cache_store_tcp_worker_queue_size)
+        .def_readwrite("rdma_transfer_worker_thread_count", &CacheStoreConfig::rdma_transfer_worker_thread_count)
+        .def_readwrite("rdma_transfer_worker_queue_size", &CacheStoreConfig::rdma_transfer_worker_queue_size)
         .def("to_string", &CacheStoreConfig::to_string)
         .def(py::pickle(
             [](const CacheStoreConfig& self) {
@@ -770,10 +773,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.p2p_layer_cache_buffer_store_timeout_ms,
                                       self.p2p_cancel_broadcast_timeout_ms,
                                       self.cache_store_tcp_anet_rpc_thread_num,
-                                      self.cache_store_tcp_anet_rpc_queue_num);
+                                      self.cache_store_tcp_anet_rpc_queue_num,
+                                      self.cache_store_tcp_worker_queue_size,
+                                      self.rdma_transfer_worker_thread_count,
+                                      self.rdma_transfer_worker_queue_size);
             },
             [](py::tuple t) {
-                if (t.size() != 20)
+                if (t.size() != 23)
                     throw std::runtime_error("Invalid state!");
                 CacheStoreConfig c;
                 try {
@@ -797,6 +803,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.p2p_cancel_broadcast_timeout_ms              = t[17].cast<int64_t>();
                     c.cache_store_tcp_anet_rpc_thread_num          = t[18].cast<int>();
                     c.cache_store_tcp_anet_rpc_queue_num           = t[19].cast<int>();
+                    c.cache_store_tcp_worker_queue_size             = t[20].cast<int>();
+                    c.rdma_transfer_worker_thread_count             = t[21].cast<int>();
+                    c.rdma_transfer_worker_queue_size               = t[22].cast<int>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());
                 }

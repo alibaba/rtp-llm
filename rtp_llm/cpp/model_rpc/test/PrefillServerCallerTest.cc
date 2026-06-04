@@ -10,8 +10,46 @@
 #include "grpc++/grpc++.h"
 
 #include "rtp_llm/cpp/model_rpc/PrefillServerCaller.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 
 namespace rtp_llm::test {
+
+// Pure function test: prefill produces a small set of grpc::StatusCode values
+// (see transErrorCodeToGrpc in RpcErrorCode.h). Decode side must map each one
+// back to a representative ErrorCode so downstream consumers see something
+// other than the generic UNKNOWN_ERROR.
+TEST(RpcErrorCodeReverseMapping, KnownStatusesMapToConcreteErrorCodes) {
+    EXPECT_EQ(transGrpcStatusToErrorCode(grpc::StatusCode::CANCELLED), ErrorCode::CANCELLED);
+    EXPECT_EQ(transGrpcStatusToErrorCode(grpc::StatusCode::RESOURCE_EXHAUSTED), ErrorCode::MALLOC_FAILED);
+    EXPECT_EQ(transGrpcStatusToErrorCode(grpc::StatusCode::DEADLINE_EXCEEDED), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(transGrpcStatusToErrorCode(grpc::StatusCode::OUT_OF_RANGE), ErrorCode::LONG_PROMPT_ERROR);
+    EXPECT_EQ(transGrpcStatusToErrorCode(grpc::StatusCode::INVALID_ARGUMENT), ErrorCode::INVALID_PARAMS);
+}
+
+TEST(RpcErrorCodeReverseMapping, UnmappedStatusesFallToUnknownError) {
+    // INTERNAL is the catch-all on the prefill side too — the original
+    // ErrorCode is genuinely lost, so UNKNOWN_ERROR is the right answer.
+    EXPECT_EQ(transGrpcStatusToErrorCode(grpc::StatusCode::INTERNAL), ErrorCode::UNKNOWN_ERROR);
+    EXPECT_EQ(transGrpcStatusToErrorCode(grpc::StatusCode::UNAVAILABLE), ErrorCode::UNKNOWN_ERROR);
+    EXPECT_EQ(transGrpcStatusToErrorCode(grpc::StatusCode::UNAUTHENTICATED), ErrorCode::UNKNOWN_ERROR);
+}
+
+TEST(RpcErrorCodeReverseMapping, RoundTripPrefillProducedStatuses) {
+    // For every ErrorCode that prefill can produce a non-INTERNAL grpc status
+    // for, the round-trip via reverse mapping should preserve the family
+    // (e.g. MALLOC_FAILED → RESOURCE_EXHAUSTED → MALLOC_FAILED).
+    EXPECT_EQ(transGrpcStatusToErrorCode(transErrorCodeToGrpc(ErrorCode::CANCELLED)), ErrorCode::CANCELLED);
+    EXPECT_EQ(transGrpcStatusToErrorCode(transErrorCodeToGrpc(ErrorCode::MALLOC_FAILED)), ErrorCode::MALLOC_FAILED);
+    EXPECT_EQ(transGrpcStatusToErrorCode(transErrorCodeToGrpc(ErrorCode::GENERATE_TIMEOUT)), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(transGrpcStatusToErrorCode(transErrorCodeToGrpc(ErrorCode::INVALID_PARAMS)), ErrorCode::INVALID_PARAMS);
+    // DECODE_MALLOC_FAILED collapses to MALLOC_FAILED (both share
+    // RESOURCE_EXHAUSTED). This is documented loss; consumers must rely on
+    // the error message string to distinguish if needed.
+    EXPECT_EQ(transGrpcStatusToErrorCode(transErrorCodeToGrpc(ErrorCode::DECODE_MALLOC_FAILED)), ErrorCode::MALLOC_FAILED);
+    // Likewise OUT_OF_VOCAB_RANGE collapses to LONG_PROMPT_ERROR (both share
+    // OUT_OF_RANGE).
+    EXPECT_EQ(transGrpcStatusToErrorCode(transErrorCodeToGrpc(ErrorCode::OUT_OF_VOCAB_RANGE)), ErrorCode::LONG_PROMPT_ERROR);
+}
 
 class FakePrefillRpcService final: public RpcService::Service {
 public:

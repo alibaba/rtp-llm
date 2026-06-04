@@ -1,8 +1,14 @@
 from types import SimpleNamespace
 from unittest import TestCase, main
 
-from rtp_llm.config.engine_config import update_worker_addrs
-from rtp_llm.ops import ParallelismConfig, RuntimeConfig
+from rtp_llm.config.engine_config import setup_pd_sep_config, update_worker_addrs
+from rtp_llm.ops import (
+    CacheStoreConfig,
+    ParallelismConfig,
+    PDSepConfig,
+    RoleType,
+    RuntimeConfig,
+)
 
 
 class EngineConfigTest(TestCase):
@@ -90,6 +96,92 @@ class EngineConfigTest(TestCase):
                 "127.0.0.2:12011:13010",
             ],
         )
+
+
+class SetupPdSepConfigTest(TestCase):
+    """Regression tests for setup_pd_sep_config: ensure CACHE_STORE_RDMA_MODE
+    (which argparse binds to CacheStoreConfig.cache_store_rdma_mode) is always
+    propagated into PDSepConfig.cache_store_rdma_mode, regardless of role_type.
+
+    Background: the C++ defaults for the two fields disagree
+    (CacheStoreConfig=false, PDSepConfig=true), so a silent split caused the
+    5/22 .202 incident — CacheStoreConfig stayed false so P2PConnectorWorker
+    picked the kTcp transfer backend (synchronous GPU->CPU copy in
+    TcpKVCacheSender), while PDSepConfig retained the C++ default true
+    elsewhere. The sync used to be gated on role_type ∈ {PREFILL, DECODE};
+    we now sync unconditionally.
+    """
+
+    def _make_configs(self, role_type, cache_rdma_mode: bool):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = role_type
+        cache_store_config = CacheStoreConfig()
+        cache_store_config.cache_store_rdma_mode = cache_rdma_mode
+        server_config = SimpleNamespace(
+            cache_store_listen_port=0,
+            cache_store_rdma_listen_port=0,
+        )
+        distribute_config = SimpleNamespace(
+            cache_store_connect_port=0,
+            cache_store_rdma_connect_port=0,
+            remote_rpc_server_port=0,
+        )
+        return pd_sep_config, cache_store_config, server_config, distribute_config
+
+    def test_sync_rdma_mode_true_in_prefill_role(self):
+        pd_sep_config, cache_store_config, server_config, distribute_config = (
+            self._make_configs(RoleType.PREFILL, cache_rdma_mode=True)
+        )
+        setup_pd_sep_config(
+            pd_sep_config, cache_store_config, server_config, distribute_config
+        )
+        self.assertTrue(pd_sep_config.cache_store_rdma_mode)
+
+    def test_sync_rdma_mode_false_in_prefill_role(self):
+        pd_sep_config, cache_store_config, server_config, distribute_config = (
+            self._make_configs(RoleType.PREFILL, cache_rdma_mode=False)
+        )
+        # PDSepConfig C++ default is true; ensure it gets overridden to false.
+        pd_sep_config.cache_store_rdma_mode = True
+        setup_pd_sep_config(
+            pd_sep_config, cache_store_config, server_config, distribute_config
+        )
+        self.assertFalse(pd_sep_config.cache_store_rdma_mode)
+
+    def test_sync_rdma_mode_true_in_decode_role(self):
+        pd_sep_config, cache_store_config, server_config, distribute_config = (
+            self._make_configs(RoleType.DECODE, cache_rdma_mode=True)
+        )
+        pd_sep_config.cache_store_rdma_mode = False
+        setup_pd_sep_config(
+            pd_sep_config, cache_store_config, server_config, distribute_config
+        )
+        self.assertTrue(pd_sep_config.cache_store_rdma_mode)
+
+    def test_sync_rdma_mode_true_in_pdfusion_role(self):
+        """Regression: before the fix, PDFUSION skipped the sync entirely, so
+        PDSepConfig.cache_store_rdma_mode kept its C++ default (true), even
+        when the user set CACHE_STORE_RDMA_MODE=0. After the fix the sync runs
+        unconditionally."""
+        pd_sep_config, cache_store_config, server_config, distribute_config = (
+            self._make_configs(RoleType.PDFUSION, cache_rdma_mode=False)
+        )
+        pd_sep_config.cache_store_rdma_mode = True  # C++ default
+        setup_pd_sep_config(
+            pd_sep_config, cache_store_config, server_config, distribute_config
+        )
+        # Must follow cache_store_config now, not retain the C++ default.
+        self.assertFalse(pd_sep_config.cache_store_rdma_mode)
+
+    def test_sync_rdma_mode_false_in_pdfusion_role(self):
+        pd_sep_config, cache_store_config, server_config, distribute_config = (
+            self._make_configs(RoleType.PDFUSION, cache_rdma_mode=True)
+        )
+        pd_sep_config.cache_store_rdma_mode = False
+        setup_pd_sep_config(
+            pd_sep_config, cache_store_config, server_config, distribute_config
+        )
+        self.assertTrue(pd_sep_config.cache_store_rdma_mode)
 
 
 if __name__ == "__main__":

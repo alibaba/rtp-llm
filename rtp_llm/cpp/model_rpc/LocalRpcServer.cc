@@ -81,6 +81,12 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                               WriterInterface*                 writer,
                                               std::shared_ptr<GenerateStream>& stream) {
     RTP_LLM_PROFILE_FUNCTION();
+    // Guard: stream may already be in error state from a failed enqueue (before
+    // entering the output polling loop). Also covers callers other than
+    // GenerateStreamCall that invoke pollStreamOutput directly.
+    if (stream->hasError()) {
+        return serializeErrorMsg(request_key, stream->statusInfo());
+    }
     // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
     // 如果流有错误，应该停止消费输出
     while (stream->isActive() || stream->hasOutput()) {
@@ -146,6 +152,9 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
                                               std::shared_ptr<GenerateStream>&      stream,
                                               const std::shared_ptr<GenerateInput>& input,
                                               GenerateOutputs&                      last_outputs) {
+    if (stream->hasError()) {
+        return stream->statusInfo();
+    }
     while (!stream->isFinished() || stream->hasOutput()) {
         if (context->IsCancelled()) {
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by client");
@@ -186,6 +195,11 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
         RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
         generate_context.setStream(engine_->enqueue(input));
     }
+    if (generate_context.getStream()->hasError()) {
+        generate_context.error_status =
+            serializeErrorMsg(generate_context.request_key, generate_context.getStream()->statusInfo());
+    }
+    CHECK_ERROR_STATUS(generate_context);
 
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
 

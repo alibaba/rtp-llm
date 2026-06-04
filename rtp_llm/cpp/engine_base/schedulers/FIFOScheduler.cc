@@ -72,12 +72,18 @@ int64_t FIFOScheduler::lastScheduleTime() {
 // 仅检查输入长度不超过 KV Cache 最大可用 token 数；max_batch_tokens_size 的约束在调度时由
 // evaluateRunningMemory 基于 contextLength 判断，不应在 enqueue 阶段乘以 batch_size 拒绝请求。
 bool FIFOScheduler::checkInputLength(const GenerateStreamPtr& stream) {
+    if (stream->inputLength() > static_cast<int>(max_seq_len_)) {
+        stream->reportError(ErrorCode::LONG_PROMPT_ERROR,
+                            "input len " + std::to_string(stream->inputLength()) + " exceeds max_seq_len "
+                                + std::to_string(max_seq_len_));
+        return false;
+    }
     if (stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
         stream->reportError(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
                             autil::StringUtil::formatString("input len " + std::to_string(stream->inputLength())
                                                             + " is greater than kv cache max available tokens num "
                                                             + std::to_string(cache_manager_->maxAvailableTokensNum())));
-        return false;  // Input length exceeds max available tokens
+        return false;
     }
     return true;
 }
@@ -85,12 +91,16 @@ bool FIFOScheduler::checkInputLength(const GenerateStreamPtr& stream) {
 absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!checkInputLength(stream)) {
+        stream->moveToNext();
         return absl::InvalidArgumentError("Check input length failed");
     }
     {
         std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.emplace_back(stream);
         schedule_trigger_ = true;
+        RTP_LLM_LOG_DEBUG("[PD-DIAG] FIFOScheduler::enqueue stream [%ld], waiting_size=%zu",
+                          stream->streamId(),
+                          waiting_streams_.size());
     }
     cond_.notify_all();
     return absl::OkStatus();
@@ -106,6 +116,8 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
     for (const auto& stream : streams) {
         if (checkInputLength(stream)) {
             stream_enqueued.emplace_back(stream);
+        } else {
+            stream->moveToNext();
         }
     }
     {
@@ -286,6 +298,8 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
 
     schedule_trigger_ = false;
 
+    auto schedule_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+
     // LOADING_CACHE -> DONE/WAITING: error / load cache done
     evaluateAndUpdateStreams(loading_cache_streams_);
     // RUNNING -> DONE: error / finished
@@ -310,6 +324,21 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     // If streams were scheduled, trigger next scheduling round
     if (waiting_streams_.size() < prev_waiting_size) {
         schedule_trigger_ = true;
+    }
+
+    auto schedule_elapsed_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_start_us;
+    // Only log slow rounds (>50ms) or rounds that actually scheduled new work.
+    // Raised from 5ms->50ms after 5/22 audit showed ~2300 entries/4h dominated
+    // by 5-20ms rounds with no diagnostic value; the 04:41:51 77s pathological
+    // round and A-class dispatch-slow scenarios are well above 50ms.
+    if (schedule_elapsed_us > 50000 || prev_waiting_size != waiting_streams_.size()) {
+        RTP_LLM_LOG_DEBUG("[PD-DIAG] FIFOScheduler::schedule round took %ld us, "
+                          "waiting: %zu->%zu, loading_cache: %zu, running: %zu",
+                          schedule_elapsed_us,
+                          prev_waiting_size,
+                          waiting_streams_.size(),
+                          loading_cache_streams_.size(),
+                          running_streams_.size());
     }
 
     reportMetrics();

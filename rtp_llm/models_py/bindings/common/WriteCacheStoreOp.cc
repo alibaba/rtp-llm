@@ -46,6 +46,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.decoder_batch_size,
                                 captured_cache_store.request_id,
                                 captured_cache_store.request_pd_separation,
+                                captured_cache_store.request_deadline_ms,
                                 captured_cache_store.cache_keys,
                                 captured_cache_store.tokens_per_block,
                                 captured_cache_store.kv_block_stride_bytes,

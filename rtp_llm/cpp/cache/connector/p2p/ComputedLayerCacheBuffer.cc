@@ -57,6 +57,10 @@ std::shared_ptr<ComputedLayerCacheBuffer> ComputedLayerCacheBufferStore::addBuff
     int64_t request_id, const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer, int64_t deadline_ms) {
     std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
 
+    if (removed_request_ids_.count(request_id)) {
+        return nullptr;
+    }
+
     auto iter = computed_buffers_.find(request_id);
     if (iter != computed_buffers_.end()) {
         // 使用现有的 ComputedLayerCacheBuffer 的 addBuffer 方法
@@ -82,6 +86,7 @@ std::shared_ptr<ComputedLayerCacheBuffer> ComputedLayerCacheBufferStore::getBuff
 void ComputedLayerCacheBufferStore::removeBuffer(int64_t request_id) {
     std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
     computed_buffers_.erase(request_id);
+    removed_request_ids_[request_id] = currentTimeMs();
 }
 
 int64_t ComputedLayerCacheBufferStore::getBuffersCount() const {
@@ -94,7 +99,22 @@ void ComputedLayerCacheBufferStore::checkTimeout() {
     int64_t                      current_time_ms = currentTimeMs();
     for (auto iter = computed_buffers_.begin(); iter != computed_buffers_.end();) {
         if (current_time_ms >= iter->second->deadlineMs()) {
-            iter = computed_buffers_.erase(iter);
+            removed_request_ids_[iter->first] = current_time_ms;
+            iter                              = computed_buffers_.erase(iter);
+        } else {
+            ++iter;
+        }
+    }
+    // Retain removed IDs long enough to cover the longest possible
+    // StoreWaitContext deadline (business deadline, up to ~1h via
+    // request_deadline_ms in writeByLayer). A shorter TTL lets late
+    // GPU-event completions slip past the blacklist and create ghost
+    // ComputedLayerCacheBuffer entries that pin blocks until their
+    // own deadline expires.
+    static constexpr int64_t kRemovedIdRetentionMs = 3600000;
+    for (auto iter = removed_request_ids_.begin(); iter != removed_request_ids_.end();) {
+        if (current_time_ms - iter->second > kRemovedIdRetentionMs) {
+            iter = removed_request_ids_.erase(iter);
         } else {
             ++iter;
         }

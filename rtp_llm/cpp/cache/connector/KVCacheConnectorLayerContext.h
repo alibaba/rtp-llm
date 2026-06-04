@@ -18,6 +18,14 @@ public:
     virtual KVCacheResourcePtr            heldKVCacheResource() const = 0;
     virtual int64_t                       requestId() const           = 0;
     virtual std::shared_ptr<torch::Event> attentionEvent() const      = 0;
+
+    // Absolute deadline (ms since epoch) for this request. Used by P2P prefill
+    // to align the per-layer ComputedLayerCacheBuffer lifetime with the
+    // request's business deadline, instead of a hard-coded store-wait timeout.
+    // Implementations may return INT64_MAX when the request has no business
+    // deadline; the worker treats that as "no deadline" and falls back to its
+    // configured store-wait timeout.
+    virtual int64_t deadlineMs() const = 0;
 };
 
 }  // namespace rtp_llm

@@ -394,7 +394,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
-        cudaSyncAndCheck();
+        cudaCurrentStreamSyncAndCheck();
         model_->releaseBuffers();
         draft_model_->releaseBuffers();
         return absl::OkStatus();
@@ -647,7 +647,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             auto accept_tokens                       = torch::zeros({1, 1}, torch::kInt32);
             speculative_sampler_output.accept_len    = {1};
             speculative_sampler_output.accept_tokens = {std::move(accept_tokens)};
-            cudaSyncAndCheck();
+            cudaCurrentStreamSyncAndCheck();
         } else {
             // target model sample
             CHECK_AND_RETURN_REF(
@@ -690,7 +690,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
-        cudaSyncAndCheck();
+        cudaCurrentStreamSyncAndCheck();
         draft_model_->releaseBuffers();
         model_->releaseBuffers();
         return absl::OkStatus();

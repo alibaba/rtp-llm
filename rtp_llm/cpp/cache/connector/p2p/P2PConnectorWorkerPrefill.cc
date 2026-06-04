@@ -7,8 +7,10 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "autil/LockFreeThreadPool.h"
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <set>
 #include <thread>
 
@@ -31,6 +33,10 @@ P2PConnectorWorkerPrefill::~P2PConnectorWorkerPrefill() {
     if (cleanup_thread_) {
         cleanup_thread_->stop();
     }
+    if (async_sender_pool_) {
+        async_sender_pool_->stop();
+        async_sender_pool_.reset();
+    }
 }
 
 bool P2PConnectorWorkerPrefill::init(int64_t store_wait_timeout_ms) {
@@ -43,6 +49,20 @@ bool P2PConnectorWorkerPrefill::init(int64_t store_wait_timeout_ms) {
         return false;
     }
 
+    // OPT-A2: dedicated pool for sender_->send so the dispatcher thread does
+    // not block on the synchronous cuda copy + sync inside TcpKVCacheSender.
+    // See PrefillRpcServerNew2.h / P2PConnectorWorkerPrefill.h comments and
+    // the OPT-0 analysis for full rationale.
+    constexpr size_t kSenderPoolThreadCount = 4;
+    constexpr size_t kSenderPoolQueueSize   = 10000;
+    auto             sender_pool            = std::make_shared<autil::LockFreeThreadPool>(
+        kSenderPoolThreadCount, kSenderPoolQueueSize, nullptr, "P2PWorkerAsyncSender");
+    if (!sender_pool->start()) {
+        RTP_LLM_LOG_ERROR("init failed: async_sender_pool start failed");
+        return false;
+    }
+    async_sender_pool_ = std::move(sender_pool);
+
     store_wait_timeout_ms_ = store_wait_timeout_ms;
     return true;
 }
@@ -50,7 +70,8 @@ bool P2PConnectorWorkerPrefill::init(int64_t store_wait_timeout_ms) {
 bool P2PConnectorWorkerPrefill::writeByLayer(int                           layer_id,
                                              const KVCacheResourcePtr&     resource,
                                              int64_t                       request_id,
-                                             std::shared_ptr<torch::Event> event) {
+                                             std::shared_ptr<torch::Event> event,
+                                             int64_t                       request_deadline_ms) {
     auto collector = std::make_shared<PrefillWorkerStoreMetricsCollector>();
 
     auto layer_cache_buffer = LayerCacheBufferUtil::convertLayer(*resource, 0, layer_id, 0, -1);
@@ -67,14 +88,35 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                           layer
     layer_cache_buffer->setKVCacheResource(resource);
     collector->total_block_count = layer_cache_buffer->blockIdMap().size();
 
-    int64_t deadline_ms = currentTimeMs() + store_wait_timeout_ms_;
+    // Buffer lifetime is the request's own deadline so decode StartLoad still
+    // finds the layer cache even when scheduling delays push it past the
+    // store_wait_timeout window. Falls back to store_wait_timeout when the
+    // request has no business deadline (request_deadline_ms == INT64_MAX) or
+    // when the deadline is already past — in the past case we keep the buffer
+    // alive for at least one store_wait window so a near-deadline StartLoad can
+    // still be served instead of getting GENERATE_TIMEOUT immediately.
+    const int64_t now_ms          = currentTimeMs();
+    const int64_t fallback_deadline = now_ms + store_wait_timeout_ms_;
+    int64_t       deadline_ms;
+    if (request_deadline_ms == std::numeric_limits<int64_t>::max() || request_deadline_ms <= now_ms) {
+        deadline_ms = fallback_deadline;
+    } else {
+        // Honor the larger of "request deadline" and "fallback" so a tiny
+        // remaining-deadline doesn't give the caller less than one store_wait
+        // window of slack.
+        deadline_ms = std::max(request_deadline_ms, fallback_deadline);
+    }
     store_wait_context_checker_->addContext(
         StoreWaitContext(request_id, std::move(event), layer_cache_buffer, deadline_ms, collector));
     if (layer_id == 0) {
-        RTP_LLM_LOG_INFO("writeByLayer [P2P Prefill]: queued request_id=%ld, layer_id=%d, blocks=%zu",
-                         request_id,
-                         layer_id,
-                         layer_cache_buffer->blockIdMap().size());
+        RTP_LLM_LOG_DEBUG(
+            "writeByLayer [P2P Prefill]: queued request_id=%ld, layer_id=%d, blocks=%zu, deadline_ms=%ld (request=%ld, fallback=%ld)",
+            request_id,
+            layer_id,
+            layer_cache_buffer->blockIdMap().size(),
+            deadline_ms,
+            request_deadline_ms,
+            fallback_deadline);
     }
     return true;
 }
@@ -140,6 +182,30 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
     int       count    = 0;
     const int layer_id = layer_cache_buffer->getLayerId();
 
+    // Reusable result callback for both success / error paths. We need the same
+    // callback shape whether the send dispatch happens inline (when async pool
+    // push fails) or async on the worker pool.
+    auto make_send_done_cb = [transfer_result](const std::string& partition_layer_key) {
+        return [transfer_result, partition_layer_key](transfer::TransferErrorCode transfer_ec,
+                                                      const std::string&          cb_error_msg) {
+            RTP_LLM_LOG_DEBUG("send done, partition_layer_key: %s, success: %d",
+                              partition_layer_key.c_str(),
+                              transfer_ec == transfer::TransferErrorCode::OK);
+            if (transfer_ec != transfer::TransferErrorCode::OK) {
+                std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
+                if (transfer_result->all_success.exchange(false)) {
+                    transfer_result->error_code = transfer::toErrorCode(transfer_ec);
+                    transfer_result->error_msg  = cb_error_msg;
+                }
+            }
+            transfer_result->done_count.fetch_add(1);
+            {
+                std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
+                transfer_result->result_cv.notify_one();
+            }
+        };
+    };
+
     for (const auto& partition_ctx : tp_partition_ctxs) {
         auto key_block_infos = LayerCacheBufferUtil::buildKeyBlockInfos(layer_block_converter_,
                                                                         layer_cache_buffer,
@@ -157,35 +223,80 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
         send_req.deadline_ms = transfer_deadline_ms;
 
         ++count;
-        sender_->send(send_req,
-                      [transfer_result, partition_layer_key](transfer::TransferErrorCode transfer_ec,
-                                                             const std::string&          cb_error_msg) {
-                          RTP_LLM_LOG_DEBUG("send done, partition_layer_key: %s, success: %d",
-                                            partition_layer_key.c_str(),
-                                            transfer_ec == transfer::TransferErrorCode::OK);
-                          if (transfer_ec != transfer::TransferErrorCode::OK) {
-                              std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
-                              if (transfer_result->all_success.exchange(false)) {
-                                  transfer_result->error_code = transfer::toErrorCode(transfer_ec);
-                                  transfer_result->error_msg  = cb_error_msg;
-                              }
-                          }
-                          transfer_result->done_count.fetch_add(1);
-                          {
-                              std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
-                              transfer_result->result_cv.notify_one();
-                          }
-                      });
+
+        // OPT-A2: push sender_->send onto the dedicated pool. The dispatcher
+        // (this thread) returns immediately after enqueuing; the cuda copy +
+        // sync inside TcpKVCacheSender::makeTransferRequest now runs on the
+        // pool worker thread. The completion callback is unchanged (still
+        // invoked by arpc IO threads when the response arrives).
+        //
+        // send_req is wrapped in shared_ptr so both the async task and the
+        // inline fallback path can reference it without a stale move.
+        auto                              done_cb         = make_send_done_cb(partition_layer_key);
+        auto                              send_req_shared = std::make_shared<transfer::SendRequest>(std::move(send_req));
+        std::shared_ptr<LayerCacheBuffer> buffer_keepalive = layer_cache_buffer;
+        auto                              task             = [sender = sender_,
+                                                 send_req_shared,
+                                                 done_cb,
+                                                 buffer_keepalive,
+                                                 partition_layer_key]() mutable {
+            // [HANG-DIAG/OPT-A2] Measure inside-pool cost so we can compare
+            // against dispatchPendingLayerTransfers.dispatch_us. If A2 works
+            // as designed, dispatch_us drops to ms-level while this inside-
+            // pool cost keeps the seconds-level cuda sync wait — confirming
+            // the cuda sync is the dominant blocker (per OPT-0).
+            const int64_t pool_task_start_us = currentTimeUs();
+            sender->send(*send_req_shared, done_cb);
+            const int64_t pool_task_cost_us = currentTimeUs() - pool_task_start_us;
+            if (pool_task_cost_us >= 100000) {
+                RTP_LLM_LOG_WARNING(
+                    "[HANG-DIAG/OPT-A2] async_sender_pool task slow, "
+                    "partition_layer_key=%s, pool_task_cost_us=%ld "
+                    "(blame: TcpKVCacheSender::send sync prefix = cuda copy + sync + getChannel)",
+                    partition_layer_key.c_str(),
+                    pool_task_cost_us);
+            }
+            // buffer_keepalive holds layer_cache_buffer alive across the
+            // async hop (block_info inside send_req only keeps pointers
+            // into it). Captured-but-unused; explicit (void) silences the
+            // warning some toolchains emit.
+            (void)buffer_keepalive;
+        };
+
+        if (!async_sender_pool_
+            || async_sender_pool_->pushTask(std::move(task)) != autil::ThreadPoolBase::ERROR_NONE) {
+            // Pool full or not initialized: fall back to inline send so we
+            // never lose a callback. WARN so we can see this in production.
+            RTP_LLM_LOG_WARNING(
+                "[HANG-DIAG/OPT-A2] async_sender_pool pushTask failed, fallback to inline send, "
+                "partition_layer_key=%s",
+                partition_layer_key.c_str());
+            sender_->send(*send_req_shared, done_cb);
+        }
     }
     return count;
 }
 
 bool P2PConnectorWorkerPrefill::waitSendCallbacksWithTimeout(const std::shared_ptr<SendTransferResult>& transfer_result,
                                                              int     sent_transfer_count,
-                                                             int64_t return_deadline_ms) const {
+                                                             int64_t return_deadline_ms,
+                                                             const std::shared_ptr<std::atomic<bool>>& cancel_flag) const {
     const int64_t                rdma_cap_ms = config_.transfer_backend_config.rdma_transfer_wait_timeout_ms;
     std::unique_lock<std::mutex> lock(transfer_result->result_mutex);
     while (transfer_result->done_count.load(std::memory_order_relaxed) < sent_transfer_count) {
+        // Honor cancel_flag here too — without this, a CANCEL_HANDLE_READ RPC
+        // arriving while we wait for RDMA send callbacks has nowhere to land,
+        // and we'd block until return_deadline_ms (≈ business deadline, up to 1h).
+        // determineSendResult() will see cancel_flag.load() and return
+        // P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED instead of TIMEOUT.
+        if (cancel_flag && cancel_flag->load()) {
+            RTP_LLM_LOG_WARNING(
+                "waitSendCallbacksWithTimeout cancelled, done_count: %ld, expected: %d, return_deadline_ms: %ld",
+                transfer_result->done_count.load(std::memory_order_relaxed),
+                sent_transfer_count,
+                return_deadline_ms);
+            return false;
+        }
         const int64_t now = currentTimeMs();
         if (now >= return_deadline_ms) {
             RTP_LLM_LOG_WARNING(
@@ -201,9 +312,21 @@ bool P2PConnectorWorkerPrefill::waitSendCallbacksWithTimeout(const std::shared_p
             return false;
         }
         const bool ready = transfer_result->result_cv.wait_for(
-            lock, std::chrono::milliseconds(wait_ms), [&transfer_result, sent_transfer_count]() {
-                return transfer_result->done_count.load(std::memory_order_relaxed) >= sent_transfer_count;
+            lock,
+            std::chrono::milliseconds(wait_ms),
+            [&transfer_result, sent_transfer_count, &cancel_flag]() {
+                // Wake up early when cancel_flag flips so we don't have to wait
+                // out the full rdma_cap_ms slice before re-checking it. This
+                // requires the cancelSend code path to call result_cv.notify_one()
+                // after setting cancel_flag — see below.
+                return transfer_result->done_count.load(std::memory_order_relaxed) >= sent_transfer_count
+                       || (cancel_flag && cancel_flag->load());
             });
+        if (cancel_flag && cancel_flag->load()) {
+            // Loop will re-check and return false on next iteration; exit early
+            // here too in case the cv predicate fired due to cancel.
+            continue;
+        }
         if (ready) {
             return true;
         }
@@ -216,10 +339,29 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
                                        const std::string&                                   unique_key,
                                        int64_t                                              deadline_ms,
                                        const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers) {
+    // For MLA, KV cache is identical across all TP ranks. Only the primary rank
+    // within each decode-target group needs to send. In NP1D mode (prefill_tp > decode_tp),
+    // multiple prefill ranks map to the same decode server; only partition_id=0 rank sends.
+    // This matches the old DecodeRpcServer behavior where partition_count=1 was used.
+    if (config_.is_mla && !decode_transfer_servers.empty()
+        && config_.tp_size > static_cast<int64_t>(decode_transfer_servers.size())) {
+        int local_partition_count = static_cast<int>(config_.tp_size / decode_transfer_servers.size());
+        int local_partition_id    = static_cast<int>(config_.tp_rank % local_partition_count);
+        if (local_partition_id != 0) {
+            RTP_LLM_LOG_DEBUG(
+                "sendKVCache [P2P]: skip for MLA non-primary rank, request_id=%ld, unique_key=%s, tp_rank=%ld",
+                request_id,
+                unique_key.c_str(),
+                config_.tp_rank);
+            computed_buffers_->removeBuffer(request_id);
+            return ErrorInfo::OkStatus();
+        }
+    }
+
     // D（deadline_ms）为 RPC 语义截止；return_deadline_ms = D - return_before，与 decode recv_req.deadline_ms 对齐。
     const int64_t return_before_ms   = config_.p2p_read_return_before_deadline_ms;
     const int64_t return_deadline_ms = deadline_ms - return_before_ms;
-    RTP_LLM_LOG_INFO(
+    RTP_LLM_LOG_DEBUG(
         "sendKVCache [P2P]: start request_id=%ld, unique_key=%s, deadline_ms=%ld, return_deadline_ms=%ld, decode_servers=%zu",
         request_id,
         unique_key.c_str(),
@@ -248,12 +390,41 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
     auto cancel_flag = std::make_shared<std::atomic<bool>>(false);
     {
         std::lock_guard<std::mutex> lock(handle_cancel_mutex_);
-        handle_cancel_flags_[unique_key] = cancel_flag;
+        // transfer_result is held in this stack frame; weak_ptr is fine because
+        // we only dereference it from cancelSend() while this frame is alive.
+        handle_cancel_flags_[unique_key] = {cancel_flag, std::weak_ptr<SendTransferResult>(transfer_result)};
     }
 
+    // [PD-DIAG] Three-stage timing for sendKVCache: addBuffer / dispatch / waitCallbacks.
+    // Each can independently account for the dominant cost depending on the failure mode:
+    //  - addBuffer slow → ComputedLayerCacheBufferStore mutex contention
+    //  - dispatch slow → sender_->send synchronous blocking or layer cache scan slow
+    //  - waitCallbacks slow → RDMA callback never arrives (the actual stuck RPC scenario)
+    const int64_t add_buffer_start_us = currentTimeUs();
     auto computed_layer_cache_buffer    = computed_buffers_->addBuffer(request_id, nullptr, deadline_ms);
+    const int64_t add_buffer_cost_us = currentTimeUs() - add_buffer_start_us;
     collector->first_layer_wait_time_us = currentTimeUs() - start_time_us;
 
+    if (!computed_layer_cache_buffer) {
+        std::lock_guard<std::mutex> lock(handle_cancel_mutex_);
+        handle_cancel_flags_.erase(unique_key);
+        const std::string error_msg =
+            "sendKVCache: computed layers already expired and removed, unique_key: " + unique_key;
+        RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
+        if (metrics_reporter_) {
+            collector->success            = false;
+            collector->total_cost_time_us = currentTimeUs() - start_time_us;
+            metrics_reporter_->report<P2PConnectorMetrics, PrefillWorkerSendMetricsCollector>(nullptr, collector.get());
+        }
+        // GENERATE_TIMEOUT (603) signals "request's business deadline already
+        // expired by the time prefill could serve the StartLoad". Decode side
+        // should surface this as a timeout to the client rather than retry.
+        // Distinct from P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT (8316), which
+        // means the in-flight RDMA transfer itself missed its deadline.
+        return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, error_msg);
+    }
+
+    const int64_t dispatch_start_us = currentTimeUs();
     std::set<int> sent_layer_ids;
     const int     sent_transfer_count  = dispatchPendingLayerTransfers(computed_layer_cache_buffer,
                                                                   tp_partition_ctxs,
@@ -263,21 +434,58 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
                                                                   transfer_result,
                                                                   sent_layer_ids,
                                                                   total_transfers);
+    const int64_t dispatch_cost_us = currentTimeUs() - dispatch_start_us;
     collector->last_layer_wait_time_us = currentTimeUs() - start_time_us;
+
+    // NOTE: do NOT erase handle_cancel_flags_[unique_key] here. The wait below
+    // is the dominant phase (RDMA callbacks may take seconds to minutes), and
+    // erasing the cancel_flag now would make any late-arriving CANCEL_HANDLE_READ
+    // RPC silently miss its target — see Bug ① in the analysis doc.
+    // We erase only after waitSendCallbacksWithTimeout returns.
+
+    const int64_t wait_cb_start_us = currentTimeUs();
+    const bool    all_callbacks_received =
+        waitSendCallbacksWithTimeout(transfer_result, sent_transfer_count, return_deadline_ms, cancel_flag);
+    const int64_t wait_cb_cost_us = currentTimeUs() - wait_cb_start_us;
+
+    if (!all_callbacks_received) {
+        RTP_LLM_LOG_WARNING(
+            "sendKVCache transfer callback wait ended before return_deadline_ms or rdma cap, request_id: %ld, unique_key: %s, cancelled: %d",
+            request_id,
+            unique_key.c_str(),
+            cancel_flag->load());
+    }
+
+    const int64_t total_send_cost_us = currentTimeUs() - start_time_us;
+    if (total_send_cost_us >= 100 * 1000) {
+        RTP_LLM_LOG_WARNING(
+            "[PD-DIAG] sendKVCache slow phases, request_id=%ld, unique_key=%s, "
+            "total_us=%ld, add_buffer_us=%ld, dispatch_us=%ld, wait_callbacks_us=%ld, "
+            "sent=%d/%d, all_cb_received=%d, cancelled=%d",
+            request_id,
+            unique_key.c_str(),
+            total_send_cost_us,
+            add_buffer_cost_us,
+            dispatch_cost_us,
+            wait_cb_cost_us,
+            sent_transfer_count,
+            total_transfers,
+            all_callbacks_received ? 1 : 0,
+            cancel_flag->load() ? 1 : 0);
+    }
 
     {
         std::lock_guard<std::mutex> lock(handle_cancel_mutex_);
         handle_cancel_flags_.erase(unique_key);
     }
 
-    const bool all_callbacks_received =
-        waitSendCallbacksWithTimeout(transfer_result, sent_transfer_count, return_deadline_ms);
-    if (!all_callbacks_received) {
-        RTP_LLM_LOG_WARNING(
-            "sendKVCache transfer callback wait ended before return_deadline_ms or rdma cap, request_id: %ld, unique_key: %s",
-            request_id,
-            unique_key.c_str());
-    }
+    // Always remove the computed buffer entry. This is safe because the caller (handleRead)
+    // holds a whole-request KVCacheResourcePtr in resource_entry, which keeps all blocks
+    // allocated via connector_ref_counter until handleRead returns. The per-layer refs here
+    // are redundant for block lifetime safety.
+    // This also marks the request_id as removed, preventing late-arriving layers from
+    // StoreWaitContextChecker from creating orphan entries that pin blocks (LACK MEM).
+    computed_buffers_->removeBuffer(request_id);
 
     auto send_result = determineSendResult(transfer_result,
                                            cancel_flag,
@@ -302,12 +510,12 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
         return ErrorInfo(send_result.error_code, send_result.error_msg);
     }
 
-    RTP_LLM_LOG_INFO("sendKVCache [P2P]: done request_id=%ld, unique_key=%s, sent=%d/%d, cost_us=%ld",
-                     request_id,
-                     unique_key.c_str(),
-                     sent_transfer_count,
-                     total_transfers,
-                     currentTimeUs() - start_time_us);
+    RTP_LLM_LOG_DEBUG("sendKVCache [P2P]: done request_id=%ld, unique_key=%s, sent=%d/%d, cost_us=%ld",
+                      request_id,
+                      unique_key.c_str(),
+                      sent_transfer_count,
+                      total_transfers,
+                      currentTimeUs() - start_time_us);
     return ErrorInfo::OkStatus();
 }
 
@@ -344,14 +552,29 @@ P2PConnectorWorkerPrefill::determineSendResult(const std::shared_ptr<SendTransfe
 
 bool P2PConnectorWorkerPrefill::cancelSend(const std::string& unique_key) {
     RTP_LLM_LOG_DEBUG("cancelSend start, unique_key: %s", unique_key.c_str());
-    std::lock_guard<std::mutex> lock(handle_cancel_mutex_);
-    auto                        it = handle_cancel_flags_.find(unique_key);
-    if (it != handle_cancel_flags_.end()) {
-        it->second->store(true);
-        RTP_LLM_LOG_INFO("cancelSend success, unique_key: %s", unique_key.c_str());
-        return true;
+    std::shared_ptr<std::atomic<bool>> cancel_flag;
+    std::shared_ptr<SendTransferResult> transfer_result;
+    {
+        std::lock_guard<std::mutex> lock(handle_cancel_mutex_);
+        auto                        it = handle_cancel_flags_.find(unique_key);
+        if (it == handle_cancel_flags_.end()) {
+            RTP_LLM_LOG_INFO("cancelSend: unique_key not found: %s (best-effort)", unique_key.c_str());
+            return true;
+        }
+        cancel_flag     = it->second.cancel_flag;
+        transfer_result = it->second.transfer_result.lock();
     }
-    RTP_LLM_LOG_INFO("cancelSend: unique_key not found: %s (best-effort)", unique_key.c_str());
+    cancel_flag->store(true);
+    // Wake up waitSendCallbacksWithTimeout immediately so it sees the flag,
+    // instead of letting it sit in cv.wait_for for up to rdma_transfer_wait_timeout_ms
+    // (180s default) before re-checking.
+    if (transfer_result) {
+        std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
+        transfer_result->result_cv.notify_all();
+    }
+    RTP_LLM_LOG_INFO("cancelSend success, unique_key: %s, notified_cv: %d",
+                     unique_key.c_str(),
+                     transfer_result ? 1 : 0);
     return true;
 }
 
