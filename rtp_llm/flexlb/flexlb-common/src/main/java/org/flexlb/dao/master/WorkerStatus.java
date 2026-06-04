@@ -114,8 +114,8 @@ public class WorkerStatus {
      * Update task states
      * Check for lost tasks, update running/waiting tasks, and clean up finished tasks
      */
-    public List<Long> updateTaskStates(Map<String, TaskInfo> waitingTaskInfo, Map<String, TaskInfo> runningTaskInfo, Map<String, TaskInfo> finishedTaskInfo) {
-        List<Long> finishedRequestIds = new ArrayList<>();
+    public TaskStateUpdateResult updateTaskStates(Map<String, TaskInfo> waitingTaskInfo, Map<String, TaskInfo> runningTaskInfo, Map<String, TaskInfo> finishedTaskInfo) {
+        TaskStateUpdateResult result = new TaskStateUpdateResult();
         Iterator<Map.Entry<Long, TaskInfo>> iterator = localTaskMap.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<Long, TaskInfo> entry = iterator.next();
@@ -127,6 +127,7 @@ public class WorkerStatus {
             if (finishedTask != null) {
                 if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
                     localTask.updateTaskState(TaskStateEnum.CONFIRMED);
+                    result.confirmed.add(requestId);
                     Logger.debug("Task {} first confirmed by worker", requestId);
                 }
                 localTask.updateTaskState(TaskStateEnum.FINISHED);
@@ -137,7 +138,7 @@ public class WorkerStatus {
                 }
                 safeDecrementQueueTime(predictedQueueTimeMs, localTask.getPredictedMs());
                 Logger.debug("Task {} finished and removed", requestId);
-                finishedRequestIds.add(requestId);
+                result.finished.add(requestId);
                 iterator.remove();
                 continue;
             }
@@ -148,6 +149,7 @@ public class WorkerStatus {
 
                 if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
                     localTask.updateTaskState(TaskStateEnum.CONFIRMED);
+                    result.confirmed.add(requestId);
                     Logger.debug("Task {} first confirmed by worker", requestId);
                 }
                 if (localTask.getTaskState() != TaskStateEnum.RUNNING) {
@@ -171,6 +173,7 @@ public class WorkerStatus {
 
                 if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
                     localTask.updateTaskState(TaskStateEnum.CONFIRMED);
+                    result.confirmed.add(requestId);
                     Logger.debug("Task {} first confirmed by worker (waiting)", requestId);
                 }
 
@@ -184,10 +187,17 @@ public class WorkerStatus {
 
             if (localTask.getTaskState() == TaskStateEnum.CONFIRMED || localTask.getTaskState() == TaskStateEnum.RUNNING) {
                 localTask.updateTaskState(TaskStateEnum.LOST);
+                result.lost.add(requestId);
                 logger.warn("Task {} marked as LOST - not in waiting, running or finished list", requestId);
             }
         }
-        return finishedRequestIds;
+        return result;
+    }
+
+    public static class TaskStateUpdateResult {
+        public final List<Long> finished = new ArrayList<>();
+        public final List<Long> confirmed = new ArrayList<>();
+        public final List<Long> lost = new ArrayList<>();
     }
 
     /**

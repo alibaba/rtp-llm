@@ -137,8 +137,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 Map<String, TaskInfo> waitingTaskInfo = newWorkerStatus.getWaitingTaskInfo();
                 Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
                 Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
-                List<Long> finished = workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
-                notifyBatchSchedulerFinished(finished);
+                WorkerStatus.TaskStateUpdateResult taskResult = workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
+                notifyBatchScheduler(taskResult);
 
                 // Report success even when version is not updated
                 engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
@@ -166,8 +166,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setRunningTaskList(runningTaskInfo);
 
             // Update local task state (including checking lost, updating running, and cleaning completed)
-            List<Long> finished2 = workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
-            notifyBatchSchedulerFinished(finished2);
+            WorkerStatus.TaskStateUpdateResult taskResult2 = workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
+            notifyBatchScheduler(taskResult2);
 
             // Correct running queue total wait time
             workerStatus.updateRunningQueueTime();
@@ -191,9 +191,18 @@ public class GrpcWorkerStatusRunner implements Runnable {
         }
     }
 
-    private void notifyBatchSchedulerFinished(List<Long> finishedRequestIds) {
-        if (batchScheduler != null && finishedRequestIds != null && !finishedRequestIds.isEmpty()) {
-            batchScheduler.onRequestsFinished(finishedRequestIds);
+    private void notifyBatchScheduler(WorkerStatus.TaskStateUpdateResult result) {
+        if (batchScheduler == null || result == null) {
+            return;
+        }
+        if (!result.confirmed.isEmpty()) {
+            batchScheduler.onRequestsConfirmed(result.confirmed);
+        }
+        if (!result.lost.isEmpty()) {
+            batchScheduler.onRequestsLost(result.lost);
+        }
+        if (!result.finished.isEmpty()) {
+            batchScheduler.onRequestsFinished(result.finished);
         }
     }
 

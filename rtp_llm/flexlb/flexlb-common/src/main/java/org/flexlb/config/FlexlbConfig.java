@@ -209,6 +209,8 @@ public class FlexlbConfig {
      */
     private long flexlbBatchInflightTtlMs = 3600L * 1000L;
 
+    private long flexlbBatchConfirmTtlMs = 10000L;
+
     // ========== CostBasedPrefill Strategy Configuration ==========
 
     private long costSloMs = 500;

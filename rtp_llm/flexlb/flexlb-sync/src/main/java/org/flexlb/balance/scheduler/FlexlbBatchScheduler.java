@@ -159,14 +159,69 @@ public class FlexlbBatchScheduler {
         }
     }
 
-    @Scheduled(fixedRate = 60000L)
+    public void onRequestsConfirmed(List<Long> requestIds) {
+        if (requestIds == null || requestIds.isEmpty()) {
+            return;
+        }
+        for (Long requestId : requestIds) {
+            InflightEntry entry = inflight.get(requestId);
+            if (entry == null) continue;
+            synchronized (entry) {
+                if (entry.confirmState == ConfirmState.PENDING_CONFIRM) {
+                    entry.confirmState = ConfirmState.CONFIRMED;
+                    if (!entry.item.future.isDone()) {
+                        Response success = copyResponse(entry.item.routeResponse);
+                        success.setSuccess(true);
+                        success.setCode(200);
+                        success.setEnqueuedByMaster(true);
+                        entry.item.future.complete(success);
+                    }
+                }
+            }
+        }
+    }
+
+    public void onRequestsLost(List<Long> requestIds) {
+        if (requestIds == null || requestIds.isEmpty()) {
+            return;
+        }
+        for (Long requestId : requestIds) {
+            InflightEntry entry = inflight.remove(requestId);
+            if (entry == null) continue;
+            synchronized (entry) {
+                rollbackOnce(entry);
+                if (!entry.item.future.isDone()) {
+                    entry.item.future.completeExceptionally(
+                        new RuntimeException("Task LOST on worker " + entry.prefill.getServerIp()));
+                }
+            }
+        }
+    }
+
+    @Scheduled(fixedRate = 5000L)
     public void cleanupInflight() {
         long now = System.currentTimeMillis();
         long ttlMs = Math.max(1000L, configService.loadBalanceConfig().getFlexlbBatchInflightTtlMs());
+        long confirmTtlMs = Math.max(1000L, configService.loadBalanceConfig().getFlexlbBatchConfirmTtlMs());
         Iterator<Map.Entry<Long, InflightEntry>> iterator = inflight.entrySet().iterator();
         while (iterator.hasNext()) {
-            Map.Entry<Long, InflightEntry> entry = iterator.next();
-            if (now - entry.getValue().createdAtMs > ttlMs) {
+            Map.Entry<Long, InflightEntry> e = iterator.next();
+            InflightEntry entry = e.getValue();
+
+            if (entry.confirmState == ConfirmState.PENDING_CONFIRM
+                && entry.ackTimeMs > 0 && now - entry.ackTimeMs > confirmTtlMs) {
+                iterator.remove();
+                synchronized (entry) {
+                    rollbackOnce(entry);
+                    if (!entry.item.future.isDone()) {
+                        entry.item.future.completeExceptionally(
+                            new RuntimeException("Task not confirmed within " + confirmTtlMs + "ms on " + entry.prefill.getServerIp()));
+                    }
+                }
+                continue;
+            }
+
+            if (now - entry.createdAtMs > ttlMs) {
                 iterator.remove();
             }
         }
@@ -322,15 +377,12 @@ public class FlexlbBatchScheduler {
         boolean cancelAfterAck = false;
         synchronized (entry) {
             entry.ackFinished = true;
+            entry.ackTimeMs = System.currentTimeMillis();
             if (entry.cancelled.get()) {
                 cancelAfterAck = true;
-            } else if (!item.future.isDone()) {
-                Response success = copyResponse(item.routeResponse);
-                success.setSuccess(true);
-                success.setCode(200);
-                success.setEnqueuedByMaster(true);
-                item.future.complete(success);
-                Logger.debug("FlexLB batch enqueued request {} in batch {}", item.requestId(), batchId);
+            } else {
+                entry.confirmState = ConfirmState.PENDING_CONFIRM;
+                Logger.debug("FlexLB batch ACK success request {} in batch {}, awaiting worker confirm", item.requestId(), batchId);
             }
         }
 
@@ -801,6 +853,8 @@ public class FlexlbBatchScheduler {
         }
     }
 
+    private enum ConfirmState { PENDING_CONFIRM, CONFIRMED }
+
     private static final class InflightEntry {
         private final BatchItem item;
         private final ServerStatus prefill;
@@ -808,6 +862,8 @@ public class FlexlbBatchScheduler {
         private final AtomicBoolean cancelled = new AtomicBoolean(false);
         private final AtomicBoolean rolledBack = new AtomicBoolean(false);
         private boolean ackFinished;
+        private volatile ConfirmState confirmState = ConfirmState.PENDING_CONFIRM;
+        private long ackTimeMs;
 
         private InflightEntry(BatchItem item, ServerStatus prefill) {
             this.item = Objects.requireNonNull(item);
