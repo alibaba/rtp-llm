@@ -854,11 +854,11 @@ class IndexerFP8(PoolBackedModule):
                 owner_block_size = kv_eb
                 if (
                     self.compress_ratio > 0
-                    and self._state_tokens_per_block > 0
-                    and self._state_tokens_per_block % self.compress_ratio == 0
+                    and self._kv_owner_tokens_per_block > 0
+                    and self._kv_owner_tokens_per_block % self.compress_ratio == 0
                 ):
                     owner_block_size = (
-                        self._state_tokens_per_block // self.compress_ratio
+                        self._kv_owner_tokens_per_block // self.compress_ratio
                     )
                 indexer_cp_plan = asm.build_indexer_cp_chunk_plan(
                     cp_ctx=cp_ctx,

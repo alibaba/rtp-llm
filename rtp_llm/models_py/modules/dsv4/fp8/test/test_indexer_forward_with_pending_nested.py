@@ -53,6 +53,7 @@ def _make_indexer_stub(*, bind_pool: bool, device: torch.device) -> IndexerFP8:
         freqs_cis=None,
         start_prefill=MagicMock(name="compressor.start_prefill"),
         finish_prefill=MagicMock(name="compressor.finish_prefill"),
+        prepare_metadata=MagicMock(name="compressor.prepare_metadata"),
         set_pool_context=MagicMock(name="compressor.set_pool_context"),
         clear_pool_context=MagicMock(name="compressor.clear_pool_context"),
     )
@@ -164,6 +165,7 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
             ind._state_eb,
             state_tokens_per_block=ind._state_tokens_per_block,
             kv_tokens_per_block=ind._kv_tokens_per_block,
+            kv_owner_tokens_per_block=ind._kv_owner_tokens_per_block,
         )
         # start_prefill was called once with the right args (cp_gather_stream
         # forwarded verbatim — FIFO contract under MTP).
@@ -186,6 +188,60 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         ind.start_prefill_nested_compressor(x, sp_int=0, meta=meta)
 
         self.assertIs(ind.compressor.freqs_cis, ind.freqs_cis)
+
+    def test_prepare_cp_plan_uses_kv_owner_not_compact_state_block(self) -> None:
+        ind = _make_indexer_stub(bind_pool=True, device=self.device)
+        ind.freqs_cis = torch.zeros(8192, dtype=torch.float32, device=self.device)
+        ind._kv_eb = 32
+        ind._kv_owner_tokens_per_block = 256
+        ind._state_tokens_per_block = 2048
+        ind._state_block_table = None
+        ind._cp_ctx = SimpleNamespace(
+            cp_size=8,
+            cp_rank=0,
+            kv_cache_sharded=True,
+            input_lengths_global=torch.tensor([8188], dtype=torch.int32),
+            prefix_lengths=torch.tensor([0], dtype=torch.int64),
+        )
+        captured = {}
+
+        def fake_build_plan(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                total_local_T=256,
+                total_actual_local_T=256,
+                restore_indices=torch.arange(2047, dtype=torch.int64),
+            )
+
+        with (
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler.build_indexer_cp_chunk_plan",
+                side_effect=fake_build_plan,
+            ),
+            patch(
+                "rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler.build_actual_local_cu_kv_seqlens",
+                return_value=torch.tensor([0, 256], dtype=torch.int32),
+            ),
+        ):
+            meta = ind.prepare(
+                bsz=1,
+                seqlen=1024,
+                sp_int=0,
+                device=self.device,
+                kv_block_table=torch.ones(1, 8, dtype=torch.int32, device=self.device),
+                kv_eb=32,
+                use_varlen=True,
+                batch_size=1,
+                cu_seqlens=torch.tensor([0, 1024], dtype=torch.int32),
+                input_lengths=torch.tensor([1024], dtype=torch.int32),
+                prefix_lengths=torch.tensor([0], dtype=torch.int32),
+                position_ids=torch.arange(1024, dtype=torch.int32),
+                req_id_per_token=torch.zeros(1024, dtype=torch.int32),
+                has_prefix=False,
+            )
+
+        self.assertEqual(captured["owner_block_size"], 64)
+        self.assertIsNotNone(meta.indexer_cp_plan)
 
     def test_clear_pool_context_also_clears_nested_pool(self) -> None:
         ind = _make_indexer_stub(bind_pool=True, device=self.device)
