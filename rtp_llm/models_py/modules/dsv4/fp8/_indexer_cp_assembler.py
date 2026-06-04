@@ -78,9 +78,7 @@ def build_indexer_cp_chunk_plan(
     if owner_bs <= 0:
         raise ValueError(f"owner_block_size must be > 0, got {owner_bs}")
     per_req = per_req_total_kv_lens.to(device=device, dtype=torch.int64).contiguous()
-    local_lens = cp_padded_local_kv_lens(
-        per_req, cp_ctx.cp_size, owner_bs
-    ).contiguous()
+    local_lens = cp_padded_local_kv_lens(per_req, cp_ctx.cp_size, owner_bs).contiguous()
     actual_lens = cp_actual_owned_kv_lens(
         per_req, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
     ).contiguous()
@@ -169,13 +167,18 @@ def copy_actual_indexer_k_to_padded(
         return
 
     device = padded_k_quant.device
-    actual_lens = plan.per_req_actual_local_kv_lens.to(
-        device=device, dtype=torch.int64
-    )
+    if int(plan.per_req_actual_local_kv_lens.numel()) == 1:
+        padded_k_quant[:total_actual].copy_(actual_k_quant)
+        padded_k_scale[:total_actual].copy_(actual_k_scale)
+        return
+
+    actual_lens = plan.per_req_actual_local_kv_lens.to(device=device, dtype=torch.int64)
     padded_lens = plan.per_req_local_kv_lens.to(device=device, dtype=torch.int64)
     B = int(actual_lens.shape[0])
     req_ids = torch.repeat_interleave(
-        torch.arange(B, device=device, dtype=torch.int64), actual_lens
+        torch.arange(B, device=device, dtype=torch.int64),
+        actual_lens,
+        output_size=total_actual,
     )
 
     actual_cu = torch.zeros(B, dtype=torch.int64, device=device)
@@ -183,10 +186,9 @@ def copy_actual_indexer_k_to_padded(
     if B > 1:
         actual_cu[1:] = torch.cumsum(actual_lens[:-1], dim=0)
         padded_cu[1:] = torch.cumsum(padded_lens[:-1], dim=0)
-    in_req_pos = (
-        torch.arange(total_actual, device=device, dtype=torch.int64)
-        - actual_cu.index_select(0, req_ids)
-    )
+    in_req_pos = torch.arange(
+        total_actual, device=device, dtype=torch.int64
+    ) - actual_cu.index_select(0, req_ids)
     dst_idx = padded_cu.index_select(0, req_ids) + in_req_pos
     padded_k_quant.view(torch.uint8).index_copy_(
         0, dst_idx, actual_k_quant.view(torch.uint8)
