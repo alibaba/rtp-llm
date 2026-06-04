@@ -49,6 +49,7 @@ struct KVCache {
     // Per-layer attention type (CacheGroupType::FULL or LINEAR).
     std::vector<rtp_llm::CacheGroupType>    layer_group_types;
     std::vector<rtp_llm::KVCacheRegionName> group_region_names;
+    std::vector<int>                        group_seq_size_per_block;
     std::vector<std::vector<int>>           layer_region_to_group_id;
     std::vector<std::vector<torch::Tensor>> kv_cache_base_by_layer_region;
     std::vector<std::vector<torch::Tensor>> kv_scale_base_by_layer_region;
@@ -133,6 +134,14 @@ struct KVCache {
         return layer_cache;
     }
 
+    int groupSeqSizePerBlock(int group_id) const {
+        if (group_id >= 0 && static_cast<size_t>(group_id) < group_seq_size_per_block.size()
+            && group_seq_size_per_block[static_cast<size_t>(group_id)] > 0) {
+            return group_seq_size_per_block[static_cast<size_t>(group_id)];
+        }
+        return seq_size_per_block;
+    }
+
     LayerKVCache getLayerCache(int idx, rtp_llm::KVCacheRegionName region_name) {
         if (region_name == rtp_llm::KVCacheRegionName::DEFAULT || kv_cache_base_by_layer_region.empty()) {
             auto layer_cache        = getLayerCache(idx);
@@ -167,7 +176,8 @@ struct KVCache {
         layer_cache.region_name   = region_name;
         const bool is_full_region = !rtp_llm::isDsv4FixedRegion(region_name);
         layer_cache.seq_size_per_block =
-            is_full_region && kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : seq_size_per_block;
+            is_full_region && kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block :
+                                                              groupSeqSizePerBlock(layer_cache.group_id);
         layer_cache.kv_cache_base = base;
         if (!kv_scale_base_by_layer_region.empty() && layer < kv_scale_base_by_layer_region.size()
             && attn < kv_scale_base_by_layer_region[layer].size()) {

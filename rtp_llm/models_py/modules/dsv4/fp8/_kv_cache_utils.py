@@ -55,6 +55,26 @@ def _region_for_group_or_region(
     return int(group_region_names[group])
 
 
+def _group_for_region(kv_cache: Any, region: int) -> Optional[int]:
+    group_region_names = getattr(kv_cache, "group_region_names", None)
+    if not group_region_names:
+        return None
+    region = int(region)
+    for gid, group_region in enumerate(group_region_names):
+        if int(group_region) == region:
+            return gid
+    return None
+
+
+def _group_tokens_per_block(kv_cache: Any, group: Optional[int]) -> Optional[int]:
+    if group is None:
+        return None
+    group_sizes = getattr(kv_cache, "group_seq_size_per_block", None)
+    if not group_sizes or group < 0 or group >= len(group_sizes):
+        return None
+    return _positive_int(group_sizes[group])
+
+
 def require_pool_tokens_per_block(
     kv_cache: Any,
     group: Optional[int] = None,
@@ -69,6 +89,12 @@ def require_pool_tokens_per_block(
     """
     region_id = _region_for_group_or_region(kv_cache, group=group, region=region)
     if region_id in _PHYSICAL_ROW_REGIONS:
+        value = _group_tokens_per_block(
+            kv_cache,
+            group if group is not None else _group_for_region(kv_cache, int(region_id)),
+        )
+        if value is not None:
+            return value
         value = _positive_int(getattr(kv_cache, "seq_size_per_block", None))
         if value is not None:
             return value
@@ -98,6 +124,7 @@ class PoolBackedModule(nn.Module):
         self._kv_block_table: Optional[torch.Tensor] = None
         self._kv_eb: int = 0
         self._kv_tokens_per_block: int = 0
+        self._kv_owner_tokens_per_block: int = 0
 
         self._state_pool_3d: Optional[torch.Tensor] = None
         self._state_block_table: Optional[torch.Tensor] = None
@@ -114,6 +141,7 @@ class PoolBackedModule(nn.Module):
         state_eb: int,
         state_tokens_per_block: int,
         kv_tokens_per_block: int,
+        kv_owner_tokens_per_block: int = 0,
     ) -> None:
         """Install framework pool views.
 
@@ -125,6 +153,9 @@ class PoolBackedModule(nn.Module):
         ``kv_eb`` is the KV pool's flat entries-per-block multiplier.
         ``kv_tokens_per_block`` is the raw-token coverage of one KV block-table
         row.
+        ``kv_owner_tokens_per_block`` is the raw-token coverage used for CP
+        page ownership. It can differ from both KV kernel rows and fixed/SWA
+        rows when fixed/SWA rows are compacted by cp_size.
 
         ``state_tokens_per_block`` is the raw-token coverage of one state-pool
         block-table row. It is decoupled from ``state_eb`` because state pools
@@ -142,6 +173,9 @@ class PoolBackedModule(nn.Module):
         self._kv_block_table = kv_block_table
         self._kv_eb = kv_eb
         self._kv_tokens_per_block = kv_tokens_per_block
+        self._kv_owner_tokens_per_block = (
+            kv_owner_tokens_per_block if kv_owner_tokens_per_block > 0 else kv_tokens_per_block
+        )
 
         if state_pool_view is not None:
             assert state_eb > 0 and state_tokens_per_block > 0, (
@@ -178,6 +212,7 @@ class PoolBackedModule(nn.Module):
         self._kv_block_table = None
         self._kv_eb = 0
         self._kv_tokens_per_block = 0
+        self._kv_owner_tokens_per_block = 0
 
         self._state_pool_3d = None
         self._state_block_table = None
