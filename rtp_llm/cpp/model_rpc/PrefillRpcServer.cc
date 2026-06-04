@@ -815,6 +815,10 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     alloc_request.set_request_id(prefill_context.request_id);
     // TODO(xinfei.sxf) reduce copy
     GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
+    new_request->clear_batch_group_size();
+    new_request->clear_batch_group_id();
+    new_request->mutable_generate_config()->clear_force_batch();
+    new_request->mutable_generate_config()->clear_batch_group_timeout();
     alloc_request.set_allocated_input(new_request);
     for (auto& addrs : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(addrs);
