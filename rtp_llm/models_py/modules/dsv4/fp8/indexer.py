@@ -427,8 +427,9 @@ class IndexerFP8(PoolBackedModule):
 
         from rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler import (
             assemble_indexer_k,
+            build_actual_local_cu_kv_seqlens,
             build_indexer_cp_chunk_plan,
-            build_local_cu_kv_seqlens,
+            copy_actual_indexer_k_to_padded,
         )
 
         cu = attention_inputs.cu_kv_seqlens.to(torch.int64)
@@ -447,24 +448,42 @@ class IndexerFP8(PoolBackedModule):
             device=k_quant_flat.device,
             owner_block_size=owner_block_size,
         )
-        local_cu = build_local_cu_kv_seqlens(plan)
-        local_q = torch.empty(
+        actual_cu = build_actual_local_cu_kv_seqlens(plan)
+        local_q = torch.zeros(
             (plan.total_local_T, k_quant_flat.shape[-1]),
             dtype=k_quant_flat.dtype,
             device=k_quant_flat.device,
         )
-        local_s = torch.empty(
+        local_s = torch.zeros(
             (plan.total_local_T, k_scale_buf.shape[-1]),
             dtype=k_scale_buf.dtype,
             device=k_scale_buf.device,
         )
-        rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-            self._kv_pool_view,
-            local_q,
-            local_s,
-            attention_inputs.block_table_i32,
-            local_cu,
-        )
+        if plan.total_actual_local_T > 0:
+            actual_q = torch.empty(
+                (plan.total_actual_local_T, k_quant_flat.shape[-1]),
+                dtype=k_quant_flat.dtype,
+                device=k_quant_flat.device,
+            )
+            actual_s = torch.empty(
+                (plan.total_actual_local_T, k_scale_buf.shape[-1]),
+                dtype=k_scale_buf.dtype,
+                device=k_scale_buf.device,
+            )
+            rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                self._kv_pool_view,
+                actual_q,
+                actual_s,
+                attention_inputs.block_table_i32,
+                actual_cu,
+            )
+            copy_actual_indexer_k_to_padded(
+                plan=plan,
+                actual_k_quant=actual_q,
+                actual_k_scale=actual_s,
+                padded_k_quant=local_q,
+                padded_k_scale=local_s,
+            )
         assemble_indexer_k(
             plan=plan,
             local_k_quant=local_q,
