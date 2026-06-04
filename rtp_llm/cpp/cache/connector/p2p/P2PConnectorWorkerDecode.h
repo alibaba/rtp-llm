@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/AsymmetricTpUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/DecodeTargetWriteLease.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheReceiver.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <atomic>
@@ -34,6 +35,11 @@ public:
 
     bool cancelRead(const std::string& unique_key);
 
+    // Query the local lease state for a given unique_key (called by QUERY_LEASE_STATUS handler).
+    // Returns false if no lease is found (lease already cleaned up = transfers done).
+    bool
+    queryLeaseStatus(const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped);
+
 private:
     int calculateRecvPartitionCount(int remote_tp_size) const;
 
@@ -42,6 +48,7 @@ private:
         std::vector<std::string>                   partition_keys;
         std::vector<transfer::IKVCacheRecvTaskPtr> tasks;
         std::atomic<bool>                          cancelled{false};
+        std::shared_ptr<DecodeTargetWriteLease>    lease;
     };
 
     enum class ReadWaitOutcome {
@@ -82,6 +89,15 @@ private:
 
     mutable std::mutex                                              read_tasks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<ReadTaskGroup>> read_tasks_;
+
+    // Leases kept alive after read() returns (for TRANSFER_NOT_DONE path) until all ops finish.
+    // Keyed by unique_key. Cleaned up lazily when polled via queryLeaseStatus.
+    struct LeaseMapEntry {
+        std::shared_ptr<ReadTaskGroup> task_group;
+        int                            finish_counted{0};  // how many tasks have been counted as finished so far
+    };
+    mutable std::mutex                             lease_map_mutex_;
+    std::unordered_map<std::string, LeaseMapEntry> lease_map_;
 };
 
 }  // namespace rtp_llm

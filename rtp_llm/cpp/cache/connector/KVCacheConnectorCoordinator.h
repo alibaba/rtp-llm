@@ -81,7 +81,11 @@ private:
     void                                    updateOnce();
     void                                    processReadContexts();
     void                                    processWriteContexts();
-    void asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext> fused_read_context);
+    // Takes a snapshot of connectors so callers running outside update_mutex_ stay
+    // safe against the destructor's connectors_.clear() — the snapshot's shared_ptrs
+    // keep each connector alive through the slow gRPC path inside this call.
+    void asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext>                fused_read_context,
+                             const std::vector<std::shared_ptr<KVCacheConnector>>& connectors_snapshot);
 
     bool isPdInvertMode() const;
 

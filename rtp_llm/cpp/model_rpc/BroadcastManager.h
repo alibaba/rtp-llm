@@ -80,21 +80,25 @@ public:
                     continue;
                 }
                 if (!ok) {
-                    RTP_LLM_FAIL("broadcast rpc cq failed, rank=%d status=%d", rank, static_cast<int>(next_status));
+                    RTP_LLM_LOG_WARNING("broadcast rpc cq failed, rank=%d status=%d", rank, static_cast<int>(next_status));
+                    ++finished_count_;
+                    finished_[rank]           = true;
+                    grpc_status_failure_seen_ = true;
+                    continue;
                 }
                 ++finished_count_;
                 finished_[rank] = true;
 
                 const auto& status = ctx->status;
                 if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
-                    RTP_LLM_FAIL("broadcast rpc timeout, timeout_ms=%d rank=%d err=%d(%s) addr=%s",
-                                 ctx->timeout_ms,
-                                 rank,
-                                 status.error_code(),
-                                 status.error_message().c_str(),
-                                 ctx->server_addr.c_str());
-                }
-                if (!status.ok()) {
+                    RTP_LLM_LOG_WARNING("broadcast rpc timeout, timeout_ms=%d rank=%d err=%d(%s) addr=%s",
+                                        ctx->timeout_ms,
+                                        rank,
+                                        status.error_code(),
+                                        status.error_message().c_str(),
+                                        ctx->server_addr.c_str());
+                    grpc_status_failure_seen_ = true;
+                } else if (!status.ok()) {
                     RTP_LLM_LOG_WARNING("broadcast rpc failed, rank=%d err=%d(%s) addr=%s",
                                         rank,
                                         status.error_code(),
@@ -172,6 +176,11 @@ public:
         std::vector<std::shared_ptr<CtxT>> contexts(worker_size);
         const auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
 
+        // [PD-DIAG] track total getConnection time across all workers — when one
+        // peer's channel is in TRANSIENT_FAILURE this loop can serialize behind
+        // RpcPool's mutex and the entire broadcast appears slow.
+        const auto t_get_conn_start = std::chrono::steady_clock::now();
+
         for (int rank = 0; rank < worker_size; ++rank) {
             const auto& addr        = worker_addrs_[rank];
             auto        conn_status = rpc_pool_->getConnection(addr);
@@ -188,6 +197,16 @@ public:
             ctx->timeout_ms     = timeout_ms;
             ctx->client_context = std::make_shared<grpc::ClientContext>();
             ctx->client_context->set_deadline(deadline);
+        }
+
+        const auto get_conn_loop_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                          std::chrono::steady_clock::now() - t_get_conn_start)
+                                          .count();
+        if (get_conn_loop_us >= 100 * 1000) {
+            RTP_LLM_LOG_WARNING(
+                "[PD-DIAG] BroadcastManager::broadcast slow getConnection loop, worker_count=%zu, total_us=%lld",
+                worker_size,
+                (long long)get_conn_loop_us);
         }
 
         for (int rank = 0; rank < worker_size; ++rank) {

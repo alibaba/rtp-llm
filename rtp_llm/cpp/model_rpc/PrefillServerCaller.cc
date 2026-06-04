@@ -128,8 +128,16 @@ grpc::Status PrefillServerCaller::callPrefill(grpc::ServerContext*              
 grpc::Status PrefillServerCaller::callPrefill(grpc::ServerContext*                   server_context,
                                               const GenerateInputPB*                 request,
                                               grpc::ServerWriter<GenerateOutputsPB>* response_writer,
+                                              const std::string&                     target_addr) {
+    return callPrefillToAddr(server_context, request, response_writer, target_addr, [server_context]() {
+        return server_context && server_context->IsCancelled();
+    });
+}
+
+grpc::Status PrefillServerCaller::callPrefill(grpc::ServerContext*                   server_context,
+                                              const GenerateInputPB*                 request,
+                                              grpc::ServerWriter<GenerateOutputsPB>* response_writer,
                                               const std::function<bool()>&           is_cancelled) {
-    // 从 request 的 role_addrs 中获取 PREFILL 角色的地址
     std::string prefill_addr;
     for (const auto& role_addr : request->generate_config().role_addrs()) {
         if (role_addr.role() == RoleAddrPB::PREFILL) {
@@ -141,7 +149,14 @@ grpc::Status PrefillServerCaller::callPrefill(grpc::ServerContext*              
         RTP_LLM_LOG_WARNING("request [%lld] no prefill server address found in role_addrs", request->request_id());
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "no prefill server address found in role_addrs");
     }
+    return callPrefillToAddr(server_context, request, response_writer, prefill_addr, is_cancelled);
+}
 
+grpc::Status PrefillServerCaller::callPrefillToAddr(grpc::ServerContext*                   server_context,
+                                                    const GenerateInputPB*                 request,
+                                                    grpc::ServerWriter<GenerateOutputsPB>* response_writer,
+                                                    const std::string&                     prefill_addr,
+                                                    const std::function<bool()>&           is_cancelled) {
     auto connect_status = rpc_pool_->getConnection(prefill_addr);
     if (!connect_status.ok()) {
         RTP_LLM_LOG_WARNING("request [%lld] get grpc connection to prefill server %s failed",
@@ -205,21 +220,21 @@ grpc::Status PrefillServerCaller::callPrefill(grpc::ServerContext*              
     return status;
 }
 
-int PrefillServerCaller::getPrefillTpSize(const std::string& ip, uint32_t port, int32_t request_timeout_ms) {
+PrefillPeerInfo PrefillServerCaller::getPrefillPeerInfo(const std::string& ip, uint32_t port, int32_t request_timeout_ms) {
     std::string addr = ip + ":" + std::to_string(port);
 
     {
-        std::shared_lock<std::shared_mutex> lock(prefill_tp_cache_mutex_);
-        auto                                it = prefill_tp_cache_.find(addr);
-        if (it != prefill_tp_cache_.end()) {
+        std::shared_lock<std::shared_mutex> lock(prefill_peer_cache_mutex_);
+        auto                                it = prefill_peer_cache_.find(addr);
+        if (it != prefill_peer_cache_.end()) {
             return it->second;
         }
     }
 
     auto conn = rpc_pool_->getConnection(addr);
     if (!conn.ok()) {
-        RTP_LLM_LOG_WARNING("getPrefillTpSize: getConnection failed for %s", addr.c_str());
-        return -1;
+        RTP_LLM_LOG_WARNING("getPrefillPeerInfo: getConnection failed for %s", addr.c_str());
+        return {};
     }
 
     grpc::ClientContext ctx;
@@ -233,23 +248,45 @@ int PrefillServerCaller::getPrefillTpSize(const std::string& ip, uint32_t port, 
 
     if (!status.ok()) {
         RTP_LLM_LOG_ERROR(
-            "getPrefillTpSize: GetPeerInfo RPC failed for %s: %s", addr.c_str(), status.error_message().c_str());
-        return -1;
+            "getPrefillPeerInfo: GetPeerInfo RPC failed for %s: %s", addr.c_str(), status.error_message().c_str());
+        return {};
     }
 
-    int tp_size = response.tp_size();
-    if (tp_size <= 0) {
-        RTP_LLM_LOG_ERROR("getPrefillTpSize: invalid tp_size=%d from %s", tp_size, addr.c_str());
-        return -1;
+    PrefillPeerInfo info;
+    info.tp_size = response.tp_size();
+    if (info.tp_size <= 0) {
+        RTP_LLM_LOG_ERROR("getPrefillPeerInfo: invalid tp_size=%d from %s", info.tp_size, addr.c_str());
+        return {};
     }
 
-    RTP_LLM_LOG_INFO("getPrefillTpSize: prefill %s tp_size=%d", addr.c_str(), tp_size);
+    for (const auto& dp_addr : response.dp_grpc_addrs()) {
+        info.dp_addrs.push_back(dp_addr);
+    }
+    if (info.dp_addrs.empty()) {
+        info.dp_addrs.push_back(addr);
+    }
+
+    RTP_LLM_LOG_INFO("getPrefillPeerInfo: prefill %s tp_size=%d, dp_addrs=[%s]",
+                      addr.c_str(),
+                      info.tp_size,
+                      [&]() {
+                          std::string s;
+                          for (size_t i = 0; i < info.dp_addrs.size(); ++i) {
+                              if (i > 0) s += ", ";
+                              s += info.dp_addrs[i];
+                          }
+                          return s;
+                      }().c_str());
 
     {
-        std::unique_lock<std::shared_mutex> lock(prefill_tp_cache_mutex_);
-        prefill_tp_cache_[addr] = tp_size;
+        std::unique_lock<std::shared_mutex> lock(prefill_peer_cache_mutex_);
+        prefill_peer_cache_[addr] = info;
     }
-    return tp_size;
+    return info;
+}
+
+int PrefillServerCaller::getPrefillTpSize(const std::string& ip, uint32_t port, int32_t request_timeout_ms) {
+    return getPrefillPeerInfo(ip, port, request_timeout_ms).tp_size;
 }
 
 }  // namespace rtp_llm

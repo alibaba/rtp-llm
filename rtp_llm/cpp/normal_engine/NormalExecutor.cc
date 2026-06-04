@@ -176,7 +176,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
 
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
-        cudaSyncAndCheck();
+        cudaCurrentStreamSyncAndCheck();
         model_->releaseBuffers();
         return absl::OkStatus();
     }

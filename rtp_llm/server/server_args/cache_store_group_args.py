@@ -178,3 +178,27 @@ def init_cache_store_group_args(parser, cache_store_config):
         default=100,
         help="P2P TCP 控制面 ANetRPCServer queueNum。",
     )
+    cache_store_group.add_argument(
+        "--cache_store_tcp_worker_queue_size",
+        env_name="CACHE_STORE_TCP_WORKER_QUEUE_SIZE",
+        bind_to=(cache_store_config, "cache_store_tcp_worker_queue_size"),
+        type=int,
+        default=500,
+        help="P2P TCP/RDMA 控制面 worker 线程池（tcp_server_rpc_threadpool）队列深度，默认 500。",
+    )
+    cache_store_group.add_argument(
+        "--rdma_transfer_worker_thread_count",
+        env_name="RDMA_TRANSFER_WORKER_THREAD_COUNT",
+        bind_to=(cache_store_config, "rdma_transfer_worker_thread_count"),
+        type=int,
+        default=16,
+        help="RDMA 传输 worker 线程池（RdmaTransferServiceWorker）线程数，默认 16。",
+    )
+    cache_store_group.add_argument(
+        "--rdma_transfer_worker_queue_size",
+        env_name="RDMA_TRANSFER_WORKER_QUEUE_SIZE",
+        bind_to=(cache_store_config, "rdma_transfer_worker_queue_size"),
+        type=int,
+        default=100,
+        help="RDMA 传输 worker 线程池（RdmaTransferServiceWorker）队列深度，默认 100。",
+    )

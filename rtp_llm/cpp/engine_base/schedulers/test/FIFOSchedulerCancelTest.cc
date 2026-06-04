@@ -5,6 +5,8 @@
 #include <thread>
 #include <vector>
 #include "torch/all.h"
+#include "gmock/gmock-actions.h"
+#include "gmock/gmock-function-mocker.h"
 #include "gtest/gtest.h"
 
 #define private public
@@ -16,11 +18,17 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/test/mock/MockAsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorCoordinator.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 using namespace std;
+using testing::_;
+using testing::NiceMock;
+using testing::Return;
 
 namespace rtp_llm {
 
@@ -36,11 +44,21 @@ protected:
         ASSERT_TRUE(cache_manager_->init());
     }
 
-    std::shared_ptr<FIFOScheduler> createScheduler() {
+    void setupMockCoordinator() {
+        mock_coord_ = std::make_shared<NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                                  cache_manager_->kv_cache_config_,
+                                                                                  cache_manager_->runtime_config_,
+                                                                                  cache_manager_->allocator_,
+                                                                                  nullptr);
+        ON_CALL(*mock_coord_, hasActiveConnectors()).WillByDefault(Return(true));
+        cache_manager_->coordinator_ = mock_coord_;
+    }
+
+    std::shared_ptr<FIFOScheduler> createScheduler(int max_generate_batch_size = 100) {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
-        runtime_config.max_generate_batch_size                     = 100;
+        runtime_config.max_generate_batch_size                     = max_generate_batch_size;
         runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
         PDSepConfig         pd_sep_config;
         ParallelismConfig   parallelism_config;
@@ -49,9 +67,13 @@ protected:
             runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
     }
 
-    GenerateStreamPtr createStream(const std::vector<int>& input_tokens = {1, 2, 3}) {
+    GenerateStreamPtr createStream(const std::vector<int>& input_tokens        = {1, 2, 3},
+                                   bool                    reuse_cache         = false,
+                                   bool                    enable_memory_cache = false) {
         ResourceContext resource_context;
-        resource_context.cache_manager = cache_manager_;
+        resource_context.cache_manager       = cache_manager_;
+        resource_context.reuse_cache         = reuse_cache;
+        resource_context.enable_memory_cache = enable_memory_cache;
 
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
@@ -60,8 +82,17 @@ protected:
         auto query             = std::make_shared<GenerateInput>();
         auto generate_config   = std::make_shared<GenerateConfig>();
         query->input_ids       = torch::tensor(input_tokens, torch::kInt32);
+        generate_config->reuse_cache         = reuse_cache;
+        generate_config->enable_memory_cache = enable_memory_cache;
         query->generate_config = generate_config;
         return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    }
+
+    std::shared_ptr<MockAsyncContext> createPendingAsyncContext() {
+        auto ctx = std::make_shared<NiceMock<MockAsyncContext>>();
+        ON_CALL(*ctx, done()).WillByDefault(Return(false));
+        ON_CALL(*ctx, success()).WillByDefault(Return(false));
+        return ctx;
     }
 
     size_t initialFreeBlocks() const {
@@ -86,9 +117,10 @@ protected:
     }
 
 protected:
-    autil::EnvGuard                 perf_scope;
-    CacheConfig                     cache_config_;
-    std::shared_ptr<KVCacheManager> cache_manager_;
+    autil::EnvGuard                                            perf_scope;
+    CacheConfig                                                cache_config_;
+    std::shared_ptr<KVCacheManager>                            cache_manager_;
+    std::shared_ptr<NiceMock<MockKVCacheConnectorCoordinator>> mock_coord_;
 };
 
 // ============================================================================
@@ -417,6 +449,93 @@ TEST_F(FIFOSchedulerCancelTest, MixedCancelAndNormalCompletion) {
     ASSERT_TRUE(stream_err->hasError());
     ASSERT_EQ(stream_err->stopReason(), "cancelled");
     // All resources released
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), free_before);
+}
+
+// ============================================================================
+// 11. Cancel in LOADING_CACHE must finish on the next schedule round even if
+//     async load is still pending.
+// ============================================================================
+TEST_F(FIFOSchedulerCancelTest, CancelWhileLoadingCacheExitsOnNextSchedule) {
+    setupMockCoordinator();
+    auto pending_ctx = createPendingAsyncContext();
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
+
+    auto scheduler   = createScheduler();
+    auto stream      = createStream({1, 2, 3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto free_before = initialFreeBlocks();
+
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+
+    auto result1 = scheduler->schedule();
+    ASSERT_TRUE(result1.ok());
+    ASSERT_EQ(result1.value().size(), 0);
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler->runningStreamsSize(), 0);
+    ASSERT_LT(cache_manager_->freeBlocksNum(), free_before);
+
+    stream->reportError(ErrorCode::CANCELLED, "cancel while loading");
+
+    auto result2 = scheduler->schedule();
+    ASSERT_TRUE(result2.ok());
+    ASSERT_EQ(result2.value().size(), 0);
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 0);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler->runningStreamsSize(), 0);
+    ASSERT_TRUE(stream->isFinished());
+    ASSERT_TRUE(stream->hasError());
+    ASSERT_EQ(stream->stopReason(), "cancel while loading");
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), free_before);
+}
+
+// ============================================================================
+// 12. One cancel sweep should drain every scheduler queue on the next round:
+//     WAITING, LOADING_CACHE, and RUNNING.
+// ============================================================================
+TEST_F(FIFOSchedulerCancelTest, CancelAcrossAllSchedulerQueuesExitsOnNextSchedule) {
+    setupMockCoordinator();
+    auto pending_ctx = createPendingAsyncContext();
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
+
+    auto scheduler      = createScheduler(/*max_generate_batch_size=*/2);
+    auto running_stream = createStream({1, 2, 3});
+    auto loading_stream = createStream({4, 5, 6}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto waiting_stream = createStream({7, 8, 9});
+    auto free_before    = initialFreeBlocks();
+
+    ASSERT_TRUE(scheduler->enqueue(running_stream).ok());
+    ASSERT_TRUE(scheduler->enqueue(loading_stream).ok());
+    ASSERT_TRUE(scheduler->enqueue(waiting_stream).ok());
+
+    auto result1 = scheduler->schedule();
+    ASSERT_TRUE(result1.ok());
+    ASSERT_EQ(result1.value().size(), 1);
+    ASSERT_EQ(running_stream->getStatus(), StreamState::RUNNING);
+    ASSERT_EQ(loading_stream->getStatus(), StreamState::LOADING_CACHE);
+    ASSERT_EQ(waiting_stream->getStatus(), StreamState::WAITING);
+    ASSERT_EQ(scheduler->runningStreamsSize(), 1);
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
+    ASSERT_LT(cache_manager_->freeBlocksNum(), free_before);
+
+    running_stream->reportError(ErrorCode::CANCELLED, "cancel running");
+    loading_stream->reportError(ErrorCode::CANCELLED, "cancel loading");
+    waiting_stream->reportError(ErrorCode::CANCELLED, "cancel waiting");
+
+    auto result2 = scheduler->schedule();
+    ASSERT_TRUE(result2.ok());
+    ASSERT_EQ(result2.value().size(), 0);
+    ASSERT_EQ(scheduler->runningStreamsSize(), 0);
+    ASSERT_EQ(scheduler->loading_cache_streams_.size(), 0);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
+    ASSERT_TRUE(running_stream->isFinished());
+    ASSERT_TRUE(loading_stream->isFinished());
+    ASSERT_TRUE(waiting_stream->isFinished());
+    ASSERT_EQ(running_stream->stopReason(), "cancel running");
+    ASSERT_EQ(loading_stream->stopReason(), "cancel loading");
+    ASSERT_EQ(waiting_stream->stopReason(), "cancel waiting");
     ASSERT_EQ(cache_manager_->freeBlocksNum(), free_before);
 }
 

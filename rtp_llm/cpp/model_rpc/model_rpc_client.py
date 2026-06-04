@@ -513,6 +513,13 @@ class ModelRpcClient(object):
                 raise FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, e.details())
             elif e.code() == StatusCode.CANCELLED:
                 raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
+            elif e.code() == StatusCode.RESOURCE_EXHAUSTED:
+                # transErrorCodeToGrpc maps only MALLOC_FAILED / DECODE_MALLOC_FAILED
+                # to RESOURCE_EXHAUSTED, so reversing it back to MALLOC_ERROR is
+                # unambiguous. Needed so prefill's LACK MEM surfaces as
+                # 602_MALLOC_ERROR in the frontend error_qps metric rather than
+                # collapsing to UNKNOWN_ERROR when grpc-status-details-bin is missing.
+                raise FtRuntimeException(ExceptionType.MALLOC_ERROR, e.details())
             else:
                 raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
 

@@ -40,6 +40,12 @@ public:
     // Reject inputs longer than the KV cache can hold; mark the stream errored so the caller
     // sees the failure via collectStreamOutput / pollStreamOutput. Mirrors FIFOScheduler.
     bool checkInputLength(const GenerateStreamPtr& stream) {
+        if (stream->inputLength() > static_cast<int>(stream->maxSeqLen())) {
+            stream->reportError(ErrorCode::LONG_PROMPT_ERROR,
+                                "input len " + std::to_string(stream->inputLength()) + " exceeds max_seq_len "
+                                    + std::to_string(stream->maxSeqLen()));
+            return false;
+        }
         if (cache_manager_ && stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
             stream->reportError(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
                                 "input len " + std::to_string(stream->inputLength())
@@ -57,6 +63,9 @@ public:
         {
             std::lock_guard<std::mutex> lock(lock_);
             waiting_streams_.emplace_back(stream);
+            RTP_LLM_LOG_INFO("[PD-DIAG] BatchDecodeScheduler::enqueue stream [%ld], waiting_size=%zu",
+                              stream->streamId(),
+                              waiting_streams_.size());
             if (waiting_streams_.size() % 16 == 0) {
                 RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::enqueue: waiting_streams_.size() = %d",
                                   waiting_streams_.size());
@@ -99,6 +108,13 @@ public:
 
     // 根据状态机转移后的目标状态，将 stream 路由到对应的队列
     void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state) {
+        RTP_LLM_LOG_INFO("[PD-DIAG] BatchDecodeScheduler stream [%ld] -> state %d, "
+                          "queues: waiting=%zu loading=%zu running=%zu",
+                          stream->streamId(),
+                          static_cast<int>(new_state),
+                          waiting_streams_.size(),
+                          loading_cache_streams_.size(),
+                          running_streams_.size());
         switch (new_state) {
             case StreamState::WAITING:
                 waiting_streams_.push_back(stream);
@@ -150,10 +166,19 @@ public:
         if (new_streams.size() >= batch_size_) {
             for (auto& stream : new_streams) {
                 stream->reportEvent(StreamEvents::CanRun);
+                RTP_LLM_LOG_INFO("[PD-DIAG] BatchDecodeScheduler stream [%ld] busy-wait loadCache start",
+                                  stream->streamId());
+                auto busy_wait_start = autil::TimeUtility::currentTimeInMicroSeconds();
                 // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
                 while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
+                auto busy_wait_us = autil::TimeUtility::currentTimeInMicroSeconds() - busy_wait_start;
+                RTP_LLM_LOG_INFO("[PD-DIAG] BatchDecodeScheduler stream [%ld] busy-wait loadCache done, "
+                                  "took %ld us, final_state=%d",
+                                  stream->streamId(),
+                                  busy_wait_us,
+                                  static_cast<int>(stream->getStatus()));
             }
             // 过滤 FINISHED stream，仅将 RUNNING stream 加入 running_streams_
             new_streams.remove_if([](const auto& s) { return s->getStatus() == StreamState::FINISHED; });
@@ -190,11 +215,14 @@ public:
                    || !loading_cache_streams_.empty();
         });
 
+        auto schedule_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+
         // 统一通过状态机驱动各队列中 stream 的状态转移
         // LOADING_CACHE -> DONE/WAITING: error / load cache done
         evaluateAndUpdateStreams(loading_cache_streams_);
         evaluateAndUpdateStreams(running_streams_);
 
+        size_t prev_running = running_streams_.size();
         if (running_streams_.empty() && waiting_streams_.size() >= batch_size_) {
             evaluateWaitingStreams();
             if (!running_streams_.empty()) {
@@ -202,6 +230,17 @@ public:
                 RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run",
                                  running_streams_.size());
             }
+        }
+
+        auto schedule_elapsed_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_start_us;
+        if (schedule_elapsed_us > 5000 || running_streams_.size() != prev_running) {
+            RTP_LLM_LOG_INFO("[PD-DIAG] BatchDecodeScheduler::schedule round took %ld us, "
+                              "waiting=%zu loading_cache=%zu running: %zu->%zu",
+                              schedule_elapsed_us,
+                              waiting_streams_.size(),
+                              loading_cache_streams_.size(),
+                              prev_running,
+                              running_streams_.size());
         }
 
         return running_streams_;

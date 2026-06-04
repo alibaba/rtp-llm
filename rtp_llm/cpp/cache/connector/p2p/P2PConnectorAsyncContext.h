@@ -58,6 +58,11 @@ public:
     bool needCancel() const;
     void cancel(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
 
+    // Called periodically by the checker when transfer_not_done hold is active.
+    // Broadcasts QUERY_LEASE_STATUS to all TP workers and sets lease_all_ranks_stopped_
+    // once all ranks confirm their transfers have finished.
+    void pollLeaseIfNeeded(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
+
     std::string uniqueKey() const {
         return tp_sync_result_ ? tp_sync_result_->uniqueKey() : "";
     }
@@ -100,6 +105,12 @@ private:
     std::atomic<bool>       transfer_not_done_hold_pending_{false};
     std::atomic<int64_t>    transfer_not_done_hold_until_ms_{0};
     std::atomic<bool>       tp_cancel_broadcast_triggered_{false};
+
+    // Lease polling state (active when transfer_not_done_hold_pending_ is true).
+    std::atomic<bool>    lease_all_ranks_stopped_{false};  // set when poll confirms all ranks stopped
+    std::atomic<int64_t> lease_poll_next_ms_{0};           // rate limit: earliest time for next poll
+    std::atomic<int64_t> lease_poll_interval_ms_{10};      // backoff interval, starts 10ms, max 100ms
+    std::atomic<int>     lease_poll_retry_count_{0};
 };
 
 /// @brief P2P 按层写入的异步上下文。

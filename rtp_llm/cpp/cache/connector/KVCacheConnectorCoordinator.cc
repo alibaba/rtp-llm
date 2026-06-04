@@ -249,9 +249,9 @@ KVCacheConnectorCoordinator::asyncWriteByLayer(int                              
         return nullptr;
     }
     if (layer_id == 0) {
-        RTP_LLM_LOG_INFO("asyncWriteByLayer [P2P]: dispatching layer_id=%d, request_id=%ld to P2PConnector",
-                         layer_id,
-                         layer_context->requestId());
+        RTP_LLM_LOG_DEBUG("asyncWriteByLayer [P2P]: dispatching layer_id=%d, request_id=%ld to P2PConnector",
+                          layer_id,
+                          layer_context->requestId());
     }
     return p2p_connector_->asyncWriteByLayer(layer_id, layer_context);
 }
@@ -307,24 +307,62 @@ void KVCacheConnectorCoordinator::updateOnce() {
 
 void KVCacheConnectorCoordinator::processReadContexts() {
     RTP_LLM_PROFILE_FUNCTION();
-    std::lock_guard<std::mutex> lock(update_mutex_);
-    for (auto it = fused_async_read_context_list_.begin(); it != fused_async_read_context_list_.end();) {
-        auto fused_read_context = *it;
-        if (fused_read_context->done()) {
-            fused_read_context->notifyDone();
-            it = fused_async_read_context_list_.erase(it);
-            continue;
-        }
-        // 没有 done 但是有 read context, 或者 match context 还没 done, 或者 match 失败 (下一轮调度处理), 继续等待
-        auto read_context  = fused_read_context->fusedReadContext();
-        auto match_context = fused_read_context->fusedMatchContext();
-        if (read_context || !match_context->done() || !match_context->success()) {
+    // Two-phase to keep the slow asyncReadAfterMatch path (per-connector gRPC ->
+    // server_caller_->load + tp_broadcast_client_->broadcast, multi-second on
+    // degraded networks) OUT OF update_mutex_. Holding the mutex across that
+    // serializes the engine main thread's coordinator->asyncRead (which also
+    // takes update_mutex_), causing scheduler deadlock. See incident: 1-hour
+    // stuck StartLoad on prefill cascading into decode-side schedule freeze.
+    //
+    // Phase 1 (under lock): drain done contexts, collect contexts that need
+    //   dispatch (match success && fusedReadContext not yet set), and snapshot
+    //   connectors_ so the dispatch path is robust against destructor
+    //   connectors_.clear(). Each FusedAsyncReadContext::setFusedReadContext is
+    //   internally locked (read_ctx_mutex_), so writing it without holding
+    //   update_mutex_ is safe.
+    // Phase 2 (no lock): run asyncReadAfterMatch for each collected context.
+    //
+    // Duplicate-dispatch hazard analysis: processReadContexts runs in a single
+    // LoopThread, so two iterations cannot interleave. Within a single iteration,
+    // each context appears once. asyncReadAfterMatch sets fusedReadContext at
+    // the end, so the next iteration's Phase 1 short-circuits on the
+    // `read_context` check. No CAS in-flight flag needed.
+    std::vector<std::shared_ptr<FusedAsyncReadContext>> to_dispatch;
+    std::vector<std::shared_ptr<KVCacheConnector>>      connectors_snapshot;
+    {
+        std::lock_guard<std::mutex> lock(update_mutex_);
+        for (auto it = fused_async_read_context_list_.begin(); it != fused_async_read_context_list_.end();) {
+            auto fused_read_context = *it;
+            if (fused_read_context->done()) {
+                fused_read_context->notifyDone();
+                it = fused_async_read_context_list_.erase(it);
+                continue;
+            }
+            // 没有 done 但是有 read context, 或者 match context 还没 done, 或者 match 失败 (下一轮调度处理), 继续等待
+            auto read_context  = fused_read_context->fusedReadContext();
+            auto match_context = fused_read_context->fusedMatchContext();
+            if (read_context || !match_context->done() || !match_context->success()) {
+                it = std::next(it);
+                continue;
+            }
+            // match success — defer dispatch to Phase 2
+            to_dispatch.push_back(fused_read_context);
             it = std::next(it);
-            continue;
         }
-        // match success, start read
-        asyncReadAfterMatch(fused_read_context);
-        it = std::next(it);
+        connectors_snapshot = connectors_;
+    }
+
+    if (to_dispatch.empty()) {
+        return;
+    }
+    for (auto& fused_read_context : to_dispatch) {
+        if (stop_.load()) {
+            // Coordinator is shutting down; skip remaining dispatches. Connectors
+            // captured in the snapshot may still be valid (kept alive by shared_ptr)
+            // but issuing new RPCs at this point is wasted work.
+            break;
+        }
+        asyncReadAfterMatch(fused_read_context, connectors_snapshot);
     }
 }
 
@@ -340,15 +378,20 @@ void KVCacheConnectorCoordinator::processWriteContexts() {
     }
 }
 
-// this function is called under lock
-void KVCacheConnectorCoordinator::asyncReadAfterMatch(std::shared_ptr<FusedAsyncReadContext> fused_read_context) {
+// Called WITHOUT update_mutex_ held (post two-phase refactor of processReadContexts).
+// connectors_snapshot is a stable shared_ptr-holding copy taken under update_mutex_;
+// each connector stays alive even if the destructor's connectors_.clear() races.
+void KVCacheConnectorCoordinator::asyncReadAfterMatch(
+    std::shared_ptr<FusedAsyncReadContext>                fused_read_context,
+    const std::vector<std::shared_ptr<KVCacheConnector>>& connectors_snapshot) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto match_contexts = fused_read_context->fusedMatchContext()->contexts();
+    auto async_read_start_us = currentTimeUs();
+    auto match_contexts      = fused_read_context->fusedMatchContext()->contexts();
     RTP_LLM_CHECK_WITH_INFO(
-        match_contexts.size() == connectors_.size(),
+        match_contexts.size() == connectors_snapshot.size(),
         "match contexts size is not equal to connectors size, match contexts size: [%d], connectors size: [%d]",
         match_contexts.size(),
-        connectors_.size());
+        connectors_snapshot.size());
 
     int                                        already_reuse_num = fused_read_context->resource()->reuseBlockNum();
     std::vector<std::shared_ptr<AsyncContext>> connector_read_contexts;
@@ -361,17 +404,41 @@ void KVCacheConnectorCoordinator::asyncReadAfterMatch(std::shared_ptr<FusedAsync
         if (matched_num <= already_reuse_num) {
             continue;
         }
-        auto connector_read_context = connectors_.at(i)->asyncRead(fused_read_context->resource(),
-                                                                   fused_read_context->meta(),
-                                                                   match_context,
-                                                                   already_reuse_num,
-                                                                   matched_num - already_reuse_num);
+        // [PD-DIAG] Per-connector asyncRead cost. Post two-phase refactor this
+        // call no longer holds update_mutex_, so a slow gRPC inside here cannot
+        // back-pressure the engine main thread's coordinator->asyncRead. The
+        // WARN below still surfaces slow per-connector cost for visibility.
+        const int64_t connector_async_read_start_us = currentTimeUs();
+        auto          connector_read_context = connectors_snapshot.at(i)->asyncRead(fused_read_context->resource(),
+                                                                                    fused_read_context->meta(),
+                                                                                    match_context,
+                                                                                    already_reuse_num,
+                                                                                    matched_num - already_reuse_num);
+        const int64_t connector_async_read_cost_us = currentTimeUs() - connector_async_read_start_us;
+        if (connector_async_read_cost_us >= 100000) {
+            RTP_LLM_LOG_WARNING("[PD-DIAG] asyncReadAfterMatch slow connector asyncRead, "
+                                "connector_index=%d, cost_us=%ld",
+                                i,
+                                connector_async_read_cost_us);
+        }
         if (connector_read_context) {
             connector_read_contexts.emplace_back(connector_read_context);
             already_reuse_num = matched_num;
         }
     }
     fused_read_context->setFusedReadContext(std::make_shared<FusedAsyncContext>(connector_read_contexts));
+    // Only log slow paths (>500ms total). Healthy asyncReadAfterMatch finishes
+    // in microseconds; the per-connector >100ms WARN above already captures
+    // G-class slow connector calls. Demoted from unconditional INFO after
+    // 5/22 audit (~1385 entries/4h with no diagnostic value at healthy speed).
+    const int64_t async_read_total_us = currentTimeUs() - async_read_start_us;
+    if (async_read_total_us >= 500000) {
+        RTP_LLM_LOG_WARNING(
+            "[PD-DIAG] asyncReadAfterMatch slow done, connectors_issued=%zu, already_reuse_num=%d, cost_us=%ld",
+            connector_read_contexts.size(),
+            already_reuse_num,
+            async_read_total_us);
+    }
 }
 
 void KVCacheConnectorCoordinator::handleRead(const P2PConnectorStartLoadRequestPB& request,
@@ -425,10 +492,21 @@ bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
         return true;
     }
     const uint32_t layer_all_num         = static_cast<uint32_t>(cache_config_.layer_all_num);
+    const bool     is_mla                = cache_config_.use_mla || cache_config_.is_sparse;
     auto           layer_block_converter = std::make_shared<LayerBlockConverterImpl>(allocator_);
 
+    RTP_LLM_LOG_INFO("initP2PConnectorInternal: pd_sep_config.cache_store_rdma_mode=%d, "
+                     "cache_store_config.cache_store_rdma_mode=%d, "
+                     "pd_sep_config.cache_store_listen_port=%ld, "
+                     "pd_sep_config.role_type=%d",
+                     pd_sep_config_.cache_store_rdma_mode ? 1 : 0,
+                     cache_store_config_.cache_store_rdma_mode ? 1 : 0,
+                     pd_sep_config_.cache_store_listen_port,
+                     static_cast<int>(pd_sep_config_.role_type));
+
     auto p2p_config = P2PConnectorConfig::create(
-        runtime_config_, cache_store_config_, parallelism_config_, pd_sep_config_, layer_all_num);
+        runtime_config_, cache_store_config_, parallelism_config_, pd_sep_config_, layer_all_num, is_mla);
+    p2p_config.scheduler_config.layer_attn_types = cache_config_.layer_attn_types;
     auto p2p = std::make_shared<P2PConnector>(std::move(p2p_config), layer_block_converter, metrics_reporter_);
     if (!p2p->init()) {
         RTP_LLM_LOG_ERROR("P2PConnector init failed");

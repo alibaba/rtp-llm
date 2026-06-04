@@ -185,13 +185,45 @@ void TcpKVCacheSender::send(const transfer::SendRequest&                        
         callback(error_code, error_msg);
     };
 
+    // [HANG-DIAG] Phase 1: makeTransferRequest is synchronous and includes
+    // cudaStreamSynchronize inside execNoBlockCopy -> blocks the dispatcher
+    // thread until GPU->CPU copy finishes. Under cuda runtime contention or
+    // GPU hang this single call can take seconds. See OPT-0 analysis: this is
+    // the dominant contributor to sendKVCache.dispatch_us under stress.
+    const int64_t make_req_start_us = currentTimeUs();
     auto transfer_request = makeTransferRequest(request, collector);
-    if (!transfer_request) {
+    const int64_t make_req_cost_us = currentTimeUs() - make_req_start_us;
+    if (transfer_request == nullptr) {
+        if (make_req_cost_us >= 100000) {
+            RTP_LLM_LOG_WARNING(
+                "[HANG-DIAG] TcpKVCacheSender::send makeTransferRequest=NULL after %ld us, "
+                "unique_key=%s, peer=%s:%u",
+                make_req_cost_us, request.unique_key.c_str(), request.ip.c_str(), request.port);
+        }
         callback2(TransferErrorCode::BUILD_REQUEST_FAILED, "make transfer request failed");
         return;
     }
 
+    // [HANG-DIAG] Phase 2: loadToRemote = getChannel + arpc stub.transfer
+    // (the latter is truly async; the closure is invoked from arpc IO threads
+    // when the response arrives). Only the synchronous prefix is measured here.
+    const int64_t load_remote_start_us = currentTimeUs();
     loadToRemote(request.ip, request.port, transfer_request, callback2, request.deadline_ms);
+    const int64_t load_remote_cost_us = currentTimeUs() - load_remote_start_us;
+
+    const int64_t total_sync_cost_us = make_req_cost_us + load_remote_cost_us;
+    if (total_sync_cost_us >= 100000) {
+        RTP_LLM_LOG_WARNING(
+            "[HANG-DIAG] TcpKVCacheSender::send slow sync prefix, "
+            "unique_key=%s, peer=%s:%u, total_sync_us=%ld, "
+            "make_req_us=%ld (cuda copy + sync), load_remote_us=%ld (getChannel + arpc submit)",
+            request.unique_key.c_str(),
+            request.ip.c_str(),
+            request.port,
+            total_sync_cost_us,
+            make_req_cost_us,
+            load_remote_cost_us);
+    }
 }
 
 }  // namespace tcp

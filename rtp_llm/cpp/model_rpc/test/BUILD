@@ -5,9 +5,7 @@ load("//bazel:device_defs.bzl",
 
 cc_test = cc_test_wrapper
 
-test_copts = [
-    "-fno-access-control",
-] + copts()
+test_copts = copts()
 
 py_test (
     name = "model_rpc_client_test",
@@ -96,7 +94,7 @@ cc_test(
         "BroadcastManagerTest.cc",
     ],
     data = [],
-    copts = test_copts,
+    copts = test_copts + ["-fno-access-control"],
     deps = test_deps + [
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
         "@havenask//aios/autil:net",
@@ -110,11 +108,28 @@ cc_test(
     srcs = [
         "PrefillServerCallerTest.cc",
     ],
-    copts = test_copts,
+    copts = test_copts + ["-fno-access-control"],
     deps = [
         "//rtp_llm/cpp/model_rpc:prefill_server_caller",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
+)
+
+cc_test(
+    name = "prefill_rpc_server_test",
+    srcs = [
+        "PrefillRpcServerTest.cc",
+    ],
+    copts = test_copts + ["-fno-access-control"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
 )

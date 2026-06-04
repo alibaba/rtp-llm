@@ -1,11 +1,15 @@
 #pragma once
+#include <atomic>
 #include <memory>
+#include <vector>
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServiceImpl.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServerNew2.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew2.h"
+#include "rtp_llm/cpp/model_rpc/PrefillServerCaller.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -21,8 +25,16 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
         switch (generateStreamTarget()) {
-            case GenerateStreamTarget::kPrefill:
+            case GenerateStreamTarget::kPrefill: {
+                if (prefill_dp_forwarder_ && prefill_dp_addrs_.size() > 1) {
+                    size_t idx = prefill_dp_counter_.fetch_add(1) % prefill_dp_addrs_.size();
+                    if (idx != local_dp_index_) {
+                        return prefill_dp_forwarder_->callPrefill(context, request, writer,
+                                                                   prefill_dp_addrs_[idx]);
+                    }
+                }
                 return prefill_server_->GenerateStreamCall(context, request, writer);
+            }
             case GenerateStreamTarget::kDecodeNew2:
                 return decode_server_new2_->GenerateStreamCall(context, request, writer);
             case GenerateStreamTarget::kPrefillNew2:
@@ -111,6 +123,8 @@ private:
         kUnsupported,
     };
 
+    void initPrefillDpForwarder(const EngineInitParams& maga_init_params);
+
     GenerateStreamTarget generateStreamTarget() const {
         if (decode_entrance_) {
             if (decode_server_new2_) {
@@ -132,6 +146,11 @@ private:
     bool                                  decode_entrance_ = false;
     std::shared_ptr<PrefillRpcServerNew2> prefill_server_new2_;
     std::shared_ptr<DecodeRpcServerNew2>  decode_server_new2_;
+
+    std::shared_ptr<PrefillServerCaller>  prefill_dp_forwarder_;
+    std::vector<std::string>              prefill_dp_addrs_;
+    size_t                                local_dp_index_ = 0;
+    std::atomic<size_t>                   prefill_dp_counter_{0};
 };
 
 }  // namespace rtp_llm
