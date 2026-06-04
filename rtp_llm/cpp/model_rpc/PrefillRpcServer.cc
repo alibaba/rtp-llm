@@ -1576,10 +1576,19 @@ grpc::Status PrefillRpcServer::AttachStream(grpc::ServerContext*                
     if (session->isPd()) {
         // PD path: drain from bounded relay (driver writes all output there)
         auto& relay = session->getRelay();
+        const auto attach_start = std::chrono::steady_clock::now();
         while (true) {
             if (context && context->IsCancelled()) {
                 // A2: disconnect only detaches, does NOT cancel the request
                 return grpc::Status(grpc::StatusCode::CANCELLED, "client disconnected");
+            }
+
+            // §5.11 ④ fetch_wait_timeout: 本次 attach 整体超时，请求仍活可重连
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - attach_start);
+            if (elapsed >= fetch_wait_timeout) {
+                return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
+                                    "fetch_wait_timeout exceeded, request still alive");
             }
 
             relay.waitForData(std::chrono::milliseconds(100));

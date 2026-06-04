@@ -346,13 +346,7 @@ WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_ver
             RTP_LLM_LOG_ERROR("unknown quant method: %d", static_cast<int>(quant_method));
             status_info.precision = "UNKNOWN";
     }
-    {
-        const char* value = std::getenv("FLEXLB_ATTACH_STREAM");
-        status_info.attach_stream_supported =
-            value != nullptr
-            && (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0
-                || strcasecmp(value, "on") == 0 || strcasecmp(value, "yes") == 0);
-    }
+    status_info.attach_stream_supported = true;
     return status_info;
 }
 
