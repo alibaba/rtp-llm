@@ -268,9 +268,20 @@ def sm120_suites():
     # SM120 MoE (h20_moe + sm100_moe 同位 — Qwen3-30B MoE)
     # 对应 PR-6 (FP8) + PR-9 (NVFP4 可选)
     # 注意：RTX 5000 Pro 无 NVLink → DeepEP 路径全部不在此 suite 内
-    #       仅跑 fp8_per_block_no_dp_masked / pure_dp / nvfp4 non-deepep
-    # TODO(PR-6): moe_masked_fp8_sm120
-    # TODO(PR-9): moe_nvfp4_no_deepep_sm120
+    #       仅跑 fp8_per_block_no_dp / nvfp4 non-deepep
+    native.test_suite(
+        name="smoke_sm120_moe",
+        tests=[
+            smoke_test(
+                name="moe_fp8pb_sm120",
+                task_info="data/model/qwen3_moe/q_r_30b_fp8pb_sm120.json",
+                envs=["LOAD_PYTHON_MODEL=1"],
+                smoke_args="--moe_strategy fp8_per_block_no_dp --quantization FP8_PER_BLOCK --warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64",
+                gpu_type=["RTX_5000_PRO"],
+            ),
+            # TODO(PR-9): moe_nvfp4_no_deepep_sm120
+        ],
+    )
 
 
     # SM120 Next (h20_next 同位 — Qwen3-Next BF16/FP8 + linear attention)
