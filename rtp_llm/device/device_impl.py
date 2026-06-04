@@ -932,13 +932,13 @@ class RocmImpl(GpuImpl):
             W.linear_attn_ba_w,
             W.linear_attn_out_w,
         ]:
-            if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
-                if weight.dtype != torch.float8_e4m3fn:
-                    weight = swizzle_tensor(weight.t(), False).t()
+            if weight.dtype == torch.float8_e4m3fn:
+                if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
+                    weight = swizzle_tensor(weight, False)
                 else:
-                    weight = swizzle_tensor(weight, weight.dtype != torch.float8_e4m3fn)
-            elif weight.dtype == torch.float8_e4m3fn:
-                weight = self.shuffle_gemm_weight(weight)
+                    weight = self.shuffle_gemm_weight(weight)
+            # Non-FP8 (FP16/BF16) weights are never swizzled: hipBLASLt has no
+            # bpreshuffle heuristic for these on gfx942 (HIPBLAS_STATUS_INTERNAL_ERROR).
 
         return weight
 

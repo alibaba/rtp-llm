@@ -60,7 +60,10 @@ class RocmF16LinearWithSwizzle(RocmF16LinearBase):
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
-        return weight_scales is None and hw_kernel_config is not None and hw_kernel_config.use_swizzleA
+        # FP16/BF16 (unquantized) weights are never swizzled: hipBLASLt has no
+        # bpreshuffle heuristic for them on gfx942 (HIPBLAS_STATUS_INTERNAL_ERROR).
+        # Only FP8 keeps swizzleA; unquantized always uses the no-swizzle path.
+        return False
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         self.init_hipblas()
@@ -75,7 +78,7 @@ class RocmF16LinearWithSwizzle(RocmF16LinearBase):
             scaleOut=None,
             bpreshuffle=True,
         )
-        
+
 class RocmF16LinearNoSwizzle(RocmF16LinearBase):
 
     @classmethod
@@ -88,14 +91,9 @@ class RocmF16LinearNoSwizzle(RocmF16LinearBase):
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
-        if weight_scales is not None:
-            return False
-        if hw_kernel_config is None:
-            return True
-        elif not hw_kernel_config.use_swizzleA:
-            return True
-        else:
-            return False
+        # Unquantized FP16/BF16 always uses the no-swizzle path; swizzleA is FP8-only
+        # (hipBLASLt has no bpreshuffle heuristic for FP16 on gfx942).
+        return weight_scales is None
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         self.init_hipblas()
