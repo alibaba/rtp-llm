@@ -1191,4 +1191,210 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     return grpc::Status::OK;
 }
 
+// ===== Decoupled RPC handlers (no long-lived stream) =====
+
+std::shared_ptr<DecodeGenerateContext> DecodeRpcServer::takePendingContext(int64_t request_id) {
+    std::lock_guard<std::mutex> lock(pending_contexts_mu_);
+    auto it = pending_contexts_.find(request_id);
+    if (it == pending_contexts_.end()) {
+        return nullptr;
+    }
+    auto ctx = std::move(it->second);
+    pending_contexts_.erase(it);
+    return ctx;
+}
+
+grpc::Status DecodeRpcServer::AllocateRemoteResource(grpc::ServerContext*                 server_context,
+                                                     const AllocateRemoteResourceRequest* request,
+                                                     AllocateRemoteResourceResponse*      response) {
+    RTP_LLM_PROFILE_FUNCTION();
+    AtomicGuard request_guard(onflight_requests_);
+
+    DecodeRpcContext rpc_context;
+    auto             decode_context = std::make_shared<DecodeGenerateContext>(
+        rpc_context, 0, server_context, metrics_reporter_, meta_);
+    decode_context->onflight_requests      = onflight_requests_;
+    decode_context->loading_cache_requests = loading_cache_requests_;
+
+    decode_context->request_id  = request->request_id();
+    decode_context->request_key = makeRequestKey(std::to_string(request->client_id()), request->request_id());
+
+    for (auto& addr : request->peer_addrs()) {
+        decode_context->peer_addrs.push_back(addr);
+    }
+    decode_context->prefill_cp_size = std::max(1, request->prefill_cp_size());
+
+    auto& alloc_req = decode_context->allocate_request;
+    alloc_req.set_stage(RemoteStage::ALLOCATE);
+    alloc_req.set_request_id(request->request_id());
+    alloc_req.set_client_id(std::to_string(request->client_id()));
+    *alloc_req.mutable_input() = request->input();
+    alloc_req.set_input_token_count(request->input_token_count());
+
+    try {
+        auto max_retry_times      = maga_init_params_.pd_sep_config.decode_retry_times;
+        auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.decode_retry_timeout_ms;
+        int  retry_interval_ms    = maga_init_params_.pd_sep_config.decode_retry_interval_ms;
+
+        // allocateResource without writing to grpc_stream
+        auto& allocate_request = decode_context->allocate_request;
+        if (allocate_request.input().token_ids_size() == 0 && allocate_request.input_token_count() > 0) {
+            allocate_request.mutable_input()->mutable_token_ids()->Resize(allocate_request.input_token_count(), 0);
+        }
+        auto input                       = QueryConverter::transQuery(&allocate_request.input());
+        decode_context->request_info     = input->request_info;
+        auto generate_stream             = engine_->makeStream(input);
+        decode_context->request_timeout_ms = generate_stream->getTimeoutMs();
+
+        generate_stream->reportEvent(StreamEvents::CanRun);
+        decode_context->setStream(generate_stream);
+
+        while (!generate_stream->hasError() && generate_stream->moveToNext() == StreamState::LOADING_CACHE) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (generate_stream->hasError()) {
+            auto   stream_error = generate_stream->statusInfo();
+            string error_msg    = stream_error.ToString();
+            if (error_msg.empty()) {
+                error_msg = "malloc kv cache block failed at decode node";
+            }
+            response->mutable_error_info()->set_error_code(transErrorCodeToRPC(stream_error.code()));
+            response->mutable_error_info()->set_error_message(error_msg);
+            return grpc::Status::OK;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(pending_contexts_mu_);
+            pending_contexts_[request->request_id()] = decode_context;
+        }
+    } catch (const std::exception& e) {
+        response->mutable_error_info()->set_error_code(ErrorCodePB::EXECUTION_EXCEPTION);
+        response->mutable_error_info()->set_error_message(e.what());
+    }
+
+    return grpc::Status::OK;
+}
+
+grpc::Status DecodeRpcServer::NotifyLoadCache(grpc::ServerContext*          server_context,
+                                              const NotifyLoadCacheRequest* request,
+                                              NotifyLoadCacheResponse*      response) {
+    RTP_LLM_PROFILE_FUNCTION();
+
+    auto decode_context = [&]() -> std::shared_ptr<DecodeGenerateContext> {
+        std::lock_guard<std::mutex> lock(pending_contexts_mu_);
+        auto it = pending_contexts_.find(request->request_id());
+        if (it == pending_contexts_.end()) {
+            return nullptr;
+        }
+        return it->second;
+    }();
+
+    if (!decode_context) {
+        response->mutable_error_info()->set_error_code(ErrorCodePB::EXECUTION_EXCEPTION);
+        response->mutable_error_info()->set_error_message("no pending context for request_id");
+        return grpc::Status::OK;
+    }
+
+    try {
+        AtomicGuard request_guard(loading_cache_requests_);
+        decode_context->time_info.updateLoadBeginTime();
+        auto error_info = loadCacheForAllRank(*decode_context);
+        decode_context->time_info.updateLoadEndTime();
+
+        if (!error_info.ok()) {
+            RTP_LLM_LOG_WARNING("request [%s] load kv cache failed, error code [%s], cost time [%ld] ms",
+                                decode_context->request_key.c_str(),
+                                error_info.ToString().c_str(),
+                                decode_context->time_info.loadCacheTimeMs());
+            response->mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
+            response->mutable_error_info()->set_error_message(error_info.ToString());
+            takePendingContext(request->request_id());
+        }
+    } catch (const std::exception& e) {
+        response->mutable_error_info()->set_error_code(ErrorCodePB::EXECUTION_EXCEPTION);
+        response->mutable_error_info()->set_error_message(e.what());
+        takePendingContext(request->request_id());
+    }
+
+    return grpc::Status::OK;
+}
+
+grpc::Status DecodeRpcServer::StartRemoteGenerate(grpc::ServerContext*                   server_context,
+                                                  const StartRemoteGenerateRequest*      request,
+                                                  grpc::ServerWriter<GenerateOutputsPB>* writer) {
+    RTP_LLM_PROFILE_FUNCTION();
+
+    auto decode_context = takePendingContext(request->request_id());
+    if (!decode_context) {
+        GenerateOutputsPB error_output;
+        error_output.mutable_error_info()->set_error_code(ErrorCodePB::EXECUTION_EXCEPTION);
+        error_output.mutable_error_info()->set_error_message("no pending context for request_id");
+        writer->Write(error_output);
+        return grpc::Status::OK;
+    }
+
+    try {
+        auto& generate_stream = decode_context->getStream();
+        decode_context->time_info.updateGenerateBeginTime();
+        generate_stream->setIsContextStream(false);
+        generate_stream->step();
+
+        auto new_tokens                    = torch::zeros({(int64_t)generate_stream->nextBatchSize(), 1}, torch::kInt32);
+        new_tokens.data_ptr<int32_t>()[0]  = request->first_generate_token_id();
+        generate_stream->incLastOutputPos();
+        generate_stream->update({new_tokens, 1, torch::Tensor(), torch::Tensor(), torch::Tensor(),
+                                 torch::Tensor(), torch::Tensor(), torch::Tensor(), torch::Tensor(), torch::Tensor()});
+
+        if (request->position_ids_size() > 0) {
+            auto context_position_ids = torch::from_blob(const_cast<int32_t*>(request->position_ids().data()),
+                                                         {(int64_t)request->position_ids_size()}, torch::kInt32)
+                                            .clone();
+            generate_stream->setContextPositionIds(context_position_ids);
+        }
+        if (!propose_maga_init_params_) {
+            generate_stream->markGrpcNormalDeviceStatePending();
+        }
+        if (propose_maga_init_params_) {
+            const size_t propose_step = propose_maga_init_params_->gen_num_per_circle;
+            generate_stream->setReuseLength(generate_stream->seqLength() - 1);
+            generate_stream->setSpEditRun(false);
+            generate_stream->setMtpTokenIndex(generate_stream->seqLength() - 1);
+            generate_stream->setContainProposeToken(true);
+            std::vector<int> propose_tokens;
+            propose_tokens.assign(request->propose_token_ids().begin(), request->propose_token_ids().end());
+            generate_stream->setProposeToken(propose_tokens);
+
+            auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+            sp_output_buffer->propose_step = propose_step;
+            sp_output_buffer->tokens       = torch::zeros({1, (int64_t)propose_tokens.size()},
+                                                    torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+            memcpy(sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
+
+            auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(request->propose_probs()));
+            auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(request->propose_hidden()));
+            sp_output_buffer->tensors_holder.push_back(std::move(propose_probs_t));
+            sp_output_buffer->tensors_holder.push_back(std::move(propose_hidden_t));
+            generate_stream->setSPOutputBuffer(sp_output_buffer);
+        }
+
+        generate_stream->resetBeginTime(currentTimeUs());
+        engine_->enqueue(generate_stream);
+
+        decode_context->error_status = pollStreamOutput(
+            server_context,
+            decode_context->request_key,
+            dynamic_cast<grpc::internal::WriterInterface<GenerateOutputsPB>*>(writer),
+            generate_stream);
+        decode_context->time_info.updateGenerateEndTime();
+        meta_->dequeue(decode_context->request_id, decode_context->getStream());
+    } catch (const std::exception& e) {
+        GenerateOutputsPB error_output;
+        error_output.mutable_error_info()->set_error_code(ErrorCodePB::EXECUTION_EXCEPTION);
+        error_output.mutable_error_info()->set_error_message(e.what());
+        writer->Write(error_output);
+    }
+
+    return grpc::Status::OK;
+}
+
 }  // namespace rtp_llm

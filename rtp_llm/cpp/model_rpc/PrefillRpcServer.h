@@ -43,6 +43,7 @@ private:
     grpc::Status prepareAllocateResource(PrefillGenerateContext& prefill_context);
     void         getRpcConnection(PrefillGenerateContext& prefill_context);
     void         multimodalProcess(PrefillGenerateContext& prefill_context);
+    GenerateInputPB buildAllocateInput(PrefillGenerateContext& prefill_context);
     void         remoteAllocateResource(PrefillGenerateContext& prefill_context);
     void         enqueueRequest(PrefillGenerateContext& prefill_context);
     void         remoteLoadCacheStart(PrefillGenerateContext& prefill_context);

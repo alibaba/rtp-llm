@@ -89,6 +89,7 @@ private:
 
 public:
     typedef grpc::ClientReaderWriter<GenerateRequestPB, GenerateOutputsPB> ClientStream;
+    typedef grpc::ClientReader<GenerateOutputsPB>                          ClientReader;
 
     RemoteServerResource*                resource;
     RPCContext                           rpc_context;
@@ -105,6 +106,12 @@ public:
     PrefillStatInfo                      stat_info;
     int64_t                              loading_cache_requests = 0;
     bool                                 recent_cache_key_metric_reported = false;
+
+    // Decoupled RPC mode: each phase uses independent short-lived RPCs
+    bool                                     use_decoupled_rpc = false;
+    RpcErrorPB                               load_cache_error;
+    std::shared_ptr<grpc::ClientContext>      generate_client_context;
+    std::shared_ptr<ClientReader>             generate_reader;
 };
 
 }  // namespace rtp_llm

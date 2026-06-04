@@ -87,6 +87,33 @@ public:
         return decode_server_->RemoteGenerate(context, stream);
     }
 
+    grpc::Status AllocateRemoteResource(grpc::ServerContext*                 context,
+                                        const AllocateRemoteResourceRequest* request,
+                                        AllocateRemoteResourceResponse*      response) override {
+        if (!decode_server_) {
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "server not implement AllocateRemoteResource");
+        }
+        return decode_server_->AllocateRemoteResource(context, request, response);
+    }
+
+    grpc::Status NotifyLoadCache(grpc::ServerContext*          context,
+                                 const NotifyLoadCacheRequest* request,
+                                 NotifyLoadCacheResponse*      response) override {
+        if (!decode_server_) {
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "server not implement NotifyLoadCache");
+        }
+        return decode_server_->NotifyLoadCache(context, request, response);
+    }
+
+    grpc::Status StartRemoteGenerate(grpc::ServerContext*                   context,
+                                     const StartRemoteGenerateRequest*      request,
+                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        if (!decode_server_) {
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "server not implement StartRemoteGenerate");
+        }
+        return decode_server_->StartRemoteGenerate(context, request, writer);
+    }
+
     grpc::Status RemoteGenerateNew(grpc::ServerContext*              context,
                                    const RemoteGenerateRequestPBNew* request,
                                    RemoteGenerateResponsePBNew*      response) override {

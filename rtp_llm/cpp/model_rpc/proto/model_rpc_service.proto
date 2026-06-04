@@ -662,6 +662,39 @@ message CancelRequestPB {
     int64 request_id = 1;
 }
 
+message AllocateRemoteResourceRequest {
+    int64 request_id = 1;
+    int64 client_id = 2;
+    GenerateInputPB input = 3;
+    repeated string peer_addrs = 4;
+    int32 prefill_cp_size = 5;
+    int32 input_token_count = 6;
+}
+
+message AllocateRemoteResourceResponse {
+    RpcErrorPB error_info = 1;
+}
+
+message NotifyLoadCacheRequest {
+    int64 request_id = 1;
+    int64 client_id = 2;
+    int64 start_time = 3;
+}
+
+message NotifyLoadCacheResponse {
+    RpcErrorPB error_info = 1;
+}
+
+message StartRemoteGenerateRequest {
+    int64 request_id = 1;
+    int64 client_id = 2;
+    int32 first_generate_token_id = 3;
+    repeated int32 position_ids = 4;
+    repeated int32 propose_token_ids = 5;
+    TensorPB propose_probs = 6;
+    TensorPB propose_hidden = 7;
+}
+
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
@@ -691,6 +724,10 @@ service RpcService {
     rpc BatchEnqueue(BatchEnqueueRequestPB) returns (BatchEnqueueResponsePB);
     rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
     rpc Cancel(CancelRequestPB) returns (EmptyPB);
+
+    rpc AllocateRemoteResource(AllocateRemoteResourceRequest) returns (AllocateRemoteResourceResponse);
+    rpc NotifyLoadCache(NotifyLoadCacheRequest) returns (NotifyLoadCacheResponse);
+    rpc StartRemoteGenerate(StartRemoteGenerateRequest) returns (stream GenerateOutputsPB);
 }
 
 service MultimodalRpcService {

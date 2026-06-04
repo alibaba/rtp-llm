@@ -35,7 +35,7 @@ struct DecodeStatInfo {
 };
 
 struct DecodeRpcContext {
-    ServerStream* grpc_stream;
+    ServerStream* grpc_stream = nullptr;
 };
 
 class DecodeGenerateContext: public GenerateContext {

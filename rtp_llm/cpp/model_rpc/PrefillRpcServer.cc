@@ -784,9 +784,60 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
     }
 }
 
+GenerateInputPB PrefillRpcServer::buildAllocateInput(PrefillGenerateContext& prefill_context) {
+    GenerateInputPB input(*prefill_context.rpc_context.request);
+    input.clear_batch_group_size();
+    input.clear_batch_group_id();
+    input.mutable_generate_config()->clear_force_batch();
+    input.mutable_generate_config()->clear_batch_group_timeout();
+    return input;
+}
+
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
+
+    if (prefill_context.use_decoupled_rpc) {
+        grpc::ClientContext ctx;
+        auto    request_timeout_ms = prefill_context.request_timeout_ms;
+        auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
+        int64_t final_timeout_ms   = request_timeout_ms > 0 ? request_timeout_ms : max_rpc_timeout_ms;
+        if (final_timeout_ms > 0) {
+            ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(final_timeout_ms));
+        }
+
+        AllocateRemoteResourceRequest request;
+        request.set_request_id(prefill_context.request_id);
+        request.set_client_id(std::stoll(process_id_));
+        auto input = buildAllocateInput(prefill_context);
+        if (engine_->resourceContext().cache_manager
+            && engine_->resourceContext().cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse) {
+            request.set_input_token_count(input.token_ids_size());
+            input.clear_token_ids();
+        }
+        *request.mutable_input() = std::move(input);
+        for (auto& addrs : prefill_context.prefill_worker_cache_store_addrs) {
+            request.add_peer_addrs(addrs);
+        }
+        const auto& cp_cfg = maga_init_params_.parallelism_config.prefill_cp_config;
+        if (cp_cfg.kv_cache_sharded && maga_init_params_.parallelism_config.tp_size > 1) {
+            request.set_prefill_cp_size(static_cast<int32_t>(maga_init_params_.parallelism_config.tp_size));
+        }
+
+        AllocateRemoteResourceResponse response;
+        auto status = prefill_context.grpc_connection.stub->AllocateRemoteResource(&ctx, request, &response);
+        CLIENT_GRPC_RET_IF_ERROR(prefill_context, status.ok(), ErrorCode::REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED);
+        if (response.has_error_info() && response.error_info().error_code() != 0) {
+            prefill_context.error_info = ErrorInfo(
+                transRPCErrorCode(response.error_info().error_code()),
+                response.error_info().error_message());
+            prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, response.error_info().error_message());
+        }
+        RTP_LLM_LOG_DEBUG("request [%ld] remote allocate resource done (decoupled)", prefill_context.request_id);
+        return;
+    }
+
+    // Legacy bidirectional stream path
     prefill_context.client_context.reset(new ClientContext());
     auto    request_timeout_ms = prefill_context.request_timeout_ms;
     auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
@@ -798,7 +849,6 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     if (prefill_context.cancel_state) {
         refreshAsyncProducerCancelState(prefill_context.cancel_state, prefill_context.client_context, prefill_context.getStream());
     }
-    // final_timeout_ms <= 0: skip set_deadline; gRPC treats it as no deadline.
     prefill_context.client_stream =
         std::move(prefill_context.grpc_connection.stub->RemoteGenerate(prefill_context.client_context.get()));
     auto&             client_stream = prefill_context.client_stream;
@@ -806,7 +856,6 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     alloc_request.set_stage(RemoteStage::ALLOCATE);
     alloc_request.set_client_id(process_id_);
     alloc_request.set_request_id(prefill_context.request_id);
-    // TODO(xinfei.sxf) reduce copy
     GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
     new_request->clear_batch_group_size();
     new_request->clear_batch_group_id();
@@ -821,8 +870,6 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     for (auto& addrs : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(addrs);
     }
-
-    // Propagate CP size so decode knows prefill used context-parallel page-RR.
     const auto& cp_cfg = maga_init_params_.parallelism_config.prefill_cp_config;
     if (cp_cfg.kv_cache_sharded && maga_init_params_.parallelism_config.tp_size > 1) {
         alloc_request.set_prefill_cp_size(static_cast<int32_t>(maga_init_params_.parallelism_config.tp_size));
@@ -867,6 +914,29 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
         logPrefillFailureTrace("wait_stream_before_run_failed", prefill_context);
         return;
     }
+
+    if (prefill_context.use_decoupled_rpc) {
+        grpc::ClientContext ctx;
+        auto    request_timeout_ms = prefill_context.request_timeout_ms;
+        auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
+        int64_t final_timeout_ms   = request_timeout_ms > 0 ? request_timeout_ms : max_rpc_timeout_ms;
+        if (final_timeout_ms > 0) {
+            ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(final_timeout_ms));
+        }
+
+        NotifyLoadCacheRequest request;
+        request.set_request_id(prefill_context.request_id);
+        request.set_client_id(std::stoll(process_id_));
+        request.set_start_time(currentTimeUs());
+
+        NotifyLoadCacheResponse response;
+        auto status = prefill_context.grpc_connection.stub->NotifyLoadCache(&ctx, request, &response);
+        CLIENT_GRPC_RET_IF_ERROR(prefill_context, status.ok(), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
+        prefill_context.load_cache_error = response.error_info();
+        RTP_LLM_LOG_DEBUG("request [%ld] remote load cache done (decoupled)", prefill_context.request_id);
+        return;
+    }
+
     AtomicGuard       request_guard(loading_cache_requests_);
     GenerateRequestPB load_request;
     load_request.set_client_id(process_id_);
@@ -900,6 +970,18 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
 
 void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
+
+    if (prefill_context.use_decoupled_rpc) {
+        auto error_code = transRPCErrorCode(prefill_context.load_cache_error.error_code());
+        if (prefill_context.generate_input->generate_config->pd_separation) {
+            prefill_context.getStream()->releaseKVCacheForPDSep();
+        }
+        CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
+        RTP_LLM_LOG_DEBUG("request [%ld] remote load cache end (decoupled)", prefill_context.request_id);
+        meta_->dequeue(prefill_context.request_id, prefill_context.getStream());
+        return;
+    }
+
     GenerateOutputsPB load_response;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Read(&load_response), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
@@ -928,10 +1010,51 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote generate", prefill_context.request_id);
     std::shared_ptr<GenerateStream> stream = prefill_context.getStream();
-    RTP_LLM_LOG_DEBUG("remote generate stream[%s]: %s", stream->streamLogTag().c_str(), stream->debugString().c_str());
     vector<int> all_token   = stream->currentExecuteTokens();
     int         first_token = all_token[all_token.size() - 1];
-    RTP_LLM_LOG_DEBUG("first token token id %d", first_token);
+
+    if (prefill_context.use_decoupled_rpc) {
+        prefill_context.generate_client_context = std::make_shared<grpc::ClientContext>();
+        auto    request_timeout_ms = prefill_context.request_timeout_ms;
+        auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
+        int64_t final_timeout_ms   = request_timeout_ms > 0 ? request_timeout_ms : max_rpc_timeout_ms;
+        if (final_timeout_ms > 0) {
+            prefill_context.generate_client_context->set_deadline(
+                std::chrono::system_clock::now() + std::chrono::milliseconds(final_timeout_ms));
+        }
+
+        StartRemoteGenerateRequest request;
+        request.set_request_id(prefill_context.request_id);
+        request.set_client_id(std::stoll(process_id_));
+        request.set_first_generate_token_id(first_token);
+        auto context_position_ids = stream->getContextPositionIds();
+        if (context_position_ids.defined()) {
+            request.mutable_position_ids()->CopyFrom(
+                {context_position_ids.data_ptr<int32_t>(),
+                 context_position_ids.data_ptr<int32_t>() + context_position_ids.numel()});
+        }
+        request.mutable_propose_token_ids()->CopyFrom(
+            {stream->getProposeToken().begin(), stream->getProposeToken().end()});
+        auto sp_output_buffer = stream->getSPOutputBuffer();
+        if (sp_output_buffer) {
+            auto all_probs_cpu = sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+            torch::Tensor hidden_states_cpu;
+            if (!sp_output_buffer->hidden_states.defined()) {
+                hidden_states_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
+            } else {
+                hidden_states_cpu = sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() : sp_output_buffer->hidden_states;
+            }
+            QueryConverter::transTensorPB(request.mutable_propose_probs(), all_probs_cpu);
+            QueryConverter::transTensorPB(request.mutable_propose_hidden(), hidden_states_cpu);
+        }
+
+        prefill_context.generate_reader = prefill_context.grpc_connection.stub->StartRemoteGenerate(
+            prefill_context.generate_client_context.get(), request);
+        CLIENT_GRPC_RET_IF_ERROR(prefill_context, prefill_context.generate_reader != nullptr, ErrorCode::REMOTE_GENERATE_FAILED);
+        return;
+    }
+
+    // Legacy path
     GenerateRequestPB generate_request;
     generate_request.set_client_id(process_id_);
     generate_request.set_request_id(prefill_context.request_id);
@@ -948,15 +1071,12 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     }
     generate_request.mutable_propose_token_ids()->CopyFrom(
         {stream->getProposeToken().begin(), stream->getProposeToken().end()});
-
     auto sp_output_buffer = stream->getSPOutputBuffer();
-
     if (sp_output_buffer) {
         auto all_probs_cpu =
             sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
         torch::Tensor hidden_states_cpu;
         if (!sp_output_buffer->hidden_states.defined()) {
-            // dummy hidden states, so datatype is not important
             hidden_states_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
         } else {
             hidden_states_cpu = sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
@@ -965,9 +1085,7 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
         QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
         QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);
     }
-
     generate_request.set_stage(RemoteStage::GENERATE);
-
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, prefill_context.client_stream->Write(generate_request), ErrorCode::REMOTE_GENERATE_FAILED);
 }
@@ -983,7 +1101,15 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto              prefill_memory_reuse_len = prefill_context.getStream()->memoryReuseLength();
 
     auto first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
-    while (prefill_context.client_stream->Read(&response)) {
+
+    auto readNext = [&](GenerateOutputsPB& resp) -> bool {
+        if (prefill_context.use_decoupled_rpc && prefill_context.generate_reader) {
+            return prefill_context.generate_reader->Read(&resp);
+        }
+        return prefill_context.client_stream && prefill_context.client_stream->Read(&resp);
+    };
+
+    while (readNext(response)) {
         if (prefill_context.server_context && prefill_context.server_context->IsCancelled()) {
             RTP_LLM_LOG_WARNING("request [%ld] cancel by user", request_id);
             prefill_context.error_status = grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
@@ -1033,8 +1159,15 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             return;
         }
     }
-    CLIENT_GRPC_RET_IF_ERROR(
-        prefill_context, prefill_context.closeGrpcStream().ok(), ErrorCode::REMOTE_GENERATE_FAILED);
+    if (prefill_context.use_decoupled_rpc) {
+        if (prefill_context.generate_reader) {
+            auto status = prefill_context.generate_reader->Finish();
+            CLIENT_GRPC_RET_IF_ERROR(prefill_context, status.ok(), ErrorCode::REMOTE_GENERATE_FAILED);
+        }
+    } else {
+        CLIENT_GRPC_RET_IF_ERROR(
+            prefill_context, prefill_context.closeGrpcStream().ok(), ErrorCode::REMOTE_GENERATE_FAILED);
+    }
 }
 
 grpc::Status PrefillRpcServer::prepareAllocateResource(PrefillGenerateContext& prefill_context) {
@@ -1334,6 +1467,7 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                                                                 meta_);
         pfx_ctx->onflight_requests      = onflight_requests_;
         pfx_ctx->loading_cache_requests = loading_cache_requests_;
+        pfx_ctx->use_decoupled_rpc      = true;
         auto guard                      = std::make_shared<AtomicGuard>(onflight_requests_);
         auto cancel_state               = std::make_shared<AsyncProducerCancelState>();
         {

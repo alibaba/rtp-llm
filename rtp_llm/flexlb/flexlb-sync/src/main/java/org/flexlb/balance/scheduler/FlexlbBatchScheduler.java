@@ -311,6 +311,10 @@ public class FlexlbBatchScheduler {
 
         EngineRpcService.GenerateConfigPB.Builder config = input.getGenerateConfigBuilder();
         config.setForceBatch(Int32Value.of(1));
+        if (config.getTimeoutMs() <= 0) {
+            FlexlbConfig cfg = configService.loadBalanceConfig();
+            config.setTimeoutMs((int) cfg.resolveSloMs(dto.getSeqLen()));
+        }
         config.clearRoleAddrs();
         addRoleAddr(config, item.prefill);
         addRoleAddr(config, item.decode);

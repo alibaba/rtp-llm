@@ -6,6 +6,9 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 
+#include <mutex>
+#include <unordered_map>
+
 namespace rtp_llm {
 
 class DecodeRpcServer: public RemoteRpcServer {
@@ -17,6 +20,18 @@ public:
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
 
     grpc::Status RemoteGenerate(grpc::ServerContext* server_context, ServerStream* stream);
+
+    grpc::Status AllocateRemoteResource(grpc::ServerContext*                   server_context,
+                                        const AllocateRemoteResourceRequest*   request,
+                                        AllocateRemoteResourceResponse*        response);
+
+    grpc::Status NotifyLoadCache(grpc::ServerContext*          server_context,
+                                 const NotifyLoadCacheRequest* request,
+                                 NotifyLoadCacheResponse*      response);
+
+    grpc::Status StartRemoteGenerate(grpc::ServerContext*              server_context,
+                                     const StartRemoteGenerateRequest* request,
+                                     grpc::ServerWriter<GenerateOutputsPB>* writer);
 
     grpc::Status RemoteLoad(grpc::ServerContext*          server_context,
                             const BroadcastLoadRequestPB* request,
@@ -79,10 +94,15 @@ private:
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
 
+    std::shared_ptr<DecodeGenerateContext> takePendingContext(int64_t request_id);
+
 private:
     autil::ThreadPoolBasePtr thread_pool_;
     std::atomic<size_t>      onflight_load_cache_requests_{0};
     size_t                   model_id;
+
+    std::mutex                                                           pending_contexts_mu_;
+    std::unordered_map<int64_t, std::shared_ptr<DecodeGenerateContext>>  pending_contexts_;
 };
 
 }  // namespace rtp_llm
