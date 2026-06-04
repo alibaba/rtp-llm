@@ -10,7 +10,6 @@
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -701,8 +700,8 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
     // connector-level dummy tail used to preserve the same contract after CP
     // Page-RR remap.
     auto cache_keys_size = cache_keys.empty() ? 0 : cache_keys.size() - 1;
-    const auto stream         = meta->generateStream();
-    const auto seq_len_tokens = stream != nullptr ? static_cast<size_t>(std::max(stream->inputLength(), 0)) : 0;
+    const auto input_length   = meta->inputLength();
+    const auto seq_len_tokens = input_length > 0 ? static_cast<size_t>(input_length) : 0;
     cache_keys_size = seq_len_tokens > 0 ?
                           capReuseBlocksForZeroSwaCaching(cache_config_,
                                                           cache_keys_size,

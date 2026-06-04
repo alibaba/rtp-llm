@@ -61,6 +61,9 @@ public:
     const std::vector<int64_t>& tokens() const override {
         return tokens_;
     }
+    int inputLength() const override {
+        return generate_stream_ != nullptr ? generate_stream_->inputLength() : static_cast<int>(tokens_.size());
+    }
 
     // P2P read extension field
     GenerateStream* generateStream() const override {
