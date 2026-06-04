@@ -34,6 +34,14 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     sp_config_(sp_config),
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config) {
+    RTP_LLM_LOG_INFO("KVCacheManager ctor: pd_sep_config.cache_store_rdma_mode=%d, "
+                     "cache_store_config.cache_store_rdma_mode=%d, "
+                     "pd_sep_config.decode_entrance=%d, pd_sep_config.role_type=%d, warmup=%d",
+                     pd_sep_config.cache_store_rdma_mode ? 1 : 0,
+                     cache_store_config.cache_store_rdma_mode ? 1 : 0,
+                     pd_sep_config.decode_entrance ? 1 : 0,
+                     static_cast<int>(pd_sep_config.role_type),
+                     warmup ? 1 : 0);
     if (warmup) {
         config_.block_num = 1;
     } else {

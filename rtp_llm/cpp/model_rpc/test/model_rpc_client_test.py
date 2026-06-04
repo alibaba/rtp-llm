@@ -25,8 +25,10 @@ from typing import AsyncGenerator
 from unittest import TestCase, main
 from unittest.mock import patch
 
+import grpc
 import torch
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
@@ -561,6 +563,28 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(decode_role_addr.ip, "10.0.0.11")
         self.assertEqual(decode_role_addr.grpc_port, 10111)
         self.assertEqual(decode_role_addr.http_port, 10110)
+
+    def test_handle_grpc_error_maps_resource_exhausted_to_malloc_error(self):
+        # Regression: prefill's LACK MEM surfaces to decode as a grpc
+        # RESOURCE_EXHAUSTED status. Without an explicit case in the fallback
+        # branch, _handle_grpc_error collapses it to UNKNOWN_ERROR (514), and
+        # frontend_server reports "514_UNKNOWN_ERROR" instead of
+        # "602_MALLOC_ERROR" on the error_qps metric.
+        class _FakeRpcError(grpc.RpcError):
+            def code(self):
+                return grpc.StatusCode.RESOURCE_EXHAUSTED
+
+            def details(self):
+                return "LACK MEM"
+
+            def trailing_metadata(self):
+                return ()
+
+        client = ModelRpcClient(["127.0.0.1:10101"], {}, 0, False)
+        with self.assertRaises(FtRuntimeException) as cm:
+            client._handle_grpc_error(_FakeRpcError(), "test-request")
+        self.assertEqual(cm.exception.exception_type, ExceptionType.MALLOC_ERROR)
+        self.assertEqual(cm.exception.message, "LACK MEM")
 
     def test_trans_input_serializes_unique_key(self):
         input_py = GenerateInput(

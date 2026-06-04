@@ -28,10 +28,15 @@ public:
     bool init(int64_t store_wait_timeout_ms = 10 * 1000);
 
 public:
+    // deadline_ms: absolute business deadline (ms since epoch). Passed through
+    // to ComputedLayerCacheBuffer so its lifetime tracks the request's own
+    // deadline rather than a hard-coded store-wait timeout. INT64_MAX means
+    // "no deadline" → fall back to store_wait_timeout_ms_.
     bool writeByLayer(int                           layer_id,
                       const KVCacheResourcePtr&     resource,
                       int64_t                       request_id,
-                      std::shared_ptr<torch::Event> event);
+                      std::shared_ptr<torch::Event> event,
+                      int64_t                       deadline_ms);
 
     ErrorInfo sendKVCache(int64_t                                              request_id,
                           const std::string&                                   unique_key,
@@ -46,6 +51,10 @@ public:
 
     bool cancelRead(const std::string& unique_key);
     bool cancelSend(const std::string& unique_key);
+
+    // Query the local lease state for QUERY_LEASE_STATUS broadcast handler.
+    bool
+    queryLeaseStatus(const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped);
 
 public:
     std::shared_ptr<ComputedLayerCacheBufferStore> getComputedBuffersStore() const;

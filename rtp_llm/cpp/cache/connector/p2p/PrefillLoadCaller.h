@@ -40,7 +40,7 @@ public:
     ~PrefillLoadCaller() = default;
 
 public:
-    struct Result {
+    struct Result: public std::enable_shared_from_this<Result> {
         Result(): success_(false), timeout_ms(0), request_id(0), start_time_us(currentTimeUs()) {}
         ~Result() {
             shutdownAndDrainCompletionQueue();
@@ -61,7 +61,15 @@ public:
     private:
         bool pollCompletionQueue();
         void updateStreamFromResponse();
-        /// After TryCancel or when tearing down, must Shutdown CQ and drain Next() until false to avoid gRPC leaks.
+        /// Shutdown the CompletionQueue and drain remaining events.
+        ///
+        /// Drains with a bounded budget (≈100ms). If draining does not complete in time
+        /// (typical cause: prefill gRPC channel is unhealthy, TryCancel signal cannot
+        /// propagate quickly), the CQ + reader + context are handed off to a process-wide
+        /// background drainer so the calling thread is not blocked. This is the fix for
+        /// the 8-min decode-side stalls observed on 2026/05/22 (DingTalk doc §7).
+        ///
+        /// Safe to call multiple times (idempotent via completion_queue_shutdown_drained_).
         void shutdownAndDrainCompletionQueue();
 
     public:

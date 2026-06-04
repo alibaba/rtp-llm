@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferBackendFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include <cstdlib>
 
 namespace rtp_llm {
 
@@ -19,12 +20,32 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
         return false;
     }
 
-    auto backend = config_.transfer_backend_config.cache_store_rdma_mode ? transfer::TransferBackend::kBarexRdma :
-                                                                           transfer::TransferBackend::kTcp;
+    const bool rdma_mode = config_.transfer_backend_config.cache_store_rdma_mode;
+    auto       backend   = rdma_mode ? transfer::TransferBackend::kBarexRdma : transfer::TransferBackend::kTcp;
+    // Emit selected backend at INFO so the next restart makes it obvious
+    // which path the process took. Also dump CACHE_STORE_RDMA_MODE env so
+    // we can disambiguate the three possible sources for the value:
+    //   effective=0 + env="(unset)" -> env never reached the container
+    //   effective=0 + env="1"       -> argparse cmdline override beat env
+    //                                  (look for --cache_store_rdma_mode 0
+    //                                   in the launch command)
+    //   effective=1 + env="1"       -> normal RDMA path, expected
+    // CACHE_STORE_RDMA_MODE env binds to CacheStoreConfig.cache_store_rdma_mode
+    // via argparse (env_name in cache_store_group_args.py), which is then
+    // synced into pd_sep_config in engine_config.setup_pd_sep_config.
+    const char* env_raw = std::getenv("CACHE_STORE_RDMA_MODE");
+    RTP_LLM_LOG_INFO(
+        "P2PConnectorWorker init: effective_cache_store_rdma_mode=%d -> TransferBackend=%s, "
+        "env CACHE_STORE_RDMA_MODE=%s",
+        rdma_mode ? 1 : 0,
+        rdma_mode ? "kBarexRdma" : "kTcp",
+        env_raw ? env_raw : "(unset)");
+
     auto [sender, receiver] =
         transfer::createTransferBackend(backend, config_.transfer_backend_config, metrics_reporter_);
     if (!sender || !receiver) {
-        RTP_LLM_LOG_ERROR("init failed: createTransferBackend failed");
+        RTP_LLM_LOG_ERROR("init failed: createTransferBackend failed for backend=%s",
+                          rdma_mode ? "kBarexRdma" : "kTcp");
         return false;
     }
 
@@ -55,8 +76,9 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
 bool P2PConnectorWorker::writeByLayer(int                           layer_id,
                                       const KVCacheResourcePtr&     resource,
                                       int64_t                       request_id,
-                                      std::shared_ptr<torch::Event> event) {
-    return prefill_->writeByLayer(layer_id, resource, request_id, std::move(event));
+                                      std::shared_ptr<torch::Event> event,
+                                      int64_t                       deadline_ms) {
+    return prefill_->writeByLayer(layer_id, resource, request_id, std::move(event), deadline_ms);
 }
 
 ErrorInfo
@@ -89,6 +111,11 @@ std::shared_ptr<ComputedLayerCacheBufferStore> P2PConnectorWorker::getComputedBu
 
 void P2PConnectorWorker::setStoreWaitTimeoutMs(int64_t store_wait_timeout_ms) {
     prefill_->setStoreWaitTimeoutMs(store_wait_timeout_ms);
+}
+
+bool P2PConnectorWorker::queryLeaseStatus(
+    const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped) {
+    return decode_->queryLeaseStatus(unique_key, sealed, started_ops, finished_ops, stopped);
 }
 
 }  // namespace rtp_llm

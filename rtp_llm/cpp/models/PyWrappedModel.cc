@@ -281,6 +281,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             decoder_batch_size,
             inputs.request_id,
             inputs.request_pd_separation,
+            inputs.request_deadline_ms,
             kv_cache_layer_to_group,
             kv_cache_group_types,
             transVectorToString(cache_keys_vec),

@@ -480,6 +480,7 @@ enum P2PConnectorBroadcastType {
     HANDLE_READ = 1;
     CANCEL_READ = 2;
     CANCEL_HANDLE_READ = 3;
+    QUERY_LEASE_STATUS = 4;
 }
 
 message P2PConnectorBroadcastTpRequestPB {
@@ -500,12 +501,23 @@ message GetPeerInfoRequestPB {
 }
 
 message GetPeerInfoResponsePB {
-    int32  tp_size = 1;
+    int32  tp_size                = 1;
+    int32  dp_size                = 2;
+    repeated string dp_grpc_addrs = 3;
 }
 
 message P2PConnectorBroadcastTpResponsePB {
     ErrorCodePB error_code = 1;
     string error_message = 2;
+    // Populated when request type == QUERY_LEASE_STATUS
+    LeaseStatusResponsePB lease_status = 3;
+}
+
+message LeaseStatusResponsePB {
+    bool sealed = 1;       // no_more_new_ops
+    int32 started_ops = 2;
+    int32 finished_ops = 3;
+    bool stopped = 4;      // sealed && started_ops == finished_ops
 }
 
 message P2PConnectorStartLoadRequestPB {

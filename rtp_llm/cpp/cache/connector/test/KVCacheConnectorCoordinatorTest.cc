@@ -1,6 +1,10 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 
+#include <atomic>
+#include <chrono>
+#include <thread>
+
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
@@ -883,7 +887,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, HoldKVCacheResourceForConnector_Preserve
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_SkipsNonMatchAndUpdatesReuseAndSetsFusedReadContext) {
     auto fused_read_ctx = makeFusedReadContextAndExpectAsyncRead();
-    coordinator_->asyncReadAfterMatch(fused_read_ctx);
+    coordinator_->asyncReadAfterMatch(fused_read_ctx, coordinator_->connectors_);
 
     ASSERT_NE(fused_read_ctx->fusedReadContext(), nullptr);
     EXPECT_EQ(fused_read_ctx->fusedReadContext()->contexts().size(), 2);
@@ -908,7 +912,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_SetsEmptyFusedReadCo
     auto meta           = std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
     auto fused_read_ctx = std::make_shared<FusedAsyncReadContext>(fused_match_ctx, resource, meta);
 
-    coordinator_->asyncReadAfterMatch(fused_read_ctx);
+    coordinator_->asyncReadAfterMatch(fused_read_ctx, coordinator_->connectors_);
 
     ASSERT_NE(fused_read_ctx->fusedReadContext(), nullptr);
     EXPECT_TRUE(fused_read_ctx->fusedReadContext()->contexts().empty());
@@ -944,7 +948,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_DoesNotUpdateReuse_W
     EXPECT_CALL(*connector1, asyncRead(testing::Eq(resource), testing::Eq(meta), testing::_, 1, 4))
         .WillOnce(testing::Return(read_ctx2));
 
-    coordinator_->asyncReadAfterMatch(fused_read_ctx);
+    coordinator_->asyncReadAfterMatch(fused_read_ctx, coordinator_->connectors_);
 
     ASSERT_NE(fused_read_ctx->fusedReadContext(), nullptr);
     EXPECT_EQ(fused_read_ctx->fusedReadContext()->contexts().size(), 1);
@@ -981,7 +985,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_UsesConnectorByIndex
     EXPECT_CALL(*connector1, asyncRead(testing::Eq(resource), testing::Eq(meta), testing::_, 2, 2))
         .WillOnce(testing::Return(read1));
 
-    coordinator_->asyncReadAfterMatch(fused_read_ctx);
+    coordinator_->asyncReadAfterMatch(fused_read_ctx, coordinator_->connectors_);
 
     ASSERT_NE(fused_read_ctx->fusedReadContext(), nullptr);
     EXPECT_EQ(fused_read_ctx->fusedReadContext()->contexts().size(), 2);
@@ -1000,7 +1004,158 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncReadAfterMatch_Throws_WhenSizeMisma
     auto meta            = std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
     auto fused_read_ctx  = std::make_shared<FusedAsyncReadContext>(fused_match_ctx, resource, meta);
 
-    EXPECT_THROW(coordinator_->asyncReadAfterMatch(fused_read_ctx), std::runtime_error);
+    EXPECT_THROW(coordinator_->asyncReadAfterMatch(fused_read_ctx, coordinator_->connectors_), std::runtime_error);
+}
+
+// ============================================================================
+// Two-phase processReadContexts regression: a slow connector->asyncRead during
+// Phase 2 must NOT block other threads from acquiring update_mutex_. Without
+// the two-phase fix, Phase 2 ran under update_mutex_, so any concurrent
+// coordinator->asyncRead (engine main thread) would serialize behind multi-
+// second gRPC, producing the scheduler deadlock observed in the 1-hour stuck
+// StartLoad incident on prefill.
+// ============================================================================
+TEST_F(KVCacheConnectorCoordinatorTest, ProcessReadContexts_DoesNotHoldUpdateMutexAcrossSlowDispatch) {
+    auto slow_connector       = std::make_shared<testing::NiceMock<MockKVCacheConnector>>();
+    coordinator_->connectors_ = {slow_connector};
+
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->setDeviceReuseBlockNum(1);
+
+    auto match_ctx = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
+    ON_CALL(*match_ctx, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*match_ctx, success()).WillByDefault(testing::Return(true));
+    ON_CALL(*match_ctx, matchedBlockCount()).WillByDefault(testing::Return(3));
+
+    auto fused_match_ctx = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_ctx});
+    auto meta            = std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
+    auto fused_read_ctx  = std::make_shared<FusedAsyncReadContext>(fused_match_ctx, resource, meta);
+
+    // Slow connector->asyncRead simulates the multi-second gRPC seen on degraded
+    // networks (server_caller_->load + tp_broadcast_client_->broadcast).
+    constexpr auto    SLOW_DURATION = std::chrono::milliseconds(500);
+    std::atomic<bool> slow_started{false};
+    auto              returned_read_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    EXPECT_CALL(*slow_connector, asyncRead(testing::_, testing::_, testing::_, testing::_, testing::_))
+        .WillOnce(
+            testing::Invoke([&slow_started, returned_read_ctx, SLOW_DURATION](const std::shared_ptr<KVCacheResource>&,
+                                                                              const std::shared_ptr<Meta>&,
+                                                                              const std::shared_ptr<AsyncMatchContext>&,
+                                                                              int,
+                                                                              int) -> std::shared_ptr<AsyncContext> {
+                slow_started.store(true);
+                std::this_thread::sleep_for(SLOW_DURATION);
+                return returned_read_ctx;
+            }));
+
+    {
+        std::lock_guard<std::mutex> lock(coordinator_->update_mutex_);
+        coordinator_->fused_async_read_context_list_.push_back(fused_read_ctx);
+    }
+
+    // Run processReadContexts in a worker; it will enter Phase 2 (slow asyncRead)
+    // after releasing update_mutex_.
+    std::thread processor([this]() { coordinator_->processReadContexts(); });
+
+    // Wait until Phase 2 has entered the slow asyncRead. By contract, Phase 1's
+    // lock is released before this point.
+    const auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!slow_started.load()) {
+        ASSERT_LT(std::chrono::steady_clock::now(), wait_deadline)
+            << "Phase 2 did not enter the slow asyncRead within 5s; suspected pre-fix regression "
+               "(Phase 2 still under update_mutex_, blocking even the worker thread itself).";
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // Now contend for update_mutex_ from the test thread. With the two-phase
+    // fix, Phase 2 holds nothing, so this should acquire essentially immediately.
+    // Without the fix, this would block until SLOW_DURATION elapses.
+    const auto t0 = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(coordinator_->update_mutex_);
+        // Hold briefly to mimic the engine main thread's "push new fused context"
+        // critical section in coordinator->asyncRead.
+    }
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+
+    // Threshold is generous (1/5 of slow duration) to absorb scheduler noise on
+    // shared CI runners while still catching the regression where the lock would
+    // be held for the full SLOW_DURATION (500ms).
+    EXPECT_LT(elapsed_ms, 100) << "update_mutex_ was held across slow asyncRead — "
+                                  "two-phase processReadContexts regression "
+                                  "(Phase 2 must run outside update_mutex_).";
+
+    processor.join();
+
+    // Sanity: dispatch eventually completed and installed fusedReadContext.
+    EXPECT_NE(fused_read_ctx->fusedReadContext(), nullptr);
+}
+
+// ============================================================================
+// Two-phase processReadContexts: connectors_snapshot keeps connectors alive
+// across the unlocked dispatch, so a destructor-style connectors_.clear()
+// during Phase 2 cannot dangle the reference passed into the connector call.
+// ============================================================================
+TEST_F(KVCacheConnectorCoordinatorTest, ProcessReadContexts_ConnectorsSnapshotSurvivesClearDuringDispatch) {
+    auto slow_connector       = std::make_shared<testing::NiceMock<MockKVCacheConnector>>();
+    coordinator_->connectors_ = {slow_connector};
+    // weak_ptr to observe whether the snapshot keeps the connector alive after
+    // the coordinator's connectors_ is cleared.
+    std::weak_ptr<MockKVCacheConnector> connector_weak = slow_connector;
+
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->setDeviceReuseBlockNum(1);
+
+    auto match_ctx = std::make_shared<testing::NiceMock<MockAsyncMatchContext>>();
+    ON_CALL(*match_ctx, done()).WillByDefault(testing::Return(true));
+    ON_CALL(*match_ctx, success()).WillByDefault(testing::Return(true));
+    ON_CALL(*match_ctx, matchedBlockCount()).WillByDefault(testing::Return(3));
+
+    auto fused_match_ctx = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_ctx});
+    auto meta            = std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
+    auto fused_read_ctx  = std::make_shared<FusedAsyncReadContext>(fused_match_ctx, resource, meta);
+
+    constexpr auto    SLOW_DURATION = std::chrono::milliseconds(300);
+    std::atomic<bool> slow_started{false};
+    EXPECT_CALL(*slow_connector, asyncRead(testing::_, testing::_, testing::_, testing::_, testing::_))
+        .WillOnce(testing::Invoke([&slow_started, SLOW_DURATION](const std::shared_ptr<KVCacheResource>&,
+                                                                 const std::shared_ptr<Meta>&,
+                                                                 const std::shared_ptr<AsyncMatchContext>&,
+                                                                 int,
+                                                                 int) -> std::shared_ptr<AsyncContext> {
+            slow_started.store(true);
+            std::this_thread::sleep_for(SLOW_DURATION);
+            return std::make_shared<testing::NiceMock<MockAsyncContext>>();
+        }));
+
+    {
+        std::lock_guard<std::mutex> lock(coordinator_->update_mutex_);
+        coordinator_->fused_async_read_context_list_.push_back(fused_read_ctx);
+    }
+
+    std::thread processor([this]() { coordinator_->processReadContexts(); });
+
+    const auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!slow_started.load()) {
+        ASSERT_LT(std::chrono::steady_clock::now(), wait_deadline);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // Mid-dispatch, drop the strong reference held by coordinator_ (mimicking
+    // ~KVCacheConnectorCoordinator's connectors_.clear() racing with Phase 2).
+    coordinator_->connectors_.clear();
+    slow_connector.reset();
+
+    // The connector must still be alive — the snapshot inside Phase 2 holds it.
+    EXPECT_FALSE(connector_weak.expired()) << "connectors_snapshot did not keep the connector alive across "
+                                              "the unlocked Phase 2 dispatch — UAF risk on shutdown race.";
+
+    processor.join();
+
+    // After processor finishes, the snapshot is destroyed; the connector should now expire.
+    EXPECT_TRUE(connector_weak.expired());
+    EXPECT_NE(fused_read_ctx->fusedReadContext(), nullptr);
 }
 
 }  // namespace test

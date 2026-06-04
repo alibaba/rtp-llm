@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheSender.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "autil/LoopThread.h"
+#include "autil/ThreadPool.h"
 #include <atomic>
 #include <condition_variable>
 #include <memory>
@@ -37,7 +38,8 @@ public:
     bool writeByLayer(int                           layer_id,
                       const KVCacheResourcePtr&     resource,
                       int64_t                       request_id,
-                      std::shared_ptr<torch::Event> event);
+                      std::shared_ptr<torch::Event> event,
+                      int64_t                       deadline_ms);
 
     ErrorInfo sendKVCache(int64_t                                              request_id,
                           const std::string&                                   unique_key,
@@ -84,7 +86,8 @@ private:
 
     bool waitSendCallbacksWithTimeout(const std::shared_ptr<SendTransferResult>& transfer_result,
                                       int                                        sent_transfer_count,
-                                      int64_t                                    return_deadline_ms) const;
+                                      int64_t                                    return_deadline_ms,
+                                      const std::shared_ptr<std::atomic<bool>>&  cancel_flag) const;
 
     struct SendResultInfo {
         bool        success = true;
@@ -113,8 +116,29 @@ private:
     int64_t                                                             store_wait_timeout_ms_ = 10 * 1000;
     std::shared_ptr<StoreWaitContextChecker>                            store_wait_context_checker_;
     autil::LoopThreadPtr                                                cleanup_thread_;
-    mutable std::mutex                                                  handle_cancel_mutex_;
-    std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> handle_cancel_flags_;
+    // Per in-flight sendKVCache, hold both the cancel signal and a weak handle
+    // to its SendTransferResult. The weak handle lets cancelSend() wake up the
+    // wait_for loop in waitSendCallbacksWithTimeout via cv.notify_all() instead
+    // of letting cancel_flag sit unchecked for up to rdma_transfer_wait_timeout_ms
+    // (180s by default). Weak ref avoids extending the lifetime of the result.
+    struct HandleCancelEntry {
+        std::shared_ptr<std::atomic<bool>> cancel_flag;
+        std::weak_ptr<SendTransferResult>  transfer_result;
+    };
+    mutable std::mutex                                  handle_cancel_mutex_;
+    std::unordered_map<std::string, HandleCancelEntry>  handle_cancel_flags_;
+
+    // OPT-A2: offload sender_->send to a dedicated thread pool. The dispatcher
+    // (sendKVCache main thread) used to call sender_->send synchronously, but
+    // that call includes makeTransferRequest -> cudaStreamSynchronize which
+    // blocks the dispatcher on every layer until the GPU->CPU copy completes.
+    // Under cuda runtime contention or GPU hang, dispatch_us balloons to
+    // seconds (max 1993s observed on 5/22). With this pool the dispatcher
+    // only pays the push cost; the cuda sync runs on pool worker threads.
+    // Pool sized at 4 threads: small enough not to oversubscribe cuda runtime,
+    // large enough to overlap with 2 prefill ranks on the same device.
+    // Queue 10000 keeps headroom for the per-layer × per-partition fanout.
+    autil::ThreadPoolBasePtr async_sender_pool_;
 };
 
 }  // namespace rtp_llm

@@ -218,4 +218,22 @@ TEST_F(ComputedLayerCacheBufferTest, LayerCacheBuffer_HoldsKVCacheResourceLifeti
     EXPECT_TRUE(deleter_called);
 }
 
+TEST_F(ComputedLayerCacheBufferTest, AddBufferRejectedAfterRemove) {
+    int64_t request_id  = 4001;
+    auto    buffer      = createLayerCacheBuffer(0);
+    int64_t deadline_ms = getDeadlineMs();
+
+    auto result = store_->addBuffer(request_id, buffer, deadline_ms);
+    ASSERT_NE(result, nullptr);
+
+    store_->removeBuffer(request_id);
+
+    // Late-arriving addBuffer should be rejected
+    auto buffer2 = createLayerCacheBuffer(1);
+    auto result2 = store_->addBuffer(request_id, buffer2, deadline_ms);
+    EXPECT_EQ(result2, nullptr);
+    EXPECT_EQ(store_->getBuffer(request_id), nullptr);
+    EXPECT_EQ(store_->getBuffersCount(), 0);
+}
+
 }  // namespace rtp_llm

@@ -1,6 +1,7 @@
 #include <atomic>
 #include <thread>
 #include <gtest/gtest.h>
+#include <limits>
 #include <memory>
 #include <vector>
 #include <chrono>
@@ -310,6 +311,15 @@ protected:
         computed_buffers_->addBuffer(request_id, layer_cache_buffer, deadline_ms);
     }
 
+    void addComputedBufferWithResource(int64_t                   request_id,
+                                       int                       layer_id,
+                                       int64_t                   deadline_ms,
+                                       const KVCacheResourcePtr& resource) {
+        auto layer_cache_buffer = createLayerCacheBuffer(layer_id);
+        layer_cache_buffer->setKVCacheResource(resource);
+        computed_buffers_->addBuffer(request_id, layer_cache_buffer, deadline_ms);
+    }
+
     std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id, int num_blocks = 2) {
         auto buffer = std::make_shared<LayerCacheBuffer>(layer_id);
         for (int i = 0; i < num_blocks; ++i) {
@@ -357,8 +367,11 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
     int64_t request_id = 1002;
     auto    resource   = createKVCacheResource(layer_id, 2);
 
-    // Pass nullopt — means "immediately ready" in StoreWaitContext logic
-    bool success = prefill_->writeByLayer(layer_id, resource, request_id, std::shared_ptr<torch::Event>{});
+    // Pass nullopt — means "immediately ready" in StoreWaitContext logic.
+    // INT64_MAX deadline → falls back to store_wait_timeout (existing test
+    // behavior; explicit cases for the request-deadline path are below).
+    bool success = prefill_->writeByLayer(
+        layer_id, resource, request_id, std::shared_ptr<torch::Event>{}, std::numeric_limits<int64_t>::max());
     EXPECT_TRUE(success);
 
     // Wait for cleanup thread to check once — event is immediately ready so buffer should appear
@@ -998,6 +1011,318 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackWaitTimeout) {
     // callback 未收齐，必须报告失败（fix: 修复前此处可能误判成功）
     EXPECT_TRUE(result.hasError());
     EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
+}
+
+// ==================== 资源释放验证测试（对 LACK MEM 修复的直接验证） ====================
+//
+// 背景：sendKVCache() 在 RDMA 传输完成后未调用 removeBuffer(request_id)，导致
+// computed_buffers_[request_id] 持续持有 LayerCacheBuffer::resource_（即经
+// holdKVCacheResourceForConnector 增加引用的 KVCacheResource），这些 KV block
+// 的 connectorReference 直到 checkTimeout()（默认 10s）才被解除，持续高负载下
+// 造成 block pool 耗尽触发 LACK MEM。
+// 修复方案：在 waitSendCallbacksWithTimeout() 返回后立即调用
+// computed_buffers_->removeBuffer(request_id)。
+// 以下测试验证该修复的正确性。
+
+// 1. sendKVCache 成功后，computed_buffers_ 中对应 request 的 buffer 必须立即移除。
+TEST_F(P2PConnectorWorkerTest, SendKVCache_Success_ComputedBufferRemovedImmediately) {
+    int64_t     request_id  = 5001;
+    std::string unique_key  = "test_buffer_removed_on_success";
+    int64_t     deadline_ms = currentTimeMs() + 5000;
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    mock_sender_->setShouldSucceed(true);
+    mock_sender_->setAsyncCallback(true);
+
+    addComputedBuffer(request_id, 0, deadline_ms);
+    addComputedBuffer(request_id, 1, deadline_ms);
+
+    // send 前 buffer 存在
+    ASSERT_NE(computed_buffers_->getBuffer(request_id), nullptr);
+
+    ErrorInfo result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
+    EXPECT_TRUE(result.ok());
+
+    // 修复前：getBuffer 返回非 nullptr，buffer 持有 KV block 引用直到 checkTimeout（最多 10s）
+    // 修复后：getBuffer 必须返回 nullptr
+    EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr)
+        << "BUG: computed_buffers_ still holds buffer after sendKVCache() success — "
+           "connectorReference'd KV blocks are not released, causing LACK MEM under load";
+}
+
+// 2. sendKVCache 因 transfer 失败返回错误时，buffer 同样必须立即移除。
+TEST_F(P2PConnectorWorkerTest, SendKVCache_TransferFailure_ComputedBufferRemovedImmediately) {
+    int64_t     request_id  = 5002;
+    std::string unique_key  = "test_buffer_removed_on_failure";
+    int64_t     deadline_ms = currentTimeMs() + 5000;
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    mock_sender_->setShouldSucceed(false);
+    mock_sender_->setAsyncCallback(true);
+
+    addComputedBuffer(request_id, 0, deadline_ms);
+    addComputedBuffer(request_id, 1, deadline_ms);
+
+    ASSERT_NE(computed_buffers_->getBuffer(request_id), nullptr);
+
+    ErrorInfo result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
+    EXPECT_TRUE(result.hasError());
+
+    // 即使 transfer 失败，buffer 也应立即释放，不能等到 checkTimeout
+    EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr)
+        << "BUG: computed_buffers_ still holds buffer after sendKVCache() failure — "
+           "KV blocks remain pinned even when transfer failed";
+}
+
+// 3. sendKVCache 成功后，LayerCacheBuffer 中持有的 KVCacheResource 引用必须归零
+//    （用 weak_ptr 观察 shared_ptr 是否已析构）。
+//    这是对 connectorReference'd block 不被泄漏的直接验证。
+TEST_F(P2PConnectorWorkerTest, SendKVCache_Success_KVCacheResourceReleasedAfterSend) {
+    int64_t     request_id  = 5003;
+    std::string unique_key  = "test_kvcache_ref_released_on_success";
+    int64_t     deadline_ms = currentTimeMs() + 5000;
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    mock_sender_->setShouldSucceed(true);
+    mock_sender_->setAsyncCallback(true);
+
+    // 构造一个 KVCacheResource，通过 weak_ptr 追踪其生命周期
+    auto                           resource      = createKVCacheResource(0, 2);
+    std::weak_ptr<KVCacheResource> weak_resource = resource;
+
+    // 注入到两层的 LayerCacheBuffer，模拟 writeByLayer 后的状态
+    addComputedBufferWithResource(request_id, 0, deadline_ms, resource);
+    addComputedBufferWithResource(request_id, 1, deadline_ms, resource);
+
+    // 释放本地强引用，让 computed_buffers_ 成为唯一持有者
+    resource.reset();
+    ASSERT_FALSE(weak_resource.expired()) << "resource should still be alive inside computed_buffers_";
+
+    ErrorInfo result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
+    EXPECT_TRUE(result.ok());
+
+    // sendKVCache 返回后，computed_buffers_ 已通过 removeBuffer 释放 ComputedLayerCacheBuffer，
+    // 其局部 shared_ptr computed_layer_cache_buffer 也已随函数返回而析构，
+    // 因此 KVCacheResource 的所有强引用归零，weak_ptr 应已过期。
+    // 修复前：resource 仍被 computed_buffers_[request_id] 持有，weak_ptr 未过期
+    // 修复后：resource 立即被释放，weak_ptr 过期
+    EXPECT_TRUE(weak_resource.expired())
+        << "BUG: KVCacheResource still alive after sendKVCache() success — "
+           "connectorReference'd KV blocks are not released, causing LACK MEM under load";
+}
+
+// 4. sendKVCache 因 transfer 失败时，KVCacheResource 同样必须立即释放。
+TEST_F(P2PConnectorWorkerTest, SendKVCache_TransferFailure_KVCacheResourceReleasedAfterSend) {
+    int64_t     request_id  = 5004;
+    std::string unique_key  = "test_kvcache_ref_released_on_failure";
+    int64_t     deadline_ms = currentTimeMs() + 5000;
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    mock_sender_->setShouldSucceed(false);
+    mock_sender_->setAsyncCallback(true);
+
+    auto                           resource      = createKVCacheResource(0, 2);
+    std::weak_ptr<KVCacheResource> weak_resource = resource;
+
+    addComputedBufferWithResource(request_id, 0, deadline_ms, resource);
+    addComputedBufferWithResource(request_id, 1, deadline_ms, resource);
+
+    resource.reset();
+    ASSERT_FALSE(weak_resource.expired());
+
+    ErrorInfo result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
+    EXPECT_TRUE(result.hasError());
+
+    EXPECT_TRUE(weak_resource.expired()) << "BUG: KVCacheResource still alive after failed sendKVCache() — "
+                                            "blocks remain connectorReference'd even when transfer failed";
+}
+
+// ==================== computed_buffers_ 过期竞态条件测试 ====================
+//
+// 复现线上超时问题（done_tasks=0/60，send_cost_us=3579884468）：
+// Prefill 计算完成后，layers 以 store_wait_timeout_ms（10s）为 deadline 存入 computed_buffers_。
+// 如果 decode 在超过该 deadline 后才发起 transfer（正常调度延迟），checkTimeout() 已将 layers
+// 清除，但 sendKVCache 仍创建了一个空 buffer 并死等层数据——永远不会到达。
+//
+// 根因：checkTimeout() 删除过期 buffer 时未将 request_id 加入 removed_request_ids_，
+// 导致后续 addBuffer() 不感知 layers 已被清理，创建了永远不会填充的空 buffer。
+
+TEST_F(P2PConnectorWorkerTest, SendKVCache_Timeout_LayersExpiredBeforeTransfer) {
+    int64_t     request_id = 6001;
+    std::string unique_key = "test_layers_expired_race";
+
+    // 用一个很短的 deadline 模拟 "layers 已过期" 的情况
+    int64_t expired_deadline_ms = currentTimeMs() - 1;  // 已经过期
+
+    // 模拟 prefill 计算完成后 layers 被存入 computed_buffers_（带短 deadline）
+    addComputedBuffer(request_id, 0, expired_deadline_ms);
+    addComputedBuffer(request_id, 1, expired_deadline_ms);
+
+    // 验证 buffer 此时存在
+    ASSERT_NE(computed_buffers_->getBuffer(request_id), nullptr);
+
+    // 模拟 loopCheckProc 中的 checkTimeout()——删除过期 buffer
+    computed_buffers_->checkTimeout();
+
+    // 验证 buffer 已被清除
+    EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr)
+        << "checkTimeout should have removed the expired buffer";
+
+    // 修复后：sendKVCache 应该快速失败（addBuffer 返回 nullptr），而不是死等 60 分钟
+    int64_t send_deadline_ms = currentTimeMs() + 5000;  // 长 deadline，但不应等这么久
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    mock_sender_->setShouldSucceed(true);
+    mock_sender_->setAsyncCallback(true);
+
+    auto      start_ms   = currentTimeMs();
+    ErrorInfo result     = prefill_->sendKVCache(request_id, unique_key, send_deadline_ms, decode_transfer_servers);
+    auto      elapsed_ms = currentTimeMs() - start_ms;
+
+    // 验证：sendKVCache 快速失败，错误码为 GENERATE_TIMEOUT（buffer 已过期）
+    EXPECT_TRUE(result.hasError());
+    EXPECT_EQ(result.code(), ErrorCode::GENERATE_TIMEOUT);
+
+    // 验证：没有任何 layer 被发送
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 0)
+        << "No layers should be transferred since computed layers were already expired";
+
+    // 修复后关键验证：应该立即返回，而不是等到 deadline
+    EXPECT_LE(elapsed_ms, 100)
+        << "After fix: sendKVCache should fail fast when layers are expired, not wait until deadline";
+}
+
+// 验证 checkTimeout 删除 buffer 后，addBuffer 正确返回 nullptr（修复后行为）
+// 修复前：addBuffer 会创建新的空 buffer（因为不在 removed_request_ids_ 中）
+// 修复后：addBuffer 返回 nullptr（因为 checkTimeout 已将 request_id 加入 removed_request_ids_）
+TEST_F(P2PConnectorWorkerTest, ComputedBufferStore_CheckTimeout_MarksRemoved) {
+    int64_t request_id          = 6002;
+    int64_t expired_deadline_ms = currentTimeMs() - 1;
+
+    // 添加并立即过期
+    addComputedBuffer(request_id, 0, expired_deadline_ms);
+    computed_buffers_->checkTimeout();
+    ASSERT_EQ(computed_buffers_->getBuffer(request_id), nullptr);
+
+    // 修复后验证：addBuffer 返回 nullptr（被 removed_request_ids_ 阻止）
+    int64_t new_deadline_ms = currentTimeMs() + 5000;
+    auto    new_buffer      = computed_buffers_->addBuffer(request_id, nullptr, new_deadline_ms);
+    EXPECT_EQ(new_buffer, nullptr) << "After fix: checkTimeout should add to removed_request_ids_, "
+                                      "so addBuffer returns nullptr for expired requests";
+}
+
+// 对照组：通过 removeBuffer 正常删除后，addBuffer 返回 nullptr（被 removed_request_ids_ 阻止）
+TEST_F(P2PConnectorWorkerTest, ComputedBufferStore_RemoveBuffer_MarksRemoved) {
+    int64_t request_id  = 6003;
+    int64_t deadline_ms = currentTimeMs() + 5000;
+
+    addComputedBuffer(request_id, 0, deadline_ms);
+    ASSERT_NE(computed_buffers_->getBuffer(request_id), nullptr);
+
+    // 使用 removeBuffer（正常路径，如 sendKVCache 完成后调用）
+    computed_buffers_->removeBuffer(request_id);
+    ASSERT_EQ(computed_buffers_->getBuffer(request_id), nullptr);
+
+    // removeBuffer 将 request_id 加入 removed_request_ids_
+    // 后续 addBuffer 应返回 nullptr（正确阻止创建空 buffer）
+    auto buffer = computed_buffers_->addBuffer(request_id, nullptr, deadline_ms);
+    EXPECT_EQ(buffer, nullptr)
+        << "After removeBuffer, addBuffer should return nullptr (blocked by removed_request_ids_)";
+}
+
+// 端到端竞态：当 request 没有业务 deadline（INT64_MAX）时，layer cache buffer
+// 仍按 store_wait_timeout 兜底过期；sendKVCache 在 buffer 过期后应快速返回
+// GENERATE_TIMEOUT，不再死等 RPC deadline。
+TEST_F(P2PConnectorWorkerTest, SendKVCache_FallbackTimeout_FailsFastWithGenerateTimeout) {
+    // 重建 prefill 使用非常短的 store_wait_timeout（50ms）以加速测试
+    prefill_.reset();
+    prefill_ =
+        std::make_unique<P2PConnectorWorkerPrefill>(worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+    prefill_->init(50);  // store_wait_timeout_ms = 50ms
+    computed_buffers_ = prefill_->getComputedBuffersStore();
+
+    int64_t request_id = 6004;
+    auto    resource   = createKVCacheResource(0, 2);
+
+    // 模拟 prefill 前向计算：writeByLayer 存入 layers
+    // INT64_MAX 表示请求无业务 deadline → buffer deadline 退回到 now + store_wait_timeout (50ms)
+    const int64_t no_deadline = std::numeric_limits<int64_t>::max();
+    prefill_->writeByLayer(0, resource, request_id, nullptr, no_deadline);
+    prefill_->writeByLayer(1, resource, request_id, nullptr, no_deadline);
+
+    // 等待 StoreWaitContextChecker 将 layers 移入 computed_buffers_
+    // （event=nullptr 表示立即就绪，checker 每次 loopCheckProc 会处理）
+    // loopCheckProc 每 1000ms 运行一次
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+
+    // 再等一下确保 deadline 过期，然后 checkTimeout 已在 loopCheckProc 中执行
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    computed_buffers_->checkTimeout();
+
+    // 验证 layers 已过期被清除
+    EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr)
+        << "Layers should have been expired by checkTimeout after store_wait_timeout_ms";
+
+    // 现在模拟 decode 发起 transfer（在 layers 过期后）
+    std::string                                   unique_key       = "test_e2e_fallback_timeout";
+    int64_t                                       send_deadline_ms = currentTimeMs() + 5000;
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    mock_sender_->setShouldSucceed(true);
+    mock_sender_->setAsyncCallback(true);
+
+    auto      start_ms   = currentTimeMs();
+    ErrorInfo result     = prefill_->sendKVCache(request_id, unique_key, send_deadline_ms, decode_transfer_servers);
+    auto      elapsed_ms = currentTimeMs() - start_ms;
+
+    // 验证快速失败 + 错误码语义清晰
+    EXPECT_TRUE(result.hasError());
+    EXPECT_EQ(result.code(), ErrorCode::GENERATE_TIMEOUT)
+        << "addBuffer-returned-nullptr path must surface as GENERATE_TIMEOUT (603) so decode "
+           "treats it as 'business deadline expired' rather than retryable transfer error.";
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 0);
+    EXPECT_LE(elapsed_ms, 100) << "Should fail fast, not wait until RPC deadline";
+}
+
+// 验证 buffer 生命周期跟着 request deadline 走：即使 store_wait_timeout 已过，
+// 只要 request 自己的 deadline 没到，buffer 仍存活，sendKVCache 仍能成功。
+TEST_F(P2PConnectorWorkerTest, WriteByLayer_BufferDeadlineFollowsRequestDeadline) {
+    // 重建 prefill 使用极短的 store_wait_timeout（50ms）模拟"forward 完成 50ms 后"
+    prefill_.reset();
+    prefill_ =
+        std::make_unique<P2PConnectorWorkerPrefill>(worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+    prefill_->init(50);  // store_wait_timeout_ms = 50ms
+    computed_buffers_ = prefill_->getComputedBuffersStore();
+
+    int64_t request_id = 6005;
+    auto    resource   = createKVCacheResource(0, 2);
+
+    // request 业务 deadline 设到 5 秒后 → buffer 应该跟着请求活到那时
+    const int64_t request_deadline_ms = currentTimeMs() + 5000;
+    prefill_->writeByLayer(0, resource, request_id, nullptr, request_deadline_ms);
+    prefill_->writeByLayer(1, resource, request_id, nullptr, request_deadline_ms);
+
+    // 等待 StoreWaitContextChecker 把 layers 加入 computed_buffers_
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+
+    // 关键：此时距离 writeByLayer 已超过 store_wait_timeout_ms (50ms)
+    // 但远未到 request deadline (5s)，buffer 必须还在
+    computed_buffers_->checkTimeout();
+    auto buffer = computed_buffers_->getBuffer(request_id);
+    ASSERT_NE(buffer, nullptr)
+        << "Buffer must outlive store_wait_timeout when request_deadline_ms is far in the future. "
+           "Old behavior (deadline = now + store_wait_timeout) would have wiped it out by now.";
 }
 
 // ==================== LayerCacheBufferUtil 边界测试 ====================

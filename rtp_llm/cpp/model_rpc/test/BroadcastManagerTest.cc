@@ -216,7 +216,9 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {
     auto result   = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/50, rpc_call);
     ASSERT_NE(result, nullptr);
 
-    EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+    result->waitDone();
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
 }
 
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
@@ -247,7 +249,9 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
     auto result   = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/50, rpc_call);
     ASSERT_NE(result, nullptr);
 
-    EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+    result->waitDone();
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
 }
 
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialResponseRpcStatusFailed) {

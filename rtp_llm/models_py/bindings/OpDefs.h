@@ -124,6 +124,9 @@ struct PyCacheStoreInputs {
     size_t                   decoder_batch_size = 0;
     torch::Tensor            request_id;
     torch::Tensor            request_pd_separation;
+    // Absolute business deadline (ms since epoch) per context request.
+    // Empty / undefined → no deadline (P2P workers fall back to store_wait_timeout).
+    torch::Tensor            request_deadline_ms;
     torch::Tensor            kv_cache_layer_to_group;
     torch::Tensor            kv_cache_group_types;
     std::vector<std::string> cache_keys;  // [context_batch_size]

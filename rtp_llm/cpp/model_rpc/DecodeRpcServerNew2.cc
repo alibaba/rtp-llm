@@ -69,7 +69,8 @@ DecodeEntranceKeys buildDecodeEntranceKeys(const GenerateInputPB& request,
     return keys;
 }
 
-GenerateInputPB makeDecodeEntranceHandoffRequest(const GenerateInputPB& request, const std::string& handoff_unique_key) {
+GenerateInputPB makeDecodeEntranceHandoffRequest(const GenerateInputPB& request,
+                                                 const std::string&     handoff_unique_key) {
     GenerateInputPB handoff_request;
     handoff_request.CopyFrom(request);
     handoff_request.mutable_generate_config()->set_unique_key(handoff_unique_key);
@@ -93,6 +94,9 @@ DecodeRpcServerNew2::pollStreamOutputWithPrefill(grpc::ServerContext*           
         return serializeErrorMsg(request_key, error_info);
     };
 
+    bool first_token_sent        = false;
+    bool skip_next_decode_output = false;
+
     while (stream->isActive() || stream->hasOutput()) {
         auto prefill_status = propagate_prefill_error();
         if (!prefill_status.ok()) {
@@ -103,6 +107,25 @@ DecodeRpcServerNew2::pollStreamOutputWithPrefill(grpc::ServerContext*           
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
         }
+
+        if (!first_token_sent && prefill_ctx) {
+            GenerateOutputsPB prefill_output;
+            if (prefill_ctx->takeFirstResponse(prefill_output)) {
+                first_token_sent        = true;
+                skip_next_decode_output = true;
+                for (int i = 0; i < prefill_output.mutable_flatten_output()->finished_size(); ++i) {
+                    prefill_output.mutable_flatten_output()->set_finished(i, false);
+                }
+                updateDecodeAuxInfo(prefill_output, stream, prefill_ctx);
+                if (!writer->Write(prefill_output)) {
+                    stream->reportError(ErrorCode::CANCELLED, "write prefill first token failed");
+                    RTP_LLM_LOG_WARNING("request [%s] write prefill first token failed", request_key.c_str());
+                    return grpc::Status(grpc::StatusCode::INTERNAL, "write prefill first token failed");
+                }
+                continue;
+            }
+        }
+
         if (!stream->hasOutput()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
@@ -116,6 +139,14 @@ DecodeRpcServerNew2::pollStreamOutputWithPrefill(grpc::ServerContext*           
                 break;
             }
         }
+
+        if (!first_token_sent) {
+            first_token_sent = true;
+        } else if (skip_next_decode_output) {
+            skip_next_decode_output = false;
+            continue;
+        }
+
         RTP_LLM_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
         GenerateOutputsPB outputs_pb;
 
@@ -196,8 +227,8 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
         }
     };
 
-    const auto normalized_timeout_ms =
-        normalizeRpcTimeoutMs(request->generate_config().timeout_ms(), maga_init_params_.pd_sep_config.max_rpc_timeout_ms);
+    const auto normalized_timeout_ms     = normalizeRpcTimeoutMs(request->generate_config().timeout_ms(),
+                                                             maga_init_params_.pd_sep_config.max_rpc_timeout_ms);
     const auto normalized_timeout_ms_i32 = clampRpcTimeoutMsToInt32(normalized_timeout_ms);
 
     // Always isolate decode-entrance P2P handoff from any caller-provided business unique_key.
@@ -209,8 +240,8 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
     // Check if pd separation should be used
     auto pd_separation = decodeEntranceRequiresPrefill(*request);
     if (pd_separation) {
-        auto decode_entrance_keys =
-            buildDecodeEntranceKeys(*request, autil::NetUtil::getBindIp(), unique_key_id_.fetch_add(1), currentTimeUs());
+        auto decode_entrance_keys = buildDecodeEntranceKeys(
+            *request, autil::NetUtil::getBindIp(), unique_key_id_.fetch_add(1), currentTimeUs());
         request_with_handoff_key = makeDecodeEntranceHandoffRequest(*request, decode_entrance_keys.handoff_unique_key);
         effective_request        = &request_with_handoff_key;
     }
@@ -245,7 +276,7 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
     auto stream                                  = engine_->makeStream(input);
     generate_context.setStream(stream);
 
-    // 获取 prefill 地址并查询 prefill_tp_size（有缓存，首次后几乎无开销）
+    // 获取 prefill peer info（含 DP 地址列表），round-robin 选择目标 DP
     std::string prefill_ip;
     uint32_t    prefill_port = 0;
     for (const auto& role_addr : request->generate_config().role_addrs()) {
@@ -261,17 +292,36 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
         return grpc::Status(grpc::StatusCode::INTERNAL, "prefill_ip or prefill_port is not available");
     }
 
-    int prefill_tp_size = prefill_server_caller_->getPrefillTpSize(prefill_ip, prefill_port, normalized_timeout_ms_i32);
-    if (prefill_tp_size <= 0) {
-        RTP_LLM_LOG_WARNING("decode rpc server new2 generate failed: prefill_tp_size unavailable, "
+    auto peer_info = prefill_server_caller_->getPrefillPeerInfo(prefill_ip, prefill_port, normalized_timeout_ms_i32);
+    if (peer_info.tp_size <= 0 || peer_info.dp_addrs.empty()) {
+        RTP_LLM_LOG_WARNING("decode rpc server new2 generate failed: prefill peer info unavailable, "
                             "request_id=%ld, prefill_addr=%s:%u",
                             request_id,
                             prefill_ip.c_str(),
                             prefill_port);
-        return grpc::Status(grpc::StatusCode::INTERNAL, "prefill_tp_size is not available");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "prefill peer info is not available");
     }
-    stream->setPrefillTpSize(prefill_tp_size);
-    // 由 DecodeRpcServerNew2 负责发起异步 prefill 调用；保留局部 context 防止提前销毁导致 prefill 侧 stream 被 cancel
+    stream->setPrefillTpSize(peer_info.tp_size);
+
+    // Round-robin across prefill DPs using request_id
+    const auto& dp_addrs      = peer_info.dp_addrs;
+    size_t      dp_index      = static_cast<size_t>(request_id) % dp_addrs.size();
+    const auto& selected_addr = dp_addrs[dp_index];
+    auto        colon_pos     = selected_addr.rfind(':');
+    std::string target_ip     = selected_addr.substr(0, colon_pos);
+    uint32_t    target_port   = static_cast<uint32_t>(std::stoul(selected_addr.substr(colon_pos + 1)));
+
+    // Update the stream's PREFILL role_addr to point to the selected DP rank
+    // so that StartLoad (P2P cache read) goes to the same prefill that runs
+    // the GenerateStreamCall, not the initial DP-0 address from the router.
+    for (auto& role_addr : input->generate_config->role_addrs) {
+        if (role_addr.role == RoleType::PREFILL) {
+            role_addr.ip        = target_ip;
+            role_addr.grpc_port = static_cast<int>(target_port);
+            break;
+        }
+    }
+
     std::shared_ptr<PrefillServerCallerContext> prefill_caller_ctx;
     PrefillContextGuard                         prefill_context_guard;
     const auto&                                 unique_key  = input->generate_config->unique_key;
@@ -281,11 +331,10 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
     prefill_request.mutable_generate_config()->set_timeout_ms(normalized_timeout_ms_i32);
     prefill_request.mutable_generate_config()->set_unique_key(unique_key);
     prefill_caller_ctx =
-        prefill_server_caller_->callPrefill(&prefill_request, prefill_ip, prefill_port, unique_key, deadline_us);
+        prefill_server_caller_->callPrefill(&prefill_request, target_ip, target_port, unique_key, deadline_us);
     if (!prefill_caller_ctx) {
-        generate_context.error_info =
-            ErrorInfo(ErrorCode::P2P_CONNECTOR_CALL_PREFILL_FAILED,
-                      "failed to start async prefill request to " + prefill_ip + ":" + std::to_string(prefill_port));
+        generate_context.error_info   = ErrorInfo(ErrorCode::P2P_CONNECTOR_CALL_PREFILL_FAILED,
+                                                "failed to start async prefill request to " + selected_addr);
         generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.error_info);
         return generate_context.error_status;
     }

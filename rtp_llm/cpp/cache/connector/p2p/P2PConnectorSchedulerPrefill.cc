@@ -121,6 +121,22 @@ P2PConnectorSchedulerPrefill::waitForBroadcastCompletion(const std::shared_ptr<P
         if (cancel_result && !cancel_result->done()) {
             cancel_result->checkDone();
         }
+        // Once cancel completed (either acked by all workers or its own gRPC
+        // timeout fired ~1s later), there is nothing the scheduler can gain by
+        // continuing to poll `result`: worker-side cleanup runs independently
+        // off worker's own return_deadline_ms, and the upstream caller only
+        // inspects cancel_result / deadline_exceeded_out for the final error
+        // code. Without this break, a hung broadcast channel kept the loop
+        // spinning until the client business deadline (~1h) — see 5/22 PD log
+        // analysis, B-class 7 cases > 60s.
+        if (cancel_result && cancel_result->done()) {
+            RTP_LLM_LOG_WARNING("sendKVCache: cancel completed, exiting wait early "
+                                "(deadline_exceeded=%d), request_id=%ld, unique_key=%s",
+                                (deadline_exceeded_out && *deadline_exceeded_out) ? 1 : 0,
+                                request_id,
+                                unique_key.c_str());
+            break;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
         sleep_ms = std::min(sleep_ms * 2, kBackoffCapMs);
     }

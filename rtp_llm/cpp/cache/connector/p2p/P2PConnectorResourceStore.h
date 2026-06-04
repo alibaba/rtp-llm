@@ -56,7 +56,10 @@ struct P2PSideChannelStoreEntry {
 // 需要将资源移除。unique_key 目前由 decode 生成, 后续可能由 master 统一生成保证全局唯一。
 class P2PConnectorResourceStore {
 public:
-    P2PConnectorResourceStore(const kmonitor::MetricsReporterPtr& metrics_reporter, int timeout_check_interval_ms);
+    P2PConnectorResourceStore(const kmonitor::MetricsReporterPtr& metrics_reporter,
+                              int                                 timeout_check_interval_ms,
+                              int64_t                             prefill_resource_hold_ms = 60 * 1000,
+                              int64_t                             cancelled_keys_ttl_ms    = 3600 * 1000);
     ~P2PConnectorResourceStore();
 
 public:
@@ -66,6 +69,12 @@ public:
     // addResource from Meta (extracts routing from Meta::p2pRouting())
     // Routing fields (unique_key, deadline_ms, request_id) are read from Meta::P2PRoutingContext
     bool addResource(const std::shared_ptr<Meta>& meta, const KVCacheResourcePtr& kv_cache_resource);
+
+    // Mark unique_key as cancelled: if the resource is already in the store, remove it
+    // immediately; otherwise record the cancellation so that a future addResource() call
+    // for the same key is rejected on arrival, preventing blocks from being pinned until
+    // the next checkTimeout() cycle.
+    void markCancelled(const std::string& unique_key);
 
     std::shared_ptr<P2PConnectorResourceEntry> waitAndStealResource(const std::string&    unique_key,
                                                                     int64_t               deadline_ms,
@@ -101,6 +110,10 @@ private:
     mutable std::mutex                                                resource_map_mutex_;
     std::condition_variable                                           resource_cv_;
     std::map<std::string, std::shared_ptr<P2PConnectorResourceEntry>> resource_map_;
+    // unique_key → cancel_time_ms: keys for which the decode-side gRPC was cancelled before the
+    // resource arrived. addResource() rejects these to avoid pinning KV blocks; entries are
+    // purged by checkTimeout() after kCancelledKeyTTLMs.
+    std::map<std::string, int64_t> cancelled_keys_;
     // Side-channel data stored independently from resource entries.
     // This allows notifySideChannelReady to store data even after the entry has been stolen.
     std::mutex                                      side_channel_map_mutex_;
@@ -111,6 +124,21 @@ private:
 
     autil::LoopThreadPtr check_timeout_thread_;
     int                  timeout_check_interval_ms_;
+
+    // Cap entry->deadline_ms to currentTimeMs() + this value, so prefill stops
+    // pinning KV blocks for the full business deadline (commonly ~1h) when
+    // decode never sends StartLoad. See P2PConnectorResourceStore.cc::addResource.
+    int64_t prefill_resource_hold_ms_;
+    // Lifetime of cancelled_keys_ tombstones; should cover the longest expected
+    // skew between addResource and a late-arriving StartLoad so handleRead can
+    // distinguish "expired on prefill" from "never seen".
+    int64_t cancelled_keys_ttl_ms_;
+
+public:
+    // Test hook: peek whether a unique_key is currently in cancelled_keys_.
+    // Used by handleRead to decide between GENERATE_TIMEOUT (expired here)
+    // and the generic RESOURCE_FAILED.
+    bool isMarkedCancelled(const std::string& unique_key) const;
 };
 
 }  // namespace rtp_llm
