@@ -1453,6 +1453,9 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
             slot.prefill_context->setStream(stream);
             all_streams.push_back(stream);
         }
+        if (abort_if_context_cancelled(local_slots.back().index, local_slots.back().request_id, local_slots)) {
+            return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
+        }
         engine_->batchEnqueue(all_streams);
         for (auto& slot : local_slots) {
             if (slot.prefill_context->refresh_cancel_state) {
