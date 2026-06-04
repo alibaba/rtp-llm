@@ -819,6 +819,11 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     new_request->clear_batch_group_id();
     new_request->mutable_generate_config()->clear_force_batch();
     new_request->mutable_generate_config()->clear_batch_group_timeout();
+    if (engine_->resourceContext().cache_manager
+        && engine_->resourceContext().cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse) {
+        alloc_request.set_input_token_count(new_request->token_ids_size());
+        new_request->clear_token_ids();
+    }
     alloc_request.set_allocated_input(new_request);
     for (auto& addrs : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(addrs);
@@ -1488,21 +1493,6 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
             return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
         }
 
-        pfx_ctx->stat_info.nextStage();
-        remoteLoadCacheStart(*pfx_ctx);
-        refreshAsyncProducerCancelState(slot.cancel_state, pfx_ctx->client_context, pfx_ctx->getStream());
-        if (abort_if_context_cancelled(slot.index, slot.request_id, local_slots)) {
-            return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
-        }
-        if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
-            return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-        }
-        if (pfx_ctx->hasError()) {
-            setBatchAckError(ack, slot.request_id, grpc::StatusCode::INTERNAL, pfx_ctx->error_info.ToString());
-            abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
-            return grpc::Status::OK;
-        }
-
         auto entry  = slot.entry;
         auto writer = std::make_shared<ResponseBufferWriter>(entry);
         pfx_ctx->rpc_context.writer = writer.get();
@@ -1516,6 +1506,7 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         try {
             std::thread worker([this,
                                 pfx_ctx = slot.prefill_context,
+                                cancel_state = slot.cancel_state,
                                 rpc_ctx = slot.rpc_context,
                                 input = slot.input,
                                 writer,
@@ -1534,10 +1525,18 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                     writer.reset();
                     entry.reset();
                     guard.reset();
+                    cancel_state.reset();
                 });
                 grpc::Status finish_status;
                 try {
-                    finish_status = finishStream(*pfx_ctx);
+                    pfx_ctx->stat_info.nextStage();
+                    remoteLoadCacheStart(*pfx_ctx);
+                    refreshAsyncProducerCancelState(cancel_state, pfx_ctx->client_context, pfx_ctx->getStream());
+                    if (!pfx_ctx->hasError()) {
+                        finish_status = finishStream(*pfx_ctx);
+                    } else {
+                        finish_status = grpc::Status(grpc::StatusCode::INTERNAL, pfx_ctx->error_info.ToString());
+                    }
                 } catch (const std::exception& e) {
                     auto error_msg = "request [" + pfx_ctx->request_key + "] finishStream exception [" + e.what() + "]";
                     finish_status  = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);

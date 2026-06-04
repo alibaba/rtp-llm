@@ -124,7 +124,12 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
 void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
-    auto input                  = QueryConverter::transQuery(&decode_context.allocate_request.input());
+    auto& allocate_request = decode_context.allocate_request;
+    if (allocate_request.input().token_ids_size() == 0 && allocate_request.input_token_count() > 0) {
+        allocate_request.mutable_input()->mutable_token_ids()->Resize(
+            allocate_request.input_token_count(), 0);
+    }
+    auto input                  = QueryConverter::transQuery(&allocate_request.input());
     decode_context.request_info = input->request_info;
     if (applyTimelineGate(decode_context.request_key,
                           input->generate_config->gen_timeline,
