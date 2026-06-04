@@ -76,8 +76,8 @@ bool BoundedRelay::isClosed() const {
 
 // ---- RequestSession ----
 
-RequestSession::RequestSession(int64_t request_id, int64_t batch_id, int64_t admitted_at_us):
-    request_id_(request_id), batch_id_(batch_id), admitted_at_us_(admitted_at_us) {}
+RequestSession::RequestSession(int64_t request_id, int64_t batch_id, int64_t admitted_at_us, bool is_pd):
+    request_id_(request_id), batch_id_(batch_id), is_pd_(is_pd), admitted_at_us_(admitted_at_us) {}
 
 void RequestSession::cancel(CancelReason reason) {
     std::lock_guard<std::mutex> lock(mu_);

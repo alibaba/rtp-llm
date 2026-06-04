@@ -68,8 +68,9 @@ void SessionManager::startGc() {
                 break;
             }
             auto swept = gcOnce();
-            if (swept > 0) {
-                RTP_LLM_LOG_INFO("SessionManager GC swept %zu entries", swept);
+            auto reaped = reapAttachDeadline();
+            if (swept > 0 || reaped > 0) {
+                RTP_LLM_LOG_INFO("SessionManager GC swept %zu, reaped %zu attach-deadline", swept, reaped);
             }
         }
     });

@@ -10,6 +10,8 @@
 #include <thread>
 #include <vector>
 
+#include <grpcpp/impl/codegen/sync_stream.h>
+
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
 namespace rtp_llm {
@@ -69,9 +71,20 @@ private:
     bool                          closed_{false};
 };
 
+// WriterInterface adapter: writes to BoundedRelay instead of gRPC ServerWriter
+class RelayWriter: public grpc::internal::WriterInterface<GenerateOutputsPB> {
+public:
+    explicit RelayWriter(BoundedRelay* relay): relay_(relay) {}
+    bool Write(const GenerateOutputsPB& outputs, grpc::WriteOptions /*options*/) override {
+        return relay_->push(outputs);
+    }
+private:
+    BoundedRelay* relay_;
+};
+
 class RequestSession {
 public:
-    RequestSession(int64_t request_id, int64_t batch_id, int64_t admitted_at_us);
+    RequestSession(int64_t request_id, int64_t batch_id, int64_t admitted_at_us, bool is_pd = false);
 
     void cancel(CancelReason reason);
 
@@ -90,6 +103,7 @@ public:
     SessionState                        state() const { return state_.load(); }
     CancelReason                        cancelReason() const { return cancel_reason_; }
     bool                                hasConsumer() const { return consumer_taken_.load(); }
+    bool                                isPd() const { return is_pd_; }
 
     void setStream(std::shared_ptr<GenerateStream> stream);
     void setCancelState(std::shared_ptr<AsyncProducerCancelState> cancel_state);
@@ -101,6 +115,7 @@ private:
 
     int64_t                                    request_id_;
     int64_t                                    batch_id_;
+    bool                                       is_pd_;
     std::shared_ptr<GenerateStream>            stream_;
     BoundedRelay                               relay_;
     std::atomic<bool>                          consumer_taken_{false};
