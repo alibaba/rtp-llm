@@ -15,13 +15,14 @@ TEST(PdKvWritebackManifestTest, DropsFinalPartialBlock) {
     auto manifest = buildPdKvWritebackManifest(snapshot);
 
     ASSERT_TRUE(manifest.ok()) << manifest.status();
+    EXPECT_EQ(manifest.value().start_block_index, 0);
     EXPECT_EQ(manifest.value().reusable_block_count, 2);
     EXPECT_EQ(manifest.value().cache_keys, CacheKeysType({101, 102}));
     ASSERT_EQ(manifest.value().group_block_ids.size(), 1);
     EXPECT_EQ(manifest.value().group_block_ids[0], BlockIndicesType({1, 2}));
 }
 
-TEST(PdKvWritebackManifestTest, KeepsOnlyDecodeCompletedBlocksAfterPrefill) {
+TEST(PdKvWritebackManifestTest, KeepsMixedBridgeBlockAndDecodeCompletedBlocksAfterPrefill) {
     PdKvWritebackSnapshot snapshot;
     snapshot.seq_size_per_block  = 16;
     snapshot.final_token_count   = 48;
@@ -32,10 +33,29 @@ TEST(PdKvWritebackManifestTest, KeepsOnlyDecodeCompletedBlocksAfterPrefill) {
     auto manifest = buildPdKvWritebackManifest(snapshot);
 
     ASSERT_TRUE(manifest.ok()) << manifest.status();
+    EXPECT_EQ(manifest.value().start_block_index, 1);
     EXPECT_EQ(manifest.value().reusable_block_count, 2);
     EXPECT_EQ(manifest.value().cache_keys, CacheKeysType({202, 203}));
     ASSERT_EQ(manifest.value().group_block_ids.size(), 1);
     EXPECT_EQ(manifest.value().group_block_ids[0], BlockIndicesType({12, 13}));
+}
+
+TEST(PdKvWritebackManifestTest, KeepsDecodeBlocksWhenPrefillEndsOnBlockBoundary) {
+    PdKvWritebackSnapshot snapshot;
+    snapshot.seq_size_per_block  = 16;
+    snapshot.final_token_count   = 64;
+    snapshot.prefill_token_count = 32;
+    snapshot.cache_keys          = {601, 602, 603, 604};
+    snapshot.group_block_ids     = {{51, 52, 53, 54}};
+
+    auto manifest = buildPdKvWritebackManifest(snapshot);
+
+    ASSERT_TRUE(manifest.ok()) << manifest.status();
+    EXPECT_EQ(manifest.value().start_block_index, 2);
+    EXPECT_EQ(manifest.value().reusable_block_count, 2);
+    EXPECT_EQ(manifest.value().cache_keys, CacheKeysType({603, 604}));
+    ASSERT_EQ(manifest.value().group_block_ids.size(), 1);
+    EXPECT_EQ(manifest.value().group_block_ids[0], BlockIndicesType({53, 54}));
 }
 
 TEST(PdKvWritebackManifestTest, RejectsMultimodalOverlap) {
@@ -49,6 +69,7 @@ TEST(PdKvWritebackManifestTest, RejectsMultimodalOverlap) {
     auto manifest = buildPdKvWritebackManifest(snapshot);
 
     ASSERT_TRUE(manifest.ok()) << manifest.status();
+    EXPECT_EQ(manifest.value().start_block_index, 0);
     EXPECT_EQ(manifest.value().reusable_block_count, 1);
     EXPECT_EQ(manifest.value().cache_keys, CacheKeysType({301}));
     ASSERT_EQ(manifest.value().group_block_ids.size(), 1);
@@ -78,6 +99,7 @@ TEST(PdKvWritebackManifestTest, UsesRequestIdFallbackWhenRequestKeyIsEmpty) {
     auto manifest = buildPdKvWritebackManifest(snapshot);
 
     ASSERT_TRUE(manifest.ok()) << manifest.status();
+    EXPECT_EQ(manifest.value().start_block_index, 0);
     EXPECT_EQ(manifest.value().request_key, "pd_kv_writeback_12345");
 }
 

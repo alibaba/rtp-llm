@@ -33,6 +33,8 @@ class WritebackAllocatorApiStaticTest(unittest.TestCase):
         self.assertRegex(manager_h, re.compile(r"absl::Status\s+mallocWritebackBlocks"))
         self.assertRegex(manager_h, re.compile(r"void\s+commitWritebackBlocks"))
         self.assertIn("allocator_->mallocWritebackBlocks", manager_cc)
+        self.assertIn("start_block_index", manager_h)
+        self.assertIn("start_block_index", manager_cc)
         self.assertIn("allocator_->commitWritebackBlocks", manager_cc)
 
         self.assertIn("mallocWritebackBlocks", single_h)

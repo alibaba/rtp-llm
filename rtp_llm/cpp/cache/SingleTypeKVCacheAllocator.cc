@@ -214,7 +214,9 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
 }
 
 absl::Status SingleTypeKVCacheAllocator::mallocWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                                               size_t                         block_count) {
+                                                               size_t                         block_count,
+                                                               size_t                         start_block_index) {
+    (void)start_block_index;
     if (!batch_kv_cache_resource) {
         return absl::InvalidArgumentError("batch_kv_cache_resource is null");
     }

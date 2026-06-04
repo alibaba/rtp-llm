@@ -265,6 +265,25 @@ TEST_F(HybridTypeKVCacheAllocatorTest, WritebackCommitInsertsExactFullAndLinearB
     EXPECT_EQ(probe_resource->cacheResource(0).reuseBlockNum(), 2);
 }
 
+TEST_F(HybridTypeKVCacheAllocatorTest, WritebackMallocPreservesOriginalBlockOffsetForLinearGroups) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto writeback_resource = std::make_shared<BatchKVCacheResource>();
+    auto status             = allocator->mallocWritebackBlocks(writeback_resource,
+                                                   /*block_count=*/2,
+                                                   /*start_block_index=*/1);
+
+    ASSERT_TRUE(status.ok()) << status;
+    ASSERT_EQ(writeback_resource->blocksNum(0, 0), 2);
+    ASSERT_EQ(writeback_resource->blocksNum(0, 1), 2);
+    EXPECT_FALSE(isNullBlockIdx(writeback_resource->blocks(0, 0)[0]));
+    EXPECT_FALSE(isNullBlockIdx(writeback_resource->blocks(0, 0)[1]));
+    EXPECT_FALSE(isNullBlockIdx(writeback_resource->blocks(0, 1)[0]));
+    EXPECT_FALSE(isNullBlockIdx(writeback_resource->blocks(0, 1)[1]));
+}
+
 TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridNoMtp) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);

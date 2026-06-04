@@ -17,7 +17,7 @@ public:
     MOCK_METHOD(void, insertIntoCache, (const InsertInfo&), (override));
     MOCK_METHOD(absl::Status,
                 mallocWritebackBlocks,
-                (const BatchKVCacheResourcePtr& batch_kv_cache_resource, size_t block_count),
+                (const BatchKVCacheResourcePtr& batch_kv_cache_resource, size_t block_count, size_t start_block_index),
                 (override));
     MOCK_METHOD(void,
                 commitWritebackBlocks,

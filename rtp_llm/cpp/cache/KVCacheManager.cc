@@ -118,9 +118,10 @@ void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
 }
 
 absl::Status KVCacheManager::mallocWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                                   size_t                         block_count) {
+                                                   size_t                         block_count,
+                                                   size_t                         start_block_index) {
     RTP_LLM_PROFILE_FUNCTION();
-    return allocator_->mallocWritebackBlocks(batch_kv_cache_resource, block_count);
+    return allocator_->mallocWritebackBlocks(batch_kv_cache_resource, block_count, start_block_index);
 }
 
 void KVCacheManager::commitWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,

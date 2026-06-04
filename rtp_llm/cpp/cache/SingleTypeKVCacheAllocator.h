@@ -19,7 +19,8 @@ public:
     void                   free(const FreeInfo& free_info) override;
     void                   insertIntoCache(const InsertInfo& insert_info) override;
     absl::Status           mallocWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                                 size_t                         block_count) override;
+                                                 size_t                         block_count,
+                                                 size_t                         start_block_index = 0) override;
     void                   commitWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                  const CacheKeysType&           cache_keys,
                                                  bool                           is_resident) override;

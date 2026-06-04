@@ -644,21 +644,28 @@ absl::Status PdKvWritebackManager::prepareReceiveOnPrefill(const PdKvWritebackLa
         report_receive("failed", "cache_keys_shorter_than_reusable_blocks");
         return absl::InvalidArgumentError("cache_keys shorter than reusable_block_count");
     }
+    if (request.manifest.start_block_index < 0) {
+        report_receive("failed", "negative_start_block_index");
+        return absl::InvalidArgumentError("start_block_index must be non-negative");
+    }
     auto compatibility_status = validatePdKvWritebackCompatibility(request.source, request.destination);
     if (!compatibility_status.ok()) {
         report_receive("failed", "compatibility_mismatch");
         return compatibility_status;
     }
 
-    RTP_LLM_LOG_INFO("PD KV writeback receive start, request_id=%ld, reusable_blocks=%ld, cache_keys=%zu, backend=%s",
-                     request.manifest.request_id,
-                     request.manifest.reusable_block_count,
-                     request.manifest.cache_keys.size(),
-                     pdKvBackendName(pd_config_).c_str());
+    RTP_LLM_LOG_INFO(
+        "PD KV writeback receive start, request_id=%ld, start_block_index=%ld, reusable_blocks=%ld, cache_keys=%zu, backend=%s",
+        request.manifest.request_id,
+        request.manifest.start_block_index,
+        request.manifest.reusable_block_count,
+        request.manifest.cache_keys.size(),
+        pdKvBackendName(pd_config_).c_str());
 
     const int64_t malloc_begin_us = currentTimeUs();
     auto          status          = cache_writer_->mallocWritebackBlocks(destination_resource,
-                                                       static_cast<size_t>(request.manifest.reusable_block_count));
+                                                       static_cast<size_t>(request.manifest.reusable_block_count),
+                                                       static_cast<size_t>(request.manifest.start_block_index));
     collector.malloc_latency_us   = currentTimeUs() - malloc_begin_us;
     if (!status.ok()) {
         report_receive("failed", "malloc_failed");

@@ -4,6 +4,8 @@
 #include <string>
 
 #include "absl/status/status.h"
+#include "autil/EnvUtil.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 namespace {
@@ -29,6 +31,21 @@ int64_t firstBlockedByMultimodal(const PdKvWritebackSnapshot& snapshot, int64_t 
     return usable_blocks;
 }
 
+bool pdKvWritebackCacheDebugEnabled() {
+    static const bool enabled = autil::EnvUtil::getEnv("PD_KV_WRITEBACK_DEBUG_CACHE", false);
+    return enabled;
+}
+
+const char* blockKind(int64_t token_begin, int64_t token_end, int64_t prefill_token_count) {
+    if (token_end <= prefill_token_count) {
+        return "prefill";
+    }
+    if (token_begin >= prefill_token_count) {
+        return "decode";
+    }
+    return "mixed";
+}
+
 }  // namespace
 
 absl::StatusOr<PdKvWritebackManifest> buildPdKvWritebackManifest(const PdKvWritebackSnapshot& snapshot) {
@@ -45,9 +62,38 @@ absl::StatusOr<PdKvWritebackManifest> buildPdKvWritebackManifest(const PdKvWrite
     const int64_t full_blocks = snapshot.final_token_count / snapshot.seq_size_per_block;
     const int64_t limited_blocks =
         std::min<int64_t>(firstBlockedByMultimodal(snapshot, full_blocks), snapshot.cache_keys.size());
-    const int64_t prefill_full_blocks = snapshot.prefill_token_count / snapshot.seq_size_per_block;
-    const int64_t start_block         = std::min(prefill_full_blocks, limited_blocks);
-    const int64_t reusable_blocks     = limited_blocks - start_block;
+    const int64_t start_block = std::min(snapshot.prefill_token_count / snapshot.seq_size_per_block, limited_blocks);
+    const int64_t reusable_blocks = limited_blocks - start_block;
+
+    if (pdKvWritebackCacheDebugEnabled()) {
+        RTP_LLM_LOG_INFO(
+            "PD KV writeback manifest summary, request_id=%ld, seq_size_per_block=%d, prefill_token_count=%ld, final_token_count=%ld, full_blocks=%ld, start_block=%ld, limited_blocks=%ld, reusable_blocks=%ld, cache_keys=%zu",
+            snapshot.request_id,
+            snapshot.seq_size_per_block,
+            snapshot.prefill_token_count,
+            snapshot.final_token_count,
+            full_blocks,
+            start_block,
+            limited_blocks,
+            reusable_blocks,
+            snapshot.cache_keys.size());
+        for (int64_t block = start_block; block < limited_blocks; ++block) {
+            const int64_t token_begin = block * snapshot.seq_size_per_block;
+            const int64_t token_end =
+                std::min<int64_t>(token_begin + snapshot.seq_size_per_block, snapshot.final_token_count);
+            const int64_t expected_valid_tokens = std::max<int64_t>(0, token_end - token_begin);
+            RTP_LLM_LOG_INFO(
+                "PD KV writeback manifest block, request_id=%ld, manifest_index=%ld, original_block=%ld, cache_key=%ld, token_begin=%ld, token_end=%ld, expected_valid_tokens=%ld, block_kind=%s",
+                snapshot.request_id,
+                block - start_block,
+                block,
+                snapshot.cache_keys[block],
+                token_begin,
+                token_end,
+                expected_valid_tokens,
+                blockKind(token_begin, token_end, snapshot.prefill_token_count));
+        }
+    }
 
     PdKvWritebackManifest manifest;
     manifest.request_id = snapshot.request_id;
@@ -55,6 +101,7 @@ absl::StatusOr<PdKvWritebackManifest> buildPdKvWritebackManifest(const PdKvWrite
         snapshot.request_key.empty() ? "pd_kv_writeback_" + std::to_string(snapshot.request_id) : snapshot.request_key;
     manifest.seq_size_per_block   = snapshot.seq_size_per_block;
     manifest.final_token_count    = snapshot.final_token_count;
+    manifest.start_block_index    = start_block;
     manifest.reusable_block_count = reusable_blocks;
     manifest.cache_keys.assign(snapshot.cache_keys.begin() + start_block, snapshot.cache_keys.begin() + limited_blocks);
 

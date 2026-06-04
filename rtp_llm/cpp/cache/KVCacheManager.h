@@ -47,7 +47,9 @@ public:
     MallocResult malloc(const MallocInfo& malloc_info);
     void         free(const FreeInfo& free_info);
     void         insertIntoCache(const InsertInfo& insert_info);
-    absl::Status mallocWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, size_t block_count);
+    absl::Status mallocWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                       size_t                         block_count,
+                                       size_t                         start_block_index = 0);
     void         commitWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                        const CacheKeysType&           cache_keys,
                                        bool                           is_resident);

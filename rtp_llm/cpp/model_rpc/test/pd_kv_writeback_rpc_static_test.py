@@ -36,6 +36,8 @@ class PdKvWritebackRpcStaticTest(unittest.TestCase):
         self.assertIn("PD_KV_WRITEBACK_COMMIT", proto)
         self.assertIn("PD_KV_WRITEBACK_ABORT", proto)
         self.assertIn("PdKvWritebackReceiveStagePB receive_stage = 13;", proto)
+        self.assertIn("int64 start_block_index = 14;", proto)
+        self.assertIn("request.manifest.start_block_index", rpc_util_cc)
         self.assertIn(
             "rpc PdKvWriteback(PdKvWritebackRequestPB) returns (PdKvWritebackResponsePB);",
             proto,

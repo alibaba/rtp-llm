@@ -25,6 +25,7 @@ struct PdKvWritebackManifest {
     std::string                   request_key;
     int32_t                       seq_size_per_block   = 0;
     int64_t                       final_token_count    = 0;
+    int64_t                       start_block_index    = 0;
     int64_t                       reusable_block_count = 0;
     CacheKeysType                 cache_keys;
     std::vector<BlockIndicesType> group_block_ids;

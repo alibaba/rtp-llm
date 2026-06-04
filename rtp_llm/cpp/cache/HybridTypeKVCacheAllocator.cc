@@ -358,7 +358,8 @@ void HybridTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
 }
 
 absl::Status HybridTypeKVCacheAllocator::mallocWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                                               size_t                         block_count) {
+                                                               size_t                         block_count,
+                                                               size_t                         start_block_index) {
     if (!batch_kv_cache_resource) {
         return absl::InvalidArgumentError("batch_kv_cache_resource is null");
     }
@@ -374,21 +375,43 @@ absl::Status HybridTypeKVCacheAllocator::mallocWritebackBlocks(const BatchKVCach
     if (block_count == 0) {
         return absl::OkStatus();
     }
-    if (block_count > static_cast<size_t>(std::numeric_limits<int>::max() / seqSizePerBlock())) {
+    const size_t max_blocks = static_cast<size_t>(std::numeric_limits<int>::max() / seqSizePerBlock());
+    if (block_count > max_blocks || start_block_index > max_blocks - block_count) {
         return absl::InvalidArgumentError("writeback block count is too large");
     }
 
-    const int seq_len = static_cast<int>(block_count) * seqSizePerBlock();
+    const size_t total_block_count = start_block_index + block_count;
+    const int    seq_len           = static_cast<int>(total_block_count) * seqSizePerBlock();
+    auto         free_valid_blocks = [this](int gid, const BlockIndicesType& blocks) {
+        BlockIndicesType valid;
+        valid.reserve(blocks.size());
+        for (const auto block : blocks) {
+            if (!isNullBlockIdx(block)) {
+                valid.push_back(block);
+            }
+        }
+        if (!valid.empty()) {
+            kv_cache_groups_[static_cast<size_t>(gid)]->free(valid);
+        }
+    };
+
     for (int gid = 0; gid < group_nums; ++gid) {
-        auto& block_ids = batch_kv_cache_resource->mutableBlockIds(0, gid);
-        if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(block_ids, seq_len, true, 0)) {
-            for (int rollback_gid = 0; rollback_gid <= gid; ++rollback_gid) {
-                kv_cache_groups_[static_cast<size_t>(rollback_gid)]->free(
-                    batch_kv_cache_resource->blocks(0, rollback_gid));
+        auto&    block_ids = batch_kv_cache_resource->mutableBlockIds(0, gid);
+        BlockIds temp_block_ids(block_ids.kernelBlocksPerKvBlock());
+        temp_block_ids.resize(start_block_index, NULL_BLOCK_IDX);
+
+        if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(temp_block_ids, seq_len, true, 0)
+            || temp_block_ids.blocksNum() != total_block_count) {
+            free_valid_blocks(gid, temp_block_ids.blocks());
+            for (int rollback_gid = 0; rollback_gid < gid; ++rollback_gid) {
+                free_valid_blocks(rollback_gid, batch_kv_cache_resource->blocks(0, rollback_gid));
             }
             batch_kv_cache_resource->clearBlocks();
             return absl::ResourceExhaustedError("not enough KV blocks for writeback");
         }
+        const auto&      temp_blocks = temp_block_ids.blocks();
+        BlockIndicesType suffix(temp_blocks.begin() + start_block_index, temp_blocks.end());
+        block_ids.assign(std::move(suffix));
     }
     return absl::OkStatus();
 }

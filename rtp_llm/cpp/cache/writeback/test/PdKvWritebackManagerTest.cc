@@ -20,8 +20,10 @@ public:
     explicit RecordingCacheWriter(std::vector<std::string>* events): events_(events) {}
 
     absl::Status mallocWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                       size_t                         block_count) override {
+                                       size_t                         block_count,
+                                       size_t                         start_block_index) override {
         events_->push_back("malloc");
+        last_start_block_index = start_block_index;
         batch_kv_cache_resource->resetBatchSize(1);
         batch_kv_cache_resource->initGroups(1, 1);
         batch_kv_cache_resource->mutableBlockIds(0, 0).add({7, 8});
@@ -42,7 +44,8 @@ public:
         events_->push_back("free");
     }
 
-    absl::Status malloc_status_ = absl::OkStatus();
+    absl::Status malloc_status_         = absl::OkStatus();
+    size_t       last_start_block_index = 0;
 
 private:
     std::vector<std::string>* events_;
@@ -484,11 +487,14 @@ TEST(PdKvWritebackManagerTest, ReceiveCommitsOnlyAfterTransferSucceeds) {
     RecordingTransferClient  transfer_client(&events);
     PdKvWritebackManager     manager(pd_config, &cache_writer, &transfer_client);
 
-    auto destination_resource = std::make_shared<BatchKVCacheResource>();
-    auto status               = manager.receiveOnPrefill(makeReceiveRequest(), destination_resource);
+    auto destination_resource          = std::make_shared<BatchKVCacheResource>();
+    auto request                       = makeReceiveRequest();
+    request.manifest.start_block_index = 3;
+    auto status                        = manager.receiveOnPrefill(request, destination_resource);
 
     EXPECT_TRUE(status.ok()) << status;
     EXPECT_EQ(events, std::vector<std::string>({"malloc", "transfer", "commit", "free"}));
+    EXPECT_EQ(cache_writer.last_start_block_index, 3);
     EXPECT_EQ(transfer_client.last_plan.decode_group_block_ids, std::vector<BlockIndicesType>({{4, 5}}));
     EXPECT_EQ(transfer_client.last_plan.prefill_group_block_ids, std::vector<BlockIndicesType>({{7, 8}}));
 }

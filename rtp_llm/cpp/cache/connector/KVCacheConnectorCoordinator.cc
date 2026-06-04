@@ -27,8 +27,9 @@ public:
         allocator_(std::move(allocator)) {}
 
     absl::Status mallocWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                       size_t                         block_count) override {
-        return allocator_->mallocWritebackBlocks(batch_kv_cache_resource, block_count);
+                                       size_t                         block_count,
+                                       size_t                         start_block_index) override {
+        return allocator_->mallocWritebackBlocks(batch_kv_cache_resource, block_count, start_block_index);
     }
 
     void commitWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -96,6 +97,7 @@ PdKvWritebackRequestPB buildPdKvWritebackRequestPB(const PdKvWritebackLaunchRequ
     pb.set_request_id(request.manifest.request_id);
     pb.set_request_key(request.manifest.request_key);
     pb.set_final_token_count(request.manifest.final_token_count);
+    pb.set_start_block_index(request.manifest.start_block_index);
     pb.set_reusable_block_count(request.manifest.reusable_block_count);
     for (const auto key : request.manifest.cache_keys) {
         pb.add_cache_keys(key);

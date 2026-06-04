@@ -31,7 +31,8 @@ public:
     virtual void                   free(const FreeInfo& free_info)                        = 0;
     virtual void                   insertIntoCache(const InsertInfo& insert_info)         = 0;
     virtual absl::Status           mallocWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                                         size_t                         block_count)              = 0;
+                                                         size_t                         block_count,
+                                                         size_t                         start_block_index = 0)    = 0;
     virtual void                   commitWritebackBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                          const CacheKeysType&           cache_keys,
                                                          bool                           is_resident)                = 0;

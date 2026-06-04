@@ -145,6 +145,7 @@ class PdWritebackSmokeConfigStaticTest(unittest.TestCase):
         )
         self.assertIn("--tp_size 1 --world_size 1", tcp_case_block)
         self.assertIn("--cache_store_rdma_mode 0", tcp_case_block)
+        self.assertIn("sleep_time_qr=60", tcp_case_block)
         self.assertIn("concurrency_request_count=4", tcp_case_block)
         self.assertIn("stability_repeat=2", tcp_case_block)
 
@@ -169,6 +170,7 @@ class PdWritebackSmokeConfigStaticTest(unittest.TestCase):
         )
         self.assertIn("--tp_size 2 --world_size 2", tcp_tp2_case_block)
         self.assertIn("--cache_store_rdma_mode 0", tcp_tp2_case_block)
+        self.assertIn("sleep_time_qr=60", tcp_tp2_case_block)
         self.assertIn("concurrency_request_count=4", tcp_tp2_case_block)
         self.assertIn("stability_repeat=2", tcp_tp2_case_block)
 

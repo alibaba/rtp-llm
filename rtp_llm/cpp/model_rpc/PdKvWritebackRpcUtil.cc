@@ -33,6 +33,7 @@ PdKvWritebackLaunchRequest pdKvWritebackLaunchRequestFromPB(const PdKvWritebackR
     request.manifest.request_id           = pb.request_id();
     request.manifest.request_key          = pb.request_key();
     request.manifest.final_token_count    = pb.final_token_count();
+    request.manifest.start_block_index    = pb.start_block_index();
     request.manifest.reusable_block_count = pb.reusable_block_count();
     request.manifest.cache_keys.assign(pb.cache_keys().begin(), pb.cache_keys().end());
     request.manifest.group_block_ids.reserve(pb.group_block_ids_size());
