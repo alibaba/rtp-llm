@@ -143,13 +143,6 @@ void setBatchAckError(BatchEnqueueAckPB* ack, int64_t request_id, int64_t code, 
     err->set_error_message(msg);
 }
 
-struct AsyncProducerCancelState {
-    std::atomic<bool>                   cancelled{false};
-    std::mutex                          mu;
-    std::weak_ptr<grpc::ClientContext>  client_context;
-    std::weak_ptr<GenerateStream>       stream;
-};
-
 std::function<void()> makeAsyncProducerCancelCallback(const std::shared_ptr<AsyncProducerCancelState>& state) {
     return [state] {
         bool expected = false;
@@ -802,8 +795,8 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
         auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(final_timeout_ms);
         prefill_context.client_context->set_deadline(deadline);
     }
-    if (prefill_context.refresh_cancel_state) {
-        prefill_context.refresh_cancel_state(prefill_context.client_context, prefill_context.getStream());
+    if (prefill_context.cancel_state) {
+        refreshAsyncProducerCancelState(prefill_context.cancel_state, prefill_context.client_context, prefill_context.getStream());
     }
     // final_timeout_ms <= 0: skip set_deadline; gRPC treats it as no deadline.
     prefill_context.client_stream =
@@ -858,8 +851,8 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", prefill_context.request_id);
     auto stream = engine_->enqueue(prefill_context.generate_input);
     prefill_context.setStream(stream);
-    if (prefill_context.refresh_cancel_state) {
-        prefill_context.refresh_cancel_state(prefill_context.client_context, prefill_context.getStream());
+    if (prefill_context.cancel_state) {
+        refreshAsyncProducerCancelState(prefill_context.cancel_state, prefill_context.client_context, prefill_context.getStream());
     }
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", prefill_context.request_id);
 }
@@ -1231,7 +1224,6 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         std::shared_ptr<ResponseBufferEntry>      entry;
         std::shared_ptr<RPCContext>               rpc_context;
         std::shared_ptr<PrefillGenerateContext>   prefill_context;
-        std::shared_ptr<AsyncProducerCancelState> cancel_state;
         AtomicGuardPtr                            request_guard;
         int64_t                                   request_id = 0;
     };
@@ -1305,7 +1297,7 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
             return grpc::Status::OK;
         }
 
-        local_slots.push_back({i, input_copy, entry, nullptr, nullptr, nullptr, nullptr, request_id});
+        local_slots.push_back({i, input_copy, entry, nullptr, nullptr, nullptr, request_id});
         if (abort_if_entry_cancelled(i, request_id, local_slots)) {
             return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
         }
@@ -1352,13 +1344,8 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
 
         slot.rpc_context     = rpc_ctx;
         slot.prefill_context = pfx_ctx;
-        slot.cancel_state    = cancel_state;
         slot.request_guard   = guard;
-        pfx_ctx->refresh_cancel_state =
-            [cancel_state](const std::shared_ptr<grpc::ClientContext>& client_context,
-                           const std::shared_ptr<GenerateStream>&      stream) {
-                refreshAsyncProducerCancelState(cancel_state, client_context, stream);
-            };
+        pfx_ctx->cancel_state = cancel_state;
 
         if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
             return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
@@ -1436,7 +1423,7 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
     }
     for (auto& slot : local_slots) {
-        refreshAsyncProducerCancelState(slot.cancel_state,
+        refreshAsyncProducerCancelState(slot.prefill_context->cancel_state,
                                         slot.prefill_context->client_context,
                                         slot.prefill_context->getStream());
         if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
@@ -1467,10 +1454,9 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         }
         engine_->batchEnqueue(all_streams);
         for (auto& slot : local_slots) {
-            if (slot.prefill_context->refresh_cancel_state) {
-                slot.prefill_context->refresh_cancel_state(
-                    slot.prefill_context->client_context, slot.prefill_context->getStream());
-            }
+            refreshAsyncProducerCancelState(slot.prefill_context->cancel_state,
+                                            slot.prefill_context->client_context,
+                                            slot.prefill_context->getStream());
         }
     }
     if (abort_if_context_cancelled(local_slots.back().index, local_slots.back().request_id, local_slots)) {
@@ -1506,7 +1492,6 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         try {
             std::thread worker([this,
                                 pfx_ctx = slot.prefill_context,
-                                cancel_state = slot.cancel_state,
                                 rpc_ctx = slot.rpc_context,
                                 input = slot.input,
                                 writer,
@@ -1525,13 +1510,12 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                     writer.reset();
                     entry.reset();
                     guard.reset();
-                    cancel_state.reset();
                 });
                 grpc::Status finish_status;
                 try {
                     pfx_ctx->stat_info.nextStage();
                     remoteLoadCacheStart(*pfx_ctx);
-                    refreshAsyncProducerCancelState(cancel_state, pfx_ctx->client_context, pfx_ctx->getStream());
+                    refreshAsyncProducerCancelState(pfx_ctx->cancel_state, pfx_ctx->client_context, pfx_ctx->getStream());
                     if (!pfx_ctx->hasError()) {
                         finish_status = finishStream(*pfx_ctx);
                     } else {

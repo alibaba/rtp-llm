@@ -1,6 +1,7 @@
 #pragma once
 
-#include <functional>
+#include <atomic>
+#include <mutex>
 
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -12,6 +13,13 @@
 #include "rtp_llm/cpp/model_rpc/RemoteServerResource.h"
 
 namespace rtp_llm {
+
+struct AsyncProducerCancelState {
+    std::atomic<bool>                  cancelled{false};
+    std::mutex                         mu;
+    std::weak_ptr<grpc::ClientContext> client_context;
+    std::weak_ptr<GenerateStream>      stream;
+};
 
 struct PrefillStatInfo {
     enum ExecuteStage {
@@ -89,12 +97,11 @@ public:
     std::vector<std::string>             prefill_worker_cache_store_addrs;
     GrpcConnection                       grpc_connection;
     std::shared_ptr<RpcService::Stub>    stub;
-    std::shared_ptr<grpc::ClientContext> client_context;
-    std::shared_ptr<ClientStream>        client_stream;
-    std::function<void(const std::shared_ptr<grpc::ClientContext>&, const std::shared_ptr<GenerateStream>&)>
-        refresh_cancel_state;
-    bool                                 grpc_stream_closed             = false;
-    grpc::Status                         last_grpc_stream_closed_status = grpc::Status::OK;
+    std::shared_ptr<grpc::ClientContext>      client_context;
+    std::shared_ptr<ClientStream>             client_stream;
+    std::shared_ptr<AsyncProducerCancelState> cancel_state;
+    bool                                     grpc_stream_closed             = false;
+    grpc::Status                             last_grpc_stream_closed_status = grpc::Status::OK;
     PrefillStatInfo                      stat_info;
     int64_t                              loading_cache_requests = 0;
     bool                                 recent_cache_key_metric_reported = false;
