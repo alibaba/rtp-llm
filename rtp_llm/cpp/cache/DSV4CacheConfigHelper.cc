@@ -203,10 +203,9 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
                          gen_num_per_cycle),
         parallelism_config,
         KVCacheRegionName::SWA_KV);
+    const uint32_t fixed_cp_size = fixedRegionCpSize(parallelism_config);
     const uint32_t fixed_tokens_per_block =
-        isPrefillCpSliced(parallelism_config) ?
-            physical_tokens_per_block * fixedRegionCpSize(parallelism_config) :
-            physical_tokens_per_block;
+        fixed_cp_size > 1 ? physical_tokens_per_block * fixed_cp_size : physical_tokens_per_block;
     return {
         {KVCacheRegionName::CSA_KV,
          &sets.csa_layers,
@@ -349,7 +348,8 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
         auto        spec = makeDSV4Spec(pool);
 
         RTP_LLM_LOG_INFO("DSV4 pool desc gid=%zu region=%s(%d) type=%s layer_count=%zu entry_elems=%u "
-                         "entries_per_block=%u physical_tokens_per_block=%u prefill_cp_fixed_sliced=%d",
+                         "entries_per_block=%u tokens_per_block=%u physical_tokens_per_block=%u "
+                         "prefill_cp_fixed_sliced=%d",
                          gid,
                          dsv4RegionName(pool.region_name),
                          static_cast<int>(pool.region_name),
@@ -357,6 +357,7 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
                          pool.layer_ids->size(),
                          pool.entry_elems,
                          pool.entries_per_block,
+                         pool.tokens_per_block,
                          physical_tokens_per_block,
                          isPrefillCpSliced(parallelism_config));
 
