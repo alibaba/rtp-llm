@@ -62,7 +62,7 @@ void SessionManager::startGc() {
         while (!gc_stop_.load()) {
             {
                 std::unique_lock<std::mutex> lock(gc_mu_);
-                gc_cv_.wait_for(lock, std::chrono::seconds(60), [this] { return gc_stop_.load(); });
+                gc_cv_.wait_for(lock, std::chrono::seconds(5), [this] { return gc_stop_.load(); });
             }
             if (gc_stop_.load()) {
                 break;

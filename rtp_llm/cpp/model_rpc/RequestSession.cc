@@ -11,7 +11,11 @@ BoundedRelay::BoundedRelay(size_t cap): cap_(cap) {}
 
 bool BoundedRelay::push(GenerateOutputsPB output) {
     std::unique_lock<std::mutex> lock(mu_);
-    cv_.wait(lock, [this] { return closed_ || queue_.size() < cap_; });
+    // 短超时轮询：不无限阻塞，每秒检查一次 closed_ 状态
+    // 避免 reaper 还没到时 driver 线程被长时间卡住
+    while (queue_.size() >= cap_ && !closed_) {
+        cv_.wait_for(lock, std::chrono::seconds(1));
+    }
     if (closed_) {
         return false;
     }
