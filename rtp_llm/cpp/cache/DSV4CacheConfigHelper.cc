@@ -40,6 +40,7 @@ struct DSV4PoolDesc {
     const std::vector<int>* layer_ids;
     uint32_t                entry_elems;
     uint32_t                entries_per_block;
+    uint32_t                tokens_per_block;
     DataType                store_dtype;
     bool                    is_paged;
 };
@@ -166,6 +167,7 @@ DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
 std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
                                              const ModelConfig&       model_config,
                                              uint32_t                 kernel_tokens_per_block,
+                                             uint32_t                 physical_tokens_per_block,
                                              const ParallelismConfig& parallelism_config,
                                              int                      gen_num_per_cycle) {
     const auto& attn         = model_config.attn_config;
@@ -201,38 +203,64 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
                          gen_num_per_cycle),
         parallelism_config,
         KVCacheRegionName::SWA_KV);
+    const uint32_t fixed_tokens_per_block =
+        isPrefillCpSliced(parallelism_config) ?
+            physical_tokens_per_block * fixedRegionCpSize(parallelism_config) :
+            physical_tokens_per_block;
     return {
         {KVCacheRegionName::CSA_KV,
          &sets.csa_layers,
          kv_entry_bytes,
          kernel_tokens_per_block / 4,
+         physical_tokens_per_block,
          DataType::TYPE_UINT8,
          true},
         {KVCacheRegionName::HCA_KV,
          &sets.hca_layers,
          kv_entry_bytes,
          kernel_tokens_per_block / 128,
+         physical_tokens_per_block,
          DataType::TYPE_UINT8,
          true},
         {KVCacheRegionName::INDEXER_KV,
          &sets.csa_layers,
          indexer_entry_bytes,
          kernel_tokens_per_block / 4,
+         physical_tokens_per_block,
          DataType::TYPE_UINT8,
          true},
         {KVCacheRegionName::INDEXER_STATE,
          &sets.csa_layers,
          idx_state_dim * 2,
          indexer_state_eb,
+         fixed_tokens_per_block,
          DataType::TYPE_FP32,
          false},
-        {KVCacheRegionName::CSA_STATE, &sets.csa_layers, csa_state_dim * 2, csa_state_eb, DataType::TYPE_FP32, false},
-        {KVCacheRegionName::HCA_STATE, &sets.hca_layers, hca_state_dim * 2, hca_state_eb, DataType::TYPE_FP32, false},
-        {KVCacheRegionName::SWA_KV, &sets.all_layers, kv_entry_bytes, swa_kv_eb, DataType::TYPE_UINT8, false},
+        {KVCacheRegionName::CSA_STATE,
+         &sets.csa_layers,
+         csa_state_dim * 2,
+         csa_state_eb,
+         fixed_tokens_per_block,
+         DataType::TYPE_FP32,
+         false},
+        {KVCacheRegionName::HCA_STATE,
+         &sets.hca_layers,
+         hca_state_dim * 2,
+         hca_state_eb,
+         fixed_tokens_per_block,
+         DataType::TYPE_FP32,
+         false},
+        {KVCacheRegionName::SWA_KV,
+         &sets.all_layers,
+         kv_entry_bytes,
+         swa_kv_eb,
+         fixed_tokens_per_block,
+         DataType::TYPE_UINT8,
+         false},
     };
 }
 
-KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool, uint32_t physical_tokens_per_block) {
+KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool) {
     const auto layer_count = static_cast<uint32_t>(pool.layer_ids->size());
     if (pool.is_paged) {
         return std::make_shared<DSV4KVSpec>(pool.region_name,
@@ -240,14 +268,14 @@ KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool, uint32_t physical_tokens_p
                                             pool.entry_elems,
                                             pool.entries_per_block,
                                             pool.store_dtype,
-                                            physical_tokens_per_block);
+                                            pool.tokens_per_block);
     }
     return std::make_shared<DSV4StateSpec>(pool.region_name,
                                            layer_count,
                                            pool.entry_elems,
                                            pool.entries_per_block,
                                            pool.store_dtype,
-                                           physical_tokens_per_block);
+                                           pool.tokens_per_block);
 }
 
 }  // namespace
@@ -290,8 +318,8 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
                      parallelism_config.tp_size);
 
     const auto sets = classifyDSV4Layers(model_config.attn_config.layer_compress_ratios);
-    const auto pools =
-        buildDSV4PoolDescs(sets, model_config, kernel_tokens_per_block, parallelism_config, gen_num_per_cycle);
+    const auto pools = buildDSV4PoolDescs(
+        sets, model_config, kernel_tokens_per_block, physical_tokens_per_block, parallelism_config, gen_num_per_cycle);
     RTP_LLM_CHECK_WITH_INFO(pools.size() == kDsv4PoolNum, "DSV4 must produce %zu pools", kDsv4PoolNum);
 
     config.layer_num                                = static_cast<uint32_t>(sets.all_layers.size());
@@ -309,7 +337,8 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
     config.layer_ids.clear();
     config.group_types.clear();
     config.group_region_names.clear();
-    config.group_seq_size_per_block.assign(pools.size(), physical_tokens_per_block);
+    config.group_seq_size_per_block.clear();
+    config.group_seq_size_per_block.reserve(pools.size());
     config.cache_specs.reserve(pools.size());
     config.global_layer_ids.reserve(pools.size());
     config.layer_ids.reserve(pools.size());
@@ -317,7 +346,7 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
     config.group_region_names.reserve(pools.size());
     for (size_t gid = 0; gid < pools.size(); ++gid) {
         const auto& pool = pools[gid];
-        auto        spec = makeDSV4Spec(pool, physical_tokens_per_block);
+        auto        spec = makeDSV4Spec(pool);
 
         RTP_LLM_LOG_INFO("DSV4 pool desc gid=%zu region=%s(%d) type=%s layer_count=%zu entry_elems=%u "
                          "entries_per_block=%u physical_tokens_per_block=%u prefill_cp_fixed_sliced=%d",
@@ -332,6 +361,7 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
                          isPrefillCpSliced(parallelism_config));
 
         config.cache_specs.push_back(spec);
+        config.group_seq_size_per_block.push_back(pool.tokens_per_block);
         config.global_layer_ids.push_back(*pool.layer_ids);
         config.layer_ids.push_back(*pool.layer_ids);
         config.group_types.push_back(pool.is_paged ? CacheGroupType::FULL : CacheGroupType::SWA);
