@@ -43,6 +43,9 @@ enum class CancelReason {
 };
 
 // PD 路径 bounded 缓冲区，承载 finishStream 全程输出
+static_assert(std::atomic<SessionState>::is_always_lock_free, "SessionState atomic must be lock-free");
+static_assert(std::atomic<CancelReason>::is_always_lock_free, "CancelReason atomic must be lock-free");
+
 class BoundedRelay {
 public:
     explicit BoundedRelay(size_t cap = 1000);

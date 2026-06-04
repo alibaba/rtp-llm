@@ -239,6 +239,47 @@ TEST(RequestSessionTest, DeriveStateWithoutStream) {
     EXPECT_EQ(session->deriveState(), SessionState::ADMITTED);
 }
 
+TEST(RequestSessionTest, DeriveStateAfterMarkFinished) {
+    auto session = std::make_shared<RequestSession>(1, 1, 0);
+    session->markFinished();
+    EXPECT_EQ(session->deriveState(), SessionState::FINISHED);
+}
+
+TEST(RequestSessionTest, DeriveStateAfterMarkError) {
+    auto session = std::make_shared<RequestSession>(1, 1, 0);
+    session->markError("engine failure");
+    EXPECT_EQ(session->deriveState(), SessionState::ERROR);
+}
+
+TEST(RequestSessionTest, DeriveStateAfterCancel) {
+    auto session = std::make_shared<RequestSession>(1, 1, 0);
+    session->cancel(CancelReason::EXPLICIT_CANCEL);
+    EXPECT_EQ(session->deriveState(), SessionState::CANCELLED);
+}
+
+TEST(RequestSessionTest, ConcurrentDeriveStateAndCancel) {
+    for (int round = 0; round < 100; round++) {
+        auto session = std::make_shared<RequestSession>(1, 1, 0);
+        std::atomic<SessionState> derived_state{SessionState::ADMITTED};
+
+        std::thread canceller([&] {
+            session->cancel(CancelReason::SLO_DEADLINE);
+        });
+        std::thread deriver([&] {
+            derived_state.store(session->deriveState());
+        });
+
+        canceller.join();
+        deriver.join();
+
+        auto final_state = session->state();
+        EXPECT_EQ(final_state, SessionState::CANCELLED);
+        auto derived = derived_state.load();
+        EXPECT_TRUE(derived == SessionState::ADMITTED || derived == SessionState::CANCELLED)
+            << "round " << round << ": unexpected state " << static_cast<int>(derived);
+    }
+}
+
 // ========================== SessionManager Tests ==========================
 
 TEST(SessionManagerTest, RegisterAndLookup) {
@@ -323,7 +364,7 @@ TEST(SessionManagerTest, GcMovesToTombstone) {
 }
 
 TEST(SessionManagerTest, GcRemovesTombstone) {
-    SessionManager mgr(/*terminal_ttl_us=*/500);
+    SessionManager mgr(/*terminal_ttl_us=*/500, /*attach_deadline_us=*/1000000, /*tombstone_ttl_us=*/1000);
     auto session = std::make_shared<RequestSession>(100, 1, 0);
     mgr.registerSession(100, session);
     session->markFinished();
@@ -334,7 +375,7 @@ TEST(SessionManagerTest, GcRemovesTombstone) {
     auto [result1, _] = mgr.lookup(100);
     EXPECT_EQ(result1, LookupResult::GONE);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
     mgr.gcOnce();
 
     auto [result2, __] = mgr.lookup(100);
