@@ -342,9 +342,9 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         self.assertFalse(_cp_sliced_state_read_needed(cp_ctx, meta))
 
         cont_meta = self._prepare(
-            stub, positions, req_id, [0, 16], [8, 6], has_prefix=True
+            stub, positions, req_id, [0, 16], [8, 6], has_prefix=False
         )
-        self.assertTrue(cont_meta.has_prefix)
+        self.assertFalse(cont_meta.has_prefix)
         self.assertTrue(_cp_sliced_state_read_needed(cp_ctx, cont_meta))
 
     def test_zero_block_id_is_invalid_sentinel(self) -> None:

@@ -162,7 +162,11 @@ def _cp_sliced_state_read_needed(
         return False
     if not getattr(cp_ctx, "kv_cache_sharded", False):
         return False
-    return bool(meta.has_prefix)
+    if meta.has_prefix:
+        return True
+    if meta.seq_start_per_req is None:
+        return False
+    return bool(torch.any(meta.seq_start_per_req > 0).item())
 
 
 @dataclass(frozen=True)
