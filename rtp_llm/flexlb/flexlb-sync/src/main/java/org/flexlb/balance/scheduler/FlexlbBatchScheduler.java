@@ -175,6 +175,27 @@ public class FlexlbBatchScheduler {
             return;
         }
 
+        long totalTokens = 0;
+        long totalHit = 0;
+        StringBuilder itemDetail = new StringBuilder();
+        for (int i = 0; i < activeItems.size(); i++) {
+            BatchItem item = activeItems.get(i);
+            long sl = seqLenOf(item);
+            long hc = hitOf(item);
+            totalTokens += sl;
+            totalHit += hc;
+            if (i > 0) {
+                itemDetail.append(", ");
+            }
+            itemDetail.append("{req_id=").append(item.requestId())
+                    .append(" seq_len=").append(sl)
+                    .append(" hit_cache=").append(hc).append('}');
+        }
+        long predMs = createPredictor(configService.loadBalanceConfig()).estimateMs(totalTokens, totalHit);
+        Logger.info("flexlb_batch_dispatch batch_id={} batch_size={} total_tokens={} total_hit={} pred_ms={} prefill={}:{} items=[{}]",
+                batchId, activeItems.size(), totalTokens, totalHit, predMs,
+                prefill.getServerIp(), prefill.getGrpcPort(), itemDetail);
+
         try {
             long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
             EngineRpcService.BatchEnqueueResponsePB response =
