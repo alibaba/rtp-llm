@@ -26,6 +26,7 @@ Run:
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from typing import Optional
 
 import torch
@@ -37,6 +38,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorFP8,
     CompressorMeta,
     _build_prefill_positions,
+    _cp_sliced_state_read_needed,
     build_prepare_metadata_args,
 )
 
@@ -127,17 +129,24 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         b_idx: torch.Tensor,
         prefix_lengths: Optional[list[int]] = None,
         input_lengths: Optional[list[int]] = None,
+        has_prefix: Optional[bool] = None,
     ):
         """Call prepare_metadata with auto-derived seq metadata."""
         if prefix_lengths is None:
             n_reqs = int(b_idx.max().item()) + 1
             prefix_lengths = [0] * n_reqs
             input_lengths = [int((b_idx == b).sum().item()) for b in range(n_reqs)]
+        if has_prefix is None:
+            has_prefix = any(p > 0 for p in prefix_lengths)
         seq_start, cu_seq = _seq_meta_for_batched(
             prefix_lengths, input_lengths, self.device  # type: ignore[arg-type]
         )
         return stub.prepare_metadata(
-            positions, b_idx, seq_start_per_req=seq_start, cu_seq_per_req=cu_seq
+            positions,
+            b_idx,
+            has_prefix=has_prefix,
+            seq_start_per_req=seq_start,
+            cu_seq_per_req=cu_seq,
         )
 
     # ------------------------------------------------------------------
@@ -155,6 +164,7 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         new_b = torch.zeros(S, dtype=torch.int64, device=self.device).contiguous()
         legacy_meta = self._prepare(stub, legacy_pos, legacy_b, [sp], [S])
         new_meta = self._prepare(stub, new_pos, new_b, [sp], [S])
+        self.assertTrue(new_meta.has_prefix)
         self.assertTrue(torch.equal(legacy_meta.positions, new_meta.positions))
         self.assertTrue(torch.equal(legacy_meta.b_idx, new_meta.b_idx))
         self.assertTrue(torch.equal(legacy_meta.state_slots, new_meta.state_slots))
@@ -182,6 +192,7 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         req_id = torch.zeros((1, S), dtype=torch.int32, device=self.device)
         args = build_prepare_metadata_args(
             use_varlen=True,
+            has_prefix=True,
             device=self.device,
             sp_int=12,
             seqlen=S,
@@ -204,6 +215,7 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
                 torch.zeros(S, dtype=torch.int64, device=self.device),
             )
         )
+        self.assertTrue(args["has_prefix"])
 
     # ------------------------------------------------------------------
     # B == 2: each token must read its own request's block_table row.
@@ -242,6 +254,7 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         #   (since eb=256, 300//256=1; within the table's two blocks)
         positions, req_id = self._build_batched_positions([0, 300], [8, 10])
         meta = self._prepare(stub, positions, req_id, [0, 300], [8, 10])
+        self.assertTrue(meta.has_prefix)
         # Req0 first token: bt[0, 0]=1, in_block=0 → slot=1*256+0=256
         self.assertEqual(int(meta.state_slots[0].item()), 256)
         # Req0 last token (pos=7): slot=1*256+7=263
@@ -303,6 +316,36 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
         # Req1 tokens (t=4..7): masked to -1
         for t in range(4, 8):
             self.assertEqual(int(meta.state_slots[t].item()), -1)
+
+    def test_cold_batched_cu_offsets_do_not_imply_prefix(self) -> None:
+        """Packed varlen batches have non-zero ``cu_seq_per_req`` offsets
+        after req0 even when every request is cold. CP sliced state reads
+        must use the explicit prefix flag, not those pack offsets.
+        """
+        stub = _make_stub(self.device, n_reqs=2)
+        positions, req_id = self._build_batched_positions([0, 0], [8, 6])
+        meta = self._prepare(stub, positions, req_id, [0, 0], [8, 6])
+        self.assertFalse(meta.has_prefix)
+        self.assertTrue(
+            torch.equal(
+                meta.seq_start_per_req,
+                torch.tensor([0, 0], dtype=torch.int64, device=self.device),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                meta.cu_seq_per_req,
+                torch.tensor([0, 8, 14], dtype=torch.int64, device=self.device),
+            )
+        )
+        cp_ctx = SimpleNamespace(cp_size=8, kv_cache_sharded=True)
+        self.assertFalse(_cp_sliced_state_read_needed(cp_ctx, meta))
+
+        cont_meta = self._prepare(
+            stub, positions, req_id, [0, 16], [8, 6], has_prefix=True
+        )
+        self.assertTrue(cont_meta.has_prefix)
+        self.assertTrue(_cp_sliced_state_read_needed(cp_ctx, cont_meta))
 
     def test_zero_block_id_is_invalid_sentinel(self) -> None:
         """block_id == 0 is the unallocated sentinel (unified with reader)."""

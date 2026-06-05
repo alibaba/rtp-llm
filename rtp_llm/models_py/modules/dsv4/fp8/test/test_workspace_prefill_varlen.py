@@ -719,14 +719,17 @@ class _StubCompressor:
         self,
         positions,
         b_idx,
+        has_prefix=False,
         is_batched=False,
         seq_start_per_req=None,
         cu_seq_per_req=None,
+        **kwargs,
     ):
         self.calls.append(
             dict(
                 positions=positions,
                 b_idx=b_idx,
+                has_prefix=has_prefix,
                 is_batched=is_batched,
                 seq_start_per_req=seq_start_per_req,
                 cu_seq_per_req=cu_seq_per_req,
@@ -763,6 +766,8 @@ class _StubIndexer:
         position_ids=None,
         req_id_per_token=None,
         max_seqlen_q=0,
+        has_prefix=False,
+        **kwargs,
     ):
         self.calls.append(
             dict(
@@ -780,6 +785,7 @@ class _StubIndexer:
                 position_ids=position_ids,
                 req_id_per_token=req_id_per_token,
                 max_seqlen_q=max_seqlen_q,
+                has_prefix=has_prefix,
             )
         )
         return f"indexer_meta_call_{len(self.calls)}"
