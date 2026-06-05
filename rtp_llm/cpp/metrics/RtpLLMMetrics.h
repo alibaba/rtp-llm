@@ -1245,6 +1245,7 @@ public:
 
 class RtpLLMMemoryCacheStatusMetricsCollector final {
 public:
+    int64_t item_num            = 0;
     int64_t total_block_num     = 0;
     int64_t allocated_block_num = 0;  // 在cache中的block数量
     int64_t available_block_num = 0;  // 可用的block数量
@@ -1286,6 +1287,7 @@ public:
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_failed_qps_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_latency_metric    = nullptr;
 
+    kmonitor::MutableMetric* kv_cache_memory_cache_status_item_num_metric        = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_total_block_num_metric     = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_allocated_block_num_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_available_block_num_metric = nullptr;
