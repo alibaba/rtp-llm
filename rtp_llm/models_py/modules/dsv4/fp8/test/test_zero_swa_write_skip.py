@@ -269,6 +269,17 @@ class WriteSkipWindowGateTest(unittest.TestCase):
             self.assertEqual(got, want)
             self.assertEqual(got % reuse_unit, 0)
 
+    def test_cp_sharded_disables_write_skip(self):
+        env = {"DSV4_ZERO_SWA_CACHING": "1", "DSV4_ZERO_SWA_TRIM": "1"}
+        with patch.dict("os.environ", env, clear=True):
+            cp_ctx = SimpleNamespace(cp_size=8, kv_cache_sharded=True)
+            self.assertEqual(
+                _dsv4_zero_swa_write_skip_window(
+                    self._v4(n_layers=61, window_size=128), self._kv(1024), cp_ctx
+                ),
+                0,
+            )
+
     def test_swa_window_zero_falls_back_to_128(self):
         env = {"DSV4_ZERO_SWA_CACHING": "1", "DSV4_ZERO_SWA_TRIM": "1"}
         with patch.dict("os.environ", env, clear=True):

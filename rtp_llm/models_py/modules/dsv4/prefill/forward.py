@@ -186,6 +186,8 @@ def _dsv4_zero_swa_write_skip_window(
         cp_size = int(getattr(cp_ctx, "cp_size", 1) or 1)
     if cp_size < 1:
         cp_size = 1
+    if cp_size > 1 and bool(getattr(cp_ctx, "kv_cache_sharded", False)):
+        return 0
     reuse_unit = spb_phys * cp_size
     restore_blocks = (restore_tokens + reuse_unit - 1) // reuse_unit
     return restore_blocks * reuse_unit

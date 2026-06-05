@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <vector>
@@ -29,6 +30,31 @@ constexpr uint32_t kDsv4KvEntryBytes      = 1024;
 constexpr uint32_t kDsv4IndexerEntryBytes = 256;
 constexpr uint32_t kDsv4Fp8KvEntryBytes   = 584;
 constexpr uint32_t kDsv4FixedPoolBlocks   = 256;
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* name, const char* value): name_(name) {
+        const char* old = std::getenv(name_);
+        if (old != nullptr) {
+            old_value_ = old;
+            had_old_   = true;
+        }
+        setenv(name_, value, 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (had_old_) {
+            setenv(name_, old_value_.c_str(), 1);
+        } else {
+            unsetenv(name_);
+        }
+    }
+
+private:
+    const char* name_;
+    std::string old_value_;
+    bool        had_old_{false};
+};
 
 }  // namespace
 
@@ -382,6 +408,29 @@ TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlock
     EXPECT_EQ(decode_config.cache_specs[4]->block_size_bytes(), 8u * 2048u * 4u);
     EXPECT_EQ(decode_config.cache_specs[5]->block_size_bytes(), 128u * 1024u * 4u);
     EXPECT_EQ(decode_config.cache_specs[6]->block_size_bytes(), 74880u);
+}
+
+TEST(HybridPoolConfigCreatorTest, ZeroSwaTrimDisabledForPrefillCpSharded) {
+    ScopedEnvVar caching_env("DSV4_ZERO_SWA_CACHING", "1");
+    ScopedEnvVar trim_env("DSV4_ZERO_SWA_TRIM", "1");
+
+    auto mc                       = makeProModelConfig();
+    mc.attn_config.kv_cache_dtype = KvCacheDataType::FP8;
+
+    ParallelismConfig prefill_pc;
+    prefill_pc.role_type                          = RoleType::PREFILL;
+    prefill_pc.tp_size                            = 4;
+    prefill_pc.prefill_cp_config.kv_cache_sharded = true;
+    auto cp_config = HybridPoolConfigCreator::createConfig(mc, prefill_pc, makeDsv4KvCacheConfig(), false, 0);
+    EXPECT_TRUE(cp_config.dsv4_zero_swa_caching);
+    EXPECT_FALSE(cp_config.dsv4_zero_swa_trim);
+
+    ParallelismConfig non_cp_pc;
+    non_cp_pc.role_type = RoleType::PREFILL;
+    non_cp_pc.tp_size   = 4;
+    auto non_cp_config = HybridPoolConfigCreator::createConfig(mc, non_cp_pc, makeDsv4KvCacheConfig(), false, 0);
+    EXPECT_TRUE(non_cp_config.dsv4_zero_swa_caching);
+    EXPECT_TRUE(non_cp_config.dsv4_zero_swa_trim);
 }
 
 // ============================================================
