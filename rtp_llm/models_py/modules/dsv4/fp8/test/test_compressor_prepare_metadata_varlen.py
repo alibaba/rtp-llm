@@ -339,13 +339,14 @@ class CompressorPrepareMetadataVarlenTest(unittest.TestCase):
             )
         )
         cp_ctx = SimpleNamespace(cp_size=8, kv_cache_sharded=True)
-        self.assertFalse(_cp_sliced_state_read_needed(cp_ctx, meta))
+        self.assertFalse(_cp_sliced_state_read_needed(meta, cp_ctx, raw_disabled=False))
+        self.assertFalse(_cp_sliced_state_read_needed(meta, cp_ctx, raw_disabled=True))
 
         cont_meta = self._prepare(
             stub, positions, req_id, [0, 16], [8, 6], has_prefix=False
         )
         self.assertFalse(cont_meta.has_prefix)
-        self.assertTrue(_cp_sliced_state_read_needed(cp_ctx, cont_meta))
+        self.assertTrue(_cp_sliced_state_read_needed(cont_meta, cp_ctx, raw_disabled=False))
 
     def test_zero_block_id_is_invalid_sentinel(self) -> None:
         """block_id == 0 is the unallocated sentinel (unified with reader)."""

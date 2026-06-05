@@ -132,6 +132,26 @@ TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ReuseEnabledUsesSparse) {
     EXPECT_EQ(need.extra_blocks, 2);
 }
 
+TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_HCAStateReuseEnabledCountsTailOnly) {
+    auto spec  = makeDsv4StateSpec(KVCacheRegionName::HCA_STATE, 4);
+    auto group = SWAKVCacheGroup({}, spec, block_pool_, 5, /*linear_step=*/3, shared_cache_.get());
+
+    // seq_len=40 => seq_slots=10. If reuse sparse allocation were enabled, step hits
+    // would keep positions 2/5/8 plus tail position 9. HCA_STATE skips reuse and keeps only tail 9.
+    auto need = group.getNeedBlocks(0, 40, 0, 0, true);
+    EXPECT_EQ(need.common_blocks, 0);
+    EXPECT_EQ(need.extra_blocks, 1);
+}
+
+TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_CSAStateReuseEnabledStillUsesSparse) {
+    auto spec  = makeDsv4StateSpec(KVCacheRegionName::CSA_STATE, 4);
+    auto group = SWAKVCacheGroup({}, spec, block_pool_, 4, /*linear_step=*/3, shared_cache_.get());
+
+    auto need = group.getNeedBlocks(0, 40, 0, 0, true);
+    EXPECT_EQ(need.common_blocks, 0);
+    EXPECT_EQ(need.extra_blocks, 4);
+}
+
 TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_WithReserveStep) {
     auto group = makeGroupWithStep(4, 2);
     // seq_len=8 => two active tail blocks, plus one reserve block.
@@ -248,6 +268,36 @@ TEST_F(SWAKVCacheGroupTest, Malloc_DSV4TrapSkipsHCAStateNullTail) {
     block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
 
     EXPECT_NO_THROW((void)group.malloc(block_ids, 12));
+}
+
+TEST_F(SWAKVCacheGroupTest, Malloc_HCAStateReuseEnabledAllocatesTailOnly) {
+    auto     spec  = makeDsv4StateSpec(KVCacheRegionName::HCA_STATE, 4);
+    auto     group = SWAKVCacheGroup({}, spec, block_pool_, 5, /*linear_step=*/3, shared_cache_.get());
+    BlockIds block_ids(1);
+
+    ASSERT_TRUE(group.malloc(block_ids, 40, /*enable_reuse_cache=*/true, /*reserve_step=*/0));
+
+    ASSERT_EQ(block_ids.blocksNum(), 10u);
+    EXPECT_EQ(validBlockCount(block_ids.blocks()), 1u);
+    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[8]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[9]));
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 1);
+}
+
+TEST_F(SWAKVCacheGroupTest, Malloc_CSAStateReuseEnabledKeepsSparseBlocks) {
+    auto     spec  = makeDsv4StateSpec(KVCacheRegionName::CSA_STATE, 4);
+    auto     group = SWAKVCacheGroup({}, spec, block_pool_, 4, /*linear_step=*/3, shared_cache_.get());
+    BlockIds block_ids(1);
+
+    ASSERT_TRUE(group.malloc(block_ids, 40, /*enable_reuse_cache=*/true, /*reserve_step=*/0));
+
+    ASSERT_EQ(block_ids.blocksNum(), 10u);
+    EXPECT_EQ(validBlockCount(block_ids.blocks()), 4u);
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[5]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[8]));
+    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[9]));
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 4);
 }
 
 TEST_F(SWAKVCacheGroupTest, Malloc_DSV4TrapChecksSWAKVNullTail) {
@@ -417,6 +467,30 @@ TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_WithStep_FreesNonStepBlocks) {
     EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[5]));
 
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 2);
+}
+
+TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_HCAStateReuseEnabledKeepsTailOnly) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+    ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
+
+    auto spec  = makeDsv4StateSpec(KVCacheRegionName::HCA_STATE, 4);
+    auto group = SWAKVCacheGroup({}, spec, block_pool, 5, /*linear_step=*/2);
+
+    auto allocated = block_pool->malloc(6);
+    ASSERT_EQ(allocated.size(), 6u);
+    BlockIds blocks;
+    blocks.assign(allocated);
+
+    const size_t free_before = block_pool->freeBlocksNum();
+    group.removeSkippedBlocks(blocks, /*enable_reuse_cache=*/true);
+
+    ASSERT_EQ(blocks.blocksNum(), 6u);
+    for (int i = 0; i < 5; ++i) {
+        EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[i])) << "position " << i << " should be freed";
+    }
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[5]));
+    EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 5);
 }
 
 TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_WithReserveStep) {

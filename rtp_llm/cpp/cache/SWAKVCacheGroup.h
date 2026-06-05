@@ -33,6 +33,8 @@ public:
 
 private:
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
+    int  activeTailBlocks() const;
+    bool effectiveReuseCacheForAllocation(bool enable_reuse_cache) const;
     bool shouldCheckSWATailBlockIds() const;
     void checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const;
 
