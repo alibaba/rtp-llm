@@ -185,10 +185,23 @@ public class WorkerStatus {
                 continue;
             }
 
-            if (localTask.getTaskState() == TaskStateEnum.CONFIRMED || localTask.getTaskState() == TaskStateEnum.RUNNING) {
+            if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT
+                    || localTask.getTaskState() == TaskStateEnum.CONFIRMED
+                    || localTask.getTaskState() == TaskStateEnum.RUNNING) {
+                logger.warn("Task {} marked as LOST (was {}) - not in waiting, running or finished list",
+                        requestId, localTask.getTaskState());
+                if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
+                    safeDecrementQueueTime(runningQueueTime, localTask.estimatePrefillTime());
+                }
+                safeDecrementQueueTime(predictedQueueTimeMs, localTask.getPredictedMs());
+                if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
+                    long needNewKvCacheLen = localTask.getInputLength() - localTask.getPrefixLength();
+                    decKvCacheFree(-needNewKvCacheLen);
+                    addKvCacheUsed(-needNewKvCacheLen);
+                }
                 localTask.updateTaskState(TaskStateEnum.LOST);
                 result.lost.add(requestId);
-                logger.warn("Task {} marked as LOST - not in waiting, running or finished list", requestId);
+                iterator.remove();
             }
         }
         return result;
