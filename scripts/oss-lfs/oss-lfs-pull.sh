@@ -104,7 +104,6 @@ download "rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/te
 download "rtp_llm/utils/test/testdata/ckpt_database_testdata/mixture_testdata/test.safetensors" "ab0f233a43d26026aed7f12a17ab6b15764dfd3bd7002124b67b82e9c714a65b" & pids+=($!)
 
 # smoke/data files (rtp_llm/test/smoke/data/...) — pointer files in repo, overwritten in place
-download "rtp_llm/test/smoke/data/model/bert/colbert_roberta_epect_1.pt" "cafb2a5f9a47b7dcfb98c0f073c9fab21f0a44be48e665f1439fb3e5d64fabb3" & pids+=($!)
 download "rtp_llm/test/smoke/data/model/bert/colbert_roberta_expect_0.pt" "3e9de8c24548d49e6cf63594550326597373a1cf32f5034ac524fff1a271f058" & pids+=($!)
 download "rtp_llm/test/smoke/data/model/bert/colbert_roberta_expect_1.pt" "92861837c099bbec05376c1c2add1435ed4060fd1bf59ca363b0edb22fb2ce7f" & pids+=($!)
 download "rtp_llm/test/smoke/data/model/bert/expect.pt" "be5c2cc3ce5f81be52616771ee7122f37566d41f3499f137c34c2bfabdda8ec6" & pids+=($!)

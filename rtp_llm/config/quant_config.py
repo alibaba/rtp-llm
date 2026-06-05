@@ -95,6 +95,12 @@ class QuantizationConfig(ABC):
     def group_size(self) -> int:
         return self._group_size
 
+    def get_runtime_method_key(self) -> str:
+        # Empty string => the new loader has no quant method registered for this config;
+        # _get_quant_type() will treat it as "none" (unquantized fallback).
+        # Subclasses meant to be loadable via NewModelLoader override this.
+        return ""
+
     @classmethod
     def load_from_ckpt(cls, ckpt_path: str) -> Optional["QuantizationConfig"]:
         """
@@ -205,9 +211,7 @@ class QuantizationConfig(ABC):
                 # Kimi-K2.5 routed-expert MoE: int4 g32 symmetric, dyn fp8 act.
                 group_size = int(weights_config.get("group_size", 32))
                 ignore_patterns = quant_config.get("ignore", [])
-                quant_method = (
-                    CompressedW4A8Int4PerChannelQuantConfig.get_method()
-                )
+                quant_method = CompressedW4A8Int4PerChannelQuantConfig.get_method()
                 return CompressedW4A8Int4PerChannelQuantConfig.from_config(
                     {
                         "bits": bits,
@@ -237,14 +241,17 @@ class QuantizationConfig(ABC):
             group_size = weights_config["group_size"]
             if (
                 weights_config["type"] == "float"
-                and bits == 4 and activation_bits == 4
+                and bits == 4
+                and activation_bits == 4
                 and group_size == 16
             ):
                 quant_method = ModelOptFp4Config.get_method()
                 mixed_attention = False
                 text_config = config_json.get("text_config", None)
                 if text_config is not None:
-                    full_attention_interval = text_config.get("full_attention_interval", 0)
+                    full_attention_interval = text_config.get(
+                        "full_attention_interval", 0
+                    )
                     if full_attention_interval != 0:
                         mixed_attention = True
                 return ModelOptFp4Config.from_config(
@@ -256,7 +263,6 @@ class QuantizationConfig(ABC):
                         "mixed_attention": mixed_attention,
                     }
                 )
-            
 
         result = cls.from_config(
             {
@@ -326,6 +332,9 @@ class Fp8PerTensorQuantConfig(QuantizationConfig):
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float8_e4m3fn]
 
+    def get_runtime_method_key(self) -> str:
+        return "fp8_online" if not self.is_quanted() else "fp8"
+
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerTensorQuantConfig(**config)
@@ -360,6 +369,9 @@ class Fp8DynamicPerTensorQuantConfig(QuantizationConfig):
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float8_e4m3fn, torch.float16, torch.bfloat16]
+
+    def get_runtime_method_key(self) -> str:
+        return "fp8_online" if not self.is_quanted() else "fp8"
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -396,6 +408,13 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+
+    def get_runtime_method_key(self) -> str:
+        # Online path: BF16 ckpt -> 128x128 block-quantized fp8 at load time.
+        # Already-quantized FP8_PER_BLOCK ckpts (is_quanted=True) need a
+        # separate method class; return "" so the new loader rejects them
+        # explicitly rather than falling back to per-tensor.
+        return "fp8_block_online" if not self.is_quanted() else ""
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -475,6 +494,12 @@ class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
 
+    def get_runtime_method_key(self) -> str:
+        # Online path: BF16 ckpt -> per-output-channel fp8 at load time.
+        # Pre-quantized compressed-tensors ckpts (is_quanted=True) need a
+        # separate method class; "" means new loader does not support them yet.
+        return "fp8_per_channel_online" if not self.is_quanted() else ""
+
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerChannelCompressedQuantConfig(**config)
@@ -520,6 +545,12 @@ class Fp8PerChannelQuarkQuantConfig(QuarkQuantConfig):
 
     def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+
+    def get_runtime_method_key(self) -> str:
+        # Same online quantization algorithm as the compressed-tensors variant;
+        # the two configs differ only in metadata format used to read scales
+        # from a pre-quantized ckpt, which is irrelevant in the online path.
+        return "fp8_per_channel_online" if not self.is_quanted() else ""
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
@@ -649,7 +680,7 @@ class ModelOptFp4Config(QuantizationConfig):
 
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
-        self.mixed_attention = kwargs.get('mixed_attention', False)
+        self.mixed_attention = kwargs.get("mixed_attention", False)
 
     @classmethod
     def get_method(cls) -> str:
@@ -779,9 +810,7 @@ DEFAULT_MODELOPT_FP4_QUANT_CONFIG = ModelOptFp4Config(
 )
 
 DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = W4a8Int4PerChannelQuantConfig(
-    bits=4,
-    group_size=128,
-    is_quanted=False
+    bits=4, group_size=128, is_quanted=False
 )
 
 DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = (
