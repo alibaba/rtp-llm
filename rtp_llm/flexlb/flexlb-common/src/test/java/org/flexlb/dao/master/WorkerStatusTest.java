@@ -399,18 +399,41 @@ class WorkerStatusTest {
         }
 
         @Test
-        @DisplayName("Task CONFIRMED but not in waiting/running/finished should be marked LOST")
+        @DisplayName("Task CONFIRMED but not in waiting/running/finished should be marked LOST and removed")
         void taskConfirmedButNotInAnyList_shouldBeMarkedLost() {
             TaskInfo localTask = new TaskInfo();
             localTask.setRequestId(REQUEST_ID);
             localTask.updateTaskState(TaskStateEnum.CONFIRMED);
+            localTask.setInputLength(100);
             workerStatus.getLocalTaskMap().put(REQUEST_ID, localTask);
+            workerStatus.addRunningQueueTime(localTask.estimatePrefillTime());
 
-            workerStatus.updateTaskStates(new HashMap<>(), new HashMap<>(), new HashMap<>());
+            WorkerStatus.TaskStateUpdateResult result =
+                    workerStatus.updateTaskStates(new HashMap<>(), new HashMap<>(), new HashMap<>());
 
-            TaskInfo updated = workerStatus.getLocalTaskMap().get(REQUEST_ID);
-            assertNotNull(updated);
-            assertTrue(updated.isLost());
+            assertNull(workerStatus.getLocalTaskMap().get(REQUEST_ID));
+            assertTrue(result.lost.contains(REQUEST_ID));
+            assertEquals(0, workerStatus.getRunningQueueTime().get());
+        }
+
+        @Test
+        @DisplayName("Task IN_TRANSIT but not seen by worker should be marked LOST and removed")
+        void taskInTransitButNotInAnyList_shouldBeMarkedLost() {
+            workerStatus.setRole("RoleType.PREFILL");
+            TaskInfo localTask = new TaskInfo();
+            localTask.setRequestId(REQUEST_ID);
+            localTask.setInputLength(50);
+            localTask.setPrefixLength(10);
+            workerStatus.putLocalTask(REQUEST_ID, localTask);
+            long queueTimeBefore = workerStatus.getRunningQueueTime().get();
+            assertTrue(queueTimeBefore > 0);
+
+            WorkerStatus.TaskStateUpdateResult result =
+                    workerStatus.updateTaskStates(new HashMap<>(), new HashMap<>(), new HashMap<>());
+
+            assertNull(workerStatus.getLocalTaskMap().get(REQUEST_ID));
+            assertTrue(result.lost.contains(REQUEST_ID));
+            assertEquals(0, workerStatus.getRunningQueueTime().get());
         }
 
         @Test
