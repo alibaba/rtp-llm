@@ -192,7 +192,9 @@ def _write_test_info(args: argparse.Namespace, remaining_args: List[str]) -> Non
     logging.info(f"Wrote test info to {path}")
 
 
-def _effective_grid_max_seq_len(args: argparse.Namespace, input_len_list: List[int]) -> int:
+def _effective_grid_max_seq_len(
+    args: argparse.Namespace, input_len_list: List[int]
+) -> int:
     needed_seq_len = max(input_len_list) + args.decode_test_length
     return max(needed_seq_len, args.max_seq_len)
 
@@ -287,7 +289,7 @@ def main() -> str:
             GridRunner(
                 server.port,
                 args.dp_size,
-                [1],
+                batch_size_list,
                 input_len_list,
                 input_query_dict,
                 is_decode=False,
