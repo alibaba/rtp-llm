@@ -3285,7 +3285,7 @@ class AttentionFP8(nn.Module):
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
         prefix = workspace[:, offset : offset + width, :].contiguous()
-        all_reduce(prefix, Group.TP)
+        all_reduce(prefix, Group.TP, inplace=True)
         workspace[:, offset : offset + width, :].copy_(prefix)
 
     def _attn_via_workspace_cp_raw_q_merge(

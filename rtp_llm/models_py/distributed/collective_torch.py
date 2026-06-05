@@ -665,15 +665,16 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     torch.distributed.broadcast(tensor, src, group=process_group)
 
 
-def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
+def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
     Args:
-        tensor: Tensor to all-reduce (will be modified in-place)
+        tensor: Tensor to all-reduce.
         group: Process group to use
+        inplace: If true, write the symmetric-memory fast-path result back to ``tensor``.
 
     Returns:
-        All-reduced tensor (same as input tensor)
+        All-reduced tensor.
     """
     rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
     if rocm_rccl.should_use_capture_collectives(group == Group.TP):
@@ -684,7 +685,7 @@ def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(
             tensor
         ):
-            return symm_mem_comm.all_reduce(tensor)
+            return symm_mem_comm.all_reduce(tensor, out=tensor if inplace else None)
 
     process_group = _get_group(group)
     torch.distributed.all_reduce(
