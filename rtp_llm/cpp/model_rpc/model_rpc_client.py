@@ -10,6 +10,11 @@ from grpc import StatusCode
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    ATTACH_FINISHED_IN_TTL,
+    ATTACH_GONE,
+    ATTACH_NOT_FOUND,
+    ATTACH_EPOCH_MISMATCH,
+    ATTACH_ALREADY_ATTACHED,
     AttachStreamRequestPB,
     CancelRequestPB,
     ErrorDetailsPB,
@@ -490,15 +495,45 @@ class ModelRpcClient(object):
 
             grpc_kwargs = {"timeout": effective_ms / 1000.0} if effective_ms > 0 else {}
             if use_attach_stream:
-                response_iterator = stub.AttachStream(
-                    AttachStreamRequestPB(request_id=input_pb.request_id), **grpc_kwargs
-                )
+                attach_req = AttachStreamRequestPB(request_id=input_pb.request_id)
+                if hasattr(input_py, "session_epoch") and input_py.session_epoch:
+                    attach_req.session_epoch = input_py.session_epoch
+                response_iterator = stub.AttachStream(attach_req, **grpc_kwargs)
             else:
                 response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
-            # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
-                output = trans_output(input_py, response, stream_state)
-                if use_attach_stream and _is_finished_response(response):
+                if use_attach_stream:
+                    which = response.WhichOneof('payload')
+                    if which == 'control':
+                        ctrl = response.control
+                        if ctrl.state == ATTACH_FINISHED_IN_TTL:
+                            terminal_seen = True
+                            break
+                        if ctrl.state == ATTACH_GONE:
+                            raise FtRuntimeException(
+                                ExceptionType.UNKNOWN_ERROR,
+                                f"AttachStream session expired for request_id={input_pb.request_id}")
+                        if ctrl.state == ATTACH_NOT_FOUND:
+                            raise FtRuntimeException(
+                                ExceptionType.UNKNOWN_ERROR,
+                                f"AttachStream session not found for request_id={input_pb.request_id}")
+                        if ctrl.state == ATTACH_EPOCH_MISMATCH:
+                            raise FtRuntimeException(
+                                ExceptionType.UNKNOWN_ERROR,
+                                f"AttachStream epoch mismatch for request_id={input_pb.request_id}")
+                        if ctrl.state == ATTACH_ALREADY_ATTACHED:
+                            raise FtRuntimeException(
+                                ExceptionType.UNKNOWN_ERROR,
+                                f"AttachStream already attached for request_id={input_pb.request_id}")
+                        continue
+                    elif which == 'output':
+                        output_pb = response.output
+                    else:
+                        continue
+                else:
+                    output_pb = response
+                output = trans_output(input_py, output_pb, stream_state)
+                if _is_finished_response(output_pb):
                     terminal_seen = True
                 yield output
             stream_done = True

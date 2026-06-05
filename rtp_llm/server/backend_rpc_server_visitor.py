@@ -199,6 +199,7 @@ class BackendRPCServerVisitor:
         if route_result.is_ok:
             input.generate_config.role_addrs = route_result.role_addrs
             input.enqueued_by_master = route_result.enqueued_by_master
+            input.session_epoch = route_result.session_epoch
             route_logger.debug(
                 "master route success, request_id=%s, addrs=%s",
                 input.request_id,

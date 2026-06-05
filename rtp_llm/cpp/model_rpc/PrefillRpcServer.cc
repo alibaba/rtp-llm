@@ -1410,6 +1410,8 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
             slot.prefill_context->stat_info.nextStage();
             auto stream = engine_->makeStream(slot.prefill_context->generate_input);
             slot.prefill_context->setStream(stream);
+            slot.session->bindStream(stream);
+            slot.session->setCancelState(slot.prefill_context->cancel_state);
             all_streams.push_back(stream);
         }
         if (check_context_cancelled(local_slots)) {
@@ -1433,8 +1435,6 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
             return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
         }
 
-        session->bindStream(pfx_ctx->getStream());
-        session->setCancelState(pfx_ctx->cancel_state);
         auto session_writer = std::make_shared<SessionWriter>(session);
         pfx_ctx->rpc_context.writer = session_writer.get();
         pfx_ctx->session_owns_stream = true;

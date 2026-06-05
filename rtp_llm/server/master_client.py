@@ -44,6 +44,7 @@ class FlexlbResponse:
     error_message: Optional[str] = None
     result: Optional[Dict[str, Any]] = None  # internal: raw JSON from scheduler
     enqueued_by_master: bool = False
+    session_epoch: int = 0
 
     @property
     def is_ok(self) -> bool:
@@ -63,7 +64,8 @@ class FlexlbResponse:
 
     @classmethod
     def ok(
-        cls, role_addrs: List[RoleAddr], enqueued_by_master: bool = False
+        cls, role_addrs: List[RoleAddr], enqueued_by_master: bool = False,
+        session_epoch: int = 0,
     ) -> "FlexlbResponse":
         """Business success: parsed role addrs."""
         return cls(
@@ -73,6 +75,7 @@ class FlexlbResponse:
             error_message=None,
             result=None,
             enqueued_by_master=enqueued_by_master,
+            session_epoch=session_epoch,
         )
 
     @classmethod
@@ -344,5 +347,7 @@ class MasterClient:
             for s in schedule_meta.server_status
         ]
         return FlexlbResponse.ok(
-            role_addrs, enqueued_by_master=schedule_meta.enqueued_by_master
+            role_addrs,
+            enqueued_by_master=schedule_meta.enqueued_by_master,
+            session_epoch=schedule_meta.session_epoch,
         )

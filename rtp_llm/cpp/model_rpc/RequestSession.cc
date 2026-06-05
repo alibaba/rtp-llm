@@ -216,13 +216,13 @@ bool RequestSession::finalizeTerminal(TerminalReason reason, grpc::Status status
     info.payload_expire_time_us = now_us + payload_ttl_us_;
     info.tombstone_expire_time_us = now_us + payload_ttl_us_ + tombstone_ttl_us_;
 
-    output_buffer_.freeze(request_id_, session_epoch_, info);
-    output_buffer_.close();
-
     {
         std::lock_guard<std::mutex> lock(terminal_mu_);
         terminal_ = info;
     }
+
+    output_buffer_.freeze(request_id_, session_epoch_, info);
+    output_buffer_.close();
 
     {
         std::lock_guard<std::mutex> lock(resource_mu_);

@@ -88,3 +88,4 @@ class ScheduleMeta(BaseModel):
     success: Optional[bool] = True
     real_master_host: Optional[str] = None
     enqueued_by_master: bool = False
+    session_epoch: int = 0
