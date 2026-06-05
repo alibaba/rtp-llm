@@ -68,8 +68,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._pool_reader import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
-from rtp_llm.models_py.modules.dsv4.qlinear import _fp8_dequant_to_fp32
-from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
+from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.ops.compute_ops import KVCacheRegionName, rtp_llm_ops
@@ -2599,8 +2598,9 @@ class AttentionFP8(nn.Module):
             with record_function_range("dsv4.fp8.attn.swa.via_concat"):
                 o = self._attn_fp8_swa_via_concat(qkv, common)
         with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
-            out_3d = self._prefill_output_proj(o, common)
-        return out_3d.squeeze(0)
+            out = self._prefill_output_proj(o, common.freqs_cis)
+        self._prefill_output_all_reduce(out)
+        return out
 
     def _forward_prefill_csa(
         self,
@@ -2868,8 +2868,10 @@ class AttentionFP8(nn.Module):
     ) -> torch.Tensor:
         """Shared CSA/HCA epilogue: write compressed-K via main compressor
         (with hoisted ``compressor_meta``), then run the workspace-path
-        attention. Falls back to ``_attn_fp8_swa_via_kv_full`` on warmup
-        when ``workspace_meta`` is None (pool context unbound).
+        attention. The workspace path streams each attention chunk directly
+        through output projection; warmup falls back to
+        ``_attn_fp8_swa_via_kv_full`` when ``workspace_meta`` is None (pool
+        context unbound).
 
         ``_skip_compressor_write`` is the Phase-Z overlap escape hatch:
         the orchestrator (HCA/CSA) has already drained the compressor's
@@ -2895,14 +2897,15 @@ class AttentionFP8(nn.Module):
             # SWA-only attention so framework shape inference still runs.
             with record_function_range("dsv4.fp8.attn.compressed.warmup_attn"):
                 o = self._attn_fp8_swa_via_kv_full(qkv, common)
+            with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
+                out = self._prefill_output_proj(o, common.freqs_cis)
+            self._prefill_output_all_reduce(out)
         else:
             with record_function_range("dsv4.fp8.attn.compressed.workspace_attn"):
-                o = self._attn_via_workspace(
+                out = self._attn_via_workspace(
                     qkv, common, workspace_meta, cmp_topk_runtime
                 )
-        with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
-            out_3d = self._prefill_output_proj(o, common)
-        return out_3d.squeeze(0)
+        return out
 
     def _attn_via_workspace(
         self,
@@ -2930,7 +2933,11 @@ class AttentionFP8(nn.Module):
              internally computes per-token ``min((pos+1)//ratio, TOP_K)``
              so HCA's full ``arange(N_max)`` row gets masked even for tokens
              whose request has ``N_b < N_max``.
-          6. ``flash_mla_sparse_fwd`` over the ``[B*M, 1, D]`` workspace view.
+          6. ``flash_mla_sparse_fwd`` over the ``[B*M, 1, D]`` workspace view,
+             chunked on Q; each chunk is immediately fed into
+             :meth:`_prefill_output_proj_into` and written to the final contiguous
+             ``[T, dim]`` output buffer, so no full ``[T, H, D]`` attention
+             output is materialized.
 
         Mirrors vLLM ``DeepseekV4MultiHeadLatentAttentionWrapper._forward_prefill``.
 
@@ -2978,7 +2985,7 @@ class AttentionFP8(nn.Module):
 
         if wm.use_cp_raw_q_merge:
             with record_function_range("dsv4.fp8.attn.workspace.cp_raw_q_merge"):
-                return self._attn_via_workspace_cp_raw_q_merge(
+                o = self._attn_via_workspace_cp_raw_q_merge(
                     qkv=qkv,
                     common=common,
                     workspace_meta=wm,
@@ -2986,6 +2993,10 @@ class AttentionFP8(nn.Module):
                     cmp_pool_3d=cmp_pool_3d,
                     swa_pool_3d=swa_pool_3d,
                 )
+            with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
+                out = self._prefill_output_proj(o, common.freqs_cis)
+            self._prefill_output_all_reduce(out)
+            return out
 
         with record_function_range("dsv4.fp8.attn.workspace.alloc"):
             workspace = torch.zeros(
@@ -3048,8 +3059,8 @@ class AttentionFP8(nn.Module):
             workspace.view(B * wm.M, D).index_copy_(0, wm.new_k_slot_in_flat, kv_bf16)
             # Free the kv_full storage before combine_topk + flash_mla_sparse_fwd.
             # After the overlay, kv_full has no remaining consumer in this
-            # function or any caller (verified: _forward_prefill_compressed
-            # uses only the returned attention output for output_proj).
+            # function or any caller; workspace attention now output-projects
+            # each FlashMLA chunk immediately after attention.
             # The NamedTuple ref keeps it alive otherwise, costing ~1.1 GiB
             # of peak overlap with the sparse-attn workspace at 1M ctx.
             dispose_tensor(kv_bf16)
@@ -3121,15 +3132,13 @@ class AttentionFP8(nn.Module):
                     N=wm.N,
                 )
 
-        # flash_mla_sparse_fwd is called once when ``s_q`` fits the safe
-        # threshold; otherwise it is chunked along Q so each launch stays
+        # flash_mla_sparse_fwd is chunked along Q so each launch stays
         # below ``DSV4_FLASH_MLA_SPARSE_Q_CHUNK`` rows. Sparse attention
-        # has no cross-Q dependency so chunking is bit-equal. The Q-chunk
-        # is defensive: with the int64 row-indexing fix in
-        # ``_combine_topk_swa_indices_cp_kernel`` long-context HCA L3
-        # prefill works in a single launch, but the chunk caps still
-        # protect against any latent int32 indexing inside flash_mla
-        # itself. Set chunk <= 0 to disable.
+        # has no cross-Q dependency so chunking is bit-equal. Each chunk is
+        # immediately output-projected into the final contiguous [T, dim]
+        # buffer, avoiding the previous full [T, H, D] o3 allocation and copy.
+        # Disallow the historical "0 disables chunking" escape hatch here:
+        # this path's purpose is to avoid materializing full [T, H, D] attention.
         kv_view = workspace.view(B * wm.M, 1, D)
         indices_3d = combined_indices.unsqueeze(1)
         q_chunk = dsv4_chunk_tokens_from_env(
@@ -3137,29 +3146,17 @@ class AttentionFP8(nn.Module):
             min_value=0,
         )
         s_q = qkv.q.shape[0]
-        if q_chunk <= 0 or s_q <= q_chunk:
+        out = torch.empty(s_q, self.dim, dtype=torch.bfloat16, device=qkv.q.device)
+        if q_chunk <= 0:
+            raise ValueError(
+                "DSV4_FLASH_MLA_SPARSE_Q_CHUNK must be positive for workspace "
+                "streaming output projection"
+            )
+        chunk_rows = min(q_chunk, s_q)
+        freqs_all = common.freqs_cis
+        for start in range(0, s_q, chunk_rows):
+            end = min(start + chunk_rows, s_q)
             with record_function_range("dsv4.fp8.attn.workspace.flash_mla_sparse_fwd"):
-                o3, _, _ = flash_mla_sparse_fwd(
-                    q=qkv.q,
-                    kv=kv_view,
-                    indices=indices_3d,
-                    sm_scale=self.softmax_scale,
-                    attn_sink=self.attn_sink,
-                    topk_length=combined_lens,
-                )
-            dispose_tensor(qkv.q)
-            return o3.unsqueeze(0)
-
-        # Preallocate the full output buffer and write each chunk directly
-        # into its slice. Avoids holding all chunks alive + allocating a
-        # separate cat output (2× peak ≈ 2 × s_q · H · D · 2B); the per-chunk
-        # o_part is released between iterations and the allocator reuses
-        # the same block for the next launch. At 1M context this drops the
-        # attention peak by ~13 GiB per rank.
-        o3: Optional[torch.Tensor] = None
-        with record_function_range("dsv4.fp8.attn.workspace.flash_mla_sparse_fwd"):
-            for start in range(0, s_q, q_chunk):
-                end = min(start + q_chunk, s_q)
                 o_part, _, _ = flash_mla_sparse_fwd(
                     q=qkv.q[start:end],
                     kv=kv_view,
@@ -3168,17 +3165,16 @@ class AttentionFP8(nn.Module):
                     attn_sink=self.attn_sink,
                     topk_length=combined_lens[start:end],
                 )
-                if o3 is None:
-                    o3 = torch.empty(
-                        (s_q,) + tuple(o_part.shape[1:]),
-                        dtype=o_part.dtype,
-                        device=o_part.device,
-                    )
-                o3[start:end].copy_(o_part)
-                dispose_tensor(o_part)
+            with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
+                self._prefill_output_proj_into(
+                    o_part,
+                    freqs_all[start:end],
+                    out=out[start:end, :],
+                )
+            dispose_tensor(o_part)
         dispose_tensor(qkv.q)
-        assert o3 is not None
-        return o3.unsqueeze(0)
+        self._prefill_output_all_reduce(out)
+        return out
 
     # _should_use_cp_raw_q_merge was inlined into _build_workspace_meta so the
     # gate evaluation (which performs 2 D2H syncs) runs once per (forward,
@@ -5250,109 +5246,53 @@ class AttentionFP8(nn.Module):
         return o3.unsqueeze(0)
 
     # ------------------------------------------------------------------
-    # Output projection: inv-RoPE + wo_a + wo_b + tp all-reduce
+    # Output projection: inv-RoPE + wo_a + wo_b
     # ------------------------------------------------------------------
+    def _prefill_output_all_reduce(self, out: torch.Tensor) -> None:
+        if self.tp_size <= 1:
+            return
+        from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+
+        with record_function_range("dsv4.fp8.attn.out.tp_all_reduce"):
+            all_reduce(out, Group.TP)
+
     def _prefill_output_proj(
-        self, o: torch.Tensor, common: PrefillMeta
+        self,
+        o: torch.Tensor,
+        freqs_cis: torch.Tensor,
     ) -> torch.Tensor:
-        """Inverse-RoPE + grouped wo_a + wo_b + (TP) all-reduce.
-
-        Fast path (CUDA, non-empty): single fused Triton kernel
-        (``fused_inv_rope_fp8_quant``) emits the exact ``(fp8 [M,G,K],
-        scale [M,G,K/512])`` layout ``deep_gemm.fp8_einsum`` consumes,
-        collapsing what used to be apply_rotary_emb + per-group
-        per_token_group_quant_fp8 + einsum into one launch.
-
-        Eager fallback (CPU / empty): explicit inv-rotary + bf16-dequant +
-        ``einsum("bsgd,grd->bsgr")``, kept for warmup / unit tests.
-
-        Output shape ``[1, T, dim]`` (caller squeezes to ``[T, dim]``).
-        """
-        rd = common.rd
-        seqlen = common.seqlen
-        freqs_cis = common.freqs_cis
-
-        if o.is_cuda and o.numel() > 0:
-            chunk_tokens = dsv4_chunk_tokens_from_env(
-                "DSV4_ATTN_OUT_CHUNK_TOKENS",
-                min_value=0,
-            )
-            if chunk_tokens > 0 and seqlen > chunk_tokens:
-                if freqs_cis.dim() == 2:
-                    freqs_all = freqs_cis
-                else:
-                    freqs_all = freqs_cis.reshape(seqlen, -1)
-                out = torch.empty(
-                    1, seqlen, self.dim, dtype=torch.bfloat16, device=o.device
-                )
-                out_2d = out.view(seqlen, self.dim)
-                o_tokens = o.reshape(seqlen, self.n_heads * self.head_dim)
-                for token_start in range(0, seqlen, chunk_tokens):
-                    token_end = min(token_start + chunk_tokens, seqlen)
-                    chunk_len = token_end - token_start
-                    o_3d = (
-                        o_tokens[token_start:token_end]
-                        .reshape(chunk_len, self.n_heads, self.head_dim)
-                        .contiguous()
-                    )
-                    freqs_per_token = freqs_all[token_start:token_end].contiguous()
-                    with record_function_range(
-                        "dsv4.fp8.attn.out.fused_inv_rope_quant"
-                    ):
-                        o_fp8, o_scale = fused_inv_rope_fp8_quant(
-                            o_3d,
-                            freqs_per_token,
-                            n_groups=self.n_groups,
-                            heads_per_group=self.n_heads // self.n_groups,
-                            nope_dim=self.head_dim - self.rope_head_dim,
-                            rope_head_dim=self.rope_head_dim,
-                        )
-                    with record_function_range("dsv4.fp8.attn.out.wo_a_einsum"):
-                        o_chunk = self._wo_a_einsum_from_fp8(
-                            o_fp8, o_scale, 1, chunk_len
-                        )
-                    with record_function_range("dsv4.fp8.attn.out.wo_b"):
-                        out_2d[token_start:token_end].copy_(
-                            self.wo_b(o_chunk.flatten(2).reshape(chunk_len, -1))
-                        )
-                if self.tp_size > 1:
-                    from rtp_llm.models_py.distributed.collective_torch import (
-                        Group,
-                        all_reduce,
-                    )
-
-                    with record_function_range("dsv4.fp8.attn.out.tp_all_reduce"):
-                        all_reduce(out, Group.TP)
-                return out
-
-            o_3d = o.reshape(seqlen, self.n_heads, self.head_dim)
-            if freqs_cis.dim() == 2:
-                freqs_per_token = freqs_cis.contiguous()
-            else:
-                freqs_per_token = freqs_cis.reshape(seqlen, -1).contiguous()
-            with record_function_range("dsv4.fp8.attn.out.fused_inv_rope_quant"):
-                o_fp8, o_scale = fused_inv_rope_fp8_quant(
-                    o_3d,
-                    freqs_per_token,
-                    n_groups=self.n_groups,
-                    heads_per_group=self.n_heads // self.n_groups,
-                    nope_dim=self.head_dim - self.rope_head_dim,
-                    rope_head_dim=self.rope_head_dim,
-                )
-            with record_function_range("dsv4.fp8.attn.out.wo_a_einsum"):
-                o = self._wo_a_einsum_from_fp8(o_fp8, o_scale, 1, seqlen)
-        else:
-            with record_function_range("dsv4.fp8.attn.out.eager_inv_rope_wo_a"):
-                apply_rotary_emb(o[..., -rd:], freqs_cis, inverse=True)
-                o = o.reshape(1, seqlen, self.n_groups, -1)
-                wo_a_bf16 = _fp8_dequant_to_fp32(self.wo_a_w, self.wo_a_s).to(o.dtype)
-                wo_a = wo_a_bf16.view(self.n_groups, self.o_lora_rank, -1)
-                o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
-        with record_function_range("dsv4.fp8.attn.out.wo_b"):
-            out = self._lin(self.wo_b, o.flatten(2))
-        if self.tp_size > 1:
-            from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-
-            with record_function_range("dsv4.fp8.attn.out.tp_all_reduce"):
-                all_reduce(out, Group.TP)
+        """Inverse-RoPE + grouped wo_a + wo_b into a fresh ``[T, dim]`` tensor."""
+        seqlen = o.shape[-3]
+        out = torch.empty(seqlen, self.dim, dtype=torch.bfloat16, device=o.device)
+        self._prefill_output_proj_into(o, freqs_cis, out=out)
         return out
+
+    def _prefill_output_proj_into(
+        self,
+        o: torch.Tensor,
+        freqs_cis: torch.Tensor,
+        *,
+        out: torch.Tensor,
+    ) -> None:
+        """Inverse-RoPE + grouped wo_a + wo_b into an existing ``[T, dim]`` tensor.
+
+        The fused Triton kernel
+        (``fused_inv_rope_fp8_quant``) emits the exact ``(fp8 [M,G,K],
+        scale [M,G,K/512])`` layout ``deep_gemm.fp8_einsum`` consumes.
+        """
+        o_3d = o.view(-1, self.n_heads, self.head_dim)
+        seqlen = o_3d.shape[0]
+        with record_function_range("dsv4.fp8.attn.out.fused_inv_rope_quant"):
+            o_fp8, o_scale = fused_inv_rope_fp8_quant(
+                o_3d,
+                freqs_cis,
+                n_groups=self.n_groups,
+                heads_per_group=self.n_heads // self.n_groups,
+                nope_dim=self.head_dim - self.rope_head_dim,
+                rope_head_dim=self.rope_head_dim,
+            )
+        with record_function_range("dsv4.fp8.attn.out.wo_a_einsum"):
+            o_proj = self._wo_a_einsum_from_fp8(o_fp8, o_scale, 1, seqlen)
+        with record_function_range("dsv4.fp8.attn.out.wo_b"):
+            wo_b_in = o_proj.flatten(2).reshape(seqlen, -1)
+            self.wo_b(wo_b_in, out=out)

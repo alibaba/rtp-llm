@@ -181,14 +181,14 @@ class ChunkedMoETest(unittest.TestCase):
                 "DSV4_CHUNK_TOKENS": "0",
                 "DSV4_MOE_CHUNK_PREFILL": "1",
                 "DSV4_MOE_CHUNK_TOKENS": "4096",
-                "DSV4_ATTN_OUT_CHUNK_TOKENS": "8192",
+                "DSV4_MTP_FUSION_CHUNK_TOKENS": "8192",
             },
             clear=True,
         ):
             self.assertFalse(chunked_moe_enabled())
             self.assertEqual(moe_chunk_tokens_from_env(), 0)
             self.assertEqual(
-                dsv4_chunk_tokens_from_env("DSV4_ATTN_OUT_CHUNK_TOKENS"),
+                dsv4_chunk_tokens_from_env("DSV4_MTP_FUSION_CHUNK_TOKENS"),
                 0,
             )
             budget = resolve_moe_max_tokens_per_rank(

@@ -36,10 +36,12 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+import rtp_llm.models_py.modules.dsv4.fp8.attention as attention_mod
 from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     AttentionFP8,
     PrefillMeta,
     PrefillQKV,
+    WorkspaceMeta,
     _prefill_cp_overlap_enabled,
 )
 
@@ -83,6 +85,7 @@ def _make_attention_stub(
         name="_forward_prefill_compressed",
         return_value=torch.zeros(2, 8, dtype=torch.bfloat16),
     )
+    layer.tp_size = 1
     return layer
 
 
@@ -326,7 +329,10 @@ class CompressedSkipCompressorWriteTest(unittest.TestCase):
             return_value=torch.zeros(2, 8, dtype=torch.bfloat16)
         )
         layer._prefill_output_proj = MagicMock(  # type: ignore[assignment]
-            return_value=torch.zeros(1, 2, 8, dtype=torch.bfloat16)
+            return_value=torch.zeros(2, 8, dtype=torch.bfloat16)
+        )
+        layer._prefill_output_all_reduce = MagicMock(  # type: ignore[assignment]
+            name="_prefill_output_all_reduce"
         )
         # Don't stub _forward_prefill_compressed this time — exercise the
         # real method with workspace_meta=None (warmup → SWA fallback).
@@ -335,7 +341,7 @@ class CompressedSkipCompressorWriteTest(unittest.TestCase):
         qkv = _make_qkv(self.device)
         x = torch.zeros(2, 4, dtype=torch.bfloat16, device=self.device)
 
-        layer._forward_prefill_compressed(
+        out = layer._forward_prefill_compressed(
             x,
             qkv,
             common,
@@ -348,6 +354,12 @@ class CompressedSkipCompressorWriteTest(unittest.TestCase):
         layer.compressor.assert_not_called()
         layer.compressor.start_prefill.assert_not_called()
         layer.compressor.finish_prefill.assert_not_called()
+        layer._prefill_output_all_reduce.assert_called_once()
+        self.assertEqual(
+            tuple(layer._prefill_output_all_reduce.call_args.args[0].shape),
+            (2, 8),
+        )
+        self.assertEqual(tuple(out.shape), (2, 8))
 
     def test_default_skip_false_invokes_compressor(self) -> None:
         layer = _make_attention_stub(compress_ratio=128)
@@ -355,14 +367,17 @@ class CompressedSkipCompressorWriteTest(unittest.TestCase):
             return_value=torch.zeros(2, 8, dtype=torch.bfloat16)
         )
         layer._prefill_output_proj = MagicMock(  # type: ignore[assignment]
-            return_value=torch.zeros(1, 2, 8, dtype=torch.bfloat16)
+            return_value=torch.zeros(2, 8, dtype=torch.bfloat16)
+        )
+        layer._prefill_output_all_reduce = MagicMock(  # type: ignore[assignment]
+            name="_prefill_output_all_reduce"
         )
         del layer._forward_prefill_compressed
         common = _make_common(cp_on=False, device=self.device)
         qkv = _make_qkv(self.device)
         x = torch.zeros(2, 4, dtype=torch.bfloat16, device=self.device)
 
-        layer._forward_prefill_compressed(
+        out = layer._forward_prefill_compressed(
             x,
             qkv,
             common,
@@ -375,6 +390,251 @@ class CompressedSkipCompressorWriteTest(unittest.TestCase):
         layer.compressor.assert_called_once_with(
             x, common.sp_int, meta=common.hca_meta.compressor_meta
         )
+        layer._prefill_output_all_reduce.assert_called_once()
+        self.assertEqual(
+            tuple(layer._prefill_output_all_reduce.call_args.args[0].shape),
+            (2, 8),
+        )
+        self.assertEqual(tuple(out.shape), (2, 8))
+
+    def test_workspace_branch_returns_projected_output_without_outer_projection(
+        self,
+    ) -> None:
+        layer = _make_attention_stub(compress_ratio=128)
+        projected = torch.zeros(2, 8, dtype=torch.bfloat16)
+        layer._attn_via_workspace = MagicMock(  # type: ignore[assignment]
+            return_value=projected
+        )
+        layer._prefill_output_proj = MagicMock(  # type: ignore[assignment]
+            name="_prefill_output_proj"
+        )
+        del layer._forward_prefill_compressed
+        common = _make_common(cp_on=False, device=self.device)
+        qkv = _make_qkv(self.device)
+        x = torch.zeros(2, 4, dtype=torch.bfloat16, device=self.device)
+        workspace_meta = SimpleNamespace(name="workspace_meta")
+
+        out = layer._forward_prefill_compressed(
+            x,
+            qkv,
+            common,
+            cmp_topk_runtime=None,
+            compressor_meta=common.hca_meta.compressor_meta,
+            workspace_meta=workspace_meta,
+        )
+
+        layer._attn_via_workspace.assert_called_once_with(
+            qkv,
+            common,
+            workspace_meta,
+            None,
+        )
+        layer._prefill_output_proj.assert_not_called()
+        self.assertEqual(tuple(out.shape), (2, 8))
+
+
+class WorkspaceStreamingOutputProjectionTest(unittest.TestCase):
+    def test_workspace_streams_flash_chunks_into_projected_output(self) -> None:
+        layer = _make_attention_stub(compress_ratio=128)
+        layer.head_dim = 2
+        layer.dim = 8
+        layer.softmax_scale = 1.0
+        layer.attn_sink = None
+        layer.window_size = 16
+        layer._pool_view_3d_fp8 = MagicMock(  # type: ignore[assignment]
+            return_value=torch.empty(1, 1, 1, dtype=torch.uint8)
+        )
+        layer._prefill_output_all_reduce = MagicMock(  # type: ignore[assignment]
+            name="_prefill_output_all_reduce"
+        )
+
+        common = PrefillMeta(
+            seqlen=5,
+            seqlen_full=5,
+            rd=0,
+            device=torch.device("cpu"),
+            cp_ctx=None,
+            cp_on=False,
+            freqs_cis=torch.arange(10, dtype=torch.float32).view(5, 2),
+            topk_idxs=torch.zeros(5, 1, dtype=torch.int32),
+            sp_int=0,
+            any_cont=False,
+            row_seqlens_full=torch.tensor([5], dtype=torch.long),
+            batch_size=1,
+        )
+        qkv = PrefillQKV(
+            qr=torch.zeros(5, 2, dtype=torch.bfloat16),
+            q=torch.arange(10, dtype=torch.float32).view(5, 1, 2).to(torch.bfloat16),
+            kv_full=torch.arange(10, dtype=torch.float32).view(5, 2),
+        )
+        workspace_meta = WorkspaceMeta(
+            M=5,
+            N=0,
+            swa_eb=1,
+            cmp_eb=1,
+            swa_bt_int32=torch.zeros(1, 1, dtype=torch.int32),
+            cmp_bt_int32=torch.zeros(1, 1, dtype=torch.int32),
+            swa_seq_lens=torch.tensor([5], dtype=torch.int32),
+            cmp_seq_lens=torch.tensor([0], dtype=torch.int32),
+            swa_gather_lens=torch.tensor([5], dtype=torch.int32),
+            swa_cache_seq_lens=torch.tensor([0], dtype=torch.int32),
+            swa_cache_gather_lens=torch.tensor([0], dtype=torch.int32),
+            qsl=torch.tensor([0, 5], dtype=torch.int32),
+            dense_cmp_topk=torch.zeros(5, 1, dtype=torch.int32),
+            new_k_slot_in_flat=torch.arange(5, dtype=torch.long),
+        )
+        flash_q_shapes = []
+
+        def fake_flash_mla_sparse_fwd(q, kv, indices, sm_scale, attn_sink, topk_length):
+            flash_q_shapes.append(tuple(q.shape))
+            fill = float(len(flash_q_shapes))
+            return (
+                torch.full(
+                    (q.shape[0], 1, 2),
+                    fill,
+                    dtype=torch.bfloat16,
+                    device=q.device,
+                ),
+                None,
+                None,
+            )
+
+        def fake_combine_topk_swa_indices(**kwargs):
+            return (
+                torch.zeros(5, 1, dtype=torch.int32),
+                torch.ones(5, dtype=torch.int32),
+            )
+
+        projected_chunks = []
+
+        def fake_output_proj_into(o, freqs_cis, *, out):
+            projected_chunks.append(
+                (
+                    tuple(o.shape),
+                    int(freqs_cis.shape[0]),
+                    freqs_cis.clone(),
+                    tuple(out.shape),
+                    out.is_contiguous(),
+                )
+            )
+            out.fill_(len(projected_chunks))
+
+        layer._prefill_output_proj_into = MagicMock(  # type: ignore[assignment]
+            side_effect=fake_output_proj_into
+        )
+
+        with patch.dict(
+            os.environ,
+            {"DSV4_FLASH_MLA_SPARSE_Q_CHUNK": "2"},
+        ), patch.dict(
+            "sys.modules",
+            {
+                "flash_mla": SimpleNamespace(
+                    flash_mla_sparse_fwd=fake_flash_mla_sparse_fwd
+                ),
+                "rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton": SimpleNamespace(),
+                "rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton": SimpleNamespace(
+                    combine_topk_swa_indices=fake_combine_topk_swa_indices,
+                    combine_topk_swa_indices_cp=MagicMock(
+                        name="combine_topk_swa_indices_cp"
+                    ),
+                ),
+            },
+        ):
+            out = layer._attn_via_workspace(
+                qkv,
+                common,
+                workspace_meta,
+                cmp_topk_runtime=None,
+            )
+
+        self.assertEqual(tuple(out.shape), (5, 8))
+        self.assertEqual(flash_q_shapes, [(2, 1, 2), (2, 1, 2), (1, 1, 2)])
+        self.assertEqual(layer._prefill_output_proj_into.call_count, 3)
+        self.assertEqual(
+            [chunk[0] for chunk in projected_chunks],
+            [(2, 1, 2), (2, 1, 2), (1, 1, 2)],
+        )
+        self.assertEqual([chunk[1] for chunk in projected_chunks], [2, 2, 1])
+        self.assertEqual(
+            [chunk[3] for chunk in projected_chunks],
+            [(2, 8), (2, 8), (1, 8)],
+        )
+        self.assertTrue(all(chunk[4] for chunk in projected_chunks))
+        self.assertTrue(torch.equal(projected_chunks[0][2], common.freqs_cis[0:2]))
+        self.assertTrue(torch.equal(projected_chunks[1][2], common.freqs_cis[2:4]))
+        self.assertTrue(torch.equal(projected_chunks[2][2], common.freqs_cis[4:5]))
+        self.assertTrue(torch.all(out[0:2] == 1))
+        self.assertTrue(torch.all(out[2:4] == 2))
+        self.assertTrue(torch.all(out[4:5] == 3))
+        layer._prefill_output_all_reduce.assert_called_once_with(out)
+
+
+class PrefillOutputProjectionContractTest(unittest.TestCase):
+    def test_out_is_2d_and_forwarded_to_wo_b(self) -> None:
+        layer = AttentionFP8.__new__(AttentionFP8)
+        torch.nn.Module.__init__(layer)
+        layer.n_heads = 2
+        layer.head_dim = 4
+        layer.dim = 6
+        layer.n_groups = 1
+        layer.rope_head_dim = 2
+
+        device = torch.device("cpu")
+        seqlen = 3
+        freqs_cis = torch.zeros(seqlen, 2, dtype=torch.float32, device=device)
+        o = torch.randn(
+            seqlen,
+            layer.n_heads,
+            layer.head_dim,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        o_proj = torch.randn(1, seqlen, 1, 5, dtype=torch.bfloat16, device=device)
+        layer._wo_a_einsum_from_fp8 = MagicMock(  # type: ignore[assignment]
+            return_value=o_proj
+        )
+        out = torch.empty(seqlen, layer.dim, dtype=torch.bfloat16, device=device)
+        expected = (
+            torch.arange(seqlen * layer.dim, dtype=torch.float32, device=device)
+            .reshape(seqlen, layer.dim)
+            .to(torch.bfloat16)
+        )
+        wo_b_calls = []
+
+        def fake_wo_b(x: torch.Tensor, *, out: torch.Tensor | None = None):
+            wo_b_calls.append((x, out))
+            self.assertIs(out, expected_out)
+            out.copy_(expected)
+            return out
+
+        expected_out = out
+        layer.wo_b = fake_wo_b  # type: ignore[assignment]
+        fused_ret = (
+            torch.empty(0, dtype=torch.bfloat16, device=device),
+            torch.empty(0, dtype=torch.float32, device=device),
+        )
+
+        with patch.object(
+            attention_mod,
+            "fused_inv_rope_fp8_quant",
+            return_value=fused_ret,
+        ) as fused:
+            ret = layer._prefill_output_proj_into(o, freqs_cis, out=out)
+
+        self.assertIsNone(ret)
+        self.assertTrue(torch.equal(out, expected))
+        fused.assert_called_once()
+        fused_args, fused_kwargs = fused.call_args
+        self.assertEqual(tuple(fused_args[0].shape), (seqlen, 2, 4))
+        self.assertEqual(tuple(fused_args[1].shape), (seqlen, 2))
+        self.assertEqual(fused_kwargs["n_groups"], 1)
+        layer._wo_a_einsum_from_fp8.assert_called_once_with(
+            fused_ret[0], fused_ret[1], 1, seqlen
+        )
+        self.assertEqual(len(wo_b_calls), 1)
+        self.assertEqual(tuple(wo_b_calls[0][0].shape), (seqlen, 5))
+        self.assertIs(wo_b_calls[0][1], out)
 
 
 if __name__ == "__main__":
