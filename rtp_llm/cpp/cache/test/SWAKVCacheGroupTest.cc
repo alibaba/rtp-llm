@@ -151,10 +151,10 @@ TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_HCAStateReuseEnabledCountsTailOnly) {
     auto group = SWAKVCacheGroup({}, spec, block_pool_, 5, /*linear_step=*/3, shared_cache_.get());
 
     // seq_len=40 => seq_slots=10. If reuse sparse allocation were enabled, step hits
-    // would keep positions 2/5/8 plus tail position 9. HCA_STATE skips reuse and keeps only tail 8/9.
+    // would keep positions 2/5/8 plus tail position 9. HCA_STATE skips reuse and keeps only tail 9.
     auto need = group.getNeedBlocks(0, 40, 0, 0, true);
     EXPECT_EQ(need.common_blocks, 0);
-    EXPECT_EQ(need.extra_blocks, 2);
+    EXPECT_EQ(need.extra_blocks, 1);
 }
 
 TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_CSAStateReuseEnabledStillUsesSparse) {
@@ -292,10 +292,10 @@ TEST_F(SWAKVCacheGroupTest, Malloc_HCAStateReuseEnabledAllocatesTailOnly) {
     ASSERT_TRUE(group.malloc(block_ids, 40, /*enable_reuse_cache=*/true, /*reserve_step=*/0));
 
     ASSERT_EQ(block_ids.blocksNum(), 10u);
-    EXPECT_EQ(validBlockCount(block_ids.blocks()), 2u);
-    EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[8]));
+    EXPECT_EQ(validBlockCount(block_ids.blocks()), 1u);
+    EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[8]));
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[9]));
-    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 1);
 }
 
 TEST_F(SWAKVCacheGroupTest, Malloc_CSAStateReuseEnabledKeepsSparseBlocks) {
@@ -500,12 +500,11 @@ TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_HCAStateReuseEnabledKeepsTailOnl
     group.removeSkippedBlocks(blocks, /*enable_reuse_cache=*/true);
 
     ASSERT_EQ(blocks.blocksNum(), 6u);
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[i])) << "position " << i << " should be freed";
     }
-    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[4]));
     EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[5]));
-    EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 4);
+    EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 5);
 }
 
 TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_WithReserveStep) {
