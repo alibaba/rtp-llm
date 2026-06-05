@@ -135,8 +135,20 @@ def test_output_buffer_and_inplace_correctness():
     cand_out = fused_rmsnorm_rope(q, None, freqs, rd, eps=eps, out=out)
     assert cand_out.data_ptr() == out.data_ptr()
     d_out = (cand_out.float() - ref.float()).abs()
-    print(f"  [OUT]  cand vs default-ref max={d_out.max():.4e}  mean={d_out.mean():.4e}")
+    print(
+        f"  [OUT]  cand vs default-ref max={d_out.max():.4e}  mean={d_out.mean():.4e}"
+    )
     assert d_out.max() <= 2e-2
+
+    q_alias = q.clone()
+    cand_alias = fused_rmsnorm_rope(q_alias, None, freqs, rd, eps=eps, out=q_alias)
+    assert cand_alias.data_ptr() == q_alias.data_ptr()
+    d_alias = (cand_alias.float() - ref.float()).abs()
+    print(
+        f"  [ALIAS] cand vs default-ref max={d_alias.max():.4e}  "
+        f"mean={d_alias.mean():.4e}"
+    )
+    assert d_alias.max() <= 2e-2
 
     q_inplace = q.clone()
     cand_inplace = fused_rmsnorm_rope(q_inplace, None, freqs, rd, eps=eps, inplace=True)
@@ -191,9 +203,7 @@ def test_group_heads_correctness():
     freqs = _make_freqs(B, rd)
     ref = fused_rmsnorm_rope(q, None, freqs, rd, eps=eps)
     for group_heads in (2, 4, 8):
-        cand = fused_rmsnorm_rope(
-            q, None, freqs, rd, eps=eps, group_heads=group_heads
-        )
+        cand = fused_rmsnorm_rope(q, None, freqs, rd, eps=eps, group_heads=group_heads)
         d = (cand.float() - ref.float()).abs()
         print(
             f"  [GH{group_heads}] cand vs default-ref max={d.max():.4e} "

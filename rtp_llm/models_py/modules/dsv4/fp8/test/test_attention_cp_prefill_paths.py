@@ -284,6 +284,31 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
         self.assertIn("gather_start", seq)
         self.assertIn(("wait", handle), seq)
 
+    def test_prefill_compute_qkv_reuses_wq_b_output_for_rope(self) -> None:
+        seq: list = []
+        layer = self._make_qkv_layer(seq)
+        common = _make_common(cp_on=False, device=torch.device("cuda"))
+        seen: dict[str, torch.Tensor] = {}
+
+        def fake_fused(t, weight, *args, **kwargs):
+            if weight is None:
+                seen["q_in"] = t
+                seen["q_out"] = kwargs["out"]
+                self.assertIs(kwargs["out"], t)
+                return kwargs["out"]
+            self.assertNotIn("out", kwargs)
+            return t
+
+        with patch.object(attention_mod, "fused_rmsnorm_rope", fake_fused):
+            qkv = layer._prefill_compute_qkv(
+                torch.zeros(3, 4, dtype=torch.bfloat16),
+                common,
+            )
+
+        self.assertEqual(seq[:2], ["lin_wq_a", "lin_wq_b"])
+        self.assertIn("q_out", seen)
+        self.assertEqual(qkv.q.data_ptr(), seen["q_out"].data_ptr())
+
     def _make_qkv_layer(self, seq: list, fail_q: bool = False) -> AttentionFP8:
         layer = AttentionFP8.__new__(AttentionFP8)
         torch.nn.Module.__init__(layer)

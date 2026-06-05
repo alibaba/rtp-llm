@@ -16,7 +16,6 @@ import torch
 import triton
 import triton.language as tl
 
-
 _BLACKWELL_GROUP_HEADS8_MIN_FREQ = 65536
 
 
@@ -137,9 +136,7 @@ def _fused_rmsnorm_rope_group_heads_kernel(
     x_rows = x_ptr + rows[:, None] * x_stride_n
     out_rows = out_ptr + rows[:, None] * out_stride_n
     d_mask = d_off < D
-    x = tl.load(x_rows + d_off[None, :], mask=d_mask[None, :], other=0.0).to(
-        tl.float32
-    )
+    x = tl.load(x_rows + d_off[None, :], mask=d_mask[None, :], other=0.0).to(tl.float32)
 
     var = tl.sum(x * x, axis=1) / D
     inv = tl.rsqrt(var + EPS)
@@ -201,9 +198,9 @@ def fused_rmsnorm_rope(
 
     Returns a tensor of the same shape & dtype as ``x``.  By default a new
     output tensor is allocated.  ``out`` can provide a preallocated contiguous
-    output buffer, and ``inplace=True`` writes back into ``x``.  ``group_heads``
-    groups Q-style rows sharing the same frequency slot; valid values are
-    1, 2, 4, and 8.
+    output buffer, ``out`` may alias ``x``, and ``inplace=True`` writes back
+    into ``x``.  ``group_heads`` groups Q-style rows sharing the same frequency
+    slot; valid values are 1, 2, 4, and 8.
     """
     assert x.is_cuda
     assert x.dtype in (torch.bfloat16, torch.float16, torch.float32)
@@ -229,7 +226,11 @@ def fused_rmsnorm_rope(
 
     if weight is not None:
         assert weight.shape == (D,) and weight.is_contiguous()
-        assert weight.is_cuda and weight.dtype in (torch.bfloat16, torch.float16, torch.float32)
+        assert weight.is_cuda and weight.dtype in (
+            torch.bfloat16,
+            torch.float16,
+            torch.float32,
+        )
         w = weight
         has_weight = True
     else:

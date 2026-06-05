@@ -4911,7 +4911,7 @@ class AttentionFP8(nn.Module):
                     -1, (self.n_heads, self.head_dim)
                 )
                 q_local = fused_rmsnorm_rope(
-                    q_local, None, common.freqs_cis, rd, eps=self.eps
+                    q_local, None, common.freqs_cis, rd, eps=self.eps, out=q_local
                 )
             return qr_local, q_local
 
