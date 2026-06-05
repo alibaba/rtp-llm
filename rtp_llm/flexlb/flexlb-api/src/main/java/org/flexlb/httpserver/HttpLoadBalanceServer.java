@@ -17,9 +17,13 @@ import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
@@ -33,6 +37,8 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 
@@ -54,6 +60,7 @@ public class HttpLoadBalanceServer {
     private final QueueManager queueManager;
     private final ActiveRequestCounter activeRequestCounter;
     private final ConfigService configService;
+    private final EngineWorkerStatus engineWorkerStatus;
 
     public HttpLoadBalanceServer(GeneralHttpNettyService generalHttpNettyService,
                                  RouteService routeService,
@@ -61,7 +68,8 @@ public class HttpLoadBalanceServer {
                                  EngineHealthReporter engineHealthReporter,
                                  QueueManager queueManager,
                                  ActiveRequestCounter activeRequestCounter,
-                                 ConfigService configService) {
+                                 ConfigService configService,
+                                 EngineWorkerStatus engineWorkerStatus) {
         this.generalHttpNettyService = generalHttpNettyService;
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
@@ -69,6 +77,7 @@ public class HttpLoadBalanceServer {
         this.queueManager = queueManager;
         this.activeRequestCounter = activeRequestCounter;
         this.configService = configService;
+        this.engineWorkerStatus = engineWorkerStatus;
     }
 
     @Bean
@@ -220,6 +229,30 @@ public class HttpLoadBalanceServer {
                 });
     }
 
+    private Map<String, Response.WorkerRoleSummary> buildWorkerSummary() {
+        ModelWorkerStatus modelStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
+        Map<String, Response.WorkerRoleSummary> summary = new LinkedHashMap<>();
+        for (RoleType role : RoleType.values()) {
+            Map<String, WorkerStatus> statusMap = modelStatus.getRoleStatusMap(role);
+            if (statusMap == null || statusMap.isEmpty()) {
+                continue;
+            }
+            Response.WorkerRoleSummary rs = new Response.WorkerRoleSummary();
+            rs.setDiscovered(statusMap.size());
+            long maxQueue = 0;
+            for (WorkerStatus ws : statusMap.values()) {
+                if (ws.isAlive()) {
+                    rs.setAlive(rs.getAlive() + 1);
+                    long qt = ws.getRunningQueueTime().get();
+                    if (qt > maxQueue) maxQueue = qt;
+                }
+            }
+            rs.setMaxQueueTokens(maxQueue);
+            summary.put(role.getCode(), rs);
+        }
+        return summary.isEmpty() ? null : summary;
+    }
+
     private Mono<ServerResponse> responseMasterInfo(ServerRequest request) {
         return request.bodyToMono(Request.class)
                 .flatMap((Function<Request, Mono<ServerResponse>>) req -> {
@@ -228,6 +261,7 @@ public class HttpLoadBalanceServer {
                     result.setQueueLength(queueManager.getQueue().size());
                     result.setCode(200);
                     result.setSuccess(true);
+                    result.setWorkerSummary(buildWorkerSummary());
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
                             .body(Mono.just(result), Response.class);
