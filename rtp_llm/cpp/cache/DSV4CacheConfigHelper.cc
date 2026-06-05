@@ -216,9 +216,11 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
                          gen_num_per_cycle),
         parallelism_config,
         KVCacheRegionName::SWA_KV);
-    const uint32_t fixed_cp_size = fixedRegionCpSize(parallelism_config);
-    const uint32_t fixed_tokens_per_block =
-        fixed_cp_size > 1 ? physical_tokens_per_block * fixed_cp_size : physical_tokens_per_block;
+    // Fixed/SWA entries may be CP-compacted by entries_per_block, but their
+    // logical row ownership remains the physical block size. Python prefill
+    // maps absolute token positions through this value; inflating it by cp_size
+    // changes long-context state/SWA slot ownership and breaks retrieval.
+    const uint32_t fixed_tokens_per_block = physical_tokens_per_block;
     return {
         {KVCacheRegionName::CSA_KV,
          &sets.csa_layers,

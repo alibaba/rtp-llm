@@ -403,7 +403,7 @@ TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlock
     EXPECT_EQ(config.group_kv_block_stride_bytes[5], config.cache_specs[5]->block_size_bytes());
     EXPECT_EQ(config.group_kv_block_stride_bytes[6], config.cache_specs[6]->block_size_bytes());
     for (size_t gid : {3u, 4u, 5u, 6u}) {
-        EXPECT_EQ(config.group_seq_size_per_block[gid], kDsv4TokensPerBlock * 4u) << "gid=" << gid;
+        EXPECT_EQ(config.group_seq_size_per_block[gid], kDsv4TokensPerBlock) << "gid=" << gid;
     }
 
     pc.role_type       = RoleType::DECODE;
@@ -1139,8 +1139,8 @@ TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2MatchesPrefillSliceT
     EXPECT_EQ(hca_state->entries_per_block, 136u);
     EXPECT_EQ(swa_kv->entries_per_block, 136u);
     for (size_t gid : {3u, 4u, 5u, 6u}) {
-        EXPECT_EQ(prefill_config.group_seq_size_per_block[gid], kDsv4TokensPerBlock * cp_size) << "gid=" << gid;
-        EXPECT_EQ(decode_config.group_seq_size_per_block[gid], kDsv4TokensPerBlock * cp_size) << "gid=" << gid;
+        EXPECT_EQ(prefill_config.group_seq_size_per_block[gid], kDsv4TokensPerBlock) << "gid=" << gid;
+        EXPECT_EQ(decode_config.group_seq_size_per_block[gid], kDsv4TokensPerBlock) << "gid=" << gid;
     }
 }
 
@@ -1173,8 +1173,8 @@ TEST(HybridPoolConfigCreatorTest, DecodeExplicitPrefillCpSizeHandlesDp16) {
         const auto expected_entries = prefill_spec->entries_per_block * cp_size;
         EXPECT_EQ(decode_spec->entries_per_block, expected_entries)
             << "gid=" << gid << " region=" << static_cast<int>(decode_spec->cache_type);
-        EXPECT_EQ(prefill_config.group_seq_size_per_block[gid], kDsv4TokensPerBlock * cp_size) << "gid=" << gid;
-        EXPECT_EQ(decode_config.group_seq_size_per_block[gid], kDsv4TokensPerBlock * cp_size) << "gid=" << gid;
+        EXPECT_EQ(prefill_config.group_seq_size_per_block[gid], kDsv4TokensPerBlock) << "gid=" << gid;
+        EXPECT_EQ(decode_config.group_seq_size_per_block[gid], kDsv4TokensPerBlock) << "gid=" << gid;
     }
 }
 
