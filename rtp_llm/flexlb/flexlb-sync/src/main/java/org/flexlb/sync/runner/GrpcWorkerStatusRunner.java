@@ -99,6 +99,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             if (newWorkerStatus.getMessage() != null) {
                 workerStatus.setAlive(false);
+                long nowUs = System.nanoTime() / 1000;
+                workerStatus.getStatusLastUpdateTime().set(nowUs);
                 logger.error("query engine worker status via gRPC, msg={}", newWorkerStatus.getMessage());
                 return;
             }
@@ -108,7 +110,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             Long responseVersion = newWorkerStatus.getStatusVersion();
             if (responseVersion == 0L) {
-                logger.info("workerStatuses.get(ip) is null for gRPC call");
+                workerStatus.setAlive(newWorkerStatus.isAlive());
+                long nowUs = System.nanoTime() / 1000;
+                workerStatus.getStatusLastUpdateTime().set(nowUs);
+                logger.info("worker status version is 0 (engine initializing), ip={}", ipPort);
                 return;
             }
 

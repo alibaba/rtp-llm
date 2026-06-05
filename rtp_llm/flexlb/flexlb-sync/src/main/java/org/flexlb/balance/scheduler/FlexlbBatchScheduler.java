@@ -223,6 +223,13 @@ public class FlexlbBatchScheduler {
 
             if (now - entry.createdAtMs > ttlMs) {
                 iterator.remove();
+                synchronized (entry) {
+                    rollbackOnce(entry);
+                    if (!entry.item.future.isDone()) {
+                        entry.item.future.completeExceptionally(
+                            new RuntimeException("Inflight entry TTL expired after " + ttlMs + "ms"));
+                    }
+                }
             }
         }
     }
@@ -698,7 +705,10 @@ public class FlexlbBatchScheduler {
             try {
                 arrival.signalAll();
                 for (BatchItem item : queue) {
-                    item.future.completeExceptionally(new CancellationException("FlexLB batcher stopped: " + key));
+                    rollback(item.routeResponse);
+                    if (!item.future.isDone()) {
+                        item.future.completeExceptionally(new CancellationException("FlexLB batcher stopped: " + key));
+                    }
                 }
                 queue.clear();
             } finally {

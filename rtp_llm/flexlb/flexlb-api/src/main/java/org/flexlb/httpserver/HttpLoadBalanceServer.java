@@ -243,6 +243,9 @@ public class HttpLoadBalanceServer {
             for (WorkerStatus ws : statusMap.values()) {
                 if (ws.isAlive()) {
                     rs.setAlive(rs.getAlive() + 1);
+                    if (ws.getResourceAvailable().get()) {
+                        rs.setAvailable(rs.getAvailable() + 1);
+                    }
                     long qt = ws.getRunningQueueTime().get();
                     if (qt > maxQueue) maxQueue = qt;
                 }
