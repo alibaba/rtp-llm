@@ -6,6 +6,10 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+
 import static org.flexlb.enums.LoadBalanceStrategyEnum.RANDOM;
 import static org.flexlb.enums.LoadBalanceStrategyEnum.SHORTEST_TTFT;
 import static org.flexlb.enums.LoadBalanceStrategyEnum.WEIGHTED_CACHE;
@@ -205,6 +209,55 @@ public class FlexlbConfig {
      */
     private long flexlbBatchInflightTtlMs = 3600L * 1000L;
 
+    // ========== CostBasedPrefill Strategy Configuration ==========
+
+    private long costSloMs = 500;
+
+    private long costSloRiskMarginMs = 100;
+
+    private String costSloBuckets = "";
+
+    private transient volatile List<long[]> parsedSloBuckets;
+
+    private double costHotspotMultiplier = 3.0;
+
+    private double costImbalanceMultiplier = 3.0;
+
+    private double costAlpha0 = 0;
+    private double costAlpha1 = 1.0;
+    private double costAlpha2 = 0;
+    private double costAlpha3 = 0;
+    private double costAlpha4 = 0.3;
+    private double costAlpha5 = 0;
+
+    // ========== SLO-Budget Batcher Configuration ==========
+
+    private double flexlbBatchFillThreshold = 0.5;
+
+    private int flexlbBatchMaxCapacity = 1048576;
+
+    private int flexlbBatchSearchIter = 10;
+
+    private int flexlbBatchScanAhead = 64;
+
+    /**
+     * Maximum queue depth per WorkerBatcher. Requests beyond this limit are
+     * rejected with QUEUE_FULL.
+     */
+    private int flexlbBatchQueueMaxSize = 64;
+
+    /**
+     * Maximum total in-flight requests across all batchers. Acts as a global
+     * admission control gate at the FlexlbBatchScheduler entry.
+     */
+    private int flexlbBatchMaxInflight = 100000;
+
+    // ========== Decode Load Balance Hard Filter Configuration ==========
+
+    private double decodeHotspotMultiplier = 3.0;
+
+    private double decodeImbalanceMultiplier = 3.0;
+
     /**
      * Get load balancing strategy for a role type
      * This method handles the logic of selecting the appropriate strategy based on role type and configuration
@@ -257,5 +310,40 @@ public class FlexlbConfig {
                 return null;
             }
         }
+    }
+
+    public long resolveSloMs(long seqLen) {
+        List<long[]> buckets = getParsedSloBuckets();
+        if (buckets == null || buckets.isEmpty()) {
+            return costSloMs;
+        }
+        for (long[] bucket : buckets) {
+            if (seqLen <= bucket[0]) {
+                return bucket[1];
+            }
+        }
+        return buckets.get(buckets.size() - 1)[1];
+    }
+
+    private List<long[]> getParsedSloBuckets() {
+        if (parsedSloBuckets != null) {
+            return parsedSloBuckets;
+        }
+        if (costSloBuckets == null || costSloBuckets.isBlank()) {
+            return null;
+        }
+        List<long[]> result = new ArrayList<>();
+        for (String entry : costSloBuckets.split(",")) {
+            String[] kv = entry.trim().split(":");
+            if (kv.length == 2) {
+                try {
+                    result.add(new long[]{Long.parseLong(kv[0].trim()), Long.parseLong(kv[1].trim())});
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
+        result.sort(Comparator.comparingLong(a -> a[0]));
+        parsedSloBuckets = result;
+        return result;
     }
 }

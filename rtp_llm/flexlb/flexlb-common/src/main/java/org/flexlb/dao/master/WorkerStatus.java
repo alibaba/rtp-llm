@@ -8,7 +8,9 @@ import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.concurrent.ConcurrentHashMap;
@@ -107,7 +109,8 @@ public class WorkerStatus {
      * Update task states
      * Check for lost tasks, update running/waiting tasks, and clean up finished tasks
      */
-    public void updateTaskStates(Map<String, TaskInfo> waitingTaskInfo, Map<String, TaskInfo> runningTaskInfo, Map<String, TaskInfo> finishedTaskInfo) {
+    public List<Long> updateTaskStates(Map<String, TaskInfo> waitingTaskInfo, Map<String, TaskInfo> runningTaskInfo, Map<String, TaskInfo> finishedTaskInfo) {
+        List<Long> finishedRequestIds = new ArrayList<>();
         Iterator<Map.Entry<Long, TaskInfo>> iterator = localTaskMap.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<Long, TaskInfo> entry = iterator.next();
@@ -128,6 +131,7 @@ public class WorkerStatus {
                     safeDecrementQueueTime(runningQueueTime, delta);
                 }
                 Logger.debug("Task {} finished and removed", requestId);
+                finishedRequestIds.add(requestId);
                 iterator.remove();
                 continue;
             }
@@ -177,6 +181,7 @@ public class WorkerStatus {
                 logger.warn("Task {} marked as LOST - not in waiting, running or finished list", requestId);
             }
         }
+        return finishedRequestIds;
     }
 
     /**

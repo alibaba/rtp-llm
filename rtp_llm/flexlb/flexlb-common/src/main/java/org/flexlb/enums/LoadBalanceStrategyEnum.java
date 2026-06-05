@@ -9,7 +9,9 @@ public enum LoadBalanceStrategyEnum {
 
     SHORTEST_TTFT("ShortestTTFT"),  // Shortest Time-To-First-Token
 
-    WEIGHTED_CACHE("WeightedCache")  // Lowest cache usage strategy
+    WEIGHTED_CACHE("WeightedCache"),  // Lowest cache usage strategy
+
+    COST_BASED_PREFILL("CostBasedPrefill")  // Cost-based prefill worker selection
 
     ;
     private final String name;
