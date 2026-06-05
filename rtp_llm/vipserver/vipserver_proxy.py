@@ -68,7 +68,7 @@ class VIPServerProxy:
         jmenv_url = f"http://{self.jmenv}/vipserver/serverlist?nofix=1&{query_string}"
 
         try:
-            resp = requests.get(jmenv_url).text
+            resp = requests.get(jmenv_url, timeout=5).text
             srv_lst = []
             for srv in resp.split("\n"):
                 if srv.strip() == "":
@@ -79,9 +79,8 @@ class VIPServerProxy:
                 srv_lst.append(srv)
 
             random.shuffle(srv_lst)
-            self.srv_update_lock.acquire()
-            self.srv_hosts = srv_lst
-            self.srv_update_lock.release()
+            with self.srv_update_lock:
+                self.srv_hosts = srv_lst
         except Exception as e:
             logging.error(
                 f"failed to refresh vipserver server list, exception : {str(e)}"
@@ -94,27 +93,32 @@ class VIPServerProxy:
         :param params: params map
         :return: response json
         """
-        self.srv_update_lock.acquire()
-        try:
-            req_params = dict()
-            if params:
-                req_params.update(params)
-                req_params.update(get_address_server_params())
+        with self.srv_update_lock:
+            srv_snapshot = list(self.srv_hosts)
 
-            for srv in self.srv_hosts:
-                try:
-                    resp = requests.get(
-                        f"http://{srv}:80/vipserver/api/{api}?{get_query_string(req_params)}"
-                    )
-                    resp_json = resp.json()
-                    return resp_json
-                except Exception as e:
-                    logging.info(
-                        f"req api from vipserver fail, api:{api}, srv:{srv}, params:{params}, {str(e)}"
-                    )
-                    raise e
-            raise Exception("all vip srv is fail.")
-        except Exception as e:
-            logging.error("failed to req api: %s", str(e))
-        finally:
-            self.srv_update_lock.release()
+        if not srv_snapshot:
+            logging.error("no vipserver hosts available")
+            return None
+
+        req_params = dict()
+        if params:
+            req_params.update(params)
+            req_params.update(get_address_server_params())
+
+        last_error = None
+        for srv in srv_snapshot:
+            try:
+                resp = requests.get(
+                    f"http://{srv}:80/vipserver/api/{api}?{get_query_string(req_params)}",
+                    timeout=3,
+                )
+                resp_json = resp.json()
+                return resp_json
+            except Exception as e:
+                logging.info(
+                    f"req api from vipserver fail, api:{api}, srv:{srv}, params:{params}, {str(e)}"
+                )
+                last_error = e
+
+        logging.error("all vipserver hosts failed for api %s: %s", api, last_error)
+        return None

@@ -121,6 +121,6 @@ class HostReactor:
         :return: host list
         """
         hosts = self.domain_map.get(domain)
-        if hosts is None:
+        if not hosts:
             return self.get_host_list_by_domain_now(domain)
         return hosts
