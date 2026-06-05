@@ -878,6 +878,8 @@ bool RtpLLMMemoryCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                   "rtp_llm_kv_cache_memory_cache_copy_latency_us");
 
     // Status 相关指标
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_status_item_num_metric,
+                                  "rtp_llm_kv_cache_memory_cache_status_item_num");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_status_total_block_num_metric,
                                   "rtp_llm_kv_cache_memory_cache_status_total_block_num");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_status_allocated_block_num_metric,
@@ -956,6 +958,7 @@ void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*           tag
 
 void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*             tags,
                                       RtpLLMMemoryCacheStatusMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_item_num_metric, collector->item_num);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_total_block_num_metric, collector->total_block_num);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_allocated_block_num_metric, collector->allocated_block_num);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_available_block_num_metric, collector->available_block_num);

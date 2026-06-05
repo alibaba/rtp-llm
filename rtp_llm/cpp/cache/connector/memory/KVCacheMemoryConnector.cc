@@ -3350,6 +3350,9 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
     std::chrono::steady_clock::time_point last_disk_metrics_time = std::chrono::steady_clock::now();
     while (!stop_.load()) {
         if (metrics_reporter_) {
+            const auto item_num = usePrefixTreeMemoryCache() ?
+                                      (prefix_block_cache_ ? prefix_block_cache_->size() : 0) :
+                                      (block_cache_ ? block_cache_->size() : 0);
             if (usePrefixTreeMemoryCache()) {
                 if (!compressed_pool_ || !state_swa_pool_) {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -3360,6 +3363,7 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
                 const auto avail = compressed_pool_->availableBlocksNum() + state_swa_pool_->availableBlocksNum();
 
                 RtpLLMMemoryCacheStatusMetricsCollector collector;
+                collector.item_num            = static_cast<int64_t>(item_num);
                 collector.total_block_num     = total;
                 collector.allocated_block_num = total - free;
                 collector.available_block_num = avail;
@@ -3399,6 +3403,7 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
                                    + (incomplete_pool_ ? incomplete_pool_->availableBlocksNum() : 0);
 
                 RtpLLMMemoryCacheStatusMetricsCollector collector;
+                collector.item_num            = static_cast<int64_t>(item_num);
                 collector.total_block_num     = total;
                 collector.allocated_block_num = total - free;
                 collector.available_block_num = avail;
@@ -3416,6 +3421,7 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
                 const auto available_blocks = block_pool_->availableBlocksNum();
 
                 RtpLLMMemoryCacheStatusMetricsCollector collector;
+                collector.item_num            = static_cast<int64_t>(item_num);
                 collector.total_block_num     = total_blocks;
                 collector.allocated_block_num = total_blocks - free_blocks;
                 collector.available_block_num = available_blocks;
