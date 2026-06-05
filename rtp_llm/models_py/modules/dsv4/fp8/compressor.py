@@ -62,6 +62,8 @@ def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tenso
 
 
 from rtp_llm.models_py.modules.dsv4.cp import (
+    _CP_ROLE_INDEXER,
+    _CP_ROLE_MAIN,
     CPContext,
     cp_all_gather_full_async,
     cp_should_gather,
@@ -79,6 +81,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
     run_save_partial_states,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 # Process-local cache for the device-side cos_sin tensor derived from a
 # given freqs_cis source. DSV4 has ~91 CompressorFP8 instances (main +
@@ -264,6 +267,8 @@ class CompressorFP8(PoolBackedModule):
         rope_head_dim: int,
         compress_ratio: int,
         max_batch_size: int,
+        *,
+        cp_role: str,
         norm_eps: float = 1e-6,
         rotate: bool = False,
         compressor_weights: Optional[Dict[str, torch.Tensor]] = None,
@@ -281,6 +286,17 @@ class CompressorFP8(PoolBackedModule):
         )
         self.dim = dim
         self.head_dim = head_dim
+        # Which per-forward workspace CP buffer pair this compressor's gather
+        # draws from — passed EXPLICITLY by the caller (main CSA/HCA vs nested
+        # indexer) rather than inferred from ``head_dim``, so the semantics are
+        # not hidden in a dimension constant. The two roles need distinct buffers
+        # so both can be in flight within one layer under the overlap
+        # orchestrator. Validated, never silently defaulted.
+        assert cp_role in (_CP_ROLE_MAIN, _CP_ROLE_INDEXER), (
+            f"CompressorFP8 cp_role must be one of "
+            f"{{{_CP_ROLE_MAIN!r}, {_CP_ROLE_INDEXER!r}}}; got {cp_role!r}"
+        )
+        self._cp_role = cp_role
         self.rope_head_dim = rope_head_dim
         self.compress_ratio = compress_ratio
         self.overlap = compress_ratio == 4
@@ -346,7 +362,7 @@ class CompressorFP8(PoolBackedModule):
     def _cp_profile_name(self, profile_label: Optional[str]) -> str:
         label = profile_label or self._profile_label
         if not label:
-            role = "indexer" if self.head_dim == INDEXER_HEAD_DIM else "attn"
+            role = "indexer" if self._cp_role == _CP_ROLE_INDEXER else "attn"
             label = f"{role}.ratio{self.compress_ratio}.hd{self.head_dim}"
         return f"dsv4.cp.all_gather.{label}.kv_score"
 
@@ -775,6 +791,14 @@ class CompressorFP8(PoolBackedModule):
         meta: Optional[CompressorMeta] = None,
         cp_gather_stream: Optional[Any] = None,
         profile_label: Optional[str] = None,
+        # REQUIRED, never Optional — by design. ``workspace`` is the single
+        # authoritative per-forward prefill scratch (allocated once in
+        # ``prefill/forward.py::forward_layers`` and threaded through the meta
+        # broadcast). It is dereferenced only on the CP gather branch and is
+        # unused on the non-CP path, but it is ALWAYS passed so there is exactly
+        # one buffer-lifecycle contract and no hidden ``None``/fallback-allocate
+        # branch a future edit could trip over. Do NOT relax this to Optional.
+        workspace: "PrefillWorkspace",
     ) -> Optional[_CompressorPending]:
         """Begin a prefill compressor launch without waiting on the CP gather.
 
@@ -826,13 +850,10 @@ class CompressorFP8(PoolBackedModule):
                 f"CP compressor meta/token length mismatch: "
                 f"meta={meta.positions.numel()} seq_len_full={N_full}"
             )
-            restored_buf = None
-            if not cp_ctx.unpad_restore_is_prefix:
-                restored_buf = torch.empty(
-                    (N_full, int(fused_flat.size(1))),
-                    dtype=fused_flat.dtype,
-                    device=fused_flat.device,
-                )
+            # The non-prefix restore destination is the per-forward workspace's
+            # role buffer (``cp_restore_{main,idx}``), selected in the gather
+            # impl by ``cp_role`` — no fresh per-layer alloc here (that churn is
+            # exactly what the workspace buffers eliminate under overlap).
             gather_stream = cp_gather_stream
             if gather_stream is None and fused_flat.is_cuda:
                 gather_stream = torch.cuda.Stream(device=fused_flat.device)
@@ -847,11 +868,10 @@ class CompressorFP8(PoolBackedModule):
                     fused_flat,
                     cp_ctx,
                     stream=gather_stream,
-                    restored_buf=restored_buf,
                     profile_name=profile_name,
+                    workspace=workspace,
+                    cp_role=self._cp_role,
                 )
-        else:
-            restored_buf = None
 
         return _CompressorPending(
             fused_flat=fused_flat,
@@ -862,7 +882,7 @@ class CompressorFP8(PoolBackedModule):
             meta=meta,
             out_dim=out_dim,
             profile_label=profile_label,
-            restored_buf=restored_buf,
+            restored_buf=None,
         )
 
     def wait_prefill_gather(self, pending: Optional[_CompressorPending]) -> None:
@@ -933,6 +953,10 @@ class CompressorFP8(PoolBackedModule):
         start_pos,
         sequence_lengths: Optional[torch.Tensor] = None,
         meta: Optional[CompressorMeta] = None,
+        *,
+        # REQUIRED, never Optional — see ``start_prefill``: one authoritative
+        # per-forward buffer, always passed (unused on non-CP), no fallback.
+        workspace: "PrefillWorkspace",
     ) -> Optional[torch.Tensor]:
         """Prefill entry. ``bsz==1`` (FIFO scheduler).
 
@@ -997,6 +1021,8 @@ class CompressorFP8(PoolBackedModule):
                     cp_ctx,
                     stream=gather_stream,
                     profile_name=self._cp_profile_name(None),
+                    workspace=workspace,
+                    cp_role=self._cp_role,
                 )
             assert meta is not None, (
                 "CompressorFP8 CP prefill requires full-sequence metadata from "

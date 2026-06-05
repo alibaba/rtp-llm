@@ -30,7 +30,8 @@ mode reads tensors from `mw.global_weights[W.*]` and
 
 import logging
 import os
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 
@@ -101,76 +102,123 @@ def _is_decode_fmha(fmha_impl: Any) -> bool:
     return isinstance(fmha_impl, decode_types)
 
 
-class MtpHiddenBufferStore:
-    """Shared owner for the large DSV4 MTP pre-hc hidden buffer.
+@dataclass(frozen=True)
+class Dsv4MtpHiddenBufferSpec:
+    token_capacity: int
+    hc_dim: int
 
-    The target and draft Python models are separate ``DeepSeekV4Model``
-    instances, but their MTP hand-off buffers are never live at the same time in
-    a way that requires two allocations.  Binding both transformers to this
-    store keeps one CUDA tensor and re-registers it on every subscriber.
-    """
 
-    def __init__(self) -> None:
-        self._buffer: Optional[torch.Tensor] = None
-        self._token_capacity = 0
-        self._hc_dim = 0
-        self._dtype: Optional[torch.dtype] = None
-        self._device: Optional[torch.device] = None
+class Dsv4SharedRuntimeBufferStore:
+
+    _instance: Optional["Dsv4SharedRuntimeBufferStore"] = None
+    _mtp_hidden_requested = False
+
+    def __init__(
+        self,
+        device: torch.device,
+        dtype: torch.dtype,
+        mtp_hidden_enabled: bool,
+        mtp_hidden: Optional[Dsv4MtpHiddenBufferSpec],
+    ) -> None:
+        device = torch.device(device)
+        self._mtp_hidden_enabled = bool(mtp_hidden_enabled)
+        self._mtp_hidden_token_capacity = (
+            int(mtp_hidden.token_capacity) if mtp_hidden is not None else 0
+        )
+        self._mtp_hidden_hc_dim = (
+            int(mtp_hidden.hc_dim) if mtp_hidden is not None else 0
+        )
+        self._mtp_hidden_storage = (
+            torch.empty(
+                self._mtp_hidden_token_capacity,
+                self._mtp_hidden_hc_dim,
+                dtype=dtype,
+                device=device,
+            )
+            if self._mtp_hidden_enabled
+            else None
+        )
         self._subscribers: list[torch.nn.Module] = []
+
+    @classmethod
+    def instance(cls) -> "Dsv4SharedRuntimeBufferStore":
+        assert cls._instance is not None, "Dsv4SharedRuntimeBufferStore is not bound"
+        return cls._instance
+
+    @classmethod
+    def _reset_for_test(cls) -> None:
+        cls._instance = None
+        cls._mtp_hidden_requested = False
+
+    @classmethod
+    def mtp_hidden_requested(cls) -> bool:
+        return cls._mtp_hidden_requested or (
+            cls._instance is not None and cls._instance.mtp_hidden_enabled
+        )
+
+    @classmethod
+    def enable_mtp_hidden(cls) -> None:
+        if cls._instance is not None and not cls._instance.mtp_hidden_enabled:
+            raise RuntimeError(
+                "Dsv4SharedRuntimeBufferStore: cannot enable MTP hidden buffer "
+                "after shared storage has been allocated"
+            )
+        cls._mtp_hidden_requested = True
+
+    @classmethod
+    def get_or_create(
+        cls,
+        device: torch.device,
+        dtype: torch.dtype,
+        mtp_hidden: Optional[Dsv4MtpHiddenBufferSpec] = None,
+    ) -> "Dsv4SharedRuntimeBufferStore":
+        if cls._instance is None:
+            cls._instance = cls(
+                device=device,
+                dtype=dtype,
+                mtp_hidden_enabled=cls._mtp_hidden_requested,
+                mtp_hidden=mtp_hidden,
+            )
+        else:
+            cls._instance._validate_request(
+                mtp_hidden_token_capacity=(
+                    int(mtp_hidden.token_capacity) if mtp_hidden is not None else 0
+                ),
+            )
+        return cls._instance
+
+    @property
+    def mtp_hidden_enabled(self) -> bool:
+        return self._mtp_hidden_enabled
 
     def bind(
         self,
         module: torch.nn.Module,
-        device: torch.device,
-        token_capacity: int,
-        hc_dim: int,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        token_capacity = int(token_capacity)
-        hc_dim = int(hc_dim)
-        device = torch.device(device)
-        assert token_capacity > 0, token_capacity
-        assert hc_dim > 0, hc_dim
-
-        if self._buffer is not None:
-            if token_capacity > self._token_capacity:
-                raise RuntimeError(
-                    "MtpHiddenBufferStore: cannot grow capacity from "
-                    f"{self._token_capacity} to {token_capacity} after first bind. "
-                    "Allocate with the worst-case capacity up front."
-                )
-            assert (
-                self._hc_dim == hc_dim
-                and self._dtype == dtype
-                and self._device == device
-            ), (
-                "MTP hidden shared buffer shape/device mismatch: "
-                f"existing=(cap={self._token_capacity}, hc_dim={self._hc_dim}, "
-                f"dtype={self._dtype}, device={self._device}), "
-                f"requested=(cap={token_capacity}, hc_dim={hc_dim}, "
-                f"dtype={dtype}, device={device})"
-            )
-        if self._buffer is None:
-            self._buffer = torch.empty(
-                token_capacity,
-                hc_dim,
-                dtype=dtype,
-                device=device,
-            )
-            self._token_capacity = token_capacity
-            self._hc_dim = hc_dim
-            self._dtype = dtype
-            self._device = device
-
+    ) -> Optional[torch.Tensor]:
         if not any(existing is module for existing in self._subscribers):
             self._subscribers.append(module)
         self._sync_subscribers()
-        return self._buffer
+        return self._views()
+
+    def _validate_request(
+        self,
+        *,
+        mtp_hidden_token_capacity: int,
+    ) -> None:
+        if mtp_hidden_token_capacity > self._mtp_hidden_token_capacity:
+            raise RuntimeError(
+                "Dsv4SharedRuntimeBufferStore: cannot grow MTP hidden capacity "
+                f"from {self._mtp_hidden_token_capacity} to "
+                f"{mtp_hidden_token_capacity} after first bind"
+            )
+
+    def _views(self) -> Optional[torch.Tensor]:
+        return self._mtp_hidden_storage
 
     def _sync_subscribers(self) -> None:
-        assert self._buffer is not None
+        mtp_hidden_buffer = self._views()
         for module in self._subscribers:
-            module.register_buffer("_mtp_hidden_buffer", self._buffer, persistent=False)
+            module._bind_runtime_buffers(mtp_hidden_buffer)
 
 
 def _args_from_model_config(
@@ -348,7 +396,7 @@ class DeepSeekV4Model(GptModelBase):
         self._prefill_cp_size = int(cp_size)
         self._is_speculative = False
         self._is_decode_role = False
-        self._mtp_hidden_buffer_store: Optional[MtpHiddenBufferStore] = None
+        self._shared_runtime_buffers: Optional[Dsv4SharedRuntimeBufferStore] = None
 
         logging.info(
             "[DeepSeekV4Model] V4Args: n_layers=%d n_heads=%d head_dim=%d q_lora=%d "
@@ -411,7 +459,7 @@ class DeepSeekV4Model(GptModelBase):
             )
             raise
 
-    def _resolve_mtp_hidden_token_capacity(self) -> int:
+    def _resolve_shared_token_capacity(self) -> int:
         if self._is_decode_role:
             return resolve_moe_max_tokens_per_rank(
                 max_seq_len=int(self._v4_args.max_seq_len),
@@ -422,7 +470,7 @@ class DeepSeekV4Model(GptModelBase):
                 is_speculative=self._is_speculative,
                 gen_num_per_cycle=self._gen_num_per_cycle,
             )
-        cp_size = max(1, int(self._prefill_cp_size))
+        cp_size = int(self._prefill_cp_size)
         if cp_size > 1:
             return (
                 cp_padded_tokens_per_rank_bound(int(self._v4_args.max_seq_len), cp_size)
@@ -430,11 +478,97 @@ class DeepSeekV4Model(GptModelBase):
             )
         return self._v4_args.max_seq_len * self._max_context_batch_size
 
+    def _resolve_mtp_hidden_token_capacity(self) -> int:
+        return self._resolve_shared_token_capacity()
+
+    def _resolve_prefill_q_token_capacity(self) -> int:
+        return self._resolve_shared_token_capacity()
+
     def _resolve_mtp_last_hidden_token_capacity(self) -> Optional[int]:
         return None
 
-    def set_mtp_hidden_buffer_store(self, store: MtpHiddenBufferStore) -> None:
-        self._mtp_hidden_buffer_store = store
+    def _resolve_prefill_ws_gather_widths(self) -> Tuple[int, int, int]:
+        """Per-row element counts for the three concurrent CP gather roles —
+        main CSA/HCA compressor, nested indexer compressor, SWA ``kv_full`` —
+        sized off ``V4Args`` STATIC dims, NOT the runtime layer compositions.
+
+        Under the overlap orchestrator + the SWA side stream, up to three
+        gathers can be in flight concurrently within one layer, so each role
+        owns a dedicated workspace sub-region (a shared one would alias).
+
+        Widths are the protocol-level UPPER BOUND for each role, independent
+        of how many CSA/HCA layers the current model happens to instantiate:
+          * main: ``2 * 2 * args.head_dim`` (the widest fused projection from
+            ``CompressorFP8.start_prefill`` — CSA uses ``coff=2``, HCA uses
+            ``coff=1``; we always pre-reserve the CSA size). fp32 elements
+            (compressor uses fp32 fused gather).
+          * indexer: ``2 * 2 * args.index_head_dim`` (nested indexer
+            compressor is CSA-only → ``coff=2``). fp32 elements.
+          * swa: ``args.head_dim`` (the KV per-head dim seen after
+            ``fused_rmsnorm_rope``; see ``kv_full.reshape(-1, self.head_dim)``
+            in ``AttentionFP8``). bf16 elements (SWA's only gather dtype).
+
+        Whether a model actually USES a role on some layer is irrelevant for
+        sizing — the union buffer is ``max(q_bytes, 2*main+2*idx+2*swa)`` and
+        q dominates in practice, so over-reserving costs nothing while keeping
+        the union BYTE-IDENTICAL across the main forward and the MTP draft
+        forward. That identity is what lets the caching allocator hand the
+        same block back to the draft at the main→draft boundary — the whole
+        reason the per-forward workspace exists. Doing it any other way would
+        re-introduce the allocator fragmentation we built this to avoid.
+        """
+        head_dim = int(self._v4_args.head_dim)
+        index_head_dim = int(self._v4_args.index_head_dim)
+        main_w = 2 * 2 * head_dim
+        idx_w = 2 * 2 * index_head_dim
+        swa_w = head_dim
+        return main_w, idx_w, swa_w
+
+    def _bind_runtime_buffers(self, device: torch.device) -> None:
+        assert self.v4 is not None
+        mtp_hidden = None
+        mtp_last_hidden_capacity = None
+        if Dsv4SharedRuntimeBufferStore.mtp_hidden_requested():
+            mtp_hidden = Dsv4MtpHiddenBufferSpec(
+                token_capacity=self._resolve_mtp_hidden_token_capacity(),
+                hc_dim=int(self._v4_args.hc_mult) * int(self._v4_args.dim),
+            )
+            if self._is_speculative:
+                mtp_last_hidden_capacity = (
+                    self._resolve_mtp_last_hidden_token_capacity()
+                )
+
+        # Per-forward prefill workspace dims (max-sized; consumed by
+        # ``forward_layers`` to build a per-forward ``PrefillWorkspace``). These
+        # are plain ints — config, not buffers — so they carry no cross-forward
+        # lifetime. CP gather/restore region is sized only when CP is active.
+        cp_size = int(self._prefill_cp_size)
+        q_rows = int(self._resolve_prefill_q_token_capacity())
+        q_dim = int(self._v4_args.n_heads) * int(self._v4_args.head_dim)
+        if cp_size > 1:
+            full_rows = q_rows * cp_size
+            main_w, idx_w, swa_w = self._resolve_prefill_ws_gather_widths()
+        else:
+            full_rows = 0
+            main_w = 0
+            idx_w = 0
+            swa_w = 0
+        self.v4._bind_prefill_workspace_dims(
+            q_rows, q_dim, full_rows, main_w, idx_w, swa_w
+        )
+
+        self._shared_runtime_buffers = Dsv4SharedRuntimeBufferStore.get_or_create(
+            device=device,
+            dtype=torch.bfloat16,
+            mtp_hidden=mtp_hidden,
+        )
+        self._shared_runtime_buffers.bind(self.v4)
+
+        if mtp_last_hidden_capacity is not None:
+            self.v4._allocate_mtp_last_hidden_buffer(
+                device,
+                mtp_last_hidden_capacity,
+            )
 
     def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
         # Called by the engine after construction and before forward.
@@ -804,26 +938,13 @@ class DeepSeekV4Model(GptModelBase):
                 raise
             _torch.cuda.synchronize()
 
-        if self._is_speculative:
-            if self._mtp_hidden_buffer_store is None:
-                raise RuntimeError(
-                    "DeepSeekV4Model speculative MTP requires a shared "
-                    "hidden buffer store"
-                )
-            mtp_token_capacity = self._resolve_mtp_hidden_token_capacity()
-            mtp_last_hidden_capacity = self._resolve_mtp_last_hidden_token_capacity()
-            self.v4._allocate_mtp_buffer(
-                torch.device(device_str),
-                mtp_token_capacity,
-                shared_store=self._mtp_hidden_buffer_store,
-                last_hidden_capacity=mtp_last_hidden_capacity,
-            )
-            logging.info(
-                "[DeepSeekV4Model] allocated MTP hidden buffer: tokens=%d "
-                "last_hidden_tokens=%s",
-                mtp_token_capacity,
-                mtp_last_hidden_capacity,
-            )
+        self._bind_runtime_buffers(torch.device(device_str))
+        logging.info(
+            "[DeepSeekV4Model] bound runtime buffers: prefill_ws_q_tokens=%d "
+            "(per-forward) mtp_hidden_enabled=%s",
+            self._resolve_prefill_q_token_capacity(),
+            self._shared_runtime_buffers.mtp_hidden_enabled,
+        )
 
         self._materialized = True
 

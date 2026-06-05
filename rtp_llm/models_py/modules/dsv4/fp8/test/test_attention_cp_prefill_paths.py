@@ -30,6 +30,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     PrefillQKV,
     WorkspaceMeta,
 )
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 
 def _make_common(
@@ -47,6 +48,12 @@ def _make_common(
             unpad_restore_is_prefix=True,
         )
     tensor_device = torch.device("cpu")
+    # Per-forward prefill scratch is now threaded via ``PrefillMeta.workspace``;
+    # the real ``_prefill_compute_qkv`` reads ``common.workspace.prefill_q``.
+    # ``_make_qkv_layer`` uses n_heads=1, head_dim=4 → q_dim=4; size for it.
+    workspace = PrefillWorkspace(
+        tensor_device, q_rows=8, q_dim=4, reserve_cp=False, align_bytes=1
+    )
     return PrefillMeta(
         seqlen=3,
         seqlen_full=6 if cp_on else 3,
@@ -59,6 +66,7 @@ def _make_common(
         sp_int=0,
         any_cont=False,
         row_seqlens_full=torch.tensor([3], dtype=torch.long, device=tensor_device),
+        workspace=workspace,
     )
 
 
@@ -246,7 +254,10 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
         self.assertEqual(seq[0], "lin_wkv")
         self.assertEqual(seq[1], ("gather_start", (3, 6), stream))
         self.assertEqual(seq[2], "lin_wq_a")
-        self.assertEqual(seq[3], "lin_wq_b")
+        # q_lora_b + RoPE are deferred to _materialize_prefill_q so the big Q
+        # buffer can reuse the union workspace storage; not run here.
+        self.assertNotIn("lin_wq_b", seq)
+        self.assertIsNone(qkv.q)
         self.assertIs(qkv.kv_full_gather_handle, handle)
         self.assertIsNone(qkv.kv_full)
         self.assertEqual(qkv.kv_full_trailing_shape, (2, 3))
@@ -284,7 +295,9 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
         self.assertIn("gather_start", seq)
         self.assertIn(("wait", handle), seq)
 
-    def test_prefill_compute_qkv_reuses_wq_b_output_for_rope(self) -> None:
+    def test_materialize_prefill_q_reuses_wq_b_output_for_rope(self) -> None:
+        # The deferred q_lora_b + RoPE now live in _materialize_prefill_q, which
+        # writes wq_b straight into the workspace Q slice and RoPEs it in-place.
         seq: list = []
         layer = self._make_qkv_layer(seq)
         common = _make_common(cp_on=False, device=torch.device("cuda"))
@@ -304,10 +317,24 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
                 torch.zeros(3, 4, dtype=torch.bfloat16),
                 common,
             )
+            # _prefill_compute_qkv runs q_lora_a but defers q_lora_b + RoPE.
+            self.assertIsNone(qkv.q)
+            self.assertNotIn("lin_wq_b", seq)
+            self.assertNotIn("q_out", seen)
+            qkv = layer._materialize_prefill_q(qkv, common)
 
-        self.assertEqual(seq[:2], ["lin_wq_a", "lin_wq_b"])
+        self.assertEqual(seq[0], "lin_wq_a")
+        self.assertEqual(seq[-1], "lin_wq_b")
         self.assertIn("q_out", seen)
         self.assertEqual(qkv.q.data_ptr(), seen["q_out"].data_ptr())
+
+    def test_prefill_workspace_q_rejects_overflow(self) -> None:
+        ws = PrefillWorkspace(
+            torch.device("cpu"), q_rows=2, q_dim=4, reserve_cp=False, align_bytes=1
+        )
+
+        with self.assertRaisesRegex(AssertionError, "prefill_q overflow: num_tokens=3"):
+            ws.prefill_q(3)
 
     def _make_qkv_layer(self, seq: list, fail_q: bool = False) -> AttentionFP8:
         layer = AttentionFP8.__new__(AttentionFP8)
@@ -325,19 +352,23 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
         layer.wkv = object()
         layer._rmsnorm_weighted = lambda t, w: t  # type: ignore[assignment]
 
-        def fake_lin(op, x):
+        def fake_lin(op, x, out=None):
             T = int(x.size(1))
             if op is layer.wkv:
                 seq.append("lin_wkv")
+                self.assertIsNone(out)
                 return torch.zeros(1, T, 2, 3, dtype=torch.bfloat16)
             if op is layer.wq_a:
                 seq.append("lin_wq_a")
+                self.assertIsNone(out)
                 if fail_q:
                     raise RuntimeError("q failed")
                 return torch.zeros(1, T, 6, dtype=torch.bfloat16)
             if op is layer.wq_b:
                 seq.append("lin_wq_b")
-                return torch.zeros(1, T, 4, dtype=torch.bfloat16)
+                self.assertIsNotNone(out)
+                out.zero_()
+                return out
             raise AssertionError("unexpected linear op")
 
         layer._lin = fake_lin  # type: ignore[assignment]

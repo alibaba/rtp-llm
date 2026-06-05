@@ -24,6 +24,7 @@ import unittest
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.cp import _CP_ROLE_INDEXER, _CP_ROLE_MAIN
 from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
@@ -31,9 +32,16 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     KV_HEAD_DIM,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 DEVICE = "cuda"
 TOKENS_PER_STATE_BLOCK = 256
+
+# Non-CP path (no cp_ctx bound): the workspace is never dereferenced, so a
+# trivial one satisfies the required arg.
+_WS = PrefillWorkspace(
+    torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
+)
 
 
 def _build_compressor(
@@ -44,6 +52,7 @@ def _build_compressor(
     compress_ratio: int,
 ) -> CompressorFP8:
     coff = 1 + (compress_ratio == 4)
+    cp_role = _CP_ROLE_INDEXER if head_dim == INDEXER_HEAD_DIM else _CP_ROLE_MAIN
     weights = {
         "ape": torch.randn(compress_ratio, coff * head_dim, dtype=torch.float32) * 0.1,
         "wkv": (torch.randn(coff * head_dim, dim, dtype=torch.float32) * 0.05).to(
@@ -60,6 +69,7 @@ def _build_compressor(
         rope_head_dim=rope_head_dim,
         compress_ratio=compress_ratio,
         max_batch_size=1,
+        cp_role=cp_role,
         norm_eps=1e-6,
         compressor_weights=weights,
     ).to(DEVICE)
@@ -155,7 +165,7 @@ class CompressorFP8FlatInputParityTest(unittest.TestCase):
             coff=coff,
             compress_ratio=compress_ratio,
         )
-        cmp.forward(x, sp)
+        cmp.forward(x, sp, workspace=_WS)
         torch.cuda.synchronize()
         return state_view.clone(), kv_pool.clone()
 

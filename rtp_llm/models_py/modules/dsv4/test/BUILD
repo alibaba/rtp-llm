@@ -105,6 +105,15 @@ py_test(
 )
 
 py_test(
+    name = "test_prefill_workspace",
+    srcs = ["test_prefill_workspace.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "test_hc_impl",
     srcs = ["test_hc_impl.py"],
     deps = [

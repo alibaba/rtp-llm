@@ -25,6 +25,7 @@ import unittest
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.cp import _CP_ROLE_INDEXER, _CP_ROLE_MAIN
 from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
@@ -45,6 +46,7 @@ def _build_compressor(
     *, dim: int, head_dim: int, rope_head_dim: int, compress_ratio: int
 ) -> CompressorFP8:
     coff = 1 + (compress_ratio == 4)
+    cp_role = _CP_ROLE_INDEXER if head_dim == INDEXER_HEAD_DIM else _CP_ROLE_MAIN
     weights = {
         "ape": torch.randn(compress_ratio, coff * head_dim, dtype=torch.float32) * 0.1,
         "wkv": torch.randn(coff * head_dim, dim, dtype=torch.float32) * 0.05,
@@ -57,6 +59,7 @@ def _build_compressor(
         rope_head_dim=rope_head_dim,
         compress_ratio=compress_ratio,
         max_batch_size=1,
+        cp_role=cp_role,
         norm_eps=1e-6,
         compressor_weights=weights,
     ).to(DEVICE)

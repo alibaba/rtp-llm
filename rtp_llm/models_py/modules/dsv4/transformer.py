@@ -8,7 +8,7 @@ mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Protocol
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -20,17 +20,6 @@ from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_head
-
-
-class MtpHiddenBufferStoreLike(Protocol):
-    def bind(
-        self,
-        module: nn.Module,
-        device: torch.device,
-        token_capacity: int,
-        hc_dim: int,
-        dtype: torch.dtype,
-    ) -> torch.Tensor: ...
 
 
 @dataclass
@@ -242,47 +231,72 @@ class V4Transformer(nn.Module):
         self.register_buffer("_mtp_last_hidden_buffer", None, persistent=False)
         self._mtp_hidden_valid_tokens = 0
         self._mtp_last_hidden_valid_tokens = 0
+        # Max-sized per-forward prefill workspace dims (plain ints; not buffers).
+        # Filled by ``_bind_prefill_workspace_dims`` at init; read by
+        # ``forward_layers`` to build a per-forward ``PrefillWorkspace``.
+        self._prefill_ws_q_rows = 0
+        self._prefill_ws_q_dim = 0
+        self._prefill_ws_full_rows = 0
+        # Separate CP gather widths for the three concurrent gathers — each
+        # backs a dedicated workspace buffer pair:
+        #   main / indexer — back-to-back on the compressor side stream;
+        #   swa            — on its own side stream (overlaps ``compute_qr``).
+        self._prefill_ws_main_w = 0
+        self._prefill_ws_idx_w = 0
+        self._prefill_ws_swa_w = 0
 
-    def _allocate_mtp_buffer(
+    def _bind_runtime_buffers(
+        self,
+        mtp_hidden_buffer: Optional[torch.Tensor],
+    ) -> None:
+        self.register_buffer("_mtp_hidden_buffer", mtp_hidden_buffer, persistent=False)
+
+    def _bind_prefill_workspace_dims(
+        self,
+        q_rows: int,
+        q_dim: int,
+        full_rows: int,
+        main_w: int,
+        idx_w: int,
+        swa_w: int,
+    ) -> None:
+        """Stash the max-sized per-forward prefill workspace dimensions.
+
+        These are configuration ints (derived from ``max_seq_len + cp_size +
+        max_context_batch_size + model dims``), not buffers — they carry no
+        cross-forward lifetime. ``forward_layers`` reads them to allocate one
+        ``PrefillWorkspace`` per forward that is released when the forward
+        returns.
+        """
+        self._prefill_ws_q_rows = int(q_rows)
+        self._prefill_ws_q_dim = int(q_dim)
+        self._prefill_ws_full_rows = int(full_rows)
+        self._prefill_ws_main_w = int(main_w)
+        self._prefill_ws_idx_w = int(idx_w)
+        self._prefill_ws_swa_w = int(swa_w)
+
+    def _allocate_mtp_last_hidden_buffer(
         self,
         device: torch.device,
         token_capacity: int,
-        shared_store: MtpHiddenBufferStoreLike,
-        last_hidden_capacity: Optional[int] = None,
     ) -> None:
-        """Allocate the pre-hc_head residual buffer for speculative draft reads.
-        Called by DeepSeekV4Model._initialize_impl during speculative init."""
-        assert (
-            shared_store is not None
-        ), "DSV4 MTP hidden buffer requires a shared store"
+        token_capacity = int(token_capacity)
         assert token_capacity > 0, token_capacity
         hc_dim = self.args.hc_mult * self.args.dim
-        shared_store.bind(
-            self,
-            device=device,
-            token_capacity=token_capacity,
-            hc_dim=hc_dim,
-            dtype=torch.bfloat16,
+        if self._mtp_last_hidden_buffer is not None and int(
+            self._mtp_last_hidden_buffer.size(0)
+        ) >= int(token_capacity):
+            return
+        self.register_buffer(
+            "_mtp_last_hidden_buffer",
+            torch.empty(
+                token_capacity,
+                hc_dim,
+                dtype=torch.bfloat16,
+                device=device,
+            ),
+            persistent=False,
         )
-
-        if last_hidden_capacity is not None:
-            last_hidden_capacity = int(last_hidden_capacity)
-            assert last_hidden_capacity > 0, last_hidden_capacity
-            if (
-                self._mtp_last_hidden_buffer is None
-                or int(self._mtp_last_hidden_buffer.size(0))
-                < int(last_hidden_capacity)
-            ):
-                self.register_buffer(
-                    "_mtp_last_hidden_buffer",
-                    torch.empty(
-                        last_hidden_capacity,
-                        hc_dim,
-                        dtype=torch.bfloat16,
-                        device=device,
-                    ),
-                    persistent=False,
-                )
 
     def _write_mtp_hidden_buffer(self, flat: torch.Tensor, is_cuda_graph: bool) -> None:
         if self._mtp_hidden_buffer is None:
@@ -301,13 +315,9 @@ class V4Transformer(nn.Module):
             return
         T = flat.size(0)
         buf = self._mtp_last_hidden_buffer
-        if T > buf.size(0):
-            self.register_buffer(
-                "_mtp_last_hidden_buffer",
-                torch.empty(T, buf.size(1), dtype=buf.dtype, device=buf.device),
-                persistent=False,
-            )
-            buf = self._mtp_last_hidden_buffer
+        assert T <= buf.size(
+            0
+        ), f"_mtp_last_hidden_buffer overflow: T={T} > cap={buf.size(0)}"
         buf[:T].copy_(flat)
         self._mtp_last_hidden_valid_tokens = int(T)
 

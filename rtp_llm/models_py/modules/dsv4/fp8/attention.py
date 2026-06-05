@@ -45,6 +45,8 @@ from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsn
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
+    _CP_ROLE_MAIN,
+    _CP_ROLE_SWA_KV_FULL,
     CPContext,
     build_cp_full_prefill_positions,
     cp_actual_owned_kv_lens,
@@ -68,6 +70,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._pool_reader import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.utils.memory import dispose_tensor
@@ -754,6 +757,10 @@ class PrefillMeta(NamedTuple):
     swa_meta: Optional[SwaPrefillMeta] = None
     csa_meta: Optional[CsaPrefillMeta] = None
     hca_meta: Optional[HcaPrefillMeta] = None
+    # Per-forward prefill scratch (Q output buffer + CP gather/restore). Filled
+    # by ``build_and_propagate_prefill_meta_fp8`` from the forward's local
+    # ``PrefillWorkspace``; non-None for every production prefill call.
+    workspace: Optional[PrefillWorkspace] = None
 
 
 class PrefillQKV(NamedTuple):
@@ -764,10 +771,16 @@ class PrefillQKV(NamedTuple):
     Under the overlap path it may be deferred behind ``kv_full_gather_handle``
     until the first consumer. The CP-aware sequence length lives on
     ``PrefillMeta.seqlen_full``.
+
+    ``q`` starts ``None``: its ``q_lora_b`` + RoPE are DEFERRED to
+    :meth:`AttentionFP8._materialize_prefill_q` (called just before the
+    ``flash_mla_sparse_fwd`` consumers) so the 16 GiB Q buffer can share the
+    union ``PrefillWorkspace`` storage with the compressor gather/restore
+    buffers, which are dead by then. Consumers assert ``q is not None``.
     """
 
     qr: torch.Tensor
-    q: torch.Tensor
+    q: Optional[torch.Tensor]
     kv_full: Optional[torch.Tensor]
     kv_full_gather_handle: Optional[Any] = None
     kv_full_trailing_shape: Optional[Tuple[int, ...]] = None
@@ -962,6 +975,7 @@ class AttentionFP8(nn.Module):
                 rope_head_dim=rope_head_dim,
                 compress_ratio=compress_ratio,
                 max_batch_size=max_batch_size,
+                cp_role=_CP_ROLE_MAIN,
                 norm_eps=norm_eps,
                 compressor_weights=outer_cmp_weights,
             )
@@ -1842,14 +1856,18 @@ class AttentionFP8(nn.Module):
         )
         return out.view(orig_shape)
 
-    def _lin(self, layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
-        """Linear call that tolerates both the legacy QuantizedLinear
-        (3-D input OK via F.linear) and factory LinearBase (expects 2-D)."""
+    def _lin(
+        self,
+        layer: nn.Module,
+        x: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if x.dim() > 2:
             shape = x.shape
-            y = layer(x.reshape(-1, shape[-1]))
+            x_2d = x.reshape(-1, shape[-1])
+            y = layer(x_2d, out=out) if out is not None else layer(x_2d)
             return y.view(*shape[:-1], y.shape[-1])
-        return layer(x)
+        return layer(x, out=out) if out is not None else layer(x)
 
     def _wo_a_einsum_from_fp8(
         self, o_fp8: torch.Tensor, o_scale: torch.Tensor, B: int, S: int
@@ -2591,6 +2609,8 @@ class AttentionFP8(nn.Module):
         (set from ``prefix_lengths.any()`` under varlen, ``sp_int > 0``
         otherwise) so a B>1 batch with any continuation request takes the
         workspace path."""
+        # No compressor on this path → Q's union slice is free; materialize now.
+        qkv = self._materialize_prefill_q(qkv, common)
         if not common.any_cont or self._kv_cache is None:
             with record_function_range("dsv4.fp8.attn.swa.via_kv_full"):
                 o = self._attn_fp8_swa_via_kv_full(qkv, common)
@@ -2627,7 +2647,9 @@ class AttentionFP8(nn.Module):
         # ``[T_total, q_lora]``). Drop the legacy ``unsqueeze(0)`` so the
         # batched flat caller hits the same code path without rewrapping.
         with record_function_range("dsv4.fp8.attn.csa.indexer"):
-            raw = self.indexer(x, qkv.qr, common.csa_meta.indexer_meta)
+            raw = self.indexer(
+                x, qkv.qr, common.csa_meta.indexer_meta, workspace=common.workspace
+            )
         return self._forward_prefill_compressed(
             x,
             qkv,
@@ -2705,6 +2727,7 @@ class AttentionFP8(nn.Module):
                     meta=csa_meta.indexer_meta.compressor_meta,
                     cp_gather_stream=cp_stream,
                     profile_label=f"{layer_label}.csa_nested_indexer",
+                    workspace=common.workspace,
                 )
             with record_function_range(
                 "dsv4.fp8.attn.csa_overlap.start_main_compressor"
@@ -2715,6 +2738,7 @@ class AttentionFP8(nn.Module):
                     meta=csa_meta.compressor_meta,
                     cp_gather_stream=cp_stream,
                     profile_label=f"{layer_label}.csa_main",
+                    workspace=common.workspace,
                 )
             with record_function_range("dsv4.fp8.attn.csa_overlap.swa_write"):
                 qkv = self._ensure_prefill_kv_full(qkv, common)
@@ -2833,6 +2857,7 @@ class AttentionFP8(nn.Module):
                     meta=common.hca_meta.compressor_meta,
                     cp_gather_stream=cp_stream,
                     profile_label=f"{layer_label}.hca_main",
+                    workspace=common.workspace,
                 )
             with record_function_range("dsv4.fp8.attn.hca_overlap.swa_write"):
                 # Default-stream work that overlaps with the NCCL gather above.
@@ -2890,7 +2915,16 @@ class AttentionFP8(nn.Module):
         # ``[T_total, dim]`` reshape inside ``_launch``.
         if not _skip_compressor_write:
             with record_function_range("dsv4.fp8.attn.compressed.compressor"):
-                self.compressor(x, common.sp_int, meta=compressor_meta)
+                self.compressor(
+                    x, common.sp_int, meta=compressor_meta, workspace=common.workspace
+                )
+
+        # Materialize the deferred dense Q now that the compressor(s) have
+        # drained their CP gather/restore buffers (which alias Q's union
+        # storage). Covers all four compressed paths: non-overlap wrote the
+        # compressor just above; overlap already drained via finish_prefill in
+        # the orchestrator before reaching here (_skip_compressor_write=True).
+        qkv = self._materialize_prefill_q(qkv, common)
 
         if workspace_meta is None:
             # Warmup forward: pool not bound. Fall back to BF16 ``kv_full``
@@ -2945,6 +2979,7 @@ class AttentionFP8(nn.Module):
         ignored and ``workspace_meta.dense_cmp_topk`` (precomputed
         ``arange(N_max)`` per token) is used instead.
         """
+        assert qkv.q is not None, "_attn_via_workspace: prefill Q not materialized"
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
 
         from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV, SWA_KV
@@ -3172,7 +3207,6 @@ class AttentionFP8(nn.Module):
                     out=out[start:end, :],
                 )
             dispose_tensor(o_part)
-        dispose_tensor(qkv.q)
         self._prefill_output_all_reduce(out)
         return out
 
@@ -3346,6 +3380,9 @@ class AttentionFP8(nn.Module):
         cmp_pool_3d: torch.Tensor,
         swa_pool_3d: torch.Tensor,
     ) -> torch.Tensor:
+        assert (
+            qkv.q is not None
+        ), "_attn_via_workspace_cp_raw_q_merge: prefill Q not materialized"
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
 
         from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
@@ -4405,13 +4442,31 @@ class AttentionFP8(nn.Module):
     def _prefill_common_setup(
         self, x: torch.Tensor, positions: torch.Tensor
     ) -> PrefillMeta:
-        """Return the (possibly upper-layer-injected) shared prefill meta.
-        Standalone callers (no upper-layer broadcast) build it per-layer
-        here, syncing ``positions[0]`` to int once inside the builder.
+        """Return the shared prefill meta broadcast by ``forward_layers``.
+
+        Standalone FP8 prefill (calling this layer's prefill forward WITHOUT the
+        upper-layer broadcast) is UNSUPPORTED: the per-forward union
+        ``PrefillWorkspace`` is allocated once in
+        ``prefill/forward.py::forward_layers`` and threaded in via
+        ``build_and_propagate_prefill_meta_fp8`` (``meta._replace(workspace=…)``).
+        A standalone call would carry ``workspace=None`` and the deferred Q
+        materialization (:meth:`_materialize_prefill_q`) would have no backing
+        buffer. We fail loud HERE — at the point the contract is violated —
+        rather than NoneType-deref deep in Q materialization, and we do NOT
+        fabricate a fallback workspace (single authoritative buffer, owned by
+        the forward; see the ``workspace`` contract in ``cp.PrefillWorkspace``).
+        In production every ``AttentionFP8`` layer always receives the broadcast
+        (``forward_layers`` runs it before the layer loop), so this branch is
+        unreachable there.
         """
         meta = self._prefill_meta_shared
         if meta is None:
-            meta = self._build_shared_prefill_meta(x, positions)
+            raise RuntimeError(
+                "AttentionFP8 prefill requires the per-forward workspace "
+                "broadcast from forward_layers (build_and_propagate_prefill_"
+                "meta_fp8); standalone prefill with no _prefill_meta_shared is "
+                "unsupported."
+            )
         return meta
 
     def _build_swa_prefill_meta_varlen(
@@ -4901,19 +4956,15 @@ class AttentionFP8(nn.Module):
         rd = common.rd
         overlap_swa_gather = self._should_overlap_swa_kv_gather_for_prefill(common)
 
-        def compute_q() -> Tuple[torch.Tensor, torch.Tensor]:
+        def compute_qr() -> torch.Tensor:
+            # q_lora_a + norm only — small ``[1, T, q_lora_rank]`` (fed to the
+            # indexer). The big ``q_lora_b`` + RoPE are deferred to
+            # ``_materialize_prefill_q`` so the 16 GiB Q buffer can reuse the
+            # union workspace storage after the compressors finish.
             with record_function_range("dsv4.fp8.attn.qkv.q_lora_a_norm"):
-                qr_local = self._rmsnorm_weighted(
+                return self._rmsnorm_weighted(
                     self._lin(self.wq_a, x_3d), self.q_norm
                 )  # [1, T, q_lora_rank]
-            with record_function_range("dsv4.fp8.attn.qkv.q_lora_b_rope"):
-                q_local = self._lin(self.wq_b, qr_local).unflatten(
-                    -1, (self.n_heads, self.head_dim)
-                )
-                q_local = fused_rmsnorm_rope(
-                    q_local, None, common.freqs_cis, rd, eps=self.eps, out=q_local
-                )
-            return qr_local, q_local
 
         def compute_kv() -> torch.Tensor:
             with record_function_range("dsv4.fp8.attn.qkv.kv_proj_rope"):
@@ -4928,24 +4979,18 @@ class AttentionFP8(nn.Module):
             kv_flat = kv.reshape(kv.size(0) * kv.size(1), *kv.shape[2:])
             trailing = tuple(int(s) for s in kv_flat.shape[1:])
             local_2d = kv_flat.reshape(common.cp_ctx.chunk_length, -1).contiguous()
-            restored_buf = None
-            if not common.cp_ctx.unpad_restore_is_prefix:
-                restored_buf = torch.empty(
-                    (int(common.cp_ctx.seq_len_full), int(local_2d.size(1))),
-                    dtype=local_2d.dtype,
-                    device=local_2d.device,
-                )
             cp_stream = self._get_swa_cp_gather_stream(x.device)
             with record_function_range("dsv4.fp8.attn.swa_kv_full.cp_gather_start"):
                 kv_full_gather_handle = cp_all_gather_full_async(
                     local_2d,
                     common.cp_ctx,
                     stream=cp_stream,
-                    restored_buf=restored_buf,
                     profile_name=f"dsv4.cp.all_gather.L{self.layer_id:02d}.swa_kv_full",
+                    workspace=common.workspace,
+                    cp_role=_CP_ROLE_SWA_KV_FULL,
                 )
             try:
-                qr, q = compute_q()
+                qr = compute_qr()
             except Exception:
                 with suppress(Exception):
                     cp_wait_gather_full(kv_full_gather_handle)
@@ -4953,7 +4998,7 @@ class AttentionFP8(nn.Module):
             kv_full = None
             kv_full_trailing_shape = trailing
         else:
-            qr, q = compute_q()
+            qr = compute_qr()
             kv = compute_kv()
             kv_full_gather_handle = None
             kv_full_trailing_shape = None
@@ -4998,11 +5043,41 @@ class AttentionFP8(nn.Module):
 
         return PrefillQKV(
             qr=qr.squeeze(0),
-            q=q.squeeze(0),
+            q=None,  # deferred to _materialize_prefill_q (union-buffer reuse)
             kv_full=kv_full.squeeze(0) if kv_full is not None else None,
             kv_full_gather_handle=kv_full_gather_handle,
             kv_full_trailing_shape=kv_full_trailing_shape,
         )
+
+    def _materialize_prefill_q(
+        self, qkv: PrefillQKV, common: PrefillMeta
+    ) -> PrefillQKV:
+        """Compute the deferred dense Q (``q_lora_b`` + RMSNorm-RoPE) into the
+        forward workspace's Q slice and return ``qkv`` with ``q`` filled.
+
+        Deferred until both compressors have drained their CP gather/restore
+        buffers — those alias the same union storage as Q (see
+        ``PrefillWorkspace``). Idempotent. Mirrors the ``[1, T, ...]`` layout the
+        original ``compute_q`` used so ``fused_rmsnorm_rope`` sees ``(B, S, …)``.
+        """
+        if qkv.q is not None:
+            return qkv
+        assert common.workspace is not None, "prefill workspace not bound"
+        qr_3d = qkv.qr.unsqueeze(0)  # [1, T, q_lora_rank]
+        with record_function_range("dsv4.fp8.attn.qkv.q_lora_b_rope"):
+            seqlen = int(qr_3d.shape[1])
+            q_out = common.workspace.prefill_q(seqlen)
+            q_local_flat = self._lin(
+                self.wq_b,
+                qr_3d,
+                out=q_out.view(seqlen, self.n_heads * self.head_dim),
+            )
+            assert q_local_flat.data_ptr() == q_out.data_ptr()
+            q_local = q_local_flat.view(1, seqlen, self.n_heads, self.head_dim)
+            q_local = fused_rmsnorm_rope(
+                q_local, None, common.freqs_cis, common.rd, eps=self.eps, out=q_local
+            )
+        return qkv._replace(q=q_local.squeeze(0))
 
     def _ensure_prefill_kv_full(
         self, qkv: PrefillQKV, common: PrefillMeta
@@ -5087,6 +5162,9 @@ class AttentionFP8(nn.Module):
         reads — write order doesn't matter here since this path doesn't
         read from the pool.
         """
+        assert (
+            qkv.q is not None
+        ), "_attn_fp8_swa_via_kv_full: prefill Q not materialized"
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
 
         meta = common.swa_meta
@@ -5125,12 +5203,7 @@ class AttentionFP8(nn.Module):
                 attn_sink=self.attn_sink,
                 topk_length=meta.topk_length_kv_full,
             )
-        # Mirror the via_concat release at line ~4431. flash_mla_sparse_fwd
-        # consumed q + kv_full; the PrefillQKV NamedTuple ref would otherwise
-        # keep both alive through _prefill_output_proj and into the next
-        # layer's _prefill_compute_qkv Q alloc. ~13.7 GiB each at 1M ctx
-        # under MTP draft + CP=8.
-        dispose_tensor(qkv.q)
+        # kv_full has no remaining consumer after flash_mla_sparse_fwd.
         dispose_tensor(qkv.kv_full)
         return o3.unsqueeze(0)
 
@@ -5155,6 +5228,7 @@ class AttentionFP8(nn.Module):
              from ``combine_topk_swa_indices``.
 
         """
+        assert qkv.q is not None, "_attn_fp8_swa_via_concat: prefill Q not materialized"
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
 
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV

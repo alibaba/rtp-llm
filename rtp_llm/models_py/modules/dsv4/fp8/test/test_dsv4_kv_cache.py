@@ -102,7 +102,14 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import _get_window_topk_idxs
 # Import our implementation
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8 as OurCompressor
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8 as OurIndexer
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
+
+# These parity tests never bind a cp_ctx, so the compressor's required
+# ``workspace`` arg is never dereferenced — a trivial one satisfies the API.
+_WS = PrefillWorkspace(
+    torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
+)
 
 # ============================================================
 # Helpers
@@ -245,7 +252,7 @@ class TestCompressorPrecision:
         B, S = 1, 12
         x = torch.randn(B, S, args["dim"], dtype=torch.bfloat16)
 
-        our_result = our_comp(x, start_pos=0)
+        our_result = our_comp(x, start_pos=0, workspace=_WS)
         official_result = official_comp(x, start_pos=0)
 
         assert our_result is not None
@@ -262,13 +269,13 @@ class TestCompressorPrecision:
         # Prefill 8 tokens first
         torch.manual_seed(100)
         x_prefill = torch.randn(B, 8, args["dim"], dtype=torch.bfloat16)
-        our_comp(x_prefill, start_pos=0)
+        our_comp(x_prefill, start_pos=0, workspace=_WS)
         official_comp(x_prefill, start_pos=0)
 
         # Decode 4 tokens one by one
         for pos in range(8, 12):
             x_decode = torch.randn(B, 1, args["dim"], dtype=torch.bfloat16)
-            our_result = our_comp(x_decode, start_pos=pos)
+            our_result = our_comp(x_decode, start_pos=pos, workspace=_WS)
             official_result = official_comp(x_decode, start_pos=pos)
 
             if our_result is not None:
@@ -284,7 +291,7 @@ class TestCompressorPrecision:
         B = 1
         x = torch.randn(B, 12, args["dim"], dtype=torch.bfloat16)
 
-        our_comp(x, start_pos=0)
+        our_comp(x, start_pos=0, workspace=_WS)
         official_comp(x, start_pos=0)
 
         kv_diff = (
@@ -347,7 +354,7 @@ class TestCompressorPrecision:
         B, S = 1, 128
         x = torch.randn(B, S, args["dim"], dtype=torch.bfloat16)
 
-        our_result = our_comp(x, start_pos=0)
+        our_result = our_comp(x, start_pos=0, workspace=_WS)
         official_result = official_comp(x, start_pos=0)
 
         assert our_result is not None
@@ -360,7 +367,7 @@ class TestCompressorPrecision:
         B = 1
         x = torch.randn(B, 64, args["dim"], dtype=torch.bfloat16)
 
-        our_result = our_comp(x, start_pos=0)
+        our_result = our_comp(x, start_pos=0, workspace=_WS)
         official_result = official_comp(x, start_pos=0)
 
         assert our_result is None
@@ -407,7 +414,7 @@ class TestSequenceLengthBoundaries:
         """Length = compress_ratio multiple (no remainder)."""
         comp, args = csa_compressor
         x = torch.randn(1, 8, args["dim"], dtype=torch.bfloat16)  # 8 = 4*2
-        result = comp(x, start_pos=0)
+        result = comp(x, start_pos=0, workspace=_WS)
         assert result is not None
         assert result.shape[1] == 2  # 8/4 = 2 entries
 
@@ -415,7 +422,7 @@ class TestSequenceLengthBoundaries:
         """Length has remainder (state has uncommitted tokens)."""
         comp, args = csa_compressor
         x = torch.randn(1, 10, args["dim"], dtype=torch.bfloat16)  # 10 = 4*2 + 2
-        result = comp(x, start_pos=0)
+        result = comp(x, start_pos=0, workspace=_WS)
         assert result is not None
         assert result.shape[1] == 2  # only 8/4 = 2 entries, 2 tokens in state
 
@@ -429,7 +436,7 @@ class TestSequenceLengthBoundaries:
         """Length < compress_ratio (no compression at all)."""
         comp, args = csa_compressor
         x = torch.randn(1, 3, args["dim"], dtype=torch.bfloat16)  # 3 < 4
-        result = comp(x, start_pos=0)
+        result = comp(x, start_pos=0, workspace=_WS)
         assert result is None  # not enough tokens to compress
 
     def test_single_token_decode(self, csa_compressor):
@@ -437,12 +444,12 @@ class TestSequenceLengthBoundaries:
         comp, args = csa_compressor
         # Prefill 4 tokens first
         x = torch.randn(1, 4, args["dim"], dtype=torch.bfloat16)
-        comp(x, start_pos=0)
+        comp(x, start_pos=0, workspace=_WS)
 
         # Decode single tokens
         for pos in range(4, 8):
             x_dec = torch.randn(1, 1, args["dim"], dtype=torch.bfloat16)
-            result = comp(x_dec, start_pos=pos)
+            result = comp(x_dec, start_pos=pos, workspace=_WS)
             if pos == 7:  # (7+1) % 4 == 0 → should compress
                 assert result is not None, f"Expected compression at pos={pos}"
             else:
@@ -453,7 +460,7 @@ class TestSequenceLengthBoundaries:
         comp, args = csa_compressor
         # Prefill 256 tokens (= 1 block of 256 tokens, 64 compressed entries)
         x = torch.randn(1, 256, args["dim"], dtype=torch.bfloat16)
-        result = comp(x, start_pos=0)
+        result = comp(x, start_pos=0, workspace=_WS)
         assert result is not None
         assert result.shape[1] == 64  # 256/4 = 64 entries
 
@@ -507,7 +514,7 @@ class TestCompressedKVCache:
         B, S = 1, 20  # 20 tokens → 5 compressed entries
         x = torch.randn(B, S, dim, dtype=torch.bfloat16)
 
-        our_comp(x, start_pos=0)
+        our_comp(x, start_pos=0, workspace=_WS)
         official_comp(x, start_pos=0)
 
         # Compare kv_cache content (first 5 entries should be written)
@@ -559,13 +566,13 @@ class TestCompressedKVCache:
         # Prefill 8 tokens
         B = 1
         x_prefill = torch.randn(B, 8, dim, dtype=torch.bfloat16)
-        our_comp(x_prefill, start_pos=0)
+        our_comp(x_prefill, start_pos=0, workspace=_WS)
         official_comp(x_prefill, start_pos=0)
 
         # Decode tokens 8-11 (should produce entry at pos 11)
         for pos in range(8, 12):
             x_dec = torch.randn(B, 1, dim, dtype=torch.bfloat16)
-            our_comp(x_dec, start_pos=pos)
+            our_comp(x_dec, start_pos=pos, workspace=_WS)
             official_comp(x_dec, start_pos=pos)
 
         # Compare all written entries (8+4=12 tokens → 3 entries)

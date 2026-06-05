@@ -386,9 +386,14 @@ class CompressedSkipCompressorWriteTest(unittest.TestCase):
             workspace_meta=None,
         )
 
-        # Baseline path: one synchronous compressor invocation.
+        # Baseline path: one synchronous compressor invocation. The per-forward
+        # prefill workspace is threaded through to the compressor (None here,
+        # since this CPU test doesn't bind one).
         layer.compressor.assert_called_once_with(
-            x, common.sp_int, meta=common.hca_meta.compressor_meta
+            x,
+            common.sp_int,
+            meta=common.hca_meta.compressor_meta,
+            workspace=common.workspace,
         )
         layer._prefill_output_all_reduce.assert_called_once()
         self.assertEqual(

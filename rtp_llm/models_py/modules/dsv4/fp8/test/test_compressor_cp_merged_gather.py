@@ -7,18 +7,26 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.cp import CPContext
+from rtp_llm.models_py.modules.dsv4.cp import _CP_ROLE_INDEXER, _CP_ROLE_MAIN, CPContext
 from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+
+# CP gather is mocked here, so the workspace only needs to flow through the
+# (patched) ``cp_all_gather_full_async`` — a trivial one suffices.
+_WS = PrefillWorkspace(
+    torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
+)
 
 
 def _build_cpu_compressor(
     *, dim: int, head_dim: int, compress_ratio: int
 ) -> CompressorFP8:
     coff = 1 + (compress_ratio == 4)
+    cp_role = _CP_ROLE_INDEXER if head_dim == INDEXER_HEAD_DIM else _CP_ROLE_MAIN
     weights = {
         "ape": torch.zeros(compress_ratio, coff * head_dim, dtype=torch.float32),
         "wkv": torch.randn(coff * head_dim, dim, dtype=torch.bfloat16),
@@ -31,6 +39,7 @@ def _build_cpu_compressor(
         rope_head_dim=0,
         compress_ratio=compress_ratio,
         max_batch_size=1,
+        cp_role=cp_role,
         compressor_weights=weights,
     )
 
@@ -106,8 +115,15 @@ class CompressorFP8CPMergedGatherTest(unittest.TestCase):
         handle = object()
         launch_args = {}
 
-        def fake_start(local_2d, ctx, stream=None, profile_name=None):
-            del stream, profile_name
+        def fake_start(
+            local_2d,
+            ctx,
+            stream=None,
+            profile_name=None,
+            workspace=None,
+            cp_role=None,
+        ):
+            del stream, profile_name, workspace, cp_role
             gather_inputs.append((local_2d, ctx))
             return handle
 
@@ -140,7 +156,7 @@ class CompressorFP8CPMergedGatherTest(unittest.TestCase):
             ),
             patch.object(cmp, "_launch", side_effect=fake_launch),
         ):
-            cmp.forward(x, 0, meta=meta)
+            cmp.forward(x, 0, meta=meta, workspace=_WS)
 
         self.assertEqual(len(gather_inputs), 1)
         gathered_local, actual_ctx = gather_inputs[0]

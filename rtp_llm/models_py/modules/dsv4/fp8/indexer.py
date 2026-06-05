@@ -30,7 +30,11 @@ import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
-from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_full_prefill_positions
+from rtp_llm.models_py.modules.dsv4.cp import (
+    _CP_ROLE_INDEXER,
+    CPContext,
+    build_cp_full_prefill_positions,
+)
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
     indexer_q_fp8_quant_fold,
 )
@@ -50,6 +54,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorMeta,
     _CompressorPending,
 )
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 
 def _use_varlen_prefill() -> bool:
@@ -344,6 +349,7 @@ class IndexerFP8(PoolBackedModule):
             rope_head_dim=rope_head_dim,
             compress_ratio=compress_ratio,
             max_batch_size=max_batch_size,
+            cp_role=_CP_ROLE_INDEXER,
             norm_eps=norm_eps,
             rotate=True,
             compressor_weights=inner_cmp_weights,
@@ -981,6 +987,12 @@ class IndexerFP8(PoolBackedModule):
         x: torch.Tensor,
         qr: torch.Tensor,
         attention_inputs: _IndexerFP8PrefillMeta,
+        *,
+        # REQUIRED, never Optional — by design. Threaded straight to the nested
+        # ``CompressorFP8`` (which dereferences it only on the CP gather branch).
+        # Always passed (unused on non-CP) so there is one buffer-lifecycle
+        # contract and no hidden ``None``/fallback-allocate. Do NOT make Optional.
+        workspace: "PrefillWorkspace",
     ) -> torch.Tensor:
         M = attention_inputs.M
         T = attention_inputs.T
@@ -1011,7 +1023,9 @@ class IndexerFP8(PoolBackedModule):
             with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
                 q = self._compute_indexer_q(qr, attention_inputs.freqs_cis_slice)
             with record_function_range("dsv4.fp8.indexer.prefill.nested_compressor"):
-                self.compressor(x, sp, meta=attention_inputs.compressor_meta)
+                self.compressor(
+                    x, sp, meta=attention_inputs.compressor_meta, workspace=workspace
+                )
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
             with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
                 weights = F.linear(x, self.weights_proj)
@@ -1121,6 +1135,8 @@ class IndexerFP8(PoolBackedModule):
         meta: Optional[CompressorMeta],
         cp_gather_stream: Optional[Any] = None,
         profile_label: Optional[str] = None,
+        # REQUIRED, never Optional — see :meth:`forward`. Do NOT make Optional.
+        workspace: "PrefillWorkspace",
     ) -> Optional[_CompressorPending]:
         """Begin the nested compressor's CP all-gather without waiting.
 
@@ -1149,6 +1165,7 @@ class IndexerFP8(PoolBackedModule):
         kwargs = {
             "meta": meta,
             "cp_gather_stream": cp_gather_stream,
+            "workspace": workspace,
         }
         if profile_label is not None:
             kwargs["profile_label"] = profile_label

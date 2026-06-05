@@ -4,6 +4,7 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules.dsv4.cp import (
+    _CP_ROLE_MAIN,
     CPContext,
     CPSyncGatherHandle,
     CudaAsyncCPGatherImpl,
@@ -14,6 +15,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_all_gather_full,
     cp_wait_gather_full,
 )
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 
 def _make_cp_ctx() -> CPContext:
@@ -98,9 +100,16 @@ def test_cp_all_gather_full_rejects_non_2d_and_wrong_t_local():
 def test_cuda_async_cp_gather_impl_fails_fast_on_cpu():
     ctx = _make_cp_ctx()
     local = torch.zeros((2, 6), dtype=torch.float32)
+    # The workspace assert fires first; pass a (minimal) one so the test
+    # exercises the intended CUDA fail-fast rather than the workspace guard.
+    ws = PrefillWorkspace(
+        torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
+    )
 
     _assert_raises(
-        lambda: CudaAsyncCPGatherImpl().start(local, ctx),
+        lambda: CudaAsyncCPGatherImpl().start(
+            local, ctx, workspace=ws, cp_role=_CP_ROLE_MAIN
+        ),
         RuntimeError,
         "requires CUDA",
     )

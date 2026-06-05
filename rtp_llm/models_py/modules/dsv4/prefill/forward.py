@@ -108,6 +108,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     clear_prefill_meta_shared_fp8,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import build_block_tables_batched
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
@@ -369,6 +370,36 @@ def forward_layers(
                 prefix_lengths = pl.to(
                     device=positions.device, dtype=torch.int32
                 ).contiguous()
+        # Per-forward prefill workspace: one runtime buffer allocated at the
+        # top of the forward, freed when ``forward_layers`` returns (so the
+        # MTP draft forward, which runs right after on a near-full card, can
+        # borrow it). Holds the prefill-Q output (eager) and — whenever CP is
+        # active — the main + indexer + SWA CP gather/restore scratch
+        # (dedicated buffer pairs per role, used by BOTH the serial and
+        # overlap paths for the workspace-backed roles). Sizing is MAX
+        # (capacity-bound, runtime-length-independent) so every forward
+        # allocates the same-sized block → zero allocator fragmentation,
+        # IDENTICAL across main and MTP-draft forwards (the draft overrides
+        # ``_resolve_prefill_ws_gather_widths`` to size off the main model's
+        # ratios — see ``deepseek_v4_mtp_model``). All three CP roles
+        # (main / indexer / swa) are workspace-backed.
+        #
+        # ``reserve_cp`` gates the CP region; we cannot derive it from
+        # ``compress_ratio != 0`` on the layers because the SWA gather runs
+        # on EVERY attention layer (including the draft's single SWA layer).
+        # The bound ``_prefill_ws_full_rows>0`` is the canonical signal that
+        # CP is active at workspace bind time.
+        reserve_cp = (cp_ctx is not None) and int(v4._prefill_ws_full_rows) > 0
+        ws = PrefillWorkspace(
+            input_ids.device,
+            q_rows=v4._prefill_ws_q_rows,
+            q_dim=v4._prefill_ws_q_dim,
+            reserve_cp=reserve_cp,
+            cp_rows=v4._prefill_ws_full_rows,
+            main_w=v4._prefill_ws_main_w,
+            idx_w=v4._prefill_ws_idx_w,
+            swa_w=v4._prefill_ws_swa_w,
+        )
         build_and_propagate_prefill_meta_fp8(
             v4,
             h,
@@ -383,52 +414,62 @@ def forward_layers(
             position_ids=positions,
             req_id_per_token=req_id_per_token,
             max_seqlen_q=max_seqlen_q,
+            workspace=ws,
         )
 
-    for layer_idx, layer in enumerate(v4.layers):
-        h = layer(
-            h,  # [T, hc, dim]
-            input_ids,  # [T]
-            positions,  # [T]
-            cu_seqlens,  # [B+1]
-            kv_cache=kv_cache,
-            block_tables_by_type=block_tables_by_type,
-        )  # [T, hc, dim]
-        if _rt_on:
-            _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
-        if write_cache_store_impl is not None:
-            write_cache_store_impl(kv_cache.get_layer_caches(layer_idx))
-        if _rt_on:
-            _rt.record(f"layer{layer_idx:02d}_out", h)
-            if cp_ctx is None:
-                layer_last = h[-1:].contiguous()
-            else:
-                layer_last_pos = cp_ctx.seq_len_total - 1
-                layer_last_mask = (
-                    cp_ctx.global_positions == layer_last_pos
-                ) & cp_ctx.local_is_real
-                layer_last = h[layer_last_mask].contiguous()
-                dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
-                if dbg_pos >= 0:
-                    layer_pos_mask = (
-                        cp_ctx.global_positions == dbg_pos
+    try:
+        for layer_idx, layer in enumerate(v4.layers):
+            h = layer(
+                h,  # [T, hc, dim]
+                input_ids,  # [T]
+                positions,  # [T]
+                cu_seqlens,  # [B+1]
+                kv_cache=kv_cache,
+                block_tables_by_type=block_tables_by_type,
+            )  # [T, hc, dim]
+            if _rt_on:
+                _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
+            if write_cache_store_impl is not None:
+                write_cache_store_impl(kv_cache.get_layer_caches(layer_idx))
+            if _rt_on:
+                _rt.record(f"layer{layer_idx:02d}_out", h)
+                if cp_ctx is None:
+                    layer_last = h[-1:].contiguous()
+                else:
+                    layer_last_pos = cp_ctx.seq_len_total - 1
+                    layer_last_mask = (
+                        cp_ctx.global_positions == layer_last_pos
                     ) & cp_ctx.local_is_real
-                    _rt.record(
-                        f"layer{layer_idx:02d}_pos{dbg_pos}",
-                        h[layer_pos_mask].contiguous(),
+                    layer_last = h[layer_last_mask].contiguous()
+                    dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
+                    if dbg_pos >= 0:
+                        layer_pos_mask = (
+                            cp_ctx.global_positions == dbg_pos
+                        ) & cp_ctx.local_is_real
+                        _rt.record(
+                            f"layer{layer_idx:02d}_pos{dbg_pos}",
+                            h[layer_pos_mask].contiguous(),
+                        )
+                    layer_tail_mask = (
+                        (cp_ctx.global_positions >= max(cp_ctx.seq_len_total - 128, 0))
+                        & (cp_ctx.global_positions < cp_ctx.seq_len_total)
+                        & cp_ctx.local_is_real
                     )
-                layer_tail_mask = (
-                    (cp_ctx.global_positions >= max(cp_ctx.seq_len_total - 128, 0))
-                    & (cp_ctx.global_positions < cp_ctx.seq_len_total)
-                    & cp_ctx.local_is_real
-                )
-                _rt.record(
-                    f"layer{layer_idx:02d}_tail128", h[layer_tail_mask].contiguous()
-                )
-            _rt.record(f"layer{layer_idx:02d}_last", layer_last)
-
-    if v4.fp8_kv_cache:
-        clear_prefill_meta_shared_fp8(v4)
+                    _rt.record(
+                        f"layer{layer_idx:02d}_tail128",
+                        h[layer_tail_mask].contiguous(),
+                    )
+                _rt.record(f"layer{layer_idx:02d}_last", layer_last)
+    finally:
+        # Always drop the per-layer ``common.workspace`` references, even if a
+        # layer raises mid-prefill (e.g. a CUDA OOM under memory pressure —
+        # the exact case this per-forward workspace exists to relieve). The
+        # ref lives on each layer's ``_prefill_meta_shared`` (a persistent
+        # module attr), so without this the ~16 GiB workspace would stay
+        # pinned past the failing forward and starve the retry / next request
+        # on a near-full card. ``clear`` is idempotent (sets None per layer).
+        if v4.fp8_kv_cache:
+            clear_prefill_meta_shared_fp8(v4)
 
     if v4._mtp_hidden_buffer is not None:
         _pre_hc_flat = h.flatten(-2)
@@ -514,6 +555,12 @@ def forward_layers(
             head_weight=getattr(v4, "head_weight", None),
             step=int(getattr(v4, "_dbg_step", 0)),
         )
+    # The per-forward ``PrefillWorkspace`` (prefill-Q + optional CP
+    # gather/restore scratch) is a local of this function: it drops here on
+    # return, returning ~16 GiB to the caching allocator so the MTP draft
+    # forward (which runs right after the main model on a near-full card) can
+    # borrow it. No explicit reset needed — the per-layer ``common.workspace``
+    # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
     return h  # [T, dim]
 
 

@@ -28,37 +28,6 @@ from rtp_llm.utils.util import check_with_info
 
 class ModelFactory:
     @staticmethod
-    def _share_mtp_hidden_buffer_if_supported(
-        model_config: ModelConfig,
-        propose_model_config: Optional[ModelConfig],
-        model: Any,
-        propose_model: Optional[Any],
-    ) -> None:
-        if model_config.model_type != "deepseek_v4":
-            return
-        if propose_model is None:
-            return
-        if (
-            propose_model_config is None
-            or propose_model_config.model_type != "deepseek_v4_mtp"
-        ):
-            raise RuntimeError(
-                "DeepSeek V4 MTP hidden buffer sharing requires "
-                "target model_type=deepseek_v4 and propose model_type=deepseek_v4_mtp, "
-                f"got target={model_config.model_type}, "
-                f"propose={None if propose_model_config is None else propose_model_config.model_type}"
-            )
-
-        from rtp_llm.models_py.model_desc.deepseek_v4_model import MtpHiddenBufferStore
-
-        main_py_model = model.py_model
-        draft_py_model = propose_model.model.py_model
-        store = MtpHiddenBufferStore()
-        main_py_model.set_mtp_hidden_buffer_store(store)
-        draft_py_model.set_mtp_hidden_buffer_store(store)
-        logging.info("enabled shared MTP hidden buffer for target/propose py models")
-
-    @staticmethod
     def get_config_json(ckpt_path: str):
         check_with_info(os.path.isdir(ckpt_path), f"{ckpt_path} check os.isdir failed")
         config_json_path = os.path.join(ckpt_path, "config.json")
@@ -257,12 +226,6 @@ class ModelFactory:
             model_config=model_config,
             propose_model_config=propose_model_config,
             engine_config=engine_config,
-        )
-        ModelFactory._share_mtp_hidden_buffer_if_supported(
-            model_config=model_config,
-            propose_model_config=propose_model_config,
-            model=model,
-            propose_model=propose_model,
         )
 
         # Create engine using create_engine function (replaces AsyncModel)

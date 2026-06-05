@@ -39,6 +39,14 @@ from rtp_llm.models_py.modules.dsv4.fp8.indexer import (
     IndexerFP8,
     _IndexerFP8PrefillMeta,
 )
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+
+# Non-CP path: the nested compressor is a MagicMock, so ``workspace`` is only
+# forwarded/recorded, never dereferenced. A trivial non-CP workspace satisfies
+# the required keyword-only arg on ``start_prefill_nested_compressor``.
+_WS = PrefillWorkspace(
+    torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
+)
 
 
 def _make_indexer_stub(*, bind_pool: bool, device: torch.device) -> IndexerFP8:
@@ -117,7 +125,7 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         meta = _make_meta(self.device, T=0)
 
         pending = ind.start_prefill_nested_compressor(
-            x, sp_int=0, meta=meta.compressor_meta
+            x, sp_int=0, meta=meta.compressor_meta, workspace=_WS
         )
 
         self.assertIsNone(pending)
@@ -150,7 +158,7 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         ind.compressor.start_prefill.return_value = sentinel_pending
 
         out_pending = ind.start_prefill_nested_compressor(
-            x, sp_int=5, meta=meta, cp_gather_stream=stream_sentinel
+            x, sp_int=5, meta=meta, cp_gather_stream=stream_sentinel, workspace=_WS
         )
 
         # Returned pending is exactly what compressor.start_prefill returned.
@@ -170,7 +178,7 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         # start_prefill was called once with the right args (cp_gather_stream
         # forwarded verbatim — FIFO contract under MTP).
         ind.compressor.start_prefill.assert_called_once_with(
-            x, 5, meta=meta, cp_gather_stream=stream_sentinel
+            x, 5, meta=meta, cp_gather_stream=stream_sentinel, workspace=_WS
         )
         # The synchronous baseline must not be touched on the overlap path.
         ind.compressor.finish_prefill.assert_not_called()
@@ -185,7 +193,7 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         x = torch.zeros(2, 8, dtype=torch.bfloat16, device=self.device)
         meta = SimpleNamespace(name="hoisted_meta")
 
-        ind.start_prefill_nested_compressor(x, sp_int=0, meta=meta)
+        ind.start_prefill_nested_compressor(x, sp_int=0, meta=meta, workspace=_WS)
 
         self.assertIs(ind.compressor.freqs_cis, ind.freqs_cis)
 

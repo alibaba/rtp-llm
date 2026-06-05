@@ -31,6 +31,7 @@ import unittest
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.cp import _CP_ROLE_MAIN
 from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     KV_ENTRY_BYTES,
     KV_HEAD_DIM,
@@ -60,6 +61,8 @@ def _build_compressor(
         rope_head_dim=rope_head_dim,
         compress_ratio=compress_ratio,
         max_batch_size=4,
+        # This UT only builds 512-wide (CSA/HCA main) compressors.
+        cp_role=_CP_ROLE_MAIN,
         norm_eps=1e-6,
         compressor_weights=weights,
     ).to(DEVICE)

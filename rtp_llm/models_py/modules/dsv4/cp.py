@@ -28,7 +28,7 @@ single-rank path unchanged.
 """
 
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
 import torch
 
@@ -36,7 +36,30 @@ from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
+if TYPE_CHECKING:
+    # PrefillWorkspace lives in its own module; cp.py only CONSUMES the
+    # interface (gather/restore getters) — the quoted annotations below resolve
+    # via this type-only import, with no runtime dependency or import cycle.
+    from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+
 _DEFAULT_CP_PROFILE_NAME = "dsv4.cp.all_gather"
+
+
+# CP gather roles — which workspace buffer backs a given gather. All three
+# roles are workspace-backed (sub-region per role; sizes pre-computed from
+# ``V4Args`` so no fresh allocation is needed in the hot path):
+#   * ``main``        — the CSA/HCA compressor's fused ``[kv|score]`` gather.
+#                       fp32, on the compressor side stream.
+#   * ``indexer``     — the nested indexer compressor's gather (distinct buffer
+#                       so it can be in flight alongside ``main`` under overlap).
+#                       fp32, same side stream as ``main``.
+#   * ``swa_kv_full`` — the SWA ``kv_full`` gather. bf16, on its own side
+#                       stream (overlaps ``compute_qr``). Width is fixed at
+#                       ``args.head_dim``; rows == ``seq_len_full`` like the
+#                       others.
+_CP_ROLE_MAIN = "main"
+_CP_ROLE_INDEXER = "indexer"
+_CP_ROLE_SWA_KV_FULL = "swa_kv_full"
 
 
 @dataclass
@@ -121,46 +144,31 @@ class CPCudaAsyncGatherHandle:
     stream: Any
     completion_event: Any
     local_2d: torch.Tensor
-    # Optional caller-owned ``[seq_len_full, H]`` buffer that
-    # :meth:`CudaAsyncCPGatherImpl.wait` writes the restored (non-prefix)
-    # index_select into. Keeping the buffer alive past ``wait`` is the
-    # caller's responsibility — required to avoid PyTorch caching-allocator
-    # churn when many overlapped gathers are in flight at once.
-    restored_buf: Optional[torch.Tensor] = None
     profile_name: str = _DEFAULT_CP_PROFILE_NAME
+    # The per-forward :class:`PrefillWorkspace` that owns this gather's reusable
+    # ``cp_{gather,restore}_{main,idx,swa}`` scratch. Always set by the CUDA
+    # impl (passed down from the prefill forward); never None.
+    workspace: Optional["PrefillWorkspace"] = None
+    # Which gather this is (``main`` / ``indexer`` / ``swa_kv_full``); selects
+    # the workspace buffer pair in start()/wait().
+    cp_role: str = _CP_ROLE_MAIN
 
 
-class CPGatherImplBase:
-    """Base interface for explicit CP gather implementations."""
+class SyncCPGatherImpl:
+    """Reference implementation using the synchronous collective wrapper.
 
-    def start(
-        self,
-        local_2d: torch.Tensor,
-        cp_ctx: CPContext,
-        stream: Optional[Any] = None,
-        *,
-        restored_buf: Optional[torch.Tensor] = None,
-        profile_name: Optional[str] = None,
-    ) -> Any:
-        raise NotImplementedError
-
-    def wait(self, handle: Any) -> torch.Tensor:
-        raise NotImplementedError
-
-
-class SyncCPGatherImpl(CPGatherImplBase):
-    """Reference implementation using the synchronous collective wrapper."""
+    Sync path materializes immediately; it has no workspace / cp_role / stream
+    machinery (those only matter for the CUDA async path's deferred buffer
+    selection).
+    """
 
     def start(
         self,
         local_2d: torch.Tensor,
         cp_ctx: CPContext,
-        stream: Optional[Any] = None,
         *,
-        restored_buf: Optional[torch.Tensor] = None,
         profile_name: Optional[str] = None,
     ) -> CPSyncGatherHandle:
-        del stream, restored_buf  # sync path materializes immediately
         name = profile_name or _DEFAULT_CP_PROFILE_NAME
         return CPSyncGatherHandle(
             full_2d=cp_all_gather_full(local_2d, cp_ctx, profile_name=name),
@@ -175,7 +183,7 @@ class SyncCPGatherImpl(CPGatherImplBase):
         return handle.full_2d
 
 
-class CudaAsyncCPGatherImpl(CPGatherImplBase):
+class CudaAsyncCPGatherImpl:
     """Production CUDA implementation.
 
     This path intentionally fails fast when CUDA distributed all-gather cannot
@@ -189,9 +197,19 @@ class CudaAsyncCPGatherImpl(CPGatherImplBase):
         cp_ctx: CPContext,
         stream: Optional[Any] = None,
         *,
-        restored_buf: Optional[torch.Tensor] = None,
         profile_name: Optional[str] = None,
+        workspace: Optional["PrefillWorkspace"] = None,
+        cp_role: str,
     ) -> CPCudaAsyncGatherHandle:
+        # Fail loud: every prefill caller threads its per-forward workspace down
+        # here. A None workspace means a caller forgot to pass it — never a cue
+        # to silently fall back to a temporary allocation.
+        assert workspace is not None, "CudaAsyncCPGatherImpl.start requires a workspace"
+        assert cp_role in (
+            _CP_ROLE_MAIN,
+            _CP_ROLE_INDEXER,
+            _CP_ROLE_SWA_KV_FULL,
+        ), f"unknown cp_role {cp_role!r}"
         profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.async"
         local_2d = _cp_gather_2d(local_2d, cp_ctx)
         if not local_2d.is_cuda:
@@ -208,24 +226,40 @@ class CudaAsyncCPGatherImpl(CPGatherImplBase):
                 f"CP gather world_size({world_size}) != cp_ctx.cp_size({cp_ctx.cp_size})"
             )
 
+        gather_rows = world_size * local_2d.size(0)
+        # All three roles draw from the per-forward workspace (a dedicated pair
+        # each, reused across layers). Main / indexer share the compressor side
+        # stream and may be in flight back-to-back under the overlap
+        # orchestrator; SWA runs on its own side stream and can be in flight
+        # alongside both. Distinct sub-regions guarantee they never alias.
         with record_function_range(f"{profile_name}.alloc"):
-            gathered = torch.empty(
-                (world_size * local_2d.size(0), local_2d.size(1)),
-                device=local_2d.device,
-                dtype=local_2d.dtype,
-            )
+            if cp_role == _CP_ROLE_MAIN:
+                gathered = workspace.cp_gather_main(
+                    gather_rows, local_2d.size(1), local_2d.dtype
+                )
+            elif cp_role == _CP_ROLE_INDEXER:
+                gathered = workspace.cp_gather_idx(
+                    gather_rows, local_2d.size(1), local_2d.dtype
+                )
+            else:  # _CP_ROLE_SWA_KV_FULL
+                gathered = workspace.cp_gather_swa(
+                    gather_rows, local_2d.size(1), local_2d.dtype
+                )
 
         current_stream = torch.cuda.current_stream(local_2d.device)
         gather_stream = stream or torch.cuda.Stream(device=local_2d.device)
         gather_stream.wait_stream(current_stream)
-        # ``gathered`` is allocated on ``current_stream`` but consumed on
-        # ``gather_stream`` for the NCCL kernel; same for ``local_2d`` (the
-        # NCCL kernel reads it). Without ``record_stream`` the PyTorch
-        # caching allocator may reuse the storage before the side-stream
-        # NCCL kernel finishes, corrupting the gather output. The wait_
-        # stream above gives NCCL a happens-after edge but NOT allocator
-        # lifetime extension — that is what record_stream does.
-        gathered.record_stream(gather_stream)
+        # ``local_2d`` is allocated on ``current_stream`` but read by the NCCL
+        # kernel on ``gather_stream``. Without ``record_stream`` the caching
+        # allocator can reuse its storage before NCCL finishes, corrupting the
+        # input. ``wait_stream`` above gives NCCL a happens-after edge but NOT
+        # allocator lifetime extension — that is what ``record_stream`` does.
+        #
+        # ``gathered`` does NOT need ``record_stream``: it's a view into the
+        # per-forward workspace (reused across layers, never recycled by the
+        # allocator). Cross-layer reuse of the same sub-region is ordered by
+        # the ``gather_stream.wait_stream(current_stream)`` edge above, which
+        # waits on the prior layer's restore (the consumer of ``gathered``).
         local_2d.record_stream(gather_stream)
         try:
             with torch.cuda.stream(gather_stream):
@@ -250,8 +284,9 @@ class CudaAsyncCPGatherImpl(CPGatherImplBase):
             stream=gather_stream,
             completion_event=completion_event,
             local_2d=local_2d,
-            restored_buf=restored_buf,
             profile_name=profile_name,
+            workspace=workspace,
+            cp_role=cp_role,
         )
 
     def wait(self, handle: Any) -> torch.Tensor:
@@ -263,18 +298,35 @@ class CudaAsyncCPGatherImpl(CPGatherImplBase):
         with record_function_range(f"{handle.profile_name}.wait_host"):
             current_stream.wait_event(handle.completion_event)
             handle.work.wait()
+        # Restore destination: the per-forward workspace restore scratch
+        # (non-prefix path) instead of a fresh per-layer ``index_select``
+        # output. The prefix fast-path returns a view of ``gathered`` and
+        # ignores ``out``.
+        out_buf = None
+        if not handle.cp_ctx.unpad_restore_is_prefix:
+            assert handle.workspace is not None
+            rows = handle.cp_ctx.seq_len_full
+            dim = handle.gathered.size(1)
+            dtype = handle.gathered.dtype
+            if handle.cp_role == _CP_ROLE_MAIN:
+                out_buf = handle.workspace.cp_restore_main(rows, dim, dtype)
+            elif handle.cp_role == _CP_ROLE_INDEXER:
+                out_buf = handle.workspace.cp_restore_idx(rows, dim, dtype)
+            else:  # _CP_ROLE_SWA_KV_FULL
+                out_buf = handle.workspace.cp_restore_swa(rows, dim, dtype)
         with record_function_range(f"{handle.profile_name}.restore"):
             full = _cp_restore_gathered_full_2d(
-                handle.gathered, handle.cp_ctx, out=handle.restored_buf
+                handle.gathered, handle.cp_ctx, out=out_buf
             )
-        # ``full`` may be a view of ``handle.gathered`` on the prefix-restore
-        # path. The gather storage was associated with the side stream; after
-        # this wait, default-stream kernels can read the returned tensor after
-        # the Python handle is dropped. Record the consumer stream explicitly so
-        # the caching allocator cannot recycle the storage before those kernels
-        # finish.
-        handle.gathered.record_stream(current_stream)
-        full.record_stream(current_stream)
+        # All three roles' gather/restore buffers come from the per-forward
+        # ``PrefillWorkspace`` union — they are reused across layers (never
+        # freed mid-forward) and cross-layer reuse is serialized by the
+        # ``gather_stream.wait_stream(current_stream)`` edge in ``start``. No
+        # allocator-lifetime guard is needed, so we skip ``record_stream`` on
+        # both ``handle.gathered`` (a workspace ``cp_gather_*`` view) and
+        # ``full`` (a workspace ``cp_restore_*`` view, or a view of
+        # ``handle.gathered`` on the prefix-restore path) to avoid piling
+        # stream-use events on long-lived blocks.
         return full
 
 
@@ -566,8 +618,9 @@ def cp_all_gather_full_async(
     cp_ctx: CPContext,
     stream: Optional[Any] = None,
     *,
-    restored_buf: Optional[torch.Tensor] = None,
     profile_name: Optional[str] = None,
+    workspace: "PrefillWorkspace",
+    cp_role: str,
 ) -> Any:
     """Start CP gather for flattened ``[T_local, H]`` input.
 
@@ -575,16 +628,19 @@ def cp_all_gather_full_async(
     fallback. CPU/reference tests can instantiate ``SyncCPGatherImpl``
     directly.
 
-    ``restored_buf`` is the caller-owned ``[seq_len_full, H]`` destination
-    forwarded to :func:`_cp_restore_gathered_full_2d` at wait time
-    (allocator-stability aid for the overlap orchestrator).
+    ``workspace`` is the per-forward :class:`PrefillWorkspace` (required, never
+    None) that backs the gather AND restore scratch for every role.
+
+    ``cp_role`` selects which workspace buffer pair backs this gather:
+    ``_CP_ROLE_MAIN`` / ``_CP_ROLE_INDEXER`` / ``_CP_ROLE_SWA_KV_FULL``.
     """
     return CudaAsyncCPGatherImpl().start(
         local_2d,
         cp_ctx,
         stream=stream,
-        restored_buf=restored_buf,
         profile_name=profile_name,
+        workspace=workspace,
+        cp_role=cp_role,
     )
 
 

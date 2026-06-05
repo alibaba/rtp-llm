@@ -22,6 +22,7 @@ from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from rtp_llm.models_py.modules.dsv4.fp8.attention import PrefillMeta
+    from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
     from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
 
 
@@ -44,6 +45,7 @@ def build_and_propagate_prefill_meta_fp8(
     position_ids: Optional[torch.Tensor] = None,
     req_id_per_token: Optional[torch.Tensor] = None,
     max_seqlen_q: int = 0,
+    workspace: "PrefillWorkspace",
 ) -> None:
     """Build the layer-invariant prefill meta once per ``compress_ratio``
     bucket and broadcast each bucket's meta to its layers'
@@ -97,7 +99,7 @@ def build_and_propagate_prefill_meta_fp8(
                         position_ids=position_ids,
                         req_id_per_token=req_id_per_token,
                         max_seqlen_q=max_seqlen_q,
-                    )
+                    )._replace(workspace=workspace)
             finally:
                 attn._kv_cache = prev_kv
                 attn._block_tables_by_type = prev_bt

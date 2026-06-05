@@ -23,7 +23,10 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
+from rtp_llm.models_py.model_desc.deepseek_v4_model import (
+    DeepSeekV4Model,
+    Dsv4SharedRuntimeBufferStore,
+)
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DEFAULT_DSV4_CHUNK_TOKENS,
@@ -55,14 +58,17 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
+        Dsv4SharedRuntimeBufferStore.enable_mtp_hidden()
         # MTP overrides for V4Args. ``DeepSeekV4Mtp._create_config``
         # already sets ``num_layers=1`` and ``layer_compress_ratios=[0]``
         # on the ModelConfig; we additionally drop the hash-router count
         # so the lone draft layer always picks the noaux_tc path.
         self._v4_args.n_hash_layers = 0
-        self._v4_args.compress_ratios = [int(self._v4_args.compress_ratios[0])] if (
-            self._v4_args.compress_ratios
-        ) else [0]
+        self._v4_args.compress_ratios = (
+            [int(self._v4_args.compress_ratios[0])]
+            if (self._v4_args.compress_ratios)
+            else [0]
+        )
         logging.info(
             "[DeepSeekV4MtpModel] V4Args: layers=%d hc_mult=%d compress_ratios=%s "
             "fp8_kv_cache=%s max_tokens_per_rank=%d",
@@ -184,9 +190,7 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
             e_norm = self.enorm(embed_chunk)
             pre_hc_chunk = pre_hc[start:end]
             chunk_len = int(pre_hc_chunk.size(0))
-            h_norm = self.hnorm(pre_hc_chunk.reshape(-1, dim)).view(
-                chunk_len, hc, dim
-            )
+            h_norm = self.hnorm(pre_hc_chunk.reshape(-1, dim)).view(chunk_len, hc, dim)
             fused_chunk = self._apply_proj(self.h_proj, h_norm)
             fused_chunk.add_(self._apply_proj(self.e_proj, e_norm).unsqueeze(1))
             fused[start:end].copy_(fused_chunk)
@@ -223,7 +227,9 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         h_norm = self.hnorm(pre_hc.reshape(-1, dim)).view(T, hc, dim)
         return self._apply_proj(self.h_proj, h_norm) + self._apply_proj(
             self.e_proj, e_norm
-        ).unsqueeze(1)  # [T, hc, dim]
+        ).unsqueeze(
+            1
+        )  # [T, hc, dim]
 
     def _pre_hc_from_inputs(self, inputs, T: int) -> torch.Tensor:
         pre_hc_in = inputs.input_hiddens

@@ -24,7 +24,7 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.cp import CPContext
+from rtp_llm.models_py.modules.dsv4.cp import _CP_ROLE_INDEXER, _CP_ROLE_MAIN, CPContext
 from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
@@ -33,6 +33,13 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorFP8,
     CompressorMeta,
     _CompressorPending,
+)
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+
+# CP gather is mocked in these tests, so the workspace just flows through the
+# patched ``cp_all_gather_full_async`` — a trivial one suffices.
+_WS = PrefillWorkspace(
+    torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
 )
 
 
@@ -45,6 +52,7 @@ def _build_compressor(
     bind_pool: bool = True,
 ) -> CompressorFP8:
     coff = 1 + (compress_ratio == 4)
+    cp_role = _CP_ROLE_INDEXER if head_dim == INDEXER_HEAD_DIM else _CP_ROLE_MAIN
     weights = {
         "ape": torch.zeros(compress_ratio, coff * head_dim, dtype=torch.float32),
         "wkv": torch.randn(coff * head_dim, dim, dtype=torch.bfloat16),
@@ -57,6 +65,7 @@ def _build_compressor(
         rope_head_dim=0,
         compress_ratio=compress_ratio,
         max_batch_size=1,
+        cp_role=cp_role,
         compressor_weights=weights,
     ).to(device)
     # _fuse_wkv_wgate stores the fused matrix on construction (CPU); rebind
@@ -149,9 +158,15 @@ class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
         launch_args = {}
 
         def fake_start(
-            local_2d, ctx, stream=None, restored_buf=None, profile_name=None
+            local_2d,
+            ctx,
+            stream=None,
+            restored_buf=None,
+            profile_name=None,
+            workspace=None,
+            cp_role=None,
         ):
-            del restored_buf, profile_name
+            del restored_buf, profile_name, workspace, cp_role
             gather_inputs.append((local_2d, ctx, stream))
             return handle
 
@@ -178,12 +193,16 @@ class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
         ):
             if use_split:
                 pending = cmp.start_prefill(
-                    self.x, 0, meta=self.meta, cp_gather_stream=cp_gather_stream
+                    self.x,
+                    0,
+                    meta=self.meta,
+                    cp_gather_stream=cp_gather_stream,
+                    workspace=_WS,
                 )
                 cmp.finish_prefill(pending)
             else:
                 pending = None
-                cmp.forward(self.x, 0, meta=self.meta)
+                cmp.forward(self.x, 0, meta=self.meta, workspace=_WS)
         return gather_inputs, launch_args, pending
 
     def test_start_finish_bit_equal_to_forward_under_cp(self):
@@ -265,9 +284,15 @@ class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
         launch_calls = []
 
         def fake_start(
-            local_2d, ctx, stream=None, restored_buf=None, profile_name=None
+            local_2d,
+            ctx,
+            stream=None,
+            restored_buf=None,
+            profile_name=None,
+            workspace=None,
+            cp_role=None,
         ):
-            del local_2d, ctx, stream, restored_buf, profile_name
+            del local_2d, ctx, stream, restored_buf, profile_name, workspace, cp_role
             return handle
 
         def fake_wait(actual_handle):
@@ -288,7 +313,7 @@ class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
             ),
             patch.object(cmp, "_launch", side_effect=fake_launch),
         ):
-            pending = cmp.start_prefill(self.x, 0, meta=self.meta)
+            pending = cmp.start_prefill(self.x, 0, meta=self.meta, workspace=_WS)
             self.assertIsNotNone(pending)
             cmp.wait_prefill_gather(pending)
             self.assertEqual(wait_calls, [handle])
@@ -325,7 +350,7 @@ class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
             launched.append((args, kwargs))
 
         with patch.object(cmp, "_launch", side_effect=fake_launch):
-            pending = cmp.start_prefill(self.x, 0, meta=self.meta)
+            pending = cmp.start_prefill(self.x, 0, meta=self.meta, workspace=_WS)
             self.assertIsNone(pending)
             cmp.finish_prefill(pending)  # no-op
         self.assertEqual(launched, [])

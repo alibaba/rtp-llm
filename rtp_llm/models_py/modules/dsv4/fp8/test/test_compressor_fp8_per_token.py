@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.cp import _CP_ROLE_INDEXER, _CP_ROLE_MAIN
 from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
@@ -30,9 +31,16 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     build_decode_metadata,
     build_prefill_metadata,
 )
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 DEVICE = "cuda"
 TOKENS_PER_STATE_BLOCK = 256
+
+# These tests exercise the non-CP prefill path (no cp_ctx bound), so the
+# workspace is never dereferenced — a trivial one satisfies the required arg.
+_WS = PrefillWorkspace(
+    torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
+)
 
 
 def _build_compressor(
@@ -43,6 +51,7 @@ def _build_compressor(
     compress_ratio: int,
 ) -> CompressorFP8:
     coff = 1 + (compress_ratio == 4)
+    cp_role = _CP_ROLE_INDEXER if head_dim == INDEXER_HEAD_DIM else _CP_ROLE_MAIN
     # Construct weights directly on DEVICE: ``CompressorFP8._fuse_wkv_wgate``
     # caches ``_wkv_wgate_fused`` as a plain attribute (not a buffer), so
     # a post-construction ``.to(DEVICE)`` would only move the registered
@@ -72,6 +81,7 @@ def _build_compressor(
         rope_head_dim=rope_head_dim,
         compress_ratio=compress_ratio,
         max_batch_size=1,
+        cp_role=cp_role,
         norm_eps=1e-6,
         compressor_weights=weights,
     )
@@ -222,7 +232,7 @@ def test_csa_per_token(seqlen: int = 64) -> None:
     )
     sp = 0
     x = torch.randn(1, seqlen, dim, dtype=torch.bfloat16, device=DEVICE) * 0.1
-    cmp.forward(x, sp)
+    cmp.forward(x, sp, workspace=_WS)
     torch.cuda.synchronize()
     _state_write_check(
         cmp,
@@ -261,7 +271,7 @@ def test_indexer_per_token(seqlen: int = 32) -> None:
     )
     sp = 0
     x = torch.randn(1, seqlen, dim, dtype=torch.bfloat16, device=DEVICE) * 0.1
-    cmp.forward(x, sp)
+    cmp.forward(x, sp, workspace=_WS)
     torch.cuda.synchronize()
     _state_write_check(
         cmp,
@@ -408,7 +418,7 @@ def test_prepared_metadata_path() -> None:
         cmp_a, seqlen=seqlen, head_dim=head_dim, coff=coff, compress_ratio=ratio
     )
     x = torch.randn(1, seqlen, dim, dtype=torch.bfloat16, device=DEVICE) * 0.1
-    cmp_a.forward(x, sp)
+    cmp_a.forward(x, sp, workspace=_WS)
     torch.cuda.synchronize()
 
     # Path B — prepared meta (slot mapping computed BEFORE forward)
@@ -427,7 +437,7 @@ def test_prepared_metadata_path() -> None:
         cmp_b, seqlen=seqlen, head_dim=head_dim, coff=coff, compress_ratio=ratio
     )
     meta = build_prefill_metadata(cmp_b, sp=sp, bsz=1, seqlen=seqlen, device=x.device)
-    cmp_b.forward(x, sp, meta=meta)
+    cmp_b.forward(x, sp, meta=meta, workspace=_WS)
     torch.cuda.synchronize()
 
     assert torch.equal(state_a, state_b), "prepared meta diverged from fallback (state)"
@@ -565,7 +575,7 @@ def test_state_pool_clear_pool_context() -> None:
     assert cmp._kv_pool_view is None
     # Forward returns None even without pool bound (warmup gate).
     x = torch.randn(1, 4, 64, dtype=torch.bfloat16, device=DEVICE)
-    out = cmp.forward(x, 0)
+    out = cmp.forward(x, 0, workspace=_WS)
     assert out is None
     print("  [warmup]      no-pool forward OK")
 

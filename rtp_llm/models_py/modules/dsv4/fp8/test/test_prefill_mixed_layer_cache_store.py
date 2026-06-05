@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from typing import Any, NamedTuple, Optional
 from unittest.mock import patch
 
 import torch
@@ -20,6 +21,18 @@ import rtp_llm.models_py.modules.dsv4.prefill.forward as prefill_forward
 from rtp_llm.models_py.modules.base.common.kvcache_store import (
     create_write_cache_store_impl,
 )
+
+
+class _FakeMeta(NamedTuple):
+    """Minimal stand-in for ``PrefillMeta``: ``forward_layers`` now threads the
+    per-forward ``PrefillWorkspace`` into the broadcast meta via
+    ``meta._replace(workspace=…)`` (prefill_meta.py), so the fake meta must be a
+    NamedTuple exposing a ``workspace`` field for ``_replace`` to target."""
+
+    ratio: int
+    built_by_layer: int
+    start_pos: int
+    workspace: Optional[Any] = None
 
 
 class _FakeAttn:
@@ -42,7 +55,7 @@ class _FakeAttn:
                 self._block_tables_by_type,
             )
         )
-        return SimpleNamespace(
+        return _FakeMeta(
             ratio=self.compress_ratio,
             built_by_layer=self.layer_idx,
             start_pos=start_pos,
@@ -110,6 +123,16 @@ class _FakeV4:
         self._kv_cache_sharded = False
         self._mtp_hidden_buffer = None
         self._mtp_last_hidden_buffer = None
+        # ``forward_layers`` builds the per-forward ``PrefillWorkspace`` from
+        # these bind-time dims (transformer.py resolves them on the real model).
+        # Tiny values keep the CPU allocation trivial; the test patches
+        # ``PrefillWorkspace`` to ``align_bytes=1`` so the 1 GiB production
+        # alignment does not force a 1 GiB host alloc here.
+        self._prefill_ws_q_rows = 4
+        self._prefill_ws_q_dim = 4
+        self._prefill_ws_full_rows = 4
+        self._prefill_ws_main_w = 1
+        self._prefill_ws_idx_w = 1
 
     def _propagate_cp_ctx(self, cp_ctx) -> None:
         self.events.append(("propagate_cp", cp_ctx))
@@ -145,11 +168,19 @@ class MixedLayerCacheStoreOrderTest(unittest.TestCase):
 
             return write
 
+        # Force the per-forward workspace to ``align_bytes=1`` so the production
+        # 1 GiB rounding does not allocate 1 GiB of host RAM in this CPU test.
+        _orig_ws = prefill_forward.PrefillWorkspace
+
+        def _small_align_ws(device, **kwargs):
+            kwargs.setdefault("align_bytes", 1)
+            return _orig_ws(device, **kwargs)
+
         with patch.object(
             prefill_forward,
             "create_write_cache_store_impl",
             side_effect=fake_create_writer,
-        ):
+        ), patch.object(prefill_forward, "PrefillWorkspace", _small_align_ws):
             out = prefill_forward.forward_layers(
                 v4,
                 kv_cache,
