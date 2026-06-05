@@ -703,7 +703,6 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
         scale_name = self.w8a8_weight_list.get(src_weight_info.name)
         scale = None
         if scale_name:
-            # shallow copy is safe: params values are simple types (str, dtype, bool)
             scale_params = params.copy()
             scale_params["name"] = scale_name
             scale: AtomicWeight = create_w8a8_fp8_per_channel_weight(
