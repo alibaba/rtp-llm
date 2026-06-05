@@ -246,10 +246,20 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                                 "failed to get prefix_length_host and input_length_host for cache store");
         RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.data_ptr<int>()[batch_id] % seq_size_per_block == 0,
                                 "prefix_length %% seq_size_per_block != 0");
+        const bool is_cp_compact_fixed_region =
+            param.cp_size > 1 && isDsv4FixedRegion(param.region_name) && seq_size_per_block % param.cp_size == 0;
+        const size_t canonical_seq_size_per_block =
+            is_cp_compact_fixed_region ? seq_size_per_block / static_cast<size_t>(param.cp_size) : seq_size_per_block;
         int reuse_block_num = param.prefix_lengths_host.data_ptr<int>()[batch_id] / seq_size_per_block;
         int block_num =
             (param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id] + seq_size_per_block - 1)
             / seq_size_per_block;
+        int canonical_reuse_block_num =
+            param.prefix_lengths_host.data_ptr<int>()[batch_id] / canonical_seq_size_per_block;
+        int canonical_block_num =
+            (param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id]
+             + canonical_seq_size_per_block - 1)
+            / canonical_seq_size_per_block;
         auto request_id     = *(param.request_id.data_ptr<int64_t>() + batch_id);
         auto event          = param.pre_created_event ? param.pre_created_event : runtimeCreateEvent();
         auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
@@ -261,7 +271,8 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
         }
 
-        const int total_blocks = block_num + reuse_block_num;
+        const int total_blocks           = block_num + reuse_block_num;
+        const int canonical_total_blocks = canonical_block_num + canonical_reuse_block_num;
         if (total_blocks <= 0) {
             continue;
         }
@@ -357,7 +368,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         // Clamp by cache_keys_per_batch (global stride) — NOT max_blocks_per_batch,
         // which under CP shard is the local-compact stride for FULL groups.
         const auto block_plan = buildCacheStoreBlockPlan(
-            static_cast<size_t>(std::min<int>(total_blocks, static_cast<int>(cache_keys_per_batch))),
+            static_cast<size_t>(std::min<int>(canonical_total_blocks, static_cast<int>(cache_keys_per_batch))),
             /*reuse_block_size=*/0,
             use_group_cache_transfer_policy,
             group_type,
