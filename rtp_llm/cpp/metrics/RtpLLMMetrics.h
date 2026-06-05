@@ -619,6 +619,7 @@ public:
     int64_t total_propose_token_num        = 0;
     int64_t total_accepted_token_num       = 0;
     int64_t total_stream_num               = 0;
+    int64_t spec_steps                     = 1;
 };
 
 class RtpLLMSpeculativeEngineMetrics: public kmonitor::MetricsGroup {
@@ -634,6 +635,9 @@ public:
     kmonitor::MutableMetric* total_propose_token_num_metric        = nullptr;
     kmonitor::MutableMetric* total_accepted_token_num_metric       = nullptr;
     kmonitor::MutableMetric* sp_avg_accept_token_num_metric        = nullptr;
+    kmonitor::MutableMetric* sp_avg_accept_rate_metric             = nullptr;
+    kmonitor::MutableMetric* sp_avg_fix_accept_rate_metric         = nullptr;
+    kmonitor::MutableMetric* sp_estimate_tpot_us_metric            = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

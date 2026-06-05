@@ -588,8 +588,8 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         p = self._cg
         _prepare_cg_prefill_kernel[p.grid](
-            attn_inputs.input_lengths_d,
-            attn_inputs.prefix_lengths_d,
+            attn_inputs.input_lengths,
+            attn_inputs.prefix_lengths,
             p.seq_lens,
             p.cu_kv_seqlens,
             attn_inputs.kv_cache_kernel_block_id_device,
@@ -666,8 +666,8 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
             )
         else:
             _prepare_cg_spec_decode_kernel[p.grid](
-                attn_inputs.prefix_lengths_d,
-                attn_inputs.input_lengths_d,
+                attn_inputs.prefix_lengths,
+                attn_inputs.input_lengths,
                 p.seq_lens,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 p.kv_cache_offset,

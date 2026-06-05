@@ -37,6 +37,25 @@ string makeRequestKey(const string& client_id, size_t request_id) {
 
 namespace rtp_llm {
 
+namespace {
+
+torch::Tensor pinGrpcTensor(torch::Tensor tensor) {
+    if (!tensor.defined() || tensor.is_cuda() || tensor.is_pinned() || tensor.numel() == 0) {
+        return tensor;
+    }
+    try {
+        return tensor.pin_memory();
+    } catch (const c10::Error& e) {
+        RTP_LLM_LOG_WARNING("[decode-grpc] pin_memory failed, fallback to pageable CPU tensor: %s", e.what());
+        return tensor;
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("[decode-grpc] pin_memory failed, fallback to pageable CPU tensor: %s", e.what());
+        return tensor;
+    }
+}
+
+}  // namespace
+
 grpc::Status DecodeRpcServer::init(const EngineInitParams&                                maga_init_params,
                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                                    py::object                                             mm_process_engine) {
@@ -182,32 +201,47 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                                         .clone();
         generate_stream->setContextPositionIds(context_position_ids);
     }
+    if (!propose_maga_init_params_) {
+        generate_stream->markGrpcNormalDeviceStatePending();
+    }
     if (propose_maga_init_params_) {
+        const size_t propose_step = propose_maga_init_params_->gen_num_per_circle;
+        RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "decode rpc propose_step should be positive");
+        if (maga_init_params_.sp_config.gen_num_per_cycle > 0) {
+            RTP_LLM_CHECK_WITH_INFO(propose_step == static_cast<size_t>(maga_init_params_.sp_config.gen_num_per_cycle),
+                                    "decode rpc propose_step mismatch, propose_params=%zu, sp_config=%ld",
+                                    propose_step,
+                                    maga_init_params_.sp_config.gen_num_per_cycle);
+        }
+
         generate_stream->setReuseLength(generate_stream->seqLength() - 1);
         generate_stream->setSpEditRun(false);
         generate_stream->setMtpTokenIndex(generate_stream->seqLength() - 1);
         generate_stream->setContainProposeToken(true);
         std::vector<int> propose_tokens;
         propose_tokens.assign(generate_request.propose_token_ids().begin(), generate_request.propose_token_ids().end());
+        RTP_LLM_CHECK_WITH_INFO(propose_tokens.size() >= 2,
+                                "decode rpc propose_tokens should contain target and draft token, count=%zu",
+                                propose_tokens.size());
         generate_stream->setProposeToken(propose_tokens);
 
-        auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
-        sp_output_buffer->tokens = torch::zeros({1, (int64_t)propose_tokens.size()}, torch::kInt32);
+        auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp_output_buffer->propose_step = propose_step;
+        sp_output_buffer->tokens       = torch::zeros({1, (int64_t)propose_tokens.size()},
+                                                torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
         memcpy(sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
-        auto propose_probs_t  = QueryConverter::transTensor(generate_request.propose_probs());
-        auto propose_hidden_t = QueryConverter::transTensor(generate_request.propose_hidden());
+        auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
+        auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
 
-        auto& tensors_holder = sp_output_buffer->tensors_holder;
-        tensors_holder.emplace_back(std::move(propose_probs_t));
-        tensors_holder.emplace_back(std::move(propose_hidden_t));
-
+        sp_output_buffer->tensors_holder.push_back(std::move(propose_probs_t));
+        sp_output_buffer->tensors_holder.push_back(std::move(propose_hidden_t));
         generate_stream->setSPOutputBuffer(sp_output_buffer);
     }
 
     generate_stream->resetBeginTime(currentTimeUs());
     RTP_LLM_LOG_DEBUG(
-        "decode init stream[%d]: %s", generate_stream->streamId(), generate_stream->debugString().c_str());
+        "decode init stream[%s]: %s", generate_stream->streamId(), generate_stream->debugString().c_str());
     engine_->enqueue(generate_stream);
     RTP_LLM_LOG_DEBUG("request [%s] enqueue success", decode_context.request_key.c_str());
     decode_context.error_status =

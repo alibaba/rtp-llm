@@ -193,7 +193,6 @@ class PyAttentionInputs:
     kv_cache_block_id_device: torch.Tensor
     kv_cache_kernel_block_id_device_by_group: list[torch.Tensor]
     kv_cache_block_id_host: torch.Tensor
-    kv_cache_kernel_block_id_host_by_group: list[torch.Tensor]
     kv_cache_kernel_block_id_device: torch.Tensor
     kv_cache_kernel_block_id_host: torch.Tensor
     kv_cache_block_id_host_by_group: list[torch.Tensor]
@@ -213,6 +212,8 @@ class PyAttentionInputs:
     def input_lengths_d(self) -> torch.Tensor: ...
     @property
     def prefix_lengths_d(self) -> torch.Tensor: ...
+    @property
+    def decode_cu_seqlens_host(self) -> torch.Tensor: ...
 
 class PyCacheStoreInputs:
     def __init__(self) -> None: ...

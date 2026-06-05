@@ -297,6 +297,9 @@ bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager* manager
     REGISTER_GAUGE_MUTABLE_METRIC(total_propose_token_num_metric, "rtp_llm_sp_total_propose_token_num");
     REGISTER_GAUGE_MUTABLE_METRIC(total_accepted_token_num_metric, "rtp_llm_sp_total_accepted_token_num");
     REGISTER_GAUGE_MUTABLE_METRIC(sp_avg_accept_token_num_metric, "rtp_llm_sp_avg_accept_token_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(sp_avg_accept_rate_metric, "rtp_llm_sp_avg_accept_rate");
+    REGISTER_GAUGE_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric, "rtp_llm_sp_avg_fix_accept_rate");
+    REGISTER_GAUGE_MUTABLE_METRIC(sp_estimate_tpot_us_metric, "rtp_llm_sp_estimate_tpot_us");
     return true;
 }
 
@@ -307,11 +310,14 @@ void RtpLLMSpeculativeEngineMetrics::report(const kmonitor::MetricsTags*        
     REPORT_MUTABLE_METRIC(score_step_latency_us_metric, collector->score_step_latency_us);
     REPORT_MUTABLE_METRIC(speculative_sampler_latency_us_metric, collector->speculative_sampler_latency_us);
 
-    if (collector->total_propose_token_num > 0) {
+    if (collector->total_propose_token_num > 0 && collector->total_stream_num > 0) {
         REPORT_MUTABLE_METRIC(total_propose_token_num_metric, collector->total_propose_token_num);
         REPORT_MUTABLE_METRIC(total_accepted_token_num_metric, collector->total_accepted_token_num);
-        REPORT_MUTABLE_METRIC(sp_avg_accept_token_num_metric,
-                              (double)collector->total_accepted_token_num / collector->total_stream_num);
+        double avg_accept_num = (double)collector->total_accepted_token_num / collector->total_stream_num;
+        REPORT_MUTABLE_METRIC(sp_avg_accept_token_num_metric, avg_accept_num);
+        REPORT_MUTABLE_METRIC(sp_avg_accept_rate_metric, avg_accept_num / (collector->spec_steps + 1));
+        REPORT_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric, (avg_accept_num - 1) / collector->spec_steps);
+        REPORT_MUTABLE_METRIC(sp_estimate_tpot_us_metric, (double)collector->step_latency_us / avg_accept_num);
     }
 }
 

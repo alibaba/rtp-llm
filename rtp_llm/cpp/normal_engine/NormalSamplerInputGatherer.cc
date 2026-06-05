@@ -135,7 +135,7 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
         sampler_inputs.cum_log_probs = torch::empty({(int64_t)total_batch_size_in}, torch::kFloat32);
     }
     sampler_inputs.token_ids =
-        torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, torch::kInt32);
+        torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, pinned_i32);
     sampler_inputs.generator.resize(total_batch_size_in);
     return sampler_inputs;
 }

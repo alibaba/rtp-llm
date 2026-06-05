@@ -241,6 +241,18 @@ cc_library(
 )
 
 cc_library(
+    name = "vocab_prune_kernels",
+    srcs = ["vocab_prune/mapping.cu"],
+    hdrs = ["vocab_prune/mapping.h"],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    copts = any_cuda_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "kernels_cu",
     deps = [
         ":kernels_activation",

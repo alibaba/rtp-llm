@@ -128,7 +128,7 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
 
     // Apply side-channel data to GenerateStream
     // 1. First token: append to stream
-    if (payload->first_token_id > 0) {
+    if (payload->first_token_id >= 0) {
         stream->setIsContextStream(false);
         stream->step();
         auto new_tokens                   = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
@@ -144,6 +144,14 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                         .loss              = {},
                         .src_batch_indices = {},
                         .all_hidden_states = {}});
+        if (stream->nextBatchSize() == 1) {
+            const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+                .epoch                 = 0,
+                .last_sample_token_gpu = new_tokens.reshape({1}).to(cuda_i32),
+                .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32),
+            });
+        }
         RTP_LLM_LOG_DEBUG("applyP2PSideChannel: appended first_token_id=%ld, stream_id=%ld",
                           payload->first_token_id,
                           stream->streamId());
@@ -359,7 +367,7 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     return absl::OkStatus();
 }
 
-absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
+absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step, int seq_len_override) {
     RTP_LLM_PROFILE_FUNCTION();
     // TODO(xinfei.sxf) add reserver_blocks
     if (fake_inited_) {
@@ -374,6 +382,7 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     malloc_info.reuse_cache                  = reuseCache();
     malloc_info.enable_device_cache          = reuseCache() && enableDeviceCache();
     malloc_info.enable_remove_skipped_blocks = true;
+    malloc_info.incr_seq_len_override        = seq_len_override;
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);

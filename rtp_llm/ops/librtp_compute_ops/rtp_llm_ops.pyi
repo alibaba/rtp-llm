@@ -16,6 +16,10 @@ class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
         """
         Fill parameters for attention execution (forbid_realloc=true only when called from prepare_cuda_graph/replay)
         """
+    def fill_decode_cuda_graph_params(self, sequence_lengths_plus_1_d: torch.Tensor, kv_cache_block_id_device: torch.Tensor, seq_size_per_block: int) -> None:
+        """
+        Update FlashInfer decode metadata on device during CUDA graph replay
+        """
     @property
     def batch_indice_d(self) -> torch.Tensor:
         """
@@ -221,6 +225,14 @@ class XQAAttnOp:
         ...
     def support(self, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> bool:
         ...
+
+    def update(self, params: XQAParams, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> None:
+        ...
+
+    def update_kv_cache_offset(self, kv_cache_offset: torch.Tensor, kv_cache_block_id_device: torch.Tensor) -> None:
+        ...
+
+
 class XQAParams(librtp_compute_ops.ParamsBase):
     kv_cache_offset: torch.Tensor
     def __cpp_ptr__(self) -> int:
@@ -427,4 +439,3 @@ class TrtllmArFusionHandle:
         """
         AllReduce kernel
         """
-

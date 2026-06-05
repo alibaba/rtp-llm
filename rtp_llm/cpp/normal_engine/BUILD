@@ -28,6 +28,7 @@ cc_library(
     ] + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
+            "//rtp_llm/models_py/bindings/cuda/kernels:mtp_target_verify_prepare",
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
         ],
         "@//:using_rocm": [

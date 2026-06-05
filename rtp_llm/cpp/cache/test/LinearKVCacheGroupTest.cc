@@ -27,7 +27,7 @@ static std::shared_ptr<LinearKVCacheSpec> makeLinearSpec(uint32_t seq_size_per_b
 
 class LinearKVCacheGroupTest: public ::testing::Test {};
 
-TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseDisabledCountsOnlyReserveStep) {
+TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseDisabledCountsLastTwoTailAndReserveStep) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
 
@@ -35,11 +35,11 @@ TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseDisabledCountsOnlyReserveStep) 
     LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
-    // common_slots=2, seq_slots=3, total_slots=5 => when reuse disabled, common=1(tail),
-    // extra=1(tail)+1(reserve_step-1)=2
+    // common_slots=2, seq_slots=3, total_slots=4 => common phase materializes
+    // its last two slots; incremental phase adds final tail and reserve slots.
     const auto need =
         group.getNeedBlocks(/*common_seq_len=*/8, /*seq_len=*/12, /*reserve_step=*/2, /*reuse_blocks_len=*/0, false);
-    EXPECT_EQ(need.common_blocks, 1);
+    EXPECT_EQ(need.common_blocks, 2);
     EXPECT_EQ(need.extra_blocks, 2);
 }
 
@@ -51,8 +51,8 @@ TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseEnabledUsesSparseCountingAndRes
     LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
-    // common_slots=2:
-    // count(0,2]=2; count(2,3]=1; reserve_step=2 => extra=2
+    // common_slots=2, seq_slots=3, total_slots=4. Reuse enabled keeps step
+    // hits plus the last two seq slots, so this matches the disabled case here.
     const auto need =
         group.getNeedBlocks(/*common_seq_len=*/8, /*seq_len=*/12, /*reserve_step=*/2, /*reuse_blocks_len=*/0, true);
     EXPECT_EQ(need.common_blocks, 2);
@@ -74,14 +74,14 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesStepHitsAndTailWhenReuseEnabled) {
     ASSERT_EQ(blocks.blocksNum(), 4u);
     EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[0]));
     EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[1]));
-    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[2]));  // tail-1 protects causal_conv1d boundary read
     EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[3]));
 
-    // Only 2 real blocks allocated.
-    EXPECT_EQ(block_pool->freeBlocksNum(), 7u);
+    // Step hit + tail-1 + tail.
+    EXPECT_EQ(block_pool->freeBlocksNum(), 6u);
 }
 
-TEST_F(LinearKVCacheGroupTest, MallocAllocatesOnlyTailWhenReuseDisabled) {
+TEST_F(LinearKVCacheGroupTest, MallocAllocatesLastTwoTailBlocksWhenReuseDisabled) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
@@ -96,11 +96,10 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesOnlyTailWhenReuseDisabled) {
     ASSERT_EQ(blocks.blocksNum(), 4u);
     EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[0]));
     EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[1]));
-    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[2]));  // tail-1 protects causal_conv1d boundary read
     EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[3]));
 
-    // Only 1 real block allocated.
-    EXPECT_EQ(block_pool->freeBlocksNum(), 8u);
+    EXPECT_EQ(block_pool->freeBlocksNum(), 7u);
 }
 
 TEST_F(LinearKVCacheGroupTest, MallocAllocatesReserveTailBlocksWhenReuseDisabled) {
@@ -119,12 +118,95 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesReserveTailBlocksWhenReuseDisabled
     ASSERT_EQ(blocks.blocksNum(), 5u);
     EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[0]));
     EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[1]));
-    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[2]));  // tail-1 protects causal_conv1d boundary read
     EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[3]));  // seq tail
     EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[4]));  // reserve tail
 
-    // Tail + reserve_step blocks are allocated.
-    EXPECT_EQ(block_pool->freeBlocksNum(), 7u);
+    EXPECT_EQ(block_pool->freeBlocksNum(), 6u);
+}
+
+TEST_F(LinearKVCacheGroupTest, MallocBackfillsExistingNullReadSlot) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+    ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
+
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    ASSERT_TRUE(group.init());
+
+    auto allocated = block_pool->malloc(2);
+    ASSERT_EQ(allocated.size(), 2u);
+
+    BlockIds blocks;
+    blocks.assign(BlockIndicesType{allocated[0], NULL_BLOCK_IDX, allocated[1]});
+    const size_t free_before = block_pool->freeBlocksNum();
+
+    // seq_len=12 => seq_slots=3. Position 1 is tail-1 and is the read slot
+    // for sequence_length=13, so it must be materialized even though no new
+    // slots are appended.
+    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/12, /*enable_reuse_cache=*/false));
+
+    ASSERT_EQ(blocks.blocksNum(), 3u);
+    EXPECT_EQ(blocks.blocks()[0], allocated[0]);
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[1]));
+    EXPECT_EQ(blocks.blocks()[2], allocated[1]);
+    EXPECT_EQ(block_pool->freeBlocksNum(), free_before - 1);
+}
+
+TEST_F(LinearKVCacheGroupTest, MallocMaterializesCausalConvReadSlotAtBoundaries) {
+    const std::vector<int> seq_lens = {4, 5, 8, 9};
+
+    for (bool enable_reuse_cache : {false, true}) {
+        for (int seq_len : seq_lens) {
+            auto block_pool = createBlockPool();
+            ASSERT_TRUE(block_pool->init());
+
+            auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
+            LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+            ASSERT_TRUE(group.init());
+
+            BlockIds blocks;
+            ASSERT_TRUE(group.malloc(blocks, seq_len, enable_reuse_cache)) << "seq_len=" << seq_len;
+
+            const int read_pos = (seq_len - 2) / 4;
+            ASSERT_GE(read_pos, 0);
+            ASSERT_LT(static_cast<size_t>(read_pos), blocks.blocksNum());
+            EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[static_cast<size_t>(read_pos)]))
+                << "seq_len=" << seq_len << " reuse=" << enable_reuse_cache << " read_pos=" << read_pos;
+        }
+    }
+}
+
+TEST_F(LinearKVCacheGroupTest, GetNeedBlocksMatchesMallocForReserveSteps) {
+    for (bool enable_reuse_cache : {false, true}) {
+        for (int reserve_step : {0, 1, 2, 3}) {
+            auto block_pool = createBlockPool();
+            ASSERT_TRUE(block_pool->init());
+
+            auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
+            LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+            ASSERT_TRUE(group.init());
+
+            const auto need = group.getNeedBlocks(/*common_seq_len=*/8,
+                                                  /*seq_len=*/12,
+                                                  reserve_step,
+                                                  /*reuse_blocks_len=*/0,
+                                                  enable_reuse_cache);
+
+            BlockIds blocks;
+            ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/8, enable_reuse_cache));
+            ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/12, enable_reuse_cache, reserve_step));
+
+            size_t valid_count = 0;
+            for (auto block : blocks.blocks()) {
+                if (!isNullBlockIdx(block)) {
+                    valid_count++;
+                }
+            }
+            EXPECT_EQ(valid_count, static_cast<size_t>(need.common_blocks + need.extra_blocks))
+                << "reserve_step=" << reserve_step << " reuse=" << enable_reuse_cache;
+        }
+    }
 }
 
 TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKeepsLastTwo) {
@@ -156,6 +238,60 @@ TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKeepsLast
     EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[5]));
 
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 2);
+}
+
+TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksSkipsNullHolesAndFreesOlderBlocks) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+    ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
+
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    ASSERT_TRUE(group.init());
+
+    auto allocated = block_pool->malloc(4);
+    ASSERT_EQ(allocated.size(), 4u);
+
+    BlockIds blocks;
+    blocks.assign(BlockIndicesType{allocated[0], allocated[1], NULL_BLOCK_IDX, allocated[2], allocated[3]});
+
+    const size_t free_before = block_pool->freeBlocksNum();
+    group.removeSkippedBlocks(blocks, /*enable_reuse_cache=*/false);
+
+    ASSERT_EQ(blocks.blocksNum(), 5u);
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[0]));
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[1]));
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[2]));
+    EXPECT_EQ(blocks.blocks()[3], allocated[2]);
+    EXPECT_EQ(blocks.blocks()[4], allocated[3]);
+    EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 2);
+}
+
+TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksKeepsStepHitBeforeNullHoleWhenReuseEnabled) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+    ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
+
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    ASSERT_TRUE(group.init());
+
+    auto allocated = block_pool->malloc(4);
+    ASSERT_EQ(allocated.size(), 4u);
+
+    BlockIds blocks;
+    blocks.assign(BlockIndicesType{allocated[0], allocated[1], NULL_BLOCK_IDX, allocated[2], allocated[3]});
+
+    const size_t free_before = block_pool->freeBlocksNum();
+    group.removeSkippedBlocks(blocks, /*enable_reuse_cache=*/true);
+
+    ASSERT_EQ(blocks.blocksNum(), 5u);
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[0]));
+    EXPECT_EQ(blocks.blocks()[1], allocated[1]);
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[2]));
+    EXPECT_EQ(blocks.blocks()[3], allocated[2]);
+    EXPECT_EQ(blocks.blocks()[4], allocated[3]);
+    EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 1);
 }
 
 TEST_F(LinearKVCacheGroupTest, InsertIntoCacheSkipsNullBlocks) {
