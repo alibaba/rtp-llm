@@ -40,7 +40,7 @@ using grpc::ClientContext;
 namespace rtp_llm {
 
 PrefillRpcServer::~PrefillRpcServer() {
-    session_manager_.cancelAll();
+    session_manager_.shutdown(autil::TimeUtility::currentTimeInMicroSeconds());
     session_manager_.stopGc();
     stopAsyncResponseWorkers();
 }
@@ -139,9 +139,17 @@ struct TheoryHitStatsSnapshot {
 
 void setBatchAckError(BatchEnqueueAckPB* ack, int64_t request_id, int64_t code, const std::string& msg) {
     ack->set_request_id(request_id);
+    ack->set_status(::REJECTED);
     auto* err = ack->mutable_error_info();
     err->set_error_code(code);
     err->set_error_message(msg);
+}
+
+int64_t computePayloadHash(const GenerateInputPB& input) {
+    std::string serialized;
+    input.SerializeToString(&serialized);
+    std::hash<std::string> hasher;
+    return static_cast<int64_t>(hasher(serialized));
 }
 
 std::function<void()> makeAsyncProducerCancelCallback(const std::shared_ptr<AsyncProducerCancelState>& state) {
@@ -1175,65 +1183,59 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
 
     struct LocalSlot {
         int                                     index = 0;
-        std::shared_ptr<GenerateInputPB>          input;
-        std::shared_ptr<RPCContext>               rpc_context;
-        std::shared_ptr<PrefillGenerateContext>   prefill_context;
-        AtomicGuardPtr                            request_guard;
-        int64_t                                   request_id = 0;
-        bool                                      cancelled = false;
+        std::shared_ptr<GenerateInputPB>        input;
+        std::shared_ptr<RPCContext>              rpc_context;
+        std::shared_ptr<PrefillGenerateContext>  prefill_context;
+        AtomicGuardPtr                          request_guard;
+        int64_t                                 request_id = 0;
+        int64_t                                 session_epoch = 0;
+        std::shared_ptr<RequestSession>         session;
+        bool                                    cancelled = false;
     };
 
-    auto cancel_reserved_slots = [this](std::vector<LocalSlot>& slots) {
+    auto cancel_created_sessions = [&](std::vector<LocalSlot>& slots) {
+        auto now = autil::TimeUtility::currentTimeInMicroSeconds();
         for (auto& slot : slots) {
-            session_manager_.cancelSession(slot.request_id, CancelReason::EXPLICIT_CANCEL);
+            if (slot.session) {
+                slot.session->cancel(CancelReason::EXPLICIT_CANCEL, now);
+            }
         }
     };
     auto abort_batch = [&](int64_t code, const std::string& message, std::vector<LocalSlot>& slots) {
         for (int i = 0; i < input_count; ++i) {
             auto* ack = response->mutable_acks(i);
-            ack->set_request_id(request->inputs(i).request_id());
+            if (ack->request_id() == 0) {
+                ack->set_request_id(request->inputs(i).request_id());
+            }
             if (!ack->has_error_info()) {
                 setBatchAckError(ack, ack->request_id(), code, message);
             }
         }
-        cancel_reserved_slots(slots);
+        cancel_created_sessions(slots);
     };
-    auto abort_if_context_cancelled = [&](int index, int64_t request_id, std::vector<LocalSlot>& slots) {
+    auto check_context_cancelled = [&](std::vector<LocalSlot>& slots) -> bool {
         if (!(context && context->IsCancelled())) {
             return false;
         }
-        setBatchAckError(response->mutable_acks(index),
-                         request_id,
-                         grpc::StatusCode::CANCELLED,
-                         "BatchEnqueue cancelled by caller");
         abort_batch(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller", slots);
-        return true;
-    };
-    auto abort_if_entry_cancelled = [&](int index, int64_t request_id, std::vector<LocalSlot>& slots) {
-        auto [result, session] = session_manager_.lookup(request_id);
-        if (session && !session->isTerminal()) {
-            return false;
-        }
-        setBatchAckError(response->mutable_acks(index),
-                         request_id,
-                         grpc::StatusCode::CANCELLED,
-                         "BatchEnqueue request cancelled");
-        abort_batch(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled", slots);
         return true;
     };
 
     std::unordered_set<int64_t> seen_request_ids;
     std::vector<LocalSlot>      local_slots;
     local_slots.reserve(input_count);
+    auto now_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
     try {
+
+    // ---- Phase 0: Validate inputs + create sessions ----
     for (int i = 0; i < input_count; ++i) {
         const auto& input      = request->inputs(i);
         const auto  request_id = input.request_id();
         auto*       ack        = response->mutable_acks(i);
         ack->set_request_id(request_id);
 
-        if (abort_if_context_cancelled(i, request_id, local_slots)) {
+        if (check_context_cancelled(local_slots)) {
             return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
         }
 
@@ -1244,18 +1246,30 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         }
 
         auto input_copy = std::make_shared<GenerateInputPB>(input);
-        auto [lr, _] = session_manager_.lookup(request_id);
-        if (lr != LookupResult::NOT_FOUND) {
-            setBatchAckError(ack, request_id, grpc::StatusCode::ALREADY_EXISTS, "request already enqueued");
+        SessionCreateOptions opts;
+        opts.request_id = request_id;
+        opts.batch_id = request->batch_id();
+        opts.batch_index = i;
+        opts.payload_hash = computePayloadHash(input);
+        opts.create_time_us = now_us;
+
+        auto cr = session_manager_.create(opts);
+        ack->set_session_epoch(cr.session_epoch);
+        ack->set_status(static_cast<::BatchEnqueueStatusPB>(static_cast<int>(cr.status)));
+
+        if (cr.status == BatchEnqueueStatus::ALREADY_ADMITTED) {
+            continue;
+        }
+        if (cr.status != BatchEnqueueStatus::ADMITTED) {
+            setBatchAckError(ack, request_id, grpc::StatusCode::ALREADY_EXISTS, cr.error.error_message());
             abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
             return grpc::Status::OK;
         }
 
-        local_slots.push_back({i, input_copy, nullptr, nullptr, nullptr, request_id});
-        if (abort_if_entry_cancelled(i, request_id, local_slots)) {
-            return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-        }
+        local_slots.push_back({i, input_copy, nullptr, nullptr, nullptr,
+                               request_id, cr.session_epoch, cr.session, false});
     }
+
     } catch (const std::exception& e) {
         abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted: " + std::string(e.what()), local_slots);
         return grpc::Status::OK;
@@ -1264,18 +1278,19 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         return grpc::Status::OK;
     }
 
+    if (local_slots.empty()) {
+        return grpc::Status::OK;
+    }
+
     auto max_retry_times      = maga_init_params_.pd_sep_config.prefill_retry_times;
     auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms;
 
     try {
 
-    // ---- Phase A: Setup all PrefillGenerateContexts (serial, fast) ----
+    // ---- Phase A: Setup PrefillGenerateContexts ----
     for (auto& slot : local_slots) {
-        if (abort_if_context_cancelled(slot.index, slot.request_id, local_slots)) {
+        if (check_context_cancelled(local_slots)) {
             return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
-        }
-        if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
-            return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
         }
 
         auto& input_copy = slot.input;
@@ -1290,51 +1305,33 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         pfx_ctx->loading_cache_requests = loading_cache_requests_;
         auto guard                      = std::make_shared<AtomicGuard>(onflight_requests_);
         auto cancel_state               = std::make_shared<AsyncProducerCancelState>();
-        cancel_state->cancelled.store(slot.cancelled);
+        cancel_state->cancelled.store(false);
 
         slot.rpc_context     = rpc_ctx;
         slot.prefill_context = pfx_ctx;
         slot.request_guard   = guard;
         pfx_ctx->cancel_state = cancel_state;
-
-        if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
-            return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-        }
     }
 
     // ---- Phase B: Parallel prepareAllocateResource ----
-    // Each slot's allocate is independent (own PrefillGenerateContext, own gRPC client stream).
-    // Running them in parallel reduces total blocking time from N*T to max(T).
     auto allocate_one_slot = [this, context, max_retry_times, max_retry_timeout_ms](LocalSlot& slot) {
         auto& pfx_ctx = slot.prefill_context;
         try {
             int64_t begin_time_us = currentTimeUs();
             auto    stage         = pfx_ctx->stat_info.saveStage();
             for (int attempt = 0; attempt <= max_retry_times; ++attempt) {
-                if (context && context->IsCancelled()) {
-                    break;
-                }
-                if (slot.cancelled) {
-                    break;
-                }
+                if (context && context->IsCancelled()) break;
+                if (slot.session && slot.session->isTerminal()) break;
                 pfx_ctx->reset();
                 pfx_ctx->stat_info.restoreStage(stage);
                 pfx_ctx->retry_times++;
                 prepareAllocateResource(*pfx_ctx);
-                if (context && context->IsCancelled()) {
-                    break;
-                }
-                if (slot.cancelled) {
-                    break;
-                }
-                if (pfx_ctx->ok()) {
-                    return;
-                }
+                if (context && context->IsCancelled()) break;
+                if (slot.session && slot.session->isTerminal()) break;
+                if (pfx_ctx->ok()) return;
                 auto cost_time_us           = currentTimeUs() - begin_time_us;
                 pfx_ctx->retry_cost_time_ms = cost_time_us / 1000;
-                if (max_retry_timeout_ms > 0 && cost_time_us >= max_retry_timeout_ms * 1000) {
-                    break;
-                }
+                if (max_retry_timeout_ms > 0 && cost_time_us >= max_retry_timeout_ms * 1000) break;
                 usleep(1000);
             }
         } catch (const std::exception& e) {
@@ -1367,18 +1364,14 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         }
     }
 
-    // ---- Phase B check: collect results ----
-    if (context && context->IsCancelled()) {
-        abort_batch(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller", local_slots);
+    // ---- Phase B check ----
+    if (check_context_cancelled(local_slots)) {
         return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
     }
     for (auto& slot : local_slots) {
         refreshAsyncProducerCancelState(slot.prefill_context->cancel_state,
                                         slot.prefill_context->client_context,
                                         slot.prefill_context->getStream());
-        if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
-            return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-        }
         if (!slot.prefill_context->ok()) {
             setBatchAckError(response->mutable_acks(slot.index),
                              slot.request_id,
@@ -1399,7 +1392,7 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
             slot.prefill_context->setStream(stream);
             all_streams.push_back(stream);
         }
-        if (abort_if_context_cancelled(local_slots.back().index, local_slots.back().request_id, local_slots)) {
+        if (check_context_cancelled(local_slots)) {
             return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
         }
         engine_->batchEnqueue(all_streams);
@@ -1409,33 +1402,21 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                                             slot.prefill_context->getStream());
         }
     }
-    if (abort_if_context_cancelled(local_slots.back().index, local_slots.back().request_id, local_slots)) {
-        return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
-    }
-    for (auto& slot : local_slots) {
-        if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
-            return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-        }
-    }
 
+    // ---- Phase D: Bind resources + launch async workers ----
     for (auto& slot : local_slots) {
         auto* ack     = response->mutable_acks(slot.index);
         auto& pfx_ctx = slot.prefill_context;
+        auto& session = slot.session;
 
-        if (abort_if_context_cancelled(slot.index, slot.request_id, local_slots)) {
+        if (check_context_cancelled(local_slots)) {
             return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
         }
-        if (abort_if_entry_cancelled(slot.index, slot.request_id, local_slots)) {
-            return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue request cancelled");
-        }
 
-        auto session = std::make_shared<RequestSession>(
-            slot.request_id, request->batch_id(), currentTimeUs(), /*is_pd=*/true);
-        session->setStream(pfx_ctx->getStream());
+        session->bindStream(pfx_ctx->getStream());
         session->setCancelState(pfx_ctx->cancel_state);
-        session_manager_.registerSession(slot.request_id, session);
-        auto relay_writer = std::make_shared<RelayWriter>(&session->getRelay());
-        pfx_ctx->rpc_context.writer = relay_writer.get();
+        auto session_writer = std::make_shared<SessionWriter>(session);
+        pfx_ctx->rpc_context.writer = session_writer.get();
         pfx_ctx->session_owns_stream = true;
 
         if (!tryStartAsyncResponseWorker()) {
@@ -1449,21 +1430,20 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                                 pfx_ctx = slot.prefill_context,
                                 rpc_ctx = slot.rpc_context,
                                 input = slot.input,
-                                relay_writer,
+                                session_writer,
                                 session,
                                 guard = slot.request_guard,
                                 request_id = slot.request_id]() mutable {
                 (void)rpc_ctx;
                 (void)input;
-                (void)relay_writer;
+                (void)session_writer;
                 (void)guard;
                 ScopeExit worker_finish_guard([this] { finishAsyncResponseWorker(); });
                 ScopeExit release_captures_guard([&] {
                     pfx_ctx.reset();
                     rpc_ctx.reset();
                     input.reset();
-                    relay_writer.reset();
-                    session.reset();
+                    session_writer.reset();
                     guard.reset();
                 });
                 grpc::Status finish_status;
@@ -1482,26 +1462,33 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                 } catch (...) {
                     finish_status = grpc::Status(grpc::StatusCode::INTERNAL, "finishStream unknown exception");
                 }
+                auto now = autil::TimeUtility::currentTimeInMicroSeconds();
                 if (finish_status.ok()) {
-                    session->markFinished();
+                    session->finalizeTerminal(TerminalReason::FINISHED, grpc::Status::OK, now);
                 } else {
-                    session->markError(finish_status.error_message());
+                    session->finalizeTerminal(TerminalReason::ERROR, finish_status, now);
                 }
                 RTP_LLM_LOG_DEBUG("BatchEnqueue request [%ld] finishStream done, ok=%d", request_id, finish_status.ok());
+                session.reset();
             });
             worker.detach();
         } catch (const std::exception& e) {
             finishAsyncResponseWorker();
-            setBatchAckError(ack,
-                             slot.request_id,
-                             grpc::StatusCode::INTERNAL,
+            auto now = autil::TimeUtility::currentTimeInMicroSeconds();
+            session->finalizeTerminal(TerminalReason::ERROR,
+                grpc::Status(grpc::StatusCode::INTERNAL,
+                    "start async response worker exception: " + std::string(e.what())), now);
+            setBatchAckError(ack, slot.request_id, grpc::StatusCode::INTERNAL,
                              "start async response worker exception: " + std::string(e.what()));
             abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
             return grpc::Status::OK;
         } catch (...) {
             finishAsyncResponseWorker();
-            setBatchAckError(
-                ack, slot.request_id, grpc::StatusCode::INTERNAL, "start async response worker unknown exception");
+            auto now = autil::TimeUtility::currentTimeInMicroSeconds();
+            session->finalizeTerminal(TerminalReason::ERROR,
+                grpc::Status(grpc::StatusCode::INTERNAL, "start async response worker unknown exception"), now);
+            setBatchAckError(ack, slot.request_id, grpc::StatusCode::INTERNAL,
+                             "start async response worker unknown exception");
             abort_batch(grpc::StatusCode::ABORTED, "BatchEnqueue aborted", local_slots);
             return grpc::Status::OK;
         }
@@ -1517,132 +1504,120 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
     return grpc::Status::OK;
 }
 
-grpc::Status PrefillRpcServer::AttachStream(grpc::ServerContext*                   context,
-                                            const AttachStreamRequestPB*           request,
-                                            grpc::ServerWriter<GenerateOutputsPB>* writer) {
+grpc::Status PrefillRpcServer::AttachStream(grpc::ServerContext*                        context,
+                                            const AttachStreamRequestPB*                request,
+                                            grpc::ServerWriter<AttachStreamResponsePB>* writer) {
     RTP_LLM_PROFILE_FUNCTION();
-    const auto request_id          = request->request_id();
-    const auto fetch_wait_timeout  = request->fetch_wait_timeout_ms() > 0
-                                         ? std::chrono::milliseconds(request->fetch_wait_timeout_ms())
-                                         : std::chrono::milliseconds(30000);
+    const auto request_id     = request->request_id();
+    const auto session_epoch  = request->session_epoch();
+    const auto wait_timeout   = request->fetch_wait_timeout_ms() > 0
+                                    ? request->fetch_wait_timeout_ms()
+                                    : int64_t(30000);
+    auto now_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
-    auto [result, session] = session_manager_.lookup(request_id);
+    auto writeControl = [&](AttachState state,
+                            TerminalReason reason = TerminalReason::FINISHED,
+                            int64_t ttl_remaining_ms = 0,
+                            bool retryable = false) -> grpc::Status {
+        AttachStreamResponsePB resp;
+        auto* ctrl = resp.mutable_control();
+        ctrl->set_state(static_cast<::AttachStatePB>(static_cast<int>(state)));
+        ctrl->set_request_id(request_id);
+        ctrl->set_session_epoch(session_epoch);
+        ctrl->set_terminal_reason(static_cast<::TerminalReasonPB>(static_cast<int>(reason)));
+        ctrl->set_ttl_remaining_ms(ttl_remaining_ms);
+        ctrl->set_retryable(retryable);
+        writer->Write(resp);
+        return grpc::Status::OK;
+    };
 
-    switch (result) {
-        case LookupResult::NOT_FOUND:
-            return grpc::Status(grpc::StatusCode::NOT_FOUND,
-                                "request [" + std::to_string(request_id) + "] not found");
-        case LookupResult::GONE:
-            return grpc::Status(grpc::StatusCode::NOT_FOUND,
-                                "request [" + std::to_string(request_id) + "] already expired (GONE)");
-        case LookupResult::ALREADY_ATTACHED:
-            return grpc::Status(grpc::StatusCode::ALREADY_EXISTS,
-                                "request [" + std::to_string(request_id) + "] already attached");
-        case LookupResult::FINISHED_IN_TTL:
-        case LookupResult::RUNNING:
+    auto lr = session_manager_.lookup(request_id, session_epoch, now_us);
+
+    switch (lr.state) {
+        case AttachState::NOT_FOUND:
+            return writeControl(AttachState::NOT_FOUND);
+        case AttachState::GONE:
+            return writeControl(AttachState::GONE,
+                                lr.terminal ? lr.terminal->reason : TerminalReason::FINISHED);
+        case AttachState::EPOCH_MISMATCH:
+            return writeControl(AttachState::EPOCH_MISMATCH);
+        case AttachState::FINISHED_IN_TTL: {
+            auto snap = lr.snapshot;
+            if (!snap) {
+                return writeControl(AttachState::GONE);
+            }
+            for (auto& output : snap->outputs) {
+                AttachStreamResponsePB resp;
+                *resp.mutable_output() = output;
+                if (!writer->Write(resp)) {
+                    return grpc::Status(grpc::StatusCode::CANCELLED, "client writer closed");
+                }
+            }
+            return writeControl(AttachState::FINISHED_IN_TTL, snap->terminal.reason);
+        }
+        case AttachState::LIVE:
+        case AttachState::ALREADY_ATTACHED:
             break;
     }
 
-    if (!session->acquireLease()) {
-        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS,
-                            "request [" + std::to_string(request_id) + "] already attached by another consumer");
-    }
-    ScopeExit lease_guard([&] { session->releaseLease(); });
-
-    auto stream = session->getStream();
-    if (!stream) {
-        return grpc::Status(grpc::StatusCode::INTERNAL,
-                            "request [" + std::to_string(request_id) + "] has no stream");
+    auto& session = lr.session;
+    if (!session) {
+        return writeControl(AttachState::NOT_FOUND);
     }
 
-    auto state = session->deriveState();
+    auto lease = session->acquireLiveLease();
+    if (lease.state == AttachState::ALREADY_ATTACHED) {
+        return writeControl(AttachState::ALREADY_ATTACHED, TerminalReason::FINISHED, 0, true);
+    }
+    ScopeExit lease_guard([&] { session->releaseLiveLease(lease.lease_id); });
 
-    if (state == SessionState::FINISHED || state == SessionState::ERROR || state == SessionState::CANCELLED) {
-        if (session->isPd()) {
-            std::vector<GenerateOutputsPB> remaining;
-            session->getRelay().drainTo(&remaining);
-            for (auto& output : remaining) {
-                if (!writer->Write(output)) {
+    const auto attach_start = std::chrono::steady_clock::now();
+    while (true) {
+        if (context && context->IsCancelled()) {
+            return grpc::Status(grpc::StatusCode::CANCELLED, "client disconnected");
+        }
+
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - attach_start).count();
+        if (elapsed_ms >= wait_timeout) {
+            return writeControl(AttachState::LIVE, TerminalReason::FINISHED, 0, true);
+        }
+
+        auto remaining_ms = std::min(int64_t(100), wait_timeout - elapsed_ms);
+        auto pop = session->popLive(lease.lease_id, remaining_ms);
+
+        if (pop.status == PopResult::OUTPUT) {
+            for (auto& output : pop.outputs) {
+                AttachStreamResponsePB resp;
+                *resp.mutable_output() = std::move(output);
+                if (!writer->Write(resp)) {
                     return grpc::Status(grpc::StatusCode::CANCELLED, "client writer closed");
                 }
             }
+            continue;
         }
-        if (state == SessionState::CANCELLED) {
-            return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
-        }
-        return grpc::Status::OK;
-    }
 
-    if (session->isPd()) {
-        // PD path: drain from bounded relay (driver writes all output there)
-        auto& relay = session->getRelay();
-        const auto attach_start = std::chrono::steady_clock::now();
-        while (true) {
-            if (context && context->IsCancelled()) {
-                // A2: disconnect only detaches, does NOT cancel the request
-                return grpc::Status(grpc::StatusCode::CANCELLED, "client disconnected");
+        if (pop.status == PopResult::CLOSED) {
+            now_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            auto final_lr = session->buildLookup(now_us);
+            if (final_lr.state == AttachState::FINISHED_IN_TTL && final_lr.snapshot) {
+                auto& snap = final_lr.snapshot;
+                auto ti = session->terminalInfo();
+                return writeControl(AttachState::FINISHED_IN_TTL, ti.reason);
             }
-
-            // §5.11 ④ fetch_wait_timeout: 本次 attach 整体超时，请求仍活可重连
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - attach_start);
-            if (elapsed >= fetch_wait_timeout) {
-                return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
-                                    "fetch_wait_timeout exceeded, request still alive");
-            }
-
-            relay.waitForData(std::chrono::milliseconds(100));
-
-            std::vector<GenerateOutputsPB> batch;
-            relay.drainTo(&batch);
-
-            for (auto& output : batch) {
-                if (!writer->Write(output)) {
-                    // A2: write failure = client gone, just detach
-                    return grpc::Status(grpc::StatusCode::CANCELLED, "client writer closed");
-                }
-            }
-
-            auto derived = session->deriveState();
-            if (derived == SessionState::FINISHED || derived == SessionState::CANCELLED
-                || derived == SessionState::ERROR) {
-                // drain any final items
-                std::vector<GenerateOutputsPB> tail;
-                relay.drainTo(&tail);
-                for (auto& output : tail) {
-                    if (!writer->Write(output)) {
-                        return grpc::Status(grpc::StatusCode::CANCELLED, "client writer closed");
-                    }
-                }
-                if (derived == SessionState::CANCELLED) {
-                    return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
-                }
-                return grpc::Status::OK;
-            }
-
-            if (relay.isClosed() && relay.empty()) {
-                return grpc::Status::OK;
-            }
+            auto ti = session->terminalInfo();
+            return writeControl(AttachState::GONE, ti.reason);
         }
     }
-
-    // Local (non-PD) path — currently unreachable: BatchEnqueue always creates PD sessions.
-    // Kept for completeness in case non-PD AttachStream is added in the future.
-    auto request_key = std::to_string(request_id);
-    auto poll_status = pollStreamOutput(context, request_key, writer, stream);
-
-    if (poll_status.ok()) {
-        session->markFinished();
-    }
-
-    return poll_status;
 }
 
 grpc::Status PrefillRpcServer::Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response) {
     (void)context;
     (void)response;
     RTP_LLM_PROFILE_FUNCTION();
-    session_manager_.cancelSession(request->request_id(), CancelReason::EXPLICIT_CANCEL);
+    auto now_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    session_manager_.cancelSession(request->request_id(), request->session_epoch(),
+                                   CancelReason::EXPLICIT_CANCEL, now_us);
     return grpc::Status::OK;
 }
 

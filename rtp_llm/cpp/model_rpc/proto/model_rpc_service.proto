@@ -640,6 +640,38 @@ message CpuTpBroadcastResponsePB {
     string error_message = 2;
 }
 
+enum BatchEnqueueStatusPB {
+    ADMITTED = 0;
+    ALREADY_ADMITTED = 1;
+    REJECTED = 2;
+    CONFLICT_PAYLOAD = 3;
+}
+
+enum AttachStatePB {
+    ATTACH_LIVE = 0;
+    ATTACH_ALREADY_ATTACHED = 1;
+    ATTACH_FINISHED_IN_TTL = 2;
+    ATTACH_GONE = 3;
+    ATTACH_NOT_FOUND = 4;
+    ATTACH_EPOCH_MISMATCH = 5;
+    ATTACH_WAIT_TIMEOUT = 6;
+}
+
+enum TerminalReasonPB {
+    TERMINAL_FINISHED = 0;
+    TERMINAL_ERROR = 1;
+    TERMINAL_CANCELLED = 2;
+    TERMINAL_TIMEOUT = 3;
+    TERMINAL_RESOURCE_EXHAUSTED = 4;
+}
+
+enum CancelReasonPB {
+    CANCEL_EXPLICIT = 0;
+    CANCEL_ATTACH_DEADLINE = 1;
+    CANCEL_EXECUTION_TIMEOUT = 2;
+    CANCEL_SLO_DEADLINE = 3;
+}
+
 message BatchEnqueueRequestPB {
     repeated GenerateInputPB inputs = 1;
     int64 batch_id = 2;
@@ -647,7 +679,9 @@ message BatchEnqueueRequestPB {
 
 message BatchEnqueueAckPB {
     int64 request_id = 1;
-    ErrorDetailsPB error_info = 2;
+    int64 session_epoch = 2;
+    BatchEnqueueStatusPB status = 3;
+    ErrorDetailsPB error_info = 4;
 }
 
 message BatchEnqueueResponsePB {
@@ -661,11 +695,31 @@ message FetchRequestPB {
 
 message AttachStreamRequestPB {
     int64 request_id = 1;
-    int64 fetch_wait_timeout_ms = 2;
+    int64 session_epoch = 2;
+    string attach_id = 3;
+    int64 fetch_wait_timeout_ms = 4;
+}
+
+message AttachControlPB {
+    AttachStatePB state = 1;
+    int64 request_id = 2;
+    int64 session_epoch = 3;
+    TerminalReasonPB terminal_reason = 4;
+    int64 ttl_remaining_ms = 5;
+    bool retryable = 6;
+}
+
+message AttachStreamResponsePB {
+    oneof payload {
+        AttachControlPB control = 1;
+        GenerateOutputsPB output = 2;
+    }
 }
 
 message CancelRequestPB {
     int64 request_id = 1;
+    int64 session_epoch = 2;
+    CancelReasonPB reason = 3;
 }
 
 service RpcService {
@@ -696,7 +750,7 @@ service RpcService {
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
     rpc BatchEnqueue(BatchEnqueueRequestPB) returns (BatchEnqueueResponsePB);
     rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
-    rpc AttachStream(AttachStreamRequestPB) returns (stream GenerateOutputsPB);
+    rpc AttachStream(AttachStreamRequestPB) returns (stream AttachStreamResponsePB);
     rpc Cancel(CancelRequestPB) returns (EmptyPB);
 }
 

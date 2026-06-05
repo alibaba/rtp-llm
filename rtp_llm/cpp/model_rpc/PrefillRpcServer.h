@@ -30,9 +30,9 @@ public:
     grpc::Status
     BatchEnqueue(grpc::ServerContext* context, const BatchEnqueueRequestPB* request, BatchEnqueueResponsePB* response);
 
-    grpc::Status AttachStream(grpc::ServerContext*                   context,
-                              const AttachStreamRequestPB*           request,
-                              grpc::ServerWriter<GenerateOutputsPB>* writer);
+    grpc::Status AttachStream(grpc::ServerContext*                          context,
+                              const AttachStreamRequestPB*                  request,
+                              grpc::ServerWriter<AttachStreamResponsePB>*   writer);
 
     grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response);
 

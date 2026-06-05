@@ -4,43 +4,98 @@
 
 namespace rtp_llm {
 
-SessionManager::SessionManager(int64_t terminal_ttl_us, int64_t attach_deadline_us, int64_t tombstone_ttl_us):
-    terminal_ttl_us_(terminal_ttl_us), attach_deadline_us_(attach_deadline_us), tombstone_ttl_us_(tombstone_ttl_us) {}
+SessionManager::SessionManager(int64_t default_payload_ttl_us,
+                               int64_t default_attach_deadline_us,
+                               int64_t default_tombstone_ttl_us):
+    default_payload_ttl_us_(default_payload_ttl_us),
+    default_attach_deadline_us_(default_attach_deadline_us),
+    default_tombstone_ttl_us_(default_tombstone_ttl_us) {}
 
 SessionManager::~SessionManager() {
     stopGc();
 }
 
-bool SessionManager::registerSession(int64_t request_id, std::shared_ptr<RequestSession> session) {
+CreateResult SessionManager::create(const SessionCreateOptions& options) {
     std::lock_guard<std::mutex> lock(mu_);
-    if (sessions_.count(request_id) || tombstones_.count(request_id)) {
-        return false;
+
+    auto it = sessions_.find(options.request_id);
+    if (it != sessions_.end()) {
+        auto& existing = it->second;
+        if (existing->samePayload(options.payload_hash)) {
+            return CreateResult{BatchEnqueueStatus::ALREADY_ADMITTED,
+                                existing,
+                                existing->sessionEpoch(),
+                                grpc::Status::OK};
+        }
+        return CreateResult{BatchEnqueueStatus::CONFLICT_PAYLOAD,
+                            nullptr, 0,
+                            grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "payload hash mismatch")};
     }
-    sessions_.emplace(request_id, std::move(session));
-    return true;
+
+    auto tomb_it = tombstones_.find(options.request_id);
+    if (tomb_it != tombstones_.end()) {
+        return CreateResult{BatchEnqueueStatus::CONFLICT_PAYLOAD,
+                            nullptr, 0,
+                            grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "request_id in tombstone")};
+    }
+
+    auto opts = options;
+    if (opts.attach_deadline_us == 0) {
+        opts.attach_deadline_us = default_attach_deadline_us_;
+    }
+    if (opts.payload_ttl_us == 0) {
+        opts.payload_ttl_us = default_payload_ttl_us_;
+    }
+    if (opts.tombstone_ttl_us == 0) {
+        opts.tombstone_ttl_us = default_tombstone_ttl_us_;
+    }
+
+    int64_t epoch = next_session_epoch_++;
+    auto session = std::make_shared<RequestSession>(opts, epoch);
+    sessions_.emplace(options.request_id, session);
+
+    return CreateResult{BatchEnqueueStatus::ADMITTED,
+                        session,
+                        epoch,
+                        grpc::Status::OK};
 }
 
-std::pair<LookupResult, std::shared_ptr<RequestSession>> SessionManager::lookup(int64_t request_id) {
+LookupResult SessionManager::lookup(int64_t request_id,
+                                     int64_t session_epoch,
+                                     int64_t now_us) {
     std::lock_guard<std::mutex> lock(mu_);
+
     auto it = sessions_.find(request_id);
     if (it != sessions_.end()) {
         auto& session = it->second;
-        if (session->isTerminal()) {
-            return {LookupResult::FINISHED_IN_TTL, session};
+        if (session_epoch != 0 && session->sessionEpoch() != session_epoch) {
+            return LookupResult{AttachState::EPOCH_MISMATCH, nullptr, nullptr, std::nullopt};
         }
-        if (session->hasConsumer()) {
-            return {LookupResult::ALREADY_ATTACHED, session};
-        }
-        return {LookupResult::RUNNING, session};
+        auto result = session->buildLookup(now_us);
+        result.session = session;
+        return result;
     }
+
     auto tomb_it = tombstones_.find(request_id);
     if (tomb_it != tombstones_.end()) {
-        return {LookupResult::GONE, nullptr};
+        auto& tomb = tomb_it->second;
+        if (session_epoch != 0 && tomb.session_epoch != session_epoch) {
+            return LookupResult{AttachState::EPOCH_MISMATCH, nullptr, nullptr, std::nullopt};
+        }
+        TerminalInfo ti;
+        ti.reason = tomb.terminal_reason;
+        ti.status = tomb.final_status;
+        ti.terminal_time_us = tomb.terminal_time_us;
+        return LookupResult{AttachState::GONE, nullptr, nullptr, ti};
     }
-    return {LookupResult::NOT_FOUND, nullptr};
+
+    return LookupResult{AttachState::NOT_FOUND, nullptr, nullptr, std::nullopt};
 }
 
-bool SessionManager::cancelSession(int64_t request_id, CancelReason reason) {
+bool SessionManager::cancelSession(int64_t request_id,
+                                    int64_t session_epoch,
+                                    CancelReason reason,
+                                    int64_t now_us) {
     std::shared_ptr<RequestSession> session;
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -49,14 +104,11 @@ bool SessionManager::cancelSession(int64_t request_id, CancelReason reason) {
             return false;
         }
         session = it->second;
+        if (session_epoch != 0 && session->sessionEpoch() != session_epoch) {
+            return false;
+        }
     }
-    session->cancel(reason);
-    return true;
-}
-
-void SessionManager::removeSession(int64_t request_id) {
-    std::lock_guard<std::mutex> lock(mu_);
-    sessions_.erase(request_id);
+    return session->cancel(reason, now_us);
 }
 
 void SessionManager::startGc() {
@@ -70,10 +122,11 @@ void SessionManager::startGc() {
             if (gc_stop_.load()) {
                 break;
             }
+            auto now_us = autil::TimeUtility::currentTimeInMicroSeconds();
             auto swept = gcOnce();
-            auto reaped = reapAttachDeadline();
+            auto reaped = reapTimeouts(now_us);
             if (swept > 0 || reaped > 0) {
-                RTP_LLM_LOG_INFO("SessionManager GC swept %zu, reaped %zu attach-deadline", swept, reaped);
+                RTP_LLM_LOG_INFO("SessionManager GC swept %zu, reaped %zu timeouts", swept, reaped);
             }
         }
     });
@@ -89,14 +142,22 @@ void SessionManager::stopGc() {
 
 size_t SessionManager::gcOnce() {
     const int64_t now_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    size_t        swept  = 0;
+    size_t swept = 0;
 
     std::lock_guard<std::mutex> lock(mu_);
 
     for (auto it = sessions_.begin(); it != sessions_.end();) {
         auto& session = it->second;
-        if (session->isTerminal() && (now_us - session->finishedAtUs()) >= terminal_ttl_us_) {
-            tombstones_[it->first] = session->finishedAtUs();
+        if (session->payloadExpired(now_us)) {
+            auto ti = session->terminalInfo();
+            TombstoneRecord tomb;
+            tomb.request_id = session->requestId();
+            tomb.session_epoch = session->sessionEpoch();
+            tomb.terminal_reason = ti.reason;
+            tomb.final_status = ti.status;
+            tomb.terminal_time_us = ti.terminal_time_us;
+            tomb.tombstone_expire_time_us = ti.tombstone_expire_time_us;
+            tombstones_[it->first] = std::move(tomb);
             it = sessions_.erase(it);
             ++swept;
         } else {
@@ -105,7 +166,7 @@ size_t SessionManager::gcOnce() {
     }
 
     for (auto it = tombstones_.begin(); it != tombstones_.end();) {
-        if ((now_us - it->second) >= tombstone_ttl_us_) {
+        if (now_us >= it->second.tombstone_expire_time_us) {
             it = tombstones_.erase(it);
             ++swept;
         } else {
@@ -116,8 +177,7 @@ size_t SessionManager::gcOnce() {
     return swept;
 }
 
-size_t SessionManager::reapAttachDeadline() {
-    const int64_t now_us = autil::TimeUtility::currentTimeInMicroSeconds();
+size_t SessionManager::reapTimeouts(int64_t now_us) {
     std::vector<std::shared_ptr<RequestSession>> to_cancel;
 
     {
@@ -129,25 +189,19 @@ size_t SessionManager::reapAttachDeadline() {
             if (session->hasConsumer()) {
                 continue;
             }
-            if ((now_us - session->admittedAtUs()) >= attach_deadline_us_) {
+            if ((now_us - session->admittedAtUs()) >= session->attachDeadlineUs()) {
                 to_cancel.push_back(session);
             }
         }
     }
 
-    // cancel() 是幂等的：已终态的 session 直接 return，不会覆盖已有的 cancel_reason_
     for (auto& session : to_cancel) {
-        session->cancel(CancelReason::ATTACH_DEADLINE);
+        session->cancel(CancelReason::ATTACH_DEADLINE, now_us);
     }
     return to_cancel.size();
 }
 
-size_t SessionManager::size() const {
-    std::lock_guard<std::mutex> lock(mu_);
-    return sessions_.size();
-}
-
-void SessionManager::cancelAll() {
+void SessionManager::shutdown(int64_t now_us) {
     std::vector<std::shared_ptr<RequestSession>> all_sessions;
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -157,8 +211,18 @@ void SessionManager::cancelAll() {
         }
     }
     for (auto& session : all_sessions) {
-        session->cancel(CancelReason::EXPLICIT_CANCEL);
+        session->cancel(CancelReason::EXPLICIT_CANCEL, now_us);
     }
+}
+
+size_t SessionManager::size() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return sessions_.size();
+}
+
+size_t SessionManager::tombstoneCount() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return tombstones_.size();
 }
 
 }  // namespace rtp_llm

@@ -47,9 +47,9 @@ public:
         return prefill_server_->BatchEnqueue(context, request, response);
     }
 
-    grpc::Status AttachStream(grpc::ServerContext*                   context,
-                              const AttachStreamRequestPB*           request,
-                              grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+    grpc::Status AttachStream(grpc::ServerContext*                        context,
+                              const AttachStreamRequestPB*                request,
+                              grpc::ServerWriter<AttachStreamResponsePB>* writer) override {
         if (!prefill_server_) {
             auto error_msg = "server not implement AttachStream";
             RTP_LLM_LOG_ERROR(error_msg);

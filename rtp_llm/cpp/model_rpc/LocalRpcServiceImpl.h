@@ -62,9 +62,9 @@ public:
         return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "FetchResponse not implemented on this role");
     }
 
-    grpc::Status AttachStream(grpc::ServerContext*                   context,
-                              const AttachStreamRequestPB*           request,
-                              grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+    grpc::Status AttachStream(grpc::ServerContext*                        context,
+                              const AttachStreamRequestPB*                request,
+                              grpc::ServerWriter<AttachStreamResponsePB>* writer) override {
         (void)context;
         (void)request;
         (void)writer;
