@@ -56,14 +56,10 @@ class HostReactor:
             else:
                 self.domain_failed_cnt[k] = self.domain_failed_cnt.get(k, 0) + 1
                 logging.warning(
-                    f"{k} failed to refresh vipserver domain server list: empyt host list - {self.domain_failed_cnt[k]} times"
+                    f"{k} failed to refresh vipserver domain server list: empty host list - {self.domain_failed_cnt[k]} times"
                 )
-                if self.domain_failed_cnt[k] >= DOMAIN_FAILED_CNT_THRESHOLD:
-                    logging.warning(
-                        f"{k} has failed {self.domain_failed_cnt[k]} times, set server list to empty."
-                    )
+                if k not in self.domain_map:
                     self.domain_map[k] = []
-                    self.domain_failed_cnt[k] = 0
 
         self.domain_update_lock.release()
 
