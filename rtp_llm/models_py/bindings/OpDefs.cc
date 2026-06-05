@@ -47,6 +47,9 @@ void registerPyOpDefs(pybind11::module& m) {
                        "Per-layer attention type (CacheGroupType::FULL or LINEAR). "
                        "Empty = all layers treated as FULL (backward compatibility).")
         .def_readwrite("group_region_names", &KVCache::group_region_names, "Per-group KV cache attention types")
+        .def_readwrite("group_seq_size_per_block",
+                       &KVCache::group_seq_size_per_block,
+                       "Per-group raw-token coverage of one block-table row")
         .def_readwrite("layer_region_to_group_id",
                        &KVCache::layer_region_to_group_id,
                        "Dense mapping from layer id and KVCacheRegionName to group id")

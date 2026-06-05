@@ -25,6 +25,21 @@ CacheGroupType groupTypeForConnector(const CacheConfig& cache_config, int group_
     return CacheGroupType::FULL;
 }
 
+bool isCpCompactFixedGroup(const CacheConfig& cache_config, int group_id, int cp_size) {
+    if (cp_size <= 1 || groupTypeForConnector(cache_config, group_id) == CacheGroupType::FULL || group_id < 0
+        || static_cast<size_t>(group_id) >= cache_config.group_seq_size_per_block.size()) {
+        return false;
+    }
+    const auto row_tokens = cache_config.group_seq_size_per_block[static_cast<size_t>(group_id)];
+    return row_tokens > 0 && row_tokens == cache_config.seq_size_per_block * static_cast<size_t>(cp_size);
+}
+
+bool isCompactFullBlockList(const KVCacheResource& source,
+                            const BlockIndicesType& src_blocks,
+                            const CacheKeysType& selected_keys) {
+    return src_blocks.size() <= selected_keys.size() || src_blocks.size() < source.cacheKeys().size();
+}
+
 bool selectedLastRankKeysAreAligned(const KVCacheResource& source, int cp_size) {
     if (source.lastBlockAligned()) {
         return true;
@@ -77,11 +92,26 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
         BlockIndicesType dst_blocks;
         dst_blocks.reserve(selected_keys.size());
 
-        if (group_types[static_cast<size_t>(gid)] == CacheGroupType::FULL) {
-            // FULL groups are physically RR-sharded: blocks are rank-local and
-            // compact, keyed by the canonical last-rank key sequence.
+        if (isCpCompactFixedGroup(cache_config, gid, cp_size)) {
+            // DSV4 fixed/SWA groups can be CP-compact by using a row size of
+            // seq_size_per_block * cp_size, so their block list is already in
+            // the canonical last-rank key namespace.
             for (size_t i = 0; i < selected_keys.size(); ++i) {
                 dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
+            }
+        } else if (group_types[static_cast<size_t>(gid)] == CacheGroupType::FULL) {
+            // Prefill rank-local FULL blocks are compact already. Decode-side
+            // FULL blocks are full-logical, so select the canonical last-rank
+            // logical positions.
+            if (isCompactFullBlockList(source, src_blocks, selected_keys)) {
+                for (size_t i = 0; i < selected_keys.size(); ++i) {
+                    dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
+                }
+            } else {
+                for (size_t logical_pos = static_cast<size_t>(cp_size - 1); dst_blocks.size() < selected_keys.size();
+                     logical_pos += static_cast<size_t>(cp_size)) {
+                    dst_blocks.push_back(logical_pos < src_blocks.size() ? src_blocks[logical_pos] : NULL_BLOCK_IDX);
+                }
             }
         } else {
             // SWA/state groups keep the non-sharded logical coordinate system.
@@ -355,8 +385,15 @@ std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnecto
 
 int KVCacheConnectorCoordinator::cpSize() const {
     const auto& cp_cfg = parallelism_config_.prefill_cp_config;
-    if (cp_cfg.kv_cache_sharded && parallelism_config_.tp_size > 1) {
+    if (!cp_cfg.kv_cache_sharded) {
+        return 1;
+    }
+    if (parallelism_config_.tp_size > 1) {
         return static_cast<int>(parallelism_config_.tp_size);
+    }
+    if (parallelism_config_.role_type == RoleType::DECODE && cp_cfg.is_prefill_enabled()
+        && cp_cfg.prefill_cp_size > 1) {
+        return static_cast<int>(cp_cfg.prefill_cp_size);
     }
     return 1;
 }

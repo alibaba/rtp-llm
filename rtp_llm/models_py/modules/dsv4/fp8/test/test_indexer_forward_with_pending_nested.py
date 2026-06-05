@@ -53,6 +53,7 @@ def _make_indexer_stub(*, bind_pool: bool, device: torch.device) -> IndexerFP8:
         freqs_cis=None,
         start_prefill=MagicMock(name="compressor.start_prefill"),
         finish_prefill=MagicMock(name="compressor.finish_prefill"),
+        prepare_metadata=MagicMock(name="compressor.prepare_metadata"),
         set_pool_context=MagicMock(name="compressor.set_pool_context"),
         clear_pool_context=MagicMock(name="compressor.clear_pool_context"),
     )
@@ -162,6 +163,7 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
             ind._state_eb,
             state_tokens_per_block=ind._state_tokens_per_block,
             kv_tokens_per_block=ind._kv_tokens_per_block,
+            kv_owner_tokens_per_block=ind._kv_owner_tokens_per_block,
         )
         # start_prefill was called once with the right args (cp_gather_stream
         # forwarded verbatim — FIFO contract under MTP).

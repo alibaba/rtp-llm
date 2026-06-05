@@ -36,6 +36,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.kv_cache_kernel_block_id.defined() ? inputs.kv_cache_kernel_block_id.size(2) : 0;
     shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch] =
         inputs.kv_cache_block_id.defined() ? inputs.kv_cache_block_id.size(2) : 0;
+    shape_hints_ptr[GptModelInputIndex::cacheKeysWidth] =
+        inputs.cache_keys.defined() && inputs.cache_keys.dim() >= 2 ? inputs.cache_keys.size(1) : 0;
     shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum] =
         inputs.kv_cache_kernel_block_id.defined() ?
             inputs.kv_cache_kernel_block_id.size(0) :
@@ -125,6 +127,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     auto   max_kernel_blocks       = (size_t)shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch];
     auto   max_blocks              = (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
+    auto   cache_keys_width        = (size_t)shape_hints_ptr[GptModelInputIndex::cacheKeysWidth];
     auto   kv_cache_group_num      = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum];
     auto   layer_to_group_len      = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheLayerToGroupLen];
     auto   group_types_len         = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen];
@@ -194,7 +197,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
                          {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks});
             if (inputs.pd_separation) {
-                inputs.cache_keys = allocBuf(rtp_llm::DataType::TYPE_INT64, {context_batch_size, max_blocks});
+                inputs.cache_keys = allocBuf(rtp_llm::DataType::TYPE_INT64,
+                                             {context_batch_size, cache_keys_width ? cache_keys_width : max_blocks});
             }
         }
         if (layer_to_group_len) {

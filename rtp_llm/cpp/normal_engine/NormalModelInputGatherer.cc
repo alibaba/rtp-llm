@@ -228,6 +228,7 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     const size_t total_context_batch_size = stream_groups.totalContextBatchSize();
     const size_t total_block_copy_num     = stream_groups.totalBlockUpdateCopyNum();
     const size_t max_blocks_num           = stream_groups.curBlocksNum();
+    const size_t max_cache_keys_num       = std::max(max_blocks_num, stream_groups.maxCacheKeysNum());
     const size_t multimodal_features_len  = stream_groups.mmFeaturesLen();
     const bool   has_multimodal_input     = config_.is_multimodal && stream_groups.has_multimodal_input();
     const bool   need_cal_position_id =
@@ -259,7 +260,8 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
         model_input.kv_cache_layer_to_group = torch::empty({(int64_t)layer_to_group_len}, pinned_i32);
         model_input.kv_cache_group_types    = torch::empty({(int64_t)config_.kv_cache_group_nums}, pinned_i32);
         model_input.kv_cache_update_mapping = torch::empty({(int64_t)total_block_copy_num, 2}, pinned_i32);
-        model_input.cache_keys = torch::empty({(int64_t)total_context_batch_size, (int64_t)max_blocks_num}, pinned_i64);
+        model_input.cache_keys =
+            torch::zeros({(int64_t)total_context_batch_size, (int64_t)max_cache_keys_num}, pinned_i64);
     }
 
     if (need_cal_position_id) {
@@ -455,6 +457,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                 model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
 
             if (ctx.max_blocks_num && config_.role_type == RoleType::PREFILL && stream->hasCacheKeys()) {
+                RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(stream->cacheKeys(i).size()) <= model_input.cache_keys.size(1),
+                                        "cache_keys overflow: stream keys=%zu tensor width=%ld",
+                                        stream->cacheKeys(i).size(),
+                                        model_input.cache_keys.size(1));
                 std::memcpy(model_input.cache_keys.data_ptr<int64_t>()
                                 + prefill_batch_idx * model_input.cache_keys.size(1),
                             stream->cacheKeys(i).data(),

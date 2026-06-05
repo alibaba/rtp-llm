@@ -18,6 +18,7 @@ struct CacheLayerLayout {
     std::vector<std::vector<int>> layer_region_to_group_id;
     std::vector<CacheGroupType>   group_types;
     std::vector<KVCacheRegionName>  group_region_names;
+    std::vector<size_t>             group_seq_size_per_block;
     std::vector<CacheGroupType>   layer_group_types;
     std::vector<torch::Tensor>              layers_to_kv_buffer_ptrs;
     std::vector<torch::Tensor>              layers_to_scale_buffer_ptrs;

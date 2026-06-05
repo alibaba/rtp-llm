@@ -67,6 +67,7 @@ enum GptModelInputIndex : size_t {
     zeroSwaWriteSkipLengths,
     maxKernelBlocksPerBatch,
     maxBlocksPerBatch,
+    cacheKeysWidth,
     kvCacheGroupNum,
     kvCacheLayerToGroupLen,
     kvCacheGroupTypesLen,

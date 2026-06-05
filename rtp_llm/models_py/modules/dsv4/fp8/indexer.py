@@ -369,6 +369,7 @@ class IndexerFP8(PoolBackedModule):
             self._state_eb,
             state_tokens_per_block=self._state_tokens_per_block,
             kv_tokens_per_block=self._kv_tokens_per_block,
+            kv_owner_tokens_per_block=self._kv_owner_tokens_per_block,
         )
 
     def _clear_nested_pool(self) -> None:
@@ -437,10 +438,10 @@ class IndexerFP8(PoolBackedModule):
         owner_block_size = self._kv_eb
         if (
             self.compress_ratio > 0
-            and self._state_tokens_per_block > 0
-            and self._state_tokens_per_block % self.compress_ratio == 0
+            and self._kv_owner_tokens_per_block > 0
+            and self._kv_owner_tokens_per_block % self.compress_ratio == 0
         ):
-            owner_block_size = self._state_tokens_per_block // self.compress_ratio
+            owner_block_size = self._kv_owner_tokens_per_block // self.compress_ratio
         plan = build_indexer_cp_chunk_plan(
             cp_ctx=cp_ctx,
             per_req_total_kv_lens=per_req_T,

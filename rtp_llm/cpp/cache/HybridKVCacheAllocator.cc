@@ -36,10 +36,9 @@ inline int cpVirtualBlockSize(const std::shared_ptr<CPSlotMapper>& mapper, int b
     return (mapper && mapper->isSharded()) ? mapper->virtualBlockSize() : block_size;
 }
 
-// Per-group gate: only RR-shard groups that participate in cache_keys reuse
-// (paged FULL groups). Non-paged groups (SWA / STATE pools with
-// fixed_blocks_per_req) keep raw seq_len semantics — sharing the cp shrink
-// would shrink their per-request block count incorrectly.
+// Per-group gate: only paged FULL groups are RR-sharded by changing the
+// sequence length fed into their allocator. Fixed/SWA groups use their own
+// group seq_size_per_block, which may already be CP-compact.
 inline bool cpShardThisGroup(const std::shared_ptr<CPSlotMapper>& mapper, CacheGroupType group_type) {
     return mapper && mapper->isSharded() && group_type == CacheGroupType::FULL;
 }
@@ -58,6 +57,13 @@ cpVirtualBlockSizeForGroup(const std::shared_ptr<CPSlotMapper>& mapper, CacheGro
     return cpShardThisGroup(mapper, group_type) ? mapper->virtualBlockSize() : block_size;
 }
 
+inline size_t groupSeqSize(const CacheConfig& config, int gid, size_t fallback) {
+    return (gid >= 0 && static_cast<size_t>(gid) < config.group_seq_size_per_block.size()
+            && config.group_seq_size_per_block[static_cast<size_t>(gid)] > 0) ?
+               config.group_seq_size_per_block[static_cast<size_t>(gid)] :
+               fallback;
+}
+
 BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) {
     BlockIndicesType valid;
     if (begin >= blocks.size()) {
@@ -74,9 +80,18 @@ BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) 
 
 }  // namespace
 
-bool HybridKVCacheAllocator::skipReuseCacheGroup(int gid) const {
+bool HybridKVCacheAllocator::skipReuseDecisionGroup(int gid) const {
     return static_cast<size_t>(gid) < config_.group_region_names.size()
            && skipReuseCacheRegion(config_.group_region_names[static_cast<size_t>(gid)]);
+}
+
+bool HybridKVCacheAllocator::cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const {
+    if (!mapper || !mapper->isSharded() || gid < 0 || static_cast<size_t>(gid) >= config_.group_types.size()
+        || config_.group_types[static_cast<size_t>(gid)] != CacheGroupType::SWA) {
+        return false;
+    }
+    const auto row_tokens = groupSeqSize(config_, gid, seqSizePerBlock());
+    return row_tokens == static_cast<size_t>(mapper->virtualBlockSize());
 }
 
 HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&                 config,
@@ -154,13 +169,13 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
             }
             auto*     swa_group = dynamic_cast<SWAKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
             RTP_LLM_CHECK_WITH_INFO(swa_group != nullptr, "group %d is not SWAKVCacheGroup", gid);
-            if (skipReuseCacheGroup(gid)) {
-                continue;
-            }
             auto result = swa_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
             if (result.block_indices.empty()) {
-                all_tail_groups_matched = false;
-                break;
+                if (!skipReuseDecisionGroup(gid)) {
+                    all_tail_groups_matched = false;
+                    break;
+                }
+                continue;
             }
             candidate_swa_tail_blocks[i].push_back(result.block_indices[0]);
         }
@@ -230,13 +245,14 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     }
     for (size_t i = 0; i < swa_group_ids_.size(); ++i) {
         const int gid = swa_group_ids_[i];
+        const int group_reuse_len = cpCompactSwaGroup(gid, cp_mapper) ? reuse_blocks_len : logical_reuse_len;
         kv_resource.mutableBlockIds(0, gid).assign(
-            BlockIndicesType(static_cast<size_t>(logical_reuse_len), NULL_BLOCK_IDX));
-        if (skipReuseCacheGroup(gid) || skipSwaKvForZeroSwaCaching(config_, gid)) {
+            BlockIndicesType(static_cast<size_t>(group_reuse_len), NULL_BLOCK_IDX));
+        if (skipSwaKvForZeroSwaCaching(config_, gid)) {
             continue;
         }
         const size_t tail_begin =
-            static_cast<size_t>(std::max(logical_reuse_len - static_cast<int>(swa_tail_blocks[i].size()), 0));
+            static_cast<size_t>(std::max(group_reuse_len - static_cast<int>(swa_tail_blocks[i].size()), 0));
         for (size_t j = 0; j < swa_tail_blocks[i].size(); ++j) {
             kv_resource.mutableBlockIds(0, gid).setAt(tail_begin + j, swa_tail_blocks[i][j]);
         }
@@ -450,7 +466,7 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                 std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_nums), NULL_BLOCK_IDX);
                 bool                      has_valid = false;
                 for (int gid = 0; gid < group_nums; ++gid) {
-                    if (skipReuseCacheGroup(gid) || skipSwaKvForZeroSwaCaching(config_, gid)) {
+                    if (skipSwaKvForZeroSwaCaching(config_, gid)) {
                         continue;
                     }
                     const auto& blocks = kv_cache_resource->blocks(batch_id, gid);
@@ -503,7 +519,7 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         const size_t token_len = token_ids.size() - 1;
 
         for (int gid = 0; gid < group_nums; ++gid) {
-            if (skipReuseCacheGroup(gid) || skipSwaKvForZeroSwaCaching(config_, gid)) {
+            if (skipSwaKvForZeroSwaCaching(config_, gid)) {
                 continue;
             }
             const int  raw_group_seq = kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock();
@@ -517,9 +533,11 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                 continue;
             }
             const bool           gp_sharded    = cpShardThisGroup(cp_mapper, group_type);
-            const CacheKeysType& src_keys      = cp_active && gp_sharded ? cp_keys : full_keys;
-            const auto&          dependencies  = cp_active && gp_sharded ? cp_dependencies : full_dependencies;
-            const auto           namespace_id  = gp_sharded ? SharedBlockCache::kGpuCpCanonicalNamespace :
+            const bool           compact_swa   = cpCompactSwaGroup(gid, cp_mapper);
+            const bool           use_cp_keys   = cp_active && (gp_sharded || compact_swa);
+            const CacheKeysType& src_keys      = use_cp_keys ? cp_keys : full_keys;
+            const auto&          dependencies  = use_cp_keys ? cp_dependencies : full_dependencies;
+            const auto           namespace_id  = use_cp_keys ? SharedBlockCache::kGpuCpCanonicalNamespace :
                                                                SharedBlockCache::kGpuLogicalNamespace;
             if (src_keys.empty()) {
                 continue;

@@ -385,8 +385,9 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
         layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
     }
 
-    layout.group_types        = config_.group_types;
-    layout.group_region_names = config_.group_region_names;
+    layout.group_types              = config_.group_types;
+    layout.group_region_names       = config_.group_region_names;
+    layout.group_seq_size_per_block = config_.group_seq_size_per_block;
     layout.layer_group_types.resize(config_.layer_num, CacheGroupType::FULL);
     layout.layers_to_kv_buffer_ptrs_by_attn.resize(config_.layer_num);
     if (!all_layout.layers_to_scale_buffer_ptrs_by_attn.empty()) {
@@ -479,8 +480,9 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     // without these, ``build_metadata_eager`` finds an empty
     // ``group_region_names`` and emits zero ``paged_block_tables``,
     // which trips Attention.forward_decode's "no paged metadata" gate.
-    layout.group_region_names = mtp_sub_config->group_region_names;
-    layout.group_types        = mtp_sub_config->group_types;
+    layout.group_region_names       = mtp_sub_config->group_region_names;
+    layout.group_types              = mtp_sub_config->group_types;
+    layout.group_seq_size_per_block = mtp_sub_config->group_seq_size_per_block;
     // Typed-pool views are indexed by LOCAL layer id from the MTP model's
     // attention modules (self.layer_id ∈ [0, mtp_layer_num)).  The full
     // layout's by_attn arrays are indexed by GLOBAL layer id (main + MTP
