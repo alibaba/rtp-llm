@@ -34,12 +34,13 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_l
                                                           bool           use_hybrid,
                                                           CacheGroupType group_type,
                                                           int            cp_rank,
-                                                          int            cp_size) {
+                                                          int            cp_size,
+                                                          bool           compact_swa_by_cp) {
     std::vector<CacheStoreBlockPair> plan;
 
-    const bool sharded_full        = (cp_size > 1) && (group_type == CacheGroupType::FULL);
-    const bool compact_swa_by_cp   = (cp_size > 1) && (group_type == CacheGroupType::SWA);
-    if (compact_swa_by_cp) {
+    const bool sharded_full       = (cp_size > 1) && (group_type == CacheGroupType::FULL);
+    const bool compact_swa_group  = compact_swa_by_cp && (cp_size > 1) && (group_type == CacheGroupType::SWA);
+    if (compact_swa_group) {
         const size_t cp_size_t        = static_cast<size_t>(cp_size);
         const size_t canonical_blocks = (total_logical_blocks + cp_size_t - 1) / cp_size_t;
         const size_t start = use_hybrid ? (canonical_blocks > 2 ? canonical_blocks - 2 : 0) :
@@ -57,7 +58,7 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_l
 
     plan.reserve(positions.size());
 
-    if (!sharded_full && !compact_swa_by_cp) {
+    if (!sharded_full && !compact_swa_group) {
         for (auto pos : positions) {
             const int p = static_cast<int>(pos);
             plan.push_back({p, p});

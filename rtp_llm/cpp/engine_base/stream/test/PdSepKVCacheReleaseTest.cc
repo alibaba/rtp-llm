@@ -1068,8 +1068,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreOpUsesCanonicalBlockSizeForCp
     KVCacheRegionName target_region = KVCacheRegionName::DEFAULT;
     for (int layer_id = 0; layer_id < static_cast<int>(config.layer_num) && target_gid < 0; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            if (config.group_types[gid] == CacheGroupType::SWA
-                && config.group_seq_size_per_block[gid] == static_cast<size_t>(spb * cp_size)) {
+            if (config.group_types[gid] == CacheGroupType::SWA) {
                 target_layer_id = layer_id;
                 target_gid      = gid;
                 target_region   = config.group_region_names[gid];
@@ -1152,7 +1151,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreOpUsesCanonicalBlockSizeForCp
     auto region_idx = static_cast<size_t>(target_region);
     torch_ext::LayerKVCache layer_cache;
     layer_cache.kv_cache_base      = layout.layers_to_kv_buffer_ptrs_by_attn[target_layer_id][region_idx];
-    layer_cache.seq_size_per_block = config.group_seq_size_per_block[target_gid];
+    layer_cache.seq_size_per_block = spb * cp_size;
     layer_cache.layer_id           = target_layer_id;
     layer_cache.group_id           = target_gid;
     layer_cache.region_name        = target_region;
@@ -1170,6 +1169,66 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreOpUsesCanonicalBlockSizeForCp
     EXPECT_TRUE(cache_store->stored_blocks_.count(expected_key_3)) << expected_key_3;
     EXPECT_TRUE(cache_store->stored_blocks_.count(expected_key_7)) << expected_key_7;
     EXPECT_FALSE(cache_store->stored_blocks_.count(old_wrong_key)) << old_wrong_key;
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreOpUsesPhysicalTailRowsForCpNonCompactFixedGroups) {
+    const int     spb        = static_cast<int>(kDsv4TokensPerBlock);
+    const int     cp_size    = 4;
+    const int     block_num  = 8;
+    const int64_t request_id = 9021;
+    const size_t  model_id   = 81;
+
+    auto host_offsets = torch::arange(block_num, torch::kInt32).reshape({1, block_num}).clone();
+    std::vector<std::string> cache_key_strings;
+    for (int i = 0; i < block_num; ++i) {
+        cache_key_strings.push_back(std::to_string(13000 + i));
+    }
+
+    auto layer_to_group_tensor = torch::tensor({0}, torch::kInt32);
+    auto group_types_tensor    = torch::tensor({static_cast<int32_t>(CacheGroupType::SWA)}, torch::kInt32);
+    auto cache_store           = std::make_shared<MemoryBackedCacheStore>();
+
+    torch_ext::PyCacheStoreInputs cache_store_inputs;
+    cache_store_inputs.context_batch_size        = 1;
+    cache_store_inputs.decoder_batch_size        = 0;
+    cache_store_inputs.request_id                = torch::tensor({request_id}, torch::kInt64);
+    cache_store_inputs.request_pd_separation     = torch::tensor({true}, torch::kBool);
+    cache_store_inputs.kv_cache_layer_to_group   = layer_to_group_tensor;
+    cache_store_inputs.kv_cache_group_types      = group_types_tensor;
+    cache_store_inputs.cache_keys                = cache_key_strings;
+    cache_store_inputs.input_lengths_host        = torch::tensor({block_num * spb}, torch::kInt32);
+    cache_store_inputs.prefix_lengths_host       = torch::tensor({0}, torch::kInt32);
+    cache_store_inputs.tokens_per_block          = spb;
+    cache_store_inputs.kv_block_stride_bytes     = 16;
+    cache_store_inputs.pd_separation             = true;
+    cache_store_inputs.model_id                  = model_id;
+    cache_store_inputs.use_opaque_kv_cache_store = true;
+    cache_store_inputs.cache_store               = cache_store;
+    cache_store_inputs.cp_size                   = cp_size;
+    cache_store_inputs.cp_rank                   = 0;
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::empty({block_num * 16}, torch::TensorOptions(torch::kUInt8));
+    layer_cache.seq_size_per_block = spb;
+    layer_cache.layer_id           = 0;
+    layer_cache.group_id           = 0;
+    layer_cache.region_name        = KVCacheRegionName::INDEXER_STATE;
+
+    WriteCacheStoreOp(cache_store_inputs.input_lengths_host,
+                      cache_store_inputs.prefix_lengths_host,
+                      host_offsets,
+                      cache_store_inputs,
+                      layer_cache);
+
+    const auto expected_key_6 =
+        "kv_" + makeCacheKey(model_id, cache_key_strings[6], /*layer_id=*/0, KVCacheRegionName::INDEXER_STATE);
+    const auto expected_key_7 =
+        "kv_" + makeCacheKey(model_id, cache_key_strings[7], /*layer_id=*/0, KVCacheRegionName::INDEXER_STATE);
+    const auto old_compact_key_3 =
+        "kv_" + makeCacheKey(model_id, cache_key_strings[3], /*layer_id=*/0, KVCacheRegionName::INDEXER_STATE);
+    EXPECT_TRUE(cache_store->stored_blocks_.count(expected_key_6)) << expected_key_6;
+    EXPECT_TRUE(cache_store->stored_blocks_.count(expected_key_7)) << expected_key_7;
+    EXPECT_FALSE(cache_store->stored_blocks_.count(old_compact_key_3)) << old_compact_key_3;
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsWithPrefixReuse) {

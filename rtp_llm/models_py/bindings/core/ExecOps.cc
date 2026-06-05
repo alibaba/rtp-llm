@@ -356,13 +356,19 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         // pairs for both legacy and sharded cases.
         // Clamp by cache_keys_per_batch (global stride) — NOT max_blocks_per_batch,
         // which under CP shard is the local-compact stride for FULL groups.
+        const size_t layer_tokens_per_block =
+            param.layer_tokens_per_block > 0 ? param.layer_tokens_per_block : seq_size_per_block;
+        const bool compact_swa_by_cp = param.cp_size > 1 && group_type == CacheGroupType::SWA
+                                       && layer_tokens_per_block
+                                              == seq_size_per_block * static_cast<size_t>(param.cp_size);
         const auto block_plan = buildCacheStoreBlockPlan(
             static_cast<size_t>(std::min<int>(total_blocks, static_cast<int>(cache_keys_per_batch))),
             /*reuse_block_size=*/0,
             use_group_cache_transfer_policy,
             group_type,
             param.cp_rank,
-            param.cp_size);
+            param.cp_size,
+            compact_swa_by_cp);
         for (const auto& pair : block_plan) {
             addBlock(pair.key_index, pair.offset_index);
         }

@@ -99,6 +99,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.request_pd_separation,
                                 captured_cache_store.cache_keys,
                                 store_tokens_per_block,
+                                layer_tokens_per_block,
                                 kv_block_stride_bytes,
                                 kv_scale_stride_bytes,
                                 captured_cache_store.pd_separation,

@@ -35,7 +35,8 @@ struct CacheStoreBlockPair {
 // To register the right key with the right buffer the planner emits:
 //   * (pos, pos)                              — non-CP / non-FULL groups
 //   * (cp_rank + i*cp_size, i) for owned i    — CP-sharded FULL groups
-//   * ((i+1)*cp_size-1, i)                    — CP-compact SWA/fixed groups
+//   * ((i+1)*cp_size-1, i)                    — CP-compact SWA/fixed groups, only when
+//                                                compact_swa_by_cp is true
 //
 // Without this re-pairing the prefill side advertises ``cache_keys[i]``
 // (== key for logical position i) attached to data from logical position
@@ -47,6 +48,7 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_l
                                                           bool           use_hybrid,
                                                           CacheGroupType group_type,
                                                           int            cp_rank,
-                                                          int            cp_size);
+                                                          int            cp_size,
+                                                          bool           compact_swa_by_cp);
 
 }  // namespace rtp_llm

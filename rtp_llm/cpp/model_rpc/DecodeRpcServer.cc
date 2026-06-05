@@ -857,21 +857,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                   group_type,
                                                   /*hybrid_full_from_begin=*/true);
         }
-
-        std::vector<size_t> block_pos_list;
-        if (block_num == 0) {
-            return block_pos_list;
-        }
-        const size_t cp_size        = static_cast<size_t>(load_context.prefill_cp_size);
-        const size_t compact_blocks = (block_num + cp_size - 1) / cp_size;
-        const size_t reuse_blocks   = static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0));
-        const size_t start          = cfg_use_hybrid ? (compact_blocks > 2 ? compact_blocks - 2 : 0) :
-                                                       std::min(reuse_blocks, compact_blocks);
-        block_pos_list.reserve(compact_blocks - start);
-        for (size_t compact_pos = start; compact_pos < compact_blocks; ++compact_pos) {
-            block_pos_list.push_back(std::min((compact_pos + 1) * cp_size - 1, block_num - 1));
-        }
-        return block_pos_list;
+        return blockPositionsForCacheTransfer(block_num,
+                                              load_context.reuse_block_size,
+                                              cfg_use_hybrid,
+                                              group_type,
+                                              /*hybrid_full_from_begin=*/true);
     };
     auto cacheKeyIndexForBlock = [&](const CacheConfig& cfg,
                                      KVCacheRegionName region_name,
