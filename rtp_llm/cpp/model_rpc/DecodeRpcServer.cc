@@ -847,6 +847,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 if (use_typed_regions && gid < cache_config.group_region_names.size()) {
                     region_name = cache_config.group_region_names[gid];
                 }
+                if (skipReuseCacheRegion(region_name)) {
+                    continue;
+                }
                 CacheGroupType group_type = groupType(cache_config, use_hybrid, gid);
 
                 auto block_pos_list = blockPositionsForCacheTransfer(block_num,
