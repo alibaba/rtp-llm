@@ -194,7 +194,7 @@ class BatchPerfImpl(object):
             all_measure_responses.extend(responses)
         results = analyze_results(all_measure_responses)
 
-        if self.profile:
+        if self.profile and self.profile_runs > 0:
             # Pre-arm via /start_profile with enable_all_rank=true so that
             # all TP/DP ranks profile the upcoming request.  Requires the
             # NormalEngine::step() patch that ticks BEFORE process(), so

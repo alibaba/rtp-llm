@@ -31,7 +31,7 @@ class GridRunner:
     ):
         self._port = port
         self._dp_size = dp_size
-        self._batch_size_list = [1] if not is_decode else batch_size_list
+        self._batch_size_list = batch_size_list
         self._input_len_list = input_len_list
         self._input_query_dict = input_query_dict
         self._is_decode = is_decode
