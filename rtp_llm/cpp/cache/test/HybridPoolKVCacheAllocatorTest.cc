@@ -965,10 +965,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4HCAStateReuseEnabledAllocatesTailOnly
 
     const auto& hca_blocks = batch_res->blocks(0, hca_state_gid);
     ASSERT_EQ(hca_blocks.size(), 10u);
-    EXPECT_EQ(validBlockCount(hca_blocks), 2u);
-    EXPECT_FALSE(isNullBlockIdx(hca_blocks[8]));
+    EXPECT_EQ(validBlockCount(hca_blocks), 1u);
+    EXPECT_TRUE(isNullBlockIdx(hca_blocks[8]));
     EXPECT_FALSE(isNullBlockIdx(hca_blocks[9]));
-    EXPECT_EQ(hca_free_before - allocator->groupBlockPools()[hca_state_gid]->freeBlocksNum(), 2u);
+    EXPECT_EQ(hca_free_before - allocator->groupBlockPools()[hca_state_gid]->freeBlocksNum(), 1u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumulator) {
