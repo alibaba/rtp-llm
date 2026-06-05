@@ -351,9 +351,9 @@ def _role_is_prefill(py_env_configs: PyEnvConfigs) -> bool:
 
 def _is_startup_real_warmup_entry_rank(py_env_configs: PyEnvConfigs) -> bool:
     parallelism_config = py_env_configs.parallelism_config
-    world_rank = int(getattr(parallelism_config, "world_rank", 0) or 0)
-    world_size = int(getattr(parallelism_config, "world_size", 1) or 1)
-    tp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
+    world_rank = int(parallelism_config.world_rank)
+    world_size = int(parallelism_config.world_size)
+    tp_size = int(parallelism_config.tp_size)
     if world_size <= 1:
         return True
     if tp_size <= 0:
@@ -377,9 +377,9 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
         logging.info(
             "skip DSV4 startup real warmup on non-entry rank, "
             "world_rank=%s, tp_size=%s, world_size=%s",
-            getattr(parallelism_config, "world_rank", None),
-            getattr(parallelism_config, "tp_size", None),
-            getattr(parallelism_config, "world_size", None),
+            parallelism_config.world_rank,
+            parallelism_config.tp_size,
+            parallelism_config.world_size,
         )
         return False
 
@@ -594,7 +594,7 @@ def _get_startup_real_warmup_grpc_addresses(py_env_configs: PyEnvConfigs):
     except Exception:
         resolve_trace = traceback.format_exc()
 
-    world_size = int(getattr(parallelism_config, "world_size", 1) or 1)
+    world_size = int(parallelism_config.world_size)
     if world_size > 1:
         if resolve_trace:
             logging.warning(
