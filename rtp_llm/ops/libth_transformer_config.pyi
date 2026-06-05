@@ -706,7 +706,6 @@ class HWKernelConfig:
     disable_dpc_random: bool
     enable_cuda_graph: bool
     enable_cuda_graph_debug_mode: bool
-    enable_fuse_kernels: bool
     enable_multi_block_mode: bool
     enable_native_cuda_graph: bool
     enable_stable_scatter_add: bool

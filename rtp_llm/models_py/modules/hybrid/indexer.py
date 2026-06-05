@@ -41,17 +41,6 @@ class Indexer(nn.Module):
     ):
         super().__init__()
         self.layer_idx = layer_idx
-        # The ``_fuse_logits_head_gate`` eager branch is gone (DSV4 strip);
-        # ``indexer_logits_head_gate_fx`` GraphFX pass takes over.  We still
-        # need ``fuse_kernels_enabled`` to decide whether to contiguify the
-        # weight (small one-time init cost paid only when the FX rewrite will
-        # actually consume it).
-        from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
-
-        self._fuse_logits_head_gate = (
-            fuse_kernels_enabled(hw_kernel_config)
-            and fused_logits_head_gate is not None
-        )
 
         self.index_n_heads = attn_config.indexer_head_num
         self.index_head_dim = attn_config.indexer_head_dim
@@ -108,9 +97,12 @@ class Indexer(nn.Module):
         # `set_` of the underlying storage that leaves the tensor in a
         # state where `F.linear` under cuda-graph capture + inference_mode
         # trips PyTorch's version-counter check.
+        # Unconditional one-time init copy: needed by the fused
+        # ``fused_logits_head_gate`` Triton kernel that the GraphFX
+        # ``indexer_logits_head_gate_fx`` pass dispatches to.  Harmless when
+        # GraphFX is off (paid once at load).
         if (
-            self._fuse_logits_head_gate
-            and hasattr(self.weights_proj, "weight")
+            hasattr(self.weights_proj, "weight")
             and not self.weights_proj.weight.is_contiguous()
         ):
             self.weights_proj.weight = self.weights_proj.weight.contiguous()
@@ -298,11 +290,11 @@ class Indexer(nn.Module):
         if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None, "cp_params is required for sparse prefill CP"
 
-        if (
-            self._fuse_logits_head_gate
-            and not attention_inputs.is_prefill
-            and cp_params is None
-        ):
+        # Fused decode QK (rope+had+quant) is the eager decode path.  The
+        # fused kernel only supports decode without context-parallel, so
+        # prefill / CP fall back to the split rope+quant ops (a structural
+        # capability dispatch, not a fusion toggle).
+        if not attention_inputs.is_prefill and cp_params is None:
             q_fp8, q_scale = self._fused_forward_decode(
                 q_lora,
                 hidden_states,

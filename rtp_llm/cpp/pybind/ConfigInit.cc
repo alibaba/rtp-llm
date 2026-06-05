@@ -502,7 +502,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("decode_capture_batch_sizes", &HWKernelConfig::decode_capture_batch_sizes)
         .def_readwrite("disable_dpc_random", &HWKernelConfig::disable_dpc_random)
         .def_readwrite("rocm_disable_custom_ag", &HWKernelConfig::rocm_disable_custom_ag)
-        .def_readwrite("enable_fuse_kernels", &HWKernelConfig::enable_fuse_kernels)
         .def("to_string", &HWKernelConfig::to_string)
         .def(py::pickle(
             [](const HWKernelConfig& self) {
@@ -519,8 +518,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.prefill_capture_seq_lens,
                                       self.decode_capture_batch_sizes,
                                       self.disable_dpc_random,
-                                      self.rocm_disable_custom_ag,
-                                      self.enable_fuse_kernels);
+                                      self.rocm_disable_custom_ag);
             },
             [](py::tuple t) {
                 if (t.size() != 14 && t.size() != 15)
@@ -541,9 +539,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.decode_capture_batch_sizes   = t[11].cast<std::vector<int>>();
                     c.disable_dpc_random           = t[12].cast<bool>();
                     c.rocm_disable_custom_ag       = t[13].cast<bool>();
-                    if (t.size() == 15) {
-                        c.enable_fuse_kernels = t[14].cast<bool>();
-                    }
+                    // Older pickles may carry a 15th element (the removed
+                    // ``enable_fuse_kernels`` flag); it is intentionally ignored.
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());
                 }

@@ -214,7 +214,7 @@ class GenericMoeLayer(nn.Module):
                     # ``moe_shared_expert_sigmoid_gate_add_fx`` GraphFX pass
                     # can rewrite it to ``sigmoid_gate_scale_add_triton`` at
                     # FX time.  Falls back to this pure-PyTorch chain when
-                    # GraphFX is off (matches enable_fuse_kernels=False).
+                    # GraphFX is off (pure unfused baseline).
                     experts_output = experts_output + (
                         torch.sigmoid(gate_output) * shared_expert_output
                     )

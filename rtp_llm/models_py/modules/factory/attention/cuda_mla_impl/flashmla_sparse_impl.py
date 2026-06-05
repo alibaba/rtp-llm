@@ -44,7 +44,6 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla import (
     fused_qk_rope_cat_cache_mla,
 )
-from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 from rtp_llm.models_py.utils.fuse_dump import dump_fuse_tensors, fuse_dump_active
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -418,7 +417,6 @@ class SparseMlaImpl(MlaImplBase):
             kv_cache_dtype=attn_configs.kv_cache_dtype,
         )
 
-        self._fuse_qk_rope_cat_cache_mla = fuse_kernels_enabled()
         self._kv_cache_type = (
             "fp8_ds_mla"
             if attn_configs.kv_cache_dtype == KvCacheDataType.FP8
@@ -538,38 +536,34 @@ class SparseMlaImpl(MlaImplBase):
         Returns [T, H, nope_head_dim]."""
         assert topk_indices is not None and kv_cache is not None
 
-        # 1. RoPE on q_pe and k_pe; write KV to cache + optional store
-        q_pe = q[:, :, self.nope_head_dim :]
-        if self._fuse_qk_rope_cat_cache_mla and kv_cache is not None:
-            _dd = fuse_dump_active()
-            if _dd:
-                _q_c, _kpe_c = q.clone(), k_pe.clone()
-            fused_qk_rope_cat_cache_mla(
-                q=q,
-                compressed_kv=compressed_kv,
-                k_pe=k_pe,
-                kv_cache=kv_cache.kv_cache_base,
-                slot_mapping=self.rope_params.slot_mapping,
-                positions=self.rope_params.positions_d,
-                cos_sin_cache=self._cos_sin_cache,
-                kv_lora_rank=self.kv_lora_rank,
-                rope_head_dim=self.rope_head_dim,
-                is_neox_style=self._is_neox_style,
-                kv_cache_type=self._kv_cache_type,
-            )
-            if _dd:
-                _u_qpe = _q_c[:, :, self.nope_head_dim :]
-                self.rope_impl.forward(_u_qpe, _kpe_c, self.rope_params)
-                dump_fuse_tensors(
-                    "rope_cache",
-                    layer_id,
-                    {"q_rope": q[:, :, self.nope_head_dim :], "k_pe": k_pe},
-                    {"q_rope": _u_qpe, "k_pe": _kpe_c},
-                )
-        else:
-            self.rope_impl.forward(q_pe, k_pe, self.rope_params)
-            self.kv_cache_write_op.forward(
-                compressed_kv, k_pe, kv_cache, self.rope_params
+        # 1. Fused RoPE(q_pe, k_pe) + cat + write KV to cache. The fused Triton
+        #    kernel is the canonical sparse-MLA rope+cache implementation (the
+        #    split rope + kv-cache-write ops it replaces are not separately
+        #    dispatchable here), so it runs unconditionally.
+        _dd = fuse_dump_active()
+        if _dd:
+            _q_c, _kpe_c = q.clone(), k_pe.clone()
+        fused_qk_rope_cat_cache_mla(
+            q=q,
+            compressed_kv=compressed_kv,
+            k_pe=k_pe,
+            kv_cache=kv_cache.kv_cache_base,
+            slot_mapping=self.rope_params.slot_mapping,
+            positions=self.rope_params.positions_d,
+            cos_sin_cache=self._cos_sin_cache,
+            kv_lora_rank=self.kv_lora_rank,
+            rope_head_dim=self.rope_head_dim,
+            is_neox_style=self._is_neox_style,
+            kv_cache_type=self._kv_cache_type,
+        )
+        if _dd:
+            _u_qpe = _q_c[:, :, self.nope_head_dim :]
+            self.rope_impl.forward(_u_qpe, _kpe_c, self.rope_params)
+            dump_fuse_tensors(
+                "rope_cache",
+                layer_id,
+                {"q_rope": q[:, :, self.nope_head_dim :], "k_pe": k_pe},
+                {"q_rope": _u_qpe, "k_pe": _kpe_c},
             )
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache

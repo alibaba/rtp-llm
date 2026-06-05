@@ -7,7 +7,7 @@ forward pass is dumped (controlled by _seq counter).
 
 Usage:
     DUMP_FUSE_TENSORS=precision_test/tensor_dumps \
-        ENABLE_FUSE_KERNELS=1 bash py_start_glm5.sh
+        ENABLE_GRAPHFX_FUSION=1 bash py_start_glm5.sh
     # send ONE request, then kill server
     python precision_test/compare_tensors.py precision_test/tensor_dumps
 """
