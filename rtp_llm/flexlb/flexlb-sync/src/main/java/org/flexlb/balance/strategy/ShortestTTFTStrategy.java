@@ -114,9 +114,19 @@ public class ShortestTTFTStrategy implements LoadBalancer {
 
         // Get available worker list (alive + resource check)
         FlexlbConfig config = balanceContext.getConfig();
-        List<WorkerStatus> availableWorkers = getAvailableWorkers(roleType, group, config.getResourceMeasureIndicator(roleType));
+        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
+        List<WorkerStatus> availableWorkers = getAvailableWorkers(workerStatusMap, roleType, config.getResourceMeasureIndicator(roleType));
         if (CollectionUtils.isEmpty(availableWorkers)) {
-            Logger.warn("No available workers for role: {}", roleType.getCode());
+            int total = workerStatusMap.size();
+            long aliveCount = workerStatusMap.values().stream().filter(WorkerStatus::isAlive).count();
+            if (total == 0) {
+                Logger.warn("No workers discovered for role: {}", roleType.getCode());
+            } else if (aliveCount == 0) {
+                Logger.warn("All {} workers for role: {} are not alive", total, roleType.getCode());
+            } else {
+                Logger.warn("{}/{} workers alive for role: {} but none have available resources",
+                        aliveCount, total, roleType.getCode());
+            }
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
@@ -151,9 +161,9 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param indicator ResourceMeasureIndicatorEnum
      * @return Available worker list
      */
-    private List<WorkerStatus> getAvailableWorkers(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
-
-        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
+    private List<WorkerStatus> getAvailableWorkers(Map<String, WorkerStatus> workerStatusMap,
+                                                    RoleType roleType,
+                                                    ResourceMeasureIndicatorEnum indicator) {
         if (MapUtils.isEmpty(workerStatusMap)) {
             return new ArrayList<>();
         }
