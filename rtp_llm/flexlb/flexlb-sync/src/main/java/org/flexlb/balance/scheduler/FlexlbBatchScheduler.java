@@ -312,13 +312,30 @@ public class FlexlbBatchScheduler {
         EngineRpcService.GenerateConfigPB.Builder config = input.getGenerateConfigBuilder();
         config.setForceBatch(Int32Value.of(1));
         if (config.getTimeoutMs() <= 0) {
-            FlexlbConfig cfg = configService.loadBalanceConfig();
-            config.setTimeoutMs((int) cfg.resolveSloMs(dto.getSeqLen()));
+            int timeoutMs = resolveBackendTimeoutMs(dto);
+            if (timeoutMs > 0) {
+                config.setTimeoutMs(timeoutMs);
+            }
         }
         config.clearRoleAddrs();
         addRoleAddr(config, item.prefill);
         addRoleAddr(config, item.decode);
         return input.build();
+    }
+
+    private static int resolveBackendTimeoutMs(Request dto) {
+        long timeoutMs = dto.getGenerateTimeout();
+        if (timeoutMs <= 0) {
+            return 0;
+        }
+        long requestTimeMs = dto.getRequestTimeMs();
+        if (requestTimeMs > 0) {
+            timeoutMs -= Math.max(0L, System.currentTimeMillis() - requestTimeMs);
+        }
+        if (timeoutMs <= 0) {
+            return 1;
+        }
+        return (int) Math.min(timeoutMs, Integer.MAX_VALUE);
     }
 
     private void addRoleAddr(EngineRpcService.GenerateConfigPB.Builder config, ServerStatus serverStatus) {

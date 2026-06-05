@@ -114,6 +114,19 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
+    void submit_uses_generate_timeout_as_backend_timeout_when_input_timeout_missing() throws Exception {
+        config.setFlexlbBatchSizeMax(1);
+
+        CompletableFuture<Response> future = scheduler.submit(contextWithGenerateTimeout(71, 12_345L));
+
+        waitForSentBatches(1);
+        assertEquals(1, sentBatches.size());
+        assertEquals(12_345, sentBatches.getFirst().getInputs(0).getGenerateConfig().getTimeoutMs());
+        scheduler.onRequestsConfirmed(List.of(71L));
+        assertTrue(future.get(2, TimeUnit.SECONDS).isSuccess());
+    }
+
+    @Test
     void cancel_removes_request_before_batch_enqueue() throws Exception {
         CompletableFuture<Response> future = scheduler.submit(context(11));
 
@@ -552,6 +565,32 @@ class FlexlbBatchSchedulerTest {
         ctx.setRequest(request);
         ctx.setConfig(new FlexlbConfig());
         return ctx;
+    }
+
+    private static BalanceContext contextWithGenerateTimeout(long requestId, long generateTimeout) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(128);
+        request.setMaxNewTokens(8);
+        request.setNumBeams(1);
+        request.setModel("test-model");
+        request.setGenerateTimeout(generateTimeout);
+        request.setGenerateInputPbB64(generateInput(requestId));
+
+        BalanceContext ctx = new BalanceContext();
+        ctx.setRequest(request);
+        ctx.setConfig(new FlexlbConfig());
+        return ctx;
+    }
+
+    private void waitForSentBatches(int count) throws InterruptedException {
+        for (int i = 0; i < 200; i++) {
+            if (sentBatches.size() >= count) {
+                return;
+            }
+            Thread.sleep(10);
+        }
+        assertTrue(sentBatches.size() >= count, "expected sent batch count >= " + count);
     }
 
     private static String generateInput(long requestId) {
