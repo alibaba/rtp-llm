@@ -297,6 +297,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     request.set_partition_count(1);
     request.set_partition_id(0);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
+    request.set_reuse_block_size(load_context.reuse_block_size);
 
     if (load_context.prefill_cp_size > 1) {
         // CP-sharded prefill: each prefill peer holds 1/N RR shard, pull from all N peers
@@ -336,6 +337,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     request.set_request_key(load_context.request_key);
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
+    request.set_reuse_block_size(load_context.reuse_block_size);
     if (load_context.prefill_cp_size > 1) {
         // CP-sharded prefill: pull from all peers (each holds 1/N RR shard)
         request.set_partition_count(1);
@@ -414,12 +416,22 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
         min_timeout_ms = std::min(min_timeout_ms, request_timeout_ms);
     }
 
+    const auto& decode_cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+    int64_t     reuse_block_size    = generate_stream->reuseBlockSize();
+    if (decode_context.prefill_cp_size > 1 && decode_cache_config.use_typed_cache_regions
+        && decode_cache_config.groupNums() > 1) {
+        // DSV4 CP prefill stores all connector-visible blocks for the request.
+        // Decode-local reuse is not a complete proof that every typed fixed/SWA
+        // region is already materialized on decode, so load all PD KV slices.
+        reuse_block_size = 0;
+    }
+
     LoadKVCacheContext load_context{decode_context.request_id,
                                     decode_context.request_key,
                                     decode_context.peer_addrs,
                                     cache_keys,
                                     block_ids_by_group,
-                                    generate_stream->reuseBlockSize(),
+                                    reuse_block_size,
                                     min_timeout_ms,
                                     1,
                                     0,

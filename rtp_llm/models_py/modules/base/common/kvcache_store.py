@@ -87,7 +87,10 @@ def create_write_cache_store_impl(
     attn_inputs: PyAttentionInputs,
     kv_cache: Optional[KVCache] = None,
 ) -> Optional[WriteCacheStoreOp]:
-    if not (attn_inputs.is_prefill and attn_inputs.cache_store_inputs):
+    # PD prefill can run a high-reuse request through a decode-shaped
+    # attention path for the first token.  The decode node still needs the
+    # prefill-side KV blocks, so cache_store_inputs is the source of truth.
+    if not attn_inputs.cache_store_inputs:
         return None
 
     cache_store_inputs = attn_inputs.cache_store_inputs

@@ -84,6 +84,8 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
         const size_t layer_tokens_per_block = static_cast<size_t>(captured_kv_cache.seq_size_per_block);
         RTP_LLM_CHECK_WITH_INFO(layer_tokens_per_block > 0,
                                 "LayerKVCache.seq_size_per_block must be positive for cache-store write");
+        const size_t store_tokens_per_block = captured_cache_store.tokens_per_block;
+        RTP_LLM_CHECK_WITH_INFO(store_tokens_per_block > 0, "cache-store tokens_per_block must be positive");
 
         CacheStoreInputs inputs{captured_input_lengths,
                                 captured_prefix_lengths,
@@ -96,7 +98,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.request_id,
                                 captured_cache_store.request_pd_separation,
                                 captured_cache_store.cache_keys,
-                                layer_tokens_per_block,
+                                store_tokens_per_block,
                                 kv_block_stride_bytes,
                                 kv_scale_stride_bytes,
                                 captured_cache_store.pd_separation,
