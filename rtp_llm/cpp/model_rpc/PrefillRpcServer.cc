@@ -137,6 +137,24 @@ struct TheoryHitStatsSnapshot {
     TheoryHitWindowSnapshot window_15m;
 };
 
+static_assert(static_cast<int>(BatchEnqueueStatus::ADMITTED) == ::ADMITTED, "enum value mismatch");
+static_assert(static_cast<int>(BatchEnqueueStatus::ALREADY_ADMITTED) == ::ALREADY_ADMITTED, "enum value mismatch");
+static_assert(static_cast<int>(BatchEnqueueStatus::REJECTED) == ::REJECTED, "enum value mismatch");
+static_assert(static_cast<int>(BatchEnqueueStatus::CONFLICT_PAYLOAD) == ::CONFLICT_PAYLOAD, "enum value mismatch");
+
+static_assert(static_cast<int>(AttachState::LIVE) == ::ATTACH_LIVE, "enum value mismatch");
+static_assert(static_cast<int>(AttachState::ALREADY_ATTACHED) == ::ATTACH_ALREADY_ATTACHED, "enum value mismatch");
+static_assert(static_cast<int>(AttachState::FINISHED_IN_TTL) == ::ATTACH_FINISHED_IN_TTL, "enum value mismatch");
+static_assert(static_cast<int>(AttachState::GONE) == ::ATTACH_GONE, "enum value mismatch");
+static_assert(static_cast<int>(AttachState::NOT_FOUND) == ::ATTACH_NOT_FOUND, "enum value mismatch");
+static_assert(static_cast<int>(AttachState::EPOCH_MISMATCH) == ::ATTACH_EPOCH_MISMATCH, "enum value mismatch");
+
+static_assert(static_cast<int>(TerminalReason::FINISHED) == ::TERMINAL_FINISHED, "enum value mismatch");
+static_assert(static_cast<int>(TerminalReason::ERROR) == ::TERMINAL_ERROR, "enum value mismatch");
+static_assert(static_cast<int>(TerminalReason::CANCELLED) == ::TERMINAL_CANCELLED, "enum value mismatch");
+static_assert(static_cast<int>(TerminalReason::TIMEOUT) == ::TERMINAL_TIMEOUT, "enum value mismatch");
+static_assert(static_cast<int>(TerminalReason::RESOURCE_EXHAUSTED) == ::TERMINAL_RESOURCE_EXHAUSTED, "enum value mismatch");
+
 void setBatchAckError(BatchEnqueueAckPB* ack, int64_t request_id, int64_t code, const std::string& msg) {
     ack->set_request_id(request_id);
     ack->set_status(::REJECTED);
@@ -145,6 +163,8 @@ void setBatchAckError(BatchEnqueueAckPB* ack, int64_t request_id, int64_t code, 
     err->set_error_message(msg);
 }
 
+// Same-process only: std::hash is not portable across platforms/STL implementations.
+// Safe here because payload_hash is only compared within the same SessionManager.
 int64_t computePayloadHash(const GenerateInputPB& input) {
     std::string serialized;
     input.SerializeToString(&serialized);
@@ -1598,15 +1618,8 @@ grpc::Status PrefillRpcServer::AttachStream(grpc::ServerContext*                
         }
 
         if (pop.status == PopResult::CLOSED) {
-            now_us = autil::TimeUtility::currentTimeInMicroSeconds();
-            auto final_lr = session->buildLookup(now_us);
-            if (final_lr.state == AttachState::FINISHED_IN_TTL && final_lr.snapshot) {
-                auto& snap = final_lr.snapshot;
-                auto ti = session->terminalInfo();
-                return writeControl(AttachState::FINISHED_IN_TTL, ti.reason);
-            }
             auto ti = session->terminalInfo();
-            return writeControl(AttachState::GONE, ti.reason);
+            return writeControl(AttachState::FINISHED_IN_TTL, ti.reason);
         }
     }
 }

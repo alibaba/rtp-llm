@@ -152,7 +152,6 @@ private:
     bool                            closed_ = false;
     size_t                          bytes_ = 0;
     size_t                          max_bytes_;
-    uint64_t                        active_lease_id_ = 0;
     std::shared_ptr<const FrozenSnapshot> snapshot_;
 };
 
@@ -167,7 +166,7 @@ private:
 
 // ========================== RequestSession ==========================
 
-class RequestSession: public std::enable_shared_from_this<RequestSession> {
+class RequestSession {
 public:
     RequestSession(const SessionCreateOptions& options, int64_t session_epoch);
 

@@ -230,6 +230,7 @@ bool RequestSession::finalizeTerminal(TerminalReason reason, grpc::Status status
             if (reason == TerminalReason::CANCELLED || reason == TerminalReason::TIMEOUT) {
                 stream_->reportError(ErrorCode::CANCELLED, "session terminated");
             }
+            stream_.reset();
         }
         if (cancel_state_) {
             cancel_state_->cancelled.store(true);
@@ -241,6 +242,7 @@ bool RequestSession::finalizeTerminal(TerminalReason reason, grpc::Status status
             if (client_ctx) {
                 client_ctx->TryCancel();
             }
+            cancel_state_.reset();
         }
     }
 
@@ -271,7 +273,9 @@ LookupResult RequestSession::buildLookup(int64_t now_us) const {
 }
 
 bool RequestSession::payloadExpired(int64_t now_us) const {
-    if (!isTerminal()) {
+    // Only check fully TERMINAL sessions, not FINALIZING — terminal_ may be
+    // uninitialized during the FINALIZING window before phase_.store(TERMINAL).
+    if (phase_.load() != Phase::TERMINAL) {
         return false;
     }
     std::lock_guard<std::mutex> lock(terminal_mu_);
