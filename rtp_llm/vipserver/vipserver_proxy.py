@@ -115,8 +115,13 @@ class VIPServerProxy:
                 resp_json = resp.json()
                 return resp_json
             except Exception as e:
+                body = ""
+                try:
+                    body = resp.text[:200] if resp is not None else ""
+                except Exception:
+                    pass
                 logging.info(
-                    f"req api from vipserver fail, api:{api}, srv:{srv}, params:{params}, {str(e)}"
+                    f"req api from vipserver fail, api:{api}, srv:{srv}, params:{params}, {str(e)}, body:{body}"
                 )
                 last_error = e
 
