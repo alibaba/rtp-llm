@@ -203,15 +203,16 @@ build:cicd --remote_upload_local_results
 build:cicd --worker_verbose
 build:cicd --show_result=0 --auto_output_filter=all
 # The remote cache cluster aggressively evicts CAS blobs, leaving poisoned
-# action-cache entries that point at outputs which no longer exist. Reading
-# such an entry throws java.io.IOException "Invalid action cache entry ...
-# expected output does not exist" (exit 34) in downloadOutputs, which the
-# eviction-retry path does NOT catch (it only handles lost *inputs*). So do
-# not accept cached action results: re-execute every action fresh on the
-# remote executor, producing and consuming outputs within the same session.
-build:cicd --noremote_accept_cached
-# Still retry if an input blob is evicted during prefetch for the local
-# wheel-packaging action (this path IS a CacheNotFoundException).
+# action-cache entries that point at outputs which no longer exist. With the
+# default "download all outputs" mode, Bazel tries to download every
+# intermediate .pic.o locally and fails with java.io.IOException "Invalid
+# action cache entry ... expected output does not exist" (exit 34). Use
+# Build-without-the-Bytes so intermediate outputs stay in remote CAS (the
+# remote linker reads them there) and only the top-level wheel is fetched
+# locally; the poisoned downloadOutputs path is never exercised.
+build:cicd --remote_download_toplevel
+# If a CAS input blob is evicted before the remote link / local wheel action
+# reads it (a CacheNotFoundException), retry the build instead of failing.
 build:cicd --experimental_remote_cache_eviction_retries=5
 test:cicd --test_output=errors --max_test_output_bytes=10240000 --experimental_ui_max_stdouterr_bytes=31457280
 
