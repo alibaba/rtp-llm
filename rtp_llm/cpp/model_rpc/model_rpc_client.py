@@ -1,12 +1,13 @@
 import functools
 import logging
+from collections.abc import Sequence
 from typing import AsyncGenerator
 
 import grpc
 from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import RoleType
+from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
     ErrorDetailsPB,
@@ -136,6 +137,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.profile_step = input_py.generate_config.profile_step
     generate_config_pb.profile_trace_name = input_py.generate_config.profile_trace_name
     generate_config_pb.global_request_id = input_py.generate_config.global_request_id
+    generate_config_pb.unique_key = input_py.generate_config.unique_key
     generate_config_pb.ignore_eos = input_py.generate_config.ignore_eos
     generate_config_pb.reuse_cache = input_py.generate_config.reuse_cache
     generate_config_pb.enable_memory_cache = (
@@ -161,9 +163,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.combo_token_size = input_py.generate_config.combo_token_size
     for i in range(len(input_py.generate_config.banned_combo_token_ids)):
         banned_combo = generate_config_pb.banned_combo_token_ids.rows.add()
-        banned_combo.values.extend(
-            input_py.generate_config.banned_combo_token_ids[i]
-        )
+        banned_combo.values.extend(input_py.generate_config.banned_combo_token_ids[i])
 
     for role_addr in input_py.generate_config.role_addrs:
         role_addr_pb = RoleAddrPB()
@@ -212,7 +212,10 @@ def trans_multimodal_input(
 
 
 def trans_output(
-    input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState
+    input_py: GenerateInput,
+    outputs_pb: GenerateOutputsPB,
+    stream_state: StreamState,
+    response_role_addrs=None,
 ) -> GenerateOutputs:
     logging.debug("outputs_pb = %s", outputs_pb)
     output_pb = outputs_pb.flatten_output
@@ -299,7 +302,7 @@ def trans_output(
                 decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
                 decode_memory_reuse_len=aux_info_pb.decode_memory_reuse_len,
                 aux_string=aux_info_pb.aux_string,
-                role_addrs=input_py.generate_config.role_addrs,
+                role_addrs=response_role_addrs or input_py.generate_config.role_addrs,
             )
             if aux_info_pb.HasField("cum_log_probs"):
                 current_aux_info.cum_log_probs = trans_tensor(
@@ -385,6 +388,61 @@ class ModelRpcClient(object):
         )
         logging.info(f"addresses: {self._addresses}")
 
+    def _get_explicit_target_address(self, input_py: GenerateInput) -> str | None:
+        for role_addr in input_py.generate_config.role_addrs:
+            if (
+                (self._decode_entrance and role_addr.role == RoleType.DECODE)
+                or role_addr.role == RoleType.PDFUSION
+                or (not self._decode_entrance and role_addr.role == RoleType.PREFILL)
+            ) and role_addr.ip != "":
+                return role_addr.ip + ":" + str(role_addr.grpc_port)
+        return None
+
+    def _build_response_role_addrs(
+        self, input_py: GenerateInput, target_address: str
+    ) -> list[RoleAddr] | None:
+        response_role_addrs = (
+            [
+                role_addr
+                for role_addr in input_py.generate_config.role_addrs
+                if role_addr.role == RoleType.DECODE
+            ]
+            if self._decode_entrance
+            else None
+        )
+        if self._decode_entrance and not response_role_addrs:
+            target_ip, target_port = target_address.rsplit(":", 1)
+            response_role_addrs = list(response_role_addrs or [])
+            response_role_addrs.append(
+                RoleAddr(
+                    role=RoleType.DECODE,
+                    ip=target_ip,
+                    http_port=int(target_port) - 1,
+                    grpc_port=int(target_port),
+                )
+            )
+        return response_role_addrs
+
+    def _select_address_and_response_role_addrs(
+        self, input_py: GenerateInput
+    ) -> tuple[list[str], str, list[RoleAddr] | None]:
+        address_list = self._addresses
+        explicit_target_address = self._get_explicit_target_address(input_py)
+        if explicit_target_address is not None:
+            address_list = [explicit_target_address]
+
+        if not address_list:
+            raise ValueError(f"No address found for request: {input_py.request_id}")
+
+        target_address = self._select_target_address(address_list, input_py.request_id)
+        response_role_addrs = self._build_response_role_addrs(input_py, target_address)
+
+        return address_list, target_address, response_role_addrs
+
+    @staticmethod
+    def _select_target_address(address_list: Sequence[str], request_id: int) -> str:
+        return address_list[request_id % len(address_list)]
+
     def _compute_grpc_timeout(self, timeout_ms) -> float:
         rpc_timeout_ms = (
             self._max_rpc_timeout_ms
@@ -432,26 +490,14 @@ class ModelRpcClient(object):
         response_iterator = None
         stream_state = StreamState()
 
-        address_list = self._addresses
-
-        for role_addr in input_py.generate_config.role_addrs:
-            if (
-                (self._decode_entrance and role_addr.role == RoleType.DECODE)
-                or role_addr.role == RoleType.PDFUSION
-                or (not self._decode_entrance and role_addr.role == RoleType.PREFILL)
-            ):
-                if role_addr.ip != "":
-                    address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
-                    break
-
-        if not address_list:
-            raise ValueError(f"No address found for request: {input_pb.request_id}")
+        address_list, target_address, response_role_addrs = (
+            self._select_address_and_response_role_addrs(input_py)
+        )
         logging.debug(
-            f"request: [{input_pb.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
+            f"request: [{input_pb.request_id}] send to address: {target_address}"
         )
         try:
             # Select target address
-            target_address = address_list[input_py.request_id % len(address_list)]
             logging.debug(f"target_address: {target_address}")
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
@@ -462,7 +508,12 @@ class ModelRpcClient(object):
             )
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
-                yield trans_output(input_py, response, stream_state)
+                yield trans_output(
+                    input_py,
+                    response,
+                    stream_state,
+                    response_role_addrs=response_role_addrs,
+                )
         except grpc.RpcError as e:
             if response_iterator:
                 response_iterator.cancel()
@@ -487,7 +538,23 @@ class ModelRpcClient(object):
             input_pb = trans_input(inp)
             batch_input_pb.inputs.append(input_pb)
 
-        target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
+        _, target_address, first_response_role_addrs = (
+            self._select_address_and_response_role_addrs(inputs[0])
+        )
+        response_role_addrs_list = [first_response_role_addrs]
+        for inp in inputs[1:]:
+            explicit_target_address = self._get_explicit_target_address(inp)
+            if (
+                explicit_target_address is not None
+                and explicit_target_address != target_address
+            ):
+                raise FtRuntimeException(
+                    ExceptionType.UNSUPPORTED_OPERATION,
+                    "batch enqueue routed to conflicting explicit backends: %s vs %s"
+                    % (target_address, explicit_target_address),
+                )
+            response_role_addrs = self._build_response_role_addrs(inp, target_address)
+            response_role_addrs_list.append(response_role_addrs)
         logging.debug(
             f"batch request: [{len(inputs)} items] send to address: {target_address}"
         )
@@ -510,7 +577,12 @@ class ModelRpcClient(object):
                         f"batch item {i} failed: {result_pb.error_info.error_message}",
                     )
                 stream_state = StreamState()
-                output = trans_output(inputs[i], result_pb.final_output, stream_state)
+                output = trans_output(
+                    inputs[i],
+                    result_pb.final_output,
+                    stream_state,
+                    response_role_addrs=response_role_addrs_list[i],
+                )
                 results.append(output)
             return results
 

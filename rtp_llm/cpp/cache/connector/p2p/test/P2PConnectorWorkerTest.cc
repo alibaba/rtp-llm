@@ -358,7 +358,7 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
     auto    resource   = createKVCacheResource(layer_id, 2);
 
     // Pass nullopt — means "immediately ready" in StoreWaitContext logic
-    bool success = prefill_->writeByLayer(layer_id, resource, request_id, std::nullopt);
+    bool success = prefill_->writeByLayer(layer_id, resource, request_id, std::shared_ptr<torch::Event>{});
     EXPECT_TRUE(success);
 
     // Wait for cleanup thread to check once — event is immediately ready so buffer should appear

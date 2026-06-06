@@ -1,3 +1,5 @@
+import asyncio
+import copy
 import logging
 import time
 from typing import AsyncGenerator, List, Optional
@@ -14,7 +16,11 @@ from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cac
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.misc import format_exception
-from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateInput,
+    GenerateOutput,
+    GenerateOutputs,
+)
 from rtp_llm.utils.time_util import Timer
 
 route_logger = logging.getLogger("route_logger")
@@ -99,9 +105,15 @@ class BackendRPCServerVisitor:
 
         config_role_type = pd_sep_config.role_type
 
-        if config_role_type == RoleType.PREFILL and not pd_sep_config.decode_entrance:
+        if config_role_type == RoleType.PREFILL:
             role_list.append(RoleType.DECODE)
-            logging.info("Added DECODE role for PREFILL type")
+            if pd_sep_config.decode_entrance:
+                role_list.append(RoleType.PREFILL)
+                logging.info(
+                    "Added DECODE and PREFILL roles for PREFILL type in decode_entrance mode"
+                )
+            else:
+                logging.info("Added DECODE role for PREFILL type")
         elif config_role_type == RoleType.DECODE and pd_sep_config.decode_entrance:
             role_list.append(RoleType.PREFILL)
             logging.info("Added PREFILL role for DECODE type")
@@ -118,6 +130,17 @@ class BackendRPCServerVisitor:
             if host_args.pdfusion_domain:
                 role_list.append(RoleType.PDFUSION)
                 logging.info("Added PDFUSION role for FRONTEND type")
+            if pd_sep_config.decode_entrance:
+                if RoleType.DECODE not in role_list:
+                    role_list.append(RoleType.DECODE)
+                    logging.info(
+                        "Added DECODE role for FRONTEND type as decode_entrance fallback"
+                    )
+                if RoleType.PREFILL not in role_list:
+                    role_list.append(RoleType.PREFILL)
+                    logging.info(
+                        "Added PREFILL role for FRONTEND type as decode_entrance requirement"
+                    )
 
         logging.info(f"configured backend role list: {role_list}")
         return role_list
@@ -176,6 +199,12 @@ class BackendRPCServerVisitor:
         missing_roles = [
             role for role in self.backend_role_list if role not in specified_roles
         ]
+        if not missing_roles:
+            route_logger.debug(
+                "skip domain routing, request_id=%s, no missing backend roles",
+                input.request_id,
+            )
+            return
         role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             missing_roles
         )
@@ -253,11 +282,15 @@ class BackendRPCServerVisitor:
             route_logger.debug("routing to master done")
 
         kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
-        if not input.generate_config.role_addrs:
+        final_roles = {addr.role for addr in input.generate_config.role_addrs}
+        missing_roles = [
+            role for role in self.backend_role_list if role not in final_roles
+        ]
+        if missing_roles:
             raise FtRuntimeException(
                 ExceptionType.ROUTE_ERROR,
-                "request_id=%s no backend role addresses found after routing"
-                % input.request_id,
+                "request_id=%s missing backend role addresses after routing: %s"
+                % (input.request_id, missing_roles),
             )
 
     def check_sp_supported(self, input: GenerateInput):
@@ -323,9 +356,119 @@ class BackendRPCServerVisitor:
             self._validate_input(input)
             self.check_sp_supported(input)
 
+        if self.pd_sep_config.decode_entrance:
+            if self.host_service.service_available:
+                for input in inputs:
+                    await self.route_ips(input)
+
+            def _output_token_len(output: GenerateOutput) -> int:
+                if output.output_ids is None:
+                    return 0
+                return output.output_ids.shape[-1]
+
+            def _is_cumulative_output(output: GenerateOutput) -> bool:
+                if output.aux_info is None:
+                    return False
+                return (
+                    output.aux_info.output_len > 0
+                    and _output_token_len(output) == output.aux_info.output_len
+                )
+
+            def _is_delta_output(output: GenerateOutput) -> bool:
+                if output.aux_info is None:
+                    return False
+                return (
+                    output.aux_info.step_output_len > 0
+                    and _output_token_len(output) == output.aux_info.step_output_len
+                    and output.aux_info.output_len >= output.aux_info.step_output_len
+                )
+
+            def _merge_stream_outputs(chunks: list[GenerateOutputs]) -> GenerateOutputs:
+                if not chunks:
+                    return GenerateOutputs()
+                if len(chunks) == 1:
+                    return chunks[0]
+
+                merged = copy.deepcopy(chunks[-1])
+                for output_idx, final_output in enumerate(merged.generate_outputs):
+                    chunk_outputs = []
+                    chunk_output_ids = []
+                    for chunk in chunks:
+                        if output_idx >= len(chunk.generate_outputs):
+                            continue
+                        chunk_output = chunk.generate_outputs[output_idx]
+                        chunk_outputs.append(chunk_output)
+                        output_ids = chunk_output.output_ids
+                        if output_ids is not None:
+                            chunk_output_ids.append(output_ids)
+
+                    if not chunk_output_ids:
+                        continue
+
+                    # Decode-entrance fallback reuses the streaming RPC path, where
+                    # chunks may carry either per-step deltas or cumulative ids.
+                    # Prefer the explicit aux_info lengths; only fall back to the
+                    # old shape heuristic when the stream does not provide them.
+                    if _is_cumulative_output(final_output) and not _is_delta_output(
+                        final_output
+                    ):
+                        continue
+                    if not any(output.aux_info is not None for output in chunk_outputs):
+                        max_len = max(ids.shape[-1] for ids in chunk_output_ids)
+                        if (
+                            final_output.output_ids is not None
+                            and final_output.output_ids.shape[-1] == max_len
+                            and max_len > 1
+                        ):
+                            continue
+                    final_output.output_ids = torch.cat(chunk_output_ids, dim=-1)
+                return merged
+
+            async def _collect_final_output(
+                input: GenerateInput,
+            ) -> GenerateOutputs:
+                chunks = []
+                async for output in self.model_rpc_client.enqueue(input):
+                    chunks.append(output)
+                return _merge_stream_outputs(chunks)
+
+            # Decode-entrance needs the per-request prefill orchestration in
+            # GenerateStreamCall. The legacy BatchGenerateCall path skips that.
+            tasks = [
+                asyncio.create_task(_collect_final_output(input)) for input in inputs
+            ]
+            pending = set(tasks)
+
+            async def _cancel_unfinished_tasks() -> None:
+                unfinished_tasks = [task for task in tasks if not task.done()]
+                for task in unfinished_tasks:
+                    task.cancel()
+                if unfinished_tasks:
+                    await asyncio.gather(*unfinished_tasks, return_exceptions=True)
+
+            try:
+                while pending:
+                    done, pending = await asyncio.wait(
+                        pending, return_when=asyncio.FIRST_EXCEPTION
+                    )
+                    for task in done:
+                        if task.cancelled():
+                            raise asyncio.CancelledError()
+                        exception = task.exception()
+                        if exception is None:
+                            continue
+                        raise exception
+                return [task.result() for task in tasks]
+            except BaseException:
+                await _cancel_unfinished_tasks()
+                raise
+
         if self.host_service.service_available:
-            for input in inputs:
-                await self.route_ips(input)
+            # /batch_infer sends the whole batch to one backend. Route only the
+            # first request here; ModelRpcClient.batch_enqueue will keep the
+            # batch on that target and reject only truly conflicting explicit
+            # backend selections carried by later requests.
+            await self.route_ips(inputs[0])
 
         return await self.model_rpc_client.batch_enqueue(inputs)
 

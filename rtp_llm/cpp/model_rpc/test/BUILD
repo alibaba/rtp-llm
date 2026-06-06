@@ -65,6 +65,32 @@ cc_test(
 )
 
 cc_test(
+    name = "rpc_timeout_utils_test",
+    srcs = [
+        "RpcTimeoutUtilsTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "decode_rpc_server_new2_test",
+    srcs = [
+        "DecodeRpcServerNew2Test.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "broadcast_manager_test",
     srcs = [
         "BroadcastManagerTest.cc",
@@ -77,4 +103,18 @@ cc_test(
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "prefill_server_caller_context_test",
+    srcs = [
+        "PrefillServerCallerTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:prefill_server_caller",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
 )
