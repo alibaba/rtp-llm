@@ -208,10 +208,11 @@ build:cicd --show_result=0 --auto_output_filter=all
 # expected output does not exist" (exit 34). A cache hit on a poisoned entry
 # fails regardless of download mode, and globally disabling cache reads
 # breaks the cache-only ROCm toolchain genrules (they cannot execute in the
-# build container). So skip the remote cache for ONLY the C++ compile/link
-# actions: they re-execute fresh on the remote executor and never read a
-# poisoned entry, while the toolchain genrules still resolve from cache.
-build:cicd --modify_execution_info=CppCompile=+no-remote-cache,CppLink=+no-remote-cache
+# build container). So mark ONLY the C++ compile/link actions no-cache: this
+# makes Bazel send skip_cache_lookup=true so the remote executor re-runs them
+# fresh instead of returning a poisoned cached result, while the toolchain
+# genrules still resolve from cache.
+build:cicd --modify_execution_info=CppCompile=+no-cache,CppLink=+no-cache
 # If a CAS input blob is evicted before an action reads it
 # (a CacheNotFoundException), retry the build instead of failing.
 build:cicd --experimental_remote_cache_eviction_retries=5
