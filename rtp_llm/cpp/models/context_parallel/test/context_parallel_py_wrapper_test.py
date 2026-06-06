@@ -739,9 +739,13 @@ class TestHandleInputsWithHidden(unittest.TestCase):
         tokens0, lengths0, hidden0, shuffle0 = cp_test.handle_inputs_with_hidden(
             total_tokens, input_lengths, sequence_lengths, hidden_states, 0, 2
         )
-        self.assertTrue(torch.equal(tokens0, torch.tensor([10, 11, 0, 0], dtype=torch.int32)))
+        self.assertTrue(
+            torch.equal(tokens0, torch.tensor([10, 11, 0, 0], dtype=torch.int32))
+        )
         self.assertTrue(torch.equal(lengths0, torch.tensor([4], dtype=torch.int32)))
-        self.assertTrue(torch.equal(shuffle0, torch.tensor([0, 1, 6, 7], dtype=torch.int32)))
+        self.assertTrue(
+            torch.equal(shuffle0, torch.tensor([0, 1, 6, 7], dtype=torch.int32))
+        )
         self.assertTrue(
             torch.equal(
                 hidden0,
@@ -755,9 +759,13 @@ class TestHandleInputsWithHidden(unittest.TestCase):
         tokens1, lengths1, hidden1, shuffle1 = cp_test.handle_inputs_with_hidden(
             total_tokens, input_lengths, sequence_lengths, hidden_states, 1, 2
         )
-        self.assertTrue(torch.equal(tokens1, torch.tensor([12, 13, 14, 15], dtype=torch.int32)))
+        self.assertTrue(
+            torch.equal(tokens1, torch.tensor([12, 13, 14, 15], dtype=torch.int32))
+        )
         self.assertTrue(torch.equal(lengths1, torch.tensor([4], dtype=torch.int32)))
-        self.assertTrue(torch.equal(shuffle1, torch.tensor([2, 3, 4, 5], dtype=torch.int32)))
+        self.assertTrue(
+            torch.equal(shuffle1, torch.tensor([2, 3, 4, 5], dtype=torch.int32))
+        )
         self.assertTrue(
             torch.equal(
                 hidden1,
