@@ -414,7 +414,7 @@ TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlock
     EXPECT_EQ(decode_config.cache_specs[6]->block_size_bytes(), 74880u);
 }
 
-TEST(HybridPoolConfigCreatorTest, ZeroSwaTrimEnabledForPrefillCpSharded) {
+TEST(HybridPoolConfigCreatorTest, ZeroSwaTrimGatedOffForPrefillCpSharded) {
     ScopedEnvVar caching_env("DSV4_ZERO_SWA_CACHING", "1");
     ScopedEnvVar trim_env("DSV4_ZERO_SWA_TRIM", "1");
 
@@ -427,7 +427,7 @@ TEST(HybridPoolConfigCreatorTest, ZeroSwaTrimEnabledForPrefillCpSharded) {
     prefill_pc.prefill_cp_config.kv_cache_sharded = true;
     auto cp_config = HybridPoolConfigCreator::createConfig(mc, prefill_pc, makeDsv4KvCacheConfig(), false, 0);
     EXPECT_TRUE(cp_config.dsv4_zero_swa_caching);
-    EXPECT_TRUE(cp_config.dsv4_zero_swa_trim);
+    EXPECT_FALSE(cp_config.dsv4_zero_swa_trim);
 
     ParallelismConfig non_cp_pc;
     non_cp_pc.role_type = RoleType::PREFILL;

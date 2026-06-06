@@ -378,16 +378,14 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
     // Inverted-triangle recompute (DSV4_ZERO_SWA_TRIM). Trim requires zero-SWA caching to be
     // enabled: it extends the cached FULL reuse and pairs with the Python compressor write-skip,
     // and both share this single env flag (implementation plan GT-3 -- without write-skip the
-    // restore-window recompute would overwrite shared cached blocks). Python only applies the
-    // suffix-slice compute trim when CP is off; under prefill CP, it still consumes the C++
-    // FULL-coverage extension as a write-skip window while running the uniform body. Keeping the
-    // C++ extension enabled in CP is required for the CP page-RR/indexer path to preserve long
-    // context retrieval precision. No separate layer_num gate is needed here: caching is itself
-    // gated to multi-layer models, and the SWA-only one-layer MTP propose config owns no FULL
-    // group so every trim stage is a structural no-op there regardless. Default off =>
-    // restore_blocks contributes 0 in reuseCache => byte-identical.
+    // restore-window recompute would overwrite shared cached blocks). The Python suffix-slice
+    // compute trim is CP-off only; CP page-RR still runs the uniform prefill body and cannot safely
+    // pair that with the C++ FULL-coverage extension/write-skip contract. Keep zero-SWA caching
+    // enabled, but gate off this less-compute trim extension for CP-sliced prefill until the CP
+    // trim contract is implemented end to end.
     const bool trim_requested = envFlagEnabled("DSV4_ZERO_SWA_TRIM");
-    config.dsv4_zero_swa_trim = trim_requested && config.dsv4_zero_swa_caching;
+    const bool trim_cp_unsupported = isPrefillCpSliced(parallelism_config);
+    config.dsv4_zero_swa_trim      = trim_requested && config.dsv4_zero_swa_caching && !trim_cp_unsupported;
     if (config.dsv4_zero_swa_trim) {
         // FULL extension is correct iff the restore window is block-aligned to the STATE pool
         // block granularity (= seq_size_per_block today, so trivially true). State it loudly so
@@ -410,9 +408,11 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
                          config.layer_num,
                          restore_window_blocks);
     } else if (trim_requested) {
-        RTP_LLM_LOG_INFO("DSV4 zero SWA trim requested but gated off: zero_swa_caching=%d layer_num=%u",
+        RTP_LLM_LOG_INFO("DSV4 zero SWA trim requested but gated off: zero_swa_caching=%d layer_num=%u "
+                         "prefill_cp_fixed_sliced=%d",
                          static_cast<int>(config.dsv4_zero_swa_caching),
-                         config.layer_num);
+                         config.layer_num,
+                         static_cast<int>(trim_cp_unsupported));
     }
 
     config.cache_specs.clear();
