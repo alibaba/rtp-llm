@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import json
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
@@ -9,6 +10,24 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
+
+
+_GRAMMAR_RESPONSE_FORMAT_TYPES = frozenset(
+    {"json_schema", "json_object", "regex", "ebnf", "structural_tag"}
+)
+
+
+def _response_format_is_grammar(rf: Optional[Union[str, Dict[str, Any]]]) -> bool:
+    if not rf:
+        return False
+    if isinstance(rf, str):
+        try:
+            rf = json.loads(rf)
+        except (json.JSONDecodeError, TypeError):
+            return False
+    if not isinstance(rf, dict):
+        return False
+    return rf.get("type") in _GRAMMAR_RESPONSE_FORMAT_TYPES
 
 
 class RequestFormat:
@@ -93,6 +112,11 @@ class GenerateConfig(BaseModel):
     chat_id: Optional[str] = None
     task_id: Optional[Union[str, int]] = None
     request_format: str = RequestFormat.RAW
+    response_format: Optional[Union[str, Dict[str, Any]]] = None
+    json_schema: Optional[Union[str, Dict[str, Any]]] = None
+    regex: Optional[str] = None
+    ebnf: Optional[str] = None
+    structural_tag: Optional[str] = None
     # calculate_loss style: 0 for not calculate; 1 for sum; 2 for each token
     calculate_loss: int = 0
     return_logits: bool = False
@@ -390,3 +414,25 @@ class GenerateConfig(BaseModel):
             )
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
+
+        # Grammar-constrained decoding advances the matcher one token at a
+        # time, but NormalOutputDispatcher skips that advance under beam
+        # search (num_beams > 1 / num_return_sequences > 1), so the matcher
+        # never moves and schema-illegal tokens can be emitted. Fail fast.
+        if (self.has_num_beams() or self.num_return_sequences > 1) and self._has_grammar_constraint():
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "grammar-constrained decoding (json_schema / regex / ebnf / "
+                "structural_tag / response_format) is not supported with beam "
+                "search (num_beams > 1 or num_return_sequences > 1)",
+            )
+
+    def _has_grammar_constraint(self) -> bool:
+        if (
+            self.json_schema is not None
+            or self.regex is not None
+            or self.ebnf is not None
+            or self.structural_tag is not None
+        ):
+            return True
+        return _response_format_is_grammar(self.response_format)

@@ -1,5 +1,8 @@
 #include <memory>
 #include <chrono>
+#include <cstdio>
+#include <functional>
+#include <optional>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -123,7 +126,15 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
 }
 
 ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) {
-    output = QueryConverter::transQuery(&input_pb);
+    try {
+        output = QueryConverter::transQuery(&input_pb);
+    } catch (const std::invalid_argument& e) {
+        // QueryConverter throws std::invalid_argument when the proto carries
+        // a malformed or unsupported response_format envelope. Translate to
+        // INVALID_PARAMS so the client sees an explicit rejection rather
+        // than a silently unconstrained generation.
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, e.what());
+    }
     if (mm_processor_ != nullptr && output->multimodal_inputs) {
         RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
         auto mm_res = mm_processor_->updateMultimodalFeatures(output);
@@ -171,6 +182,35 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
             generate_context.error_status = serializeErrorMsg(generate_context.request_key, mm_res);
         }
     }
+    if (input && input->generate_config) {
+        // Grammar payloads (json_schema / ebnf / structural_tag) can be
+        // arbitrarily large user input — log only len+hash so the full
+        // schema doesn't end up in service logs. response_format is a short
+        // type identifier ("json_object" / "text"), keep it verbatim.
+        auto summarize = [](const std::string& s) -> std::string {
+            if (s.empty()) return "<empty>";
+            char buf[64];
+            std::snprintf(buf,
+                          sizeof(buf),
+                          "len=%zu,hash=%zx",
+                          s.size(),
+                          std::hash<std::string>{}(s));
+            return buf;
+        };
+        const std::string json_schema     = input->generate_config->json_schema.value_or("");
+        const std::string regex           = input->generate_config->regex.value_or("");
+        const std::string ebnf            = input->generate_config->ebnf.value_or("");
+        const std::string structural_tag  = input->generate_config->structural_tag.value_or("");
+        const std::string response_format = input->generate_config->response_format.value_or("");
+        RTP_LLM_LOG_DEBUG(
+            "request [%ld] grammar params: json_schema=%s, regex=%s, ebnf=%s, structural_tag=%s, response_format=%s",
+            request_id,
+            summarize(json_schema).c_str(),
+            summarize(regex).c_str(),
+            summarize(ebnf).c_str(),
+            summarize(structural_tag).c_str(),
+            response_format.c_str());
+    }
     CHECK_ERROR_STATUS(generate_context);
 
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
@@ -193,7 +233,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
     RTP_LLM_PROFILE_SCOPE("rpc.batch_generate_call");
     AtomicGuard request_guard(onflight_requests_);
     const int   batch_size = request->inputs_size();
-    RTP_LLM_LOG_INFO("receive batch generate request, batch_size=%d", batch_size);
+    RTP_LLM_LOG_DEBUG("receive batch generate request, batch_size=%d", batch_size);
 
     if (batch_size == 0) {
         return grpc::Status::OK;
@@ -249,7 +289,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         }
     }
 
-    RTP_LLM_LOG_INFO("batch generate done, batch_size=%d", batch_size);
+    RTP_LLM_LOG_DEBUG("batch generate done, batch_size=%d", batch_size);
     return grpc::Status::OK;
 }
 

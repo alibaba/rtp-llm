@@ -14,11 +14,19 @@
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include <cstdint>
 #include <iterator>
+#include <memory>
 #include <mutex>
 #include <optional>
 
 namespace rtp_llm {
+
+// Per-stream grammar matcher. Forward declared so this header does not pull in
+// the xgrammar headers (and therefore does not force every TU that includes
+// GenerateStream.h to also link xgrammar). The full type is required only by
+// the dtor and accessor implementations in GenerateStream.cc.
+class RtpGrammarMatcher;
 
 // WARNGING: buffer in generate stream should all be host to avoid gpu buffer hold more time (except kv cache)
 
@@ -98,11 +106,10 @@ public:
                    kmonitor::MetricsReporterPtr          metrics_reporter,
                    size_t                                extra_reserve_token_num = 0,
                    bool                                  pert_test               = false);
-    virtual ~GenerateStream() {
-        reportMetric();
-        releaseResource();
-        stream_magic_ = 0;
-    }
+    // Out-of-line: matcher_ is a std::unique_ptr<RtpGrammarMatcher> with a
+    // forward-declared element type. The unique_ptr destructor needs the
+    // complete definition, so we keep the dtor body in GenerateStream.cc.
+    virtual ~GenerateStream();
 
     bool isStreamAlive() const {
         return stream_magic_ == STREAM_MAGIC;
@@ -443,6 +450,33 @@ public:
         return generator_;
     }
 
+    // ---- Grammar matcher accessors (zero-GIL hot path) -------------------
+    //
+    // After Phase 3 the per-stream grammar state is a fully native C++ object
+    // (`RtpGrammarMatcher`). All four accessors are noexcept and *do not*
+    // touch Python — the underlying state lives entirely in C++ and is owned
+    // exclusively by this stream.
+    //
+    // Threading: setMatcher / clearMatcher are called from the scheduler
+    // thread (FIFOScheduler::pollGrammar / cleanupStream); read accessors
+    // (hasGrammarMatcher / tryGetGrammarMatcher) are called from the executor
+    // thread (NormalBatchStreamProcessor / NormalOutputDispatcher /
+    // MtpBatchStreamProcessor) but only AFTER the scheduler has finished its
+    // tick, so there is no concurrent read+write. RtpGrammarMatcher itself
+    // is single-threaded; if a future change introduces cross-thread access
+    // an atomic<RtpGrammarMatcher*> would be needed here.
+    // Stored as shared_ptr (rather than unique_ptr) only so the implicitly-
+    // generated copy constructor of GenerateStream stays valid for the
+    // pre-existing `NormalGenerateStream(const GenerateStream&)` clone path.
+    // In production each stream owns its own matcher exclusively — sharing
+    // a matcher across streams would corrupt its DFA state. The clone path
+    // is followed by an immediate setGrammarMatcher / clearGrammarMatcher,
+    // so the brief shared ownership does not actually leak.
+    void               setGrammarMatcher(std::shared_ptr<RtpGrammarMatcher> matcher);
+    bool               hasGrammarMatcher() const noexcept;
+    RtpGrammarMatcher* tryGetGrammarMatcher() const noexcept;
+    void               clearGrammarMatcher() noexcept;
+
     torch::Tensor getProposeTokens() const {
         if (propose_stream_ && propose_stream_->sp_output_buffer_->tokens.defined()) {
             return propose_stream_->sp_output_buffer_->tokens;
@@ -626,6 +660,14 @@ protected:
 
     std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
     at::Generator                       generator_;
+    // Per-stream grammar matcher (written once by GrammarManager after compile
+    // finishes, read once per decode tick on the hot path). Wraps an
+    // xgrammar::GrammarMatcher and the reasoning-passthrough state machine.
+    // Pure C++ — destructor + ref drops never touch Python, so cc_tests run
+    // with no embedded interpreter. All other grammar plumbing (future / key /
+    // wait_count) is kept inside GrammarManager. See setGrammarMatcher for the
+    // reason this is a shared_ptr rather than a unique_ptr.
+    std::shared_ptr<RtpGrammarMatcher> matcher_;
 
     // just for bool test
     bool perf_test_ = false;

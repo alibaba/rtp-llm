@@ -98,7 +98,7 @@ absl::Status EmbeddingEngine::step() {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     CHECK_AND_RETURN_REF(streams, scheduler_->scheduleNew());
     if (streams.empty()) {
-        RTP_LLM_LOG_INFO("no query run and sleep");
+        RTP_LLM_LOG_DEBUG("no query run and sleep");
         return absl::OkStatus();
     }
     step_profiler_.tick();

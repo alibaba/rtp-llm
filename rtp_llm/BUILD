@@ -348,6 +348,7 @@ py_library(
         ":config",
         ":structure",
         "//rtp_llm/cpp/model_rpc:model_rpc_client",
+        "//rtp_llm/models_py/triton_kernels:grammar",
     ],
 )
 

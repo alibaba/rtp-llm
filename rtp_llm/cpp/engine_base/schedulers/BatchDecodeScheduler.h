@@ -50,9 +50,47 @@ public:
         return true;
     }
 
+    // BatchDecodeScheduler has no grammar preprocessing path: streams go
+    // straight from the waiting queue into the running batch with no call
+    // to GrammarManager::processReqWithGrammar. If a stream carries any
+    // grammar constraint (json_schema / regex / ebnf / structural_tag),
+    // it would sample UNCONSTRAINED here — the user asked for structured
+    // output and silently got free-form text. Fail the request loudly
+    // instead, so callers learn at enqueue time that grammar + this
+    // scheduler are incompatible.
+    //
+    // Only the four concrete fields are checked; `response_format` on its
+    // own (e.g. {"type":"text"}) is not a grammar request and must not
+    // trigger this rejection. QueryConverter / Python client normalize
+    // response_format into the concrete fields BEFORE the stream reaches
+    // the scheduler, so anything that needs enforcement will have one set.
+    bool checkNoGrammarRequest(const GenerateStreamPtr& stream) {
+        const auto& cfg = stream->generateConfig();
+        if (!cfg) {
+            return true;
+        }
+        const bool has_grammar = cfg->json_schema.has_value() || cfg->regex.has_value()
+                                 || cfg->ebnf.has_value() || cfg->structural_tag.has_value();
+        if (has_grammar) {
+            stream->reportError(
+                ErrorCode::INVALID_PARAMS,
+                "grammar-constrained generation (json_schema / regex / ebnf / "
+                "structural_tag) is not supported under batch_decode_scheduler. "
+                "Re-submit without the grammar field, or disable "
+                "batch_decode_scheduler to route through the default "
+                "grammar-aware scheduler.");
+            return false;
+        }
+        return true;
+    }
+
     absl::Status enqueue(const GenerateStreamPtr& stream) override {
         if (!checkInputLength(stream)) {
             return absl::InvalidArgumentError("Check input length failed");
+        }
+        if (!checkNoGrammarRequest(stream)) {
+            return absl::InvalidArgumentError(
+                "grammar-constrained generation is not supported under batch_decode_scheduler");
         }
         {
             std::lock_guard<std::mutex> lock(lock_);
@@ -67,13 +105,14 @@ public:
     }
 
     // Returns the input vector unchanged so callers can index 1:1 with their original list.
-    // Streams that fail checkInputLength are NOT added to the waiting queue but are still in the
-    // returned vector with their error already reported via reportError().
+    // Streams that fail checkInputLength / checkNoGrammarRequest are NOT added to the waiting
+    // queue but are still in the returned vector with their error already reported via
+    // reportError().
     std::vector<GenerateStreamPtr> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override {
         std::vector<GenerateStreamPtr> stream_enqueued;
         stream_enqueued.reserve(streams.size());
         for (const auto& stream : streams) {
-            if (checkInputLength(stream)) {
+            if (checkInputLength(stream) && checkNoGrammarRequest(stream)) {
                 stream_enqueued.emplace_back(stream);
             }
         }
@@ -199,8 +238,8 @@ public:
             evaluateWaitingStreams();
             if (!running_streams_.empty()) {
                 initRunningStreams();
-                RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run",
-                                 running_streams_.size());
+                RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run",
+                                  running_streams_.size());
             }
         }
 
@@ -236,10 +275,10 @@ private:
     bool                         reorder_request_;
     uint32_t                     current_step_ = 0;
 
-    std::shared_ptr<KVCacheManager> cache_manager_;
-    kmonitor::MetricsReporterPtr    metrics_reporter_;
-    SchedulerType                   scheduler_type_;
-    int                             dp_rank_ = 0;
+    std::shared_ptr<KVCacheManager>     cache_manager_;
+    kmonitor::MetricsReporterPtr        metrics_reporter_;
+    SchedulerType                       scheduler_type_;
+    int                                 dp_rank_ = 0;
 };
 
 }  // namespace rtp_llm

@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/normal_engine/speculative/SpecGrammarHelpers.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
@@ -376,7 +377,23 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         } else {
             CHECK_AND_RETURN_REF(sampler_input,
                                  batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
+            const bool has_grammar = spec_grammar::streamGroupsHaveGrammar(stream_groups);
+            if (has_grammar) {
+                batch_stream_processor_->applyGrammarConstraints(sampler_input, stream_groups);
+            }
             sampler_output = std::move(sampler_->forward(sampler_input));
+            if (has_grammar) {
+                // Advance matcher past the prefill bonus token so the first
+                // decode step's bitmask reflects "state after T0", not START.
+                // Reuses the unified accept driver behind batchAcceptGrammarTokens
+                // — same window-last-token slicing as normal decode (single-token
+                // accept per stream).
+                const torch::Tensor token_ids_cpu =
+                    sampler_output.token_ids.defined() && sampler_output.token_ids.is_cuda()
+                        ? sampler_output.token_ids.cpu()
+                        : sampler_output.token_ids;
+                batch_stream_processor_->outputDispatcher()->batchAcceptGrammarTokens(stream_groups, token_ids_cpu);
+            }
             batch_stream_processor_->updatePrefillPostDraftModelInput(model_input, model_output, sampler_output);
         }
     }
@@ -649,12 +666,39 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             CHECK_AND_RETURN_REF(
                 sampler_input,
                 batch_stream_processor_->gatherSpecSamplerInput(stream_groups, model_input, model_output));
+
+            // grammar bitmask via DFS accept/rollback — only when grammar is requested
+            if (spec_grammar::streamGroupsHaveGrammar(stream_groups)) {
+                torch::Tensor draft_tokens_for_grammar;
+                if (propose_step_ == 1) {
+                    draft_tokens_for_grammar = torch::empty({(int64_t)batch_size, 2}, torch::kInt32);
+                    int idx                  = 0;
+                    for (auto& stream : stream_groups.allStreams()) {
+                        auto sp_buf = stream->getSPOutputBuffer();
+                        memcpy(draft_tokens_for_grammar.data_ptr<int>() + idx * 2,
+                               sp_buf->tokens.data_ptr<int>(),
+                               2 * sizeof(int));
+                        idx++;
+                    }
+                } else {
+                    draft_tokens_for_grammar = draft_token_ids_t.cpu();
+                }
+                batch_stream_processor_->applySpecGrammarConstraints(
+                    sampler_input, stream_groups, draft_tokens_for_grammar, propose_step_);
+            }
+
             sampler_output           = std::move(sampler_->forward(sampler_input));
             sampler_output.all_probs = sampler_output.all_probs.reshape(
                 {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
 
             // rejection sampling
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
+        }
+        // Per-step accept_len trace (opt-in via RTP_SP_ACCEPT_TRACE=1). Only
+        // emit for real streams — fake-stream ticks always report accept_len=1
+        // and would skew averages toward 1.
+        if (!model_input.is_fake_stream) {
+            spec_grammar::logSpAcceptTrace(stream_groups, speculative_sampler_output, propose_step_);
         }
         // NOTE: here will have cuda device sync before update model input
         batch_stream_processor_->updateDecodePostDraftModelInput(
@@ -726,6 +770,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             stream_groups,
             speculative_sampler_output,
             {std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output)});
+
+        // grammar accept for verified tokens — only when grammar is requested
+        if (spec_grammar::streamGroupsHaveGrammar(stream_groups)) {
+            batch_stream_processor_->batchAcceptSpecGrammarTokens(stream_groups, speculative_sampler_output);
+        }
+
         // clean holder tensors from grpc
         for (auto& stream : streams) {
             stream->getSPOutputBuffer()->tensors_holder.clear();
@@ -861,6 +911,17 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d/%d start, batch_size %zu", i, propose_step_ - 1, batch_size);
         draft_decode_model_output = std::move(draft_model_->forward(model_input));
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d forward done", i);
+
+        // Draft-side grammar mask: constrain draft's next token to grammar-legal
+        // set so the chain survives target verify's rejection. Matcher accept +
+        // rollback are balanced inside the helper → no state leak. Skipped for
+        // fake / warm-up streams (no matcher) and when no stream requests grammar.
+        if (!model_input.is_fake_stream && !warm_up_ && spec_grammar::streamGroupsHaveGrammar(stream_groups)) {
+            auto draft_tokens_cpu =
+                torch::cat(draft_token_ids_list, 1).to(torch::kInt32).to(torch::kCPU);
+            batch_stream_processor_->applyDraftGrammarConstraints(
+                draft_decode_model_output.logits, stream_groups, draft_tokens_cpu, i);
+        }
 
         // sample
         auto fast_topk_sampler_output = fast_topk_sampler_->forward(draft_decode_model_output.logits, 1);

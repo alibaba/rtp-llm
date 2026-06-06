@@ -45,8 +45,12 @@ protected:
         PDSepConfig         pd_sep_config;
         ParallelismConfig   parallelism_config;
         ModelSpecificConfig model_specific_config;
-        return std::make_shared<FIFOScheduler>(
-            runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
+        return std::make_shared<FIFOScheduler>(runtime_config,
+                                               model_config,
+                                               pd_sep_config,
+                                               parallelism_config,
+                                               model_specific_config,
+                                               cache_manager_);
     }
 
     GenerateStreamPtr createStream(const std::vector<int>& input_tokens = {1, 2, 3}) {

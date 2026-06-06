@@ -136,7 +136,9 @@ void RtpLLMOp::init(py::object model,
     }
 }
 
-EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config, py::object vit_config) {
+EngineInitParams RtpLLMOp::initModel(py::object model,
+                                     py::object engine_config,
+                                     py::object vit_config) {
     try {
         // Get model_config from model
         auto model_config = model.attr("model_config").cast<ModelConfig>();
@@ -206,8 +208,14 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 py_model,
                                 weight_manager,
                                 py_eplb);
-        params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
-        params.server_config    = engine_config.attr("server_config");
+        params.nccl_comm_config           = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
+        params.server_config              = engine_config.attr("server_config");
+        // GrammarConfig carries both user-tunable knobs and bootstrap fields
+        // (tokenizer_info_json / override_stop_tokens / think_end_id).
+        // Bootstrap is done entirely in Python before RtpLLMOp construction
+        // (see rpc_engine.py -> bootstrap_grammar_config), so the config we
+        // see here already has tokenizer_info_json populated.
+        params.grammar_config = engine_config.attr("grammar_config").cast<GrammarConfig>();
         model_id_++;
         if (parallelism_config.tp_rank == 0) {
             // kmon metric init

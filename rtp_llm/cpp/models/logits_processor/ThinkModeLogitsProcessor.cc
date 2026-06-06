@@ -36,7 +36,7 @@ void ThinkModeLogitsProcessor::setVocabMask(std::shared_ptr<StringContainDFA<siz
                                             size_t                                         vocab_size,
                                             bool                                           enforce) {
     if (!dfa_ptr->isFinished() && enforce) {
-        RTP_LLM_LOG_INFO("sampler enforce transfer status");
+        RTP_LLM_LOG_DEBUG("sampler enforce transfer status");
         memFill(new_tokens_logits, vocab_size, (size_t)template_token_ids[dfa_ptr->status()]);
     }
 }

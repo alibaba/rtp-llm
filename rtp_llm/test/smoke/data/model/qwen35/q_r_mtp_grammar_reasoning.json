@@ -1,0 +1,111 @@
+{
+    "model_type": "qwen35_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "_comment": "MTP + grammar + reasoning — 4-axis stacking. Each axis has had a real bug in living memory: (1) MTP rollback non-reasoning active_steps formula bug; (2) ReasonerGrammarObject per-stream tokens_after_think_end reset (GrammarManager.cc:473-474); (3) MTP prefill bonus token T0 must be accepted into matcher; (4) grammar fork/DFS in spec decoding. With reasoning enabled, the matcher is in 'free-accept' (mask off) until </think> is seen, then locks onto the schema. Under MTP this means: the spec engine drafts N tokens including possibly </think>, the matcher must transition state synchronously, AND rollback must use the reasoning-mode active_steps formula. If any of those four breaks, the output is either non-JSON or never closes <think>. grammar_constraint_only=true because reasoning_content is model-version-dependent.",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Generate a person profile as JSON."
+                    }
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "person",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "maxLength": 40},
+                                "age": {"type": "integer"},
+                                "city": {"type": "string", "maxLength": 40}
+                            },
+                            "required": ["name", "age", "city"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "max_tokens": 2048,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "chat_template_kwargs": {
+                        "enable_thinking": true
+                    }
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+            },
+            "grammar_constraint_only": true,
+            "_comment": "json_schema #1 (cache MISS) — first request triggers async compile of ReasonerGrammarObject under MTP. Verifies the freshly-built reasoner state propagates through MtpExecutor::dispatchDecode without leaking the compile-time default."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Generate another person profile."
+                    }
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "person",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "maxLength": 40},
+                                "age": {"type": "integer"},
+                                "city": {"type": "string", "maxLength": 40}
+                            },
+                            "required": ["name", "age", "city"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "max_tokens": 2048,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "chat_template_kwargs": {
+                        "enable_thinking": true
+                    }
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+            },
+            "grammar_constraint_only": true,
+            "_comment": "json_schema #2 (memory cache HIT under MTP) — same schema, different prompt. The cache-hit branch must independently re-init the reasoner per request. Also, since the cached ReasonerGrammarObject just walked through Q1's spec DFS rollback path, any state it picked up from Q1 must NOT bleed into Q2 — this is the matcher-state-reset cross-check under MTP."
+        }
+    ]
+}

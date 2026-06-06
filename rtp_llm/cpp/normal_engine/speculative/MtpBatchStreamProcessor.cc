@@ -1,10 +1,19 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
+#include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
+#include "rtp_llm/cpp/normal_engine/speculative/SpecGrammarHelpers.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/pybind/PyUtils.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include <numeric>
+
+#include <algorithm>
 #include <cstring>
+#include <numeric>
+#include <utility>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -109,7 +118,7 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
                       tensorDebugStringWithData<float>(sampler_inputs.logits.cpu(), 10).c_str());
 
     RTP_LLM_LOG_DEBUG("gatherSamplerInput done");
-    return std::move(sampler_inputs);
+    return sampler_inputs;
 }
 
 void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&                stream_groups,
@@ -506,6 +515,194 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
     }
 
     model_input.last_hidden_states = all_hidden_states;
+}
+
+// Spec-target mask walk. For each alive matcher, fills score_len rows of a
+// shared [batch*score_len, words] bitmask using the matcher's evolving state;
+// runs the draft chain through the matcher to compute each position's mask;
+// rolls back at the end so observable matcher state is unchanged (the actual
+// accept happens later via batchAcceptSpecGrammarTokens).
+//
+// Reasoning passthrough is per-position: the chain may include </think> at
+// some position and later positions must be JSON-masked. Passthrough rows
+// are left at the all-allow default; active rows get filled.
+//
+// All rows are uploaded + masked in a single batched kernel call after the walk.
+void MtpBatchStreamProcessor::applySpecGrammarConstraints(SamplerInputs&       inputs,
+                                                          const StreamGroups&  stream_groups,
+                                                          const torch::Tensor& draft_token_ids,
+                                                          size_t               propose_step) const {
+    if (!spec_grammar::streamGroupsHaveAttachedGrammar(stream_groups)) return;
+    if (reportGrammarUnavailableIfNeeded(stream_groups)) return;
+
+    int32_t vocab_size = -1;
+    auto    active     = spec_grammar::collectActiveGrammarStreams(
+        stream_groups, draft_token_ids, /*chain_skip_first=*/1, vocab_size);
+    if (active.empty()) return;
+
+    const size_t  score_len  = propose_step + 1;
+    const int32_t words      = (vocab_size + 31) / 32;
+    const int     total_rows = static_cast<int>(inputs.logits.size(0));  // batch*score_len
+
+    auto     bitmask = at::full({total_rows, words}, /*fill_value=*/-1, at::dtype(at::kInt));
+    DLTensor dl      = spec_grammar::makeBitmaskView(bitmask.data_ptr<int32_t>(), total_rows, words);
+    int32_t* bm_data = bitmask.data_ptr<int32_t>();
+
+    auto poisonRow = [&](int row) {
+        // All-zero except a single bit on the padding token forces the
+        // sampler to pick it; downstream batchAccept will then reject and
+        // surface the error. (vs leaving all-allow which lets the sampler
+        // pick freely — keeps existing strict semantics.)
+        int32_t* p = bm_data + row * words;
+        std::memset(p, 0, sizeof(int32_t) * words);
+        p[0] = 1;
+    };
+
+    for (auto& a : active) {
+        const int row_base = a.batch_idx * static_cast<int>(score_len);
+        int       accepted = 0;
+        try {
+            for (size_t pos = 0; pos < score_len; ++pos) {
+                if (a.matcher->isTerminated()) {
+                    for (size_t p = pos; p < score_len; ++p) poisonRow(row_base + p);
+                    break;
+                }
+                if (!a.matcher->isPassthroughForMask()) {
+                    a.matcher->fillBitmask(&dl, row_base + static_cast<int>(pos));
+                }
+                if (pos == score_len - 1) break;  // last row: no chain accept needed
+
+                const int32_t  tok      = a.chain_ptr[pos];
+                const int32_t* row_data = bm_data + (row_base + static_cast<int>(pos)) * words;
+                if (!a.matcher->isPassthroughForMask()
+                    && !spec_grammar::tokenAllowed(row_data, tok, vocab_size)) {
+                    break;
+                }
+                if (!a.matcher->acceptToken(tok)) break;
+                ++accepted;
+            }
+            if (accepted > 0) a.matcher->rollback(accepted);
+            RTP_LLM_LOG_DEBUG("[xgrammar spec_apply] stream=%d done: rollback=%d",
+                              a.batch_idx, accepted);
+        } catch (const std::exception& e) {
+            if (accepted > 0) try { a.matcher->rollback(accepted); } catch (...) {}
+            for (size_t p = 0; p < score_len; ++p) poisonRow(row_base + p);
+            RTP_LLM_LOG_WARNING("[xgrammar spec_apply] stream=%d error: %s", a.batch_idx, e.what());
+            a.stream->reportError(ErrorCode::INVALID_PARAMS,
+                                  std::string("grammar spec_apply error: ") + e.what());
+        }
+    }
+
+    // One D2H + one kernel call for the whole batch.
+    auto bm_gpu = bitmask.to(inputs.logits.device(), /*non_blocking=*/true);
+    auto target_logits =
+        inputs.logits.size(1) > vocab_size ? inputs.logits.slice(/*dim=*/1, 0, vocab_size) : inputs.logits;
+    py::gil_scoped_acquire acquire;
+    triton_bitmask_ops_.attr("apply_token_bitmask_inplace_triton")(
+        convertTensorToObject(target_logits), convertTensorToObject(bm_gpu));
+}
+
+// Pre-draft mask: replay each matcher's tokens_so_far[1..] (skip T0, which
+// took the prefill bonus path) to reach the post-chain state, then fill that
+// matcher's row in a shared [batch, words] bitmask. Terminated matchers get a
+// poisoned row so the draft sampler can't pick an illegal continuation.
+// Always rolls back at the end so observable matcher state is unchanged.
+//
+// Passthrough streams are dropped entirely: this masks the draft model only,
+// and applySpecGrammarConstraints (which handles passthrough per-position) is
+// the authoritative grammar gate downstream.
+//
+// All rows uploaded + masked in a single batched kernel call after the walk.
+void MtpBatchStreamProcessor::applyDraftGrammarConstraints(torch::Tensor&       logits,
+                                                           const StreamGroups&  stream_groups,
+                                                           const torch::Tensor& draft_tokens_so_far,
+                                                           int                  step_idx) const {
+    if (!spec_grammar::streamGroupsHaveAttachedGrammar(stream_groups)) return;
+    if (reportGrammarUnavailableIfNeeded(stream_groups)) return;
+
+    int32_t vocab_size = -1;
+    auto    active     = spec_grammar::collectActiveGrammarStreams(
+        stream_groups, draft_tokens_so_far, /*chain_skip_first=*/0, vocab_size);
+    active.erase(std::remove_if(active.begin(), active.end(),
+                                [](const spec_grammar::ActiveGrammarStream& a) {
+                                    return a.matcher->isPassthroughForMask();
+                                }),
+                 active.end());
+    if (active.empty()) return;
+
+    const int     batch_size = static_cast<int>(logits.size(0));
+    const int32_t words      = (vocab_size + 31) / 32;
+    auto     bitmask = at::full({batch_size, words}, /*fill_value=*/-1, at::dtype(at::kInt));
+    DLTensor dl      = spec_grammar::makeBitmaskView(bitmask.data_ptr<int32_t>(), batch_size, words);
+    int32_t* bm_data = bitmask.data_ptr<int32_t>();
+
+    auto poisonRow = [&](int row) {
+        int32_t* p = bm_data + row * words;
+        std::memset(p, 0, sizeof(int32_t) * words);
+        p[0] = 1;
+    };
+
+    for (auto& a : active) {
+        int accepted = 0;
+        try {
+            for (size_t i = 1; i < a.chain_len; ++i) {
+                const int32_t tok = a.chain_ptr[i];
+                if (tok < 0 || tok >= vocab_size) break;
+                // Probe the next mask using the matcher's current state.
+                std::memset(bm_data + a.batch_idx * words, 0xff, sizeof(int32_t) * words);
+                a.matcher->fillBitmask(&dl, a.batch_idx);
+                if (!spec_grammar::tokenAllowed(bm_data + a.batch_idx * words, tok, vocab_size)) break;
+                if (!a.matcher->acceptToken(tok)) break;
+                ++accepted;
+                if (a.matcher->isTerminated()) break;
+            }
+            if (a.matcher->isTerminated()) {
+                poisonRow(a.batch_idx);
+            } else {
+                // Final fill is the actual mask we want applied to the draft logit row.
+                std::memset(bm_data + a.batch_idx * words, 0xff, sizeof(int32_t) * words);
+                a.matcher->fillBitmask(&dl, a.batch_idx);
+            }
+            if (accepted > 0) a.matcher->rollback(accepted);
+        } catch (const std::exception& e) {
+            if (accepted > 0) try { a.matcher->rollback(accepted); } catch (...) {}
+            poisonRow(a.batch_idx);
+            RTP_LLM_LOG_WARNING("[xgrammar draft_apply] stream=%d error: %s", a.batch_idx, e.what());
+            a.stream->reportError(ErrorCode::INVALID_PARAMS,
+                                  std::string("grammar draft_apply error: ") + e.what());
+        }
+    }
+
+    auto bm_gpu = bitmask.to(logits.device(), /*non_blocking=*/true);
+    auto target_logits =
+        logits.size(1) > vocab_size ? logits.slice(/*dim=*/1, 0, vocab_size) : logits;
+    py::gil_scoped_acquire acquire;
+    triton_bitmask_ops_.attr("apply_token_bitmask_inplace_triton")(
+        convertTensorToObject(target_logits), convertTensorToObject(bm_gpu));
+}
+
+void MtpBatchStreamProcessor::batchAcceptSpecGrammarTokens(
+    const StreamGroups& stream_groups, const speculative::SpeculativeSamplerOutput& spec_output) const {
+    // stream_idx tracks position in stream_groups.allStreams() iteration, which
+    // matches the layout of spec_output.accept_len / accept_tokens. The closure
+    // must advance this counter on EVERY stream (grammar or not) to stay in
+    // lock-step with the spec_output arrays.
+    int stream_idx = 0;
+    outputDispatcher()->invokeBatchAcceptTokens(
+        stream_groups,
+        [&](const GenerateStreamPtr&) -> std::vector<int32_t> {
+            const size_t accept_len = spec_output.accept_len[stream_idx];
+            const int*   token_ptr  = spec_output.accept_tokens[stream_idx].data_ptr<int>();
+
+            std::vector<int32_t> out;
+            out.reserve(accept_len);
+            for (size_t k = 0; k < accept_len; ++k) {
+                out.push_back(token_ptr[k]);
+            }
+            ++stream_idx;
+            return out;
+        },
+        "xgrammar spec_accept");
 }
 
 }  // namespace rtp_llm

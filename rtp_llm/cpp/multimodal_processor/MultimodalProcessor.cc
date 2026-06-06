@@ -7,8 +7,6 @@
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 
-namespace py = pybind11;
-
 namespace rtp_llm {
 
 ErrorInfo MultimodalProcessor::getStrHash(int32_t* token_ids, std::string& url, int mm_emb_len) {

@@ -60,8 +60,12 @@ protected:
         PDSepConfig         pd_sep_config;
         ParallelismConfig   parallelism_config;
         ModelSpecificConfig model_specific_config;
-        return std::make_shared<FIFOScheduler>(
-            runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
+        return std::make_shared<FIFOScheduler>(runtime_config,
+                                               model_config,
+                                               pd_sep_config,
+                                               parallelism_config,
+                                               model_specific_config,
+                                               cache_manager_);
     }
 
     GenerateStreamPtr createStream(const std::vector<int>& input_tokens        = {1, 2, 3},
@@ -238,8 +242,12 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_CountedInBatchLimit)
     PDSepConfig         pd_sep_config;
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
-    auto                scheduler = std::make_shared<FIFOScheduler>(
-        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
+    auto                scheduler = std::make_shared<FIFOScheduler>(runtime_config,
+                                                                    model_config,
+                                                                    pd_sep_config,
+                                                                    parallelism_config,
+                                                                    model_specific_config,
+                                                                    cache_manager_);
 
     auto pending_ctx = createPendingAsyncContext();
     EXPECT_CALL(*mock_coord_, asyncRead(_)).WillRepeatedly(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));

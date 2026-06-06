@@ -1,6 +1,5 @@
 #pragma once
-#include <torch/extension.h>
-#include "rtp_llm/cpp/utils/Logger.h"
+#include <string>
 
 namespace torch_ext {
 

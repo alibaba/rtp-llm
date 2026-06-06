@@ -78,6 +78,18 @@ def git_deps():
         ],
     )
 
+    # xgrammar v0.1.32 — structured output (json_schema/regex) grammar engine.
+    # init_submodules=True to fetch 3rdparty/dlpack (required header-only dep).
+    # Internal source overrides this in internal_source/deps/git.bzl with a
+    # gitlab mirror and selective submodule init (skips cpptrace/googletest).
+    new_git_repository(
+        name = "xgrammar",
+        remote = "https://github.com/mlc-ai/xgrammar.git",
+        commit = "62e13551b9b63251114894c5ee638564b160dd48",  # v0.1.32
+        init_submodules = True,
+        build_file = str(Label("@rtp_llm//3rdparty/xgrammar:xgrammar.BUILD")),
+    )
+
     new_git_repository(
         name = "flashmla",
         remote = "https://github.com/deepseek-ai/FlashMLA.git",

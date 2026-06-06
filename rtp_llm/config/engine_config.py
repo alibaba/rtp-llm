@@ -10,6 +10,7 @@ from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.py_config_modules import (
     MIN_WORKER_INFO_PORT_NUM,
     WORKER_INFO_PORT_NUM,
+    GrammarConfig,
     LoadConfig,
     PyEnvConfigs,
     ServerConfig,
@@ -69,6 +70,7 @@ class EngineConfig:
     arpc_config: ArpcConfig
     grpc_config: GrpcConfig
     load_config: LoadConfig
+    grammar_config: GrammarConfig
 
     def to_string(self) -> str:
         """Return a formatted string representation of EngineConfig for debugging.
@@ -178,6 +180,11 @@ class EngineConfig:
             lines.append(self.load_config.to_string())
         else:
             lines.append(str(self.load_config))
+        lines.append("\n[GrammarConfig]")
+        if hasattr(self.grammar_config, "to_string"):
+            lines.append(self.grammar_config.to_string())
+        else:
+            lines.append(str(self.grammar_config))
 
         lines.append("\n" + "=" * 80)
         return "\n".join(lines)
@@ -227,6 +234,7 @@ class EngineConfig:
         arpc_config = py_env_configs.arpc_config
         grpc_config = py_env_configs.grpc_config
         load_config = py_env_configs.load_config
+        grammar_config = py_env_configs.grammar_config
 
         # Setup pd_sep_config role_type based on vit_separation
         if (
@@ -267,6 +275,7 @@ class EngineConfig:
             arpc_config=arpc_config,
             grpc_config=grpc_config,
             load_config=load_config,
+            grammar_config=grammar_config,
         )
 
         runtime_config.max_generate_batch_size = concurrency_config.concurrency_limit

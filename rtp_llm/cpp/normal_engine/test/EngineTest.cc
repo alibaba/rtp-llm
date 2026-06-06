@@ -18,9 +18,7 @@ namespace W = rtp_llm::W;
 
 namespace rtp_llm {
 
-class NormalEngineTest: public DeviceTestBase {
-public:
-};
+class NormalEngineTest: public DeviceTestBase {};
 
 TEST_F(NormalEngineTest, testInt8KVCache) {
     CustomConfig config;

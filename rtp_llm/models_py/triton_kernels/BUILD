@@ -53,6 +53,12 @@ py_library(
 )
 
 py_library(
+    name = "grammar",
+    srcs = glob(["grammar/*.py"]),
+    visibility = ["//visibility:public"]
+)
+
+py_library(
     name = "triton_kernels",
     deps = [
         ":autotune_cache",
@@ -62,6 +68,7 @@ py_library(
         ":moe",
         ":common",
         ":sparse_mla",
+        ":grammar",
     ],
     visibility = ["//visibility:public"]
 )

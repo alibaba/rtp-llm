@@ -53,6 +53,24 @@ cc_test(
 )
 
 cc_test(
+    name = "grammar_manager_abort_test",
+    srcs = [
+        "GrammarManagerAbortTest.cc",
+    ],
+    data = [],
+    copts = copts() + ["-fno-access-control"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
+        "@xgrammar//:xgrammar",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
     name = "fifo_scheduler_async_cache_test",
     srcs = [
         "FIFOSchedulerAsyncCacheTest.cc",
@@ -65,3 +83,4 @@ cc_test(
     },
     exec_properties = {'gpu':'A10'},
 )
+
