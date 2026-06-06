@@ -202,19 +202,12 @@ build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
 build:cicd --remote_upload_local_results
 build:cicd --worker_verbose
 build:cicd --show_result=0 --auto_output_filter=all
-# The remote cache cluster aggressively evicts CAS blobs while keeping the
-# action-cache entries that reference them, so a cache HIT on a C++ compile
-# action fails with java.io.IOException "Invalid action cache entry ...
-# expected output does not exist" (exit 34). A cache hit on a poisoned entry
-# fails regardless of download mode, and globally disabling cache reads
-# breaks the cache-only ROCm toolchain genrules (they cannot execute in the
-# build container). So mark ONLY the C++ compile/link actions no-cache: this
-# makes Bazel send skip_cache_lookup=true so the remote executor re-runs them
-# fresh instead of returning a poisoned cached result, while the toolchain
-# genrules still resolve from cache.
-build:cicd --modify_execution_info=CppCompile=+no-cache,CppLink=+no-cache
-# If a CAS input blob is evicted before an action reads it
-# (a CacheNotFoundException), retry the build instead of failing.
+# Retry the build if a remote CAS input blob is evicted before an action
+# reads it (a CacheNotFoundException) instead of failing outright. NOTE: this
+# does NOT cover the "Invalid action cache entry ... expected output does not
+# exist" failure seen on the online_aone cluster, which is a server-side CAS
+# eviction / dangling action-cache entry problem (the executor ignores
+# skip_cache_lookup) and must be fixed in the remote cache infra, not here.
 build:cicd --experimental_remote_cache_eviction_retries=5
 test:cicd --test_output=errors --max_test_output_bytes=10240000 --experimental_ui_max_stdouterr_bytes=31457280
 
