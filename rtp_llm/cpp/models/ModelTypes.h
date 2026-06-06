@@ -56,7 +56,7 @@ struct GptModelInitParams {
     // When >1, the model's pre-output residual ([T, hc_mult*hidden_size])
     // is the contract between target and draft for MTP — see
     // MtpExecutor::makeFakeSPOutputBuffer and CudaGraphRunner input_hiddens.
-    int64_t                               hc_mult                 = 1;
+    int64_t hc_mult = 1;
 };
 
 enum GptModelInputIndex : size_t {
@@ -79,6 +79,7 @@ enum GptModelInputIndex : size_t {
     mmFeaturesSize,  // hidden_size of mm features
     mmFeaturesDtype,
     needAllLogits,
+    needAllHiddenStates,
     mtpHiddenStates,
     mtpHiddenStatesDtype,
     skipRun,

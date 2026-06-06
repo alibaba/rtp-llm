@@ -333,9 +333,10 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     }
 
     for (const auto& stream : stream_groups.decodeStreams()) {
-        model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
-        auto  current_batch_size    = stream->currentBatchSize();
-        auto& kv_cache              = *stream->kvCachePtr();
+        model_input.need_all_logits        = model_input.need_all_logits || stream->calculateLoss();
+        model_input.need_all_hidden_states = model_input.need_all_hidden_states || stream->needReturnHiddenStates();
+        auto  current_batch_size           = stream->currentBatchSize();
+        auto& kv_cache                     = *stream->kvCachePtr();
         RTP_LLM_LOG_DEBUG("decode kv_cache: %s", kv_cache.debugString().c_str());
         RTP_LLM_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
 
@@ -404,9 +405,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     ctx.prefix_lengths_host = prefix_lengths_host.data_ptr<int32_t>();
 
     for (const auto& stream : stream_groups.contextStreams()) {
-        model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
-        auto  current_batch_size    = stream->currentBatchSize();
-        auto& kv_cache              = *stream->kvCachePtr();
+        model_input.need_all_logits        = model_input.need_all_logits || stream->calculateLoss();
+        model_input.need_all_hidden_states = model_input.need_all_hidden_states || stream->needReturnHiddenStates();
+        auto  current_batch_size           = stream->currentBatchSize();
+        auto& kv_cache                     = *stream->kvCachePtr();
         if (config_.enable_detail_log) {
             RTP_LLM_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
             RTP_LLM_LOG_DEBUG("context stream: %s", stream->debugString().c_str());

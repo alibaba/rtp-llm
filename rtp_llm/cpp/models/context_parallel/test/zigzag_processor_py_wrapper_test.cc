@@ -15,9 +15,11 @@ namespace unittest {
 class ZigZagProcessorTestWrapper: public ZigZagProcessor {
 public:
     ZigZagProcessorTestWrapper(): ZigZagProcessor(ParallelismConfig{}) {}
+    explicit ZigZagProcessorTestWrapper(const ParallelismConfig& cfg): ZigZagProcessor(cfg) {}
     using ZigZagProcessor::plan;
     using ZigZagProcessor::generateQKVRestoreIndices;
     using ZigZagProcessor::generateQKVPaddingMask;
+    using ZigZagProcessor::computeLocalLastHidden;
 };
 
 // Wrapper for ZigZagProcessor::plan that returns a tuple
@@ -80,6 +82,30 @@ zigzagHandleInputsWithHidden(const torch::Tensor& total_input_tokens,
                            cp_params.prefill_shuffle_indices.cpu().clone());
 }
 
+// Wrapper for ZigZagProcessor::computeLocalLastHidden — this rank's contribution
+// to the gathered last-token hidden (no comm). The Python test sums these across
+// ranks to simulate the all-reduce in handleOutputsLastHidden.
+torch::Tensor zigzagComputeLocalLastHidden(const torch::Tensor& hidden_chunk,
+                                           const torch::Tensor& restore_indice,
+                                           const torch::Tensor& padding_mask,
+                                           const torch::Tensor& lm_output_indexes,
+                                           int                  cp_rank,
+                                           int                  cp_size) {
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_rank = cp_rank;
+    parallelism_config.tp_size = cp_size;
+    ZigZagProcessorTestWrapper processor(parallelism_config);
+
+    GptModelInputs inputs;
+    inputs.lm_output_indexes = lm_output_indexes.contiguous().clone();
+
+    torch_ext::PyContextParallelParams cp_params;
+    cp_params.prefill_qkv_restore_indice = restore_indice.contiguous().clone();
+    cp_params.prefill_qkv_padding_mask   = padding_mask.contiguous().clone();
+
+    return processor.computeLocalLastHidden(hidden_chunk.contiguous().clone(), inputs, cp_params).cpu().clone();
+}
+
 PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
     m.def("context_parallel_load_balance_split",
           &zigzagProcessorPlanWrapper,
@@ -114,6 +140,16 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("cp_rank"),
           py::arg("cp_size"),
           "Run CP handleInputs and return split input tokens, lengths, hidden states, and shuffle indices");
+
+    m.def("compute_local_last_hidden",
+          &zigzagComputeLocalLastHidden,
+          py::arg("hidden_chunk"),
+          py::arg("restore_indice"),
+          py::arg("padding_mask"),
+          py::arg("lm_output_indexes"),
+          py::arg("cp_rank"),
+          py::arg("cp_size"),
+          "This rank's contribution to the CP gather-last-hidden (sum across ranks == gathered last hidden)");
 }
 
 }  // namespace unittest

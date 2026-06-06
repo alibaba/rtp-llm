@@ -88,6 +88,12 @@ private:
                                       const GptModelInputs& inputs,
                                       torch::Tensor         merged_eagle3_hidden,
                                       bool                  skip_final_layernorm = false);
+    // CP gather-last-hidden exit: `hidden` is already the lm_output_indexes-selected,
+    // post-final-layernorm rows produced by handleOutputsLastHidden, so this runs
+    // lm_head directly (no index_select, no final layernorm — matching the existing
+    // CP path's skip_final_layernorm=true) and returns the small [num_lm, hidden]
+    // both as hidden_states and all_hidden_states.
+    GptModelOutputs forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs);
     MicroBatchPlan  planMicroBatches(const GptModelInputs& inputs);
     std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
          splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);

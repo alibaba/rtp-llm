@@ -62,7 +62,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] ?
             (std::uint8_t)torchDTypeToDataType(inputs.multimodal_features.value()[0].dtype()) :
             0;
-    shape_hints_ptr[GptModelInputIndex::needAllLogits] = inputs.need_all_logits;
+    shape_hints_ptr[GptModelInputIndex::needAllLogits]       = inputs.need_all_logits;
+    shape_hints_ptr[GptModelInputIndex::needAllHiddenStates] = inputs.need_all_hidden_states;
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStates] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype] =
@@ -103,6 +104,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     torch::Tensor mm_features_shape_t;
     int32_t*      mm_features_shape_ptr = nullptr;
     inputs.need_all_logits              = shape_hints_ptr[GptModelInputIndex::needAllLogits];
+    inputs.need_all_hidden_states       = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
     inputs.skip_run                     = shape_hints_ptr[GptModelInputIndex::skipRun];
     inputs.is_fake_stream               = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     if (inputs.skip_run) {

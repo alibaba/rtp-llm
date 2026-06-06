@@ -773,6 +773,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // already used by callForwardPostLayers.
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
         if (device_props_.enable_prefill_cp && has_context_request) {
+            // When no consumer needs the full sequence hidden, gather only the
+            // last-token rows lm_head needs instead of all-gathering+restoring the
+            // full [seq, hidden] (the 14 GiB block at the 1M-prefill OOM). The
+            // gather is a small [num_lm, hidden] all-reduce-sum; see
+            // ZigZagProcessor::handleOutputsLastHidden.
+            if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
+                context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
+                return forwardPostLayersLastHidden(hidden_states, inputs);
+            }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
             return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
         }
@@ -962,6 +971,46 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
     } else {
         return {torch::Tensor(), torch::Tensor(), hidden};
     }
+}
+
+GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs) {
+    // `hidden` is already the lm_output_indexes-selected, post-final-layernorm rows
+    // ([num_lm, hidden_size]) gathered by handleOutputsLastHidden. Mirror the CP
+    // exit's existing tail: skip the final layernorm (the CP path passes
+    // skip_final_layernorm=true) and the lm_output_indexes index_select (already
+    // applied during the gather), then run lm_head and TP-sync the logits.
+    DevicePerfWrapper wrapper(enable_device_perf_, "forwardPostLayersLastHidden");
+    const auto&       lm_head = weights_.lm_head;
+    if (!lm_head) {
+        return {torch::Tensor(), torch::Tensor(), hidden};
+    }
+    printTorchTensorData(hidden, "last_hidden");
+
+    torch::Tensor last_hidden = hidden;
+    torch::Tensor logits;
+    {
+        RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(lm_head_mm)");
+#if USING_CUDA
+        if (lm_head->kernel.dtype() == torch::kBFloat16) {
+            logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
+        } else
+#endif
+        {
+            logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
+        }
+    }
+    printTorchTensorData(logits, "logits");
+    if (device_props_.tp_size > 1) {
+        RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
+        logits = tpSyncEmbeddingOrLogits(logits);
+    }
+    if (check_nan_) {
+        RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
+        RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
+    }
+    // 3rd field (all_hidden_states) is the small [num_lm, hidden_size] — the whole
+    // point of this path is to never materialize the full [seq, hidden] sequence.
+    return {logits, last_hidden, last_hidden, torch::Tensor(), torch::Tensor()};
 }
 
 MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {

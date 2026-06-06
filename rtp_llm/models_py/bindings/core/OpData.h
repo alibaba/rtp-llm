@@ -78,10 +78,14 @@ struct GptModelInputs {
     bool          use_opaque_kv_cache_store = false;
 
     bool need_all_logits = false;
-    bool need_moe_gating = false;
-    bool warmup          = false;
-    bool skip_run        = false;
-    bool is_fake_stream  = false;
+    // Set when any stream requests return_all_hidden_states. Gates whether the
+    // CP prefill exit must materialize the full [seq, hidden] all_hidden_states
+    // (true) or may gather only the last-token rows lm_head needs (false).
+    bool need_all_hidden_states = false;
+    bool need_moe_gating        = false;
+    bool warmup                 = false;
+    bool skip_run               = false;
+    bool is_fake_stream         = false;
 
     // Linear attention target verify should write draft tokens mamba states
     // to extra kv_cache blocks when normal inference only write last token mamba state.

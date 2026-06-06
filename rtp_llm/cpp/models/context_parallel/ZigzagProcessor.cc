@@ -147,4 +147,52 @@ size_t ZigZagProcessor::handleOutputs(torch::Tensor&                            
 #endif
 }
 
+torch::Tensor ZigZagProcessor::computeLocalLastHidden(const torch::Tensor&                      hidden_states,
+                                                      const GptModelInputs&                     inputs,
+                                                      const torch_ext::PyContextParallelParams& cp_params) {
+    // chunk_len is this rank's local row count; the all-gather lays rank r at
+    // offset r * chunk_len, so a chunk-concat flat index g decomposes as
+    // g = owner_rank * chunk_len + local_off (see handleOutputs / generateQKVRestoreIndices).
+    const int64_t chunk_len = hidden_states.size(0);
+    const int64_t hidden    = hidden_states.size(1);
+
+    // Map each requested output row (in restored valid-seq order) to its
+    // chunk-concat flat index, without ever materializing the full sequence.
+    torch::Tensor valid_indices = torch::nonzero(cp_params.prefill_qkv_padding_mask).squeeze(-1);
+    torch::Tensor combined      = cp_params.prefill_qkv_restore_indice.index_select(0, valid_indices);
+    torch::Tensor sel           = combined.index_select(0, inputs.lm_output_indexes.to(torch::kLong)).to(torch::kLong);
+
+    const int64_t num_lm = sel.size(0);
+
+    // sel is non-negative kLong; floor-division and the residual recover (rank, offset).
+    torch::Tensor owner     = sel.div(chunk_len, c10::string_view("floor"));
+    torch::Tensor local_off = sel - owner.mul(chunk_len);
+    torch::Tensor mine      = (owner == static_cast<int64_t>(parallelism_config_.tp_rank));
+    torch::Tensor mine_rows = torch::nonzero(mine).squeeze(-1);  // positions in [0, num_lm) this rank owns
+
+    torch::Tensor local_buf = torch::zeros({num_lm, hidden}, hidden_states.options());
+    if (mine_rows.size(0) > 0) {
+        torch::Tensor my_local_off = local_off.index_select(0, mine_rows);
+        local_buf.index_copy_(0, mine_rows, hidden_states.index_select(0, my_local_off));
+    }
+    return local_buf;
+}
+
+void ZigZagProcessor::handleOutputsLastHidden(torch::Tensor&                            hidden_states,
+                                              const GptModelInputs&                     inputs,
+                                              const torch_ext::PyContextParallelParams& cp_params) {
+#if !USING_CUDA
+    RTP_LLM_FAIL("Context parallel not supported on ROCm");
+#else
+    // Each requested last-token row is owned by exactly one CP rank (zigzag is a
+    // bijection on valid positions), so every other rank contributes an all-zero
+    // row — an all-reduce-sum reconstructs the gathered rows exactly (no bf16
+    // accumulation error) over a small [num_lm, hidden] buffer instead of the
+    // full [seq, hidden] all-gather.
+    torch::Tensor local_buf = computeLocalLastHidden(hidden_states, inputs, cp_params);
+    auto          reduced   = execAllReduce({local_buf, ReduceOp::Sum, false, ParallelMode::TP});
+    hidden_states           = reduced.buffer;
+#endif
+}
+
 }  // namespace rtp_llm
