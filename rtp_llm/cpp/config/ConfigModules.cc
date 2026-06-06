@@ -416,6 +416,13 @@ std::string RuntimeConfig::to_string() const {
             oss << ", ";
     }
     oss << "]\n"
+        << "all_worker_grpc_addrs: [";
+    for (size_t i = 0; i < all_worker_grpc_addrs.size(); ++i) {
+        oss << all_worker_grpc_addrs[i];
+        if (i < all_worker_grpc_addrs.size() - 1)
+            oss << ", ";
+    }
+    oss << "]\n"
         << "specify_gpu_arch: " << specify_gpu_arch;
     return oss.str();
 }

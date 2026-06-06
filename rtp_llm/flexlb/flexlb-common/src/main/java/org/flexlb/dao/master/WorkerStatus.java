@@ -44,6 +44,7 @@ public class WorkerStatus {
     private long iterateCount;
     private long dpSize;
     private long tpSize;
+    private long dpRank;
 
     private AtomicLong statusLastUpdateTime = new AtomicLong(-1); // Last status update time (microseconds)
     private AtomicLong statusUpdateIntervalUs = new AtomicLong(0); // Actual interval between last two status updates (microseconds)
@@ -130,6 +131,12 @@ public class WorkerStatus {
                     Logger.debug("Task {} first confirmed by worker", requestId);
                 }
                 localTask.updateTaskState(TaskStateEnum.FINISHED);
+                localTask.setErrorCode(finishedTask.getErrorCode());
+                localTask.setErrorMessage(finishedTask.getErrorMessage());
+                if (finishedTask.getErrorCode() != 0L) {
+                    logger.warn("Task {} finished with worker error code={}, message={}",
+                            requestId, finishedTask.getErrorCode(), finishedTask.getErrorMessage());
+                }
 
                 if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
                     long delta = finishedTask.estimatePrefillTime();
@@ -161,6 +168,8 @@ public class WorkerStatus {
                 localTask.setIterateCount(runningTask.getIterateCount());
                 localTask.setEndTimeMs(runningTask.getEndTimeMs());
                 localTask.setDpRank(runningTask.getDpRank());
+                localTask.setErrorCode(runningTask.getErrorCode());
+                localTask.setErrorMessage(runningTask.getErrorMessage());
 
                 continue;
             }
@@ -178,6 +187,8 @@ public class WorkerStatus {
                 localTask.setInputLength(waitingTask.getInputLength());
                 localTask.setWaitingTime(waitingTask.getWaitingTime());
                 localTask.setDpRank(waitingTask.getDpRank());
+                localTask.setErrorCode(waitingTask.getErrorCode());
+                localTask.setErrorMessage(waitingTask.getErrorMessage());
 
                 continue;
             }

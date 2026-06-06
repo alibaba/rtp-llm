@@ -1,5 +1,9 @@
 #pragma once
 #include <atomic>
+#include <list>
+#include <shared_mutex>
+#include <string>
+#include <unordered_map>
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 
@@ -33,6 +37,17 @@ public:
             {request_id, stream->prefixLength(), stream->inputLength(), stream->getTimeInfo().wait_time_us});
     }
 
+    void enqueuePending(int64_t request_id, int64_t input_length) {
+        std::unique_lock<std::shared_mutex> lock(read_write_lock_);
+        running_streams_[request_id] = EngineScheduleInfo::TaskInfo({request_id,
+                                                                     /*prefix_length=*/0,
+                                                                     input_length,
+                                                                     /*waiting_time_ms=*/0,
+                                                                     /*iterate_count=*/0,
+                                                                     /*end_time_ms=*/-1,
+                                                                     /*is_waiting=*/true});
+    }
+
     void dequeue(int64_t request_id, const GenerateStreamPtr& stream) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         auto                                ptr = running_streams_.find(request_id);
@@ -49,10 +64,48 @@ public:
         task_info.input_length    = stream->inputLength();
         task_info.waiting_time_ms = stream->getTimeInfo().wait_time_us / 1000;
         task_info.iterate_count   = stream->iterCount();
+        if (stream->hasError()) {
+            task_info.error_code    = static_cast<int64_t>(stream->statusInfo().code());
+            task_info.error_message = stream->statusInfo().ToString();
+        }
 
         int64_t version = version_.fetch_add(1, std::memory_order_relaxed);
         finished_streams_.push_back(std::make_pair(version, task_info));
         running_streams_.erase(ptr);
+    }
+
+    void finishTask(int64_t request_id,
+                    int64_t input_length = 0,
+                    int64_t prefix_length = 0,
+                    int64_t error_code = 0,
+                    const std::string& error_message = "") {
+        std::unique_lock<std::shared_mutex> lock(read_write_lock_);
+        EngineScheduleInfo::TaskInfo task_info{request_id,
+                                               prefix_length,
+                                               input_length,
+                                               /*waiting_time_ms=*/0,
+                                               /*iterate_count=*/0,
+                                               /*end_time_ms=*/-1,
+                                               /*is_waiting=*/true};
+        auto                         ptr = running_streams_.find(request_id);
+        if (ptr != running_streams_.end()) {
+            task_info = ptr->second;
+            if (input_length > 0) {
+                task_info.input_length = input_length;
+            }
+            if (prefix_length > 0) {
+                task_info.prefix_length = prefix_length;
+            }
+            running_streams_.erase(ptr);
+        }
+        if (finished_streams_.size() >= finished_capacity_) {
+            finished_streams_.pop_front();
+        }
+        task_info.end_time_ms     = autil::TimeUtility::currentTimeInMilliSeconds();
+        task_info.error_code      = error_code;
+        task_info.error_message   = error_message;
+        int64_t version         = version_.fetch_add(1, std::memory_order_relaxed);
+        finished_streams_.push_back(std::make_pair(version, task_info));
     }
 
 protected:

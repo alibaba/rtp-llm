@@ -30,6 +30,10 @@ public:
     grpc::Status
     BatchEnqueue(grpc::ServerContext* context, const BatchEnqueueRequestPB* request, BatchEnqueueResponsePB* response);
 
+    grpc::Status BatchEnqueueDp(grpc::ServerContext*           context,
+                                const BatchEnqueueDpRequestPB* request,
+                                BatchEnqueueResponsePB*        response);
+
     grpc::Status FetchResponse(grpc::ServerContext*                   context,
                                const FetchRequestPB*                  request,
                                grpc::ServerWriter<GenerateOutputsPB>* writer);
@@ -56,6 +60,7 @@ private:
     bool         tryStartAsyncResponseWorker();
     void         finishAsyncResponseWorker();
     void         stopAsyncResponseWorkers();
+    std::string  batchTargetAddrForDpRank(int dp_rank) const;
 
 private:
     std::string                           decode_cluster_name_;

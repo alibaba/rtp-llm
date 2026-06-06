@@ -406,6 +406,7 @@ message TaskInfoPB {
     int64 end_time_ms = 7;
     int64 dp_rank = 8;
     bool is_waiting = 9;
+    ErrorDetailsPB error_info = 10;
 }
 
 message UpdateWeightsRequestPB {
@@ -429,6 +430,7 @@ message WorkerStatusPB {
     bool alive = 13;
     string precision = 14;
     int64 latest_finished_version = 15;
+    int64 dp_rank = 16;
 }
 
 message EmbeddingInputPB {
@@ -638,19 +640,43 @@ message CpuTpBroadcastResponsePB {
     string error_message = 2;
 }
 
-message BatchEnqueueRequestPB {
-    repeated GenerateInputPB inputs = 1;
-    int64 batch_id = 2;
+message BatchEnqueueExternalInputPB {
+    GenerateInputPB input = 1;
 }
 
-message BatchEnqueueAckPB {
+message BatchEnqueueDpSlotPB {
+    int32 dp_rank = 1;
+    repeated BatchEnqueueExternalInputPB requests = 2;
+}
+
+message BatchEnqueueRequestPB {
+    int64 batch_id = 1;
+    repeated BatchEnqueueDpSlotPB dp_slots = 2;
+}
+
+message BatchEnqueueDpInputPB {
+    GenerateInputPB input = 1;
+}
+
+message BatchEnqueueDpRequestPB {
+    int64 batch_id = 1;
+    int32 dp_rank = 2;
+    repeated BatchEnqueueDpInputPB requests = 3;
+}
+
+message BatchEnqueueSuccessPB {
+    int64 request_id = 1;
+}
+
+message BatchEnqueueErrorPB {
     int64 request_id = 1;
     ErrorDetailsPB error_info = 2;
 }
 
 message BatchEnqueueResponsePB {
-    repeated BatchEnqueueAckPB acks = 1;
-    int64 batch_id = 2;
+    int64 batch_id = 1;
+    repeated BatchEnqueueSuccessPB successes = 2;
+    repeated BatchEnqueueErrorPB errors = 3;
 }
 
 message FetchRequestPB {
@@ -688,6 +714,7 @@ service RpcService {
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
     rpc BatchEnqueue(BatchEnqueueRequestPB) returns (BatchEnqueueResponsePB);
+    rpc BatchEnqueueDp(BatchEnqueueDpRequestPB) returns (BatchEnqueueResponsePB);
     rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
     rpc Cancel(CancelRequestPB) returns (EmptyPB);
 }

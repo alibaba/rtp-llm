@@ -244,6 +244,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         result.setServerIp(worker.getIp());
         result.setHttpPort(worker.getPort());
         result.setGrpcPort(CommonUtils.toGrpcPort(worker.getPort()));
+        result.setDpRank(worker.getDpRank());
         return result;
     }
 }

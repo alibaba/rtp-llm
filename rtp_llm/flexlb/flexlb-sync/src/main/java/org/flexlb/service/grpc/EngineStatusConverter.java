@@ -30,6 +30,7 @@ public class EngineStatusConverter {
         response.setIterateCount(workerStatusPB.getIterateCount());
         response.setDpSize(workerStatusPB.getDpSize());
         response.setTpSize(workerStatusPB.getTpSize());
+        response.setDpRank(workerStatusPB.getDpRank());
         response.setStatusVersion(workerStatusPB.getStatusVersion());
         response.setLatestFinishedVersion(workerStatusPB.getLatestFinishedVersion());
         response.setAlive(workerStatusPB.getAlive());
@@ -85,6 +86,10 @@ public class EngineStatusConverter {
             taskInfo.setIterateCount(taskInfoPB.getIterateCount());
             taskInfo.setEndTimeMs(taskInfoPB.getEndTimeMs());
             taskInfo.setDpRank(taskInfoPB.getDpRank());
+            if (taskInfoPB.hasErrorInfo() && taskInfoPB.getErrorInfo().getErrorCode() != 0L) {
+                taskInfo.setErrorCode(taskInfoPB.getErrorInfo().getErrorCode());
+                taskInfo.setErrorMessage(taskInfoPB.getErrorInfo().getErrorMessage());
+            }
 
             taskInfoMap.put(String.valueOf(taskInfoPB.getRequestId()), taskInfo);
         }

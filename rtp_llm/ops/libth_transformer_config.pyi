@@ -1779,6 +1779,7 @@ class RuntimeConfig:
     use_gather_batch_scheduler: bool
     warm_up: bool
     warm_up_with_loss: bool
+    all_worker_grpc_addrs: list[str]
     worker_addrs: list[str]
     worker_grpc_addrs: list[str]
 

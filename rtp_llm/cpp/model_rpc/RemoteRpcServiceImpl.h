@@ -47,6 +47,17 @@ public:
         return prefill_server_->BatchEnqueue(context, request, response);
     }
 
+    grpc::Status BatchEnqueueDp(grpc::ServerContext*           context,
+                                const BatchEnqueueDpRequestPB* request,
+                                BatchEnqueueResponsePB*        response) override {
+        if (!prefill_server_) {
+            auto error_msg = "server not implement BatchEnqueueDp";
+            RTP_LLM_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
+        }
+        return prefill_server_->BatchEnqueueDp(context, request, response);
+    }
+
     grpc::Status FetchResponse(grpc::ServerContext*                   context,
                                const FetchRequestPB*                  request,
                                grpc::ServerWriter<GenerateOutputsPB>* writer) override {

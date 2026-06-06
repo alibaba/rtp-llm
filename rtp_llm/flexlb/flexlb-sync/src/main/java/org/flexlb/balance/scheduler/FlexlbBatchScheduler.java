@@ -90,7 +90,9 @@ public class FlexlbBatchScheduler {
 
             Response routeResponse = router.route(ctx);
             if (routeResponse == null || !routeResponse.isSuccess()) {
-                future.complete(routeResponse != null ? routeResponse : Response.error(StrategyErrorType.NO_AVAILABLE_WORKER));
+                future.complete(routeResponse != null
+                        ? routeResponse
+                        : Response.error(StrategyErrorType.NO_AVAILABLE_WORKER));
                 return future;
             }
 
@@ -213,18 +215,21 @@ public class FlexlbBatchScheduler {
                     .append(" hit_cache=").append(hc).append('}');
         }
         long predMs = createPredictor(configService.loadBalanceConfig()).estimateMs(totalTokens, totalHit);
-        Logger.info("flexlb_batch_dispatch batch_id={} batch_size={} total_tokens={} total_hit={} pred_ms={} prefill={}:{} items=[{}]",
+        ServerStatus entrypoint = batchEntrypoint(prefill);
+        Logger.info("flexlb_batch_dispatch batch_id={} batch_size={} total_tokens={} total_hit={} "
+                        + "pred_ms={} prefill={}:{} entrypoint={}:{} items=[{}]",
                 batchId, activeItems.size(), totalTokens, totalHit, predMs,
-                prefill.getServerIp(), prefill.getGrpcPort(), itemDetail);
+                prefill.getServerIp(), prefill.getGrpcPort(),
+                entrypoint.getServerIp(), entrypoint.getGrpcPort(), itemDetail);
 
         try {
             long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
             EngineRpcService.BatchEnqueueResponsePB response =
-                    grpcClient.batchEnqueue(prefill.getServerIp(), prefill.getGrpcPort(), request, deadlineMs);
+                    grpcClient.batchEnqueue(entrypoint.getServerIp(), entrypoint.getGrpcPort(), request, deadlineMs);
             handleAck(batchId, activeItems, response);
         } catch (Throwable t) {
-            Logger.warn("BatchEnqueue failed batchId: {}, prefill: {}:{}, err: {}",
-                    batchId, prefill.getServerIp(), prefill.getGrpcPort(), t.getMessage());
+            Logger.warn("BatchEnqueue failed batchId: {}, entrypoint: {}:{}, err: {}",
+                    batchId, entrypoint.getServerIp(), entrypoint.getGrpcPort(), t.getMessage());
             for (BatchItem item : activeItems) {
                 failAck(item, t);
             }
@@ -235,9 +240,31 @@ public class FlexlbBatchScheduler {
             throws InvalidProtocolBufferException {
         EngineRpcService.BatchEnqueueRequestPB.Builder builder = EngineRpcService.BatchEnqueueRequestPB.newBuilder()
                 .setBatchId(batchId);
-        int groupSize = items.size();
+        Map<Long, List<BatchItem>> byDpRank = new HashMap<>();
         for (BatchItem item : items) {
-            builder.addInputs(buildInput(batchId, groupSize, item));
+            byDpRank.computeIfAbsent(item.prefill.getDpRank(), ignored -> new ArrayList<>()).add(item);
+        }
+        try {
+            byDpRank.entrySet().stream()
+                    .sorted(Map.Entry.comparingByKey())
+                    .forEach(entry -> {
+                        EngineRpcService.BatchEnqueueDpSlotPB.Builder slot =
+                                EngineRpcService.BatchEnqueueDpSlotPB.newBuilder()
+                                        .setDpRank(entry.getKey().intValue());
+                        int groupSize = entry.getValue().size();
+                        for (BatchItem item : entry.getValue()) {
+                            try {
+                                slot.addRequests(EngineRpcService.BatchEnqueueExternalInputPB.newBuilder()
+                                        .setInput(buildInput(batchId, groupSize, item))
+                                        .build());
+                            } catch (InvalidProtocolBufferException e) {
+                                throw new BatchRequestBuildException(e);
+                            }
+                        }
+                        builder.addDpSlots(slot.build());
+                    });
+        } catch (BatchRequestBuildException e) {
+            throw (InvalidProtocolBufferException) e.getCause();
         }
         return builder.build();
     }
@@ -288,25 +315,35 @@ public class FlexlbBatchScheduler {
             return;
         }
 
-        Map<Long, EngineRpcService.BatchEnqueueAckPB> ackByRequestId = new HashMap<>(response.getAcksCount() * 2);
-        for (EngineRpcService.BatchEnqueueAckPB ack : response.getAcksList()) {
-            ackByRequestId.put(ack.getRequestId(), ack);
+        Map<Long, EngineRpcService.BatchEnqueueErrorPB> errorByRequestId =
+                new HashMap<>(response.getErrorsCount() * 2);
+        for (EngineRpcService.BatchEnqueueErrorPB error : response.getErrorsList()) {
+            errorByRequestId.put(error.getRequestId(), error);
+        }
+        Map<Long, EngineRpcService.BatchEnqueueSuccessPB> successByRequestId =
+                new HashMap<>(response.getSuccessesCount() * 2);
+        for (EngineRpcService.BatchEnqueueSuccessPB success : response.getSuccessesList()) {
+            successByRequestId.put(success.getRequestId(), success);
         }
 
         for (BatchItem item : items) {
             InflightEntry entry = inflight.get(item.requestId());
-            EngineRpcService.BatchEnqueueAckPB ack = ackByRequestId.get(item.requestId());
-            if (ack == null) {
-                failAck(item, new RuntimeException("BatchEnqueue missing ack for request " + item.requestId()));
-                continue;
-            }
-            if (ack.hasErrorInfo() && ack.getErrorInfo().getErrorCode() != 0L) {
-                failAck(item, new RuntimeException("BatchEnqueue rejected request "
-                        + item.requestId() + ": " + ack.getErrorInfo().getErrorMessage()));
+            if (successByRequestId.containsKey(item.requestId())) {
+                completeAckSuccess(batchId, item, entry);
                 continue;
             }
 
-            completeAckSuccess(batchId, item, entry);
+            if (errorByRequestId.containsKey(item.requestId())) {
+                EngineRpcService.BatchEnqueueErrorPB error = errorByRequestId.get(item.requestId());
+                String errorMessage = error.hasErrorInfo()
+                        ? error.getErrorInfo().getErrorMessage()
+                        : "missing error_info";
+                failAck(item, new RuntimeException("BatchEnqueue rejected request "
+                        + item.requestId() + ": " + errorMessage));
+                continue;
+            }
+
+            failAck(item, new RuntimeException("BatchEnqueue missing ack for request " + item.requestId()));
         }
     }
 
@@ -395,10 +432,52 @@ public class FlexlbBatchScheduler {
     private void cancelPrefill(InflightEntry entry) {
         try {
             long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
-            grpcClient.cancel(entry.prefill.getServerIp(), entry.prefill.getGrpcPort(), entry.item.requestId(), deadlineMs);
+            grpcClient.cancel(entry.prefill.getServerIp(),
+                    entry.prefill.getGrpcPort(),
+                    entry.item.requestId(),
+                    deadlineMs);
+            ServerStatus entrypoint = batchEntrypoint(entry.prefill);
+            if (!sameGrpcEndpoint(entrypoint, entry.prefill)) {
+                grpcClient.cancel(entrypoint.getServerIp(),
+                        entrypoint.getGrpcPort(),
+                        entry.item.requestId(),
+                        deadlineMs);
+            }
         } catch (RuntimeException e) {
             Logger.warn("FlexLB batch cancel failed for request {}", entry.item.requestId(), e);
         }
+    }
+
+    private ServerStatus batchEntrypoint(ServerStatus selectedPrefill) {
+        if (selectedPrefill == null || selectedPrefill.getRole() == null) {
+            return selectedPrefill;
+        }
+        Map<String, WorkerStatus> workerStatusMap =
+                engineWorkerStatus.selectModelWorkerStatus(selectedPrefill.getRole(), selectedPrefill.getGroup());
+        if (workerStatusMap == null) {
+            return selectedPrefill;
+        }
+        for (WorkerStatus workerStatus : workerStatusMap.values()) {
+            if (workerStatus != null
+                    && workerStatus.getStatusVersion().get() >= 0
+                    && workerStatus.getDpRank() == 0) {
+                ServerStatus entrypoint = copyOf(selectedPrefill);
+                entrypoint.setServerIp(workerStatus.getIp());
+                entrypoint.setHttpPort(workerStatus.getPort());
+                entrypoint.setGrpcPort(CommonUtils.toGrpcPort(workerStatus.getPort()));
+                entrypoint.setDpRank(workerStatus.getDpRank());
+                return entrypoint;
+            }
+        }
+        return selectedPrefill;
+    }
+
+    private static boolean sameGrpcEndpoint(ServerStatus left, ServerStatus right) {
+        if (left == null || right == null) {
+            return left == right;
+        }
+        return Objects.equals(left.getServerIp(), right.getServerIp())
+                && left.getGrpcPort() == right.getGrpcPort();
     }
 
     private static ServerStatus findServer(Response response, RoleType roleType) {
@@ -522,6 +601,7 @@ public class FlexlbBatchScheduler {
         status.setServerIp(src.getServerIp());
         status.setHttpPort(src.getHttpPort());
         status.setGrpcPort(src.getGrpcPort());
+        status.setDpRank(src.getDpRank());
         status.setPrefillTime(src.getPrefillTime());
         status.setGroup(src.getGroup());
         status.setDebugInfo(copyOf(src.getDebugInfo()));
@@ -770,7 +850,7 @@ public class FlexlbBatchScheduler {
 
         private void flushItems(List<BatchItem> items) {
             for (BatchItem item : items) {
-                inflight.put(item.requestId(), new InflightEntry(item, prefill));
+                inflight.put(item.requestId(), new InflightEntry(item, item.prefill()));
             }
             try {
                 dispatchExecutor.execute(() -> dispatch(items, prefill));
@@ -788,6 +868,12 @@ public class FlexlbBatchScheduler {
                 item.future.completeExceptionally(
                         new RuntimeException("FlexLB request deadline expired — cannot meet TTFT SLO"));
             }
+        }
+    }
+
+    private static final class BatchRequestBuildException extends RuntimeException {
+        private BatchRequestBuildException(Throwable cause) {
+            super(cause);
         }
     }
 

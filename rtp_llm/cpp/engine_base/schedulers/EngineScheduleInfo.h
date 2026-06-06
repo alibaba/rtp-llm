@@ -14,6 +14,8 @@ struct EngineScheduleInfo {
         int64_t iterate_count = 0;
         int64_t end_time_ms   = -1;
         bool    is_waiting    = true;
+        int64_t error_code    = 0;
+        std::string error_message;
     };
     std::vector<TaskInfo> running_task_info_list;
     std::vector<TaskInfo> finished_task_info_list;

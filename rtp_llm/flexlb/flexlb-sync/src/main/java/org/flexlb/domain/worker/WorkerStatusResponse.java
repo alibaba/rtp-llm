@@ -59,6 +59,9 @@ public class WorkerStatusResponse {
     @JsonProperty("tpSize")
     private long tpSize;
 
+    @JsonProperty("dpRank")
+    private long dpRank;
+
     @JsonProperty("alive")
     private boolean alive;
 

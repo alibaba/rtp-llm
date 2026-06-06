@@ -24,6 +24,10 @@ public class TaskInfo {
     private long endTimeMs;
     @JsonProperty("dp_rank")
     private long dpRank;
+    @JsonProperty("error_code")
+    private long errorCode;
+    @JsonProperty("error_message")
+    private String errorMessage;
 
     private long predictedMs;
 

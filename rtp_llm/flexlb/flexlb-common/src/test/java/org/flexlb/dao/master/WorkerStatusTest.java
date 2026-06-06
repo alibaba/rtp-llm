@@ -367,6 +367,8 @@ class WorkerStatusTest {
             waitingTask.setInputLength(200);
             waitingTask.setWaitingTime(100);
             waitingTask.setDpRank(1);
+            waitingTask.setErrorCode(7);
+            waitingTask.setErrorMessage("waiting error");
             Map<String, TaskInfo> waitingTaskInfo = new HashMap<>();
             waitingTaskInfo.put(String.valueOf(REQUEST_ID), waitingTask);
 
@@ -379,6 +381,8 @@ class WorkerStatusTest {
             assertEquals(200, updated.getInputLength());
             assertEquals(100, updated.getWaitingTime());
             assertEquals(1, updated.getDpRank());
+            assertEquals(7, updated.getErrorCode());
+            assertEquals("waiting error", updated.getErrorMessage());
         }
 
         @Test
@@ -425,12 +429,16 @@ class WorkerStatusTest {
             TaskInfo finishedTask = new TaskInfo();
             finishedTask.setRequestId(REQUEST_ID);
             finishedTask.setEndTimeMs(System.currentTimeMillis());
+            finishedTask.setErrorCode(13);
+            finishedTask.setErrorMessage("decode alloc failed");
             Map<String, TaskInfo> finishedTaskInfo = new HashMap<>();
             finishedTaskInfo.put(String.valueOf(REQUEST_ID), finishedTask);
 
             workerStatus.updateTaskStates(new HashMap<>(), new HashMap<>(), finishedTaskInfo);
 
             assertNull(workerStatus.getLocalTaskMap().get(REQUEST_ID));
+            assertEquals(13, localTask.getErrorCode());
+            assertEquals("decode alloc failed", localTask.getErrorMessage());
         }
 
         @Test
@@ -448,6 +456,8 @@ class WorkerStatusTest {
             runningTask.setIterateCount(2);
             runningTask.setEndTimeMs(12345L);
             runningTask.setDpRank(0);
+            runningTask.setErrorCode(9);
+            runningTask.setErrorMessage("running error");
             Map<String, TaskInfo> runningTaskInfo = new HashMap<>();
             runningTaskInfo.put(String.valueOf(REQUEST_ID), runningTask);
 
@@ -461,6 +471,8 @@ class WorkerStatusTest {
             assertEquals(50, updated.getPrefillTime());
             assertEquals(2, updated.getIterateCount());
             assertEquals(12345L, updated.getEndTimeMs());
+            assertEquals(9, updated.getErrorCode());
+            assertEquals("running error", updated.getErrorMessage());
         }
 
         @Test

@@ -135,7 +135,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
 
         // SLO filter: reject workers whose estimated TTFT exceeds SLO
         long sloMs = config.resolveSloMs(seqLen);
-        PrefillTimePredictor predictor = PredictorFactory.create(config);
+        PrefillTimePredictor predictor = createPredictor(config);
         availableWorkers = filterBySlo(availableWorkers, cacheMatchResults, seqLen, sloMs, predictor);
         if (CollectionUtils.isEmpty(availableWorkers)) {
             Logger.warn("No workers within SLO for role: {}, sloMs: {}", roleType.getCode(), sloMs);
@@ -461,6 +461,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             result.setServerIp(workerStatus.getIp());
             result.setHttpPort(workerStatus.getPort());
             result.setGrpcPort(CommonUtils.toGrpcPort(workerStatus.getPort()));
+            result.setDpRank(workerStatus.getDpRank());
         } catch (Exception e) {
             Logger.error("Failed to build server status for requestId: {}", requestId, e);
             result.setCode(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
@@ -468,6 +469,12 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             result.setSuccess(false);
         }
         return result;
+    }
+
+    private PrefillTimePredictor createPredictor(FlexlbConfig config) {
+        return new PrefillTimePredictor(
+                config.getCostAlpha0(), config.getCostAlpha1(), config.getCostAlpha2(),
+                config.getCostAlpha3(), config.getCostAlpha4(), config.getCostAlpha5());
     }
 
     /**

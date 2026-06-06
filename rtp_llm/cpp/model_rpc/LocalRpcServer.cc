@@ -257,6 +257,10 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_end_time_ms(task.end_time_ms);
         task_info->set_dp_rank(status_info.dp_rank);
         task_info->set_is_waiting(task.is_waiting);
+        if (task.error_code != 0) {
+            task_info->mutable_error_info()->set_error_code(task.error_code);
+            task_info->mutable_error_info()->set_error_message(task.error_message);
+        }
     }
 
     for (const auto& task : engine_schedule_info.finished_task_info_list) {
@@ -269,6 +273,10 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_end_time_ms(task.end_time_ms);
         task_info->set_dp_rank(status_info.dp_rank);
         task_info->set_is_waiting(task.is_waiting);
+        if (task.error_code != 0) {
+            task_info->mutable_error_info()->set_error_code(task.error_code);
+            task_info->mutable_error_info()->set_error_message(task.error_message);
+        }
     }
     response->set_dp_size(status_info.dp_size);
     response->set_tp_size(status_info.tp_size);
@@ -276,6 +284,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     response->set_latest_finished_version(status_info.latest_finished_version);
     response->set_alive(status_info.alive);
     response->set_precision(status_info.precision);
+    response->set_dp_rank(status_info.dp_rank);
     reportWorkerStatusTime(request_begin_time_us, request_after_ws_time_us);
     return grpc::Status::OK;
 }

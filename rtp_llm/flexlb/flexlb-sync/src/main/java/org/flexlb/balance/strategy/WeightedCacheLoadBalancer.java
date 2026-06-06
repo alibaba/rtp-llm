@@ -269,6 +269,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             result.setServerIp(optimalWorker.getIp());
             result.setHttpPort(optimalWorker.getPort());
             result.setGrpcPort(CommonUtils.toGrpcPort(optimalWorker.getPort()));
+            result.setDpRank(optimalWorker.getDpRank());
             result.setGroup(optimalWorker.getGroup());
             result.setRequestId(requestId);
         } catch (Exception e) {

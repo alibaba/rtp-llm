@@ -104,3 +104,16 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "rpc_server_runtime_meta_test",
+    srcs = [
+        "RpcServerRuntimeMetaTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)

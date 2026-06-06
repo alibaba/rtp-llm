@@ -53,6 +53,15 @@ public:
         return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "BatchEnqueue not implemented on this role");
     }
 
+    grpc::Status BatchEnqueueDp(grpc::ServerContext*           context,
+                                const BatchEnqueueDpRequestPB* request,
+                                BatchEnqueueResponsePB*        response) override {
+        (void)context;
+        (void)request;
+        (void)response;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "BatchEnqueueDp not implemented on this role");
+    }
+
     grpc::Status FetchResponse(grpc::ServerContext*                   context,
                                const FetchRequestPB*                  request,
                                grpc::ServerWriter<GenerateOutputsPB>* writer) override {
