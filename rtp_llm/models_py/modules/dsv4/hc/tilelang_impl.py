@@ -6,6 +6,7 @@ from typing import NoReturn
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.hc.base import HCHeadBase, HCUnitBase
 from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
     tk_mhc_head,
     tk_mhc_head_fused,
@@ -13,7 +14,6 @@ from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
     tk_mhc_post,
     tk_mhc_pre,
 )
-from rtp_llm.models_py.modules.dsv4.hc.base import HCHeadBase, HCUnitBase
 from rtp_llm.models_py.modules.dsv4.hc.utils import squeeze_hc_batch, wrap_hc_batch
 
 
@@ -95,12 +95,19 @@ class TileLangHCUnit(HCUnitBase):
         tk_post = _require_contiguous(tk_post, name="mhc_post post")
         tk_comb = _require_contiguous(tk_comb, name="mhc_post comb")
         with torch.inference_mode():
+            # In-place reuse: the HC residual stream is overwritten by the next
+            # sublayer immediately after this call, so the input buffer is dead
+            # at return. Aliasing out=residual saves a per-call empty_like
+            # (residual.numel() * 2 bytes, e.g. 7.5 GB at T=128K, hc=4,
+            # dim=7168). Kernel-side safety: each block reads residual[pid_n]
+            # into shared memory before writing out[pid_n] at the same slot.
             out = tk_mhc_post(
                 tk_x,
                 tk_residual,
                 tk_post,
                 tk_comb,
                 hc_mult=self.hc_mult,
+                out=tk_residual,
             )
         if out is None:
             _raise_unavailable("post", residual, self.hc_mult)

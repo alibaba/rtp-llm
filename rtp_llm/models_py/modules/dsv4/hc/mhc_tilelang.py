@@ -1,22 +1,27 @@
 """TileLang-backed mHC entry points (pre / post / head).
 
 Thin adapter over the vendored ``rtp_llm.models_py.3rdparty.tile_kernels``
-(DeepSeek TileKernels). Each entry point caches a compile-success/failure
-verdict. Most failures are returned to the caller as ``None``; production HC
-callers must treat that as fail-fast rather than falling back implicitly. The
-fused head is stricter: when enabled, unavailable/JIT failure raises directly.
+(DeepSeek TileKernels).
 
-Why per-op flags rather than a single ``_TK_AVAILABLE``: empirically
-``pre_big_fuse`` has hit ``decouple_type_cast`` ICEs while ``post`` /
-``head_compute_mix`` compile fine — losing all three would be a
-regression.
+Two distinct failure modes, kept distinct on purpose:
+
+  * **Gate miss** — input doesn't satisfy ``_can_use_tk`` (wrong dtype/device,
+    non-contiguous, hc_mult != 4, ...). Wrapper returns ``None`` and the caller
+    raises a shape-specific "unavailable" error. This is "not applicable",
+    not "broken".
+  * **Runtime failure** — import / JIT compile / kernel launch raised. Wrapper
+    re-raises a ``RuntimeError`` chained (``from e``) to the original
+    exception with shape context attached. Earlier versions swallowed these
+    into ``None``, which lost the underlying cause (OOM, ICE, etc.).
 
 Activation gate (``_can_use_tk``):
   * ``DSV4_USE_TK_MHC=0`` env disables the path entirely (parity testing).
   * residual must be bf16 contiguous.
   * residual must be on CUDA.
-  * residual's flattened HC hidden size must be divisible by TileLang's
-    256-wide hidden tile.
+  * residual's flattened HC hidden size (``hc * dim``) must be divisible by
+    256 — the ``pre_norm_fn`` GEMM kernel asserts ``hidden_block=256``
+    divisibility. (The ``post`` / ``head_fuse`` / ``pre_apply_mix`` kernels
+    handle arbitrary hidden via ``gcd``; this gate is keyed to the strictest.)
   * ``hc_mult == 4`` (only mult upstream guarantees).
   * ``torch.is_grad_enabled()`` must be False (we serve, not train).
   * residual.numel() > 0.
@@ -25,18 +30,10 @@ Activation gate (``_can_use_tk``):
 from __future__ import annotations
 
 import importlib
-import logging
 import os
 from typing import NoReturn, Tuple
 
 import torch
-
-_log = logging.getLogger(__name__)
-
-_TK_PRE_OK: bool | None = None  # None = untried, True/False = sticky verdict
-_TK_POST_OK: bool | None = None
-_TK_HEAD_FUSED_OK: bool | None = None
-_TK_HEAD_OK: bool | None = None
 
 # Lazy-imported callables (populated on first successful import).
 _tk_mhc_pre = None
@@ -46,21 +43,17 @@ _tk_mhc_head = None
 
 
 def _import_tk():
-    """Import the vendored package, returning (pre, post, head) callables.
+    """Import the vendored package, populating the module-level callables.
 
-    Raises on import failure; caller pins the failure verdict.
+    Raises on import failure — caller wraps with shape context.
     """
     global _tk_mhc_pre, _tk_mhc_post, _tk_mhc_head_fused, _tk_mhc_head
-    # Reuse the dsv4 tilelang env-prep (z3 path, TVM tmpdir).
-    try:
-        from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _dsv4_tl
-
-        if hasattr(_dsv4_tl, "_ensure_tvm_tmpdir_writable"):
-            _dsv4_tl._ensure_tvm_tmpdir_writable()
-        if hasattr(_dsv4_tl, "_ensure_z3_loadable"):
-            _dsv4_tl._ensure_z3_loadable()
-    except Exception as e:  # pragma: no cover
-        _log.debug("dsv4 tilelang env-prep skipped: %r", e)
+    # Importing tilelang_kernels triggers its module-level env-prep
+    # (libz3 preload + TVM tmpdir setup), which must run before any tilelang
+    # JIT import below.
+    from rtp_llm.models_py.modules.dsv4 import (  # noqa: F401  # pyright: ignore[reportUnusedImport]
+        tilelang_kernels,
+    )
 
     mod = importlib.import_module(
         "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.functional"
@@ -84,17 +77,28 @@ def _head_fuse_disabled() -> bool:
     return not tk_mhc_head_fused_enabled()
 
 
+def _shape_ctx(t: torch.Tensor, *, hc_mult: int, extra: str = "") -> str:
+    base = (
+        f"shape={tuple(t.shape)}, stride={tuple(t.stride())}, "
+        f"dtype={t.dtype}, device={t.device}, hc_mult={hc_mult}"
+    )
+    return f"{base}, {extra}" if extra else base
+
+
 def _raise_head_fused_unavailable(
     residual: torch.Tensor,
     hc_mult: int,
     reason: str,
+    cause: BaseException | None = None,
 ) -> NoReturn:
-    raise RuntimeError(
+    err = RuntimeError(
         f"TileLang fused mHC head unavailable: {reason}; "
-        f"shape={tuple(residual.shape)}, stride={tuple(residual.stride())}, "
-        f"dtype={residual.dtype}, device={residual.device}, hc_mult={hc_mult}. "
+        f"{_shape_ctx(residual, hc_mult=hc_mult)}. "
         "Set DSV4_MHC_HEAD_FUSED=0 to use the older TileLang head composition."
     )
+    if cause is not None:
+        raise err from cause
+    raise err
 
 
 def _can_use_tk(residual: torch.Tensor, hc_mult: int) -> bool:
@@ -132,8 +136,9 @@ def tk_mhc_head_fused(
     Returns ``None`` only when the fused head is explicitly disabled. When the
     fused path is enabled, incompatibility or JIT/import failure is fatal so the
     caller cannot silently fall back to the older TileLang head composition.
+    Runtime failures (import / JIT / kernel run) propagate as ``RuntimeError``
+    chained via ``from e`` to the original exception.
     """
-    global _TK_HEAD_FUSED_OK
     if _head_fuse_disabled():
         return None
     if not _can_use_tk(residual, hc_mult):
@@ -142,34 +147,19 @@ def tk_mhc_head_fused(
             hc_mult,
             "input does not satisfy TileLang fused mHC head gates",
         )
-    if _TK_HEAD_FUSED_OK is False:
-        _raise_head_fused_unavailable(
-            residual,
-            hc_mult,
-            "previous fused mHC head compile failed",
-        )
     if _tk_mhc_head_fused is None:
         try:
             _import_tk()
         except Exception as e:
-            if _TK_HEAD_FUSED_OK is None:
-                _log.exception("tk fused mhc_head disabled after import failure")
-            _TK_HEAD_FUSED_OK = False
-            _raise_head_fused_unavailable(
-                residual,
-                hc_mult,
-                f"import failure: {e!r}",
-            )
+            _raise_head_fused_unavailable(residual, hc_mult, "import failure", cause=e)
     if _tk_mhc_head_fused is None:
-        _TK_HEAD_FUSED_OK = False
         _raise_head_fused_unavailable(
-            residual,
-            hc_mult,
-            "vendored TileKernels has no mhc_head_fuse",
+            residual, hc_mult, "vendored TileKernels has no mhc_head_fuse"
         )
-    out = None
+    fused = _tk_mhc_head_fused
+    assert fused is not None
     try:
-        out = _tk_mhc_head_fused(
+        out = fused(
             residual,
             fn,
             scale.reshape(1),
@@ -178,22 +168,9 @@ def tk_mhc_head_fused(
             mhc_pre_eps=pre_eps,
         )
     except Exception as e:
-        if _TK_HEAD_FUSED_OK is None:
-            _log.exception("tk fused mhc_head disabled after JIT failure")
-        _TK_HEAD_FUSED_OK = False
         _raise_head_fused_unavailable(
-            residual,
-            hc_mult,
-            f"JIT/import failure: {e!r}",
+            residual, hc_mult, "JIT / kernel failure", cause=e
         )
-    if out is None:
-        _TK_HEAD_FUSED_OK = False
-        _raise_head_fused_unavailable(
-            residual,
-            hc_mult,
-            "fused kernel returned None",
-        )
-    _TK_HEAD_FUSED_OK = True
     return out
 
 
@@ -212,17 +189,19 @@ def tk_mhc_pre(
     """TK ``mhc_pre`` wrapper.
 
     Returns (layer_input, post_mix [..., hc, 1], comb_mix [..., hc, hc])
-    on success, or ``None`` to signal "TileLang unavailable".
+    on success. Returns ``None`` only when the input fails ``_can_use_tk``
+    gates (caller raises a shape-specific "unavailable"). Runtime failures
+    (import / JIT / kernel run) propagate as ``RuntimeError`` chained via
+    ``from e`` to the original exception.
     """
-    global _TK_PRE_OK
     if not _can_use_tk(residual, hc_mult):
-        return None
-    if _TK_PRE_OK is False:
         return None
     try:
         if _tk_mhc_pre is None:
             _import_tk()
-        out, (post_mix, comb_mix) = _tk_mhc_pre(
+        pre_fn = _tk_mhc_pre
+        assert pre_fn is not None
+        out, (post_mix, comb_mix) = pre_fn(
             residual,
             fn,
             scale,
@@ -235,13 +214,11 @@ def tk_mhc_pre(
             sinkhorn_eps=sinkhorn_eps,
             sinkhorn_repeat=sinkhorn_iters,
         )
-        _TK_PRE_OK = True
         return out, post_mix, comb_mix
     except Exception as e:
-        if _TK_PRE_OK is None:
-            _log.exception("tk mhc_pre disabled after JIT failure")
-        _TK_PRE_OK = False
-        return None
+        raise RuntimeError(
+            "TileLang mhc_pre failed: " + _shape_ctx(residual, hc_mult=hc_mult)
+        ) from e
 
 
 def tk_mhc_post(
@@ -250,26 +227,40 @@ def tk_mhc_post(
     post_mix: torch.Tensor,
     comb_mix: torch.Tensor,
     hc_mult: int = 4,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor | None:
-    """TK ``mhc_post`` wrapper. Returns ``None`` when TileLang is unavailable."""
-    global _TK_POST_OK
+    """TK ``mhc_post`` wrapper.
+
+    Returns ``None`` only when ``residual`` fails ``_can_use_tk`` gates (caller
+    raises a shape-specific "unavailable"). A non-bfloat16 sublayer output ``x``
+    raises ``RuntimeError`` directly: that is an upstream dtype bug, not a
+    TileLang availability issue, and must not be disguised as one. Runtime
+    failures (import / JIT / kernel run) propagate as ``RuntimeError`` chained
+    via ``from e`` to the original exception.
+
+    Pass ``out=residual`` to write in place and skip the kernel's
+    ``torch.empty_like(residual)`` allocation (7.5 GB at T=128K, hc=4, dim=7168).
+    """
     if not _can_use_tk(residual, hc_mult):
         return None
     if x.dtype != torch.bfloat16:
-        return None
-    if _TK_POST_OK is False:
-        return None
+        raise RuntimeError(
+            "TileLang mhc_post requires a bfloat16 sublayer output x; got "
+            f"x.dtype={x.dtype}, x.shape={tuple(x.shape)}. This is an upstream "
+            "dtype bug — fix the producer rather than treating it as a "
+            f"TileLang fallback. {_shape_ctx(residual, hc_mult=hc_mult)}"
+        )
     try:
         if _tk_mhc_post is None:
             _import_tk()
-        out = _tk_mhc_post(x, residual, post_mix, comb_mix)
-        _TK_POST_OK = True
-        return out
+        post_fn = _tk_mhc_post
+        assert post_fn is not None
+        return post_fn(x, residual, post_mix, comb_mix, out=out)
     except Exception as e:
-        if _TK_POST_OK is None:
-            _log.exception("tk mhc_post disabled after JIT failure")
-        _TK_POST_OK = False
-        return None
+        raise RuntimeError(
+            "TileLang mhc_post failed: "
+            + _shape_ctx(residual, hc_mult=hc_mult, extra=f"x.shape={tuple(x.shape)}")
+        ) from e
 
 
 def tk_mhc_head(
@@ -282,16 +273,21 @@ def tk_mhc_head(
     pre_eps: float,
     hc_mult: int = 4,
 ) -> torch.Tensor | None:
-    """TK ``mhc_head`` wrapper. Returns ``None`` when TileLang is unavailable."""
-    global _TK_HEAD_OK
+    """TK ``mhc_head`` wrapper.
+
+    Returns ``None`` only when the input fails ``_can_use_tk`` gates (caller
+    raises a shape-specific "unavailable"). Runtime failures (import / JIT /
+    kernel run) propagate as ``RuntimeError`` chained via ``from e`` to the
+    original exception.
+    """
     if not _can_use_tk(residual, hc_mult):
-        return None
-    if _TK_HEAD_OK is False:
         return None
     try:
         if _tk_mhc_head is None:
             _import_tk()
-        out = _tk_mhc_head(
+        head_fn = _tk_mhc_head
+        assert head_fn is not None
+        return head_fn(
             residual,
             fn,
             scale,
@@ -301,10 +297,7 @@ def tk_mhc_head(
             mhc_mult=hc_mult,
             pre_eps=pre_eps,
         )
-        _TK_HEAD_OK = True
-        return out
     except Exception as e:
-        if _TK_HEAD_OK is None:
-            _log.exception("tk mhc_head disabled after JIT failure")
-        _TK_HEAD_OK = False
-        return None
+        raise RuntimeError(
+            "TileLang mhc_head failed: " + _shape_ctx(residual, hc_mult=hc_mult)
+        ) from e

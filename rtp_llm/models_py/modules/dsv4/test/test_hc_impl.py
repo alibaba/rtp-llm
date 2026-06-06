@@ -5,8 +5,14 @@ from contextlib import contextmanager
 import torch
 
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_head, build_hc_unit
-from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import FallbackHCHead, FallbackHCUnit
-from rtp_llm.models_py.modules.dsv4.hc.tilelang_impl import TileLangHCHead, TileLangHCUnit
+from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import (
+    FallbackHCHead,
+    FallbackHCUnit,
+)
+from rtp_llm.models_py.modules.dsv4.hc.tilelang_impl import (
+    TileLangHCHead,
+    TileLangHCUnit,
+)
 
 
 @contextmanager
@@ -282,9 +288,106 @@ class TestHCImpl(unittest.TestCase):
             except RuntimeError as exc:
                 self.skipTest(str(exc))
         torch.testing.assert_close(tk_y, ref_y, atol=2e-2, rtol=2e-2)
-        torch.testing.assert_close(tk_post.float(), ref_post.float(), atol=5e-3, rtol=5e-3)
-        torch.testing.assert_close(tk_comb.float(), ref_comb.float(), atol=5e-3, rtol=5e-3)
+        torch.testing.assert_close(
+            tk_post.float(), ref_post.float(), atol=5e-3, rtol=5e-3
+        )
+        torch.testing.assert_close(
+            tk_comb.float(), ref_comb.float(), atol=5e-3, rtol=5e-3
+        )
         torch.testing.assert_close(tk_out, ref_out, atol=2e-2, rtol=2e-2)
+
+    def test_tilelang_post_reuses_residual_buffer_in_place(self) -> None:
+        # Pins the memory-saving wiring (no CUDA needed): _post_impl must pass
+        # out=residual so the kernel writes in place instead of allocating a
+        # fresh empty_like(residual). A future refactor that drops the alias
+        # would silently re-introduce the per-call allocation; this catches it.
+        hc, dim, T = 4, 16, 5
+        fn, base, scale = _weights(hc, dim)
+        unit = TileLangHCUnit(
+            fn,
+            base,
+            scale,
+            dim=dim,
+            hc_mult=hc,
+            hc_sinkhorn_iters=3,
+            norm_eps=1e-6,
+            hc_eps=1e-6,
+        )
+        import rtp_llm.models_py.modules.dsv4.hc.tilelang_impl as tilelang_impl
+
+        captured: dict = {}
+
+        def fake_post(x, residual, post, comb, hc_mult=4, out=None):
+            captured["out_is_residual"] = out is residual
+            captured["out_ptr"] = None if out is None else out.data_ptr()
+            return residual if out is None else out
+
+        old_post = tilelang_impl.tk_mhc_post
+        tilelang_impl.tk_mhc_post = fake_post
+        self.addCleanup(lambda: setattr(tilelang_impl, "tk_mhc_post", old_post))
+
+        residual = torch.randn(T, hc, dim, dtype=torch.bfloat16)
+        x = torch.randn(T, dim, dtype=torch.bfloat16)
+        post = torch.randn(T, hc, 1, dtype=torch.float32)
+        comb = torch.randn(T, hc, hc, dtype=torch.float32)
+        out = unit.post(x, residual, post, comb)
+
+        self.assertTrue(captured["out_is_residual"])
+        # the aliased out points at the caller's residual storage
+        self.assertEqual(captured["out_ptr"], residual.data_ptr())
+        self.assertEqual(out.data_ptr(), residual.data_ptr())
+        self.assertEqual(tuple(out.shape), (T, hc, dim))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_tilelang_post_nonbf16_x_raises_dtype_error(self) -> None:
+        # A non-bf16 sublayer output x is an upstream dtype bug, not a TileLang
+        # availability miss: it must raise loudly (with the offending dtype),
+        # not return None and get disguised as "TileLang unavailable". Reaches
+        # the x.dtype check before any kernel import, so tilelang is not needed.
+        from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_post
+
+        hc, dim, T = 4, 128, 8
+        residual = torch.randn(1, T, hc, dim, device="cuda", dtype=torch.bfloat16)
+        post = torch.randn(1, T, hc, 1, device="cuda", dtype=torch.float32)
+        comb = torch.randn(1, T, hc, hc, device="cuda", dtype=torch.float32)
+        x_fp32 = torch.randn(1, T, dim, device="cuda", dtype=torch.float32)
+        with torch.inference_mode():
+            with self.assertRaisesRegex(RuntimeError, "bfloat16 sublayer output"):
+                tk_mhc_post(x_fp32, residual, post, comb, hc_mult=hc)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_tilelang_post_in_place_matches_fresh_buffer_cuda(self) -> None:
+        # Pins the out=residual aliasing invariant: writing the post output back
+        # into the residual buffer must be bit-identical to writing into a fresh
+        # buffer. The vendored kernel's safety relies on reading residual[pid_n]
+        # into shared memory before overwriting out[pid_n]; if a future kernel
+        # change breaks that read-before-write ordering, this fails loudly.
+        from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_post
+
+        hc, dim, T = 4, 128, 64
+        torch.manual_seed(0)
+        x = torch.randn(1, T, dim, device="cuda", dtype=torch.bfloat16)
+        residual = torch.randn(1, T, hc, dim, device="cuda", dtype=torch.bfloat16)
+        post = torch.randn(1, T, hc, 1, device="cuda", dtype=torch.float32)
+        comb = torch.randn(1, T, hc, hc, device="cuda", dtype=torch.float32)
+
+        residual_fresh = residual.clone()
+        residual_alias = residual.clone()
+        with torch.inference_mode():
+            try:
+                out_fresh = tk_mhc_post(x, residual_fresh, post, comb, hc_mult=hc)
+                out_alias = tk_mhc_post(
+                    x, residual_alias, post, comb, hc_mult=hc, out=residual_alias
+                )
+            except RuntimeError as exc:
+                self.skipTest(str(exc))
+
+        assert out_fresh is not None and out_alias is not None
+        # fresh path allocated a new buffer; aliased path wrote into residual
+        self.assertNotEqual(out_fresh.data_ptr(), residual_fresh.data_ptr())
+        self.assertEqual(out_alias.data_ptr(), residual_alias.data_ptr())
+        # in-place and fresh-buffer results must be bit-identical
+        torch.testing.assert_close(out_alias, out_fresh, atol=0, rtol=0)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_tilelang_head_matches_fallback_cuda(self) -> None:
