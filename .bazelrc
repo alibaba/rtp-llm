@@ -202,6 +202,11 @@ build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
 build:cicd --remote_upload_local_results
 build:cicd --worker_verbose
 build:cicd --show_result=0 --auto_output_filter=all
+# Retry the build when the remote cache drops an output blob mid-build
+# (java.io.IOException "Invalid action cache entry ... expected output does
+# not exist"). A fresh invocation re-executes the evicted actions instead of
+# failing the whole build with exit 34.
+build:cicd --experimental_remote_cache_eviction_retries=5
 test:cicd --test_output=errors --max_test_output_bytes=10240000 --experimental_ui_max_stdouterr_bytes=31457280
 
 # asan
