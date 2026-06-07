@@ -23,6 +23,7 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.model_factory_register import _model_factory
+from rtp_llm.omni.config.pipeline_registry import OmniPipelineRegistry
 from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparation
 from rtp_llm.utils.util import check_with_info
 
@@ -70,6 +71,15 @@ class ModelFactory:
             merge_lora: Whether to merge LoRA weights
         """
         model_type = model_config.model_type
+
+        pipeline_config = OmniPipelineRegistry.get(model_type)
+        if pipeline_config is not None:
+            from rtp_llm.omni.engine.omni_engine import OmniEngine
+            logging.info(f"Detected omni model type: {model_type}, creating OmniEngine")
+            return OmniEngine.from_pipeline_config(
+                pipeline_config, model_config, engine_config
+            )
+
         model_cls = ModelFactory.get_model_cls(model_type)
 
         # Get model_name from model_config (default to model class name if not set)
@@ -206,6 +216,20 @@ class ModelFactory:
             vit_config=vit_config,
             merge_lora=merge_lora,
         )
+
+        from rtp_llm.omni.engine.omni_engine import OmniEngine
+        if isinstance(model, OmniEngine):
+            logging.info("Initializing OmniEngine stages")
+            model.initialize_stages(
+                model_config=model_config,
+                engine_config=engine_config,
+                world_info=world_info,
+                vit_config=vit_config,
+                merge_lora=merge_lora,
+            )
+            model.start()
+            logging.info("OmniEngine created and started")
+            return model
 
         model_type = model_config.model_type
         if model_type == "fake_model":
