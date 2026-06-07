@@ -30,6 +30,17 @@ py_library(
 )
 
 py_library(
+    name = "sparse_msa",
+    srcs = glob([
+        "sparse_msa/*.py",
+        "sparse_msa/common/*.py",
+        "sparse_msa/prefill/*.py",
+        "sparse_msa/decode/*.py",
+    ]),
+    visibility = ["//visibility:public"]
+)
+
+py_library(
     name = "triton_kernels",
     deps = [
         ":fla",
@@ -37,6 +48,7 @@ py_library(
         ":moe",
         ":common",
         ":sparse_mla",
+        ":sparse_msa",
     ],
     visibility = ["//visibility:public"]
 )

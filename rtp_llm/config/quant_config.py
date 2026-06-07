@@ -160,6 +160,27 @@ class QuantizationConfig(ABC):
 
         group_size = quant_config["group_size"] if "group_size" in quant_config else 0
         bits = quant_config["bits"] if "bits" in quant_config else 0
+        if quant_method == "mxfp8":
+            bits = 8
+            weight_block = quant_config.get("weight_block_size", [1, 32])
+            ignored = (
+                quant_config.get("ignored_layers")
+                or quant_config.get("modules_to_not_convert")
+                or []
+            )
+            cfg = Fp8MxBlockWiseQuantConfig.from_config(
+                {
+                    "bits": 8,
+                    "method": Fp8MxBlockWiseQuantConfig.get_method(),
+                    "group_size": 128,
+                    "is_quanted": True,
+                }
+            )
+            cfg.weight_block_size = list(weight_block)
+            cfg.activation_scheme = quant_config.get("activation_scheme", "dynamic")
+            if ignored:
+                cfg.exclude_modules = set(ignored)
+            return cfg
         if quant_method == "fp8":
             bits = 8
             if "weight_block_size" in quant_config:
@@ -405,6 +426,59 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8BlockWiseQuantConfig(**config)
+
+
+class Fp8MxBlockWiseQuantConfig(Fp8BlockWiseQuantConfig):
+    """MXFP8 (OCP microscaling FP8): e4m3 weights + UE8M0 (uint8) scales on a
+    fixed ``[1, 32]`` micro-block, as shipped by MiniMax-M3.
+
+    This is NOT DeepGEMM's 128x128 ``FP8_PER_BLOCK``: the scale granularity is
+    1 row x 32 columns (``weight_scale_inv`` stored as uint8 UE8M0). The on-disk
+    weight is already fp8-serialized, so we never re-quantize; the loader reads
+    ``weight_scale_inv`` and packs it into DeepGEMM's int32 TMA layout via
+    ``transform_sf_into_required_layout(..., recipe=(1, 32))``.
+
+    C++/alignment note: ``group_size()`` is reported as 128 (a clean multiple of
+    the real 32 micro-block) so the C++ ``setQuantAlgo`` group-size validation
+    (``kValidGroupSizes = {16, 64, 128}``) and align-size math stay valid. The
+    real micro-block lives in ``mx_block_size`` / ``weight_block_size``.
+    """
+
+    MX_BLOCK = 32
+
+    def __init__(
+        self,
+        bits: int = 8,
+        group_size: int = 128,
+        is_quanted: bool = True,
+        **kwargs: Any,
+    ):
+        # Always advertise 128 to the base/C++ layer for alignment; keep the
+        # real 1x32 micro-block separately.
+        super().__init__(bits=8, group_size=128, is_quanted=is_quanted, **kwargs)
+        self.mx_block_size = self.MX_BLOCK
+        self.weight_block_size = [1, self.MX_BLOCK]
+        self.activation_scheme = "dynamic"
+        self.use_mxfp8 = True
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "MXFP8"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        # Reuse the C++ FP8Quant enum; group_size (128) disambiguates groupwise.
+        return "fp8"
+
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        return Fp8MxBlockWiseQuantConfig(**config)
 
 
 class CompressedTensorsQuantConfig(QuantizationConfig):
@@ -826,7 +900,10 @@ DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = (
     CompressedW4A8Int4PerChannelQuantConfig(bits=4, group_size=32, is_quanted=True)
 )
 
+DEFAULT_FP8_MX_BLOCK_WISE_QUANT_CONFIG = Fp8MxBlockWiseQuantConfig(is_quanted=True)
+
 preset_quant_config = {
+    "MXFP8": DEFAULT_FP8_MX_BLOCK_WISE_QUANT_CONFIG,
     "INT8": DEFAULT_WEIGHT_ONLY_INT8_PER_CHANNEL_QUANT_CONFIG,
     "FP8": DEFAULT_FP8_PER_TENSOR_QUANT_CONFIG,
     "FP8_DYNAMIC_PER_TENSOR": DEFAULT_FP8_DYNAMIC_PER_TENSOR_QUANT_CONFIG,

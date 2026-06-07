@@ -260,3 +260,30 @@ class PureTpRouterFp4PerGroup(PureTpRouterBase):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """FP4 per-group quantization"""
         return a1, None
+
+
+class PureTpRouterMxfp8(PureTpRouterBase):
+    """Pure TP router for MXFP8 (1x32): no activation pre-quant (the executor
+    quantizes per-expert chunks at group-32 internally).
+
+    ``do_recompute_topk=True`` so under EP (ep_size>1) the global expert IDs are
+    remapped to this rank's local range ``[0, expert_num_per_rank)`` (non-local
+    experts marked -1); the executor drops the -1 assignments and the per-rank
+    partial outputs are merged by the TP all-reduce in ``finalize``. At
+    ep_size==1 this is a no-op (start_id=0, local==global)."""
+
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(config, quant_config, do_recompute_topk=True)
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        super().check_conditions(checker, config)
+        resolver = MoeConfigResolver()
+        checker.check(resolver.get_quant_method(config) == "MXFP8")
+
+    def _do_quant(self, a1):
+        return a1, None

@@ -24,6 +24,7 @@ from .no_quant import (
 from .fp4 import (CudaFp4EpLowLatencyStrategy,
                   CudaFp4EpNormalStrategy,
                   CudaFp4NoDPStrategy)
+from .mxfp8 import CudaMxfp8NoDPStrategy
 
 
 __all__ = [
@@ -46,5 +47,6 @@ __all__ = [
     "CudaW4a8Int4PerChannelNoDPStrategy",
     "CudaFp4EpLowLatencyStrategy",
     "CudaFp4EpNormalStrategy",
-    "CudaFp4NoDPStrategy"
+    "CudaFp4NoDPStrategy",
+    "CudaMxfp8NoDPStrategy",
 ]
