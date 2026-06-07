@@ -5,8 +5,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RequestFormat, RoleAddr
-
-request_id_field_name = "__request_id__"
+from rtp_llm.structure.request_constants import request_id_field_name
 
 
 class Request(NamedTuple):

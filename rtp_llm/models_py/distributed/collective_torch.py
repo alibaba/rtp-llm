@@ -10,11 +10,6 @@ from typing import Dict, List, Optional, Union
 import torch
 import torch.distributed
 
-from rtp_llm.models_py.distributed import rocm_rccl
-from rtp_llm.models_py.distributed.symm_mem import (
-    get_symm_mem_communicator,
-    init_symm_mem_communicator,
-)
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 # ParallelMode enum values matching C++ rtp_llm::ParallelMode in OpData.h
@@ -36,6 +31,29 @@ class Group(Enum):
 _group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
 _parallelism_config: Optional[ParallelismConfig] = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
+_rocm_rccl = None
+_symm_mem = None
+
+
+def _get_rocm_rccl():
+    """Import ROCm RCCL helpers only on ROCm runtime."""
+    global _rocm_rccl
+    if getattr(torch.version, "hip", None) is None:
+        return None
+    if _rocm_rccl is None:
+        from rtp_llm.models_py.distributed import rocm_rccl
+
+        _rocm_rccl = rocm_rccl
+    return _rocm_rccl
+
+
+def _get_symm_mem():
+    global _symm_mem
+    if _symm_mem is None:
+        from rtp_llm.models_py.distributed import symm_mem
+
+        _symm_mem = symm_mem
+    return _symm_mem
 
 
 def init_distributed_environment(
@@ -71,7 +89,8 @@ def init_distributed_environment(
         if not _group_map:
             _create_process_groups(parallelism_config, backend, timedelta(days=36500))
             _register_process_groups_to_cpp()
-        if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
+        rocm_rccl = _get_rocm_rccl()
+        if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         return
 
@@ -82,7 +101,9 @@ def init_distributed_environment(
     world_size = parallelism_config.world_size
     local_rank = parallelism_config.local_rank
 
-    rocm_rccl.configure_process_groups(parallelism_config)
+    rocm_rccl = _get_rocm_rccl()
+    if rocm_rccl is not None:
+        rocm_rccl.configure_process_groups(parallelism_config)
     os.environ["TORCH_DIST_INIT_BARRIER"] = "1"
 
     # If torch.distributed is already initialized (e.g., by external code),
@@ -93,7 +114,7 @@ def init_distributed_environment(
         _parallelism_config = parallelism_config
         _initialized = True
         _register_process_groups_to_cpp()
-        if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
+        if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         return
 
@@ -127,7 +148,7 @@ def init_distributed_environment(
     _parallelism_config = parallelism_config
     _initialized = True
     _register_process_groups_to_cpp()
-    if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
+    if rocm_rccl is not None and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
     init_user_buffers_environment(parallelism_config)
 
@@ -199,13 +220,13 @@ def _create_process_groups(
                         f"[rank: {world_rank}] Stored TP group with key: {group_key} {tp_group} with ranks: {tp_ranks}"
                     )
 
-                init_symm_mem_communicator(tp_group)
+                _get_symm_mem().init_symm_mem_communicator(tp_group)
 
                 # All ranks must wait for group creation to complete
                 torch.distributed.barrier()
     elif tp_size > 1 and world_size == tp_size:
         # Single TP group: WORLD is the TP group, init symm_mem for it
-        init_symm_mem_communicator(torch.distributed.group.WORLD)
+        _get_symm_mem().init_symm_mem_communicator(torch.distributed.group.WORLD)
 
 
 def _register_process_groups_to_cpp():
@@ -451,7 +472,8 @@ def destroy_distributed_environment():
     # Clean up ROCm RCCL capture comm before destroying process groups,
     # so that re-init will bootstrap a fresh communicator instead of
     # reusing the stale one from the destroyed environment.
-    if rocm_rccl.is_available_runtime():
+    rocm_rccl = _get_rocm_rccl()
+    if rocm_rccl is not None:
         rocm_rccl.destroy_capture_comm()
 
     if torch.distributed.is_initialized():
@@ -571,12 +593,14 @@ def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     Returns:
         All-reduced tensor (same as input tensor)
     """
-    rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
-    if rocm_rccl.should_use_capture_collectives(group == Group.TP):
-        return rocm_rccl.capture_all_reduce(tensor, _get_group(group))
+    rocm_rccl = _get_rocm_rccl()
+    if rocm_rccl is not None:
+        rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
+        if rocm_rccl.should_use_capture_collectives(group == Group.TP):
+            return rocm_rccl.capture_all_reduce(tensor, _get_group(group))
 
     if group == Group.TP:
-        symm_mem_comm = get_symm_mem_communicator()
+        symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(
             tensor
         ):
@@ -600,13 +624,15 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
         Concatenated tensor containing all gathered tensors
         (shape: [world_size * tensor.shape[0]] + list(tensor.shape)[1:])
     """
-    rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
-    if rocm_rccl.should_use_capture_collectives(group == Group.TP):
-        process_group = _get_group(group)
-        return rocm_rccl.capture_all_gather(tensor, process_group)
+    rocm_rccl = _get_rocm_rccl()
+    if rocm_rccl is not None:
+        rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
+        if rocm_rccl.should_use_capture_collectives(group == Group.TP):
+            process_group = _get_group(group)
+            return rocm_rccl.capture_all_gather(tensor, process_group)
 
     if group == Group.TP:
-        symm_mem_comm = get_symm_mem_communicator()
+        symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allgather(
             tensor
         ):

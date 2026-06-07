@@ -3,7 +3,6 @@ import hashlib
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.ops import RoleType
