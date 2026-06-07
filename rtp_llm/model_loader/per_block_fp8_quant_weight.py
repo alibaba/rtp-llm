@@ -4,7 +4,11 @@ from typing import Any, Dict, List, Optional, Union
 
 import torch
 
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, QuantizationConfig
+from rtp_llm.config.quant_config import (
+    Fp8BlockWiseQuantConfig,
+    Fp8MxBlockWiseQuantConfig,
+    QuantizationConfig,
+)
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.linear_attn_weight import (
@@ -270,6 +274,9 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         if not quant_config.is_quanted() or not isinstance(
             quant_config, Fp8BlockWiseQuantConfig
         ):
+            return False
+        # MXFP8 (1x32) is handled by Mxfp8Weight, not this 128-block loader.
+        if isinstance(quant_config, Fp8MxBlockWiseQuantConfig):
             return False
         name = src_weight_info.name
         if name not in cls.w8a8_weight_list:

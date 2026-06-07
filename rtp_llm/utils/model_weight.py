@@ -1260,6 +1260,16 @@ class W:
     mla_indexer_weights_proj_w = (
         "self_attention_weights.mla.indexer.weights_proj.kernel"
     )
+
+    # MiniMax-M3 sparse attention (MSA) index branch.
+    # Sparse layers (per text_config.sparse_attention_freq) carry an
+    # additional Q/K projection + RMSNorm pair that feeds the index attention
+    # path. With disable_index_value=True (M3 default for all sparse layers)
+    # there is NO index_v_proj and NO index_o_proj.
+    msa_idx_q_w = "self_attention_weights.msa.index_q_proj.kernel"
+    msa_idx_k_w = "self_attention_weights.msa.index_k_proj.kernel"
+    msa_idx_q_norm = "self_attention_weights.msa.index_q_layernorm.gamma"
+    msa_idx_k_norm = "self_attention_weights.msa.index_k_layernorm.gamma"
     # cross attn
     cross_attn_pre_ln_gamma = "cross_attention_weights_pre_layernorm.gamma"
     cross_attn_pre_ln_beta = "cross_attention_weights_pre_layernorm.beta"
@@ -1470,6 +1480,13 @@ class W:
         qk_ln_gamma: sp_head_qk_norm,
         q_ln_gamma: sp_id,
         k_ln_gamma: sp_id,
+        # MiniMax-M3 MSA index branch is replicated across TP ranks: every rank
+        # computes the same index Q/K and thus the same top-k block selection,
+        # which it then applies to its local (sharded) main K/V heads.
+        msa_idx_q_w: sp_id,
+        msa_idx_k_w: sp_id,
+        msa_idx_q_norm: sp_id,
+        msa_idx_k_norm: sp_id,
         attn_qkv_w: sp_head,
         attn_qkv_z: sp_head_z,
         attn_qkv_s: sp_head_s,

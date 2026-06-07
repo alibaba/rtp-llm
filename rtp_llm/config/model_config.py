@@ -92,6 +92,16 @@ class ModelConfig(CppModelConfig):
         "index_topk_pattern",
         "indexer_types",
         "index_share_for_mtp_iteration",
+        # SwiGLU-OAI (GPT-OSS / MiniMax-M3) alpha coefficient. The matching
+        # ``swiglu_limit`` already lives on the C++ side. Adding alpha as a
+        # Python field avoids a C++ rebuild for first-pass adoption; future
+        # work may promote it to the C++ ModelConfig.
+        "swiglu_alpha",
+        # MiniMax-M3 sparse-attention (MSA) config. Python-only dict carrying
+        # the index-branch dims + topk/block params parsed from the checkpoint
+        # ``sparse_attention_config``. Consumed by MSAAttention when wiring the
+        # Triton MSA kernels for sparse layers. See models/minimax_m3.py.
+        "msa_sparse_config",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)

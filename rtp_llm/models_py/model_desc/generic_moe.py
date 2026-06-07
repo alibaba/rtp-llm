@@ -53,6 +53,20 @@ class _FusedSharedExpertSentinel(nn.Module):
 
     def forward(self, *args, **kwargs):
         raise RuntimeError("shared expert is fused into MegaMoE")
+def _resolve_swiglu_oai_params(config: ModelConfig):
+    """Return (alpha, limit) tuple iff config asks for SwiGLU-OAI, else None.
+
+    Used by MiniMax M3 / GPT-OSS-style models. ``swiglu_alpha`` is a Python-only
+    config field (added via _python_fields); ``swiglu_limit`` already lives on
+    the C++ side. We trigger OAI when ``swiglu_alpha > 0`` *and* a positive
+    limit is set, to avoid grabbing DeepSeek-V4's silu-clamp variant (which
+    sets only swiglu_limit).
+    """
+    alpha = getattr(config, "swiglu_alpha", 0.0) or 0.0
+    limit = getattr(config, "swiglu_limit", 0.0) or 0.0
+    if alpha > 0.0 and limit > 0.0:
+        return (float(alpha), float(limit))
+    return None
 
 
 class GenericMoeLayer(nn.Module):
@@ -168,6 +182,7 @@ class GenericMoeLayer(nn.Module):
                     weights,
                     quant_config,
                     hw_kernel_config=hw_kernel_config,
+                    swiglu_oai_params=_resolve_swiglu_oai_params(config),
                 )
         else:
             self.shared_expert = None
@@ -277,11 +292,23 @@ class GenericMoeLayer(nn.Module):
             and self._use_mega_moe_fused_shared
         )
 
+        # SwiGLU-OAI routing: when config asks for OAI math (MiniMax-M3 /
+        # GPT-OSS), tell the FusedMoE backend to use the OAI kernel variant.
+        # Alpha/limit are carried through ``extra_expert_args`` so executors
+        # that don't know OAI can ignore them and we get a clear error in
+        # those that do.
+        _moe_act = "SiGLU"
+        _moe_extra: Optional[Dict[str, Any]] = None
+        _oai = _resolve_swiglu_oai_params(self.config)
+        if _oai is not None:
+            _moe_act = "swiglu_oai"
+            _moe_extra = {"swiglu_alpha": _oai[0], "swiglu_limit": _oai[1]}
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            activation="SiGLU",
+            activation=_moe_act,
+            extra_expert_args=_moe_extra,
         )
         if use_mega_moe_fused_shared:
             return experts_output
@@ -366,20 +393,49 @@ class GenericMoeDecoderLayer(nn.Module):
             attn_configs = config.getAttentionConfigs(
                 parallelism_config.get_attn_tp_size()
             )
-            self.self_attn = CausalAttention(
-                attn_configs,
-                parallelism_config,
-                weights,
-                config.layernorm_eps,
-                quant_config,
-                hw_kernel_config,
-                layer_idx,
+            # MiniMax-M3 sparse layers (MSA): route to the Triton sparse
+            # attention path when this layer is sparse AND its index-branch
+            # weights are present (gated by M3_LOAD_MSA_INDEX at load time).
+            # Otherwise fall back to dense CausalAttention (numerically
+            # equivalent to MSA for short prompts).
+            msa_cfg = getattr(config, "msa_sparse_config", None)
+            is_msa_layer = (
+                msa_cfg is not None
+                and layer_idx in set(msa_cfg.get("sparse_layer_ids", []))
+                and W.msa_idx_q_w in weights
             )
+            if is_msa_layer:
+                from rtp_llm.models_py.modules.hybrid.msa_attention import (
+                    MSAAttention,
+                )
+
+                self.self_attn = MSAAttention(
+                    attn_configs,
+                    parallelism_config,
+                    weights,
+                    config.layernorm_eps,
+                    msa_cfg,
+                    layer_idx,
+                    quant_config,
+                    hw_kernel_config,
+                )
+            else:
+                self.self_attn = CausalAttention(
+                    attn_configs,
+                    parallelism_config,
+                    weights,
+                    config.layernorm_eps,
+                    quant_config,
+                    hw_kernel_config,
+                    layer_idx,
+                )
+        self._is_msa_attn = self.self_attn.__class__.__name__ == "MSAAttention"
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
         if layer_idx not in config.moe_layer_index:
             self.mlp = DenseMLP(
-                config.activation_type, parallelism_config, weights, quant_config
+                config.activation_type, parallelism_config, weights, quant_config,
+                swiglu_oai_params=_resolve_swiglu_oai_params(config),
             )
         else:
             self.mlp = GenericMoeLayer(
@@ -469,9 +525,20 @@ class GenericMoeDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
         force_reuse_topk_indices: bool = False,
+        attn_inputs: Optional[Any] = None,
     ) -> DecodeLayerOutput:
         topk_indices = None
-        if self._fuse_input_norm_quant and hidden_states.dim() == 2:
+        if self._is_msa_attn:
+            # Sparse MSA path: bypass the shared FMHA impl and the
+            # norm+quant fusion; the MSA module consumes PyAttentionInputs
+            # directly and runs its own index branch + Triton sparse kernels.
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                attn_inputs=attn_inputs,
+                kv_cache=kv_cache,
+            )
+        elif self._fuse_input_norm_quant and hidden_states.dim() == 2:
             bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
                 hidden_states,
                 residual,
@@ -631,6 +698,7 @@ class GenericMoeModel(GptModelBase):
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 prev_topk_indices=prev_topk_indices,
+                attn_inputs=inputs.attention_inputs,
             )
             hidden_states = output.hidden_states
             residual = output.residual

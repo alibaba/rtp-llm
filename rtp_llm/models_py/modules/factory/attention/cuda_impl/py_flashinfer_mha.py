@@ -14,7 +14,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm_100
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm_100, force_py_flashinfer
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     check_attention_inputs,
 )
@@ -37,7 +37,13 @@ from rtp_llm.ops.compute_ops import (
 )
 
 # Constants
-DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
+# FlashInfer's batch-prefill plan allocates a few internal scratch tensors
+# (e.g. ``batch_prefill_tmp_v``) out of this workspace. The size scales with
+# max_batch_tokens * num_qo_heads * head_dim, so 128MB can overflow for wide
+# GQA models. Allow overriding via env and default to a roomier 512MB.
+DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = int(
+    __import__("os").environ.get("PY_FLASHINFER_WORKSPACE_SIZE_MB", "512")
+)
 
 # Global workspace buffer pool
 _g_py_flashinfer_workspace_pool: list[torch.Tensor] = []
@@ -355,14 +361,18 @@ class PyFlashinferPrefillAttnOp(object):
         batch_size = attn_inputs.input_lengths.size(0)
         cu_seqlens = attn_inputs.cu_seqlens[: batch_size + 1]
 
-        # Ragged prefill also uses the device metadata planner.
-        self.fmha_params.fill_params_mha_device(
-            attn_inputs.prefix_lengths,
-            attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id_device,
-            self.page_size,
-        )
+        # Ragged prefill only needs the device metadata planner when a paged KV
+        # cache is present. During warmup / context-only prefill (no prefix) the
+        # block-id tensor is None, so skip the paged-metadata fill (the C++ binding
+        # requires a real torch.Tensor) and just plan the ragged layout below.
+        if attn_inputs.kv_cache_kernel_block_id_device is not None:
+            self.params.fill_params_mha_device(
+                attn_inputs.prefix_lengths,
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                self.page_size,
+            )
 
         self.prefill_wrapper.plan(
             cu_seqlens,
@@ -564,7 +574,7 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         2. The underlying paged FMHA op supports the inputs
         3. MhaRotaryEmbeddingOp supports the inputs
         """
-        return not is_sm_100() and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
+        return (not is_sm_100() or force_py_flashinfer()) and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
 
     def support_cuda_graph(self) -> bool:
         return True
@@ -621,7 +631,7 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
            (requires prefix_lengths to be empty or zero)
         3. MhaRotaryEmbeddingOp supports the inputs
         """
-        return not is_sm_100() and PyFlashinferPrefillAttnOp.support(attn_inputs)
+        return (not is_sm_100() or force_py_flashinfer()) and PyFlashinferPrefillAttnOp.support(attn_inputs)
 
 
 def determine_use_tensor_core_from_configs(attn_configs: AttentionConfigs) -> bool:
@@ -649,6 +659,10 @@ class PyFlashinferDecodeAttnOp(object):
             use_tensor_cores=self.use_tensor_core,
         )
         self.kv_cache_dtype = attn_configs.kv_cache_dtype
+        # Decode owns its FlashInfer paged-KV metadata params (the decode Impl
+        # does not share a params object across ops the way prefill does); it is
+        # filled and the wrapper planned in prepare() below.
+        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
@@ -674,9 +688,9 @@ class PyFlashinferDecodeAttnOp(object):
         )
         # Get torch.dtype from attention configs
         self.decode_wrapper.plan(
-            flashinfer_decode_params.decode_page_indptr_d,
-            flashinfer_decode_params.page_indice_d,
-            flashinfer_decode_params.paged_kv_last_page_len_d,
+            self.fmha_params.decode_page_indptr_d,
+            self.fmha_params.page_indice_d,
+            self.fmha_params.paged_kv_last_page_len_d,
             self.local_head_num,
             self.local_kv_head_num,
             self.head_dim_qk,
@@ -744,15 +758,36 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = PyFlashinferDecodeAttnOp(attn_configs)
-        self.rope_impl = FusedRopeKVCacheDecodeOp(attn_configs)
         self.attn_configs = attn_configs
 
         # Store input info
         self.attn_inputs = attn_inputs
 
-        # Create params
+        # fmha_impl.prepare() fills the shared FlashInfer paged-KV params
+        # (positions_d, batch_indice_d, the page table, last_page_len, ...) and
+        # plans the decode wrapper. All of these are produced by the SM103-safe
+        # C++ fill_params_mha_device.
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_impl.prepare(attn_inputs)
+
+        # SM103/B300: the fused C++ decode RoPE+KV-write kernel
+        # (decode_fused_rope_kvcache / invokeDecodeAddFusedQKVBiasTranspose) has
+        # no kernel image and hard-aborts. Mirror the (proven SM103-safe) prefill
+        # paged path instead: apply RoPE with FlashInfer (MhaRotaryEmbeddingOp)
+        # and append K/V to the paged cache with FlashInfer (KVCacheWriteOp),
+        # both sharing the params already filled above.
+        self.rope_impl: Optional[MhaRotaryEmbeddingOp] = None
+        self.kv_cache_write_op: Optional[KVCacheWriteOp] = None
+        if self.need_rope_kv_cache:
+            if attn_configs.rope_config.style != RopeStyle.No:
+                self.rope_impl = MhaRotaryEmbeddingOp(attn_configs)
+                self.rope_impl.set_params(self.fmha_params)
+            self.kv_cache_write_op = KVCacheWriteOp(
+                num_kv_heads=attn_configs.kv_head_num,
+                head_size=attn_configs.size_per_head,
+                token_per_block=attn_configs.kernel_tokens_per_block,
+            )
+            self.kv_cache_write_op.set_params(self.fmha_params)
+
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     @classmethod
@@ -761,20 +796,44 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
     ) -> bool:
         return not attn_configs.use_mla
 
+    def _split_qkv(
+        self, qkv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        qkv = qkv.reshape(qkv.shape[0], -1)
+        num_heads = self.attn_configs.head_num
+        num_kv_heads = self.attn_configs.kv_head_num
+        head_dim = self.attn_configs.size_per_head
+        q, k, v = torch.split(
+            qkv,
+            [head_dim * num_heads, head_dim * num_kv_heads, head_dim * num_kv_heads],
+            dim=-1,
+        )
+        return (
+            q.reshape(q.shape[0], num_heads, head_dim),
+            k.reshape(k.shape[0], num_kv_heads, head_dim),
+            v.reshape(v.shape[0], num_kv_heads, head_dim),
+        )
+
     def forward(
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         layer_idx: int = 0,
     ) -> torch.Tensor:
-        # Apply RoPE and KV Cache processing
+        # Apply RoPE and write K/V to the paged cache (FlashInfer, SM103-safe).
         if self.need_rope_kv_cache:
-            qkv = self.rope_impl.forward(qkv, kv_cache, self.rope_params)
+            if self.rope_impl is not None:
+                query, key, value = self.rope_impl.forward(qkv)
+            else:
+                query, key, value = self._split_qkv(qkv)
+            if self.kv_cache_write_op is not None:
+                self.kv_cache_write_op.forward(key, value, kv_cache)
+            qkv = query
 
         # Apply write cache store if needed
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
-        # Execute FMHA forward
+        # Execute FMHA forward (decode attention reads K/V from the paged cache)
         return self.fmha_impl.forward(qkv, kv_cache, self.fmha_params)

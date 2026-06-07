@@ -1,6 +1,6 @@
 """Unified dense MLP implementation supporting multiple activation types."""
 
-from typing import Dict, Optional, Type
+from typing import Dict, Optional, Tuple, Type
 
 import torch
 from torch import nn
@@ -23,8 +23,12 @@ if _DEVICE_TYPE == DeviceType.Cuda:
     from rtp_llm.models_py.triton_kernels.common.activation import (
         silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd,
     )
+    from rtp_llm.models_py.triton_kernels.common.swiglu_oai import (
+        swiglu_oai_torch,
+    )
 else:
     CudaFp8GEMMLinear = None  # type: ignore
+    swiglu_oai_torch = None  # type: ignore
 
 _ACTIVATION_FUNC_MAP: Dict[ActivationType, Type[nn.Module]] = {
     ActivationType.Swiglu: FusedSiluAndMul,
@@ -49,6 +53,7 @@ class DenseMLP(nn.Module):
         weights: Dict[str, torch.Tensor],
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        swiglu_oai_params: Optional[Tuple[float, float]] = None,
     ):
         super().__init__()
 
@@ -56,7 +61,22 @@ class DenseMLP(nn.Module):
         self.parallelism_config = parallelism_config
         if self.activation_type not in _ACTIVATION_FUNC_MAP:
             raise ValueError(f"Unsupported activation type: {activation_type}")
-        self.act_fn = _ACTIVATION_FUNC_MAP[activation_type]()
+        # SwiGLU-OAI override: when alpha/limit are provided we use the GPT-OSS /
+        # MiniMax-M3 variant ``gate * sigmoid(gate*alpha) * (up + 1)`` with both
+        # ends clamped at ±limit (one-sided on gate). When None, fall back to
+        # plain SiLU-and-mul as before. Caller (decoder layer) reads
+        # ``config.swiglu_alpha`` / ``config.swiglu_limit`` and passes them in.
+        self.swiglu_oai_params = swiglu_oai_params
+        if self.swiglu_oai_params is not None:
+            assert activation_type == ActivationType.Swiglu, (
+                "swiglu_oai_params requires Swiglu activation_type"
+            )
+            self.act_fn = lambda x: swiglu_oai_torch(
+                x, self.swiglu_oai_params[0], self.swiglu_oai_params[1],
+                gate_first=True,
+            )
+        else:
+            self.act_fn = _ACTIVATION_FUNC_MAP[activation_type]()
         self.is_gated = activation_type in _GATED_ACTIVATION_TYPE_LIST
 
         if self.is_gated:
@@ -118,6 +138,11 @@ class DenseMLP(nn.Module):
         )
         if self._fuse_silu_quant and self.down_proj.scale_ue8m0:
             self._fuse_silu_quant = self.down_proj.K % 512 == 0
+        # SwiGLU-OAI has no fused FP8-quant kernel (and M3's dense FFN is MXFP8,
+        # not the 128-block FP8 GEMM the fused path targets), so always run the
+        # bf16 reference activation (``act_fn``) followed by a plain down_proj.
+        if self.swiglu_oai_params is not None:
+            self._fuse_silu_quant = False
 
     @property
     def accepts_fp8_input(self) -> bool:
@@ -138,12 +163,10 @@ class DenseMLP(nn.Module):
             up = self.up_proj(x)
         if self._fuse_silu_quant and up.dim() == 2:
             scale_ue8m0 = self.down_proj.scale_ue8m0
-            fp8_out, scale_out = (
-                silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
-                    up.contiguous(),
-                    quant_group_size=128,
-                    scale_ue8m0=scale_ue8m0,
-                )
+            fp8_out, scale_out = silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
+                up.contiguous(),
+                quant_group_size=128,
+                scale_ue8m0=scale_ue8m0,
             )
             output = self.down_proj(fp8_out, input_scales=scale_out)
         else:
