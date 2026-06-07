@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import base64
 import json
 import logging
@@ -6,34 +8,36 @@ import threading
 from dataclasses import dataclass
 from enum import IntEnum
 from io import BytesIO
-from typing import Optional
-
-import requests
-import torch
+from typing import Any, Optional
 
 from rtp_llm.utils.lru_dict import LruDict
-from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
 logger = logging.getLogger(__name__)
 
 REQUEST_GET = None
+
+
+def _default_request_get(url, headers):
+    import requests
+
+    return requests.get(url, stream=True, headers=headers, timeout=10)
+
 
 def request_get(url, headers):
     global REQUEST_GET
     if REQUEST_GET is None:
         try:
             from internal_source.rtp_llm.utils.ssrf_check import safe_request_get
+
             REQUEST_GET = safe_request_get
         except ImportError:
-            REQUEST_GET = lambda url, headers: requests.get(
-                url, stream=True, headers=headers, timeout=10
-            )
+            REQUEST_GET = _default_request_get
     return REQUEST_GET(url, headers)
 
 
 def _get_http_heads(download_headers: str = ""):
     """Get HTTP headers from download_headers string.
-    
+
     Args:
         download_headers: JSON string containing HTTP headers. If empty, returns default headers.
     """
@@ -45,11 +49,13 @@ def _get_http_heads(download_headers: str = ""):
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
         }
 
+
 def get_base64_prefix(s):
     match = re.match(r"^data:[^,]*;base64,", s)
     if not match:
         return 0
     return match.end()
+
 
 class MMUrlType(IntEnum):
     DEFAULT = 0
@@ -58,6 +64,7 @@ class MMUrlType(IntEnum):
     AUDIO = 3
     TENSOR = 4
     IGRAPH = 5
+
 
 @dataclass
 class MMPreprocessConfig:
@@ -74,28 +81,35 @@ class MultimodalInput:
     url: str
     mm_type: MMUrlType
     config: MMPreprocessConfig
-    tensor: torch.Tensor
+    tensor: Any
 
     def __init__(
         self,
         url: str,
         mm_type: MMUrlType = MMUrlType.DEFAULT,
         config: MMPreprocessConfig = MMPreprocessConfig(),
-        tensor: torch.Tensor = torch.empty(1),
+        tensor: Optional[Any] = None,
     ):
+        if tensor is None:
+            import torch
+
+            tensor = torch.empty(1)
         self.url = url
         self.mm_type = mm_type
         self.config = config
         self.tensor = tensor
 
+
 class IgraphItemKeyCountMismatchError(Exception):
-    
+
     def __init__(self, requested_count: int, received_count: int, message: str = None):
         self.requested_count = requested_count
         self.received_count = received_count
         super().__init__(
-            message or f"item number from igraph response ({received_count}) diff with keys number from request({requested_count})"
+            message
+            or f"item number from igraph response ({received_count}) diff with keys number from request({requested_count})"
         )
+
 
 def retry_on_assertion_error(retries: int = 3):
     def decorator(func):
@@ -103,7 +117,11 @@ def retry_on_assertion_error(retries: int = 3):
             for attempt in range(1, retries + 1):
                 try:
                     return func(*args, **kwargs)
-                except (AssertionError, ValueError, IgraphItemKeyCountMismatchError) as e:
+                except (
+                    AssertionError,
+                    ValueError,
+                    IgraphItemKeyCountMismatchError,
+                ) as e:
                     logger.warning(
                         f"[retry_on_assertion_error] AssertionError on attempt {attempt}: {str(e)}"
                     )
@@ -120,7 +138,7 @@ def retry_on_assertion_error(retries: int = 3):
 
 def get_json_result_from_url(url: str, download_headers: str = ""):
     """Get JSON result from URL.
-    
+
     Args:
         url: URL to fetch from.
         download_headers: JSON string containing HTTP headers. If empty, uses default headers.
@@ -128,6 +146,8 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
     headers = _get_http_heads(download_headers)
     try:
         if url.startswith("http") or url.startswith("https"):
+            import requests
+
             response = requests.get(url, stream=True, headers=headers, timeout=10)
             if response.status_code == 200:
                 res = response.content.decode("utf-8")
@@ -148,7 +168,7 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
 
 def get_bytes_io_from_url(url: str, download_headers: str = ""):
     """Get BytesIO from URL.
-    
+
     Args:
         url: URL to fetch from.
         download_headers: JSON string containing HTTP headers. If empty, uses default headers.
@@ -167,6 +187,8 @@ def get_bytes_io_from_url(url: str, download_headers: str = ""):
                         f"download failed, error code: {response.status_code}"
                     )
             elif url.startswith("oss"):
+                from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
+
                 res = get_bytes_io_from_oss_path(url)
             elif get_base64_prefix(url) > 0:
                 res = BytesIO(base64.b64decode(url[get_base64_prefix(url) :]))
@@ -192,17 +214,17 @@ class MMDataCache(object):
             self.mm_data_cache = LruDict(cache_size)
 
     def check_cache(self, url: str):
-         with self.cache_lock:
+        with self.cache_lock:
             if self.mm_data_cache == None:
                 return None
             if url in self.mm_data_cache:
                 return self.mm_data_cache[url]
             else:
-                return None   
+                return None
 
     def insert_cache(self, url: str, data):
-         with self.cache_lock:
-            if self.mm_data_cache == None:  
+        with self.cache_lock:
+            if self.mm_data_cache == None:
                 return
             self.mm_data_cache[url] = data
 
@@ -210,7 +232,7 @@ class MMDataCache(object):
         with self.cache_lock:
             self.mm_data_cache.set_size(cache_size)
 
+
 # Global cache instance for VIT embeddings
 vit_emb_cache_ = MMDataCache(cache_size=10)
 url_data_cache_ = MMDataCache(cache_size=10)
-        

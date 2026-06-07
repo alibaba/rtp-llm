@@ -1,8 +1,6 @@
 import functools
 from typing import Any, Dict, List, Union
 
-from transformers import AutoTokenizer
-
 
 class BaseTokenizer:
     def __init__(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
@@ -11,6 +9,8 @@ class BaseTokenizer:
         self.init_tokenizer(tokenizer_path, self.config_json)
 
     def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any]):
+        from transformers import AutoTokenizer
+
         self.tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_path, trust_remote_code=True, verbose=False, use_fast=True
         )

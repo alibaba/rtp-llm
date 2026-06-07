@@ -6,12 +6,6 @@ import threading
 import time
 import traceback
 
-import requests
-
-from rtp_llm.distribute.distributed_server import (
-    get_dp_addrs_from_world_info,
-    get_world_info,
-)
 from rtp_llm.utils.time_util import timer_wrapper
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -54,6 +48,8 @@ class StartupRealWarmupAddressResolutionError(RuntimeError):
 
 def check_server_health(server_port, path="/health"):
     try:
+        import requests
+
         response = requests.get(f"http://localhost:{server_port}{path}", timeout=60)
         health_ok = False
         if response.status_code == 200:
@@ -341,7 +337,9 @@ def _role_is_prefill(py_env_configs: PyEnvConfigs) -> bool:
     role_type = py_env_configs.role_config.role_type
     role_value = getattr(role_type, "value", role_type)
     prefill_value = getattr(RoleType.PREFILL, "value", RoleType.PREFILL)
-    role_is_prefill = role_type == RoleType.PREFILL or str(role_type).endswith("PREFILL")
+    role_is_prefill = role_type == RoleType.PREFILL or str(role_type).endswith(
+        "PREFILL"
+    )
     try:
         role_is_prefill = role_is_prefill or int(role_value) == int(prefill_value)
     except Exception:
@@ -517,9 +515,7 @@ def start_server(py_env_configs: PyEnvConfigs):
 
         startup_warmup_succeeded = _maybe_run_startup_real_warmup(py_env_configs)
         _mark_startup_warmup_health_gate_ready(startup_warmup_gate_file)
-        _start_post_startup_jit_cache_writer(
-            py_env_configs, startup_warmup_succeeded
-        )
+        _start_post_startup_jit_cache_writer(py_env_configs, startup_warmup_succeeded)
 
         logging.info(
             f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"
@@ -580,6 +576,11 @@ def _get_startup_real_warmup_token_lens(py_env_configs: PyEnvConfigs):
 
 
 def _get_startup_real_warmup_grpc_addresses(py_env_configs: PyEnvConfigs):
+    from rtp_llm.distribute.distributed_server import (
+        get_dp_addrs_from_world_info,
+        get_world_info,
+    )
+
     parallelism_config = py_env_configs.parallelism_config
     resolve_trace = None
     try:
@@ -657,7 +658,9 @@ def _get_startup_real_warmup_max_new_tokens() -> int:
 
 def _get_startup_real_warmup_timeout_s() -> float:
     timeout_s = float(
-        os.environ.get("DSV4_STARTUP_REAL_WARMUP_TIMEOUT_S", STARTUP_REAL_WARMUP_TIMEOUT_S)
+        os.environ.get(
+            "DSV4_STARTUP_REAL_WARMUP_TIMEOUT_S", STARTUP_REAL_WARMUP_TIMEOUT_S
+        )
     )
     if timeout_s <= 0:
         raise ValueError(
@@ -813,6 +816,7 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
         len(token_lens),
         time.time() - begin_all,
     )
+
 
 def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     if not _should_run_startup_real_warmup(py_env_configs):

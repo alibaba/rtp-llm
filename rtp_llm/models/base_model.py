@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import Any, Optional, Type, Union
+from typing import Any, Optional, Protocol, Type, Union, cast, runtime_checkable
 
 import torch
 
@@ -16,10 +16,8 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
-from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
-from rtp_llm.models.multimodal.multimodal_mixin import MultiModalMixin
 from rtp_llm.ops import (
     DeviceResourceConfig,
     FMHAConfig,
@@ -31,6 +29,25 @@ from rtp_llm.ops import (
 )
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.time_util import timer_wrapper
+
+
+@runtime_checkable
+class _MultiModalModel(Protocol):
+    def init_multimodal(
+        self,
+        mm_model_config: Any,
+        vit_config: VitConfig,
+        device: str,
+    ) -> None: ...
+
+    def load_mm_weight(
+        self,
+        model_config: ModelConfig,
+        ctype: str,
+        tp_size: int,
+        tp_rank: int,
+        device: str,
+    ) -> None: ...
 
 
 class BaseModel(object):
@@ -143,6 +160,8 @@ class BaseModel(object):
         self.py_eplb = self.model_weights_loader._py_eplb
         device_str = self._get_device_str()
         self._load(device_str)
+        from rtp_llm.model_loader.weight_manager import WeightManager
+
         self.weight_manager = WeightManager(
             self.device, self.weight, self.model_weights_loader
         )
@@ -262,10 +281,10 @@ class BaseModel(object):
 
     @timer_wrapper(description="init mutlimodal")
     def _may_init_multimodal(self):
-        if not self.is_multimodal():
+        multimodal_model = self._as_multimodal_model()
+        if multimodal_model is None:
             return
 
-        assert isinstance(self, MultiModalMixin)  # for syntax check
         self.model_config.mm_model_config.is_multimodal = True
         if self.parallelism_config.tp_rank != 0:
             return
@@ -275,7 +294,7 @@ class BaseModel(object):
         # Only initialize multimodal if vit_separation != REMOTE
         vit_separation = self.vit_config.vit_separation
         if vit_separation != VitSeparation.VIT_SEPARATION_REMOTE:
-            self.init_multimodal(
+            multimodal_model.init_multimodal(
                 mm_model_config=self.model_config.mm_model_config,
                 vit_config=self.vit_config,
                 device=self._get_device_str(),
@@ -294,7 +313,12 @@ class BaseModel(object):
             self.model_config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
 
     def is_multimodal(self) -> bool:
-        return isinstance(self, MultiModalMixin)
+        return self._as_multimodal_model() is not None
+
+    def _as_multimodal_model(self) -> Optional[_MultiModalModel]:
+        if isinstance(self, _MultiModalModel):
+            return cast(_MultiModalModel, self)
+        return None
 
     def _load_model_weights(self):
         self.weight: ModelWeights = self.model_weights_loader.load_weights(
@@ -308,15 +332,15 @@ class BaseModel(object):
 
     @timer_wrapper(description="load multimodal")
     def _load_multimodal(self):
+        multimodal_model = self._as_multimodal_model()
         if (
             self.vit_config is not None
             and self.vit_config.vit_separation != VitSeparation.VIT_SEPARATION_REMOTE
-            and self.is_multimodal()
+            and multimodal_model is not None
         ):
-            assert isinstance(self, MultiModalMixin)  # for syntax check
             # Convert torch.dtype to string for load_mm_weight
             dtype_str = self.model_config.data_type
-            self.load_mm_weight(
+            multimodal_model.load_mm_weight(
                 model_config=self.model_config,
                 ctype=dtype_str,
                 tp_size=self.parallelism_config.tp_size,
