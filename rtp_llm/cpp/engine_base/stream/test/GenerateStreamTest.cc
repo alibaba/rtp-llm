@@ -93,6 +93,97 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
+TEST_F(GenerateStreamTest, testBatchSizeWithNumReturnSequences) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    RuntimeConfig runtime_config;
+
+    auto generate_input                   = std::make_shared<GenerateInput>();
+    auto generate_config                  = std::make_shared<GenerateConfig>();
+    generate_config->num_return_sequences = 3;
+    generate_input->generate_config       = generate_config;
+    generate_input->input_ids             = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto stream =
+        std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+
+    // prefill: batch=1 even though n=3
+    EXPECT_EQ(1, stream->batchSize(0));
+    // decode: batch=n=3
+    EXPECT_EQ(3, stream->batchSize(1));
+    EXPECT_EQ(3, stream->batchSize(5));
+    EXPECT_EQ(3, stream->maxBatchSize());
+}
+
+TEST_F(GenerateStreamTest, testBatchSizeWithBeamSearch) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    RuntimeConfig runtime_config;
+
+    auto generate_input             = std::make_shared<GenerateInput>();
+    auto generate_config            = std::make_shared<GenerateConfig>();
+    generate_config->num_beams      = 4;
+    generate_input->generate_config = generate_config;
+    generate_input->input_ids       = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto stream =
+        std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+
+    // beam search: first step 1 beam, subsequent steps 4 beams
+    EXPECT_EQ(1, stream->batchSize(0));
+    EXPECT_EQ(4, stream->batchSize(1));
+    EXPECT_EQ(4, stream->maxBatchSize());
+}
+
+TEST_F(GenerateStreamTest, testNeedTilingForSampling) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    RuntimeConfig runtime_config;
+
+    // Case 1: context stream with num_return_sequences > 1, no beam search -> needs tiling
+    {
+        auto input                   = std::make_shared<GenerateInput>();
+        auto config                  = std::make_shared<GenerateConfig>();
+        config->num_return_sequences = 2;
+        input->generate_config       = config;
+        input->input_ids             = torch::tensor({1, 2}, torch::kInt32);
+        auto stream =
+            std::make_shared<NormalGenerateStream>(input, model_config, runtime_config, resource_context, nullptr);
+        // context stream: currentBatchSize()=1, nextBatchSize()=2, no beams
+        EXPECT_TRUE(stream->isContextStream());
+        EXPECT_TRUE(stream->needTilingForSampling());
+    }
+
+    // Case 2: context stream with num_beams > 1 -> no tiling (beam search handles expansion)
+    {
+        auto input             = std::make_shared<GenerateInput>();
+        auto config            = std::make_shared<GenerateConfig>();
+        config->num_beams      = 2;
+        input->generate_config = config;
+        input->input_ids       = torch::tensor({1, 2}, torch::kInt32);
+        auto stream =
+            std::make_shared<NormalGenerateStream>(input, model_config, runtime_config, resource_context, nullptr);
+        EXPECT_TRUE(stream->isContextStream());
+        EXPECT_FALSE(stream->needTilingForSampling());
+    }
+
+    // Case 3: decoder stream with num_return_sequences > 1 -> no tiling (not context stream)
+    {
+        auto input                   = std::make_shared<GenerateInput>();
+        auto config                  = std::make_shared<GenerateConfig>();
+        config->num_return_sequences = 2;
+        input->generate_config       = config;
+        input->input_ids             = torch::tensor({1, 2}, torch::kInt32);
+        auto stream =
+            std::make_shared<NormalGenerateStream>(input, model_config, runtime_config, resource_context, nullptr);
+        stream->setIsContextStream(false);
+        EXPECT_FALSE(stream->needTilingForSampling());
+    }
+}
+
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});

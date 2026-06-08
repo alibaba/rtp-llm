@@ -4,11 +4,15 @@
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
+#include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "autil/LockFreeThreadPool.h"
 
 using namespace std;
 
@@ -40,7 +44,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
 
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr, false);
 
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = hostIntBuffer({1, 2});
@@ -123,7 +127,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         MMModelConfig mm_model_config;
         model_config.mm_model_config = mm_model_config;
         NormalBatchStreamProcessor processor(
-            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr, false);
 
         StreamGroups stream_groups(streams);
         auto         merge_input_status = processor.gatherModelInput(stream_groups);
@@ -164,7 +168,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     }
     cache_config.group_types = {CacheGroupType::FULL};
     NormalBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr, false);
 
     StreamGroups stream_groups(streams);
     auto         merge_input_status = processor.gatherModelInput(stream_groups);
@@ -243,7 +247,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     }
     cache_config.group_types = {CacheGroupType::FULL};
     NormalBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr, false);
 
     StreamGroups stream_groups(streams);
     auto         merge_input_status = processor.gatherModelInput(stream_groups);
@@ -291,7 +295,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     cache_config.group_types = {CacheGroupType::FULL};
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, nullptr, false);
 
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = hostIntBuffer({1, -1, -1, -1, 2});
@@ -350,6 +354,265 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
         EXPECT_EQ(model_input.multimodal_features.value()[0].numel(), 3 * 10);
         EXPECT_EQ(model_input.multimodal_features.value()[1].numel(), 2 * 10);
     }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbsWithNumReturnSequences) {
+    // Setup cache manager (needed because dispatch->update->updateKvCacheBlocks requires it)
+    auto cache_config = test::makeSimpleMhaCacheConfig(
+        /*layer_num=*/2, /*block_num=*/20, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len                = 2048;
+    model_config.vocab_size                 = 4;
+    model_config.num_layers                 = 2;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    RuntimeConfig               runtime_config;
+
+    // Create stream with num_return_sequences=2, test in decode state
+    // (softmax_probs with n>1 on context step is not supported because logits have 1 row but need n results)
+    auto query                                   = make_shared<GenerateInput>();
+    query->input_ids                             = hostIntBuffer({1});
+    query->generate_config                       = make_shared<GenerateConfig>();
+    query->generate_config->num_return_sequences = 2;
+    query->generate_config->return_softmax_probs = true;
+    query->need_release_resource                 = false;
+
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+
+    // Set up as decode stream with batch=2
+    BatchKVCacheResource addr;
+    addr.resetBatchSize(2);
+    addr.initGroups(cache_config.groupNums(), cache_config.layer_all_num, cache_config.layer_to_group_id);
+    addr.setBatchBlocks(0, 0, {1});
+    addr.setBatchBlocks(1, 0, {2});
+    stream->setKVCache(addr);
+    stream->generate_status_->status = StreamState::RUNNING;
+    stream->setIsContextStream(false);
+    stream->setSeqLength(2);
+    stream->complete_token_ids_->batch_size_ = 2;
+    stream->resizeSubGenerateStatus(2);
+    auto complete_ids  = stream->completeTokenIds();
+    complete_ids[0][0] = 1;
+    complete_ids[0][1] = 2;
+    complete_ids[1][0] = 1;
+    complete_ids[1][1] = 3;
+
+    EXPECT_EQ(2, stream->currentBatchSize());
+    EXPECT_EQ(2, stream->nextBatchSize());
+
+    list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream);
+
+    CacheConfig proc_cache_config;
+    proc_cache_config.group_types = {CacheGroupType::FULL};
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, proc_cache_config, nullptr, false);
+
+    StreamGroups stream_groups(streams);
+    auto         merge_input_status = processor.gatherModelInput(stream_groups);
+    EXPECT_TRUE(merge_input_status.ok());
+
+    // Build merge outputs: model and sampler both have batch=2
+    MergedOutput merge_outputs;
+    merge_outputs.model_output.logits =
+        torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 4.0f, 3.0f, 2.0f, 1.0f}).reshape({2, 4}).to(torch::kCUDA);
+    merge_outputs.model_output.hidden_states = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}).reshape({2, 2}).to(torch::kCUDA);
+    // token_ids: [2, 3] — each row is [input_token, old_token, new_token]
+    merge_outputs.sampler_output.token_ids     = torch::tensor({1, 2, 0, 1, 3, 1}, torch::kInt32).reshape({2, 3});
+    merge_outputs.sampler_output.cum_log_probs = torch::tensor({-0.5f, -1.0f}).to(torch::kCUDA);
+
+    auto status = processor.dispatch(stream_groups, merge_outputs);
+    EXPECT_TRUE(status.ok());
+
+    auto softmax_probs = stream->getSoftmaxProbs();
+    EXPECT_TRUE(softmax_probs.defined());
+    EXPECT_EQ(2, softmax_probs.size(0));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDispatchWithBeamSearch) {
+    // Setup cache manager
+    auto cache_config = test::makeSimpleMhaCacheConfig(
+        /*layer_num=*/2, /*block_num=*/20, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len                = 2048;
+    model_config.vocab_size                 = 4;
+    model_config.num_layers                 = 2;
+    model_config.attn_config.kv_cache_dtype = KvCacheDataType::INT8;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    RuntimeConfig               runtime_config;
+
+    // Create stream with num_beams=2, return_softmax_probs=true
+    auto query                                   = make_shared<GenerateInput>();
+    query->input_ids                             = hostIntBuffer({1});
+    query->generate_config                       = make_shared<GenerateConfig>();
+    query->generate_config->num_beams            = 2;
+    query->generate_config->return_softmax_probs = true;
+    query->need_release_resource                 = false;
+
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+
+    // Allocate KV cache blocks for beam_batch=2
+    BatchKVCacheResource addr;
+    addr.resetBatchSize(2);
+    addr.initGroups(cache_config.groupNums(), cache_config.layer_all_num, cache_config.layer_to_group_id);
+    addr.setBatchBlocks(0, 0, {1, 2});
+    addr.setBatchBlocks(1, 0, {3, 4});
+    stream->setKVCache(addr);
+
+    // Manually set up decode state: simulate context step already done
+    // Set seqLength=2 (input_len=1 + 1 decoded token), mark as decode stream
+    stream->generate_status_->status = StreamState::RUNNING;
+    stream->setIsContextStream(false);
+    stream->setSeqLength(2);
+    stream->complete_token_ids_->batch_size_ = 2;
+    // Fill complete_token_ids for both beams
+    auto complete_ids = stream->completeTokenIds();
+    // beam 0: [1, 2], beam 1: [1, 3]
+    complete_ids[0][0] = 1;
+    complete_ids[0][1] = 2;
+    complete_ids[1][0] = 1;
+    complete_ids[1][1] = 3;
+    // Resize sub_generate_status to match batch=2
+    stream->resizeSubGenerateStatus(2);
+
+    EXPECT_FALSE(stream->isContextStream());
+    EXPECT_EQ(2, stream->seqLength());
+    EXPECT_EQ(2, stream->currentBatchSize());
+    EXPECT_EQ(2, stream->nextBatchSize());
+
+    // Decode step: test beam search dispatch with beam swap
+    {
+        list<GenerateStreamPtr> streams_dec;
+        streams_dec.emplace_back(stream);
+        StreamGroups sg_dec(streams_dec);
+
+        CacheConfig proc_cache_config;
+        proc_cache_config.group_types = {CacheGroupType::FULL};
+        NormalBatchStreamProcessor proc_dec(
+            model_config, pd_sep_config, profiling_debug_logging_config, proc_cache_config, nullptr, false);
+
+        auto gather_status = proc_dec.gatherModelInput(sg_dec);
+        EXPECT_TRUE(gather_status.ok());
+
+        MergedOutput dec_outputs;
+        // logits: [2, 4] — beam 0 has logits [10, 20, 30, 40], beam 1 has [40, 30, 20, 10]
+        dec_outputs.model_output.logits =
+            torch::tensor({10.0f, 20.0f, 30.0f, 40.0f, 40.0f, 30.0f, 20.0f, 10.0f}).reshape({2, 4}).to(torch::kCUDA);
+        dec_outputs.model_output.hidden_states =
+            torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}).reshape({2, 2}).to(torch::kCUDA);
+
+        // beam search: token_ids [2, max_seq_len] with full sequences
+        int  max_seq_len = 2048;
+        auto token_ids   = torch::zeros({2, max_seq_len}, torch::kInt32);
+        // After beam search, beams are swapped: output beam 0 came from input beam 1
+        // beam 0: input=1, tok1=3, new_tok=0 (from input beam 1)
+        token_ids[0][0] = 1;
+        token_ids[0][1] = 3;
+        token_ids[0][2] = 0;
+        // beam 1: input=1, tok1=2, new_tok=1 (from input beam 0)
+        token_ids[1][0]                          = 1;
+        token_ids[1][1]                          = 2;
+        token_ids[1][2]                          = 1;
+        dec_outputs.sampler_output.token_ids     = token_ids;
+        dec_outputs.sampler_output.beam_index    = torch::tensor({1, 0}, torch::kInt32);  // beams swapped
+        dec_outputs.sampler_output.cum_log_probs = torch::tensor({-0.3f, -0.5f}).to(torch::kCUDA);
+
+        auto status = proc_dec.dispatch(sg_dec, dec_outputs);
+        EXPECT_TRUE(status.ok());
+
+        // Verify softmax_probs: logits were reordered by beam_index before softmax
+        // Output beam 0 used input beam 1's logits [40, 30, 20, 10], new_token=0
+        // softmax([40,30,20,10])[0] = exp(40)/sum(exp([40,30,20,10]))
+        // Output beam 1 used input beam 0's logits [10, 20, 30, 40], new_token=1
+        // softmax([10,20,30,40])[1] = exp(20)/sum(exp([10,20,30,40]))
+        auto softmax_probs = stream->getSoftmaxProbs();
+        EXPECT_TRUE(softmax_probs.defined());
+        EXPECT_EQ(2, softmax_probs.size(0));
+
+        // Verify the stream advanced to seqLength=3
+        EXPECT_EQ(3, stream->seqLength());
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testParallelDispatch) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2;
+    model_config.num_layers  = 2;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    RuntimeConfig runtime_config;
+
+    auto thread_pool = std::make_shared<autil::LockFreeThreadPool>(4, 100, nullptr, "TestPool");
+    ASSERT_TRUE(thread_pool->start());
+
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, thread_pool, false);
+
+    std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
+    query1->input_ids                     = hostIntBuffer({1});
+    query1->generate_config               = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream1 =
+        make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource addr1;
+    addr1.resetBatchSize(1);
+    addr1.initGroups(1, 3, {0, 0, 0});
+    addr1.setBatchBlocks(0, 0, {1});
+    stream1->setKVCache(addr1);
+
+    std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
+    query2->input_ids                     = hostIntBuffer({1});
+    query2->generate_config               = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream2 =
+        make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource addr2;
+    addr2.resetBatchSize(1);
+    addr2.initGroups(1, 3, {0, 0, 0});
+    addr2.setBatchBlocks(0, 0, {2});
+    stream2->setKVCache(addr2);
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream1);
+    streams.emplace_back(stream2);
+
+    for (const auto& stream : streams) {
+        stream->generate_status_->status = StreamState::RUNNING;
+    }
+
+    StreamGroups stream_groups(streams);
+    auto         merge_input_status = processor.gatherModelInput(stream_groups);
+    EXPECT_TRUE(merge_input_status.ok());
+
+    MergedOutput merge_outputs;
+    merge_outputs.model_output.hidden_states = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}).reshape({2, 2}).to(torch::kCUDA);
+    merge_outputs.model_output.logits        = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}).reshape({2, 2}).to(torch::kCUDA);
+    merge_outputs.sampler_output.token_ids   = torch::tensor({0, 1, 1, 0}, torch::kInt32).reshape({2, 2});
+    merge_outputs.sampler_output.cum_log_probs = torch::tensor({1.0f, 2.0f}).to(torch::kCUDA);
+
+    auto status = processor.dispatch(stream_groups, merge_outputs);
+    EXPECT_TRUE(status.ok());
+
+    thread_pool->stop();
 }
 
 }  // namespace rtp_llm

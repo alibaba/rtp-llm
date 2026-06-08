@@ -205,18 +205,22 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("concurrency_with_block", &ConcurrencyConfig::concurrency_with_block)
         .def_readwrite("concurrency_limit", &ConcurrencyConfig::concurrency_limit)
+        .def_readwrite("engine_async_worker_count", &ConcurrencyConfig::engine_async_worker_count)
         .def("to_string", &ConcurrencyConfig::to_string)
         .def(py::pickle(
             [](const ConcurrencyConfig& self) {
-                return py::make_tuple(self.concurrency_with_block, self.concurrency_limit);
+                return py::make_tuple(
+                    self.concurrency_with_block, self.concurrency_limit, self.engine_async_worker_count);
             },
             [](py::tuple t) {
-                if (t.size() != 2)
+                if (t.size() < 2)
                     throw std::runtime_error("Invalid state!");
                 ConcurrencyConfig c;
                 try {
                     c.concurrency_with_block = t[0].cast<int>();
                     c.concurrency_limit      = t[1].cast<int>();
+                    if (t.size() >= 3)
+                        c.engine_async_worker_count = t[2].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ConcurrencyConfig unpickle error: ") + e.what());
                 }

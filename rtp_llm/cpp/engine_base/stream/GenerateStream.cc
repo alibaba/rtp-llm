@@ -53,16 +53,21 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         RTP_LLM_LOG_WARNING("beam search does not support PERF_TEST for now");
     }
 
-    // Note it is invalid to use currentBatchSize here, because currentBatchSize depends on complete_token_ids_,
-    // which has not been initialized yet
+    // Note it is invalid to use currentBatchSize and nextBatchSize here, because they depend on
+    // complete_token_ids_, which has not been initialized yet
     const size_t init_batch_size = batchSize(0);
+    const size_t next_batch_size = batchSize(1);
+    // due to logits processing following tiling for logits, the batch size of the 2nd step is used here
+    // TODO(zhangjianning.zjn): tiling for logits should be moved after logits processors
+    const size_t logits_processor_init_batch_size =
+        init_batch_size != next_batch_size && !hasNumBeams() ? next_batch_size : init_batch_size;
 
     begin_time_us_ = input->begin_time_us;
     if (generate_input_->generate_config->calculate_loss && inputLength() > 1) {
         loss_ = torch::zeros({(int64_t)inputLength() - 1}, torch::kFloat32);
     }
     if (generate_input_->generate_config->return_softmax_probs) {
-        softmax_probs_ = torch::zeros({(int64_t)init_batch_size, (int64_t)max_seq_len_}, torch::kFloat32);
+        softmax_probs_ = torch::zeros({(int64_t)maxBatchSize(), (int64_t)max_seq_len_}, torch::kFloat32);
     }
     if (generate_input_->generate_config->return_all_hidden_states) {
         setReturnLastHiddenStates(true);
@@ -78,6 +83,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     is_context_stream_  = std::make_shared<bool>();
     *is_context_stream_ = true;
     generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
+    sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
 
@@ -86,7 +92,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
     logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
-        generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
+        generate_input_, logits_processor_init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
 
     if (generateConfig()->random_seed.has_value()) {
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -178,7 +184,7 @@ int GenerateStream::batchSize(int output_len) const {
     if (generate_input_->generate_config->hasNumBeams()) {
         return numBeams(output_len);
     } else {
-        return std::max(numReturnSequences(), 1);
+        return output_len == 0 && !perf_test_ ? 1 : std::max(numReturnSequences(), 1);
     }
 }
 
@@ -816,7 +822,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         updateLogitProcessorStatus(update_info);
     }
 
-    if (!is_done || reuseCache()) {
+    if (!is_done || stream_cache_resource_->reuseCache()) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
         auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
         if (!update_res) {
@@ -848,7 +854,7 @@ bool GenerateStream::updateKvCacheBlocks(const torch::Tensor& src_batch_indices)
 
 void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices) {
     RTP_LLM_PROFILE_FUNCTION();
-    if (!src_batch_indices.defined() || !hasNumBeams()) {
+    if (!src_batch_indices.defined()) {
         return;
     }
 
