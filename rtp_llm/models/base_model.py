@@ -1,7 +1,8 @@
 import json
 import logging
 import os
-from typing import Any, Optional, Type, Union
+import re
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 
@@ -135,6 +136,10 @@ class BaseModel(object):
             and self.support_cuda_graph() is False
         ):
             raise Exception("current model can't support cuda graph in py model mode")
+
+        if self._use_new_loader():
+            self._load_with_new_loader()
+            return
 
         self._may_init_multimodal()
         self.custom_module = self._init_custom_module()
@@ -329,6 +334,128 @@ class BaseModel(object):
                 tp_rank=self.parallelism_config.tp_rank,
                 device=self._get_device_str(),
             )
+
+    def _use_new_loader(self) -> bool:
+        if os.environ.get("USE_NEW_LOADER", "0") == "1":
+            return True
+        if (
+            hasattr(self.model_config, "use_new_loader")
+            and self.model_config.use_new_loader
+        ):
+            return True
+        return False
+
+    def _load_with_new_loader(self):
+        from rtp_llm.models_py.model_loader import LoadConfig, NewModelLoader
+
+        device_str = self._get_device_str()
+        logging.info(f"Using NewModelLoader (two-phase) to load model on {device_str}")
+
+        load_config = LoadConfig(
+            tp_size=self.parallelism_config.tp_size,
+            tp_rank=self.parallelism_config.tp_rank,
+            ep_size=getattr(self.parallelism_config, "ep_size", 1),
+            ep_rank=getattr(self.parallelism_config, "ep_rank", 0),
+            quant_type=self._get_quant_type(),
+            compute_dtype=self.model_config.compute_dtype,
+            device=device_str,
+            parallelism_config=self.parallelism_config,
+            fmha_config=getattr(self.hw_kernel_config, "fmha_config", None),
+            device_resource_config=self.device_resource_config,
+        )
+
+        loader = NewModelLoader(
+            model_config=self.model_config,
+            load_config=load_config,
+            model_path=self.model_config.ckpt_path,
+            device=device_str,
+        )
+
+        self.device = device_str
+        self.py_model = loader.load()
+        self.weight = self._build_weights_from_module(self.py_model)
+        self.weight_manager = None
+        self.model_weights_loader = None
+        self.py_eplb = None
+        logging.info("NewModelLoader: model loaded successfully")
+
+    def _get_quant_type(self) -> str:
+        # Each QuantizationConfig subclass (in rtp_llm/config/quant_config.py)
+        # owns its dispatch identity via get_runtime_method_key(); no central
+        # if-elif here. Add a new quant type by overriding that method on the
+        # config and decorating the method class with @register_quant_method.
+        qc = getattr(self.model_config, "quant_config", None)
+        if qc is None or not hasattr(qc, "get_runtime_method_key"):
+            return "none"
+        return qc.get_runtime_method_key() or "none"
+
+    def _build_weights_from_module(self, module: torch.nn.Module) -> ModelWeights:
+        num_layers = self.model_config.num_layers
+        dtype = self.model_config.compute_dtype or torch.float16
+        weights = ModelWeights(num_layers, self.device, dtype)
+
+        global_weights = self._extract_global_weights(module)
+        for key, tensor in global_weights.items():
+            weights.set_global_weight(key, tensor)
+
+        logging.info(
+            f"Built ModelWeights shell from nn.Module: "
+            f"{num_layers} layers, "
+            f"global_weights={list(global_weights.keys())}"
+        )
+        return weights
+
+    @staticmethod
+    def _in_layers(name: str) -> bool:
+        return bool(re.search(r"layers\.\d+", name))
+
+    @staticmethod
+    def _is_final_norm(name: str) -> bool:
+        if BaseModel._in_layers(name):
+            return False
+        if "lm_head" in name:
+            return False
+        return "norm" in name or "layernorm" in name
+
+    def _extract_global_weights(
+        self, module: torch.nn.Module
+    ) -> Dict[str, torch.Tensor]:
+        rules: List[Tuple[Any, str]] = [
+            (lambda n: "embed_token" in n and not self._in_layers(n), "embedding"),
+            (lambda n: "lm_head" in n and "weight" in n.split(".")[-1], "lm_head"),
+            (
+                lambda n: self._is_final_norm(n) and n.split(".")[-1] == "weight",
+                "final_layernorm.gamma",
+            ),
+            (
+                lambda n: self._is_final_norm(n) and n.split(".")[-1] == "bias",
+                "final_layernorm.beta",
+            ),
+            (
+                lambda n: ("position" in n and "encod" in n)
+                or ("wpe" in n and not self._in_layers(n)),
+                "position_encoding.weight",
+            ),
+            (
+                lambda n: "token_type" in n and "embed" in n and not self._in_layers(n),
+                "token_type_embedding.weight",
+            ),
+        ]
+
+        result: Dict[str, torch.Tensor] = {}
+        assigned_keys: set = set()
+
+        for name, param in module.named_parameters():
+            for matcher, w_key in rules:
+                if w_key in assigned_keys:
+                    continue
+                if matcher(name):
+                    result[w_key] = param.data
+                    assigned_keys.add(w_key)
+                    logging.info(f"Global weight mapped: {name} -> {w_key}")
+                    break
+
+        return result
 
     def create_model_loader(self) -> ModelLoader:
         # Create database locally, only used for model loading

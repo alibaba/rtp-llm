@@ -22,8 +22,8 @@ class GptModelBase(nn.Module):
         self,
         config: ModelConfig,
         parallelism_config,
-        weight: ModelWeights,
-        max_generate_batch_size: int,
+        weight: Optional[ModelWeights] = None,
+        max_generate_batch_size: int = 0,
         fmha_config=None,  # Optional FMHAConfig
         py_hw_kernel_config=None,  # Optional HWKernelConfig
         device_resource_config: Optional[
