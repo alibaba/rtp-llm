@@ -39,6 +39,7 @@ from .glm4_moe import Glm4Moe
 from .jina_bert.jina_bert import JinaBert
 from .kimi_linear.kimi_linear import KimiLinear
 from .megatron_bert import MegatronBert
+from .minimax_m2 import MinimaxM2
 from .mixtral import Mixtral
 from .qwen3_next.qwen3_next import Qwen3Next
 from .qwen3_next.qwen3_next_mtp import Qwen3NextMTP
