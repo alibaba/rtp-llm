@@ -47,3 +47,11 @@ py_test(
         'gpu': 'MI308X-ROCM7',
     },
 )
+
+py_test(
+    name = "test_shared_expert_fusion",
+    srcs = ["test_shared_expert_fusion.py"],
+    deps = py_test_deps,
+    tags = ["rocm"],
+    timeout = "short",
+)

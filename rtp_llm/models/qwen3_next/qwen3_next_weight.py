@@ -1,4 +1,5 @@
 import functools
+import os
 from typing import Any, Dict, List
 
 import torch
@@ -318,9 +319,12 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
             ),
         ]
 
-    def _should_fuse_shared_expert(self) -> bool:
-        import os
+    _FUSION_SUPPORTED_QUANT_TYPES = (
+        "Fp8PerChannelCompressedQuantConfig",
+        "Fp8PerChannelQuarkQuantConfig",
+    )
 
+    def _should_fuse_shared_expert(self) -> bool:
         if not (hasattr(torch.version, "hip") and torch.version.hip is not None):
             return False
         if os.environ.get("DISABLE_SHARED_EXPERT_FUSION", "0") == "1":
@@ -330,11 +334,22 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
             return False
         if getattr(mc, "inter_size", 0) != getattr(mc, "moe_inter_size", 0):
             return False
-        if self.ep_size > 1:
+        # TP-only: no EP, no DP, ffn_tp == attn_tp, no EPLB redundant experts
+        if not (self.ep_size == 1 and self.dp_size == 1
+                and self.ffn_tp_size == self.tp_size):
             return False
+        if mc.eplb_config.phy_exp_num(mc.expert_num) != mc.expert_num:
+            return False
+        if self._quant_algo.isQuant():
+            quant_type = type(self._quant_config).__name__
+            if quant_type not in self._FUSION_SUPPORTED_QUANT_TYPES:
+                return False
+            exclude = getattr(self._quant_config, "exclude_modules", None)
+            if exclude and any("mlp.shared_expert" in m for m in exclude):
+                return False
         return True
 
-    def _get_shared_expert_overrides(self, fuse_shared: bool):
+    def _get_shared_expert_overrides(self, fuse_shared: bool, stacked: bool = False):
         if not fuse_shared:
             return None, None
         n = self.expert_num_
@@ -346,18 +361,19 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                 )
             ]
         }
-        overrides_w1 = {
-            n: [
-                CkptWeightInfo(
-                    self.prefix + "layers.{i}.mlp.shared_expert.gate_proj.weight",
-                    identity,
-                ),
-                CkptWeightInfo(
-                    self.prefix + "layers.{i}.mlp.shared_expert.up_proj.weight",
-                    identity,
-                ),
-            ]
-        }
+        gate = CkptWeightInfo(
+            self.prefix + "layers.{i}.mlp.shared_expert.gate_proj.weight",
+            identity,
+        )
+        up = CkptWeightInfo(
+            self.prefix + "layers.{i}.mlp.shared_expert.up_proj.weight",
+            identity,
+        )
+        # stacked (transpose_stack_moe_w1): checkpoint is [gate, up], process_fun
+        # swaps to [up, gate] uniformly for all experts including the override.
+        # split (stack_moe_w1): ckpt_weights order is [up_proj, gate_proj],
+        # override must match so ckpt_idx indexing is correct.
+        overrides_w1 = {n: [gate, up] if stacked else [up, gate]}
         return overrides_w1, overrides_w2
 
     def _create_ffn_weight(self) -> List[WeightModule]:
@@ -386,7 +402,11 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
         n = self.expert_num_
         if fuse_shared:
             n += 1
-        return MoeConfig(expert_num=n, align_size=self._align_size)
+        return MoeConfig(
+            expert_num=n,
+            align_size=self._align_size,
+            fused_shared_expert=fuse_shared,
+        )
 
     def _create_ffn_common_weights(
         self, moe_config: MoeConfig, ffn_config: FfnConfig, fuse_shared: bool = False
@@ -633,7 +653,7 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
     def _create_moe_expert_weights_stacked(
         self, moe_config: MoeConfig, fuse_shared: bool = False
     ) -> List[MoeAtomicWeight]:
-        overrides_w1, overrides_w2 = self._get_shared_expert_overrides(fuse_shared)
+        overrides_w1, overrides_w2 = self._get_shared_expert_overrides(fuse_shared, stacked=True)
         return [
             MoeAtomicWeight(
                 W.moe_w2,

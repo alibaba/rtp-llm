@@ -1,5 +1,4 @@
 import logging
-import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -75,21 +74,26 @@ class GenericMoeLayer(nn.Module):
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
         self.ep_size = parallelism_config.ep_size
 
-        moe_w1_check = weights.get(W.moe_w1, None)
-        actual_experts = moe_w1_check.shape[0] if moe_w1_check is not None else 0
+        # Detect shared expert fusion: the weight loader appends the shared
+        # expert as expert #N, making moe_w1.shape[0] == expert_num + 1.
+        # Exclude EPLB redundant experts (phy_exp_num > expert_num) which
+        # also increase shape[0] but are not shared expert fusion.
+        moe_w1 = weights.get(W.moe_w1, None)
+        num_loaded_experts = moe_w1.shape[0] if moe_w1 is not None else 0
+        phy_exp_num = config.eplb_config.phy_exp_num(config.expert_num)
+        is_tp_only = (
+            self.ep_size == 1
+            and parallelism_config.dp_size == 1
+            and self.ffn_tp_size == parallelism_config.get_attn_tp_size()
+        )
         self.use_fused_shared_expert = (
             self.add_shared_expert
-            and self.ep_size == 1
-            and actual_experts > config.expert_num
-            and os.environ.get("DISABLE_SHARED_EXPERT_FUSION", "0") != "1"
+            and is_tp_only
+            and num_loaded_experts > config.expert_num
+            and phy_exp_num == config.expert_num
         )
         if self.use_fused_shared_expert:
             self.fused_shared_expert_id = config.expert_num
-            logging.info(
-                "shared expert fused as expert %d, moe_w1: %s",
-                self.fused_shared_expert_id,
-                moe_w1_check.shape,
-            )
 
         config_adapter = MoEConfigAdapter(
             model_config=config,
@@ -99,7 +103,12 @@ class GenericMoeLayer(nn.Module):
             enable_cuda_graph=enable_cuda_graph,
         )
         if self.use_fused_shared_expert:
-            config_adapter.expert_num = moe_w1_check.shape[0]
+            config_adapter.expert_num = num_loaded_experts
+            logging.info(
+                "shared expert fused as expert %d (total %d experts in moe_w1)",
+                self.fused_shared_expert_id,
+                num_loaded_experts,
+            )
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
 
         self.w1 = weights.get(W.moe_w1, None)
@@ -143,22 +152,23 @@ class GenericMoeLayer(nn.Module):
 
     def _extend_topk_with_shared_expert(self, topk_ids, topk_weights, hidden_states):
         num_tokens = topk_ids.shape[0]
-        shared_ids = torch.full(
-            (num_tokens, 1),
-            self.fused_shared_expert_id,
-            dtype=topk_ids.dtype,
-            device=topk_ids.device,
+        k = topk_ids.shape[1]
+        ext_ids = torch.empty(
+            (num_tokens, k + 1), dtype=topk_ids.dtype, device=topk_ids.device
         )
+        ext_weights = torch.empty(
+            (num_tokens, k + 1), dtype=topk_weights.dtype, device=topk_weights.device
+        )
+        ext_ids[:, :k] = topk_ids
+        ext_ids[:, k] = self.fused_shared_expert_id
+        ext_weights[:, :k] = topk_weights
         if self.shared_expert_gate is not None:
-            gate_out = self.shared_expert_gate(hidden_states)
-            shared_weights = torch.sigmoid(gate_out).float()
+            ext_weights[:, k:] = torch.sigmoid(
+                self.shared_expert_gate(hidden_states)
+            ).float()
         else:
-            shared_weights = torch.ones(
-                (num_tokens, 1), dtype=torch.float32, device=topk_ids.device
-            )
-        topk_ids = torch.cat([topk_ids, shared_ids], dim=1).contiguous()
-        topk_weights = torch.cat([topk_weights, shared_weights], dim=1).contiguous()
-        return topk_ids, topk_weights
+            ext_weights[:, k] = 1.0
+        return ext_ids, ext_weights
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
