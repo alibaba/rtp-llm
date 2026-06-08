@@ -186,11 +186,16 @@ class Qwen2VisionPatchMerger(nn.Module):
         params_dtype: torch.dtype = torch.float16,
     ):
         super().__init__()
-        merge_input_size = hidden_size * (spatial_merge_size**2)
+        # HF: PatchMerger keeps the bumped-up dim across the gelu and only
+        # projects down at fc2 (transformers/qwen2_vl: dim = context_dim *
+        # spatial_merge_size**2). Pair fc1 ColumnParallel + fc2 RowParallel
+        # so TP>1 splits along the bumped-up dim and reduces back to LLM dim,
+        # mirroring Qwen2VisionMLP/Qwen2VisionAttn in this file.
+        self.merge_input_size = hidden_size * (spatial_merge_size**2)
         self.ln_q = LayerNorm(hidden_size, params_dtype=params_dtype)
         self.fc1 = ColumnParallelLinear(
-            input_size=merge_input_size,
-            output_size=output_size,
+            input_size=self.merge_input_size,
+            output_size=self.merge_input_size,
             tp_size=tp_size,
             tp_rank=tp_rank,
             quant_config=quant_config,
@@ -198,8 +203,8 @@ class Qwen2VisionPatchMerger(nn.Module):
             bias=True,
             params_dtype=params_dtype,
         )
-        self.fc2 = ColumnParallelLinear(
-            input_size=output_size,
+        self.fc2 = RowParallelLinear(
+            input_size=self.merge_input_size,
             output_size=output_size,
             tp_size=tp_size,
             tp_rank=tp_rank,
@@ -211,6 +216,10 @@ class Qwen2VisionPatchMerger(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.ln_q(x)
+        # Spatial merge: every spatial_merge_size**2 neighboring tokens get
+        # concatenated into one along the channel dim (matches HF's
+        # `.view(-1, hidden_size)` after ln_q).
+        x = x.view(-1, self.merge_input_size)
         x = self.fc1(x)
         x = torch.nn.functional.gelu(x, approximate="tanh")
         x = self.fc2(x)

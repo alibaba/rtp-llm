@@ -24,7 +24,6 @@ class LoadConfig:
         ep_size: int = 1,
         ep_rank: int = 0,
         quant_type: str = "none",
-        num_experts: int = 0,
         compute_dtype: torch.dtype = torch.float16,
         device: str = "cuda",
         load_method: str = LoadMethod.AUTO,
@@ -35,7 +34,6 @@ class LoadConfig:
         self.ep_size = ep_size
         self.ep_rank = ep_rank
         self.quant_type = quant_type
-        self.num_experts = num_experts
         self.compute_dtype = compute_dtype
         self.device = device
         self.load_method = load_method
@@ -399,6 +397,10 @@ class NewModelLoader:
         ep_rank = getattr(self.load_config, "ep_rank", 0)
         if ep_size <= 1:
             return weights_iter
-        num_experts = getattr(self.load_config, "num_experts", 0)
+        # Single source of truth: model_config.expert_num. Same convention as
+        # the legacy loader (model_loader/ffn_weight.py) and every MoE executor
+        # under models_py/modules/factory/fused_moe/. dense models lack this
+        # attr, getattr default 0 short-circuits _create_ep_filter to a no-op.
+        num_experts = getattr(self.model_config, "expert_num", 0)
         ep_filter = _create_ep_filter(ep_size, ep_rank, num_experts)
         return ep_filter.apply(weights_iter)
