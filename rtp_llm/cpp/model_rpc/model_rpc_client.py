@@ -72,9 +72,9 @@ def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
-    input_pb.batch_group_size = input_py.batch_group_size
-    if hasattr(input_py, "batch_group_id") and input_py.batch_group_id != -1:
-        input_pb.batch_group_id.value = input_py.batch_group_id
+    input_pb.group_size = input_py.group_size
+    if hasattr(input_py, "group_id") and input_py.group_id != -1:
+        input_pb.group_id.value = input_py.group_id
 
     request_info = getattr(input_py, "request_info", None)
     if request_info is not None:
@@ -203,8 +203,8 @@ def trans_input(input_py: GenerateInput):
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "trace_id", functools.partial(str)
     )
-    trans_option(generate_config_pb, input_py.generate_config, "batch_group_timeout")
-    trans_option(generate_config_pb, input_py.generate_config, "force_batch")
+    trans_option(generate_config_pb, input_py.generate_config, "group_timeout")
+    trans_option(generate_config_pb, input_py.generate_config, "force_group")
 
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()

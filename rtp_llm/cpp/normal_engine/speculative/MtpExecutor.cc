@@ -764,7 +764,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             snprintf(buf, sizeof(buf), "{id=%ld input=%d prefix=%d reuse=%d ctx=%d grp=%ld/%d tokens=%d} ",
                      s->streamId(), s->inputLength(), s->prefixLength(),
                      s->reuseLength(), s->contextLength(),
-                     s->batchGroupId(), s->batchGroupSize(), s->currentExecuteTokenSize());
+                     s->groupId(), s->groupSize(), s->currentExecuteTokenSize());
             details += buf;
         }
         RTP_LLM_LOG_INFO("prefill_batch_begin: ctx_batch=%zu gen_batch=%zu total_tokens=%zu max_seq=%zu streams=[%s]",

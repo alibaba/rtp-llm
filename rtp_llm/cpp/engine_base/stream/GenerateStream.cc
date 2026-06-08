@@ -583,7 +583,7 @@ void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_
     generate_status_->reportEvent(event, error_code, error_msg);
 }
 
-// 无锁版本，供已持有 mutex_ 的内部调用路径使用（如 update/specUpdate/moveToNext 链路）。
+// 无锁版本，供已持有 mutex_ 的内部调用路径使用（如 update/specUpdate 链路）。
 void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
                                             ErrorCode               error_code,
                                             const std::string&      error_msg) {
@@ -617,16 +617,97 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
     generate_status_->setReserveStep(reserve_step);
 }
 
-StreamState GenerateStream::moveToNext() {
-    checkTimeout();
+bool GenerateStream::prepare() {
     std::lock_guard<std::mutex> lock(*mutex_);
-    StreamState                 state = generate_status_->moveToNext();
-
-    // notify one thread waiting for stream completion
-    if (getStatus() == StreamState::FINISHED) {
-        cv_->notify_one();
+    generate_status_->reportEvent(StreamEvents::CanRun);
+    auto result = streamCacheResource().initKVBlock(reserveStep());
+    if (!result.ok()) {
+        finish_internal();
+        return false;
     }
-    return state;
+    needs_cache_loading_ = streamCacheResource().asyncLoadCache();
+    generate_status_->reportEvent(StreamEvents::LoadInitiated);
+    return needs_cache_loading_;
+}
+
+bool GenerateStream::isReady() {
+    if (!needs_cache_loading_) return true;
+    return streamCacheResource().loadCacheDone();
+}
+
+void GenerateStream::activate() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (generate_status_->hasEvent(StreamEvents::Error)) {
+        finish_internal();
+        return;
+    }
+    if (streamCacheResource().resourceContext().role_type == RoleType::PREFILL && isContextStream()) {
+        generate_status_->status.store(StreamState::RUNNING, std::memory_order_release);
+        return;
+    }
+    auto result = streamCacheResource().incrKVBlock(reserveStep());
+    if (!result.ok()) {
+        finish_internal();
+        return;
+    }
+    generate_status_->status.store(StreamState::RUNNING, std::memory_order_release);
+}
+
+void GenerateStream::advance() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (generate_status_->hasEvent(StreamEvents::Error)) {
+        finish_internal();
+        return;
+    }
+    if (generate_status_->hasEvent(StreamEvents::GenerateDone)) {
+        finish_internal();
+        return;
+    }
+    if (streamCacheResource().resourceContext().role_type == RoleType::PREFILL && isContextStream()) {
+        return;
+    }
+    // Use the publish-time seqLength so incrKVBlock doesn't race the async
+    // worker's update() — a stale read skips the block-boundary allocation.
+    // Prefer Normal state; fall back to MTP state if the stream is MTP.
+    int seq_len_override = -1;
+    const int normal_override = getNormalAsyncDeviceState().next_real_seq_len;
+    if (normal_override > 0) {
+        seq_len_override = normal_override;
+    } else {
+        const auto& mtp_state = getMtpAsyncDeviceState();
+        const int   mtp_override = mtp_state.next_real_seq_len;
+        if (mtp_override > 0) {
+            seq_len_override = mtp_override;
+        }
+    }
+    auto result = streamCacheResource().incrKVBlock(reserveStep(), seq_len_override);
+    if (!result.ok()) {
+        finish_internal();
+        return;
+    }
+}
+
+bool GenerateStream::alive() {
+    return generate_status_->getStatus() != StreamState::FINISHED;
+}
+
+void GenerateStream::finish() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    finish_internal();
+}
+
+void GenerateStream::finish_internal() {
+    if (generate_status_->getStatus() == StreamState::FINISHED) return;
+    // releaseResource runs under mutex_; do not wait here.
+    // If a worker still owns KV blocks, mark deferred and let its dec path
+    // perform the release after the pending count drains.
+    if (hasPendingAsyncBookkeeping()) {
+        markDeferredRelease();
+    } else if (!streamCacheResource().isResourceReleased()) {
+        streamCacheResource().releaseResource();
+    }
+    generate_status_->status.store(StreamState::FINISHED, std::memory_order_release);
+    cv_->notify_one();
 }
 
 bool GenerateStream::hasError() const {

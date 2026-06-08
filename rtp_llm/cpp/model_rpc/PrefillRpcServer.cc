@@ -160,12 +160,12 @@ grpc::Status statusFromErrorInfo(const ErrorInfo& error_info) {
     return grpc::Status(grpc::StatusCode::INTERNAL, error_info.ToString());
 }
 
-void addBatchSuccess(BatchEnqueueResponsePB* response, int64_t request_id) {
+void addBatchSuccess(EnqueueBatchResponsePB* response, int64_t request_id) {
     auto* success = response->add_successes();
     success->set_request_id(request_id);
 }
 
-void addBatchError(BatchEnqueueResponsePB* response, int64_t request_id, int64_t code, const std::string& msg) {
+void addBatchError(EnqueueBatchResponsePB* response, int64_t request_id, int64_t code, const std::string& msg) {
     auto* error = response->add_errors();
     error->set_request_id(request_id);
     auto* error_info = error->mutable_error_info();
@@ -862,10 +862,10 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     alloc_request.set_request_id(prefill_context.request_id);
     // TODO(xinfei.sxf) reduce copy
     GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
-    new_request->clear_batch_group_size();
-    new_request->clear_batch_group_id();
-    new_request->mutable_generate_config()->clear_force_batch();
-    new_request->mutable_generate_config()->clear_batch_group_timeout();
+    new_request->clear_group_size();
+    new_request->clear_group_id();
+    new_request->mutable_generate_config()->clear_force_group();
+    new_request->mutable_generate_config()->clear_group_timeout();
     alloc_request.set_allocated_input(new_request);
     for (auto& addrs : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(addrs);
@@ -1255,9 +1255,9 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     return grpc::Status::OK;
 }
 
-grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context,
-                                            const BatchEnqueueRequestPB* request,
-                                            BatchEnqueueResponsePB*      response) {
+grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context,
+                                            const EnqueueBatchRequestPB* request,
+                                            EnqueueBatchResponsePB*      response) {
     RTP_LLM_PROFILE_FUNCTION();
     response->set_batch_id(request->batch_id());
 
@@ -1279,7 +1279,7 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                 addBatchError(response,
                               /*request_id=*/0,
                               grpc::StatusCode::INVALID_ARGUMENT,
-                              "BatchEnqueue external request missing input");
+                              "EnqueueBatch external request missing input");
                 continue;
             }
             const auto& input = external_input.input();
@@ -1294,7 +1294,7 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
     response->mutable_successes()->Reserve(static_cast<int>(all_inputs.size()));
     response->mutable_errors()->Reserve(static_cast<int>(all_inputs.size()));
 
-    auto add_error_for_inputs = [](BatchEnqueueResponsePB* response,
+    auto add_error_for_inputs = [](EnqueueBatchResponsePB* response,
                                    const std::vector<const GenerateInputPB*>& inputs,
                                    int64_t code,
                                    const std::string& message) {
@@ -1310,7 +1310,7 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         add_error_for_inputs(response,
                              all_inputs,
                              grpc::StatusCode::ALREADY_EXISTS,
-                             "duplicate request_id in BatchEnqueue");
+                             "duplicate request_id in EnqueueBatch");
         return grpc::Status::OK;
     }
 
@@ -1318,14 +1318,14 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
         add_error_for_inputs(response,
                              all_inputs,
                              grpc::StatusCode::CANCELLED,
-                             "BatchEnqueue cancelled by caller");
-        return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueue cancelled by caller");
+                             "EnqueueBatch cancelled by caller");
+        return grpc::Status(grpc::StatusCode::CANCELLED, "EnqueueBatch cancelled by caller");
     }
 
     struct DispatchTarget {
         int                     dp_rank = 0;
         std::string             addr;
-        BatchEnqueueDpRequestPB request;
+        EnqueueGroupRequestPB request;
     };
 
     const int local_dp_rank = static_cast<int>(maga_init_params_.parallelism_config.dp_rank);
@@ -1350,7 +1350,7 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                 add_error_for_inputs(response,
                                      target.inputs,
                                      grpc::StatusCode::INVALID_ARGUMENT,
-                                     "invalid BatchEnqueue dp_rank " + std::to_string(target.dp_rank));
+                                     "invalid EnqueueBatch dp_rank " + std::to_string(target.dp_rank));
                 continue;
             }
         }
@@ -1358,9 +1358,9 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
     }
 
     std::mutex response_mu;
-    auto merge_response = [&](const BatchEnqueueDpRequestPB& dp_request,
+    auto merge_response = [&](const EnqueueGroupRequestPB& dp_request,
                               const grpc::Status&           status,
-                              const BatchEnqueueResponsePB& dp_response) {
+                              const EnqueueBatchResponsePB& dp_response) {
         std::lock_guard<std::mutex> lock(response_mu);
         if (!status.ok()) {
             for (const auto& dp_input : dp_request.requests()) {
@@ -1400,7 +1400,7 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                 addBatchError(response,
                               request_id,
                               grpc::StatusCode::INTERNAL,
-                              "BatchEnqueueDp missing result for request");
+                              "EnqueueGroup missing result for request");
             }
         }
     };
@@ -1409,10 +1409,10 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
     dispatch_threads.reserve(dispatch_targets.size());
     for (auto& target : dispatch_targets) {
         dispatch_threads.emplace_back([this, target = std::move(target), merge_response] {
-            BatchEnqueueResponsePB dp_response;
+            EnqueueBatchResponsePB dp_response;
             grpc::Status           status;
             if (target.dp_rank == static_cast<int>(maga_init_params_.parallelism_config.dp_rank)) {
-                status = BatchEnqueueDp(/*context=*/nullptr, &target.request, &dp_response);
+                status = EnqueueGroup(/*context=*/nullptr, &target.request, &dp_response);
                 merge_response(target.request, status, dp_response);
                 return;
             }
@@ -1421,7 +1421,7 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                 auto connect_status = resource_.rpc_pool.getConnection(target.addr);
                 if (!connect_status.ok()) {
                     status = grpc::Status(grpc::StatusCode::UNAVAILABLE,
-                                          "get BatchEnqueueDp connection failed: "
+                                          "get EnqueueGroup connection failed: "
                                               + std::string(connect_status.status().message()));
                 } else {
                     grpc::ClientContext client_context;
@@ -1431,13 +1431,13 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
                                                     + std::chrono::milliseconds(timeout_ms));
                     }
                     status =
-                        connect_status.value().stub->BatchEnqueueDp(&client_context, target.request, &dp_response);
+                        connect_status.value().stub->EnqueueGroup(&client_context, target.request, &dp_response);
                 }
             } catch (const std::exception& e) {
                 status = grpc::Status(grpc::StatusCode::INTERNAL,
-                                      "BatchEnqueueDp forward exception: " + std::string(e.what()));
+                                      "EnqueueGroup forward exception: " + std::string(e.what()));
             } catch (...) {
-                status = grpc::Status(grpc::StatusCode::INTERNAL, "BatchEnqueueDp forward unknown exception");
+                status = grpc::Status(grpc::StatusCode::INTERNAL, "EnqueueGroup forward unknown exception");
             }
             merge_response(target.request, status, dp_response);
         });
@@ -1450,9 +1450,9 @@ grpc::Status PrefillRpcServer::BatchEnqueue(grpc::ServerContext*         context
     return grpc::Status::OK;
 }
 
-grpc::Status PrefillRpcServer::BatchEnqueueDp(grpc::ServerContext*           context,
-                                              const BatchEnqueueDpRequestPB* request,
-                                              BatchEnqueueResponsePB*        response) {
+grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*           context,
+                                              const EnqueueGroupRequestPB* request,
+                                              EnqueueBatchResponsePB*        response) {
     RTP_LLM_PROFILE_FUNCTION();
     response->set_batch_id(request->batch_id());
 
@@ -1477,7 +1477,7 @@ grpc::Status PrefillRpcServer::BatchEnqueueDp(grpc::ServerContext*           con
             addBatchError(response,
                           /*request_id=*/0,
                           grpc::StatusCode::INVALID_ARGUMENT,
-                          "BatchEnqueueDp request missing input");
+                          "EnqueueGroup request missing input");
             continue;
         }
         all_inputs.push_back(&dp_input.input());
@@ -1498,27 +1498,27 @@ grpc::Status PrefillRpcServer::BatchEnqueueDp(grpc::ServerContext*           con
     const int local_dp_rank = static_cast<int>(maga_init_params_.parallelism_config.dp_rank);
     if (request->dp_rank() != local_dp_rank) {
         add_error_for_all(grpc::StatusCode::INVALID_ARGUMENT,
-                          "BatchEnqueueDp dp_rank mismatch, request dp_rank " + std::to_string(request->dp_rank())
+                          "EnqueueGroup dp_rank mismatch, request dp_rank " + std::to_string(request->dp_rank())
                               + ", local dp_rank " + std::to_string(local_dp_rank));
         return grpc::Status::OK;
     }
     if (duplicate_request_id) {
         response->clear_errors();
-        add_error_for_all(grpc::StatusCode::ALREADY_EXISTS, "duplicate request_id in BatchEnqueueDp");
+        add_error_for_all(grpc::StatusCode::ALREADY_EXISTS, "duplicate request_id in EnqueueGroup");
         return grpc::Status::OK;
     }
     if (context && context->IsCancelled()) {
-        add_error_for_all(grpc::StatusCode::CANCELLED, "BatchEnqueueDp cancelled by caller");
-        return grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueueDp cancelled by caller");
+        add_error_for_all(grpc::StatusCode::CANCELLED, "EnqueueGroup cancelled by caller");
+        return grpc::Status(grpc::StatusCode::CANCELLED, "EnqueueGroup cancelled by caller");
     }
 
     std::vector<LocalSlot> slots;
     slots.reserve(all_inputs.size());
-    const int batch_group_size = static_cast<int>(all_inputs.size());
+    const int group_size = static_cast<int>(all_inputs.size());
     for (const auto* input : all_inputs) {
         auto input_copy = std::make_shared<GenerateInputPB>(*input);
-        input_copy->set_batch_group_size(batch_group_size);
-        input_copy->mutable_batch_group_id()->set_value(request->batch_id());
+        input_copy->set_group_size(group_size);
+        input_copy->mutable_group_id()->set_value(request->batch_id());
 
         auto entry = response_registry_.reserve(input_copy->request_id());
         if (!entry) {
@@ -1555,7 +1555,7 @@ grpc::Status PrefillRpcServer::BatchEnqueueDp(grpc::ServerContext*           con
     };
 
     if (!tryStartAsyncResponseWorker()) {
-        auto status = grpc::Status(grpc::StatusCode::UNAVAILABLE, "BatchEnqueueDp server is stopping");
+        auto status = grpc::Status(grpc::StatusCode::UNAVAILABLE, "EnqueueGroup server is stopping");
         for (const auto& slot : slots) {
             finish_pending_before_ack(slot, status);
             addBatchError(response, slot.request_id, status.error_code(), status.error_message());
@@ -1617,7 +1617,7 @@ grpc::Status PrefillRpcServer::BatchEnqueueDp(grpc::ServerContext*           con
                 slot.prefill_context->rpc_context.writer = writer.get();
 
                 if (!tryStartAsyncResponseWorker()) {
-                    fail_slot(slot, grpc::Status(grpc::StatusCode::UNAVAILABLE, "BatchEnqueueDp server is stopping"));
+                    fail_slot(slot, grpc::Status(grpc::StatusCode::UNAVAILABLE, "EnqueueGroup server is stopping"));
                     return;
                 }
 
@@ -1658,7 +1658,7 @@ grpc::Status PrefillRpcServer::BatchEnqueueDp(grpc::ServerContext*           con
                                 grpc::Status(grpc::StatusCode::INTERNAL, "finishStream unknown exception");
                         }
                         markResponseEntryDone(entry, finish_status);
-                        RTP_LLM_LOG_DEBUG("BatchEnqueueDp request [%ld] finishStream done, ok=%d",
+                        RTP_LLM_LOG_DEBUG("EnqueueGroup request [%ld] finishStream done, ok=%d",
                                           request_id,
                                           finish_status.ok());
                     });
@@ -1712,7 +1712,7 @@ grpc::Status PrefillRpcServer::BatchEnqueueDp(grpc::ServerContext*           con
                     auto& slot = *slot_ptr;
                     if (entry_cancelled(slot)) {
                         slot.stage_status =
-                            grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueueDp request cancelled");
+                            grpc::Status(grpc::StatusCode::CANCELLED, "EnqueueGroup request cancelled");
                         return;
                     }
                     try {
@@ -1721,7 +1721,7 @@ grpc::Status PrefillRpcServer::BatchEnqueueDp(grpc::ServerContext*           con
                         for (int attempt = 0; attempt <= max_retry_times; ++attempt) {
                             if (entry_cancelled(slot)) {
                                 slot.stage_status =
-                                    grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueueDp request cancelled");
+                                    grpc::Status(grpc::StatusCode::CANCELLED, "EnqueueGroup request cancelled");
                                 return;
                             }
                             slot.prefill_context->reset();
@@ -1764,7 +1764,7 @@ grpc::Status PrefillRpcServer::BatchEnqueueDp(grpc::ServerContext*           con
             ready_slots.reserve(slots.size());
             for (auto& slot : slots) {
                 if (entry_cancelled(slot)) {
-                    fail_slot(slot, grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueueDp request cancelled"));
+                    fail_slot(slot, grpc::Status(grpc::StatusCode::CANCELLED, "EnqueueGroup request cancelled"));
                 } else if (!slot.prepared) {
                     fail_slot(slot, slot.stage_status);
                 } else {
@@ -1779,26 +1779,26 @@ grpc::Status PrefillRpcServer::BatchEnqueueDp(grpc::ServerContext*           con
             std::vector<std::shared_ptr<GenerateInput>> generate_inputs;
             generate_inputs.reserve(ready_slots.size());
             for (auto* slot : ready_slots) {
-                slot->input->set_batch_group_size(local_group_size);
-                slot->prefill_context->generate_input->batch_group_size = local_group_size;
+                slot->input->set_group_size(local_group_size);
+                slot->prefill_context->generate_input->group_size = local_group_size;
                 slot->prefill_context->stat_info.nextStage();
                 generate_inputs.push_back(slot->prefill_context->generate_input);
             }
 
             std::vector<GenerateStreamPtr> streams;
             try {
-                streams = engine_->batchEnqueue(generate_inputs);
+                streams = engine_->enqueueMultiple(generate_inputs);
             } catch (const std::exception& e) {
                 for (auto* slot : ready_slots) {
                     fail_slot(*slot,
                               grpc::Status(grpc::StatusCode::INTERNAL,
-                                           "batchEnqueue exception: " + std::string(e.what())));
+                                           "enqueueMultiple exception: " + std::string(e.what())));
                 }
                 return;
             } catch (...) {
                 for (auto* slot : ready_slots) {
                     fail_slot(*slot,
-                              grpc::Status(grpc::StatusCode::INTERNAL, "batchEnqueue unknown exception"));
+                              grpc::Status(grpc::StatusCode::INTERNAL, "enqueueMultiple unknown exception"));
                 }
                 return;
             }
@@ -1815,7 +1815,7 @@ grpc::Status PrefillRpcServer::BatchEnqueueDp(grpc::ServerContext*           con
                 auto it = stream_by_id.find(slot->request_id);
                 if (it == stream_by_id.end()) {
                     fail_slot(*slot,
-                              grpc::Status(grpc::StatusCode::INTERNAL, "BatchEnqueueDp stream not enqueued"));
+                              grpc::Status(grpc::StatusCode::INTERNAL, "EnqueueGroup stream not enqueued"));
                     continue;
                 }
                 slot->prefill_context->setStream(it->second);
@@ -1831,7 +1831,7 @@ grpc::Status PrefillRpcServer::BatchEnqueueDp(grpc::ServerContext*           con
                 load_threads.emplace_back([this, slot, entry_cancelled, fail_slot, start_finish_worker] {
                     if (entry_cancelled(*slot)) {
                         fail_slot(*slot,
-                                  grpc::Status(grpc::StatusCode::CANCELLED, "BatchEnqueueDp request cancelled"));
+                                  grpc::Status(grpc::StatusCode::CANCELLED, "EnqueueGroup request cancelled"));
                         return;
                     }
                     try {
@@ -1843,7 +1843,7 @@ grpc::Status PrefillRpcServer::BatchEnqueueDp(grpc::ServerContext*           con
                         if (entry_cancelled(*slot)) {
                             fail_slot(*slot,
                                       grpc::Status(grpc::StatusCode::CANCELLED,
-                                                   "BatchEnqueueDp request cancelled"));
+                                                   "EnqueueGroup request cancelled"));
                             return;
                         }
                         if (slot->prefill_context->hasError()) {
@@ -1873,7 +1873,7 @@ grpc::Status PrefillRpcServer::BatchEnqueueDp(grpc::ServerContext*           con
     } catch (const std::exception& e) {
         finishAsyncResponseWorker();
         auto status = grpc::Status(grpc::StatusCode::INTERNAL,
-                                   "start BatchEnqueueDp accept worker exception: " + std::string(e.what()));
+                                   "start EnqueueGroup accept worker exception: " + std::string(e.what()));
         for (const auto& slot : *slots_ptr) {
             finish_pending_before_ack(slot, status);
             addBatchError(response, slot.request_id, status.error_code(), status.error_message());
@@ -1882,7 +1882,7 @@ grpc::Status PrefillRpcServer::BatchEnqueueDp(grpc::ServerContext*           con
         return grpc::Status::OK;
     } catch (...) {
         finishAsyncResponseWorker();
-        auto status = grpc::Status(grpc::StatusCode::INTERNAL, "start BatchEnqueueDp accept worker unknown exception");
+        auto status = grpc::Status(grpc::StatusCode::INTERNAL, "start EnqueueGroup accept worker unknown exception");
         for (const auto& slot : *slots_ptr) {
             finish_pending_before_ack(slot, status);
             addBatchError(response, slot.request_id, status.error_code(), status.error_message());

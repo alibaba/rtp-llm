@@ -76,8 +76,8 @@ public:
     int64_t begin_time_us = 0;
 
     // Batch grouping params
-    int     batch_group_size = 1;
-    int64_t batch_group_id   = -1;  // Batch group ID for force batch grouping, -1 means not set
+    int     group_size = 1;
+    int64_t group_id   = -1;  // Group ID for force group scheduling, -1 means not set
 };
 
 struct AuxInfo {
@@ -149,7 +149,7 @@ inline std::string StreamStateToString(StreamState state) {
     }
 }
 
-// 事件集合：外部通过 reportEvent() 投递事件，状态机在 moveToNext() 中统一消费。
+// 事件集合：外部通过 reportEvent() 投递事件，生命周期方法中统一消费。
 // 内部使用 bit flag 组合多个并发事件。
 // 所有事件均为永久事件：一旦设置即保留，不会被自动清除。
 class StreamEvents {

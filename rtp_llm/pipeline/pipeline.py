@@ -473,8 +473,8 @@ class Pipeline(object):
             generate_config=generate_config,
             tokenizer=self.tokenizer,
             token_type_ids=token_type_ids,
-            batch_group_size=kwargs.get("batch_group_size", 1),
-            batch_group_id=kwargs.get("batch_group_id", -1),
+            group_size=kwargs.get("group_size", 1),
+            group_id=kwargs.get("group_id", -1),
             headers=request_headers,
         )
 

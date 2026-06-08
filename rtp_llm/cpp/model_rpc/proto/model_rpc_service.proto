@@ -96,8 +96,8 @@ message GenerateConfigPB {
     bool enable_device_cache = 52;
     bool enable_remote_cache = 53;
     string unique_key = 54;
-    google.protobuf.Int32Value force_batch = 55;
-    google.protobuf.Int32Value batch_group_timeout = 56;
+    google.protobuf.Int32Value force_group = 55;
+    google.protobuf.Int32Value group_timeout = 56;
     string profile_trace_name = 57;
     repeated int32 begin_think_token_ids = 58;
     google.protobuf.StringValue json_schema = 59;
@@ -152,8 +152,8 @@ message GenerateInputPB {
     GenerateConfigPB generate_config = 4;
     string client_id = 5;
     int64 start_time = 6;
-    int32 batch_group_size = 7;
-    google.protobuf.Int64Value batch_group_id = 8;
+    int32 group_size = 7;
+    google.protobuf.Int64Value group_id = 8;
     RequestInfoPB request_info = 9;
 }
 
@@ -640,43 +640,43 @@ message CpuTpBroadcastResponsePB {
     string error_message = 2;
 }
 
-message BatchEnqueueExternalInputPB {
+message EnqueueBatchExternalInputPB {
     GenerateInputPB input = 1;
 }
 
-message BatchEnqueueDpSlotPB {
+message EnqueueBatchDpSlotPB {
     int32 dp_rank = 1;
-    repeated BatchEnqueueExternalInputPB requests = 2;
+    repeated EnqueueBatchExternalInputPB requests = 2;
 }
 
-message BatchEnqueueRequestPB {
+message EnqueueBatchRequestPB {
     int64 batch_id = 1;
-    repeated BatchEnqueueDpSlotPB dp_slots = 2;
+    repeated EnqueueBatchDpSlotPB dp_slots = 2;
 }
 
-message BatchEnqueueDpInputPB {
+message EnqueueGroupInputPB {
     GenerateInputPB input = 1;
 }
 
-message BatchEnqueueDpRequestPB {
+message EnqueueGroupRequestPB {
     int64 batch_id = 1;
     int32 dp_rank = 2;
-    repeated BatchEnqueueDpInputPB requests = 3;
+    repeated EnqueueGroupInputPB requests = 3;
 }
 
-message BatchEnqueueSuccessPB {
+message EnqueueBatchSuccessPB {
     int64 request_id = 1;
 }
 
-message BatchEnqueueErrorPB {
+message EnqueueBatchErrorPB {
     int64 request_id = 1;
     ErrorDetailsPB error_info = 2;
 }
 
-message BatchEnqueueResponsePB {
+message EnqueueBatchResponsePB {
     int64 batch_id = 1;
-    repeated BatchEnqueueSuccessPB successes = 2;
-    repeated BatchEnqueueErrorPB errors = 3;
+    repeated EnqueueBatchSuccessPB successes = 2;
+    repeated EnqueueBatchErrorPB errors = 3;
 }
 
 message FetchRequestPB {
@@ -713,8 +713,8 @@ service RpcService {
     rpc CpuTpBroadcast(CpuTpBroadcastRequestPB) returns (CpuTpBroadcastResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
-    rpc BatchEnqueue(BatchEnqueueRequestPB) returns (BatchEnqueueResponsePB);
-    rpc BatchEnqueueDp(BatchEnqueueDpRequestPB) returns (BatchEnqueueResponsePB);
+    rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);
+    rpc EnqueueGroup(EnqueueGroupRequestPB) returns (EnqueueBatchResponsePB);
     rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
     rpc Cancel(CancelRequestPB) returns (EmptyPB);
 }

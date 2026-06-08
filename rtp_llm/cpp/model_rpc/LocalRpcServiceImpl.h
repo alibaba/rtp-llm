@@ -44,22 +44,22 @@ public:
         return local_server_->GenerateStreamCall(context, request, writer);
     }
 
-    grpc::Status BatchEnqueue(grpc::ServerContext*         context,
-                              const BatchEnqueueRequestPB* request,
-                              BatchEnqueueResponsePB*      response) override {
+    grpc::Status EnqueueBatch(grpc::ServerContext*         context,
+                              const EnqueueBatchRequestPB* request,
+                              EnqueueBatchResponsePB*      response) override {
         (void)context;
         (void)request;
         (void)response;
-        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "BatchEnqueue not implemented on this role");
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "EnqueueBatch not implemented on this role");
     }
 
-    grpc::Status BatchEnqueueDp(grpc::ServerContext*           context,
-                                const BatchEnqueueDpRequestPB* request,
-                                BatchEnqueueResponsePB*        response) override {
+    grpc::Status EnqueueGroup(grpc::ServerContext*           context,
+                                const EnqueueGroupRequestPB* request,
+                                EnqueueBatchResponsePB*        response) override {
         (void)context;
         (void)request;
         (void)response;
-        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "BatchEnqueueDp not implemented on this role");
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "EnqueueGroup not implemented on this role");
     }
 
     grpc::Status FetchResponse(grpc::ServerContext*                   context,

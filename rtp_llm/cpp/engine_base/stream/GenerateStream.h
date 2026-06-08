@@ -253,7 +253,13 @@ public:
     size_t      reserveStep() const {
         return reserve_step_;
     }
-    StreamState moveToNext();
+    // Lifecycle methods — replace moveToNext().
+    bool prepare();
+    bool isReady();
+    void activate();
+    void advance();
+    bool alive();
+    void finish();
 
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is active (no error and not finished)
@@ -434,19 +440,19 @@ public:
         return generate_input_->generate_config->trace_id;
     }
 
-    int batchGroupSize() const {
-        return generate_input_->batch_group_size;
+    int groupSize() const {
+        return generate_input_->group_size;
     }
 
-    int batchGroupTimeout() const {
-        return generate_input_->generate_config->batch_group_timeout.value_or(100);
+    int groupTimeout() const {
+        return generate_input_->generate_config->group_timeout.value_or(100);
     }
 
-    bool forceBatch() const {
-        return generate_input_->generate_config->force_batch;
+    bool forceGroup() const {
+        return generate_input_->generate_config->force_group;
     }
-    int64_t batchGroupId() const {
-        return generate_input_->batch_group_id;
+    int64_t groupId() const {
+        return generate_input_->group_id;
     }
 
     int64_t enqueueTime() const {
@@ -684,6 +690,7 @@ protected:
 
     void reportStreamMetrics();
     void reportCacheReuseMetrics() const;
+    void finish_internal();
 
 protected:
     uint64_t                              stream_magic_ = STREAM_MAGIC;
@@ -749,6 +756,7 @@ protected:
     size_t                             propose_step_         = 0;
     size_t                             score_len_            = 0;
     size_t                             reserve_step_         = 0;
+    bool                               needs_cache_loading_  = false;
     bool                               acceped_bouns_token_  = false;
     int                                sp_edit_search_index_ = 0;
     bool                               sp_edit_first_time_   = true;

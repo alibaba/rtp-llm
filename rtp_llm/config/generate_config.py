@@ -176,8 +176,8 @@ class GenerateConfig(BaseModel):
 
     enable_remote_cache: bool = True
     # 是否强制相同 request_id 的 stream 在一批中调度
-    force_batch: bool = False
-    batch_group_timeout: Optional[int] = None  # ms
+    force_group: bool = False
+    group_timeout: Optional[int] = None  # ms
 
     unique_key: str = ""
 
