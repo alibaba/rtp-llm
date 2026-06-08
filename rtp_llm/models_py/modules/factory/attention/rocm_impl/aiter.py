@@ -1372,13 +1372,35 @@ class AiterPrefillImplAsm(FMHAImplBase):
         layer_idx: int = 0,
     ) -> torch.Tensor:
         if kv_cache is None:
-            # Embedding models still need positional encoding even without a KV cache.
             if self.need_rope_kv_cache:
                 fmha_input = self.rope_kvcache_impl.forward(
                     qkv, kv_cache, self.rope_params
                 )
             else:
                 fmha_input = qkv
+
+            # embedding_fast_path: C++ returns (packed_qkv_with_rope, None, None)
+            if isinstance(fmha_input, (tuple, list)) and len(fmha_input) == 3 and fmha_input[1] is None:
+                fmha_input = fmha_input[0]
+            if isinstance(fmha_input, torch.Tensor) and fmha_input.dim() == 2:
+                # Packed QKV [tokens, (nheads+2*nkv)*hdim] - split and call flash_attn directly
+                M = fmha_input.shape[0]
+                q_size = self.fmha_impl.head_num * self.fmha_impl.head_dim
+                kv_size = self.fmha_impl.head_num_kv * self.fmha_impl.head_dim
+                q, k, v = torch.split(fmha_input, [q_size, kv_size, kv_size], dim=-1)
+                q = q.view(M, self.fmha_impl.head_num, self.fmha_impl.head_dim)
+                k = k.view(M, self.fmha_impl.head_num_kv, self.fmha_impl.head_dim)
+                v = v.view(M, self.fmha_impl.head_num_kv, self.fmha_impl.head_dim)
+                return aiter.flash_attn_varlen_func(
+                    q, k, v,
+                    self.fmha_params.cu_seqlens_q,
+                    self.fmha_params.cu_seqlens_k,
+                    self.fmha_params.max_seqlen_q,
+                    self.fmha_params.max_seqlen_k,
+                    dropout_p=0.0,
+                    causal=self.fmha_impl.is_causal,
+                ).reshape(M, q_size)
+
             return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
         # Apply RoPE and KV Cache processing

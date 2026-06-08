@@ -178,14 +178,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     const int  q_output_token_num = (use_paged_fmha && pad_query) ? batch_size * seq_len : token_num;
     const bool paged_fp8          = use_paged_fmha && attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     const auto q_opts             = torch::TensorOptions(qkv.dtype()).device(qkv.device());
+    const bool embedding_fast_path = !kv_cache.has_value() && !paged_fp8;
 
-    // pad_query=false: q_output is packed [token_num, heads, dim] and the kernel writes
-    // every cell — skip the zero-fill. pad_query=true: padded slots between sequences
-    // are not written by the kernel, so they must be zero-initialized for downstream
-    // FMHA correctness.
-    torch::Tensor q_output = (use_paged_fmha && pad_query) ?
-                                 torch::zeros({q_output_token_num, local_head_num, size_per_head}, q_opts) :
-                                 torch::empty({q_output_token_num, local_head_num, size_per_head}, q_opts);
+    torch::Tensor q_output;
+    if (!embedding_fast_path) {
+        q_output = (use_paged_fmha && pad_query) ?
+                       torch::zeros({q_output_token_num, local_head_num, size_per_head}, q_opts) :
+                       torch::empty({q_output_token_num, local_head_num, size_per_head}, q_opts);
+    }
     torch::Tensor q_fp8_buf;
     if (paged_fp8) {
         q_fp8_buf = torch::empty({q_output_token_num, local_head_num, size_per_head},
@@ -231,27 +231,30 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         //       Please run with BF16 activation instead (set environment variable ACT_TYPE=bf16)
         use_fmha_fp8 = false;
     }
-    // FP8 path: keep original behavior (store QKV linearly for flash_attn_varlen_fp8).
-    // Non-FP8 with paged cache: K/V go directly into the cache via store_cache, so
-    //   store_kv=false (writing k_output/v_output would be wasted HBM bandwidth).
-    // Non-FP8 without paged cache (embedding models): store_kv=true so K/V are
-    //   returned as padded buffers for downstream varlen attention; RoPE must still
-    //   run for positional encoding.
-    bool store_qkv   = use_fmha_fp8 ? !use_paged_fmha : false;
-    bool store_q     = true;
     bool store_cache = kv_cache.has_value();
-    bool store_kv    = use_fmha_fp8 ? !use_paged_fmha : !store_cache;
-
-    // Allocate K/V output buffers only when the kernel actually writes them,
-    // avoiding unnecessary GPU memory allocation and zero-fill.
+    bool store_qkv;
+    bool store_q;
+    bool store_kv;
     torch::Tensor k_output;
     torch::Tensor v_output;
-    if (store_kv) {
-        k_output = torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head}, q_opts);
-        v_output = torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head}, q_opts);
+    void* k_output_ptr = nullptr;
+    void* v_output_ptr = nullptr;
+
+    if (embedding_fast_path) {
+        store_qkv = true;
+        store_q   = false;
+        store_kv  = false;
+    } else {
+        store_qkv = use_fmha_fp8 ? !use_paged_fmha : false;
+        store_q   = true;
+        store_kv  = use_fmha_fp8 ? !use_paged_fmha : !store_cache;
+        if (store_kv) {
+            k_output = torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head}, q_opts);
+            v_output = torch::zeros({batch_size, local_head_num_kv, seq_len_with_prefix, size_per_head}, q_opts);
+            k_output_ptr = k_output.data_ptr();
+            v_output_ptr = v_output.data_ptr();
+        }
     }
-    void* k_output_ptr = store_kv ? k_output.data_ptr() : nullptr;
-    void* v_output_ptr = store_kv ? v_output.data_ptr() : nullptr;
 
     // int8
     float* scale_out_ptr = nullptr;
@@ -280,7 +283,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
             torchDTypeToDataType(qkv.dtype()),
             invokeAddFusedQKVBiasTransposePrefill,
-            q_output.data_ptr(),
+            embedding_fast_path ? nullptr : q_output.data_ptr(),
             k_output_ptr,
             v_output_ptr,
             &prefix_prompt_param,
@@ -301,7 +304,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
             attn_configs_.use_logn_attn,
             scale_out_ptr,
             int8_mode,
-            use_fmha_fp8 ? use_paged_fmha : true,  // FP8: original flag; non-FP8: always paged
+            embedding_fast_path ? false : (use_fmha_fp8 ? use_paged_fmha : true),
             store_qkv,
             store_q,
             store_kv,
@@ -313,7 +316,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
             torchDTypeToDataType(qkv.dtype()),
             invokeAddFusedQKVBiasTransposePrefillV1,
-            q_output.data_ptr(),
+            embedding_fast_path ? nullptr : q_output.data_ptr(),
             k_output_ptr,
             v_output_ptr,
             &prefix_prompt_param,
@@ -334,7 +337,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
             attn_configs_.use_logn_attn,
             nullptr,
             0,
-            use_fmha_fp8 ? use_paged_fmha : true,  // FP8: original flag; non-FP8: always paged
+            embedding_fast_path ? false : (use_fmha_fp8 ? use_paged_fmha : true),
             store_qkv,
             store_q,
             store_kv,
@@ -342,12 +345,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
             nullptr,
             stream_);
     }
-    // FP8 path: paged returns Q-only fp8 buf; non-paged returns full qkv fp8 buf
     if (use_fmha_fp8) {
         return std::make_tuple(paged_fp8 ? q_fp8_buf : qkv_buf_fp8, torch::Tensor(), torch::Tensor());
     }
-    // Non-FP8 with paged cache: return bf16 Q (K/V are already written into the cache).
-    // Non-FP8 without paged cache: also return padded K/V for flash_attn_varlen_func.
+    if (embedding_fast_path) {
+        // Return the in-place RoPE'd packed QKV buffer directly.
+        // Downstream Python will split into Q/K/V.
+        return std::make_tuple(qkv, torch::Tensor(), torch::Tensor());
+    }
     return std::make_tuple(q_output, k_output, v_output);
 }
 
