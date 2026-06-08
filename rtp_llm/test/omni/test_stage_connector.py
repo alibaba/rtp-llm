@@ -32,41 +32,53 @@ class TestSharedMemoryConnector(unittest.TestCase):
     def setUp(self):
         self.connector = SharedMemoryConnector()
 
-    def test_put_and_get(self):
+    def test_put_and_get_by_name(self):
         output = StageOutput(token_ids=[1, 2, 3])
-        result = self.connector.put("req_1", 0, output)
-        self.assertTrue(result)
-
-        retrieved = self.connector.get("req_1", 0)
+        self.connector.put("req_1", "thinker", output)
+        retrieved = self.connector.get("req_1", "thinker")
         self.assertIsNotNone(retrieved)
         self.assertEqual(retrieved.token_ids, [1, 2, 3])
 
     def test_get_nonexistent_returns_none(self):
-        result = self.connector.get("nonexistent", 0)
+        result = self.connector.get("nonexistent", "thinker")
         self.assertIsNone(result)
 
     def test_cleanup(self):
-        self.connector.put("req_1", 0, StageOutput(token_ids=[1]))
-        self.connector.put("req_1", 1, StageOutput(token_ids=[2]))
-        self.connector.put("req_2", 0, StageOutput(token_ids=[3]))
-
+        self.connector.put("req_1", "thinker", StageOutput(token_ids=[1]))
+        self.connector.put("req_1", "talker", StageOutput(token_ids=[2]))
+        self.connector.put("req_2", "thinker", StageOutput(token_ids=[3]))
         self.connector.cleanup("req_1")
-
-        self.assertIsNone(self.connector.get("req_1", 0))
-        self.assertIsNone(self.connector.get("req_1", 1))
-        self.assertIsNotNone(self.connector.get("req_2", 0))
+        self.assertIsNone(self.connector.get("req_1", "thinker"))
+        self.assertIsNone(self.connector.get("req_1", "talker"))
+        self.assertIsNotNone(self.connector.get("req_2", "thinker"))
 
     def test_cleanup_nonexistent_is_noop(self):
         self.connector.cleanup("nonexistent")
 
     def test_put_overwrites_existing(self):
-        self.connector.put("req_1", 0, StageOutput(token_ids=[1]))
-        self.connector.put("req_1", 0, StageOutput(token_ids=[2]))
-        retrieved = self.connector.get("req_1", 0)
+        self.connector.put("req_1", "thinker", StageOutput(token_ids=[1]))
+        self.connector.put("req_1", "thinker", StageOutput(token_ids=[2]))
+        retrieved = self.connector.get("req_1", "thinker")
         self.assertEqual(retrieved.token_ids, [2])
 
     def test_is_abstract_base(self):
         self.assertIsInstance(self.connector, StageConnector)
+
+    def test_open_stream(self):
+        ch = self.connector.open_stream("req_1", "thinker", "talker")
+        ch.emit({"token": 42})
+        chunk = ch.recv(timeout=1.0)
+        self.assertEqual(chunk, {"token": 42})
+
+    def test_open_stream_same_pair_returns_same_channel(self):
+        ch1 = self.connector.open_stream("req_1", "thinker", "talker")
+        ch2 = self.connector.open_stream("req_1", "thinker", "talker")
+        self.assertIs(ch1, ch2)
+
+    def test_cleanup_closes_streams(self):
+        ch = self.connector.open_stream("req_1", "thinker", "talker")
+        self.connector.cleanup("req_1")
+        self.assertTrue(ch.closed)
 
 
 if __name__ == "__main__":

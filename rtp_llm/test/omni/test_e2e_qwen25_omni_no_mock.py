@@ -24,13 +24,14 @@ from rtp_llm.omni.config.pipeline_registry import OmniPipelineRegistry
 from rtp_llm.omni.engine.omni_engine import OmniEngine
 from rtp_llm.omni.engine.output_processor import OmniOutputProcessor
 from rtp_llm.omni.engine.stage_connector import SharedMemoryConnector, StageOutput
-from rtp_llm.omni.engine.stage_processor_registry import StageProcessorRegistry
 from rtp_llm.omni.models.qwen2_5_omni.pipeline import QWEN2_5_OMNI_PIPELINE
 from rtp_llm.omni.models.qwen2_5_omni.thinker import Qwen2_5OmniThinker
 from rtp_llm.omni.models.qwen2_5_omni.talker import Qwen2_5OmniTalker
 from rtp_llm.omni.models.qwen2_5_omni.token2wav import Qwen2_5OmniToken2Wav
-
-import rtp_llm.omni.models.qwen2_5_omni.stage_processors  # noqa: F401
+from rtp_llm.omni.models.qwen2_5_omni.stage_processors import (
+    thinker2talker,
+    talker2code2wav,
+)
 
 # Full HuggingFace Qwen2.5-Omni config.json matching the real model structure.
 QWEN25_OMNI_HF_CONFIG = {
@@ -48,8 +49,6 @@ QWEN25_OMNI_HF_CONFIG = {
             "max_position_embeddings": 32768,
             "rms_norm_eps": 1e-06,
             "rope_theta": 1000000,
-            "tie_word_embeddings": False,
-            "torch_dtype": "bfloat16",
         },
         "audio_config": {
             "model_type": "qwen2_5_omni_audio_encoder",
@@ -58,16 +57,8 @@ QWEN25_OMNI_HF_CONFIG = {
             "encoder_ffn_dim": 5120,
             "encoder_layers": 32,
             "num_mel_bins": 128,
-            "output_dim": 3584,
+            "max_source_positions": 1500,
         },
-        "vision_config": {
-            "model_type": "qwen2_5_omni_vision_encoder",
-            "embed_dim": 1280,
-            "depth": 32,
-            "num_heads": 16,
-        },
-        "audio_token_index": 151646,
-        "image_token_index": 151655,
     },
     "talker_config": {
         "model_type": "qwen2_5_omni_talker",
@@ -77,27 +68,22 @@ QWEN25_OMNI_HF_CONFIG = {
         "num_key_value_heads": 2,
         "num_hidden_layers": 24,
         "vocab_size": 8448,
+        "max_position_embeddings": 32768,
         "rms_norm_eps": 1e-06,
         "rope_theta": 1000000,
-        "tie_word_embeddings": False,
-        "embedding_size": 3584,
-        "torch_dtype": "bfloat16",
+        "thinker_hidden_size": 3584,
     },
     "token2wav_config": {
         "model_type": "qwen2_5_omni_token2wav",
         "dit_config": {
-            "model_type": "qwen2_5_omni_dit",
             "depth": 22,
             "dim": 1024,
             "heads": 16,
             "head_dim": 64,
             "mel_dim": 80,
             "num_embeds": 8193,
-            "ff_mult": 2,
         },
         "bigvgan_config": {
-            "model_type": "qwen2_5_omni_bigvgan",
-            "input_mel_dim": 80,
             "upsample_rates": [5, 3, 2, 2, 2, 2],
             "upsample_initial_channel": 1536,
             "resblock_kernel_sizes": [3, 7, 11],
@@ -107,17 +93,12 @@ QWEN25_OMNI_HF_CONFIG = {
 
 
 class TestE2EQwen25OmniNoMock(unittest.TestCase):
-    """End-to-end test with real classes, real config, no mocks."""
-
     @classmethod
     def setUpClass(cls):
-        cls.tmpdir = tempfile.mkdtemp(prefix="qwen25_omni_e2e_")
+        cls.tmpdir = tempfile.mkdtemp(prefix="rtp_omni_test_")
         config_path = os.path.join(cls.tmpdir, "config.json")
         with open(config_path, "w") as f:
             json.dump(QWEN25_OMNI_HF_CONFIG, f)
-
-        if OmniPipelineRegistry.get("qwen2_5_omni") is None:
-            OmniPipelineRegistry.register(QWEN2_5_OMNI_PIPELINE)
 
     @classmethod
     def tearDownClass(cls):
@@ -125,7 +106,8 @@ class TestE2EQwen25OmniNoMock(unittest.TestCase):
 
     # ── 1. Model registration ──
 
-    def test_stage_models_registered_in_model_factory(self):
+    def test_model_classes_registered(self):
+        self.assertIn("qwen2_5_omni", _model_factory)
         self.assertIn("qwen2_5_omni_thinker", _model_factory)
         self.assertIn("qwen2_5_omni_talker", _model_factory)
         self.assertIn("qwen2_5_omni_token2wav", _model_factory)
@@ -136,13 +118,9 @@ class TestE2EQwen25OmniNoMock(unittest.TestCase):
         self.assertEqual(config.model_arch, "Qwen2_5OmniModel")
         self.assertEqual(len(config.stages), 3)
 
-    def test_stage_processors_registered(self):
-        self.assertIsNotNone(
-            StageProcessorRegistry.get("qwen2_5_omni.thinker2talker")
-        )
-        self.assertIsNotNone(
-            StageProcessorRegistry.get("qwen2_5_omni.talker2token2wav")
-        )
+    def test_stage_processor_functions_importable(self):
+        self.assertTrue(callable(thinker2talker))
+        self.assertTrue(callable(talker2code2wav))
 
     # ── 2. Real config parsing from HF config.json ──
 
@@ -196,7 +174,7 @@ class TestE2EQwen25OmniNoMock(unittest.TestCase):
         self.assertEqual(engine.num_stages, 3)
         self.assertIs(engine.model_config, model_config)
         self.assertEqual(
-            engine.get_final_output_types(), {"text": 0, "audio": 2}
+            engine.get_final_output_types(), {"text": "thinker", "audio": "token2wav"}
         )
 
     # ── 4. Full pipeline data flow with real processors ──
@@ -212,21 +190,23 @@ class TestE2EQwen25OmniNoMock(unittest.TestCase):
 
         # Submit
         state = engine.orchestrator.submit(request_id)
-        self.assertEqual(engine.orchestrator.get_execution_order(), [0, 1, 2])
+        self.assertEqual(
+            engine.orchestrator.get_execution_order(),
+            ["thinker", "talker", "token2wav"],
+        )
 
-        # ── Stage 0: Thinker output ──
-        thinker_embeddings = torch.randn(5, 3584)  # 5 tokens, hidden=3584
+        # ── Stage "thinker": output ──
+        thinker_embeddings = torch.randn(5, 3584)
         thinker_output = StageOutput(
             token_ids=[151644, 1001, 1002, 1003, 151645],
             embeddings=thinker_embeddings,
             metadata={"text": "The weather is nice today."},
         )
-        connector.put(request_id, 0, thinker_output)
-        state.advance()
+        connector.put(request_id, "thinker", thinker_output)
+        state.mark_complete("thinker")
 
-        # ── Thinker2Talker processor ──
-        processor_t2t = StageProcessorRegistry.create("qwen2_5_omni.thinker2talker")
-        talker_input = processor_t2t.process(connector.get(request_id, 0))
+        # ── thinker -> talker processor ──
+        talker_input = thinker2talker(connector.get(request_id, "thinker"))
 
         self.assertTrue(torch.equal(talker_input.embeddings, thinker_embeddings))
         self.assertEqual(
@@ -237,27 +217,24 @@ class TestE2EQwen25OmniNoMock(unittest.TestCase):
             talker_input.metadata["source_text"], "The weather is nice today."
         )
 
-        # ── Stage 1: Talker output (codec tokens) ──
+        # ── Stage "talker": output (codec tokens) ──
         codec_tokens = [101, 202, 303, 404, 505, 606, 707, 808, 8294]
         talker_output = StageOutput(
             token_ids=codec_tokens,
             metadata={"codec_format": "tts_v1"},
         )
-        connector.put(request_id, 1, talker_output)
-        state.advance()
+        connector.put(request_id, "talker", talker_output)
+        state.mark_complete("talker")
 
-        # ── Talker2Token2Wav processor ──
-        processor_t2w = StageProcessorRegistry.create(
-            "qwen2_5_omni.talker2token2wav"
-        )
-        t2w_input = processor_t2w.process(connector.get(request_id, 1))
+        # ── talker -> token2wav processor ──
+        t2w_input = talker2code2wav(connector.get(request_id, "talker"))
 
         self.assertEqual(
             t2w_input.token_ids, [101, 202, 303, 404, 505, 606, 707, 808]
         )
         self.assertEqual(t2w_input.metadata["codec_token_count"], 8)
 
-        # ── Stage 2: Token2Wav output (audio waveform) ──
+        # ── Stage "token2wav": output (audio waveform) ──
         sample_rate = 24000
         duration_s = 1.0
         num_samples = int(sample_rate * duration_s)
@@ -267,17 +244,17 @@ class TestE2EQwen25OmniNoMock(unittest.TestCase):
             audio_waveform=waveform,
             metadata={"sample_rate": sample_rate, "duration_s": duration_s},
         )
-        connector.put(request_id, 2, token2wav_output)
-        state.advance()
+        connector.put(request_id, "token2wav", token2wav_output)
+        state.mark_complete("token2wav")
         self.assertTrue(state.is_complete)
 
         # ── Output assembly ──
         final_output_types = engine.get_final_output_types()
-        self.assertEqual(final_output_types, {"text": 0, "audio": 2})
+        self.assertEqual(final_output_types, {"text": "thinker", "audio": "token2wav"})
 
         stage_outputs = {
-            sid: connector.get(request_id, sid)
-            for sid in engine.orchestrator.get_execution_order()
+            name: connector.get(request_id, name)
+            for name in engine.orchestrator.get_execution_order()
         }
 
         output_processor = OmniOutputProcessor()
@@ -298,8 +275,8 @@ class TestE2EQwen25OmniNoMock(unittest.TestCase):
         # ── Cleanup ──
         engine.orchestrator.cleanup(request_id)
         self.assertIsNone(engine.orchestrator.get_request_state(request_id))
-        for sid in [0, 1, 2]:
-            self.assertIsNone(connector.get(request_id, sid))
+        for name in ["thinker", "talker", "token2wav"]:
+            self.assertIsNone(connector.get(request_id, name))
 
     # ── 5. Cross-stage config consistency ──
 
@@ -349,31 +326,30 @@ class TestE2EQwen25OmniNoMock(unittest.TestCase):
         state_a = engine.orchestrator.submit("iso-a")
         state_b = engine.orchestrator.submit("iso-b")
 
-        connector.put("iso-a", 0, StageOutput(
+        connector.put("iso-a", "thinker", StageOutput(
             token_ids=[1], embeddings=torch.randn(1, 3584),
             metadata={"text": "Request A"},
         ))
-        connector.put("iso-b", 0, StageOutput(
+        connector.put("iso-b", "thinker", StageOutput(
             token_ids=[2], embeddings=torch.randn(1, 3584),
             metadata={"text": "Request B"},
         ))
 
-        proc = StageProcessorRegistry.create("qwen2_5_omni.thinker2talker")
-        result_a = proc.process(connector.get("iso-a", 0))
-        result_b = proc.process(connector.get("iso-b", 0))
+        result_a = thinker2talker(connector.get("iso-a", "thinker"))
+        result_b = thinker2talker(connector.get("iso-b", "thinker"))
 
         self.assertEqual(result_a.metadata["source_text"], "Request A")
         self.assertEqual(result_b.metadata["source_text"], "Request B")
         self.assertEqual(result_a.metadata["source_token_ids"], [1])
         self.assertEqual(result_b.metadata["source_token_ids"], [2])
 
-        state_a.advance()
-        self.assertEqual(state_a.current_stage, 1)
-        self.assertEqual(state_b.current_stage, 0)
+        state_a.mark_complete("thinker")
+        self.assertTrue(state_a.is_stage_complete("thinker"))
+        self.assertFalse(state_b.is_stage_complete("thinker"))
 
         engine.orchestrator.cleanup("iso-a")
-        self.assertIsNone(connector.get("iso-a", 0))
-        self.assertIsNotNone(connector.get("iso-b", 0))
+        self.assertIsNone(connector.get("iso-a", "thinker"))
+        self.assertIsNotNone(connector.get("iso-b", "thinker"))
 
 
 if __name__ == "__main__":

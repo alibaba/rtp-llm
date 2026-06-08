@@ -20,11 +20,10 @@ class TestModelFactoryOmniDetection(unittest.TestCase):
             model_arch="TestOmniArch",
             stages=(
                 OmniStageConfig(
-                    stage_id=0,
-                    model_stage="thinker",
+                    name="thinker",
                     execution_type=StageExecutionType.LLM_AR,
                     model_cls="TestThinker",
-                    input_sources=(),
+                    terminal=True,
                 ),
             ),
         )
@@ -44,11 +43,10 @@ class TestModelFactoryOmniDetection(unittest.TestCase):
             model_arch="TestOmniArch",
             stages=(
                 OmniStageConfig(
-                    stage_id=0,
-                    model_stage="thinker",
+                    name="thinker",
                     execution_type=StageExecutionType.LLM_AR,
                     model_cls="TestThinker",
-                    input_sources=(),
+                    terminal=True,
                 ),
             ),
         )

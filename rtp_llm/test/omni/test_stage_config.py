@@ -12,133 +12,302 @@ class TestStageExecutionType(unittest.TestCase):
         self.assertEqual(StageExecutionType.LLM_AR.value, "llm_ar")
         self.assertEqual(StageExecutionType.LLM_GENERATION.value, "llm_generation")
         self.assertEqual(StageExecutionType.DIFFUSION.value, "diffusion")
+        self.assertEqual(StageExecutionType.CPU_EXECUTOR.value, "cpu_executor")
 
     def test_enum_members_count(self):
-        self.assertEqual(len(StageExecutionType), 3)
+        self.assertEqual(len(StageExecutionType), 4)
 
 
 class TestOmniStageConfig(unittest.TestCase):
-    def test_create_stage_config(self):
+    def test_create_named_stage(self):
         stage = OmniStageConfig(
-            stage_id=0,
-            model_stage="thinker",
+            name="thinker",
             execution_type=StageExecutionType.LLM_AR,
             model_cls="Qwen2_5OmniThinker",
-            input_sources=(),
         )
-        self.assertEqual(stage.stage_id, 0)
-        self.assertEqual(stage.model_stage, "thinker")
-        self.assertEqual(stage.execution_type, StageExecutionType.LLM_AR)
-        self.assertEqual(stage.model_cls, "Qwen2_5OmniThinker")
-        self.assertEqual(stage.input_sources, ())
-        self.assertFalse(stage.final_output)
-        self.assertIsNone(stage.final_output_type)
-        self.assertFalse(stage.requires_multimodal_data)
-        self.assertIsNone(stage.engine_output_type)
-        self.assertIsNone(stage.stage_processor)
+        self.assertEqual(stage.name, "thinker")
+        self.assertIsNone(stage.gpu)
+        self.assertEqual(stage.tp_size, 1)
+        self.assertEqual(stage.process, "pipeline")
+        self.assertIsNone(stage.next)
+        self.assertEqual(stage.stream_to, ())
+        self.assertEqual(stage.wait_for, ())
+        self.assertFalse(stage.terminal)
+        self.assertFalse(stage.can_accept_stream_before_payload)
 
-    def test_stage_config_with_all_fields(self):
+    def test_stage_with_dag_fields(self):
         stage = OmniStageConfig(
-            stage_id=0,
-            model_stage="thinker",
+            name="talker_ar",
             execution_type=StageExecutionType.LLM_AR,
-            model_cls="Qwen2_5OmniThinker",
-            input_sources=(),
+            model_cls="Qwen3OmniTalker",
+            gpu=1,
+            tp_size=2,
+            process="talker",
+            next="code2wav",
+            stream_to=("code2wav",),
+            can_accept_stream_before_payload=True,
+            terminal=False,
+        )
+        self.assertEqual(stage.gpu, 1)
+        self.assertEqual(stage.tp_size, 2)
+        self.assertEqual(stage.process, "talker")
+        self.assertEqual(stage.next, "code2wav")
+        self.assertEqual(stage.stream_to, ("code2wav",))
+
+    def test_stage_with_fan_out(self):
+        stage = OmniStageConfig(
+            name="thinker",
+            execution_type=StageExecutionType.LLM_AR,
+            model_cls="Thinker",
+            next=("talker_ar", "decode"),
+        )
+        self.assertEqual(stage.next, ("talker_ar", "decode"))
+
+    def test_stage_with_wait_for(self):
+        stage = OmniStageConfig(
+            name="mm_aggregate",
+            execution_type=StageExecutionType.CPU_EXECUTOR,
+            model_cls="Aggregator",
+            wait_for=("preprocessing", "image_encoder", "audio_encoder"),
+            merge_fn="some.module.merge_for_thinker",
+        )
+        self.assertEqual(len(stage.wait_for), 3)
+        self.assertEqual(stage.merge_fn, "some.module.merge_for_thinker")
+
+    def test_cpu_executor_type(self):
+        stage = OmniStageConfig(
+            name="preprocessing",
+            execution_type=StageExecutionType.CPU_EXECUTOR,
+            model_cls="Preprocessor",
+        )
+        self.assertEqual(stage.execution_type, StageExecutionType.CPU_EXECUTOR)
+        self.assertIsNone(stage.gpu)
+
+    def test_stage_is_frozen(self):
+        stage = OmniStageConfig(
+            name="thinker",
+            execution_type=StageExecutionType.LLM_AR,
+            model_cls="Thinker",
+        )
+        with self.assertRaises(AttributeError):
+            stage.name = "other"
+
+    def test_legacy_fields_still_work(self):
+        stage = OmniStageConfig(
+            name="thinker",
+            execution_type=StageExecutionType.LLM_AR,
+            model_cls="Thinker",
+            stage_id=0,
+            model_type="qwen2_5_omni_thinker",
+            input_sources=(0,),
             final_output=True,
             final_output_type="text",
             requires_multimodal_data=True,
             engine_output_type="latent",
-            stage_processor=None,
+            stage_processor="some.proc",
         )
+        self.assertEqual(stage.stage_id, 0)
         self.assertTrue(stage.final_output)
-        self.assertEqual(stage.final_output_type, "text")
-        self.assertTrue(stage.requires_multimodal_data)
-        self.assertEqual(stage.engine_output_type, "latent")
-
-    def test_stage_config_is_frozen(self):
-        stage = OmniStageConfig(
-            stage_id=0,
-            model_stage="thinker",
-            execution_type=StageExecutionType.LLM_AR,
-            model_cls="Qwen2_5OmniThinker",
-            input_sources=(),
-        )
-        with self.assertRaises(AttributeError):
-            stage.stage_id = 1
 
 
 class TestOmniPipelineConfig(unittest.TestCase):
     def _make_pipeline(self):
         return OmniPipelineConfig(
-            model_type="qwen2_5_omni",
-            model_arch="Qwen2_5OmniForConditionalGeneration",
+            model_type="test_omni",
+            model_arch="TestOmniArch",
             stages=(
                 OmniStageConfig(
-                    stage_id=0,
-                    model_stage="thinker",
+                    name="thinker",
                     execution_type=StageExecutionType.LLM_AR,
-                    model_cls="Qwen2_5OmniThinker",
-                    input_sources=(),
-                    final_output=True,
-                    final_output_type="text",
-                    requires_multimodal_data=True,
-                    engine_output_type="latent",
+                    model_cls="TestThinker",
+                    next="talker",
+                    terminal=False,
                 ),
                 OmniStageConfig(
-                    stage_id=1,
-                    model_stage="talker",
+                    name="talker",
                     execution_type=StageExecutionType.LLM_AR,
-                    model_cls="Qwen2_5OmniTalker",
-                    input_sources=(0,),
-                    engine_output_type="latent",
-                    stage_processor="qwen2_5_omni.thinker2talker",
+                    model_cls="TestTalker",
+                    next="vocoder",
+                    terminal=False,
                 ),
                 OmniStageConfig(
-                    stage_id=2,
-                    model_stage="code2wav",
+                    name="vocoder",
                     execution_type=StageExecutionType.LLM_GENERATION,
-                    model_cls="Qwen2_5OmniToken2Wav",
-                    input_sources=(1,),
-                    final_output=True,
-                    final_output_type="audio",
-                    stage_processor="qwen2_5_omni.talker2code2wav",
+                    model_cls="TestVocoder",
+                    terminal=True,
                 ),
             ),
         )
 
-    def test_pipeline_config_fields(self):
+    def test_pipeline_fields(self):
         pipeline = self._make_pipeline()
-        self.assertEqual(pipeline.model_type, "qwen2_5_omni")
-        self.assertEqual(pipeline.model_arch, "Qwen2_5OmniForConditionalGeneration")
+        self.assertEqual(pipeline.model_type, "test_omni")
         self.assertEqual(len(pipeline.stages), 3)
 
-    def test_pipeline_config_is_frozen(self):
+    def test_pipeline_is_frozen(self):
         pipeline = self._make_pipeline()
         with self.assertRaises(AttributeError):
             pipeline.model_type = "other"
 
-    def test_pipeline_stage_access(self):
+    def test_get_stage_by_name(self):
         pipeline = self._make_pipeline()
-        self.assertEqual(pipeline.stages[0].model_stage, "thinker")
-        self.assertEqual(pipeline.stages[1].model_stage, "talker")
-        self.assertEqual(pipeline.stages[2].model_stage, "code2wav")
+        stage = pipeline.get_stage_by_name("talker")
+        self.assertEqual(stage.model_cls, "TestTalker")
 
-    def test_pipeline_get_final_output_stages(self):
-        pipeline = self._make_pipeline()
-        final_stages = pipeline.get_final_output_stages()
-        self.assertEqual(len(final_stages), 2)
-        self.assertEqual(final_stages[0].stage_id, 0)
-        self.assertEqual(final_stages[1].stage_id, 2)
-
-    def test_pipeline_get_stage_by_id(self):
-        pipeline = self._make_pipeline()
-        stage = pipeline.get_stage(1)
-        self.assertEqual(stage.model_stage, "talker")
-
-    def test_pipeline_get_stage_by_id_not_found(self):
+    def test_get_stage_by_name_not_found(self):
         pipeline = self._make_pipeline()
         with self.assertRaises(KeyError):
-            pipeline.get_stage(99)
+            pipeline.get_stage_by_name("nonexistent")
+
+    def test_get_terminal_stages(self):
+        pipeline = self._make_pipeline()
+        terminals = pipeline.get_terminal_stages()
+        self.assertEqual(len(terminals), 1)
+        self.assertEqual(terminals[0].name, "vocoder")
+
+    def test_get_entry_stages(self):
+        pipeline = self._make_pipeline()
+        entries = pipeline.get_entry_stages()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].name, "thinker")
+
+    def test_validate_valid_pipeline(self):
+        pipeline = self._make_pipeline()
+        pipeline.validate()
+
+    def test_validate_duplicate_names(self):
+        pipeline = OmniPipelineConfig(
+            model_type="test",
+            model_arch="Test",
+            stages=(
+                OmniStageConfig(name="a", execution_type=StageExecutionType.LLM_AR, model_cls="A", terminal=True),
+                OmniStageConfig(name="a", execution_type=StageExecutionType.LLM_AR, model_cls="B", terminal=True),
+            ),
+        )
+        with self.assertRaises(ValueError) as ctx:
+            pipeline.validate()
+        self.assertIn("Duplicate stage name", str(ctx.exception))
+
+    def test_validate_dangling_next(self):
+        pipeline = OmniPipelineConfig(
+            model_type="test",
+            model_arch="Test",
+            stages=(
+                OmniStageConfig(name="a", execution_type=StageExecutionType.LLM_AR, model_cls="A", next="nonexistent"),
+            ),
+        )
+        with self.assertRaises(ValueError) as ctx:
+            pipeline.validate()
+        self.assertIn("nonexistent", str(ctx.exception))
+
+    def test_validate_self_reference(self):
+        pipeline = OmniPipelineConfig(
+            model_type="test",
+            model_arch="Test",
+            stages=(
+                OmniStageConfig(name="a", execution_type=StageExecutionType.LLM_AR, model_cls="A", next="a", terminal=True),
+            ),
+        )
+        with self.assertRaises(ValueError) as ctx:
+            pipeline.validate()
+        self.assertIn("self-reference", str(ctx.exception))
+
+    def test_validate_no_terminal(self):
+        pipeline = OmniPipelineConfig(
+            model_type="test",
+            model_arch="Test",
+            stages=(
+                OmniStageConfig(name="a", execution_type=StageExecutionType.LLM_AR, model_cls="A"),
+            ),
+        )
+        with self.assertRaises(ValueError) as ctx:
+            pipeline.validate()
+        self.assertIn("terminal", str(ctx.exception))
+
+    def test_validate_no_entry_point(self):
+        pipeline = OmniPipelineConfig(
+            model_type="test",
+            model_arch="Test",
+            stages=(
+                OmniStageConfig(name="a", execution_type=StageExecutionType.LLM_AR, model_cls="A", next="b"),
+                OmniStageConfig(name="b", execution_type=StageExecutionType.LLM_AR, model_cls="B", next="a", terminal=True),
+            ),
+        )
+        with self.assertRaises(ValueError) as ctx:
+            pipeline.validate()
+        self.assertIn("entry point", str(ctx.exception))
+
+    def test_validate_dangling_stream_to(self):
+        pipeline = OmniPipelineConfig(
+            model_type="test",
+            model_arch="Test",
+            stages=(
+                OmniStageConfig(
+                    name="a",
+                    execution_type=StageExecutionType.LLM_AR,
+                    model_cls="A",
+                    stream_to=("ghost",),
+                    terminal=True,
+                ),
+            ),
+        )
+        with self.assertRaises(ValueError) as ctx:
+            pipeline.validate()
+        self.assertIn("ghost", str(ctx.exception))
+
+    def test_validate_dangling_wait_for(self):
+        pipeline = OmniPipelineConfig(
+            model_type="test",
+            model_arch="Test",
+            stages=(
+                OmniStageConfig(
+                    name="a",
+                    execution_type=StageExecutionType.LLM_AR,
+                    model_cls="A",
+                    wait_for=("ghost",),
+                    terminal=True,
+                ),
+            ),
+        )
+        with self.assertRaises(ValueError) as ctx:
+            pipeline.validate()
+        self.assertIn("ghost", str(ctx.exception))
+
+    # Legacy compat: get_stage by int id still works
+    def test_get_stage_by_id_legacy(self):
+        pipeline = OmniPipelineConfig(
+            model_type="test",
+            model_arch="Test",
+            stages=(
+                OmniStageConfig(
+                    name="thinker",
+                    execution_type=StageExecutionType.LLM_AR,
+                    model_cls="A",
+                    stage_id=0,
+                    terminal=True,
+                ),
+            ),
+        )
+        stage = pipeline.get_stage(0)
+        self.assertEqual(stage.name, "thinker")
+
+    def test_get_final_output_stages_legacy(self):
+        pipeline = OmniPipelineConfig(
+            model_type="test",
+            model_arch="Test",
+            stages=(
+                OmniStageConfig(
+                    name="thinker",
+                    execution_type=StageExecutionType.LLM_AR,
+                    model_cls="A",
+                    final_output=True,
+                    final_output_type="text",
+                    terminal=True,
+                ),
+            ),
+        )
+        finals = pipeline.get_final_output_stages()
+        self.assertEqual(len(finals), 1)
 
 
 if __name__ == "__main__":

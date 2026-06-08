@@ -27,11 +27,10 @@ class TestOmniPipelineRegistry(unittest.TestCase):
             model_arch=f"TestOmniArch_{model_type}",
             stages=(
                 OmniStageConfig(
-                    stage_id=0,
-                    model_stage="thinker",
+                    name="thinker",
                     execution_type=StageExecutionType.LLM_AR,
                     model_cls="TestThinker",
-                    input_sources=(),
+                    terminal=True,
                 ),
             ),
         )
@@ -69,11 +68,10 @@ class TestOmniPipelineRegistry(unittest.TestCase):
             model_arch="SharedArch",
             stages=(
                 OmniStageConfig(
-                    stage_id=0,
-                    model_stage="thinker",
+                    name="thinker",
                     execution_type=StageExecutionType.LLM_AR,
                     model_cls="TestThinker",
-                    input_sources=(),
+                    terminal=True,
                 ),
             ),
         )
@@ -82,11 +80,10 @@ class TestOmniPipelineRegistry(unittest.TestCase):
             model_arch="SharedArch",
             stages=(
                 OmniStageConfig(
-                    stage_id=0,
-                    model_stage="thinker",
+                    name="thinker",
                     execution_type=StageExecutionType.LLM_AR,
                     model_cls="TestThinker",
-                    input_sources=(),
+                    terminal=True,
                 ),
             ),
         )

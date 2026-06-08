@@ -100,7 +100,9 @@ class Qwen2_5OmniTalker(QWenV2):
         config.tie_word_embeddings = talker_config.get("tie_word_embeddings", False)
         config.config_dtype = talker_config.get("torch_dtype", None)
 
-        embedding_size = talker_config.get("embedding_size")
+        embedding_size = talker_config.get(
+            "embedding_size", talker_config.get("thinker_hidden_size")
+        )
         if embedding_size is not None:
             config.embedding_size = embedding_size
 

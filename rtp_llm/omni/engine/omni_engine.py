@@ -40,9 +40,9 @@ class OmniEngine:
         self.connector = connector or SharedMemoryConnector()
         self.output_processor = OmniOutputProcessor()
 
-        self.stage_pools: Dict[int, OmniStagePool] = {}
+        self.stage_pools: Dict[str, OmniStagePool] = {}
         for stage_config in pipeline_config.stages:
-            self.stage_pools[stage_config.stage_id] = OmniStagePool(
+            self.stage_pools[stage_config.name] = OmniStagePool(
                 stage_config=stage_config
             )
 
@@ -52,7 +52,7 @@ class OmniEngine:
             stage_pools=self.stage_pools,
         )
 
-        self.stage_engines: Dict[int, Any] = {}
+        self.stage_engines: Dict[str, Any] = {}
         self._primary_engine = None
         self._thinker_engine = None
         self._talker_engine = None
@@ -90,11 +90,11 @@ class OmniEngine:
             return self._primary_engine.role_type
         return "omni"
 
-    def get_final_output_types(self) -> Dict[str, int]:
+    def get_final_output_types(self) -> Dict[str, Any]:
         result = {}
         for stage in self.pipeline_config.stages:
             if stage.final_output and stage.final_output_type:
-                result[stage.final_output_type] = stage.stage_id
+                result[stage.final_output_type] = stage.name
         return result
 
     def _create_stage_model_config(
@@ -135,7 +135,7 @@ class OmniEngine:
             stage_config.init_precision_config(kv_cache_config=None, act_type=None)
 
         logger.info(
-            f"Created stage config for {stage.model_stage}: "
+            f"Created stage config for {stage.name}: "
             f"hidden_size={stage_config.hidden_size}, "
             f"num_layers={stage_config.num_layers}, "
             f"vocab_size={stage_config.vocab_size}, "
@@ -167,15 +167,14 @@ class OmniEngine:
         for stage in self.pipeline_config.stages:
             if stage.execution_type == StageExecutionType.LLM_AR:
                 logger.info(
-                    f"Initializing LLM_AR stage {stage.stage_id} "
-                    f"({stage.model_stage}) with model_type={stage.model_type}"
+                    f"Initializing LLM_AR stage '{stage.name}' "
+                    f"with model_type={stage.model_type}"
                 )
 
                 stage_model_type = stage.model_type
                 if stage_model_type is None:
                     raise ValueError(
-                        f"Stage {stage.stage_id} ({stage.model_stage}) "
-                        f"has no model_type configured"
+                        f"Stage '{stage.name}' has no model_type configured"
                     )
 
                 model_cls = ModelFactory.get_model_cls(stage_model_type)
@@ -218,37 +217,33 @@ class OmniEngine:
                     alog_conf_path=alog_conf_path,
                     world_info=world_info,
                 )
-                self.stage_engines[stage.stage_id] = sub_engine
+                self.stage_engines[stage.name] = sub_engine
 
                 if self._primary_engine is None:
                     self._primary_engine = sub_engine
 
-                if stage.model_stage == "thinker":
+                if stage.name == "thinker":
                     self._thinker_engine = sub_engine
-                elif stage.model_stage == "talker":
+                elif stage.name == "talker":
                     self._talker_engine = sub_engine
 
-                logger.info(
-                    f"Stage {stage.stage_id} ({stage.model_stage}) engine created"
-                )
+                logger.info(f"Stage '{stage.name}' engine created")
 
             elif stage.execution_type == StageExecutionType.LLM_GENERATION:
                 logger.info(
-                    f"Stage {stage.stage_id} ({stage.model_stage}) "
-                    f"is token2wav — will be loaded separately"
+                    f"Stage '{stage.name}' is token2wav — will be loaded separately"
                 )
 
             else:
                 logger.warning(
-                    f"Stage {stage.stage_id} ({stage.model_stage}) "
-                    f"has unsupported execution type: {stage.execution_type}"
+                    f"Stage '{stage.name}' has unsupported execution type: "
+                    f"{stage.execution_type}"
                 )
 
     def start(self) -> None:
-        for stage_id, engine in self.stage_engines.items():
+        for stage_name, engine in self.stage_engines.items():
             if hasattr(engine, 'start'):
-                stage = self.pipeline_config.get_stage(stage_id)
-                logger.info(f"Starting stage {stage_id} ({stage.model_stage})")
+                logger.info(f"Starting stage '{stage_name}'")
                 engine.start()
         self.started = True
         logger.info(
@@ -257,17 +252,16 @@ class OmniEngine:
 
     def stop(self) -> None:
         self.started = False
-        for stage_id, engine in self.stage_engines.items():
+        for stage_name, engine in self.stage_engines.items():
             if hasattr(engine, 'stop'):
-                stage = self.pipeline_config.get_stage(stage_id)
-                logger.info(f"Stopping stage {stage_id} ({stage.model_stage})")
+                logger.info(f"Stopping stage '{stage_name}'")
                 engine.stop()
         logger.info("OmniEngine stopped")
 
     def ready(self) -> bool:
         if not self.started:
             return False
-        for stage_id, engine in self.stage_engines.items():
+        for stage_name, engine in self.stage_engines.items():
             if hasattr(engine, 'ready') and not engine.ready():
                 return False
         return True

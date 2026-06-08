@@ -14,13 +14,13 @@ logger = logging.getLogger(__name__)
 class OmniOutputProcessor:
     def assemble(
         self,
-        stage_outputs: Dict[int, StageOutput],
-        final_output_types: Dict[str, int],
+        stage_outputs: Dict[Any, StageOutput],
+        final_output_types: Dict[str, Any],
     ) -> Dict[str, Any]:
         result: Dict[str, Any] = {}
 
-        for output_type, stage_id in final_output_types.items():
-            stage_out = stage_outputs.get(stage_id)
+        for output_type, stage_key in final_output_types.items():
+            stage_out = stage_outputs.get(stage_key)
             if stage_out is None:
                 continue
 
