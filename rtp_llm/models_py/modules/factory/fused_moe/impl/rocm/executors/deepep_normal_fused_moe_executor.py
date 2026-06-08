@@ -4,6 +4,14 @@ import aiter
 import numpy as np
 import torch
 import torch.nn.functional as F
+from aiter.fused_moe import fused_moe
+
+
+def _moe_activation_type(activation: str) -> "aiter.ActivationType":
+    if activation in ("silu", "SiGLU"):
+        return aiter.ActivationType.Silu
+    return aiter.ActivationType.Gelu
+
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -160,87 +168,25 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
                 )
             )
 
-        dtype = a1.dtype
-        device = topk_ids.device
-        model_dim = a1.shape[-1]
-        inter_dim = self.w13_weight.shape[1]
+        assert a1.is_contiguous(), "Hidden_states must be contiguous"
+        assert self.w13_weight.stride(-1) == 1, "Stride of last dimension must be 1"
+        assert self.w2_weight.stride(-1) == 1, "Stride of last dimension must be 1"
 
-        # === 选择 block_size ===
-        block_size = self.get_block_size(M, topk, self.num_experts)
-
-        # === 构建 local_expert_mask（用于 EP）===
-        # Dispatch 已经将全局专家 ID 映射为本地 ID，所有本地专家都是活跃的
-        expert_mask = torch.ones(self.num_experts, dtype=torch.int32, device=device)
-
-        # === MoE Sorting ===
-        (
-            sorted_ids,
-            sorted_weights,
-            sorted_expert_ids,
-            num_valid_ids,
-            moe_buf,
-        ) = self.moe_sorting_ck(
-            topk_ids=topk_ids,
-            topk_weights=topk_weights,
-            num_experts=self.num_experts,
-            model_dim=model_dim,
-            moebuf_dtype=dtype,
-            block_size=block_size,
-            expert_mask=expert_mask,
+        # DeepEP normal dispatch已将全局专家ID映射为本地ID（0..local_E-1），
+        # 且 router 已将 -1 padding 置为 0 并将其权重置 0，因此 expert_mask=None。
+        # fused_moe 内部会应用 topk 权重 —— 这是必须的，因为 DeepEP normal
+        # combine() 对各 rank 的专家输出做无权重求和。
+        output = fused_moe(
+            a1,
+            self.w13_weight,
+            self.w2_weight,
+            topk_weights,
+            topk_ids,
+            activation=_moe_activation_type(activation),
+            expert_mask=None,
         )
 
-        # In EP mode (ep_size > 1), the router handles weighting in _combine,
-        # so skip kernel-side weighting. In non-EP mode, the kernel must
-        # apply router weights since there's no external combiner.
-        # Per aiter convention, ck_moe_stage1 never applies weighting —
-        # only ck_moe_stage2 does.
-        routed_weights = sorted_weights if self.ep_size <= 1 else None
-
-        # === Stage 1: Up/Gate Projection + Activation ===
-        a2 = torch.empty((M, topk, inter_dim // 2), dtype=dtype, device=device)
-        fc1_scale = None
-        a1_scale = None
-        # act_op = 1 if activation == "silu" else 0  # 1 = silu_and_mul
-
-        aiter.ck_moe_stage1(
-            hidden_states=a1,
-            w1=self.w13_weight,
-            w2=self.w2_weight,
-            sorted_token_ids=sorted_ids,
-            sorted_expert_ids=sorted_expert_ids,
-            num_valid_ids=num_valid_ids,
-            out=a2,
-            topk=topk,
-            kernelName="",
-            w1_scale=fc1_scale,
-            a1_scale=a1_scale,
-            block_m=block_size,
-        )
-
-        # Reshape for stage2: [M, topk, inter_dim//2] -> [M*topk, inter_dim//2]
-        a2 = a2.view(-1, a2.shape[-1])
-
-        # === Stage 2: Down Projection + Weighted Combine ===
-        fc2_scale = None
-        a2_scale = None
-
-        aiter.ck_moe_stage2(
-            inter_states=a2,  # [M*topk, inter_dim//2]
-            w1=self.w13_weight,
-            w2=self.w2_weight,
-            sorted_token_ids=sorted_ids,
-            sorted_expert_ids=sorted_expert_ids,
-            num_valid_ids=num_valid_ids,
-            out=moe_buf,  # [M, D]
-            topk=topk,
-            kernelName="",
-            w2_scale=fc2_scale,
-            a2_scale=a2_scale,
-            block_m=block_size,
-            sorted_weights=routed_weights,
-        )
-
-        return CombineForwardPayload(fused_expert_output=moe_buf)
+        return CombineForwardPayload(fused_expert_output=output)
 
 
 def torch_moe_ref(

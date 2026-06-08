@@ -77,7 +77,7 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         # else:
         input = a1
         # pre dispatch
-        # topk_ids = topk_ids.long()
+        topk_ids = topk_ids.long()
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
@@ -112,12 +112,30 @@ class DeepepNormalRouter(FusedMoeDataRouter):
         expert_x = output
         expert_x_scale = None
         self.handle = handle
+
+        # DeepEP normal dispatch returns recv_topk_idx as LOCAL expert ids
+        # (0..local_E-1) with -1 padding for top-k slots whose selected expert
+        # is not owned by this rank. Any id outside [0, local_E-1] (including
+        # -1 padding) must be treated as padding: feeding it into the aiter
+        # moe_sorting/ck_moe kernels (or any downstream gather) would index out
+        # of bounds and trigger a device-side assert. Remap such slots to local
+        # expert 0 and zero their weight so they contribute nothing.
+        recv_topk_idx = recv_topk_idx.long()
+        local_e = self.expert_num_per_rank
+        invalid = (recv_topk_idx < 0) | (recv_topk_idx >= local_e)
+        if invalid.any():
+            recv_topk_weights = recv_topk_weights.clone()
+            recv_topk_weights[invalid] = 0.0
+            recv_topk_idx = recv_topk_idx.clone()
+            recv_topk_idx[invalid] = 0
+
         return ExpertForwardPayload(
             expert_x=expert_x,
             expert_x_scale=expert_x_scale,
             expert_x_origin_dtype=None,
             expert_topk_ids=recv_topk_idx,
             expert_topk_weights=recv_topk_weights,
+            expert_ids_are_local=True,
             expert_tokens_meta=ExpertTokensMetadata(
                 expert_num_tokens=None,
                 expert_num_tokens_cpu=num_recv_tokens_per_expert_list,
