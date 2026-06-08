@@ -365,6 +365,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_memory_cache_sm_copy", &KVCacheConfig::enable_memory_cache_sm_copy)
         .def_readwrite("write_cache_sync", &KVCacheConfig::write_cache_sync)
         .def_readwrite("enable_tiered_memory_cache", &KVCacheConfig::enable_tiered_memory_cache)
+        .def_readwrite("enable_gpu_prefix_tree", &KVCacheConfig::enable_gpu_prefix_tree)
+        .def_readwrite("enable_prefix_tree_memory_cache", &KVCacheConfig::enable_prefix_tree_memory_cache)
+        .def_readwrite("enable_legacy_memory_connector_fallback",
+                       &KVCacheConfig::enable_legacy_memory_connector_fallback)
+        .def_readwrite("prefix_tree_memory_state_swa_pool_ratio",
+                       &KVCacheConfig::prefix_tree_memory_state_swa_pool_ratio)
+        .def_readwrite("enable_dsv4_state_block_independent_eviction",
+                       &KVCacheConfig::enable_dsv4_state_block_independent_eviction)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
@@ -446,14 +454,21 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.ssm_state_dtype,
                                       self.dsv4_fixed_pool_blocks,
                                       self.dsv4_fixed_pool_use_memory,
-                                      self.dsv4_hca_state_pool_blocks);
+                                      self.dsv4_hca_state_pool_blocks,
+                                      self.enable_gpu_prefix_tree,
+                                      self.enable_prefix_tree_memory_cache,
+                                      self.enable_legacy_memory_connector_fallback,
+                                      self.prefix_tree_memory_state_swa_pool_ratio,
+                                      self.enable_dsv4_state_block_independent_eviction);
             },
             [](py::tuple t) {
-                if (t.size() != 45 && t.size() != 46 && t.size() != 47 && t.size() < 50)
+                const bool has_disk_fields =
+                    t.size() >= 50 && py::isinstance<py::str>(t[9]);
+                const size_t min_size = has_disk_fields ? 50u : 45u;
+                if (t.size() < min_size)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
-                    const bool has_disk_fields     = t.size() >= 50;
                     c.reuse_cache                  = t[0].cast<bool>();
                     c.multi_task_prompt            = t[1].cast<std::string>();
                     c.multi_task_prompt_str        = t[2].cast<std::string>();
@@ -512,9 +527,26 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     if (t.size() >= expected_with_fixed_pool_memory) {
                         c.dsv4_fixed_pool_use_memory = t[45 + offset].cast<bool>();
                     }
-                    const size_t expected_with_hca_state_pool = (has_disk_fields ? 52u : 47u);
-                    if (t.size() >= expected_with_hca_state_pool) {
-                        c.dsv4_hca_state_pool_blocks = t[46 + offset].cast<uint32_t>();
+                    const size_t extra_start = 46 + offset;
+                    if (t.size() > extra_start) {
+                        const size_t extra_count = t.size() - extra_start;
+                        if (extra_count == 1 || extra_count >= 4) {
+                            c.dsv4_hca_state_pool_blocks = t[extra_start].cast<uint32_t>();
+                        }
+                        if (extra_count == 3) {
+                            c.enable_gpu_prefix_tree                  = t[extra_start].cast<bool>();
+                            c.enable_prefix_tree_memory_cache         = t[extra_start + 1].cast<bool>();
+                            c.enable_legacy_memory_connector_fallback = t[extra_start + 2].cast<bool>();
+                        } else if (extra_count >= 4) {
+                            c.enable_gpu_prefix_tree                  = t[extra_start + 1].cast<bool>();
+                            c.enable_prefix_tree_memory_cache         = t[extra_start + 2].cast<bool>();
+                            c.enable_legacy_memory_connector_fallback = t[extra_start + 3].cast<bool>();
+                            if (extra_count >= 6) {
+                                c.prefix_tree_memory_state_swa_pool_ratio = t[extra_start + 4].cast<int64_t>();
+                                c.enable_dsv4_state_block_independent_eviction =
+                                    t[extra_start + 5].cast<bool>();
+                            }
+                        }
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());

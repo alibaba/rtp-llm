@@ -821,8 +821,14 @@ class KVCacheConfig:
     enable_device_cache: bool
     enable_memory_cache: bool
     enable_memory_cache_sm_copy: bool
+    enable_prefix_tree_memory_cache: bool
+    enable_legacy_memory_connector_fallback: bool
+    enable_gpu_prefix_tree: bool
+    prefix_tree_memory_state_swa_pool_ratio: int
+    enable_dsv4_state_block_independent_eviction: bool
     enable_remote_cache: bool
     dsv4_fixed_pool_blocks: int
+    dsv4_hca_state_pool_blocks: int
     dsv4_fixed_pool_use_memory: bool
     fp8_kv_cache: int
     int8_kv_cache: int

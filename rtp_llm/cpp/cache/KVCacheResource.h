@@ -23,6 +23,14 @@ inline bool isNullBlockIdx(BlockIdxType block_idx) {
 using CacheKeysType    = std::vector<CacheKeyType>;
 using BlockIndicesType = std::vector<BlockIdxType>;
 
+struct BlockDependency {
+    bool         has_parent{false};
+    CacheKeyType parent_key{0};
+    uint32_t     ordinal{0};
+};
+
+using BlockDependenciesType = std::vector<BlockDependency>;
+
 class BlockIds {
 public:
     explicit BlockIds(size_t kernel_blocks_per_kv_block = 1):
@@ -100,6 +108,17 @@ public:
 
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
+    void                 setCacheKeys(const CacheKeysType& keys);
+    void                 setCacheKeys(CacheKeysType&& keys);
+    bool                 cacheKeysAreCpCanonical() const;
+    void                 setCacheKeysAreCpCanonical(bool cache_keys_are_cp_canonical);
+
+    BlockDependenciesType&       blockDependencies();
+    const BlockDependenciesType& blockDependencies() const;
+    void                         setBlockDependencies(const BlockDependenciesType& dependencies);
+    void                         setBlockDependencies(BlockDependenciesType&& dependencies);
+    void                         rebuildLinearBlockDependencies();
+    void                         ensureLinearBlockDependencies();
 
     // Return rank-local cache keys: every cp_size-th key starting from cp_rank.
     // localCacheKeys(r, s)[i] == cacheKeys()[i * s + r]
@@ -145,6 +164,8 @@ private:
     // group_id -> block_indices
     GroupBlockIds group_block_ids;
     CacheKeysType cache_keys;
+    BlockDependenciesType block_dependencies;
+    bool cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

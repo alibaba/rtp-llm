@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -53,8 +54,20 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
             return false;
         }
 
-        const size_t need_evict = static_cast<size_t>(required_blocks) - free_blocks;
-        size_t       freed      = shared_cache_->evictAndFree(need_evict);
+        const size_t                  need_evict = static_cast<size_t>(required_blocks) - free_blocks;
+        SharedBlockCache::EvictResult evict_result;
+        size_t                        freed = shared_cache_->evictAndFreeForGroup(group_id_, need_evict, &evict_result);
+        if (metrics_reporter_) {
+            for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
+                RtpLLMCacheEvictionMetricsCollector collector;
+                collector.lifetime_ms = lifetime_ms;
+                kmonitor::MetricsTags tags("scope", "gpu");
+                tags.AddTag("kind", evict_result.evicted_state_only_group.count(cache_key) ? "state_swa_kv" : "chain");
+                tags.AddTag("backing", "device");
+                metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
+                                                                                                           &collector);
+            }
+        }
         if (freed == 0) {
             RTP_LLM_LOG_WARNING("ensure free blocks failed, free blocks: %zu, need evict blocks: %zu",
                                 block_pool_->freeBlocksNum(),

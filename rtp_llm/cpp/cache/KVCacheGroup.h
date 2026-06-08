@@ -7,6 +7,7 @@
 
 #include <torch/torch.h>
 
+#include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
@@ -27,11 +28,13 @@ public:
                  KVCacheSpecPtr      kvcache_spec,
                  BlockPoolPtr        block_pool,
                  int                 group_id,
-                 SharedBlockCache*   shared_cache = nullptr):
+                 SharedBlockCache*   shared_cache = nullptr,
+                 const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
         layer_ids_(layer_ids),
         kvcache_spec_(std::move(kvcache_spec)),
         block_pool_(block_pool),
         shared_cache_(shared_cache),
+        metrics_reporter_(metrics_reporter),
         group_id_(group_id),
         seq_size_per_block_(kvcache_spec_->seq_size_per_block) {}
 
@@ -67,6 +70,7 @@ protected:
     KVCacheSpecPtr    kvcache_spec_;
     BlockPoolPtr      block_pool_;
     SharedBlockCache* shared_cache_ = nullptr;
+    kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
     int               group_id_     = 0;
 
     int                                    seq_size_per_block_;

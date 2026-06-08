@@ -16,6 +16,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSchedulerMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCachePoolMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheEvictionMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMDeviceCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
@@ -512,6 +513,17 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
     REPORT_MUTABLE_METRIC(used_ratio_metric, collector->used_ratio);
 }
 
+bool RtpLLMCacheEvictionMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_lifetime_ms_metric,
+                                  "rtp_llm_kv_cache_evicted_block_lifetime_ms");
+    return true;
+}
+
+void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*       tags,
+                                        RtpLLMCacheEvictionMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(evicted_block_lifetime_ms_metric, collector->lifetime_ms);
+}
+
 bool RtpLLMRemoteCacheMatchMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(remote_match_qps_metric, "rtp_llm_remote_match_qps");
     REGISTER_QPS_MUTABLE_METRIC(remote_match_fail_qps_metric, "rtp_llm_remote_match_fail_qps");
@@ -872,6 +884,8 @@ bool RtpLLMMemoryCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                   "rtp_llm_kv_cache_memory_cache_status_allocated_block_num");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_status_available_block_num_metric,
                                   "rtp_llm_kv_cache_memory_cache_status_available_block_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_memory_cache_status_used_ratio_metric,
+                                  "rtp_llm_kv_cache_memory_cache_status_used_ratio");
 
     return true;
 }
@@ -945,6 +959,7 @@ void RtpLLMMemoryCacheMetrics::report(const kmonitor::MetricsTags*             t
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_total_block_num_metric, collector->total_block_num);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_allocated_block_num_metric, collector->allocated_block_num);
     REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_available_block_num_metric, collector->available_block_num);
+    REPORT_MUTABLE_METRIC(kv_cache_memory_cache_status_used_ratio_metric, collector->used_ratio);
 }
 
 bool RtpLLMDiskCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -995,6 +1010,8 @@ bool RtpLLMDiskCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                   "rtp_llm_kv_cache_disk_cache_status_available_block_num");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_status_in_flight_block_num_metric,
                                   "rtp_llm_kv_cache_disk_cache_status_in_flight_block_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_status_used_ratio_metric,
+                                  "rtp_llm_kv_cache_disk_cache_status_used_ratio");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_read_bytes_metric, "rtp_llm_kv_cache_disk_cache_read_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_write_bytes_metric, "rtp_llm_kv_cache_disk_cache_write_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_disk_cache_read_bandwidth_metric,
@@ -1066,6 +1083,7 @@ void RtpLLMDiskCacheMetrics::report(const kmonitor::MetricsTags*           tags,
     REPORT_MUTABLE_METRIC(kv_cache_disk_cache_status_allocated_block_num_metric, collector->allocated_block_num);
     REPORT_MUTABLE_METRIC(kv_cache_disk_cache_status_available_block_num_metric, collector->available_block_num);
     REPORT_MUTABLE_METRIC(kv_cache_disk_cache_status_in_flight_block_num_metric, collector->in_flight_block_num);
+    REPORT_MUTABLE_METRIC(kv_cache_disk_cache_status_used_ratio_metric, collector->used_ratio);
     REPORT_MUTABLE_METRIC(kv_cache_disk_cache_read_bytes_metric, collector->read_bytes);
     REPORT_MUTABLE_METRIC(kv_cache_disk_cache_write_bytes_metric, collector->write_bytes);
     REPORT_MUTABLE_METRIC(kv_cache_disk_cache_read_bandwidth_metric, collector->read_bandwidth);
