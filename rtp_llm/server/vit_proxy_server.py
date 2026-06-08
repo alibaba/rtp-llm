@@ -29,6 +29,8 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 
+STATUS_CHECK_TIMEOUT_SEC = 1.0
+
 
 def _now_us() -> int:
     return time.monotonic_ns() // 1000
@@ -232,18 +234,57 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             if not callback_added:
                 _report_lifecycle()
 
+    def _get_alive_worker_status(
+        self, request: StatusVersionPB
+    ) -> Optional[WorkerStatusPB]:
+        for worker_address in self.load_balancer.worker_addresses:
+            try:
+                stub = self.connection_pool.get_stub(worker_address)
+                worker_status = stub.GetWorkerStatus(
+                    request, timeout=STATUS_CHECK_TIMEOUT_SEC
+                )
+                if worker_status.alive:
+                    if not worker_status.role:
+                        worker_status.role = "VIT"
+                    return worker_status
+                logging.warning(
+                    "VIT worker %s reported not alive during proxy status check",
+                    worker_address,
+                )
+            except grpc.RpcError as e:
+                logging.warning(
+                    "VIT worker %s status check failed: %s - %s",
+                    worker_address,
+                    e.code(),
+                    e.details(),
+                )
+            except Exception as e:
+                logging.warning(
+                    "VIT worker %s status check failed: %s",
+                    worker_address,
+                    e,
+                )
+        return None
+
+    @staticmethod
+    def _set_no_alive_worker_status(context):
+        context.set_code(grpc.StatusCode.UNAVAILABLE)
+        context.set_details("No alive VIT worker behind proxy")
+
     def GetWorkerStatus(self, request: StatusVersionPB, context) -> WorkerStatusPB:
-        # Aggregation pending flexlb refactor; explicitly UNIMPLEMENTED so the caller
-        # doesn't mistake a default WorkerStatusPB() (alive=false) for "all workers down".
-        # todo: refactor status interface with flexlb
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details("VitProxy.GetWorkerStatus pending flexlb status refactor")
-        return WorkerStatusPB()
+        worker_status = self._get_alive_worker_status(request)
+        if worker_status:
+            return worker_status
+        self._set_no_alive_worker_status(context)
+        return WorkerStatusPB(role="VIT", alive=False)
 
     def GetCacheStatus(self, request: CacheVersionPB, context) -> CacheStatusPB:
-        # todo: refactor status interface with flexlb
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details("VitProxy.GetCacheStatus pending flexlb status refactor")
+        status_request = StatusVersionPB(
+            latest_cache_version=request.latest_cache_version
+        )
+        if self._get_alive_worker_status(status_request):
+            return CacheStatusPB()
+        self._set_no_alive_worker_status(context)
         return CacheStatusPB()
 
 

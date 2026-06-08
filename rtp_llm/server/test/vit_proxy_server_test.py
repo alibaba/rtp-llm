@@ -1,15 +1,55 @@
 import threading
+from concurrent import futures
 from unittest import TestCase, main
 from unittest.mock import MagicMock, patch
 
-from rtp_llm.server.vit_proxy_server import LoadBalancer, WorkerConnectionPool
+import grpc
+
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    CacheStatusPB,
+    CacheVersionPB,
+    StatusVersionPB,
+    WorkerStatusPB,
+)
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+    MultimodalRpcServiceServicer,
+    add_MultimodalRpcServiceServicer_to_server,
+)
+from rtp_llm.server.vit_proxy_server import (
+    LoadBalancer,
+    VitProxyRpcServer,
+    WorkerConnectionPool,
+)
+
+
+class FakeContext:
+    def __init__(self):
+        self.code = None
+        self.details = None
+
+    def set_code(self, code):
+        self.code = code
+
+    def set_details(self, details):
+        self.details = details
+
+
+class StatusOnlyVitWorker(MultimodalRpcServiceServicer):
+    def __init__(self, status):
+        self.status = status
+        self.requests = []
+
+    def GetWorkerStatus(self, request, context):
+        self.requests.append(request)
+        return self.status
 
 
 class LoadBalancerRoundRobinTest(TestCase):
     def test_cycles_through_workers(self):
         lb = LoadBalancer(["a", "b", "c"], strategy="round_robin")
-        self.assertEqual([lb.get_worker() for _ in range(6)],
-                         ["a", "b", "c", "a", "b", "c"])
+        self.assertEqual(
+            [lb.get_worker() for _ in range(6)], ["a", "b", "c", "a", "b", "c"]
+        )
 
     def test_single_worker(self):
         lb = LoadBalancer(["only"], strategy="round_robin")
@@ -104,10 +144,12 @@ class LoadBalancerThreadSafetyTest(TestCase):
 
     def test_concurrent_increment_decrement(self):
         lb = LoadBalancer(["a"])
+
         def inc_dec():
             for _ in range(1000):
                 lb.increment_connections("a")
                 lb.decrement_connections("a")
+
         threads = [threading.Thread(target=inc_dec) for _ in range(8)]
         for t in threads:
             t.start()
@@ -162,6 +204,97 @@ class WorkerConnectionPoolTest(TestCase):
         # should not propagate
         pool.close_all()
         self.assertEqual(pool.channels, {})
+
+
+class VitProxyRpcServerStatusTest(TestCase):
+    def _make_server(self, stubs):
+        load_balancer = LoadBalancer(list(stubs.keys()))
+        connection_pool = MagicMock()
+        connection_pool.get_stub.side_effect = lambda addr: stubs[addr]
+        return VitProxyRpcServer(load_balancer, connection_pool)
+
+    def test_worker_status_is_alive_when_any_worker_is_alive(self):
+        dead_stub = MagicMock()
+        dead_stub.GetWorkerStatus.return_value = WorkerStatusPB(
+            role="VIT", alive=False, status_version=1
+        )
+        live_stub = MagicMock()
+        live_stub.GetWorkerStatus.return_value = WorkerStatusPB(
+            role="VIT", alive=True, status_version=2
+        )
+        server = self._make_server({"dead": dead_stub, "live": live_stub})
+        context = FakeContext()
+
+        response = server.GetWorkerStatus(StatusVersionPB(), context)
+
+        self.assertEqual(response.role, "VIT")
+        self.assertTrue(response.alive)
+        self.assertEqual(context.code, None)
+
+    def test_worker_status_is_unavailable_when_no_worker_is_alive(self):
+        stub = MagicMock()
+        stub.GetWorkerStatus.return_value = WorkerStatusPB(
+            role="VIT", alive=False, status_version=1
+        )
+        server = self._make_server({"dead": stub})
+        context = FakeContext()
+
+        response = server.GetWorkerStatus(StatusVersionPB(), context)
+
+        self.assertFalse(response.alive)
+        self.assertEqual(context.code, grpc.StatusCode.UNAVAILABLE)
+
+    def test_cache_status_is_ok_when_any_worker_is_alive(self):
+        stub = MagicMock()
+        stub.GetWorkerStatus.return_value = WorkerStatusPB(
+            role="VIT", alive=True, status_version=1
+        )
+        server = self._make_server({"live": stub})
+        context = FakeContext()
+
+        response = server.GetCacheStatus(CacheVersionPB(), context)
+
+        self.assertIsInstance(response, CacheStatusPB)
+        self.assertEqual(context.code, None)
+
+    def test_cache_status_is_unavailable_when_no_worker_is_alive(self):
+        stub = MagicMock()
+        stub.GetWorkerStatus.return_value = WorkerStatusPB(
+            role="VIT", alive=False, status_version=1
+        )
+        server = self._make_server({"dead": stub})
+        context = FakeContext()
+
+        response = server.GetCacheStatus(CacheVersionPB(), context)
+
+        self.assertIsInstance(response, CacheStatusPB)
+        self.assertEqual(context.code, grpc.StatusCode.UNAVAILABLE)
+
+    def test_status_check_works_with_generated_grpc_stub_timeout(self):
+        worker = StatusOnlyVitWorker(
+            WorkerStatusPB(role="", alive=True, status_version=3)
+        )
+        grpc_server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
+        add_MultimodalRpcServiceServicer_to_server(worker, grpc_server)
+        port = grpc_server.add_insecure_port("127.0.0.1:0")
+        grpc_server.start()
+        worker_address = f"127.0.0.1:{port}"
+        connection_pool = WorkerConnectionPool([worker_address])
+        server = VitProxyRpcServer(LoadBalancer([worker_address]), connection_pool)
+        context = FakeContext()
+
+        try:
+            response = server.GetWorkerStatus(
+                StatusVersionPB(latest_cache_version=11), context
+            )
+        finally:
+            connection_pool.close_all()
+            grpc_server.stop(0)
+
+        self.assertTrue(response.alive)
+        self.assertEqual(response.role, "VIT")
+        self.assertEqual(context.code, None)
+        self.assertEqual(worker.requests[0].latest_cache_version, 11)
 
 
 if __name__ == "__main__":
