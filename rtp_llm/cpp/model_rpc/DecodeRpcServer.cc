@@ -903,9 +903,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                         load_context.block_ids_by_group.size());
                 RTP_LLM_CHECK_WITH_INFO(
                     load_context.block_ids_by_group[gid] != nullptr, "null group_block: gid=%zu", gid);
-                const auto& block_ids = load_context.block_ids_by_group[gid]->blocks();
-                auto        block_num = block_ids.size();
-                size_t      model_id  = maga_init_params_.model_id;
+                const auto& block_ids            = load_context.block_ids_by_group[gid]->blocks();
+                const auto  allocated_block_num  = block_ids.size();
+                size_t      model_id             = maga_init_params_.model_id;
 
                 KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
                 if (use_typed_regions && gid < cache_config.group_region_names.size()) {
@@ -913,6 +913,13 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 }
                 CacheGroupType group_type = groupType(cache_config, use_hybrid, gid);
 
+                const auto block_num = cacheVisibleBlockNumForCacheLoad(allocated_block_num,
+                                                                        load_context.cache_keys.size(),
+                                                                        use_hybrid,
+                                                                        group_type,
+                                                                        load_context.prefill_cp_size,
+                                                                        isCompactFixedBlockTable(
+                                                                            cache_config, region_name, gid));
                 auto block_pos_list =
                     blockPositionsForLoad(block_num, cache_config, use_hybrid, group_type, region_name, gid);
 
@@ -1043,15 +1050,22 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                     load_context.block_ids_by_group.size());
                             RTP_LLM_CHECK_WITH_INFO(
                                 load_context.block_ids_by_group[gid] != nullptr, "null mtp group_block: gid=%zu", gid);
-                            const auto& block_ids = load_context.block_ids_by_group[gid]->blocks();
-                            auto        block_num = block_ids.size();
-                            size_t      model_id  = mtp_base_model_id;
+                            const auto& block_ids           = load_context.block_ids_by_group[gid]->blocks();
+                            const auto  allocated_block_num = block_ids.size();
+                            size_t      model_id            = mtp_base_model_id;
 
                             KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
                             if (mtp_use_typed_regions && gid < mtp_cache_cfg.group_region_names.size()) {
                                 region_name = mtp_cache_cfg.group_region_names[gid];
                             }
-                            CacheGroupType group_type     = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
+                            CacheGroupType group_type = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
+                            const auto     block_num  = cacheVisibleBlockNumForCacheLoad(
+                                allocated_block_num,
+                                load_context.cache_keys.size(),
+                                mtp_use_hybrid,
+                                group_type,
+                                load_context.prefill_cp_size,
+                                isCompactFixedBlockTable(mtp_cache_cfg, region_name, gid));
                             auto block_pos_list =
                                 blockPositionsForLoad(
                                     block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, region_name, gid);

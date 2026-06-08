@@ -29,6 +29,23 @@ std::vector<size_t> blockPositionsForCacheTransfer(size_t         block_num,
     return block_pos_list;
 }
 
+size_t cacheVisibleBlockNumForCacheLoad(size_t         allocated_block_num,
+                                        size_t         cache_key_count,
+                                        bool           use_hybrid,
+                                        CacheGroupType group_type,
+                                        int            cp_size,
+                                        bool           compact_blocks_by_cp) {
+    if (!use_hybrid || group_type == CacheGroupType::FULL || cache_key_count == 0) {
+        return allocated_block_num;
+    }
+    if (compact_blocks_by_cp && cp_size > 1) {
+        const size_t cp_size_t      = static_cast<size_t>(cp_size);
+        const size_t compact_count  = (cache_key_count + cp_size_t - 1) / cp_size_t;
+        return std::min(allocated_block_num, compact_count);
+    }
+    return std::min(allocated_block_num, cache_key_count);
+}
+
 std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_logical_blocks,
                                                           size_t         reuse_block_size,
                                                           bool           use_hybrid,

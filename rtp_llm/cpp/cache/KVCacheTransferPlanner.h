@@ -11,6 +11,13 @@ namespace rtp_llm {
 std::vector<size_t> blockPositionsForCacheTransfer(
     size_t block_num, size_t reuse_block_size, bool use_hybrid, CacheGroupType group_type, bool hybrid_full_from_begin);
 
+size_t cacheVisibleBlockNumForCacheLoad(size_t         allocated_block_num,
+                                        size_t         cache_key_count,
+                                        bool           use_hybrid,
+                                        CacheGroupType group_type,
+                                        int            cp_size,
+                                        bool           compact_blocks_by_cp);
+
 std::string layerRegionCacheTransferKey(size_t request_id, size_t layer_id, KVCacheRegionName region_name);
 
 // One iteration step of cache_store registration: pair the cache_key at

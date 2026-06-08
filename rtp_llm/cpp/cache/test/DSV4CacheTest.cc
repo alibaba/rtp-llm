@@ -496,6 +496,54 @@ TEST(KVCacheTransferPlannerTest, CpNonCompactSwaUsesPhysicalTailRows) {
     EXPECT_EQ(plan[1].offset_index, 7);
 }
 
+TEST(KVCacheTransferPlannerTest, CacheLoadSwaTailIgnoresSpeculativeReserveRow) {
+    const size_t visible_blocks = cacheVisibleBlockNumForCacheLoad(/*allocated_block_num=*/129,
+                                                                   /*cache_key_count=*/128,
+                                                                   /*use_hybrid=*/true,
+                                                                   CacheGroupType::SWA,
+                                                                   /*cp_size=*/1,
+                                                                   /*compact_blocks_by_cp=*/false);
+    EXPECT_EQ(visible_blocks, 128u);
+
+    auto positions = blockPositionsForCacheTransfer(visible_blocks,
+                                                    /*reuse_block_size=*/0,
+                                                    /*use_hybrid=*/true,
+                                                    CacheGroupType::SWA,
+                                                    /*hybrid_full_from_begin=*/true);
+    ASSERT_EQ(positions.size(), 2u);
+    EXPECT_EQ(positions[0], 126u);
+    EXPECT_EQ(positions[1], 127u);
+}
+
+TEST(KVCacheTransferPlannerTest, CacheLoadCompactCpSwaTailIgnoresSpeculativeReserveRow) {
+    const size_t visible_blocks = cacheVisibleBlockNumForCacheLoad(/*allocated_block_num=*/17,
+                                                                   /*cache_key_count=*/128,
+                                                                   /*use_hybrid=*/true,
+                                                                   CacheGroupType::SWA,
+                                                                   /*cp_size=*/8,
+                                                                   /*compact_blocks_by_cp=*/true);
+    EXPECT_EQ(visible_blocks, 16u);
+
+    auto positions = blockPositionsForCacheTransfer(visible_blocks,
+                                                    /*reuse_block_size=*/0,
+                                                    /*use_hybrid=*/true,
+                                                    CacheGroupType::SWA,
+                                                    /*hybrid_full_from_begin=*/true);
+    ASSERT_EQ(positions.size(), 2u);
+    EXPECT_EQ(positions[0], 14u);
+    EXPECT_EQ(positions[1], 15u);
+}
+
+TEST(KVCacheTransferPlannerTest, CacheLoadFullRowsKeepAllocatedBlockCount) {
+    EXPECT_EQ(cacheVisibleBlockNumForCacheLoad(/*allocated_block_num=*/129,
+                                               /*cache_key_count=*/128,
+                                               /*use_hybrid=*/true,
+                                               CacheGroupType::FULL,
+                                               /*cp_size=*/1,
+                                               /*compact_blocks_by_cp=*/false),
+              129u);
+}
+
 // ============================================================
 // CacheConfig output
 // ============================================================
