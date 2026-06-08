@@ -8,7 +8,7 @@ from rtp_llm.config.quant_config import (
     QuantizationConfig,
 )
 from rtp_llm.model_loader.load_config import LoadConfig
-from rtp_llm.model_loader.tensor_source import TensorSource
+from rtp_llm.model_loader.tensor_source import StackSplitTensorSource, TensorSource
 from rtp_llm.model_loader.w8a8_weight import create_w8a8_fp8_weight
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
@@ -135,6 +135,10 @@ class LoadW4a8Int4PerChannelQuantWeight(CompositeWeight, QuantWeight):
             src_weight_info.__class__, src_weight_info, quant_config
         )
         kernel: AtomicWeight = create_w8a8_fp8_weight(src_weight_info, **params)
+        # W4A8 online quantization needs the intermediate MoE weight materialized
+        # before packing. Avoid the direct-copy preallocation path, which can
+        # crash in native extensions during multi-rank startup.
+        setattr(kernel, "disable_gpu_preallocate", True)
         sub_weights = {kernel.name: kernel}
 
         scale_name, _, _ = self.weight_scale_map.get(src_weight_info.name)
@@ -157,6 +161,15 @@ class LoadW4a8Int4PerChannelQuantWeight(CompositeWeight, QuantWeight):
         device: str,
         load_config: LoadConfig,
     ):
+        if self.kernel.name in [W.moe_w1, W.moe_w2]:
+            target_device = (
+                device if isinstance(device, torch.device) else torch.device(device)
+            )
+            if torch.cuda.is_available() and target_device.type == "cuda":
+                return self._load_moe_int4_streaming(
+                    tensor_source, layer_id, device, load_config
+                )
+
         kernel = self.kernel._load_raw_tensor(
             tensor_source, layer_id, device, load_config
         )
@@ -183,3 +196,98 @@ class LoadW4a8Int4PerChannelQuantWeight(CompositeWeight, QuantWeight):
             self.scale.name: scale.contiguous().to(device),
         }
         return res
+
+    def _load_moe_expert_tensor(
+        self,
+        ckpt_weight,
+        layer_id: Optional[int],
+        expert_id: int,
+        tensor_source: TensorSource,
+        convert_type: torch.dtype,
+    ) -> torch.Tensor:
+        name = ckpt_weight.name.format(
+            i=str(layer_id),
+            i_1=str(layer_id + 1),
+            expert_id=str(expert_id),
+        )
+        return ckpt_weight.merge_fun(
+            tensor_source.load_tensor(name, convert_type)
+        )
+
+    def _load_moe_int4_streaming(
+        self,
+        tensor_source: TensorSource,
+        layer_id: Optional[int],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        """Load and quantize one expert at a time on CPU.
+
+        GLM-5 W4A8 online quantization previously moved every per-expert tensor to
+        CUDA before packing, which can crash in CUDA/native extensions during
+        multi-rank startup. Keep the streaming work on CPU and move the final
+        packed tensors to CUDA once.
+        """
+        if self.kernel.stacked_ckpt_keys and tensor_source.has_tensor(
+            self.kernel.weights[0].tensor_name(layer_id)
+        ):
+            tensor_source = StackSplitTensorSource(
+                tensor_source,
+                self.kernel._build_split_config(layer_id, load_config),
+            )
+
+        ckpt_weights = (
+            self.kernel._get_expert_weights()
+            if self.kernel.stacked_ckpt_keys
+            else self.kernel.weights
+        )
+        selected_experts = load_config.get_selected_experts(
+            layer_id, self.kernel.config.expert_num
+        )
+        convert_type = (
+            self.kernel.data_type
+            if self.kernel.data_type is not None
+            else load_config.compute_dtype
+        )
+
+        quant_kernel = None
+        scale = None
+
+        for local_idx, expert_id in enumerate(selected_experts):
+            expert_parts = [
+                self._load_moe_expert_tensor(
+                    ckpt_weight,
+                    layer_id,
+                    expert_id,
+                    tensor_source,
+                    convert_type,
+                )
+                for ckpt_weight in ckpt_weights
+            ]
+            expert_tensor = self.kernel.process_fun(expert_parts).squeeze(0)
+            expert_quant_kernel, expert_scale = quantize_weight_to_int4b(
+                expert_tensor, self.group_size
+            )
+
+            if quant_kernel is None:
+                expert_num = len(selected_experts)
+                quant_kernel = torch.empty(
+                    (expert_num,) + tuple(expert_quant_kernel.shape),
+                    device=expert_quant_kernel.device,
+                    dtype=expert_quant_kernel.dtype,
+                )
+                scale = torch.empty(
+                    (expert_num,) + tuple(expert_scale.shape),
+                    device=expert_scale.device,
+                    dtype=expert_scale.dtype,
+                )
+
+            quant_kernel[local_idx].copy_(expert_quant_kernel)
+            scale[local_idx].copy_(expert_scale)
+
+        assert quant_kernel is not None
+        assert scale is not None
+        return {
+            self.kernel.name: quant_kernel.contiguous().to(device),
+            self.scale.name: scale.contiguous().to(device),
+        }

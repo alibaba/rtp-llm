@@ -399,6 +399,7 @@ class MoeAtomicWeight(AtomicWeight):
         )
         if (
             num_experts > 1
+            and not getattr(self, "disable_gpu_preallocate", False)
             and torch.cuda.is_available()
             and target_device.type == "cuda"
             and self._process_fun_name in ("stack_moe_w1", "stack_", "stack_moe_w1_s2")

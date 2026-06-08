@@ -3462,9 +3462,9 @@ rouge==1.0.1 \
     --hash=sha256:12b48346ca47d6bcf3c45061f315452b9ccec0620ee895ec85b7efc3d54aae34 \
     --hash=sha256:28d118536e8c774dc47d1d15ec266479b4dd0914c4672ce117d4002789bdc644
     # via auto-gptq
-rtp-kernel @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/rtp_kernel-0.1.0%2B125c29e5.20260422154605-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:cafcb02ab3feacdebc209d739a48f5677d3ca0be353e28097717d95f4109d4f0
-    # via -r open_source/deps/requirements_torch_gpu_cuda12_9.txt
+rtp-kernel @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/rtp_kernel-0.1.0%2B125c29e5.20260513165441-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:a37d90ffeb9050f4f8c322f53b40b7de5dd4a39a229f10a04daad77c259ca0c5
+    # via -r deps/requirements_torch_gpu_cuda12_9.txt
 safetensors==0.6.2 \
     --hash=sha256:1d2d2b3ce1e2509c68932ca03ab8f20570920cd9754b05063d4368ee52833ecd \
     --hash=sha256:43ff2aa0e6fa2dc3ea5524ac7ad93a9839256b8703761e76e2d0b2a3fa4f15d9 \
