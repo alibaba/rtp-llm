@@ -448,9 +448,10 @@ public:
         return generate_input_->generate_config->group_timeout.value_or(100);
     }
 
-    bool forceGroup() const {
-        return generate_input_->generate_config->force_group;
+    bool isGroup() const {
+        return generate_input_->group_id != -1;
     }
+
     int64_t groupId() const {
         return generate_input_->group_id;
     }

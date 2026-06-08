@@ -204,7 +204,6 @@ def trans_input(input_py: GenerateInput):
         generate_config_pb, input_py.generate_config, "trace_id", functools.partial(str)
     )
     trans_option(generate_config_pb, input_py.generate_config, "group_timeout")
-    trans_option(generate_config_pb, input_py.generate_config, "force_group")
 
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()

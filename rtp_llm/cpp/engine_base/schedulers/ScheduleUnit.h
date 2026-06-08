@@ -59,6 +59,10 @@ struct ScheduleUnit {
         return !streams.empty();
     }
 
+    bool isGroup() const {
+        return group_id != -1;
+    }
+
     size_t size() const {
         return streams.size();
     }

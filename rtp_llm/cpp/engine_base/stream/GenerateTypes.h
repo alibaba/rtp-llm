@@ -77,7 +77,11 @@ public:
 
     // Batch grouping params
     int     group_size = 1;
-    int64_t group_id   = -1;  // Group ID for force group scheduling, -1 means not set
+    int64_t group_id   = -1;
+
+    bool isGroup() const {
+        return group_id != -1;
+    }
 };
 
 struct AuxInfo {

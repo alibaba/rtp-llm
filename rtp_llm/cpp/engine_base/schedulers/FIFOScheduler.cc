@@ -133,8 +133,7 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::enqueueGroup(const v
     }
     if (!valid_streams.empty()) {
         std::lock_guard<std::mutex> lock(lock_);
-        bool is_group = !valid_streams.empty() && valid_streams[0]->forceGroup()
-                        && valid_streams[0]->groupId() != -1;
+        bool is_group = !valid_streams.empty() && valid_streams[0]->isGroup();
         if (is_group) {
             ScheduleUnit unit;
             unit.group_id = valid_streams[0]->groupId();
@@ -197,8 +196,8 @@ bool FIFOScheduler::canAdmitUnit(size_t admitted_count, const ScheduleUnit& unit
     if (running_count + admitted_count + unit.size() > max_generate_batch_size_) {
         return false;
     }
-    // force_group skips token limit check (FlexLB already budgeted)
-    if (unit.group_id != -1) {
+    // group skips token limit check (FlexLB already budgeted)
+    if (unit.isGroup()) {
         return true;
     }
     // Token limit check
@@ -215,19 +214,18 @@ bool FIFOScheduler::canAdmitUnit(size_t admitted_count, const ScheduleUnit& unit
 
 void FIFOScheduler::admitWaitingUnits() {
     size_t admitted_count = 0;
-    int64_t force_group_id = -1;
+    int64_t admitted_group_id = -1;
     for (auto it = waiting_.begin(); it != waiting_.end();) {
         auto& unit = *it;
-        bool is_group = (unit.group_id != -1);
         // Batch isolation: group and normal don't mix; different groups don't mix
         if (admitted_count > 0) {
-            if (force_group_id != -1) {
-                if (!is_group || unit.group_id != force_group_id) {
+            if (admitted_group_id != -1) {
+                if (!unit.isGroup() || unit.group_id != admitted_group_id) {
                     ++it;
                     continue;
                 }
             } else {
-                if (is_group) {
+                if (unit.isGroup()) {
                     ++it;
                     continue;
                 }
@@ -237,8 +235,8 @@ void FIFOScheduler::admitWaitingUnits() {
             ++it;
             continue;
         }
-        if (admitted_count == 0 && is_group) {
-            force_group_id = unit.group_id;
+        if (admitted_count == 0 && unit.isGroup()) {
+            admitted_group_id = unit.group_id;
         }
         bool needs_loading = unit.prepare();
         if (!unit.alive()) {

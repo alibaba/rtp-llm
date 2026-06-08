@@ -850,7 +850,6 @@ TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
         query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_group         = true;
         query->generate_config->group_timeout = 10;
         query->group_id                       = group_id;
         query->group_size                     = group_size;
@@ -863,7 +862,6 @@ TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
         query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_group         = true;
         query->generate_config->group_timeout = 10;
         query->group_id                       = group_id;
         query->group_size                     = group_size;
@@ -884,7 +882,6 @@ TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
         query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_group         = true;
         query->generate_config->group_timeout = 10;
         query->group_id                       = group_id;
         query->group_size                     = group_size;
@@ -929,7 +926,6 @@ TEST_F(FIFOSchedulerTest, testForceBatchCompleteGroupSkipsTokenCapAfterTimeout) 
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
         query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_group         = true;
         query->generate_config->group_timeout = timeout_ms;
         query->group_id                       = group_id;
         query->group_size                     = group_size;
@@ -974,7 +970,6 @@ TEST_F(FIFOSchedulerTest, testForceBatchTimeout) {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
         query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_group         = true;
         query->generate_config->group_timeout = timeout_ms;
         query->group_id                       = group_id;
         query->group_size                     = group_size;
@@ -987,7 +982,6 @@ TEST_F(FIFOSchedulerTest, testForceBatchTimeout) {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
         query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_group         = true;
         query->generate_config->group_timeout = timeout_ms;
         query->group_id                       = group_id;
         query->group_size                     = group_size;
@@ -1031,7 +1025,6 @@ TEST_F(FIFOSchedulerTest, testIncompleteForceBatchTimeoutUsesNormalTokenCap) {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
         query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_group         = true;
         query->generate_config->group_timeout = timeout_ms;
         query->group_id                       = group_id;
         query->group_size                     = group_size;
@@ -1084,7 +1077,6 @@ TEST_F(FIFOSchedulerTest, testForceBatchIsolation) {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
         query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_group         = true;
         query->generate_config->group_timeout = 10;
         query->group_id                       = group_id;
         query->group_size                     = group_size;
@@ -1097,7 +1089,6 @@ TEST_F(FIFOSchedulerTest, testForceBatchIsolation) {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
         query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_group         = true;
         query->generate_config->group_timeout = 10;
         query->group_id                       = group_id;
         query->group_size                     = group_size;
@@ -1154,7 +1145,6 @@ TEST_F(FIFOSchedulerTest, testTwoForceBatchGroupsIsolation) {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
         query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_group         = true;
         query->generate_config->group_timeout = 10;
         query->group_id                       = group_id_a;
         query->group_size                     = group_size;
@@ -1167,7 +1157,6 @@ TEST_F(FIFOSchedulerTest, testTwoForceBatchGroupsIsolation) {
         std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
         query->input_ids                            = torch::tensor({1}, torch::kInt32);
         query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_group         = true;
         query->generate_config->group_timeout = 10;
         query->group_id                       = group_id_b;
         query->group_size                     = group_size;

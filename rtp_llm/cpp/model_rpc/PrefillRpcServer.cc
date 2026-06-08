@@ -864,7 +864,6 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
     new_request->clear_group_size();
     new_request->clear_group_id();
-    new_request->mutable_generate_config()->clear_force_group();
     new_request->mutable_generate_config()->clear_group_timeout();
     alloc_request.set_allocated_input(new_request);
     for (auto& addrs : prefill_context.prefill_worker_cache_store_addrs) {

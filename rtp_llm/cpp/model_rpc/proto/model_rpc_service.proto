@@ -96,7 +96,7 @@ message GenerateConfigPB {
     bool enable_device_cache = 52;
     bool enable_remote_cache = 53;
     string unique_key = 54;
-    google.protobuf.Int32Value force_group = 55;
+    reserved 55;
     google.protobuf.Int32Value group_timeout = 56;
     string profile_trace_name = 57;
     repeated int32 begin_think_token_ids = 58;
