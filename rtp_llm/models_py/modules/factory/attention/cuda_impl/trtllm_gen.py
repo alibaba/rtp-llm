@@ -6,7 +6,10 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.modules.factory.attention import common
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm_100
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
+    force_py_flashinfer,
+    is_sm_100,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
@@ -329,7 +332,9 @@ class FlashInferTRTLLMPrefillOp(object):
         release_trt_workspace_buffer(self.workspace_buffer)
 
     def support(self, attention_inputs: PyAttentionInputs):
-        if not is_sm_100():
+        # On B300/SM103 the trtllm-gen FMHA kernels have no valid kernel image
+        # and hard-crash; force the pure-Python FlashInfer path instead.
+        if not is_sm_100() or force_py_flashinfer():
             return False
         try:
             from flashinfer.artifacts import ArtifactPath, CheckSumHash
@@ -449,7 +454,9 @@ class FlashInferTRTLLMDecodeOp(object):
         release_trt_workspace_buffer(self.workspace_buffer)
 
     def support(self, attention_inputs: PyAttentionInputs):
-        if not is_sm_100():
+        # On B300/SM103 the trtllm-gen FMHA kernels have no valid kernel image
+        # and hard-crash; force the pure-Python FlashInfer path instead.
+        if not is_sm_100() or force_py_flashinfer():
             return False
         try:
             from flashinfer.artifacts import ArtifactPath, CheckSumHash

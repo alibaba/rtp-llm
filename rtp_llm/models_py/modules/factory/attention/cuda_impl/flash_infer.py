@@ -4,6 +4,9 @@ from typing import Optional
 import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
+    force_py_flashinfer,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
@@ -46,6 +49,10 @@ class FlashInferPrefillImpl(FMHAImplBase):
     ) -> bool:
         # Check MLA is not enabled
         if attn_configs.use_mla:
+            return False
+        # On B300/SM103 the C++ FlashInfer prepare()/fillFlashInfer() segfaults;
+        # force the pure-Python FlashInfer prefill impl instead.
+        if force_py_flashinfer():
             return False
         # Create temporary instance to check support
         fmha_impl = FlashInferPrefillOp(attn_configs)
@@ -104,6 +111,10 @@ class FlashInferDecodeImpl(FMHAImplBase):
     ) -> bool:
         # Check MLA is not enabled
         if attn_configs.use_mla:
+            return False
+        # On B300/SM103 the C++ FlashInfer prepare()/fillFlashInfer() segfaults;
+        # force the pure-Python FlashInfer decode impl instead.
+        if force_py_flashinfer():
             return False
         # Create temporary instance to check support
         fmha_impl = FlashInferDecodeOp(attn_configs)
