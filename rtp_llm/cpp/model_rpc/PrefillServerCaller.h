@@ -38,11 +38,6 @@ public:
                              const GenerateInputPB*                 request,
                              grpc::ServerWriter<GenerateOutputsPB>* response_writer);
 
-    grpc::Status callPrefill(grpc::ServerContext*                   server_context,
-                             const GenerateInputPB*                 request,
-                             grpc::ServerWriter<GenerateOutputsPB>* response_writer,
-                             const std::string&                     target_addr);
-
     PrefillPeerInfo getPrefillPeerInfo(const std::string& ip, uint32_t port, int32_t request_timeout_ms);
 
     int getPrefillTpSize(const std::string& ip, uint32_t port, int32_t request_timeout_ms);
