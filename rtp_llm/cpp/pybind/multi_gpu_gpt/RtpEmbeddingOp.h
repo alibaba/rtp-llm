@@ -35,14 +35,14 @@ public:
                       std::vector<MultimodalInput> multimodal_inputs = {});
 
 private:
-
-    void startRpcServer(int64_t model_rpc_port,
-                        int64_t arpc_thread_num,
-                        int64_t arpc_queue_num,
-                        int64_t arpc_io_thread_num,
-                        py::object                                    py_render,
-                        py::object                                    py_tokenizer,
-                        kmonitor::MetricsReporterPtr                  reporter,
+    void startRpcServer(int64_t                              model_rpc_port,
+                        int64_t                              arpc_thread_num,
+                        int64_t                              arpc_queue_num,
+                        int64_t                              arpc_io_thread_num,
+                        bool                                 arpc_rdma_mode,
+                        py::object                           py_render,
+                        py::object                           py_tokenizer,
+                        kmonitor::MetricsReporterPtr         reporter,
                         std::shared_ptr<MultimodalProcessor> mm_processor);
 
     void startHttpServer(std::shared_ptr<EmbeddingEngine>     embedding_engine,

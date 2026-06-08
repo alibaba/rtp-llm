@@ -106,10 +106,14 @@ void RtpEmbeddingOp::init(py::object model,
 
         int64_t model_rpc_port     = params.server_config.attr("rpc_server_port").cast<int64_t>();
         int64_t embedding_rpc_port = params.server_config.attr("embedding_rpc_server_port").cast<int64_t>();
+        auto    embedding_config   = engine_config.attr("embedding_config");
+        bool    arpc_rdma_mode     = embedding_config.attr("embedding_arpc_rdma_mode").cast<bool>();
+
         startRpcServer(model_rpc_port,
                        arpc_config.threadNum,
                        arpc_config.queueNum,
                        arpc_config.ioThreadNum,
+                       arpc_rdma_mode,
                        py_render,
                        py_tokenizer,
                        params.metrics_reporter,
@@ -203,6 +207,7 @@ void RtpEmbeddingOp::startRpcServer(int64_t                              model_r
                                     int64_t                              arpc_thread_num,
                                     int64_t                              arpc_queue_num,
                                     int64_t                              arpc_io_thread_num,
+                                    bool                                 arpc_rdma_mode,
                                     py::object                           py_render,
                                     py::object                           py_tokenizer,
                                     kmonitor::MetricsReporterPtr         reporter,
@@ -215,11 +220,16 @@ void RtpEmbeddingOp::startRpcServer(int64_t                              model_r
                                                              py_tokenizer,
                                                              mm_processor,
                                                              embedding_engine_,
-                                                             reporter));
+                                                             reporter,
+                                                             arpc_rdma_mode));
     if (arpc_service) {
         RTP_LLM_LOG_INFO("creating arpc service");
-        embedding_rpc_service_.reset(new ArpcServerWrapper(
-            std::move(arpc_service), arpc_thread_num, arpc_queue_num, arpc_io_thread_num, model_rpc_port));
+        embedding_rpc_service_ = createArpcServerWrapper(arpc_rdma_mode,
+                                                         std::move(arpc_service),
+                                                         arpc_thread_num,
+                                                         arpc_queue_num,
+                                                         arpc_io_thread_num,
+                                                         model_rpc_port);
         embedding_rpc_service_->start();
     } else {
         RTP_LLM_LOG_INFO("Embedding RPC not supported, skip");

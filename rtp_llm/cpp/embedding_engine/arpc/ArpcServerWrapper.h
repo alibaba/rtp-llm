@@ -1,6 +1,7 @@
 #pragma once
 
-#include "aios/network/arpc/arpc/ANetRPCServer.h"
+#include <memory>
+#include <google/protobuf/service.h>
 
 namespace rtp_llm {
 class ArpcServerWrapper {
@@ -12,17 +13,16 @@ public:
         threadNum_(threadNum),
         queueNum_(queueNum),
         ioThreadNum_(ioThreadNum) {}
-    void start();
-    void stop();
+    virtual ~ArpcServerWrapper() = default;
+    virtual void start()         = 0;
+    virtual void stop()          = 0;
 
-private:
+protected:
     std::unique_ptr<::google::protobuf::Service> service_;
     int                                          port_;
     int                                          threadNum_;
     int                                          queueNum_;
     int                                          ioThreadNum_;
-    std::unique_ptr<arpc::ANetRPCServer>         arpc_server_;
-    std::unique_ptr<anet::Transport>             arpc_server_transport_;
 };
 
 }  // namespace rtp_llm

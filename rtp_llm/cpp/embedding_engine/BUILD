@@ -35,10 +35,11 @@ cc_library(
     name = "embedding_engine_arpc_server_header",
     hdrs = glob([
         "arpc/ArpcServerWrapper.h",
-        "arpc/ArpcServiceCreator.h"
+        "arpc/ArpcServiceCreator.h",
+        "arpc/AnetArpcServerWrapper.h",
     ]),
     srcs = glob([
-        "arpc/ArpcServerWrapper.cc"
+        "arpc/AnetArpcServerWrapper.cc",
     ]),
     deps = [
         ":embedding_engine"
