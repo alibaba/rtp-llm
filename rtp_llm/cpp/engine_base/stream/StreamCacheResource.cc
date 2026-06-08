@@ -67,7 +67,7 @@ public:
     }
     void reportError(ErrorCode error_code, const std::string& error_msg) override {
         if (generate_stream_) {
-            generate_stream_->reportErrorWithoutLock(error_code, error_msg);
+            generate_stream_->reportError(error_code, error_msg);
         }
     }
 
