@@ -255,40 +255,21 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     const GptModelOutputs&                       model_output,
     const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
     const size_t                                 batch_size,
-    torch::Tensor&                               hidden_states_d_t,
-    size_t&                                      total_accept_len) {
-    auto& accept_lens = speculative_sampler_output.accept_len;
-    total_accept_len  = std::accumulate(accept_lens.begin(), accept_lens.end(), 0);
-
-    model_input.combo_tokens = torch::empty({(int64_t)total_accept_len}, torch::kInt32).pin_memory();
-
-    int  token_offset      = 0;
-    auto lm_output_indexes = torch::empty({(int64_t)batch_size}, torch::kInt32).pin_memory();
-
-    std::vector<torch::Tensor> hidden_states_list;
-    for (int i = 0; i < batch_size; i++) {
-        RTP_LLM_CHECK_WITH_INFO(accept_lens[i] == (size_t)speculative_sampler_output.accept_tokens[i].numel(),
-                                "accept_lens[%d] = %d, speculative_sampler_output.accept_tokens[%d].numel() = %d",
-                                i,
-                                accept_lens[i],
-                                i,
-                                speculative_sampler_output.accept_tokens[i].numel());
-
-        memcpy(model_input.combo_tokens.data_ptr<int>() + token_offset,
-               speculative_sampler_output.accept_tokens[i].data_ptr<int>(),
-               accept_lens[i] * sizeof(int));
-
-        auto hidden_slice = model_output.all_hidden_states.narrow(0, i * (propose_step_ + 1), accept_lens[i]);
-        hidden_states_list.push_back(hidden_slice);
-
-        model_input.input_lengths.data_ptr<int>()[i] = accept_lens[i];
-        token_offset += accept_lens[i];
-        lm_output_indexes.data_ptr<int>()[i] = token_offset - 1;
-    }
-
-    hidden_states_d_t              = torch::cat(hidden_states_list).contiguous();
-    model_input.last_hidden_states = hidden_states_d_t;
-    model_input.lm_output_indexes  = std::move(lm_output_indexes);
+    torch::Tensor&                               hidden_states_d_t) {
+    // accept_tokens is (batch_size, propose_step_+1) with -1 padding for rejected positions.
+    // batchSample already resets -1 entries to token 0 via index_put_, so the padding slots
+    // contain token-0 ids. We intentionally keep the dense fixed-width shape and leave
+    // input_lengths at propose_step_+1 for CUDA graph reuse; lm_output_indexes below selects
+    // only the last accepted position per sequence, so padding positions are not surfaced as
+    // next-step last_hidden_states.
+    int total_tokens         = (propose_step_ + 1) * batch_size;
+    model_input.combo_tokens = speculative_sampler_output.accept_tokens.reshape({(int64_t)total_tokens});
+    model_input.lm_output_indexes =
+        torch::arange(
+            0, total_tokens, propose_step_ + 1, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
+        + (speculative_sampler_output.accept_len - 1);
+    model_input.last_hidden_states = model_output.all_hidden_states;
+    hidden_states_d_t              = model_input.last_hidden_states;
 }
 
 void MtpBatchStreamProcessor::updateOneStepDraftSamplerOutput(const StreamGroups& stream_groups,
@@ -405,8 +386,8 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const speculative::SpeculativeSamplerOutput& spec_decode_output,
     const MergedOutput&                          draft_prefill_output,
     std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const {
-    const auto& accept_len    = spec_decode_output.accept_len;
-    const auto& accept_tokens = spec_decode_output.accept_tokens;
+    const auto& accept_len    = spec_decode_output.accept_len.cpu();
+    const auto& accept_tokens = spec_decode_output.accept_tokens.cpu();
 
     const auto& draft_model_output   = draft_prefill_output.model_output;
     const auto& draft_sampler_output = draft_prefill_output.sampler_output;
@@ -423,20 +404,20 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         torch::Tensor propose_all_probs =
             draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
 
+        int cur_accept_len = accept_len[batch_idx_out].item<int>();
+
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1) {
-            auto slice_t =
-                draft_model_output.all_hidden_states.narrow(0, token_offset + accept_len[batch_idx_out] - 1, 1);
+            auto slice_t       = draft_model_output.all_hidden_states.narrow(0, token_offset + cur_accept_len - 1, 1);
             last_hidden_states = slice_t;
         }
 
-        spec_update_infos.push_back({accept_tokens[batch_idx_out],
-                                     accept_len[batch_idx_out],
-                                     -1,
-                                     std::move(last_hidden_states),
-                                     std::move(propose_all_probs)});
+        torch::Tensor accept_tokens_tensor =
+            accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
+        spec_update_infos.push_back(
+            {accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
 
-        token_offset += accept_len[batch_idx_out];
+        token_offset += propose_step_ + 1;
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
     }

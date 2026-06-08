@@ -9,11 +9,13 @@
 #if USING_ROCM
 #include <ATen/hip/HIPGraph.h>
 #include <ATen/hip/HIPContext.h>
+#include <c10/hip/HIPGuard.h>
 #define GRAPH_DEVICE_TYPE c10::DeviceType::HIP
 #else
 #include <ATen/cuda/CUDAGraph.h>
 #include <ATen/cuda/CUDAContext.h>
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
+#include <c10/cuda/CUDAGuard.h>
 #define GRAPH_DEVICE_TYPE c10::DeviceType::CUDA
 #endif
 
@@ -47,10 +49,20 @@ struct GraphPoolHandle {};
 #endif
 
 #if USING_ROCM
-using GraphStream = at::hip::HIPStream;
+using GraphStream      = at::hip::HIPStream;
+using GraphStreamGuard = at::hip::HIPStreamGuard;
 #else
-using GraphStream = at::cuda::CUDAStream;
+using GraphStream      = at::cuda::CUDAStream;
+using GraphStreamGuard = at::cuda::CUDAStreamGuard;
 #endif
+
+inline GraphStream toGraphStream(const torch::Stream& stream) {
+#if USING_ROCM
+    return at::hip::HIPStream(stream);
+#else
+    return at::cuda::CUDAStream(stream);
+#endif
+}
 
 inline void* getGraphCaptureTpNcclComm() {
 #if USING_ROCM

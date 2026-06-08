@@ -40,12 +40,13 @@ class GraphBase {
 public:
     GraphBase(py::object py_instance): py_instance_(std::move(py_instance)) {}
     virtual ~GraphBase() {}
-    virtual void           initCapture()                                               = 0;
-    virtual PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) = 0;
-    virtual void           setPositionEncoding(torch::Tensor position_encoding)        = 0;
-    virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)   = 0;
-    virtual void           setInputEmbeddingScalar(float input_embedding_scalar)       = 0;
-    virtual bool           canRun(const PyModelInputs& inputs, CudaGraphState& state)  = 0;
+    virtual void           initCapture()                                                              = 0;
+    virtual PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state)                = 0;
+    virtual void           setPositionEncoding(torch::Tensor position_encoding)                       = 0;
+    virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)                  = 0;
+    virtual void           setInputEmbeddingScalar(float input_embedding_scalar)                      = 0;
+    virtual bool           canRun(const PyModelInputs& inputs, CudaGraphState& state)                 = 0;
+    virtual void           prepareAttentionInputs(const PyModelInputs& inputs, CudaGraphState& state) = 0;
     py::object             py_instance_;
 };
 }  // namespace rtp_llm

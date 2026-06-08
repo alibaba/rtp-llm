@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 namespace rtp_llm {
 
@@ -8,6 +9,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (parallelism_config.tp_size <= 1) {
         return;
     }
+
+    // first sync stage: shape hints
+    // Keep one host-transfer stream per caller thread. TP worker threads may call this function
+    // concurrently, and sharing one process-global stream would serialize unrelated transfers and
+    // let one caller's synchronize() wait on another caller's queued work.
+    static thread_local auto host_tensor_stream = cuda_graph::graphGetStreamFromPool(true);
+
     const size_t shape_hints_size = GptModelInputIndex::gptModelInputLength;
     auto         shape_hints_t    = torch::empty({(int64_t)shape_hints_size}, torch::kInt32).pin_memory();
     auto         shape_hints_ptr  = shape_hints_t.data_ptr<int32_t>();
@@ -59,9 +67,14 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
-    execBroadcast({{shape_hints_t}, 0});
-    execSyncCommunication(false);
-    cudaSyncAndCheck();
+
+    {
+        c10::StreamGuard stream_guard(host_tensor_stream);
+        execBroadcast({{shape_hints_t}, 0});
+        execSyncCommunication(false);
+        host_tensor_stream.synchronize();
+        cudaSyncAndCheck();
+    }
 
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;
@@ -288,15 +301,18 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
 
     // Broadcast at most 2 packed buffers instead of N individual tensors.
-    std::vector<torch::Tensor> packed_buffers;
     if (cpu_packed.defined()) {
-        packed_buffers.push_back(cpu_packed);
+        c10::StreamGuard stream_guard(host_tensor_stream);
+        execBroadcast({{cpu_packed}, 0});
+        execSyncCommunication(false);
+        host_tensor_stream.synchronize();
+        cudaSyncAndCheck();
     }
+
     if (gpu_packed.defined()) {
-        packed_buffers.push_back(gpu_packed);
+        // gpu no need to sync communication
+        execBroadcast({{gpu_packed}, 0});
     }
-    execBroadcast({packed_buffers, 0});
-    cudaSyncAndCheck();
 
     // Unpack from packed buffers back to each tensor's original storage.
     if (!is_root) {
