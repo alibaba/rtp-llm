@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -801,6 +802,21 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MaxSeqLen) {
     allocator_->init();
 
     EXPECT_EQ(allocator_->maxAvailableTokensNum(), (10 - 1) * 8);  // block_num * seq_size_per_block
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, CapacityAndNeedBlocksUseCPVirtualBlockSize) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    allocator_->setCPSlotMapper(
+        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/8));
+
+    EXPECT_EQ(allocator_->maxAvailableTokensNum(), (10u - 1u) * 16u);
+    EXPECT_EQ(allocator_->availableTokensNum(), (10u - 1u) * 16u);
+
+    auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    EXPECT_EQ(allocator_->singleBatchNeedBlocks(batch_resource, /*seq_len=*/65, /*reserve_step=*/0), 5);
 }
 
 // Test boundary conditions

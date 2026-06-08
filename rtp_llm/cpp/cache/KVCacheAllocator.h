@@ -75,6 +75,14 @@ public:
         use_cuda_malloc_block_pool_ = use_cuda_malloc_block_pool;
     }
 
+    void setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) {
+        cp_slot_mapper_ = std::move(cp_slot_mapper);
+    }
+
+    std::shared_ptr<CPSlotMapper> cpSlotMapper() const {
+        return cp_slot_mapper_;
+    }
+
     // Reserve some blocks for already-running streams' future allocations.
     // Only applied to "init malloc" requests where batch_kv_cache_resource has no blocks yet.
     void setReserveBlockNum(size_t reserve_block_num) {
@@ -95,6 +103,7 @@ public:
     virtual size_t                  blockCacheRefBlocksNum() const;
     virtual size_t                  notInUseBlocksNum() const;
     virtual size_t                  availableTokensNum() const;
+    virtual size_t                  totalTokensNum() const;
     virtual size_t                  totalBlocksNum() const;
     virtual size_t                  maxAvailableTokensNum() const;
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
@@ -107,11 +116,16 @@ protected:
     virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info)                              = 0;
     virtual int          getNeedBlocks(const MallocInfo& malloc_info) const                                 = 0;
     virtual void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) = 0;
+    bool                 cpShardThisGroupForCapacity(size_t gid) const;
+    size_t               logicalSeqSizePerBlockForCapacity(size_t gid) const;
+    int                  cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const;
+    int                  deviceCacheMetricTokensPerBlock() const;
 
     CacheConfig                        config_;
     AllocationType                     allocation_type_;
     BlockPoolPtr                       block_pool_;
     SharedBlockCachePtr                shared_block_cache_;
+    std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_           = nullptr;
     bool                               use_cuda_malloc_block_pool_ = false;
 

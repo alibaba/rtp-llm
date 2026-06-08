@@ -9,12 +9,26 @@
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 
 namespace rtp_llm {
+namespace {
+
+inline bool cpShardThisGroupForReserve(const std::shared_ptr<CPSlotMapper>& mapper, CacheGroupType group_type) {
+    return mapper && mapper->isSharded() && group_type == CacheGroupType::FULL;
+}
+
+inline int cpEffectiveSeqLenForReserve(const std::shared_ptr<CPSlotMapper>& mapper,
+                                       CacheGroupType                       group_type,
+                                       int                                  seq_len) {
+    return cpShardThisGroupForReserve(mapper, group_type) ? mapper->effectiveSeqLenForAlloc(seq_len) : seq_len;
+}
+
+}  // namespace
 
 HybridPoolKVCacheAllocator::HybridPoolKVCacheAllocator(const CacheConfig&                 config,
                                                        AllocationType                     allocation_type,
@@ -495,13 +509,28 @@ size_t HybridPoolKVCacheAllocator::availableTokensNum() const {
     }
     size_t min_tokens = std::numeric_limits<size_t>::max();
     for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
-        const size_t seq_size =
-            (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
-                config_.group_seq_size_per_block[gid] :
-                config_.seq_size_per_block;
-        min_tokens = std::min(min_tokens, group_block_pools_[gid]->availableBlocksNum() * seq_size);
+        if (!group_block_pools_[gid]) {
+            continue;
+        }
+        min_tokens =
+            std::min(min_tokens, group_block_pools_[gid]->availableBlocksNum() * logicalSeqSizePerBlockForCapacity(gid));
     }
-    return min_tokens;
+    return min_tokens == std::numeric_limits<size_t>::max() ? 0 : min_tokens;
+}
+
+size_t HybridPoolKVCacheAllocator::totalTokensNum() const {
+    if (group_block_pools_.empty()) {
+        return 0;
+    }
+    size_t min_tokens = std::numeric_limits<size_t>::max();
+    for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
+        if (!group_block_pools_[gid]) {
+            continue;
+        }
+        min_tokens =
+            std::min(min_tokens, group_block_pools_[gid]->totalBlocksNum() * logicalSeqSizePerBlockForCapacity(gid));
+    }
+    return min_tokens == std::numeric_limits<size_t>::max() ? 0 : min_tokens;
 }
 
 size_t HybridPoolKVCacheAllocator::totalBlocksNum() const {
@@ -522,23 +551,23 @@ size_t HybridPoolKVCacheAllocator::maxAvailableTokensNum() const {
         if (gid < config_.group_types.size() && config_.group_types[gid] != CacheGroupType::FULL) {
             continue;
         }
+        if (!group_block_pools_[gid]) {
+            continue;
+        }
         saw_full_group = true;
-        const size_t seq_size =
-            (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
-                config_.group_seq_size_per_block[gid] :
-                config_.seq_size_per_block;
-        min_tokens = std::min(min_tokens, group_block_pools_[gid]->totalBlocksNum() * seq_size);
+        min_tokens =
+            std::min(min_tokens, group_block_pools_[gid]->totalBlocksNum() * logicalSeqSizePerBlockForCapacity(gid));
     }
     if (!saw_full_group) {
         for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
-            const size_t seq_size =
-                (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
-                    config_.group_seq_size_per_block[gid] :
-                    config_.seq_size_per_block;
-            min_tokens = std::min(min_tokens, group_block_pools_[gid]->totalBlocksNum() * seq_size);
+            if (!group_block_pools_[gid]) {
+                continue;
+            }
+            min_tokens =
+                std::min(min_tokens, group_block_pools_[gid]->totalBlocksNum() * logicalSeqSizePerBlockForCapacity(gid));
         }
     }
-    return min_tokens;
+    return min_tokens == std::numeric_limits<size_t>::max() ? 0 : min_tokens;
 }
 
 void HybridPoolKVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
@@ -560,12 +589,13 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
     if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
         return true;
     }
-    const int  batch_size     = malloc_info.batch_kv_cache_resource->batchSize();
-    const int  total_seq_len  = malloc_info.complete_token_ids->totalSeqLength();
-    const int  common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
-    const int  seq_len        = malloc_info.complete_token_ids->seqLength();
-    const int  reserve_step   = malloc_info.complete_token_ids->getReserveStep();
-    const bool reuse_enabled  = malloc_info.reuse_cache;
+    const auto& cp_mapper          = malloc_info.cp_slot_mapper;
+    const int   batch_size         = malloc_info.batch_kv_cache_resource->batchSize();
+    const int   total_seq_len      = malloc_info.complete_token_ids->totalSeqLength();
+    const int   raw_common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
+    const int   raw_seq_len        = malloc_info.complete_token_ids->seqLength();
+    const int   reserve_step       = malloc_info.complete_token_ids->getReserveStep();
+    const bool  reuse_enabled      = malloc_info.reuse_cache;
 
     size_t total_reservable_available_blocks = 0;
     for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
@@ -578,9 +608,14 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
     }
 
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
+        const auto group_type = static_cast<size_t>(gid) < config_.group_types.size() ?
+                                    config_.group_types[static_cast<size_t>(gid)] :
+                                    CacheGroupType::FULL;
+        const int  group_common_seq      = cpEffectiveSeqLenForReserve(cp_mapper, group_type, raw_common_seq_len);
+        const int  group_seq_len          = cpEffectiveSeqLenForReserve(cp_mapper, group_type, raw_seq_len);
         const int  group_reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;
         const auto need                   = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(
-            common_seq_len, seq_len, reserve_step, group_reuse_blocks_len, reuse_enabled);
+            group_common_seq, group_seq_len, reserve_step, group_reuse_blocks_len, reuse_enabled);
         const int need_blocks = need.common_blocks + batch_size * need.extra_blocks;
         if (need_blocks <= 0) {
             continue;

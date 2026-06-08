@@ -993,6 +993,36 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
     EXPECT_LT(info.total_kv_cache, kv_cache_manager->totalBlocksNum() * cache_config.seq_size_per_block);
 }
 
+TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridPoolFullGroups) {
+    auto cache_config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/16, /*swa_batch_size=*/3);
+
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(kv_cache_manager->init());
+
+    auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(kv_cache_manager->allocator_);
+    ASSERT_NE(hybrid_allocator, nullptr);
+
+    const size_t physical_capacity = hybrid_allocator->maxAvailableTokensNum();
+    auto cp_slot_mapper =
+        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, static_cast<int>(cache_config.seq_size_per_block));
+    kv_cache_manager->cp_slot_mapper_ = cp_slot_mapper;
+    hybrid_allocator->setCPSlotMapper(cp_slot_mapper);
+
+    size_t      expected_logical_capacity = std::numeric_limits<size_t>::max();
+    const auto& pools                     = hybrid_allocator->groupBlockPools();
+    for (size_t gid = 0; gid < pools.size(); ++gid) {
+        if (gid < cache_config.group_types.size() && cache_config.group_types[gid] != CacheGroupType::FULL) {
+            continue;
+        }
+        expected_logical_capacity =
+            std::min(expected_logical_capacity,
+                     pools[gid]->totalBlocksNum() * static_cast<size_t>(cache_config.seq_size_per_block * 2));
+    }
+
+    EXPECT_EQ(kv_cache_manager->maxAvailableTokensNum(), expected_logical_capacity);
+    EXPECT_GT(kv_cache_manager->maxAvailableTokensNum(), physical_capacity);
+}
+
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailable) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 8, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;

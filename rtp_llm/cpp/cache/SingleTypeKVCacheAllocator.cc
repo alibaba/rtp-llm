@@ -472,7 +472,8 @@ int SingleTypeKVCacheAllocator::seqSizePerBlock() const {
 int SingleTypeKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                       int                            seq_len,
                                                       int                            reserve_step) const {
-    return full_kv_cache_group_->needBlocksNum(seq_len, 0, reserve_step);
+    (void)batch_kv_cache_resource;
+    return full_kv_cache_group_->needBlocksNum(cpEffectiveSeqLenForAlloc(/*gid=*/0, seq_len), 0, reserve_step);
 }
 
 }  // namespace rtp_llm

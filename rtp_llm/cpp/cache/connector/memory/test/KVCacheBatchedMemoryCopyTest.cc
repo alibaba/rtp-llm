@@ -91,6 +91,10 @@ size_t KVCacheAllocator::availableTokensNum() const {
     return 0;
 }
 
+size_t KVCacheAllocator::totalTokensNum() const {
+    return 0;
+}
+
 size_t KVCacheAllocator::totalBlocksNum() const {
     return 0;
 }

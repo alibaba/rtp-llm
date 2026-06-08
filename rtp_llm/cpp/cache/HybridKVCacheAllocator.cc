@@ -653,7 +653,8 @@ int HybridKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr&
     int need_blocks = 0;
     for (int gid = 0; gid < batch_kv_cache_resource->groupNums(); ++gid) {
         const int cur_blocks = batch_kv_cache_resource->blocksNum(0, gid);
-        need_blocks += kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(seq_len, cur_blocks, reserve_step);
+        const int group_seq_len = cpEffectiveSeqLenForAlloc(static_cast<size_t>(gid), seq_len);
+        need_blocks += kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(group_seq_len, cur_blocks, reserve_step);
     }
     return need_blocks;
 }
