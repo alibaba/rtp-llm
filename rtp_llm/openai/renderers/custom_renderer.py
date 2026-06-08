@@ -5,7 +5,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncGenerator, List, Optional, Tuple, Union
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -32,6 +32,7 @@ from rtp_llm.openai.api_datatype import (
     UsageInfo,
 )
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateInput,
@@ -402,6 +403,7 @@ class CustomChatRenderer:
         generate_config: GenerateConfig,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
         request: ChatCompletionRequest,
+        headers: Optional[Dict[str, str]] = None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
@@ -415,6 +417,7 @@ class CustomChatRenderer:
                     generate_config=generate_config,
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,
+                    headers=normalize_request_headers(headers),
                 )
             )
         )

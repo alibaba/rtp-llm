@@ -111,7 +111,11 @@ class MagaServerManager(object):
             if rc is not None:
                 if rc < 0:
                     sig = -rc
-                    sig_name = signal_mod.Signals(sig).name if sig in signal_mod.Signals._value2member_map_ else f"signal {sig}"
+                    sig_name = (
+                        signal_mod.Signals(sig).name
+                        if sig in signal_mod.Signals._value2member_map_
+                        else f"signal {sig}"
+                    )
                     logging.warning(
                         f"Server process pid={self._server_process.pid} killed by {sig_name} (exit code {rc})"
                     )
@@ -250,8 +254,18 @@ class MagaServerManager(object):
             self._file_stream = None
         return True
 
-    def visit(self, query: Dict[str, Any], retry_times: int, endpoint: str = "/"):
+    def visit(
+        self,
+        query: Dict[str, Any],
+        retry_times: int,
+        endpoint: str = "/",
+        expected_status_code: Any = 200,
+    ):
         logging.info(f"retry times: {retry_times}")
+        if isinstance(expected_status_code, list):
+            expected_status_codes = set(expected_status_code)
+        else:
+            expected_status_codes = {expected_status_code}
         port_offset = 5 if int(self._env_args.get("HTTP_API_TEST", 0)) else 0
         # for dp test, random select dp for visit
         if int(self._env_args.get("DP_SIZE", 1)) > 1:
@@ -267,7 +281,7 @@ class MagaServerManager(object):
             try:
                 logging.info(f"curl {url} -d '{json.dumps(query)}'")
                 response = requests.post(url, json=query)
-                if response.status_code == 200:
+                if response.status_code in expected_status_codes:
                     logging.debug("%s", response.text)
                 else:
                     logging.warning(
@@ -308,7 +322,10 @@ class MagaServerManager(object):
                         all_lines = f.readlines()
                         content = "".join(all_lines[-max_lines:])
                         if len(all_lines) > max_lines:
-                            content = f"... ({len(all_lines) - max_lines} lines truncated)\n" + content
+                            content = (
+                                f"... ({len(all_lines) - max_lines} lines truncated)\n"
+                                + content
+                            )
                     else:
                         content = f.read()
                 if content:

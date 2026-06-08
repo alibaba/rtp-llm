@@ -2,6 +2,8 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
+import org.flexlb.balance.policy.GroupRoutingDecision;
+import org.flexlb.balance.policy.GroupRoutingPolicy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -42,6 +44,9 @@ class DefaultRouterTest {
 
     @Mock
     private FlexlbConfig loadBalanceConfig;
+
+    @Mock
+    private GroupRoutingPolicy groupRoutingPolicy;
 
     @Mock
     private LoadBalancer prefillLoadBalancer;
@@ -91,7 +96,8 @@ class DefaultRouterTest {
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, fusionLoadBalancer);
 
         // Create scheduler instance
-        defaultRouter = new DefaultRouter(configService);
+        lenient().when(groupRoutingPolicy.route(any(BalanceContext.class))).thenReturn(GroupRoutingDecision.none());
+        defaultRouter = new DefaultRouter(configService, groupRoutingPolicy);
 
         // Mock LoadBalanceStrategyFactory to return our mock load balancers
         mockStaticLoadBalanceStrategyFactory();
@@ -532,5 +538,50 @@ class DefaultRouterTest {
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(3, response.getServerStatus().size(), "Should have 3 server statuses");
+    }
+
+    @Test
+    void should_force_initial_group_when_traffic_policy_matches() {
+        // Setup - add dummy workers to trigger role types
+        org.flexlb.dao.master.WorkerStatus dummyDecodeWorker = new org.flexlb.dao.master.WorkerStatus();
+        dummyDecodeWorker.setIp("192.168.1.2");
+        dummyDecodeWorker.setPort(8081);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
+
+        org.flexlb.dao.master.WorkerStatus dummyPrefillWorker = new org.flexlb.dao.master.WorkerStatus();
+        dummyPrefillWorker.setIp("192.168.1.1");
+        dummyPrefillWorker.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
+
+        Request actualRequest = new Request();
+        actualRequest.setRequestId(12345L);
+        actualRequest.setSeqLen(10000L);
+        when(balanceContext.getRequest()).thenReturn(actualRequest);
+        when(groupRoutingPolicy.route(balanceContext)).thenReturn(GroupRoutingDecision.of("long-group", "long-context"));
+
+        ServerStatus decodeServerStatus = new ServerStatus();
+        decodeServerStatus.setSuccess(true);
+        decodeServerStatus.setServerIp("192.168.1.2");
+        decodeServerStatus.setHttpPort(8081);
+        decodeServerStatus.setGroup("long-group");
+        decodeServerStatus.setRole(RoleType.DECODE);
+        when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), eq("long-group"))).thenReturn(decodeServerStatus);
+
+        ServerStatus prefillServerStatus = new ServerStatus();
+        prefillServerStatus.setSuccess(true);
+        prefillServerStatus.setServerIp("192.168.1.1");
+        prefillServerStatus.setHttpPort(8080);
+        prefillServerStatus.setGroup("long-group");
+        prefillServerStatus.setRole(RoleType.PREFILL);
+        when(prefillLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PREFILL), eq("long-group"))).thenReturn(prefillServerStatus);
+
+        // Execute
+        Response response = defaultRouter.route(balanceContext);
+
+        // Verify
+        assertTrue(response.isSuccess(), "Response should be successful");
+        assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
+        verify(decodeLoadBalancer).select(any(BalanceContext.class), eq(RoleType.DECODE), eq("long-group"));
+        verify(prefillLoadBalancer).select(any(BalanceContext.class), eq(RoleType.PREFILL), eq("long-group"));
     }
 }

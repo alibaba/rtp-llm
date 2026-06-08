@@ -12,6 +12,7 @@ from aiohttp import ClientTimeout
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.server.host_service import HostService
+from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.server.worker_status import ScheduleMeta
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
@@ -142,6 +143,7 @@ class MasterClient:
         payload: Dict[str, Any],
         generate_timeout_ms: int,
         request_id: int,
+        request_headers: Optional[Dict[str, str]] = None,
     ) -> FlexlbResponse:
         """
         Send one schedule request to the given host (master or slave).
@@ -150,6 +152,7 @@ class MasterClient:
         """
         url = f"http://{addr}{SCHEDULE_PATH}"
         headers = {"Content-Type": "application/json"}
+        headers.update(normalize_request_headers(request_headers))
         timeout_sec = (
             (generate_timeout_ms / 1000.0)
             if generate_timeout_ms > 0
@@ -259,8 +262,9 @@ class MasterClient:
             "request_time_ms": int(start * 1000),
         }
 
+        request_headers = getattr(input, "headers", None)
         resp = await self._send_schedule_request(
-            master_addr, payload, ttft_timeout_ms, request_id
+            master_addr, payload, ttft_timeout_ms, request_id, request_headers
         )
 
         if resp.connection_failed and slave_addr:
@@ -270,7 +274,7 @@ class MasterClient:
                 request_id,
             )
             resp = await self._send_schedule_request(
-                slave_addr, payload, ttft_timeout_ms, request_id
+                slave_addr, payload, ttft_timeout_ms, request_id, request_headers
             )
 
         if resp.result is None:

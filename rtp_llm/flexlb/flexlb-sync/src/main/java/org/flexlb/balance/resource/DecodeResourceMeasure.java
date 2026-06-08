@@ -7,11 +7,13 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.springframework.stereotype.Component;
 
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Decode role resource measure
- * Availability criteria: KV cache usage percentage below threshold
+ * Availability criteria: KV cache usage percentage below threshold and decode concurrency below limit
  *
  * @author saichen.sm
  * @since 2025/12/23
@@ -22,6 +24,7 @@ public class DecodeResourceMeasure implements ResourceMeasure {
     private final long hysteresisBiasPercent;
     private final long fullSpeedThreshold;
     private final long stopThreshold;
+    private final long concurrencyLimit;
 
     public DecodeResourceMeasure(ConfigService configService) {
         FlexlbConfig config = configService.loadBalanceConfig();
@@ -29,11 +32,16 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         this.hysteresisBiasPercent = config.getHysteresisBiasPercent();
         this.fullSpeedThreshold = config.getDecodeFullSpeedThreshold();
         this.stopThreshold = config.getDecodeStopThreshold();
+        this.concurrencyLimit = config.getDecodeConcurrencyLimit();
     }
 
     @Override
     public boolean isResourceAvailable(WorkerStatus workerStatus) {
         if (workerStatus == null || !workerStatus.isAlive()) {
+            return false;
+        }
+
+        if (isConcurrencyLimitReached(workerStatus)) {
             return false;
         }
 
@@ -78,6 +86,10 @@ public class DecodeResourceMeasure implements ResourceMeasure {
             return 0.0;
         }
 
+        return Math.max(calculateKvCacheWaterLevel(workerStatus), calculateConcurrencyWaterLevel(workerStatus));
+    }
+
+    private double calculateKvCacheWaterLevel(WorkerStatus workerStatus) {
         long used = workerStatus.getUsedKvCacheTokens().get();
         long available = workerStatus.getAvailableKvCacheTokens().get();
         long total = used + available;
@@ -96,5 +108,37 @@ public class DecodeResourceMeasure implements ResourceMeasure {
             return (usedPercentage - fullSpeedThreshold) /
                     (stopThreshold - fullSpeedThreshold) * 100.0;
         }
+    }
+
+    private double calculateConcurrencyWaterLevel(WorkerStatus workerStatus) {
+        if (concurrencyLimit <= 0) {
+            return 0.0;
+        }
+
+        long currentConcurrency = calculateDecodeConcurrency(workerStatus);
+        if (currentConcurrency <= 0) {
+            return 0.0;
+        }
+        return Math.min(100.0, currentConcurrency * 100.0 / concurrencyLimit);
+    }
+
+    private boolean isConcurrencyLimitReached(WorkerStatus workerStatus) {
+        return concurrencyLimit > 0 && calculateDecodeConcurrency(workerStatus) >= concurrencyLimit;
+    }
+
+    private long calculateDecodeConcurrency(WorkerStatus workerStatus) {
+        Set<String> requestIds = new HashSet<>();
+        if (MapUtils.isNotEmpty(workerStatus.getWaitingTaskList())) {
+            requestIds.addAll(workerStatus.getWaitingTaskList().keySet());
+        }
+        if (MapUtils.isNotEmpty(workerStatus.getRunningTaskList())) {
+            requestIds.addAll(workerStatus.getRunningTaskList().keySet());
+        }
+        if (MapUtils.isNotEmpty(workerStatus.getLocalTaskMap())) {
+            workerStatus.getLocalTaskMap().keySet().stream()
+                    .map(String::valueOf)
+                    .forEach(requestIds::add);
+        }
+        return requestIds.size();
     }
 }

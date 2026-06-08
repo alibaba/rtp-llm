@@ -1,0 +1,24 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "endpoint": "/__dash_sc_grpc__",
+            "query": {
+                "prompt": "Write a detailed analogy between mathematics and a lighthouse.\n\nAnswer: ",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                "top_k": 1,
+                    "top_p": 0
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response": "1. Mathematics is like a lighthouse in the",
+                "iter_count": 10,
+                "finished": true
+            }
+        }
+    ]
+}
