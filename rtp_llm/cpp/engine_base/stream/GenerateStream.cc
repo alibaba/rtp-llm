@@ -67,7 +67,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         loss_ = torch::zeros({(int64_t)inputLength() - 1}, torch::kFloat32);
     }
     if (generate_input_->generate_config->return_softmax_probs) {
-        softmax_probs_ = torch::zeros({(int64_t)init_batch_size, (int64_t)max_seq_len_}, torch::kFloat32);
+        softmax_probs_ = torch::zeros({(int64_t)maxBatchSize(), (int64_t)max_seq_len_}, torch::kFloat32);
     }
     if (generate_input_->generate_config->return_all_hidden_states) {
         setReturnLastHiddenStates(true);
@@ -92,7 +92,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
     logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
-        generate_input_, logits_processor_init_batch_size, logits_processor_init_batch_size, special_tokens_.eos_token_id);
+        generate_input_, logits_processor_init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
 
     if (generateConfig()->random_seed.has_value()) {
 #if defined(USING_CUDA) || defined(USING_ROCM)
