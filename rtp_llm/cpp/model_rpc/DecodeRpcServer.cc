@@ -738,6 +738,14 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 gid,
                                 spec->debugString().c_str());
         const size_t cp_size = static_cast<size_t>(load_context.prefill_cp_size);
+        if (state_spec->cache_type == KVCacheRegionName::SWA_KV) {
+            const size_t full_block_bytes = state_spec->block_size_bytes();
+            RTP_LLM_CHECK_WITH_INFO(full_block_bytes % cp_size == 0,
+                                    "CP byte-sliced SWA_KV block bytes %zu not divisible by cp_size %zu",
+                                    full_block_bytes,
+                                    cp_size);
+            return full_block_bytes / cp_size;
+        }
         RTP_LLM_CHECK_WITH_INFO(state_spec->entries_per_block % cp_size == 0,
                                 "CP-sliced fixed region entries %u not divisible by cp_size %zu",
                                 state_spec->entries_per_block,
@@ -757,52 +765,6 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             parts.size() == 1, "Dsv4 fixed/SWA opaque block expects one part when CP-sliced, got %zu", parts.size());
         auto& block = parts[0];
         RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null DSV4 fixed/SWA block addr while slicing");
-        if (region_name == KVCacheRegionName::SWA_KV) {
-            RTP_LLM_CHECK_WITH_INFO(gid < cfg.cache_specs.size(), "group id out of range for cache_specs: %zu", gid);
-            const auto& spec = cfg.cache_specs[gid];
-            RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "null cache spec for group %zu", gid);
-            const auto* state_spec = dynamic_cast<const DSV4StateSpec*>(spec.get());
-            RTP_LLM_CHECK_WITH_INFO(state_spec != nullptr,
-                                    "CP-sliced SWA_KV group %zu expects DSV4StateSpec, got %s",
-                                    gid,
-                                    spec->debugString().c_str());
-            const size_t cp_size = static_cast<size_t>(load_context.prefill_cp_size);
-            RTP_LLM_CHECK_WITH_INFO(state_spec->state_dim == DSV4_FP8_KV_ENTRY_BYTES
-                                        && state_spec->store_dtype == DataType::TYPE_UINT8,
-                                    "SWA_KV expects uint8 %u-byte entries, got state_dim=%u dtype=%d",
-                                    DSV4_FP8_KV_ENTRY_BYTES,
-                                    state_spec->state_dim,
-                                    static_cast<int>(state_spec->store_dtype));
-            RTP_LLM_CHECK_WITH_INFO(state_spec->entries_per_block % cp_size == 0,
-                                    "CP-sliced SWA_KV entries %u not divisible by cp_size %zu",
-                                    state_spec->entries_per_block,
-                                    cp_size);
-
-            constexpr size_t kSwaTokenDataBytes  = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES;
-            constexpr size_t kSwaTokenScaleBytes = DSV4_FP8_KV_ENTRY_BYTES - kSwaTokenDataBytes;
-            const size_t     local_entries       = state_spec->entries_per_block / cp_size;
-            const size_t     data_bytes          = local_entries * kSwaTokenDataBytes;
-            const size_t     scale_bytes         = local_entries * kSwaTokenScaleBytes;
-            const size_t     data_offset         = data_bytes * static_cast<size_t>(peer_idx);
-            const size_t     scale_region_offset =
-                static_cast<size_t>(state_spec->entries_per_block) * kSwaTokenDataBytes;
-            const size_t scale_offset = scale_region_offset + scale_bytes * static_cast<size_t>(peer_idx);
-            RTP_LLM_CHECK_WITH_INFO(scale_offset + scale_bytes <= block.size_bytes,
-                                    "Dsv4 SWA_KV DATA/SCALE slice exceeds block bytes: data=[%zu,%zu) scale=[%zu,%zu) block=%zu gid=%zu",
-                                    data_offset,
-                                    data_offset + data_bytes,
-                                    scale_offset,
-                                    scale_offset + scale_bytes,
-                                    block.size_bytes,
-                                    gid);
-            BlockInfo data_block   = block;
-            BlockInfo scale_block  = block;
-            data_block.addr        = static_cast<void*>(static_cast<char*>(block.addr) + data_offset);
-            data_block.size_bytes  = data_bytes;
-            scale_block.addr       = static_cast<void*>(static_cast<char*>(block.addr) + scale_offset);
-            scale_block.size_bytes = scale_bytes;
-            return std::vector<BlockInfo>{data_block, scale_block};
-        }
         const size_t slice_bytes  = cpFixedSliceBytes(cfg, gid);
         const size_t slice_offset = slice_bytes * static_cast<size_t>(peer_idx);
         RTP_LLM_CHECK_WITH_INFO(slice_offset + slice_bytes <= block.size_bytes,

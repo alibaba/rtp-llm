@@ -820,3 +820,149 @@ def dequantize_slots_to_bf16(
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
     )
     return out
+
+
+@triton.jit
+def _gather_k_cache_packed_slots_cp_byte_sliced_kernel(
+    out_ptr,
+    out_stride0,
+    k_cache_ptr,
+    slot_indices_ptr,
+    n_slots,
+    full_entries_per_block: tl.constexpr,
+    local_slice_bytes: tl.constexpr,
+    cp_rank: tl.constexpr,
+    block_stride: tl.constexpr,
+    num_cache_blocks: tl.constexpr,
+    token_data_size: tl.constexpr,
+    scale_dim: tl.constexpr,
+    entry_bytes: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
+):
+    """Gather this rank's byte contribution for packed per-token SWA rows."""
+    pid = tl.program_id(0).to(tl.int64)
+    if pid >= n_slots:
+        return
+
+    slot = tl.load(slot_indices_ptr + pid)
+    if slot < 0:
+        return
+
+    blk = slot // full_entries_per_block
+    off = slot % full_entries_per_block
+    if blk < 0:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+    if blk >= num_cache_blocks:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+
+    cache_block_ptr = k_cache_ptr + blk.to(tl.int64) * block_stride
+    out_row_ptr = out_ptr + pid * out_stride0
+    slice_start = cp_rank * local_slice_bytes
+    slice_end = slice_start + local_slice_bytes
+
+    data_offsets = tl.arange(0, 1024)
+    data_mask = data_offsets < token_data_size
+    token_data_base = off * token_data_size
+    full_data_offsets = token_data_base + data_offsets
+    data_in_slice = data_mask & (full_data_offsets >= slice_start) & (full_data_offsets < slice_end)
+    data = tl.load(cache_block_ptr + full_data_offsets - slice_start, mask=data_in_slice, other=0)
+    tl.store(out_row_ptr + data_offsets, data, mask=data_mask)
+
+    scale_offsets = tl.arange(0, 8)
+    scale_mask = scale_offsets < scale_dim
+    token_scale_base = full_entries_per_block * token_data_size + off * scale_dim
+    full_scale_offsets = token_scale_base + scale_offsets
+    scale_in_slice = scale_mask & (full_scale_offsets >= slice_start) & (full_scale_offsets < slice_end)
+    scales = tl.load(cache_block_ptr + full_scale_offsets - slice_start, mask=scale_in_slice, other=0)
+    tl.store(out_row_ptr + token_data_size + scale_offsets, scales, mask=scale_mask)
+
+
+def gather_k_cache_packed_slots_cp_byte_sliced(
+    out: torch.Tensor,
+    k_cache_raw: torch.Tensor,
+    slot_indices: torch.Tensor,
+    *,
+    full_entries_per_block: int,
+    cp_rank: int,
+    cp_size: int,
+) -> None:
+    assert out.dim() == 2 and out.shape[-1] == ENTRY_BYTES and out.dtype == torch.uint8
+    assert out.stride(1) == 1, f"out must be packed byte rows; got {out.stride()}"
+    assert k_cache_raw.dim() == 2 and k_cache_raw.dtype == torch.uint8
+    assert k_cache_raw.stride(1) == 1, f"k_cache_raw must be byte-contiguous; got {k_cache_raw.stride()}"
+    full_entries_per_block = int(full_entries_per_block)
+    cp_rank = int(cp_rank)
+    cp_size = int(cp_size)
+    assert full_entries_per_block > 0 and cp_size > 1 and 0 <= cp_rank < cp_size
+    slots_i64 = slot_indices.reshape(-1).to(device=k_cache_raw.device, dtype=torch.int64).contiguous()
+    if slots_i64.numel() == 0:
+        return
+    validate_slot_mapping(
+        "swa.gather_cp_byte.slot_indices",
+        slots_i64,
+        block_size=full_entries_per_block,
+        num_blocks=int(k_cache_raw.shape[0]),
+        negative_mode="skip_any",
+    )
+    _gather_k_cache_packed_slots_cp_byte_sliced_kernel[(int(slots_i64.numel()),)](
+        out,
+        out.stride(0),
+        k_cache_raw,
+        slots_i64,
+        int(slots_i64.numel()),
+        full_entries_per_block=full_entries_per_block,
+        local_slice_bytes=int(k_cache_raw.shape[1]),
+        cp_rank=cp_rank,
+        block_stride=int(k_cache_raw.stride(0)),
+        num_cache_blocks=int(k_cache_raw.shape[0]),
+        token_data_size=TOKEN_DATA_SIZE,
+        scale_dim=SCALE_BYTES_PER_TOKEN,
+        entry_bytes=ENTRY_BYTES,
+        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+    )
+
+
+def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+    out: torch.Tensor,
+    k_cache_raw: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    gather_lens: Optional[torch.Tensor],
+    offset: int,
+    *,
+    full_entries_per_block: int,
+    cp_rank: int,
+    cp_size: int,
+) -> None:
+    """Reconstruct byte-sliced SWA entries with all_gather, then dequantize."""
+    assert out.dim() == 3 and out.shape[-1] == HEAD_DIM and out.dtype == torch.bfloat16
+    assert slot_mapping.dim() == 2
+    B = int(slot_mapping.shape[0])
+    W = int(slot_mapping.shape[1])
+    if B == 0 or W == 0:
+        return
+    slots_i64 = slot_mapping.to(device=out.device, dtype=torch.int64).contiguous()
+    local_packed = torch.zeros((B * W, ENTRY_BYTES), dtype=torch.uint8, device=out.device)
+    gather_k_cache_packed_slots_cp_byte_sliced(
+        local_packed,
+        k_cache_raw,
+        slots_i64.reshape(-1),
+        full_entries_per_block=full_entries_per_block,
+        cp_rank=cp_rank,
+        cp_size=cp_size,
+    )
+
+    from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+
+    gathered = all_gather(local_packed.contiguous(), group=Group.TP).view(cp_size, B * W, ENTRY_BYTES)
+    packed = gathered.to(torch.int16).sum(dim=0).to(torch.uint8).contiguous()
+    restored = torch.empty((B * W, HEAD_DIM), dtype=torch.bfloat16, device=out.device)
+    dequantize_packed_k_cache_flat(restored, packed)
+    restored_3d = restored.view(B, W, HEAD_DIM)
+    if gather_lens is None:
+        out[:, offset : offset + W, :].copy_(restored_3d)
+        return
+    gather_lens_cpu = gather_lens.to(device="cpu", dtype=torch.int32).reshape(-1)
+    for b in range(B):
+        gl = int(gather_lens_cpu[b].item())
+        if gl > 0:
+            out[b, offset : offset + gl, :].copy_(restored_3d[b, :gl, :])

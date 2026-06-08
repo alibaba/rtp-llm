@@ -1205,6 +1205,39 @@ class AttentionFP8(nn.Module):
             (stride_bytes, bytes_per_entry, 1),
         )
 
+    def _pool_raw_u8(self, attn_type: int) -> Optional[torch.Tensor]:
+        if self._kv_cache is None:
+            return None
+        attn_type_enum = _ATTN_TYPE_ENUM_BY_INT.get(attn_type)
+        if attn_type_enum is None:
+            return None
+        try:
+            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_enum)
+        except RuntimeError:
+            return None
+        base = layer_kv.kv_cache_base
+        if base is None or base.numel() == 0 or base.dim() != 2:
+            return None
+        return base.view(torch.uint8)
+
+    def _swa_cp_byte_sliced(self) -> bool:
+        cp_ctx = getattr(self, "_cp_ctx", None)
+        return (
+            cp_ctx is not None
+            and int(getattr(cp_ctx, "cp_size", 1)) > 1
+            and bool(getattr(cp_ctx, "kv_cache_sharded", False))
+        )
+
+    def _swa_entries_per_block(self) -> int:
+        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+
+        if self._swa_cp_byte_sliced():
+            raw = self._pool_raw_u8(SWA_KV)
+            cp_ctx = getattr(self, "_cp_ctx", None)
+            if raw is not None and cp_ctx is not None:
+                return (int(raw.shape[1]) * int(cp_ctx.cp_size)) // _DSV4_FP8_KV_ENTRY_BYTES
+        return self._pool_entries_per_block(SWA_KV)
+
     def _pool_entries_per_block(self, attn_type: int) -> int:
         """Derive ``entries_per_block`` from the framework pool tensor for
         this layer + attn_type.  Returns 0 if pool unavailable."""
@@ -1902,6 +1935,14 @@ class AttentionFP8(nn.Module):
 
         self._ensure_freqs_cis_bound()
         qkv = decode_compute_qkv(self, x, position_ids)
+        with suppress(Exception):
+            from rtp_llm.models_py.modules.dsv4.attn_type import (
+                CSA_KV,
+                HCA_KV,
+                INDEXER_KV,
+                SWA_KV,
+            )
+
         self._decode_write_swa_fp8(qkv.kv, bsz, q_len, attn_metadata)
 
         if self.compress_ratio == 0:
@@ -2909,11 +2950,15 @@ class AttentionFP8(nn.Module):
         ratio = self.compress_ratio
         ratio_tag = "csa" if ratio == 4 else "hca"
         cmp_at = CSA_KV if ratio == 4 else HCA_KV
-        swa_pool_3d = self._pool_view_3d_fp8(SWA_KV)
+        swa_byte_sliced = self._swa_cp_byte_sliced()
+        swa_pool_raw = self._pool_raw_u8(SWA_KV) if swa_byte_sliced else None
+        swa_pool_3d = None if swa_byte_sliced else self._pool_view_3d_fp8(SWA_KV)
         cmp_pool_3d = self._pool_view_3d_fp8(cmp_at)
-        assert (
-            swa_pool_3d is not None and cmp_pool_3d is not None
-        ), "FP8 SWA + CSA/HCA pools required for workspace path"
+        assert cmp_pool_3d is not None, "FP8 CSA/HCA pool required for workspace path"
+        if swa_byte_sliced:
+            assert swa_pool_raw is not None, "byte-sliced FP8 SWA pool unavailable"
+        else:
+            assert swa_pool_3d is not None, "FP8 SWA pool required for workspace path"
 
         assert workspace_meta is not None, (
             "_attn_via_workspace requires a non-None WorkspaceMeta; the caller "
@@ -2972,19 +3017,27 @@ class AttentionFP8(nn.Module):
         if common.any_cont:
             with record_function_range("dsv4.fp8.attn.workspace.gather_swa_prefix"):
                 assert wm.swa_cache_slot_mapping is not None
-                _swa_dq.dequantize_and_gather_k_cache_slots(
-                    out=workspace,
-                    k_cache=swa_pool_3d,
-                    slot_mapping=wm.swa_cache_slot_mapping,
-                    gather_lens=wm.swa_cache_gather_lens,
-                    offset=wm.N,
-                )
-                self._merge_cp_sliced_swa_prefix(
-                    workspace,
-                    offset=wm.N,
-                    width=int(wm.swa_cache_slot_mapping.shape[1]),
-                    common=common,
-                )
+                if swa_byte_sliced:
+                    assert common.cp_ctx is not None
+                    _swa_dq.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                        out=workspace,
+                        k_cache_raw=swa_pool_raw,
+                        slot_mapping=wm.swa_cache_slot_mapping,
+                        gather_lens=wm.swa_cache_gather_lens,
+                        offset=wm.N,
+                        full_entries_per_block=wm.swa_eb,
+                        cp_rank=int(common.cp_ctx.cp_rank),
+                        cp_size=int(common.cp_ctx.cp_size),
+                    )
+                else:
+                    assert swa_pool_3d is not None
+                    _swa_dq.dequantize_and_gather_k_cache_slots(
+                        out=workspace,
+                        k_cache=swa_pool_3d,
+                        slot_mapping=wm.swa_cache_slot_mapping,
+                        gather_lens=wm.swa_cache_gather_lens,
+                        offset=wm.N,
+                    )
 
         # BF16 overlay of freshly computed new K — single ``index_copy_``
         # using the meta-precomputed ``new_k_slot_in_flat``. Avoids the FP8
@@ -3286,30 +3339,6 @@ class AttentionFP8(nn.Module):
         factor = torch.sigmoid(lse.float() - sink)
         factor = torch.where(torch.isfinite(lse), factor, torch.zeros_like(factor))
         return (out.float() * factor.unsqueeze(-1)).to(out.dtype)
-
-    @staticmethod
-    def _merge_cp_sliced_swa_prefix(
-        workspace: torch.Tensor,
-        *,
-        offset: int,
-        width: int,
-        common: PrefillMeta,
-    ) -> None:
-        cp_ctx = common.cp_ctx
-        if (
-            width <= 0
-            or not common.cp_on
-            or cp_ctx is None
-            or cp_ctx.cp_size <= 1
-            or not bool(getattr(cp_ctx, "kv_cache_sharded", False))
-        ):
-            return
-
-        from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-
-        prefix = workspace[:, offset : offset + width, :].contiguous()
-        all_reduce(prefix, Group.TP, inplace=True)
-        workspace[:, offset : offset + width, :].copy_(prefix)
 
     def _attn_via_workspace_cp_raw_q_merge(
         self,
@@ -4024,7 +4053,7 @@ class AttentionFP8(nn.Module):
             or cmp_bt.numel() == 0
         ):
             return None
-        swa_eb = self._pool_entries_per_block(SWA_KV)
+        swa_eb = self._swa_entries_per_block()
         cmp_eb = self._pool_entries_per_block(cmp_at)
         if swa_eb <= 0 or cmp_eb <= 0:
             return None
@@ -4241,8 +4270,10 @@ class AttentionFP8(nn.Module):
         # (prefix_len, input_len, ratio). ``_force_all_cp_raw_q_merge``
         # bypasses the ratio check for test/debug.
         use_cp_raw_q_merge = False
+        swa_byte_sliced = self._swa_cp_byte_sliced()
         if (
             _use_cp_cache_hit_raw_q_merge()
+            and not swa_byte_sliced
             and N > 0
             and cp_ctx_local is not None
             and cp_ctx_local.cp_size > 1
@@ -4283,47 +4314,22 @@ class AttentionFP8(nn.Module):
                     )
                 )
 
-        if kv_cache_sharded and cp_ctx_local is not None and cp_ctx_local.cp_size > 1:
-            swa_cache_slot_mapping = _build_suffix_cp_sliced_slot_mapping(
+        swa_cache_slot_mapping = _build_suffix_pool_slot_mapping(
+            block_table=swa_bt_int32,
+            seq_lens=swa_cache_seq_lens,
+            gather_lens=swa_cache_gather_lens,
+            entries_per_block=swa_eb,
+            tokens_per_block_for_block_table=swa_tokens_per_block,
+            ring_entries=swa_eb,
+        )
+        swa_slot_mapping = (
+            _build_suffix_pool_slot_mapping(
                 block_table=swa_bt_int32,
-                seq_lens=swa_cache_seq_lens,
-                gather_lens=swa_cache_gather_lens,
-                local_entries_per_block=swa_eb,
-                tokens_per_block_for_block_table=swa_tokens_per_block,
-                cp_rank=int(cp_ctx_local.cp_rank),
-                cp_size=int(cp_ctx_local.cp_size),
-            )
-        else:
-            swa_cache_slot_mapping = _build_suffix_pool_slot_mapping(
-                block_table=swa_bt_int32,
-                seq_lens=swa_cache_seq_lens,
-                gather_lens=swa_cache_gather_lens,
+                seq_lens=swa_seq_lens,
+                gather_lens=swa_gather_lens,
                 entries_per_block=swa_eb,
                 tokens_per_block_for_block_table=swa_tokens_per_block,
                 ring_entries=swa_eb,
-            )
-        swa_slot_mapping = (
-            (
-                _build_suffix_cp_sliced_slot_mapping(
-                    block_table=swa_bt_int32,
-                    seq_lens=swa_seq_lens,
-                    gather_lens=swa_gather_lens,
-                    local_entries_per_block=swa_eb,
-                    tokens_per_block_for_block_table=swa_tokens_per_block,
-                    cp_rank=int(cp_ctx_local.cp_rank),
-                    cp_size=int(cp_ctx_local.cp_size),
-                )
-                if kv_cache_sharded
-                and cp_ctx_local is not None
-                and cp_ctx_local.cp_size > 1
-                else _build_suffix_pool_slot_mapping(
-                    block_table=swa_bt_int32,
-                    seq_lens=swa_seq_lens,
-                    gather_lens=swa_gather_lens,
-                    entries_per_block=swa_eb,
-                    tokens_per_block_for_block_table=swa_tokens_per_block,
-                    ring_entries=swa_eb,
-                )
             )
             if use_cp_raw_q_merge
             else None
@@ -4485,7 +4491,7 @@ class AttentionFP8(nn.Module):
             if self._block_tables_by_type is not None
             else None
         )
-        eb = self._pool_entries_per_block(SWA_KV)
+        eb = self._swa_entries_per_block()
         if self._kv_cache is None or bt is None or bt.numel() == 0 or eb <= 0:
             return SwaPrefillMeta(
                 slot_mapping=None,
@@ -4555,27 +4561,15 @@ class AttentionFP8(nn.Module):
             write_combined_seq_lens = combined_seq_lens
             write_num_tokens = num_tokens
         bt_swa = bt[:write_B].to(device=device, dtype=torch.int32).contiguous()
-        if cp_on_write and bool(getattr(cp_ctx, "kv_cache_sharded", False)):
-            slot_mapping = _swa_ops.compute_swa_cp_sliced_slot_mapping(
-                block_table=bt_swa,
-                query_start_loc=write_query_start_loc,
-                seq_lens=write_combined_seq_lens,
-                num_tokens=write_num_tokens,
-                tokens_per_block_for_block_table=swa_tokens_per_block,
-                local_entries_per_block=eb,
-                cp_rank=int(cp_ctx.cp_rank),
-                cp_size=int(cp_ctx.cp_size),
-            )
-        else:
-            slot_mapping = _swa_ops.compute_swa_slot_mapping(
-                block_table=bt_swa,
-                query_start_loc=write_query_start_loc,
-                seq_lens=write_combined_seq_lens,
-                num_tokens=write_num_tokens,
-                pool_entries_per_block=eb,
-                tokens_per_block_for_block_table=swa_tokens_per_block,
-                ring_entries=eb,
-            )
+        slot_mapping = _swa_ops.compute_swa_slot_mapping(
+            block_table=bt_swa,
+            query_start_loc=write_query_start_loc,
+            seq_lens=write_combined_seq_lens,
+            num_tokens=write_num_tokens,
+            pool_entries_per_block=eb,
+            tokens_per_block_for_block_table=swa_tokens_per_block,
+            ring_entries=eb,
+        )
 
         # CSA/HCA: Group-1 only. Their attention meta lives on workspace_meta.
         if not is_swa_only:
@@ -4642,25 +4636,14 @@ class AttentionFP8(nn.Module):
                 .to(device=device, dtype=torch.int32)[:write_B]
                 .contiguous()
             )
-            if cp_on_write and bool(getattr(cp_ctx, "kv_cache_sharded", False)):
-                cache_slot_mapping = _build_suffix_cp_sliced_slot_mapping(
-                    block_table=bt_swa,
-                    seq_lens=cache_seq_lens,
-                    gather_lens=cache_gather_lens,
-                    local_entries_per_block=eb,
-                    tokens_per_block_for_block_table=swa_tokens_per_block,
-                    cp_rank=int(cp_ctx.cp_rank),
-                    cp_size=int(cp_ctx.cp_size),
-                )
-            else:
-                cache_slot_mapping = _build_suffix_pool_slot_mapping(
-                    block_table=bt_swa,
-                    seq_lens=cache_seq_lens,
-                    gather_lens=cache_gather_lens,
-                    entries_per_block=eb,
-                    tokens_per_block_for_block_table=swa_tokens_per_block,
-                    ring_entries=eb,
-                )
+            cache_slot_mapping = _build_suffix_pool_slot_mapping(
+                block_table=bt_swa,
+                seq_lens=cache_seq_lens,
+                gather_lens=cache_gather_lens,
+                entries_per_block=eb,
+                tokens_per_block_for_block_table=swa_tokens_per_block,
+                ring_entries=eb,
+            )
             if cp_on_write:
                 # CP path: build per-Q-token attention meta with explicit
                 # rank-local CP positions. B>1 needs request offsets in the
@@ -5065,15 +5048,29 @@ class AttentionFP8(nn.Module):
         meta = common.swa_meta
         if meta is None or meta.slot_mapping is None:
             return
-        packed_3d = self._pool_view_3d_fp8(SWA_KV)
-        if packed_3d is None:
+        cp_byte_sliced = self._swa_cp_byte_sliced()
+        packed_3d = None if cp_byte_sliced else self._pool_view_3d_fp8(SWA_KV)
+        raw_u8 = self._pool_raw_u8(SWA_KV) if cp_byte_sliced else None
+        if (cp_byte_sliced and raw_u8 is None) or (not cp_byte_sliced and packed_3d is None):
             return
 
         k_bf16 = kv_full.reshape(-1, self.head_dim)
         if k_bf16.dtype != torch.bfloat16:
             k_bf16 = k_bf16.to(torch.bfloat16)
         with record_function_range("dsv4.fp8.attn.swa.quant_insert"):
-            _ins.quantize_and_insert_k_cache(k_bf16, packed_3d, meta.slot_mapping)
+            if cp_byte_sliced:
+                cp_ctx = common.cp_ctx
+                assert cp_ctx is not None
+                _ins.quantize_and_insert_k_cache_cp_byte_sliced(
+                    k_bf16,
+                    raw_u8,
+                    meta.slot_mapping,
+                    full_entries_per_block=self._swa_entries_per_block(),
+                    cp_rank=int(cp_ctx.cp_rank),
+                    cp_size=int(cp_ctx.cp_size),
+                )
+            else:
+                _ins.quantize_and_insert_k_cache(k_bf16, packed_3d, meta.slot_mapping)
 
     def _attn_fp8_swa_via_kv_full(
         self,
@@ -5178,8 +5175,13 @@ class AttentionFP8(nn.Module):
             "fields (only built when any request has prefix > 0)"
         )
 
-        packed_3d = self._pool_view_3d_fp8(SWA_KV)
-        assert packed_3d is not None, "FP8 SWA pool unavailable"
+        cp_byte_sliced = self._swa_cp_byte_sliced()
+        packed_3d = None if cp_byte_sliced else self._pool_view_3d_fp8(SWA_KV)
+        raw_u8 = self._pool_raw_u8(SWA_KV) if cp_byte_sliced else None
+        if cp_byte_sliced:
+            assert raw_u8 is not None, "byte-sliced FP8 SWA pool unavailable"
+        else:
+            assert packed_3d is not None, "FP8 SWA pool unavailable"
         D = self.head_dim
 
         assert common.use_varlen, "DSV4 FP8 SWA concat requires varlen metadata"
@@ -5196,19 +5198,27 @@ class AttentionFP8(nn.Module):
         if meta.prefix_len_max > 0:
             with record_function_range("dsv4.fp8.attn.swa_concat.gather_prefix"):
                 assert meta.cache_slot_mapping is not None
-                _swa_dq.dequantize_and_gather_k_cache_slots(
-                    out=workspace,
-                    k_cache=packed_3d,
-                    slot_mapping=meta.cache_slot_mapping,
-                    gather_lens=meta.cache_gather_lens,
-                    offset=0,
-                )
-                self._merge_cp_sliced_swa_prefix(
-                    workspace,
-                    offset=0,
-                    width=int(meta.cache_slot_mapping.shape[1]),
-                    common=common,
-                )
+                if cp_byte_sliced:
+                    cp_ctx = common.cp_ctx
+                    assert cp_ctx is not None
+                    _swa_dq.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                        out=workspace,
+                        k_cache_raw=raw_u8,
+                        slot_mapping=meta.cache_slot_mapping,
+                        gather_lens=meta.cache_gather_lens,
+                        offset=0,
+                        full_entries_per_block=self._swa_entries_per_block(),
+                        cp_rank=int(cp_ctx.cp_rank),
+                        cp_size=int(cp_ctx.cp_size),
+                    )
+                else:
+                    _swa_dq.dequantize_and_gather_k_cache_slots(
+                        out=workspace,
+                        k_cache=packed_3d,
+                        slot_mapping=meta.cache_slot_mapping,
+                        gather_lens=meta.cache_gather_lens,
+                        offset=0,
+                    )
 
         # 2. New K BF16 overlay.
         kv_bf16 = qkv.kv_full.to(torch.bfloat16)
