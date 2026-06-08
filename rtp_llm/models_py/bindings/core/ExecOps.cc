@@ -225,6 +225,11 @@ void writeCacheToConnector(const CacheStoreInputs& param, IKVCacheConnectorCoord
                && static_cast<size_t>(param.layer_id)
                       < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
         gid = param.kv_cache_layer_to_group_host.data_ptr<int32_t>()[param.layer_id];
+        RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < group_num,
+                                "writeCacheToConnector: invalid group id [%d], group_num=%d, layer_id=%d",
+                                gid,
+                                group_num,
+                                param.layer_id);
     }
 
     const int32_t* offset_addr          = nullptr;

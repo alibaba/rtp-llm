@@ -120,6 +120,11 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                 while (!context->IsCancelled() && !stream->hasError() && stream->getStatus() != StreamState::FINISHED) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
+                if (context->IsCancelled()) {
+                    stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
+                    RTP_LLM_LOG_WARNING("request [%s] cancelled by user during decode_entrance wait", request_key.c_str());
+                    return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
+                }
             }
             break;
         }
@@ -127,6 +132,9 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             stream->waitForRemoteGenerate();
             break;
         }
+    }
+    if (stream->hasError()) {
+        return serializeErrorMsg(request_key, stream->statusInfo());
     }
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
 

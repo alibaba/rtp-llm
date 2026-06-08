@@ -11,8 +11,9 @@
 
 namespace rtp_llm {
 
-constexpr int32_t kPeerInfoProbeMaxMs = 500;
-constexpr int32_t kPeerInfoProbeMinMs = 50;
+constexpr int32_t kPeerInfoProbeMaxMs  = 500;
+constexpr int32_t kPeerInfoProbeMinMs  = 50;
+constexpr int64_t kPeerInfoCacheTtlMs  = 30000;
 
 namespace {
 
@@ -226,7 +227,7 @@ PrefillPeerInfo PrefillServerCaller::getPrefillPeerInfo(const std::string& ip, u
     {
         std::shared_lock<std::shared_mutex> lock(prefill_peer_cache_mutex_);
         auto                                it = prefill_peer_cache_.find(addr);
-        if (it != prefill_peer_cache_.end()) {
+        if (it != prefill_peer_cache_.end() && (currentTimeMs() - it->second.cached_at_ms) < kPeerInfoCacheTtlMs) {
             return it->second;
         }
     }
@@ -278,6 +279,7 @@ PrefillPeerInfo PrefillServerCaller::getPrefillPeerInfo(const std::string& ip, u
                           return s;
                       }().c_str());
 
+    info.cached_at_ms = currentTimeMs();
     {
         std::unique_lock<std::shared_mutex> lock(prefill_peer_cache_mutex_);
         prefill_peer_cache_[addr] = info;
