@@ -19,12 +19,21 @@ from .base import (
 # Side-effect import — each module's ``@register_strategy`` decorator pushes
 # the class into the priority list as the import lands. Order here = priority
 # (high→low):
-from .mega import MegaMoEStrategy        # noqa: F401  ep_size>1 + SM100 + dist
-from .grouped_fp4 import (               # noqa: F401  ep_size==1 + kernel
-    GroupedFP4Strategy,
-    _has_fp8_fp4_grouped_kernel,
-)
-from .deepep import DeepEPStrategy       # noqa: F401  ep_size>1 fallback
+try:
+    from .mega import MegaMoEStrategy        # noqa: F401  ep_size>1 + SM100 + dist
+except ImportError:
+    pass
+try:
+    from .grouped_fp4 import (               # noqa: F401  ep_size==1 + kernel
+        GroupedFP4Strategy,
+        _has_fp8_fp4_grouped_kernel,
+    )
+except (ImportError, AttributeError):
+    _has_fp8_fp4_grouped_kernel = lambda: False
+try:
+    from .deepep import DeepEPStrategy       # noqa: F401  ep_size>1 fallback
+except ImportError:
+    pass
 from .local_loop import LocalLoopStrategy  # noqa: F401  universal fallback
 
 __all__ = [

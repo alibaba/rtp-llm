@@ -263,7 +263,36 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
                                           py_attn_inputs.padding_offset,
                                           c10::cuda::getCurrentCUDAStream().stream());
 #else
-        RTP_LLM_FAIL("device attention input metadata requires CUDA");
+        // ROCm fallback: compute on CPU then copy to device
+        {
+            auto input_lens_cpu = py_attn_inputs.input_lengths.to(torch::kCPU);
+            auto prefix_lens_cpu = py_attn_inputs.prefix_lengths.defined()
+                ? py_attn_inputs.prefix_lengths.to(torch::kCPU) : torch::zeros_like(input_lens_cpu);
+            auto bs = input_lens_cpu.size(0);
+            auto cu_seq = torch::zeros({bs + 1}, torch::kInt32);
+            auto cu_kv  = torch::zeros({bs + 1}, torch::kInt32);
+            auto il = input_lens_cpu.data_ptr<int32_t>();
+            auto pl = prefix_lens_cpu.data_ptr<int32_t>();
+            auto cs = cu_seq.data_ptr<int32_t>();
+            auto ck = cu_kv.data_ptr<int32_t>();
+            int32_t q_acc = 0, kv_acc = 0, max_il = 0;
+            for (int b = 0; b < bs; ++b) {
+                q_acc += il[b]; kv_acc += il[b] + pl[b];
+                cs[b+1] = q_acc; ck[b+1] = kv_acc;
+                if (il[b] > max_il) max_il = il[b];
+            }
+            int32_t total = py_attn_inputs.total_tokens;
+            auto pad = torch::zeros({total}, torch::kInt32);
+            auto pp = pad.data_ptr<int32_t>();
+            int32_t out = 0, cum = 0;
+            for (int b = 0; b < bs; ++b) {
+                for (int j = 0; j < il[b] && out < total; ++j) pp[out++] = cum;
+                cum += max_il - il[b];
+            }
+            py_attn_inputs.cu_seqlens     = cu_seq.to(torch::kCUDA);
+            py_attn_inputs.cu_kv_seqlens  = cu_kv.to(torch::kCUDA);
+            py_attn_inputs.padding_offset = pad.to(torch::kCUDA);
+        }
 #endif
     } else {
         py_attn_inputs.total_tokens        = 0;
@@ -312,7 +341,34 @@ static void calculatePaddingOffsetDeviceAware(torch_ext::PyAttentionInputs& py_a
                                       py_attn_inputs.padding_offset,
                                       c10::cuda::getCurrentCUDAStream().stream());
 #else
-    RTP_LLM_FAIL("device padding_offset requires CUDA");
+    // ROCm fallback: recompute on CPU
+    {
+        auto input_lens_cpu = py_attn_inputs.input_lengths.to(torch::kCPU);
+        auto prefix_lens_cpu = py_attn_inputs.prefix_lengths.defined()
+            ? py_attn_inputs.prefix_lengths.to(torch::kCPU) : torch::zeros_like(input_lens_cpu);
+        auto bs = input_lens_cpu.size(0);
+        auto cu_seq = torch::zeros({bs + 1}, torch::kInt32);
+        auto cu_kv  = torch::zeros({bs + 1}, torch::kInt32);
+        auto il = input_lens_cpu.data_ptr<int32_t>();
+        auto pl = prefix_lens_cpu.data_ptr<int32_t>();
+        int32_t q_acc = 0, kv_acc = 0, max_il = 0;
+        for (int b = 0; b < bs; ++b) {
+            q_acc += il[b]; kv_acc += il[b] + pl[b];
+            cu_seq.data_ptr<int32_t>()[b+1] = q_acc;
+            cu_kv.data_ptr<int32_t>()[b+1] = kv_acc;
+            if (il[b] > max_il) max_il = il[b];
+        }
+        int32_t total = py_attn_inputs.total_tokens;
+        auto pad = torch::zeros({total}, torch::kInt32);
+        int32_t out = 0, cum = 0;
+        for (int b = 0; b < bs; ++b) {
+            for (int j = 0; j < il[b] && out < total; ++j) pad.data_ptr<int32_t>()[out++] = cum;
+            cum += max_il - il[b];
+        }
+        py_attn_inputs.cu_seqlens     = cu_seq.to(torch::kCUDA);
+        py_attn_inputs.cu_kv_seqlens  = cu_kv.to(torch::kCUDA);
+        py_attn_inputs.padding_offset = pad.to(torch::kCUDA);
+    }
 #endif
 }
 
