@@ -129,15 +129,6 @@ grpc::Status PrefillServerCaller::callPrefill(grpc::ServerContext*              
 grpc::Status PrefillServerCaller::callPrefill(grpc::ServerContext*                   server_context,
                                               const GenerateInputPB*                 request,
                                               grpc::ServerWriter<GenerateOutputsPB>* response_writer,
-                                              const std::string&                     target_addr) {
-    return callPrefillToAddr(server_context, request, response_writer, target_addr, [server_context]() {
-        return server_context && server_context->IsCancelled();
-    });
-}
-
-grpc::Status PrefillServerCaller::callPrefill(grpc::ServerContext*                   server_context,
-                                              const GenerateInputPB*                 request,
-                                              grpc::ServerWriter<GenerateOutputsPB>* response_writer,
                                               const std::function<bool()>&           is_cancelled) {
     std::string prefill_addr;
     for (const auto& role_addr : request->generate_config().role_addrs()) {
