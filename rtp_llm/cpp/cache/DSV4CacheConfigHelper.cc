@@ -43,6 +43,7 @@ struct DSV4PoolDesc {
     uint32_t                tokens_per_block;
     DataType                store_dtype;
     bool                    is_paged;
+    size_t                  block_size_bytes_override = 0;
 };
 
 constexpr int kCsaCompressRatio     = 4;
@@ -136,6 +137,28 @@ uint32_t maybeAdjustFixedEntriesForCpSharding(uint32_t                 entries,
     return entries_per_block;
 }
 
+uint32_t maybeAdjustSwaEntriesForCpSharding(uint32_t entries, const ParallelismConfig& parallelism_config) {
+    const auto cp_size = fixedRegionCpSize(parallelism_config);
+    if (cp_size <= 1) {
+        return entries;
+    }
+    return alignUpToMultiple(entries, cp_size);
+}
+
+size_t maybeSwaPrefillCpByteSliceBytes(uint32_t entries_per_block, const ParallelismConfig& parallelism_config) {
+    const auto cp_size = fixedRegionCpSize(parallelism_config);
+    if (cp_size <= 1 || !isPrefillCpSliced(parallelism_config)) {
+        return 0;
+    }
+    const size_t full_natural_bytes = static_cast<size_t>(entries_per_block) * DSV4_FP8_KV_ENTRY_BYTES;
+    const size_t full_stride_bytes  = alignDsv4Fp8KvBlockBytes(full_natural_bytes, cp_size);
+    RTP_LLM_CHECK_WITH_INFO(full_stride_bytes % cp_size == 0,
+                            "DSV4 SWA_KV full stride %zu must be divisible by cp_size %u",
+                            full_stride_bytes,
+                            cp_size);
+    return full_stride_bytes / cp_size;
+}
+
 DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
     DSV4LayerSets sets;
     const size_t  num_layers = compress_ratios.size();
@@ -197,12 +220,13 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
     // SWA_KV ring = window + MTP draft slack, sized like the HCA state ring.
     // Without the +gen_num_per_cycle slack, a decode step's later draft writes
     // wrap onto ring slots still inside earlier tokens' SWA window -> MTP garble.
-    const uint32_t swa_kv_eb = maybeAdjustFixedEntriesForCpSharding(
+    const uint32_t swa_kv_eb = maybeAdjustSwaEntriesForCpSharding(
         computeStateRing(/*compress_ratio=*/static_cast<int>(kDsv4SwaWindowEntries),
                          /*overlap=*/0,
                          gen_num_per_cycle),
-        parallelism_config,
-        KVCacheRegionName::SWA_KV);
+        parallelism_config);
+    const size_t swa_kv_block_size_bytes_override =
+        maybeSwaPrefillCpByteSliceBytes(swa_kv_eb, parallelism_config);
     const uint32_t fixed_cp_size = fixedRegionCpSize(parallelism_config);
     const uint32_t fixed_tokens_per_block =
         fixed_cp_size > 1 ? physical_tokens_per_block * fixed_cp_size : physical_tokens_per_block;
@@ -255,7 +279,8 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
          swa_kv_eb,
          fixed_tokens_per_block,
          DataType::TYPE_UINT8,
-         false},
+         false,
+         swa_kv_block_size_bytes_override},
     };
 }
 
@@ -274,7 +299,8 @@ KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool) {
                                            pool.entry_elems,
                                            pool.entries_per_block,
                                            pool.store_dtype,
-                                           pool.tokens_per_block);
+                                           pool.tokens_per_block,
+                                           pool.block_size_bytes_override);
 }
 
 }  // namespace
