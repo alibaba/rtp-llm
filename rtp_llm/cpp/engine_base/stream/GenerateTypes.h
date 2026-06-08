@@ -53,6 +53,10 @@ public:
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
 
+    // For prompt embedding replacement
+    std::optional<torch::Tensor>                input_embeddings;      // pre-computed embeddings [num_locs, hidden_size]
+    std::optional<torch::Tensor>                input_embedding_locs;  // token positions to replace [num_locs], int32
+
     int     prefix_length = 0;
     int64_t begin_time_us = 0;
 

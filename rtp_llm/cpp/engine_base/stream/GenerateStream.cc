@@ -420,6 +420,24 @@ int GenerateStream::multimodalFeaturesLength() const {
     return multimodalFeatures().size() * currentBatchSize();
 }
 
+torch::Tensor GenerateStream::inputEmbeddings() const {
+    if (generate_input_->input_embeddings) {
+        return generate_input_->input_embeddings.value();
+    }
+    return torch::Tensor();
+}
+
+torch::Tensor GenerateStream::inputEmbeddingLocs() const {
+    if (generate_input_->input_embedding_locs) {
+        return generate_input_->input_embedding_locs.value();
+    }
+    return torch::Tensor();
+}
+
+bool GenerateStream::hasInputEmbeddings() const {
+    return generate_input_->input_embeddings.has_value();
+}
+
 torch::Tensor GenerateStream::multimodalLocations() const {
     if (!generate_input_->mm_locs) {
         return torch::Tensor();

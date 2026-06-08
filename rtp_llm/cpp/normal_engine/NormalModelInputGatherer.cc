@@ -271,6 +271,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
 absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&     model_input,
                                                              const StreamGroups& stream_groups) const {
     std::vector<torch::Tensor> gathered_mm_features;
+    std::vector<torch::Tensor> gathered_input_embeddings;
+    std::vector<int>           gathered_input_embedding_locs;
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
 
     for (const auto& stream : stream_groups.contextStreams()) {
@@ -310,6 +312,14 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
             gatherMultimodalFeaturesForContextBatch(stream, ctx, gathered_mm_features);
 
+            if (stream->hasInputEmbeddings()) {
+                torch::Tensor emb = stream->inputEmbeddings();
+                if (emb.defined()) {
+                    gathered_input_embeddings.emplace_back(emb.cpu());
+                    gathered_input_embedding_locs.push_back(ctx.token_idx);
+                }
+            }
+
             if (ctx.need_cal_position_id) {
                 auto context_pos_ids = stream->generateContextPositionIds();
                 int  reuse_offset    = stream->reuseLength() * config_.position_id_len_factor;
@@ -342,6 +352,13 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
     if (config_.is_multimodal && !gathered_mm_features.empty()) {
         model_input.multimodal_features = std::move(gathered_mm_features);
+    }
+    if (!gathered_input_embeddings.empty()) {
+        model_input.input_embeddings      = std::move(gathered_input_embeddings);
+        model_input.input_embeddings_locs = torch::from_blob(gathered_input_embedding_locs.data(),
+                                                             {(int64_t)gathered_input_embedding_locs.size()},
+                                                             torch::kInt32)
+                                                .clone();
     }
     return absl::OkStatus();
 }

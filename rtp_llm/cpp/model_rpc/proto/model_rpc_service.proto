@@ -143,6 +143,8 @@ message GenerateInputPB {
     int64 start_time = 6;
     int32 batch_group_size = 7;
     google.protobuf.Int64Value batch_group_id = 8;
+    TensorPB input_embeddings = 9;
+    repeated int32 input_embedding_locs = 10;
 }
 
 message AuxInfoPB {

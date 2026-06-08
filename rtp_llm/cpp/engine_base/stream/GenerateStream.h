@@ -221,6 +221,10 @@ public:
     int                        multimodalFeaturesLength() const;
     torch::Tensor              multimodalLocations() const;
 
+    torch::Tensor              inputEmbeddings() const;
+    torch::Tensor              inputEmbeddingLocs() const;
+    bool                       hasInputEmbeddings() const;
+
     int64_t getTimeoutMs() const;
     void    checkTimeout();
 

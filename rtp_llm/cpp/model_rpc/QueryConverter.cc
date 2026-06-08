@@ -138,6 +138,17 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         generate_input->batch_group_id = input->batch_group_id().value();
     }
 
+    if (input->input_embeddings().shape_size() > 0 && input->input_embeddings().shape(0) > 0) {
+        generate_input->input_embeddings = transTensor(input->input_embeddings());
+    }
+    if (input->input_embedding_locs_size() > 0) {
+        generate_input->input_embedding_locs =
+            torch::from_blob(const_cast<int*>(input->input_embedding_locs().data()),
+                             {(int64_t)input->input_embedding_locs_size()},
+                             torch::kInt32)
+                .clone();
+    }
+
     return generate_input;
 }
 
