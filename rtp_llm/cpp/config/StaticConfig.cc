@@ -1,4 +1,3 @@
-// cache-key bump: invalidate poisoned online_aone remote action-cache entry (CAS eviction)
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
