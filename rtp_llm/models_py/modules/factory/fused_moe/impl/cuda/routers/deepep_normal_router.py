@@ -36,6 +36,19 @@ from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 class DeepepNormalRouterBase(FusedMoeDataRouter):
     """Base class for DeepEP normal routers."""
 
+    # When True, keep DeepEP's recv expert indices in this rank's *local*
+    # range ``[0, expert_num_per_rank)`` (with -1 for non-local) instead of
+    # remapping them back to global ids. Used by the MXFP8 path whose executor
+    # (``mxfp8_moe_forward``) consumes local ids + ``num_experts=E_local``.
+    LOCAL_TOPK_IDS: bool = False
+
+    # When True, always dispatch the raw BF16 activations (no pre-quant), even
+    # if ``quant_dtype`` is an fp8 type. MXFP8 (1x32) sets this: its e4m3fn
+    # quant_dtype would otherwise trigger the FP8-per-block-128 quant path,
+    # which is the wrong recipe — the MXFP8 executor quantizes per-expert
+    # chunks at group-32 internally after combine-side scatter.
+    FORCE_BF16_DISPATCH: bool = False
+
     @classmethod
     def router_type(cls):
         return RouterType.DEEPEP_NORMAL
@@ -102,9 +115,20 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         use_fp8 = (
             self.quant_config.is_quantized
             and self.quant_config.quant_dtype == torch.float8_e4m3fn
+            and not self.FORCE_BF16_DISPATCH
         )
         quant_method = MoeConfigResolver().get_quant_method(self.config)
         use_fp4 = quant_method == "modelopt_fp4"
+        # DeepEP normal dispatch is a prefill-mode kernel that assumes every
+        # rank holds at least one token. On decode / tiny batches a rank can be
+        # left empty after TP-slicing (e.g. 1 token over tp_size>1), and the
+        # ACCL-EP intranode kernel then asserts because the per-expert layout
+        # metadata is present while the topk pointers are null. Feed such ranks
+        # a single dummy token routed to no expert (topk all -1, weight 0): it
+        # is sent to no rank, computed by no expert, and dropped by the
+        # finalize gather slice (which keeps only ``original_num_tokens`` rows).
+        empty_slice = slice_size == 0
+
         if use_fp8:
             a1_quant, a1_scale_quant = self._do_quant(a1)
             assert a1_scale_quant is not None
@@ -113,15 +137,43 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
                 a1_scale_quant, 0, slice_begin, slice_size
             )
             tp_expert_input = (tp_expert_a1, tp_expert_a1_scale)
+        elif empty_slice:
+            tp_expert_a1 = torch.zeros(
+                (1, a1.size(1)), dtype=a1.dtype, device=a1.device
+            )
+            tp_expert_input = tp_expert_a1
         else:
             tp_expert_a1 = torch.narrow(a1, 0, slice_begin, slice_size)
             tp_expert_input = tp_expert_a1
 
         # pre dispatch
-        tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size).to(
-            torch.int64
-        )
-        tp_expert_scales = torch.narrow(topk_weights, 0, slice_begin, slice_size)
+        if empty_slice and not use_fp8:
+            tp_expert_ids = torch.full(
+                (1, topk_ids.size(1)), -1, dtype=torch.int64, device=topk_ids.device
+            )
+            tp_expert_scales = torch.zeros(
+                (1, topk_weights.size(1)),
+                dtype=topk_weights.dtype,
+                device=topk_weights.device,
+            )
+        else:
+            tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size).to(
+                torch.int64
+            )
+            tp_expert_scales = torch.narrow(topk_weights, 0, slice_begin, slice_size)
+
+        import os as _os
+
+        if _os.environ.get("DEEPEP_DBG"):
+            print(
+                f"[DEEPEP_DBG] ep_rank={self.ep_rank} tp_rank={tp_rank} "
+                f"token_num={token_num} slice={slice_begin}:{slice_size} use_fp8={use_fp8} "
+                f"ids[shape={tuple(tp_expert_ids.shape)} dt={tp_expert_ids.dtype} "
+                f"contig={tp_expert_ids.is_contiguous()} ptr={tp_expert_ids.data_ptr()}] "
+                f"sc[shape={tuple(tp_expert_scales.shape)} dt={tp_expert_scales.dtype} "
+                f"contig={tp_expert_scales.is_contiguous()} ptr={tp_expert_scales.data_ptr()}]",
+                flush=True,
+            )
 
         (
             num_tokens_per_rank,
@@ -169,7 +221,12 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             num_recv_tokens_per_expert_list, device=expert_x.device, dtype=torch.int32
         )
 
-        if recv_topk_idx.numel() != 0 and (not use_fp8) and (not use_fp4):
+        if (
+            recv_topk_idx.numel() != 0
+            and (not use_fp8)
+            and (not use_fp4)
+            and not self.LOCAL_TOPK_IDS
+        ):
             expert_topk_ids = torch.where(
                 recv_topk_idx == -1,
                 self.expert_num - 1 if self.rank_expert_offset == 0 else 0,
@@ -368,3 +425,33 @@ class DeepepNormalRouterFp4PerGroup(DeepepNormalRouterBase):
         checker.check(quant_method == "modelopt_fp4")
         checker.check(config.moe_config.use_deepep_moe)
         checker.check(not config.moe_config.use_deepep_low_latency)
+
+
+class DeepepNormalRouterMxfp8(DeepepNormalRouterBase):
+    """DeepEP normal router for MXFP8 (1x32) MoE (MiniMax-M3).
+
+    Dispatches BF16 activations (no pre-quant — the MXFP8 executor quantizes
+    per-expert chunks at group-32 internally), and keeps DeepEP's *local*
+    expert indices (``LOCAL_TOPK_IDS=True``) so ``mxfp8_moe_forward``
+    (num_experts = E_local, drops -1 assignments) can consume them directly.
+    ``finalize`` runs DeepEP combine + TP all_gather to reconstruct the full
+    token output, replacing the full-hidden TP all_reduce of the pure-TP path.
+    """
+
+    LOCAL_TOPK_IDS = True
+    FORCE_BF16_DISPATCH = True
+
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(config, quant_config, expert_alignment=1)
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        """Check if DeepepNormalRouterMxfp8 can handle the configuration"""
+        super().check_conditions(checker, config)
+        resolver = MoeConfigResolver()
+        quant_method = resolver.get_quant_method(config)
+        checker.check(quant_method == "MXFP8")

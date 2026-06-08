@@ -98,6 +98,7 @@ else:
             CudaFp4EpLowLatencyStrategy,
             CudaFp4EpNormalStrategy,
             CudaFp4NoDPStrategy,
+            CudaMxfp8EpNormalStrategy,
             CudaMxfp8NoDPStrategy,
         )
 
@@ -105,4 +106,5 @@ else:
         registry.register(CudaFp4EpNormalStrategy())
         registry.register(CudaFp4NoDPStrategy())
         registry.register(CudaMxfp8NoDPStrategy())
+        registry.register(CudaMxfp8EpNormalStrategy())
     FusedMoeFactory.set_registry(registry)
