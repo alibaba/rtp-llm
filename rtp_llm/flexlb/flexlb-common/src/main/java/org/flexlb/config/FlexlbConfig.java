@@ -185,12 +185,12 @@ public class FlexlbConfig {
     /**
      * Enables master-side request coalescing. Requests that carry a full
      * generate_input_pb_b64 payload can be routed once, grouped by Prefill worker,
-     * and submitted through BatchEnqueue.
+     * and submitted through EnqueueBatch.
      */
     private boolean flexlbBatchEnabled = true;
 
     /**
-     * Maximum real requests in one BatchEnqueue request.
+     * Maximum real requests in one EnqueueBatch request.
      */
     private int flexlbBatchSizeMax = 8;
 
@@ -200,7 +200,7 @@ public class FlexlbConfig {
     private long flexlbBatchWindowMs = 30;
 
     /**
-     * Deadline in milliseconds for BatchEnqueue.
+     * Deadline in milliseconds for EnqueueBatch.
      */
     private long flexlbBatchEnqueueDeadlineMs = 5000;
 

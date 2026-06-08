@@ -180,15 +180,15 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
     /**
      * Submit a batch of already-routed requests to a Prefill worker.
      */
-    public EngineRpcService.BatchEnqueueResponsePB batchEnqueue(String ip,
+    public EngineRpcService.EnqueueBatchResponsePB batchEnqueue(String ip,
                                                                 int port,
-                                                                EngineRpcService.BatchEnqueueRequestPB request,
+                                                                EngineRpcService.EnqueueBatchRequestPB request,
                                                                 long requestTimeoutMs) {
-        return executeGrpcCall(ip, port, stub -> stub.getRpcServiceStub().batchEnqueue(request), requestTimeoutMs, ServiceType.BATCH_ENQUEUE);
+        return executeGrpcCall(ip, port, stub -> stub.getRpcServiceStub().enqueueBatch(request), requestTimeoutMs, ServiceType.BATCH_ENQUEUE);
     }
 
     /**
-     * Cancel a request previously submitted through BatchEnqueue.
+     * Cancel a request previously submitted through EnqueueBatch.
      */
     public EngineRpcService.EmptyPB cancel(String ip, int port, long requestId, long requestTimeoutMs) {
         EngineRpcService.CancelRequestPB request = EngineRpcService.CancelRequestPB.newBuilder()

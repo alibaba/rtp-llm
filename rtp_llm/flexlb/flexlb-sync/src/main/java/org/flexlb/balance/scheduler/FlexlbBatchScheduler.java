@@ -187,7 +187,7 @@ public class FlexlbBatchScheduler {
         }
 
         long batchId = batchIdGenerator.incrementAndGet();
-        EngineRpcService.BatchEnqueueRequestPB request;
+        EngineRpcService.EnqueueBatchRequestPB request;
         try {
             request = buildBatchRequest(batchId, activeItems);
         } catch (Exception e) {
@@ -224,11 +224,11 @@ public class FlexlbBatchScheduler {
 
         try {
             long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
-            EngineRpcService.BatchEnqueueResponsePB response =
+            EngineRpcService.EnqueueBatchResponsePB response =
                     grpcClient.batchEnqueue(entrypoint.getServerIp(), entrypoint.getGrpcPort(), request, deadlineMs);
             handleAck(batchId, activeItems, response);
         } catch (Throwable t) {
-            Logger.warn("BatchEnqueue failed batchId: {}, entrypoint: {}:{}, err: {}",
+            Logger.warn("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
                     batchId, entrypoint.getServerIp(), entrypoint.getGrpcPort(), t.getMessage());
             for (BatchItem item : activeItems) {
                 failAck(item, t);
@@ -236,9 +236,9 @@ public class FlexlbBatchScheduler {
         }
     }
 
-    private EngineRpcService.BatchEnqueueRequestPB buildBatchRequest(long batchId, List<BatchItem> items)
+    private EngineRpcService.EnqueueBatchRequestPB buildBatchRequest(long batchId, List<BatchItem> items)
             throws InvalidProtocolBufferException {
-        EngineRpcService.BatchEnqueueRequestPB.Builder builder = EngineRpcService.BatchEnqueueRequestPB.newBuilder()
+        EngineRpcService.EnqueueBatchRequestPB.Builder builder = EngineRpcService.EnqueueBatchRequestPB.newBuilder()
                 .setBatchId(batchId);
         Map<Long, List<BatchItem>> byDpRank = new HashMap<>();
         for (BatchItem item : items) {
@@ -248,13 +248,13 @@ public class FlexlbBatchScheduler {
             byDpRank.entrySet().stream()
                     .sorted(Map.Entry.comparingByKey())
                     .forEach(entry -> {
-                        EngineRpcService.BatchEnqueueDpSlotPB.Builder slot =
-                                EngineRpcService.BatchEnqueueDpSlotPB.newBuilder()
+                        EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
+                                EngineRpcService.EnqueueBatchDpSlotPB.newBuilder()
                                         .setDpRank(entry.getKey().intValue());
                         int groupSize = entry.getValue().size();
                         for (BatchItem item : entry.getValue()) {
                             try {
-                                slot.addRequests(EngineRpcService.BatchEnqueueExternalInputPB.newBuilder()
+                                slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
                                         .setInput(buildInput(batchId, groupSize, item))
                                         .build());
                             } catch (InvalidProtocolBufferException e) {
@@ -306,23 +306,23 @@ public class FlexlbBatchScheduler {
                 .build());
     }
 
-    private void handleAck(long batchId, List<BatchItem> items, EngineRpcService.BatchEnqueueResponsePB response) {
+    private void handleAck(long batchId, List<BatchItem> items, EngineRpcService.EnqueueBatchResponsePB response) {
         if (response == null) {
-            RuntimeException error = new RuntimeException("BatchEnqueue returned null response");
+            RuntimeException error = new RuntimeException("EnqueueBatch returned null response");
             for (BatchItem item : items) {
                 failAck(item, error);
             }
             return;
         }
 
-        Map<Long, EngineRpcService.BatchEnqueueErrorPB> errorByRequestId =
+        Map<Long, EngineRpcService.EnqueueBatchErrorPB> errorByRequestId =
                 new HashMap<>(response.getErrorsCount() * 2);
-        for (EngineRpcService.BatchEnqueueErrorPB error : response.getErrorsList()) {
+        for (EngineRpcService.EnqueueBatchErrorPB error : response.getErrorsList()) {
             errorByRequestId.put(error.getRequestId(), error);
         }
-        Map<Long, EngineRpcService.BatchEnqueueSuccessPB> successByRequestId =
+        Map<Long, EngineRpcService.EnqueueBatchSuccessPB> successByRequestId =
                 new HashMap<>(response.getSuccessesCount() * 2);
-        for (EngineRpcService.BatchEnqueueSuccessPB success : response.getSuccessesList()) {
+        for (EngineRpcService.EnqueueBatchSuccessPB success : response.getSuccessesList()) {
             successByRequestId.put(success.getRequestId(), success);
         }
 
@@ -334,23 +334,23 @@ public class FlexlbBatchScheduler {
             }
 
             if (errorByRequestId.containsKey(item.requestId())) {
-                EngineRpcService.BatchEnqueueErrorPB error = errorByRequestId.get(item.requestId());
+                EngineRpcService.EnqueueBatchErrorPB error = errorByRequestId.get(item.requestId());
                 String errorMessage = error.hasErrorInfo()
                         ? error.getErrorInfo().getErrorMessage()
                         : "missing error_info";
-                failAck(item, new RuntimeException("BatchEnqueue rejected request "
+                failAck(item, new RuntimeException("EnqueueBatch rejected request "
                         + item.requestId() + ": " + errorMessage));
                 continue;
             }
 
-            failAck(item, new RuntimeException("BatchEnqueue missing ack for request " + item.requestId()));
+            failAck(item, new RuntimeException("EnqueueBatch missing ack for request " + item.requestId()));
         }
     }
 
     private void completeAckSuccess(long batchId, BatchItem item, InflightEntry entry) {
         if (entry == null) {
             if (!item.future.isDone()) {
-                item.future.completeExceptionally(new RuntimeException("BatchEnqueue inflight entry missing"));
+                item.future.completeExceptionally(new RuntimeException("EnqueueBatch inflight entry missing"));
             }
             return;
         }
