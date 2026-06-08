@@ -1,5 +1,8 @@
 #pragma once
 
+#include <algorithm>
+#include <numeric>
+
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 
@@ -19,8 +22,8 @@ inline constexpr size_t   DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES = 576;
 // has fewer. Used to tell them apart in DSV4StateSpec::block_size_bytes().
 inline constexpr uint32_t DSV4_SWA_WINDOW_ENTRIES = 128;
 
-inline size_t alignDsv4Fp8KvBlockBytes(size_t natural) {
-    constexpr size_t align = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES;
+inline size_t alignDsv4Fp8KvBlockBytes(size_t natural, size_t extra_multiple = 1) {
+    const size_t align = std::lcm(DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES, std::max<size_t>(extra_multiple, 1));
     return ((natural + align - 1) / align) * align;
 }
 
@@ -111,6 +114,7 @@ struct DSV4StateSpec: public KVCacheSpec {
     uint32_t          state_dim;          // state dimension (entry_elems in pool_spec)
     uint32_t          entries_per_block;  // 4 or 8
     DataType          store_dtype;        // TYPE_FP32
+    size_t            block_size_bytes_override = 0;
 
     DSV4StateSpec() = default;
 
@@ -119,11 +123,13 @@ struct DSV4StateSpec: public KVCacheSpec {
                   uint32_t          state_elements,
                   uint32_t          block_entries,
                   DataType          storage_dtype,
-                  uint32_t          seq_size_per_blk) {
+                  uint32_t          seq_size_per_blk,
+                  size_t            block_size_bytes_override_value = 0) {
         cache_type        = cache_region;
         state_dim         = state_elements;
         entries_per_block = block_entries;
         store_dtype       = storage_dtype;
+        block_size_bytes_override = block_size_bytes_override_value;
 
         // KVCacheSpec base fields
         layer_num          = layer_count;
@@ -153,6 +159,9 @@ struct DSV4StateSpec: public KVCacheSpec {
     // SWA_KV ring stores the FP8 KV layout and needs TMA padding; a prefill
     // CP-sliced sub-block (< window) keeps its natural size.
     size_t block_size_bytes() const override {
+        if (block_size_bytes_override > 0) {
+            return block_size_bytes_override;
+        }
         const size_t natural = natural_block_size_bytes();
         if (state_dim == DSV4_FP8_KV_ENTRY_BYTES && entries_per_block >= DSV4_SWA_WINDOW_ENTRIES) {
             return alignDsv4Fp8KvBlockBytes(natural);
@@ -174,6 +183,7 @@ struct DSV4StateSpec: public KVCacheSpec {
         os << std::string(indent + 2, ' ') << "cache_type=" << static_cast<int>(cache_type) << "\n";
         os << std::string(indent + 2, ' ') << "state_dim=" << state_dim << "\n";
         os << std::string(indent + 2, ' ') << "entries_per_block=" << entries_per_block << "\n";
+        os << std::string(indent + 2, ' ') << "block_size_bytes_override=" << block_size_bytes_override << "\n";
         os << std::string(indent, ' ') << "}\n";
         return os.str();
     }
