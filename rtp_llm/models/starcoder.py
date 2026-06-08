@@ -1,12 +1,6 @@
 from typing import Any, Dict, List
 
-try:
-    from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
-except ImportError:
-    from transformers import GPT2TokenizerFast
-
-from rtp_llm.config.model_config import VitParameters
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import ModelConfig, VitParameters
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
