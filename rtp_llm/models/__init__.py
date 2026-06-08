@@ -45,5 +45,7 @@ from .qwen3_next.qwen3_next_mtp import Qwen3NextMTP
 from .qwen_v2_moe import Qwen2Moe
 from .qwen_v3_moe import Qwen3Moe
 
+import rtp_llm.omni  # noqa: F401
+
 if has_internal_source():
     import internal_source.rtp_llm.models.internal_init
