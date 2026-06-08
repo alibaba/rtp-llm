@@ -97,6 +97,22 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         else:
             self._compress_ratios = self._compress_ratios[: self._num_layers]
         self._num_hash_layers = int(self.model_config.num_hash_layers)
+        self._expert_dtype = getattr(self.model_config, "v4_expert_dtype", "fp4")
+
+        # V4-Flash-FP8: wo_a is BF16 (no .scale file in checkpoint).
+        # Remove wo_a from the FP8 weight list so the loader doesn't
+        # look for a non-existent wo_a.scale tensor.
+        if self._expert_dtype == "fp8":
+            from rtp_llm.model_loader.per_block_fp8_quant_weight import (
+                PerBlockFp8Weight,
+                _V4_FP8_WEIGHT_LIST,
+            )
+
+            wo_a_w = W.v4_attn_wo_a_w
+            if wo_a_w in PerBlockFp8Weight.w8a8_weight_list:
+                del PerBlockFp8Weight.w8a8_weight_list[wo_a_w]
+            if wo_a_w in _V4_FP8_WEIGHT_LIST:
+                del _V4_FP8_WEIGHT_LIST[wo_a_w]
 
     def _compress_ratio(self, layer_id: int) -> int:
         if layer_id < 0 or layer_id >= len(self._compress_ratios):
@@ -369,6 +385,57 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
             )
         return out
 
+    def _build_routed_experts_fp8(self, layer_id: int) -> List[WeightModule]:
+        """FP8-blockwise routed experts (V4-Flash-FP8 on MI308X).
+
+        Checkpoint layout (per expert):
+          - weight: float8_e4m3fn, shape (N, K) e.g. (2048, 4096)
+          - scale:  float32, shape (N/128, K/128) — per 128×128 block scale
+
+        Reuses the same W.v4_routed_w{1,2,3}_{w,s} constants as FP4 path.
+        The framework's weight loader stacks per-expert tensors into
+        [num_experts, ...] via MoeAtomicWeight + stack_.
+        """
+        moe_cfg = MoeConfig(
+            expert_num=self.expert_num_,
+            align_size=self._moe_align_size,
+        )
+        out: List[WeightModule] = []
+        for sub_w_name, sub_s_name, sub in [
+            (W.v4_routed_w1_w, W.v4_routed_w1_s, "w1"),
+            (W.v4_routed_w2_w, W.v4_routed_w2_s, "w2"),
+            (W.v4_routed_w3_w, W.v4_routed_w3_s, "w3"),
+        ]:
+            out.append(
+                MoeAtomicWeight(
+                    sub_w_name,
+                    [
+                        CkptWeightInfo(
+                            self._key(f"ffn.experts.{{expert_id}}.{sub}.weight"),
+                            identity,
+                        )
+                    ],
+                    stack_,
+                    config=moe_cfg,
+                    data_type=torch.float8_e4m3fn,
+                )
+            )
+            out.append(
+                MoeAtomicWeight(
+                    sub_s_name,
+                    [
+                        CkptWeightInfo(
+                            self._key(f"ffn.experts.{{expert_id}}.{sub}.scale"),
+                            identity,
+                        )
+                    ],
+                    stack_,
+                    config=moe_cfg,
+                    data_type=torch.float32,
+                )
+            )
+        return out
+
     # ------------------------------------------------------------------
     # Top-level entry points
     # ------------------------------------------------------------------
@@ -417,8 +484,11 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         # 8. Shared expert (FP8)
         weights += self._build_shared_expert(layer_id)
 
-        # 9. Routed experts (FP4 — per-expert via MoeAtomicWeight)
-        weights += self._build_routed_experts_fp4(layer_id)
+        # 9. Routed experts (FP4 or FP8 depending on checkpoint format)
+        if self._expert_dtype == "fp8":
+            weights += self._build_routed_experts_fp8(layer_id)
+        else:
+            weights += self._build_routed_experts_fp4(layer_id)
 
         return weights
 
@@ -651,6 +721,20 @@ class DeepSeekV4(DeepSeekV2):
         # need fp32 logits accumulation, but doubles RAM (1 GiB → 2 GiB).
         # V4 sampling runs on bf16 logits like V3.
         config.enable_fp32_lm_head = False
+
+        # Detect expert quantization format:
+        # - V4-Flash-Base: explicit expert_dtype="fp8"
+        # - V4-Flash-FP8: no expert_dtype, but quantization_config.quant_method="fp8"
+        #   and safetensors has float8_e4m3fn expert weights (not int8 packed FP4)
+        # - V4-Flash / V4-Pro: expert_dtype="fp4" (MXFP4)
+        expert_dtype = config_json.get("expert_dtype", None)
+        if expert_dtype is None:
+            qcfg = config_json.get("quantization_config", {})
+            if qcfg.get("quant_method") == "fp8" and qcfg.get("fmt") == "e4m3":
+                expert_dtype = "fp8"
+            else:
+                expert_dtype = "fp4"
+        config.v4_expert_dtype = expert_dtype
 
         logging.info(
             "DeepSeek-V4 config loaded: layers=%d hidden=%d head_num=%d head_dim=%d "
