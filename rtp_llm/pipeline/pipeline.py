@@ -603,6 +603,14 @@ class Pipeline(object):
                 generate_config=copy.copy(generate_config),
                 tokenizer=self.tokenizer,
             )
+            if generate_config.force_batch:
+                # FIFOScheduler.evaluateWaitingStreams locks force_batch_group_id only
+                # when batch_group_id != -1. Without these fields, later force_batch
+                # siblings are skipped (FIFOScheduler.cc:228-234), splitting them
+                # across separate batch_epochs and defeating both batch-local KV reuse
+                # and the "force_batch" guarantee.
+                gen_input.batch_group_id = base_request_id
+                gen_input.batch_group_size = len(prompts)
             inputs.append(gen_input)
 
         batch_outputs = await self.backend_rpc_server_visitor.batch_enqueue(inputs)

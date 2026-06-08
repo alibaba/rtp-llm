@@ -105,6 +105,22 @@ KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id, int partition_cou
     return block_pool_->convertIndexToBuffer(local_layer_id, block_id, partition_count, partition_id);
 }
 
+void KVCacheGroup::handlePutResult(const BlockCache::PutResult& result, BlockIdxType block_index) {
+    switch (result.action) {
+        case BlockCache::PutResult::Action::SKIPPED:
+            break;
+        case BlockCache::PutResult::Action::REPLACED:
+            if (result.old_block_index != block_index) {
+                block_pool_->blockCacheFree(result.old_block_index);
+                block_pool_->blockCacheReference(block_index);
+            }
+            break;
+        case BlockCache::PutResult::Action::INSERTED:
+            block_pool_->blockCacheReference(block_index);
+            break;
+    }
+}
+
 void KVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
     block_pool_->requestReference(new_block_indices);
 }
