@@ -150,7 +150,9 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                                    .loss                   = {},
                                    .src_batch_indices      = {},
                                    .all_hidden_states      = {},
-                                   .update_remote_generate = false});
+                                   .update_remote_generate = false,
+                                   .force_update_info      = false,
+                                   .skip_finish_check      = true});
     }
 
     // 2. Reuse lengths

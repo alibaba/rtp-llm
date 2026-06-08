@@ -37,6 +37,7 @@ struct StreamUpdateInfo {
     const torch::Tensor all_hidden_states;
     bool                update_remote_generate = true;
     bool                force_update_info      = false;
+    bool                skip_finish_check      = false;
 };
 
 struct StreamSpecUpdateInfo {

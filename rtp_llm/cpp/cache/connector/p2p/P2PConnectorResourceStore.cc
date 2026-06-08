@@ -10,6 +10,8 @@
 
 namespace {
 
+constexpr int64_t kSideChannelMaxTtlMs = 3600000;  // 1 hour
+
 std::chrono::system_clock::time_point deadlineToTimeoutPoint(int64_t deadline_ms, int64_t start_time_us) {
     const int64_t remaining_us = deadline_ms * 1000 - start_time_us;
     return std::chrono::system_clock::now() + std::chrono::microseconds(remaining_us);
@@ -324,6 +326,8 @@ void P2PConnectorResourceStore::notifySideChannelReady(const std::string&       
             // caller-provided business deadline (~1h).
             deadline_ms = it->second->deadline_ms;
             add_time_us = it->second->add_time_us;
+        } else if (deadline_ms <= 0 || deadline_ms == INT64_MAX) {
+            deadline_ms = currentTimeMs() + kSideChannelMaxTtlMs;
         }
     }
     {
