@@ -50,7 +50,7 @@ def sm8x_suites():
                 gpu_type=["L20"],
                 smoke_args= {
                     "frontend": "--max_seq_len 2048 --role_type FRONTEND --warm_up 0",
-                    "pd_fusion": "--reuse_cache 1 --seq_size_per_block 8 --act_type FP16 --warm_up 0"
+                    "pd_fusion": "--reuse_cache 1 --seq_size_per_block 8 --act_type FP16 --warm_up 0",
                 }
             ),
             # Simplified from qwen_7b → qwen2.5-0.5B; result/logits placeholders need rewrite_smoke regen
@@ -71,3 +71,22 @@ def sm8x_suites():
         ],
     )
 
+    # Keep the basic/light SM8x suite on the direct frontend -> pd_fusion path:
+    # it is the fast compatibility smoke and should not pull the non-hermetic
+    # FlexLB Maven jar. FlexLB coverage is explicit in this separate target.
+    native.test_suite(
+        name = "smoke_sm8x_flexlb",
+        tests = [
+            smoke_test(
+                name="frontend_flexlb_app",
+                task_info="data/model/qwen25/q_r_3_front_app.json",
+                gpu_type=["L20"],
+                smoke_args= {
+                    "frontend": "--max_seq_len 2048 --role_type FRONTEND --warm_up 0",
+                    "pd_fusion": "--reuse_cache 1 --seq_size_per_block 8 --act_type FP16 --warm_up 0",
+                    "flexlb": "",
+                },
+                data=["//rtp_llm/flexlb:flexlb_api_jar"],
+            ),
+        ],
+    )

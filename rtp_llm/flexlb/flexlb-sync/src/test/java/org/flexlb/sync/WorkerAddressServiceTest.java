@@ -2,6 +2,10 @@ package org.flexlb.sync;
 
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.route.Endpoint;
+import org.flexlb.dao.route.GroupRoleEndPoint;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -76,5 +80,58 @@ class WorkerAddressServiceTest {
 
         // Assertions - should return hosts
         Assertions.assertFalse(actualHosts.isEmpty());
+    }
+
+    @Test
+    void testGetEngineWorkers_MarksEmptyDiscoveryGroupUnavailable() {
+        String modelName = "TestModel";
+        ServiceRoute serviceRoute = new ServiceRoute();
+        GroupRoleEndPoint stableEndpoint = buildPrefillGroup("stable", "stable-vip");
+        GroupRoleEndPoint grayEndpoint = buildPrefillGroup("gray", "gray-vip");
+        serviceRoute.setRoleEndpoints(List.of(stableEndpoint, grayEndpoint));
+
+        when(modelMetaConfig.getServiceRoute(anyString())).thenReturn(serviceRoute);
+        when(serviceDiscovery.getHosts(eq("stable-vip")))
+                .thenReturn(List.of(new WorkerHost("127.0.0.1", 8080, "site1")));
+        when(serviceDiscovery.getHosts(eq("gray-vip"))).thenReturn(Collections.emptyList());
+
+        WorkerAddressService.EngineWorkerList result = workerAddressService.getEngineWorkers(modelName, RoleType.PREFILL);
+
+        Assertions.assertEquals(1, result.getWorkerHosts().size());
+        Assertions.assertEquals("stable", result.getWorkerHosts().getFirst().getGroup());
+        Assertions.assertTrue(result.getUnavailableGroups().contains("gray"));
+    }
+
+    @Test
+    void testGetEngineWorkers_DoesNotMarkDiscoveryFailureUnavailable() {
+        String modelName = "TestModel";
+        ServiceRoute serviceRoute = new ServiceRoute();
+        GroupRoleEndPoint stableEndpoint = buildPrefillGroup("stable", "stable-vip");
+        GroupRoleEndPoint grayEndpoint = buildPrefillGroup("gray", "gray-vip");
+        serviceRoute.setRoleEndpoints(List.of(stableEndpoint, grayEndpoint));
+
+        when(modelMetaConfig.getServiceRoute(anyString())).thenReturn(serviceRoute);
+        when(serviceDiscovery.getHosts(eq("stable-vip")))
+                .thenReturn(List.of(new WorkerHost("127.0.0.1", 8080, "site1")));
+        when(serviceDiscovery.getHosts(eq("gray-vip"))).thenThrow(new RuntimeException("discovery failed"));
+
+        WorkerAddressService.EngineWorkerList result = workerAddressService.getEngineWorkers(modelName, RoleType.PREFILL);
+
+        Assertions.assertEquals(1, result.getWorkerHosts().size());
+        Assertions.assertEquals("stable", result.getWorkerHosts().getFirst().getGroup());
+        Assertions.assertFalse(result.getUnavailableGroups().contains("gray"));
+        Assertions.assertTrue(result.getDiscoveryFailedGroups().contains("gray"));
+    }
+
+    private GroupRoleEndPoint buildPrefillGroup(String group, String address) {
+        Endpoint endpoint = new Endpoint();
+        endpoint.setAddress(address);
+        endpoint.setProtocol("http");
+        endpoint.setPath("/");
+
+        GroupRoleEndPoint groupRoleEndPoint = new GroupRoleEndPoint();
+        groupRoleEndPoint.setGroup(group);
+        groupRoleEndPoint.setPrefillEndpoint(endpoint);
+        return groupRoleEndPoint;
     }
 }

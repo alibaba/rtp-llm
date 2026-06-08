@@ -5,7 +5,38 @@ package(default_visibility = ["//visibility:public"])
 # that breaks namespace package merging with internal smoke/.
 filegroup(
     name = "smoke_framework_srcs",
-    srcs = glob(["*.py"]),
+    srcs = glob(["*.py"], exclude = ["*_test.py"]),
+)
+
+py_test(
+    name = "flexlb_smoke_checks_test",
+    srcs = [
+        "flexlb_smoke_checks.py",
+        "flexlb_smoke_checks_test.py",
+    ],
+    imports = [".."],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
+    name = "openai_comparer_test",
+    srcs = [
+        "base_comparer.py",
+        "common_def.py",
+        "openai_comparer.py",
+        "openai_comparer_test.py",
+        "utils.py",
+    ],
+    imports = [
+        "..",
+        "../../..",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/utils:maga_server_manager",
+    ],
 )
 
 exports_files([

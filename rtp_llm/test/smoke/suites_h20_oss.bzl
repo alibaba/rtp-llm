@@ -341,6 +341,34 @@ def h20_oss_suites():
                 },
                 gpu_type=["H20"],
             ),
+            smoke_test(
+                name="next_flexlb_pd",
+                task_info="data/model/qwen3_next/q_r_next_fp8_tp2_pd_sep.json",
+                envs={
+                    "flexlb": [
+                        "FLEXLB_CONFIG={\"enableQueueing\":true,\"deploy\":\"DISAGGREGATED\",\"loadBalanceStrategy\":\"SHORTEST_TTFT\",\"prefillBatchWaitTimeMs\":100,\"kvCache\":\"LOCAL_STATIC\",\"staticCacheBlockSize\":500,\"batchSize\":1,\"prefillLbTimeoutMs\":300,\"prefillGenerateTimeoutMs\":5000,\"enableGrpcPrefillMaster\":false,\"enableGrpcCacheStatus\":true,\"enableGrpcEngineStatus\":true,\"maxPrefillQueueSize\":10,\"prefillQueueSizeThreshold\":8,\"decodeConcurrencyLimit\":128,\"maxQueueSize\":20}",
+                        "FLEXLB_SMOKE_INTEGRATION_CHECK=True",
+                        "FLEXLB_SMOKE_CHECK_CACHE_AFFINITY=True",
+                        "FLEXLB_SMOKE_CHECK_QUEUE=True",
+                        "FLEXLB_SMOKE_QUEUE_REQUESTS=12",
+                        "FLEXLB_SMOKE_CACHE_PROMPT_REPEAT_CANDIDATES=260,320",
+                    ],
+                },
+                smoke_args={
+                    # This target is FlexLB integration coverage, not the
+                    # direct-PD golden. Keep the same 2048-token block as
+                    # next_pd: Qwen3-Next hybrid attention cannot start when a
+                    # smaller block makes the full-attention KV block require
+                    # padding. Cache-affinity probes repeat the prompt enough
+                    # to produce at least one cache key at this block size.
+                    "prefill": "--warm_up 0 --load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --dp_size 2 --world_size 4 --reuse_cache 1 --write_cache_sync 1 --reserver_runtime_mem_mb 9861 --ssm_state_dtype fp32",
+                    "decode": "--warm_up 0 --load_cache_timeout_ms 120000 --seq_size_per_block 2048 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --world_size 2 --reuse_cache 1 --write_cache_sync 1 --reserver_runtime_mem_mb 9861 --ssm_state_dtype fp32",
+                    "frontend": "--role_type FRONTEND --use_local 1 --load_cache_timeout_ms 120000 --seq_size_per_block 2048",
+                    "flexlb": "",
+                },
+                data=["//rtp_llm/flexlb:flexlb_api_jar"],
+                gpu_type=["H20"],
+            ),
         ],
     )
 
@@ -451,4 +479,3 @@ def h20_oss_suites():
             ),
         ],
     )
-

@@ -12,6 +12,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.util.CollectionUtils;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -75,9 +76,23 @@ public class EngineSyncRunner implements Runnable {
         logger.info("EngineSyncRunner start for model: {}, role: {}", modelName, roleType.toString());
         try {
             long startTimeInUs = System.nanoTime() / 1000;
-            List<WorkerHost> latestEngineWorkerList = workerAddressService.getEngineWorkerList(modelName, roleType);
-            logger.info("workerAddressService getEngineWorkerList, model: {}, role: {}, size: {}", modelName, roleType, latestEngineWorkerList.size());
-            engineHealthReporter.reportServiceDiscoveryResult(modelName, latestEngineWorkerList.size(), roleType.toString());
+            WorkerAddressService.EngineWorkerList engineWorkerList = workerAddressService.getEngineWorkers(modelName, roleType);
+            if (engineWorkerList == null) {
+                logger.warn("workerAddressService getEngineWorkers returned null, model: {}, role: {}", modelName, roleType);
+                engineWorkerList = new WorkerAddressService.EngineWorkerList(List.of(), Set.of());
+            }
+            List<WorkerHost> discoveredEngineWorkerList = engineWorkerList.getWorkerHosts();
+            if (discoveredEngineWorkerList == null) {
+                discoveredEngineWorkerList = List.of();
+            }
+            long nowUs = System.nanoTime() / 1000;
+            markUnavailableGroupWorkers(workerStatusMap, engineWorkerList.getUnavailableGroups(), nowUs);
+            Set<String> discoveryFailedGroups = engineWorkerList.getDiscoveryFailedGroups();
+            List<WorkerHost> latestEngineWorkerList = mergeDiscoveryFailedCachedWorkers(
+                    discoveredEngineWorkerList, workerStatusMap, discoveryFailedGroups);
+            logger.info("workerAddressService getEngineWorkerList, model: {}, role: {}, discoveredSize: {}, effectiveSize: {}",
+                    modelName, roleType, discoveredEngineWorkerList.size(), latestEngineWorkerList.size());
+            engineHealthReporter.reportServiceDiscoveryResult(modelName, discoveredEngineWorkerList.size(), roleType.toString());
             if (CollectionUtils.isEmpty(latestEngineWorkerList)) {
                 logger.error("get engine worker list is empty, cost={}μs, model={}", System.nanoTime() / 1000 - startTimeInUs, modelName);
                 return;
@@ -98,11 +113,12 @@ public class EngineSyncRunner implements Runnable {
                 WorkerStatus workerStatus = entry.getValue();
                 String ipPort = entry.getKey();
                 if (!latestValidIpPorts.contains(ipPort)) {
-                    long lastTime = workerStatus.getStatusLastUpdateTime().get();
-                    long actualIntervalUs = workerStatus.getStatusUpdateIntervalUs().get();
-                    // Use max(3 * actual sync interval, 1s) as removal threshold to tolerate transient service discovery flaps
-                    long removalThresholdUs = Math.max(3 * actualIntervalUs, 1_000_000L);
-                    if (System.nanoTime() / 1000 - lastTime > removalThresholdUs) {
+                    if (isDiscoveryFailedGroup(workerStatus, discoveryFailedGroups)) {
+                        logger.warn("[keep] engine discovery failed, keep cached worker, model={}, role={}, group={}, ipPort={}",
+                                modelName, roleType, normalizeGroupName(workerStatus), ipPort);
+                        continue;
+                    }
+                    if (shouldRemoveWorker(workerStatus, nowUs)) {
                         cachedWorkerStatuses.remove(ipPort);
                         logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
                     }
@@ -121,6 +137,8 @@ public class EngineSyncRunner implements Runnable {
                 String site = host.getSite();
 
                 WorkerStatus workerStatus = getOrCreateWorkerStatus(cachedWorkerStatuses, workerIpPort);
+                workerStatus.setSite(site);
+                workerStatus.setGroup(host.getGroup());
 
                 if (workerStatus.getStatusCheckInProgress().compareAndSet(false, true)) {
                     logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
@@ -185,6 +203,66 @@ public class EngineSyncRunner implements Runnable {
         }
     }
 
+    private List<WorkerHost> mergeDiscoveryFailedCachedWorkers(List<WorkerHost> discoveredWorkerList,
+                                                               Map<String, WorkerStatus> cachedWorkerStatuses,
+                                                               Set<String> discoveryFailedGroups) {
+        if (CollectionUtils.isEmpty(cachedWorkerStatuses) || CollectionUtils.isEmpty(discoveryFailedGroups)) {
+            return discoveredWorkerList;
+        }
+
+        List<WorkerHost> mergedWorkerList = new ArrayList<>(
+                discoveredWorkerList == null ? List.of() : discoveredWorkerList);
+        Set<String> mergedIpPorts = mergedWorkerList.stream()
+                .map(WorkerHost::getIpPort)
+                .collect(Collectors.toSet());
+        for (Map.Entry<String, WorkerStatus> entry : cachedWorkerStatuses.entrySet()) {
+            WorkerStatus workerStatus = entry.getValue();
+            if (!isDiscoveryFailedGroup(workerStatus, discoveryFailedGroups)) {
+                continue;
+            }
+            WorkerHost cachedHost = cachedWorkerHost(entry.getKey(), workerStatus);
+            if (cachedHost == null || !mergedIpPorts.add(cachedHost.getIpPort())) {
+                continue;
+            }
+            mergedWorkerList.add(cachedHost);
+            logger.warn("[keep] engine discovery failed, refresh cached worker, model={}, role={}, group={}, ipPort={}",
+                    modelName, roleType, cachedHost.getGroup(), cachedHost.getIpPort());
+        }
+        return mergedWorkerList;
+    }
+
+    private WorkerHost cachedWorkerHost(String ipPort, WorkerStatus workerStatus) {
+        if (workerStatus == null) {
+            return null;
+        }
+        String ip = workerStatus.getIp();
+        int port = workerStatus.getPort();
+        if ((ip == null || ip.isEmpty() || port <= 0) && ipPort != null) {
+            String[] split = ipPort.split(":");
+            if (split.length == 2) {
+                ip = split[0];
+                try {
+                    port = Integer.parseInt(split[1]);
+                } catch (NumberFormatException e) {
+                    logger.warn("invalid cached worker ipPort={}, model={}, role={}", ipPort, modelName, roleType);
+                    return null;
+                }
+            }
+        }
+        if (ip == null || ip.isEmpty() || port <= 0) {
+            logger.warn("skip cached worker with invalid address, model={}, role={}, ipPort={}, worker={}",
+                    modelName, roleType, ipPort, workerStatus);
+            return null;
+        }
+        return new WorkerHost(
+                ip,
+                port,
+                port + 1,
+                port + 5,
+                workerStatus.getSite(),
+                normalizeGroupName(workerStatus));
+    }
+
     private WorkerStatus getOrCreateWorkerStatus(Map<String, WorkerStatus> workerStatuses, String workerIpPort) {
         WorkerStatus workerStatus = workerStatuses.get(workerIpPort);
         if (workerStatus == null) {
@@ -196,5 +274,69 @@ public class EngineSyncRunner implements Runnable {
             logger.info("Created new WorkerStatus for worker: {}", workerIpPort);
         }
         return workerStatus;
+    }
+
+    private void markUnavailableGroupWorkers(Map<String, WorkerStatus> cachedWorkerStatuses, Set<String> unavailableGroups,
+                                             long nowUs) {
+        if (CollectionUtils.isEmpty(cachedWorkerStatuses) || CollectionUtils.isEmpty(unavailableGroups)) {
+            return;
+        }
+        List<String> ipPortsToRemove = new ArrayList<>();
+        for (Map.Entry<String, WorkerStatus> entry : cachedWorkerStatuses.entrySet()) {
+            WorkerStatus workerStatus = entry.getValue();
+            if (workerStatus == null) {
+                continue;
+            }
+            String group = workerStatus.getGroup() == null ? "" : workerStatus.getGroup();
+            if (unavailableGroups.contains(group)) {
+                workerStatus.setAlive(false);
+                workerStatus.getResourceAvailable().set(false);
+                if (shouldRemoveWorker(workerStatus, nowUs)) {
+                    ipPortsToRemove.add(entry.getKey());
+                } else {
+                    logger.warn("[mark unavailable] engine group unavailable, model={}, role={}, group={}, ipPort={}",
+                            modelName, roleType, group, entry.getKey());
+                }
+            }
+        }
+        for (String ipPort : ipPortsToRemove) {
+            WorkerStatus workerStatus = cachedWorkerStatuses.remove(ipPort);
+            if (workerStatus != null) {
+                String group = workerStatus.getGroup() == null ? "" : workerStatus.getGroup();
+                logger.warn("[remove] engine group unavailable, model={}, role={}, group={}, ipPort={}",
+                        modelName, roleType, group, ipPort);
+            }
+        }
+    }
+
+    private boolean shouldRemoveWorker(WorkerStatus workerStatus, long nowUs) {
+        if (workerStatus == null) {
+            return false;
+        }
+        long lastTime = workerStatus.getStatusLastUpdateTime().get();
+        long removalBaseTimeUs = lastTime;
+        if (removalBaseTimeUs <= 0) {
+            removalBaseTimeUs = workerStatus.getStatusFirstSeenTimeUs().get();
+            if (removalBaseTimeUs <= 0) {
+                return true;
+            }
+        }
+        long actualIntervalUs = workerStatus.getStatusUpdateIntervalUs().get();
+        // Use max(3 * actual sync interval, 1s) as removal threshold to tolerate transient service discovery flaps.
+        // Workers that never completed a status sync fall back to first-seen time,
+        // so a bad host cannot stay in the cache forever after discovery removes it.
+        long removalThresholdUs = Math.max(3 * Math.max(actualIntervalUs, 0L), 1_000_000L);
+        return nowUs - removalBaseTimeUs > removalThresholdUs;
+    }
+
+    private boolean isDiscoveryFailedGroup(WorkerStatus workerStatus, Set<String> discoveryFailedGroups) {
+        if (workerStatus == null || CollectionUtils.isEmpty(discoveryFailedGroups)) {
+            return false;
+        }
+        return discoveryFailedGroups.contains(normalizeGroupName(workerStatus));
+    }
+
+    private String normalizeGroupName(WorkerStatus workerStatus) {
+        return workerStatus.getGroup() == null ? "" : workerStatus.getGroup();
     }
 }
