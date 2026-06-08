@@ -95,7 +95,12 @@ private:
     struct LeaseMapEntry {
         std::shared_ptr<ReadTaskGroup> task_group;
         int                            finish_counted{0};  // how many tasks have been counted as finished so far
+        int64_t                        create_time_ms{0};
     };
+
+    static constexpr int64_t kLeaseMapTtlMs = 600000;  // 10 min
+
+    void evictStaleLeases();
     mutable std::mutex                             lease_map_mutex_;
     std::unordered_map<std::string, LeaseMapEntry> lease_map_;
 };

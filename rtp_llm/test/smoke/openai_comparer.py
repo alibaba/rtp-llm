@@ -168,26 +168,30 @@ class OpenaiComparer(BaseComparer):
                         logprob.logprob = 0
         return logprobs, choices
 
-    def _to_json_safe(self, value: Any) -> Any:
+    def _to_json_safe(self, value: Any, _depth: int = 0, _seen: Optional[set] = None) -> Any:
         """Convert value to JSON-serializable form (e.g. BaseModel -> dict)."""
+        if _depth > 32:
+            return repr(value)
+        if _seen is None:
+            _seen = set()
+        obj_id = id(value)
+        if obj_id in _seen:
+            return repr(value)
         if isinstance(value, BaseModel):
-            return self._to_json_safe(value.model_dump(mode="json"))
+            return self._to_json_safe(value.model_dump(mode="json"), _depth + 1, _seen)
         if isinstance(value, Enum):
             return value.value
-        if hasattr(value, "name") and isinstance(getattr(value, "name"), str):
-            return value.name
-        if hasattr(value, "value") and isinstance(
-            getattr(value, "value"), (str, int, float, bool)
-        ):
-            return value.value
+        if isinstance(value, (str, int, float, bool, type(None))):
+            return value
+        _seen.add(obj_id)
         if isinstance(value, tuple):
-            return [self._to_json_safe(x) for x in value]
+            return [self._to_json_safe(x, _depth + 1, _seen) for x in value]
         if isinstance(value, list):
-            return [self._to_json_safe(x) for x in value]
+            return [self._to_json_safe(x, _depth + 1, _seen) for x in value]
         if isinstance(value, dict):
-            return {k: self._to_json_safe(v) for k, v in value.items()}
+            return {k: self._to_json_safe(v, _depth + 1, _seen) for k, v in value.items()}
         if hasattr(value, "__dict__"):
-            return self._to_json_safe(vars(value))
+            return self._to_json_safe(vars(value), _depth + 1, _seen)
         return value
 
     def _dump_value(self, value: Any) -> str:

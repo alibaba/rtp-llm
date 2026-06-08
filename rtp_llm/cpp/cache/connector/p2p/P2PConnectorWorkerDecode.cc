@@ -184,7 +184,7 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                                
     }
     {
         std::lock_guard<std::mutex> lock(lease_map_mutex_);
-        lease_map_[unique_key] = LeaseMapEntry{task_group, 0};
+        lease_map_[unique_key] = LeaseMapEntry{task_group, 0, currentTimeMs()};
     }
 
     const ReadWaitOutcome outcome =
@@ -303,9 +303,24 @@ bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key) {
     return true;
 }
 
+void P2PConnectorWorkerDecode::evictStaleLeases() {
+    int64_t now_ms = currentTimeMs();
+    for (auto it = lease_map_.begin(); it != lease_map_.end();) {
+        if (now_ms - it->second.create_time_ms > kLeaseMapTtlMs) {
+            RTP_LLM_LOG_WARNING("evictStaleLeases: removing stale lease_map_ entry unique_key=%s, age_ms=%ld",
+                                it->first.c_str(),
+                                now_ms - it->second.create_time_ms);
+            it = lease_map_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 bool P2PConnectorWorkerDecode::queryLeaseStatus(
     const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped) {
     std::lock_guard<std::mutex> lock(lease_map_mutex_);
+    evictStaleLeases();
     auto                        it = lease_map_.find(unique_key);
     if (it == lease_map_.end()) {
         // Lease not in map — either never created or already cleaned up after all ops finished.
