@@ -498,6 +498,8 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             stack_,
             data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
+            stacked_ckpt_keys=src_weight_info.stacked_ckpt_keys,
+            expert_key_overrides=src_weight_info.expert_key_overrides,
         )
         scale = create_w8a8_fp8_per_channel_weight(
             src_weight_info,
@@ -506,11 +508,29 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
             stack_,
             data_type=torch.float32,
             config=src_weight_info.config,
+            stacked_ckpt_keys=src_weight_info.stacked_ckpt_keys,
+            expert_key_overrides=self._make_scale_overrides(src_weight_info.expert_key_overrides),
         )
         return [kernel, scale]
 
+    @staticmethod
+    def _make_scale_overrides(overrides):
+        if not overrides:
+            return overrides
+        scale_overrides = {}
+        for eid, ckpt_list in overrides.items():
+            scale_overrides[eid] = [
+                CkptWeightInfo(
+                    ow.name[: -len(W_SUFFIX)] + QS_SUFFIX if ow.name.endswith(W_SUFFIX) else ow.name,
+                    _identity_ensure_2d,
+                )
+                for ow in ckpt_list
+            ]
+        return scale_overrides
+
     def _get_moe_w1_quant_weight(self, src_weight_info: MoeAtomicWeight):
         assert src_weight_info.name in [W.moe_w1]
+        w1_process_fun = src_weight_info.process_fun if src_weight_info.stacked_ckpt_keys else stack_moe_w1
         kernel = create_w8a8_fp8_per_channel_weight(
             src_weight_info,
             W.moe_w1,
@@ -518,9 +538,11 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                 CkptWeightInfo(w.name[: -len(W_SUFFIX)] + QW_SUFFIX, identity)
                 for w in src_weight_info.weights
             ],
-            stack_moe_w1,
+            w1_process_fun,
             data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
+            stacked_ckpt_keys=src_weight_info.stacked_ckpt_keys,
+            expert_key_overrides=src_weight_info.expert_key_overrides,
         )
         scale = create_w8a8_fp8_per_channel_weight(
             src_weight_info,
@@ -531,9 +553,11 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
                 )
                 for w in src_weight_info.weights
             ],
-            stack_moe_w1,
+            w1_process_fun,
             data_type=torch.float32,
             config=src_weight_info.config,
+            stacked_ckpt_keys=src_weight_info.stacked_ckpt_keys,
+            expert_key_overrides=self._make_scale_overrides(src_weight_info.expert_key_overrides),
         )
         return [kernel, scale]
 
@@ -843,7 +867,6 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
                 )
                 if (
                     has_prequant
-                    and "float8" in str(t.dtype)
                     and tensor_source.has_prequantized_scale(name)
                 ):
                     fp8_out[local_idx].copy_(t)

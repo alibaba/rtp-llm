@@ -287,6 +287,7 @@ class MoeConfig(BaseModel):
     expert_num: int = -1
     # align_size is used for dynamic padding calculation
     align_size: int = 0  # 0 means no padding needed (for MoE)
+    fused_shared_expert: bool = False
 
 
 class MoeAtomicWeight(AtomicWeight):
@@ -423,27 +424,17 @@ class MoeAtomicWeight(AtomicWeight):
         before_merge_tensors = []
         for ckpt_idx, ckpt_weight in enumerate(ckpt_weights):
             for expert_id in selected_experts:
-                if (
-                    expert_id in self.expert_key_overrides
-                    and len(self.expert_key_overrides[expert_id]) > 1
-                    and self.stacked_ckpt_keys
-                ):
-                    parts = []
-                    for ow in self.expert_key_overrides[expert_id]:
-                        n = ow.name.format(
-                            i=str(layer_id),
-                            i_1=str(layer_id + 1),
-                            expert_id=str(expert_id),
+                if expert_id in self.expert_key_overrides:
+                    before_merge_tensors.append(
+                        self._load_override_tensor(
+                            tensor_source,
+                            layer_id,
+                            expert_id,
+                            convert_type,
+                            ckpt_idx,
+                            device=device,
                         )
-                        parts.append(
-                            ow.merge_fun(
-                                [
-                                    x.to(device)
-                                    for x in tensor_source.load_tensor(n, convert_type)
-                                ]
-                            )
-                        )
-                    before_merge_tensors.append(torch.cat(parts, dim=0))
+                    )
                 else:
                     effective = self._resolve_ckpt_weight(
                         ckpt_weight, ckpt_idx, expert_id
@@ -481,6 +472,42 @@ class MoeAtomicWeight(AtomicWeight):
                 return overrides[ckpt_idx]
         return ckpt_weight
 
+    def _load_override_tensor(
+        self, tensor_source, layer_id, expert_id, convert_type, ckpt_idx,
+        device=None,
+    ):
+        """Load an override expert's tensor directly from database.
+
+        Override experts are not registered in TensorCollector (to avoid
+        delaying collector completion), so we bypass it and read from the
+        underlying database.
+        """
+        from rtp_llm.model_loader.tensor_source import DatabaseTensorSource
+
+        overrides = self.expert_key_overrides[expert_id]
+        db_source = DatabaseTensorSource(tensor_source.get_database())
+        if len(overrides) > 1 and self.stacked_ckpt_keys:
+            parts = []
+            for ow in overrides:
+                n = ow.name.format(
+                    i=str(layer_id),
+                    i_1=str(layer_id + 1),
+                    expert_id=str(expert_id),
+                )
+                parts.append(ow.merge_fun(
+                    [x.to(device) if device else x for x in db_source.load_tensor(n, convert_type)]
+                ))
+            return torch.cat(parts, dim=0)
+        effective = overrides[ckpt_idx] if ckpt_idx < len(overrides) else overrides[0]
+        n = effective.name.format(
+            i=str(layer_id),
+            i_1=str(layer_id + 1),
+            expert_id=str(expert_id),
+        )
+        return effective.merge_fun(
+            [x.to(device) if device else x for x in db_source.load_tensor(n, convert_type)]
+        )
+
     def _load_expert_tensor(
         self,
         ckpt_weight,
@@ -494,33 +521,17 @@ class MoeAtomicWeight(AtomicWeight):
     ):
         """Load a single expert tensor with error handling."""
         if expert_id in self.expert_key_overrides:
+            t = self._load_override_tensor(
+                tensor_source,
+                layer_id,
+                expert_id,
+                convert_type,
+                ckpt_idx,
+            )
             overrides = self.expert_key_overrides[expert_id]
-            # Override experts are not in the TensorCollector (to avoid
-            # delaying collector completion). Load directly from database.
-            from rtp_llm.model_loader.tensor_source import DatabaseTensorSource
-
-            db = tensor_source.get_database()
-            db_source = DatabaseTensorSource(db)
-            if len(overrides) > 1 and self.stacked_ckpt_keys:
-                parts = []
-                for ow in overrides:
-                    n = ow.name.format(
-                        i=str(layer_id),
-                        i_1=str(layer_id + 1),
-                        expert_id=str(expert_id),
-                    )
-                    parts.append(ow.merge_fun(db_source.load_tensor(n, convert_type)))
-                combined = torch.cat(parts, dim=0)
-                return overrides[0].name.format(i=str(layer_id)), combined
-            else:
-                effective = overrides[0]
-                n = effective.name.format(
-                    i=str(layer_id),
-                    i_1=str(layer_id + 1),
-                    expert_id=str(expert_id),
-                )
-                t = effective.merge_fun(db_source.load_tensor(n, convert_type))
-                return n, t
+            effective_ow = overrides[ckpt_idx] if ckpt_idx < len(overrides) else overrides[0]
+            n = effective_ow.name.format(i=str(layer_id))
+            return n, t
 
         effective = self._resolve_ckpt_weight(ckpt_weight, ckpt_idx, expert_id)
         name = effective.name.format(
@@ -658,6 +669,12 @@ class MoeAtomicWeight(AtomicWeight):
         for ckpt_idx, ckpt_weight in enumerate(ckpt_weights):
             for expert_id in selected_experts:
                 if expert_id in self.expert_key_overrides:
+                    # Override experts (e.g. fused shared expert) are excluded
+                    # from TensorCollector target keys intentionally:
+                    # they are loaded directly from database via
+                    # _load_override_tensor, bypassing the fastsafetensors
+                    # iterator. Adding them here would block collector
+                    # completion since the iterator never stores them.
                     continue
                 name = ckpt_weight.name.format(
                     i=str(layer_id),
