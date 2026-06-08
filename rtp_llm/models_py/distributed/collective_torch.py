@@ -22,6 +22,63 @@ _CPP_PARALLEL_MODE_TP = 0
 _CPP_PARALLEL_MODE_DP = 1
 _CPP_PARALLEL_MODE_DP_AND_TP = 2
 
+# Step1 (Mori EP perf): prefer TRT-LLM IPC AllReduce over RCCL on ROCm for TP
+# even outside HIPGraph capture. Cuts the long tail of mscclKernel_Sum_* in
+# decode caused by per-rank arrival jitter. Set 0 to fall back to RCCL.
+_ENABLE_TRT_AR_ROCM = os.environ.get("ENABLE_TRT_ALLREDUCE_ROCM", "1") == "1"
+_trt_ar_unavailable_warned: bool = False
+
+
+def _maybe_trt_allreduce(
+    tensor: torch.Tensor,
+    process_group: torch.distributed.ProcessGroup,
+) -> Optional[torch.Tensor]:
+    """Attempt TRT-LLM IPC AllReduce on ROCm.
+
+    Returns the allreduced tensor on success, or None to indicate the caller
+    should fall back to torch.distributed.all_reduce (RCCL).
+    """
+    global _trt_ar_unavailable_warned
+    if not _ENABLE_TRT_AR_ROCM:
+        return None
+    if not rocm_rccl.is_rocm_runtime():
+        return None
+    if torch.cuda.is_current_stream_capturing():
+        # Capture path is handled separately by rocm_rccl.capture_all_reduce.
+        return None
+    try:
+        from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
+            ALLREDUCE_SUPPORTED_HIDDEN_SIZES,
+        )
+        from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
+            allreduce as trtllm_allreduce,
+        )
+        from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
+            ensure_trtllm_comm_initialized,
+        )
+    except ImportError:
+        return None
+    if tensor.shape[-1] not in ALLREDUCE_SUPPORTED_HIDDEN_SIZES:
+        return None
+    device_id = torch.cuda.current_device()
+    try:
+        if not ensure_trtllm_comm_initialized(group=process_group, device_id=device_id):
+            return None
+        return trtllm_allreduce(
+            allreduce_in=tensor,
+            group=process_group,
+            device_id=device_id,
+        )
+    except Exception as exc:
+        if not _trt_ar_unavailable_warned:
+            logging.warning(
+                "TRT-LLM AllReduce unavailable, falling back to RCCL "
+                "(further warnings suppressed): %s",
+                exc,
+            )
+            _trt_ar_unavailable_warned = True
+        return None
+
 
 class Group(Enum):
     """Process group types for collective operations"""
@@ -583,6 +640,12 @@ def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
             return symm_mem_comm.all_reduce(tensor)
 
     process_group = _get_group(group)
+
+    if group == Group.TP:
+        trt_out = _maybe_trt_allreduce(tensor, process_group)
+        if trt_out is not None:
+            return trt_out
+
     torch.distributed.all_reduce(
         tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
     )
