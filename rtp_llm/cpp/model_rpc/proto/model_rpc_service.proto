@@ -407,6 +407,7 @@ message TaskInfoPB {
     int64 dp_rank = 8;
     bool is_waiting = 9;
     ErrorDetailsPB error_info = 10;
+    int64 batch_id = 11;
 }
 
 message UpdateWeightsRequestPB {

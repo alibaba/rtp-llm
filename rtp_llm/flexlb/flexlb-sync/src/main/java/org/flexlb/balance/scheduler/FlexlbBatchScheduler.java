@@ -3,6 +3,8 @@ package org.flexlb.balance.scheduler;
 import com.google.protobuf.Int32Value;
 import com.google.protobuf.Int64Value;
 import com.google.protobuf.InvalidProtocolBufferException;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.strategy.BatcherSnapshot;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.balance.strategy.RequestProfile;
@@ -52,6 +54,7 @@ public class FlexlbBatchScheduler {
     private final Router router;
     private final EngineGrpcClient grpcClient;
     private final EngineWorkerStatus engineWorkerStatus;
+    private final EndpointRegistry endpointRegistry;
     private final ExecutorService dispatchExecutor;
     private final Map<String, WorkerBatcher> batchers = new ConcurrentHashMap<>();
     private final Map<Long, InflightEntry> inflight = new ConcurrentHashMap<>();
@@ -60,11 +63,13 @@ public class FlexlbBatchScheduler {
     public FlexlbBatchScheduler(ConfigService configService,
                                 @Lazy Router router,
                                 EngineGrpcClient grpcClient,
-                                EngineWorkerStatus engineWorkerStatus) {
+                                EngineWorkerStatus engineWorkerStatus,
+                                EndpointRegistry endpointRegistry) {
         this.configService = configService;
         this.router = router;
         this.grpcClient = grpcClient;
         this.engineWorkerStatus = engineWorkerStatus;
+        this.endpointRegistry = endpointRegistry;
         this.dispatchExecutor = Executors.newFixedThreadPool(
                 Math.max(1, configService.loadBalanceConfig().getScheduleWorkerSize()),
                 r -> {
@@ -214,13 +219,24 @@ public class FlexlbBatchScheduler {
                     .append(" seq_len=").append(sl)
                     .append(" hit_cache=").append(hc).append('}');
         }
-        long predMs = createPredictor(configService.loadBalanceConfig()).estimateMs(totalTokens, totalHit);
+        List<RequestProfile> profiles = new ArrayList<>(activeItems.size());
+        for (BatchItem item : activeItems) {
+            profiles.add(new RequestProfile(seqLenOf(item), hitOf(item)));
+        }
+        PrefillTimePredictor predictor = createPredictor(configService.loadBalanceConfig());
+        long predMs = predictor.predictBatchMs(profiles);
         ServerStatus entrypoint = batchEntrypoint(prefill);
         Logger.info("flexlb_batch_dispatch batch_id={} batch_size={} total_tokens={} total_hit={} "
                         + "pred_ms={} prefill={}:{} entrypoint={}:{} items=[{}]",
                 batchId, activeItems.size(), totalTokens, totalHit, predMs,
                 prefill.getServerIp(), prefill.getGrpcPort(),
                 entrypoint.getServerIp(), entrypoint.getGrpcPort(), itemDetail);
+
+        String ipPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
+        WorkerEndpoint ep = endpointRegistry.get(ipPort);
+        if (ep != null) {
+            ep.commitBatch(batchId, predMs);
+        }
 
         try {
             long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
@@ -230,6 +246,9 @@ public class FlexlbBatchScheduler {
         } catch (Throwable t) {
             Logger.warn("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
                     batchId, entrypoint.getServerIp(), entrypoint.getGrpcPort(), t.getMessage());
+            if (ep != null) {
+                ep.releaseBatch(batchId);
+            }
             for (BatchItem item : activeItems) {
                 failAck(item, t);
             }
@@ -277,11 +296,11 @@ public class FlexlbBatchScheduler {
         if (input.getRequestId() != item.requestId()) {
             throw new IllegalArgumentException("request_id mismatch between schedule request and GenerateInputPB");
         }
-        input.setBatchGroupId(Int64Value.of(batchId));
-        input.setBatchGroupSize(groupSize);
+        input.setGroupId(Int64Value.of(batchId));
+        input.setGroupSize(groupSize);
 
         EngineRpcService.GenerateConfigPB.Builder config = input.getGenerateConfigBuilder();
-        config.setForceBatch(Int32Value.of(1));
+        config.setForceGroup(Int32Value.of(1));
         config.clearRoleAddrs();
         addRoleAddr(config, item.prefill);
         addRoleAddr(config, item.decode);

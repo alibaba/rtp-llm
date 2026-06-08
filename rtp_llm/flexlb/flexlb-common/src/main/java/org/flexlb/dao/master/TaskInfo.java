@@ -28,6 +28,8 @@ public class TaskInfo {
     private long errorCode;
     @JsonProperty("error_message")
     private String errorMessage;
+    @JsonProperty("batch_id")
+    private long batchId = -1;
 
     private long predictedMs;
 

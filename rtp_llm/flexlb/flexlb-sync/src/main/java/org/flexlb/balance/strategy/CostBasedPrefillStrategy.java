@@ -2,6 +2,8 @@ package org.flexlb.balance.strategy;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
@@ -34,17 +36,20 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
     private final ResourceMeasureFactory resourceMeasureFactory;
     private final EngineHealthReporter engineHealthReporter;
     private final FlexlbBatchScheduler batchScheduler;
+    private final EndpointRegistry endpointRegistry;
 
     public CostBasedPrefillStrategy(EngineWorkerStatus engineWorkerStatus,
                                     CacheAwareService cacheAwareService,
                                     ResourceMeasureFactory resourceMeasureFactory,
                                     EngineHealthReporter engineHealthReporter,
-                                    FlexlbBatchScheduler batchScheduler) {
+                                    FlexlbBatchScheduler batchScheduler,
+                                    EndpointRegistry endpointRegistry) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.cacheAwareService = cacheAwareService;
         this.resourceMeasureFactory = resourceMeasureFactory;
         this.engineHealthReporter = engineHealthReporter;
         this.batchScheduler = batchScheduler;
+        this.endpointRegistry = endpointRegistry;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, this);
     }
 
@@ -176,12 +181,8 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
             waitMs = 0;
         }
 
-        // queue_ms: sum of per-task predictions from localTaskMap
-        long queueMs = 0;
-        for (TaskInfo task : w.getLocalTaskMap().values()) {
-            queueMs += predictor.predictBatchMs(
-                    List.of(new RequestProfile(task.getInputLength(), task.getPrefixLength())));
-        }
+        WorkerEndpoint ep = endpointRegistry.get(w.getIpPort());
+        long workerWaitMs = ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
 
         // delta_prefill_ms: marginal cost of adding this request to the batcher batch
         List<RequestProfile> oldBatch = snap.requests();
@@ -189,7 +190,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         newBatch.add(new RequestProfile(seqLen, cacheHit));
         long deltaPrefillMs = predictor.predictBatchMs(newBatch) - predictor.predictBatchMs(oldBatch);
 
-        return waitMs + queueMs + deltaPrefillMs;
+        return waitMs + workerWaitMs + deltaPrefillMs;
     }
 
     private PrefillTimePredictor createPredictor(FlexlbConfig config) {

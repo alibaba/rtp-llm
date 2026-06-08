@@ -257,6 +257,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_end_time_ms(task.end_time_ms);
         task_info->set_dp_rank(status_info.dp_rank);
         task_info->set_is_waiting(task.is_waiting);
+        task_info->set_batch_id(task.batch_id);
         if (task.error_code != 0) {
             task_info->mutable_error_info()->set_error_code(task.error_code);
             task_info->mutable_error_info()->set_error_message(task.error_message);
@@ -273,6 +274,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_end_time_ms(task.end_time_ms);
         task_info->set_dp_rank(status_info.dp_rank);
         task_info->set_is_waiting(task.is_waiting);
+        task_info->set_batch_id(task.batch_id);
         if (task.error_code != 0) {
             task_info->mutable_error_info()->set_error_code(task.error_code);
             task_info->mutable_error_info()->set_error_message(task.error_message);

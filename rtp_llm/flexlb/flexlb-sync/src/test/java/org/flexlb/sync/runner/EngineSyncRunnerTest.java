@@ -72,6 +72,7 @@ class EngineSyncRunnerTest {
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
+                null,
                 null
         );
     }
@@ -100,6 +101,7 @@ class EngineSyncRunnerTest {
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
+                null,
                 null
         );
 

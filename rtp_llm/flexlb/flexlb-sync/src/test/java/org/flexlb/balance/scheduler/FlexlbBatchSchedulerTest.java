@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -80,7 +81,8 @@ class FlexlbBatchSchedulerTest {
         when(grpcClient.cancel(anyString(), anyInt(), anyLong(), anyLong()))
                 .thenReturn(EngineRpcService.EmptyPB.getDefaultInstance());
 
-        scheduler = new FlexlbBatchScheduler(configService, router, grpcClient, engineWorkerStatus);
+        EndpointRegistry endpointRegistry = new EndpointRegistry(engineWorkerStatus);
+        scheduler = new FlexlbBatchScheduler(configService, router, grpcClient, engineWorkerStatus, endpointRegistry);
     }
 
     @AfterEach
@@ -109,11 +111,11 @@ class FlexlbBatchSchedulerTest {
         assertEquals(0, batch.getDpSlots(0).getDpRank());
         assertEquals(2, batch.getDpSlots(0).getRequestsCount());
         assertEquals(2, inputs.size());
-        assertEquals(2, inputs.get(0).getBatchGroupSize());
-        assertEquals(batch.getBatchId(), inputs.get(0).getBatchGroupId().getValue());
-        assertEquals(batch.getBatchId(), inputs.get(1).getBatchGroupId().getValue());
-        assertEquals(1, inputs.get(0).getGenerateConfig().getForceBatch().getValue());
-        assertEquals(77, inputs.get(0).getGenerateConfig().getBatchGroupTimeout().getValue());
+        assertEquals(2, inputs.get(0).getGroupSize());
+        assertEquals(batch.getBatchId(), inputs.get(0).getGroupId().getValue());
+        assertEquals(batch.getBatchId(), inputs.get(1).getGroupId().getValue());
+        assertEquals(1, inputs.get(0).getGenerateConfig().getForceGroup().getValue());
+        assertEquals(77, inputs.get(0).getGenerateConfig().getGroupTimeout().getValue());
         assertEquals(2, inputs.get(0).getGenerateConfig().getRoleAddrsCount());
         assertEquals(EngineRpcService.RoleAddrPB.RoleType.PREFILL,
                 inputs.get(0).getGenerateConfig().getRoleAddrs(0).getRole());
@@ -694,7 +696,7 @@ class FlexlbBatchSchedulerTest {
                 .addTokenIds(102)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(8)
-                        .setBatchGroupTimeout(com.google.protobuf.Int32Value.of(77))
+                        .setGroupTimeout(com.google.protobuf.Int32Value.of(77))
                         .build())
                 .build();
         return Base64.getEncoder().encodeToString(input.toByteArray());

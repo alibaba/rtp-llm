@@ -1,5 +1,7 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
@@ -33,6 +35,7 @@ class CostBasedPrefillStrategyTest {
     private ResourceMeasureFactory resourceMeasureFactory;
     private EngineHealthReporter engineHealthReporter;
     private FlexlbBatchScheduler batchScheduler;
+    private EndpointRegistry endpointRegistry;
     private CostBasedPrefillStrategy strategy;
 
     @BeforeEach
@@ -42,6 +45,7 @@ class CostBasedPrefillStrategyTest {
         resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
         batchScheduler = Mockito.mock(FlexlbBatchScheduler.class);
+        endpointRegistry = new EndpointRegistry(engineWorkerStatus);
 
         ResourceMeasure resourceMeasure = Mockito.mock(ResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(any())).thenReturn(resourceMeasure);
@@ -51,7 +55,7 @@ class CostBasedPrefillStrategyTest {
 
         strategy = new CostBasedPrefillStrategy(
                 engineWorkerStatus, cacheAwareService, resourceMeasureFactory,
-                engineHealthReporter, batchScheduler);
+                engineHealthReporter, batchScheduler, endpointRegistry);
     }
 
     @Test
@@ -193,24 +197,19 @@ class CostBasedPrefillStrategyTest {
     }
 
     @Test
-    void queueMsUsesLocalTaskMapWithPredictor() {
+    void workerWaitMsFavorsEndpointWithLowerEstimate() {
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         WorkerStatus w1 = createWorker("10.0.0.1", 0);
         WorkerStatus w2 = createWorker("10.0.0.2", 0);
         prefillMap.put("10.0.0.1:8080", w1);
         prefillMap.put("10.0.0.2:8080", w2);
 
-        org.flexlb.dao.master.TaskInfo t1 = new org.flexlb.dao.master.TaskInfo();
-        t1.setRequestId(100L);
-        t1.setInputLength(2000);
-        t1.setPrefixLength(0);
-        w1.putLocalTask(100L, t1);
-
-        org.flexlb.dao.master.TaskInfo t2 = new org.flexlb.dao.master.TaskInfo();
-        t2.setRequestId(101L);
-        t2.setInputLength(2000);
-        t2.setPrefixLength(0);
-        w1.putLocalTask(101L, t2);
+        PrefillTimePredictor predictor = new PrefillTimePredictor(0, 1, 0, 0, 0, 0);
+        WorkerEndpoint ep1 = new WorkerEndpoint("10.0.0.1", 8080, 8081, w1, predictor);
+        ep1.commitBatch(1L, 4000);
+        endpointRegistry.getOrCreate("10.0.0.1:8080", k -> ep1);
+        endpointRegistry.getOrCreate("10.0.0.2:8080", k ->
+                new WorkerEndpoint("10.0.0.2", 8080, 8081, w2, predictor));
 
         ServerStatus result = strategy.select(buildContext(500, 10L), RoleType.PREFILL, null);
 

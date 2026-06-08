@@ -187,6 +187,7 @@ public class WorkerStatus {
                 localTask.setInputLength(waitingTask.getInputLength());
                 localTask.setWaitingTime(waitingTask.getWaitingTime());
                 localTask.setDpRank(waitingTask.getDpRank());
+                localTask.setBatchId(waitingTask.getBatchId());
                 localTask.setErrorCode(waitingTask.getErrorCode());
                 localTask.setErrorMessage(waitingTask.getErrorMessage());
 

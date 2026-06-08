@@ -1566,7 +1566,8 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*           conte
     }
 
     for (const auto& slot : slots) {
-        meta_->enqueuePending(slot.request_id, slot.input ? slot.input->token_ids_size() : 0);
+        int64_t batch_id = (slot.input && slot.input->has_group_id()) ? slot.input->group_id().value() : -1;
+        meta_->enqueuePending(slot.request_id, slot.input ? slot.input->token_ids_size() : 0, batch_id);
     }
 
     auto erase_reserved_slots = [this](const std::vector<LocalSlot>& slots) {

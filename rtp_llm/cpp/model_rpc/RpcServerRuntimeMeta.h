@@ -37,15 +37,17 @@ public:
             {request_id, stream->prefixLength(), stream->inputLength(), stream->getTimeInfo().wait_time_us});
     }
 
-    void enqueuePending(int64_t request_id, int64_t input_length) {
+    void enqueuePending(int64_t request_id, int64_t input_length, int64_t batch_id = -1) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
-        running_streams_[request_id] = EngineScheduleInfo::TaskInfo({request_id,
-                                                                     /*prefix_length=*/0,
-                                                                     input_length,
-                                                                     /*waiting_time_ms=*/0,
-                                                                     /*iterate_count=*/0,
-                                                                     /*end_time_ms=*/-1,
-                                                                     /*is_waiting=*/true});
+        auto task = EngineScheduleInfo::TaskInfo({request_id,
+                                                  /*prefix_length=*/0,
+                                                  input_length,
+                                                  /*waiting_time_ms=*/0,
+                                                  /*iterate_count=*/0,
+                                                  /*end_time_ms=*/-1,
+                                                  /*is_waiting=*/true});
+        task.batch_id = batch_id;
+        running_streams_[request_id] = task;
     }
 
     void dequeue(int64_t request_id, const GenerateStreamPtr& stream) {

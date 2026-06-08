@@ -1,5 +1,7 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -40,13 +42,15 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final long createTimeUs = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
+    private final EndpointRegistry endpointRegistry;
 
     public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
                                   WorkerStatus workerStatus,
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
                                   long syncRequestTimeoutMs,
-                                  FlexlbBatchScheduler batchScheduler) {
+                                  FlexlbBatchScheduler batchScheduler,
+                                  EndpointRegistry endpointRegistry) {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
         this.ip = split[0];
@@ -60,6 +64,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.engineGrpcService = engineGrpcService;
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.batchScheduler = batchScheduler;
+        this.endpointRegistry = endpointRegistry;
     }
 
     @Override
@@ -173,6 +178,13 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             // Correct running queue total wait time
             workerStatus.updateRunningQueueTime();
+
+            if (endpointRegistry != null) {
+                WorkerEndpoint ep = endpointRegistry.get(ipPort);
+                if (ep != null) {
+                    ep.calibrateWaitingTime();
+                }
+            }
 
             engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
                     Optional.ofNullable(runningTaskInfo).map(Map::size).orElse(0),
