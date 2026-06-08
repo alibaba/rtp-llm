@@ -21,6 +21,7 @@ class PrefillServerCallerTest;
 struct PrefillPeerInfo {
     int                      tp_size = -1;
     std::vector<std::string> dp_addrs;
+    int64_t                  cached_at_ms{0};
 };
 
 class PrefillServerCaller {
