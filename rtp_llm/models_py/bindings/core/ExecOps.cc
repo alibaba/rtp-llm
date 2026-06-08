@@ -542,7 +542,7 @@ void cudaCurrentStreamSyncAndCheck() {
     check_cuda_value(cudaStreamSynchronize(stream));
     check_cuda_error();
 #elif USING_ROCM
-    auto stream = at::cuda::getCurrentCUDAStream();
+    auto stream = at::cuda::getCurrentHIPStream();
     ROCM_CHECK(hipStreamSynchronize(stream));
     ROCM_CHECK_ERROR();
 #endif
@@ -565,7 +565,7 @@ void cudaPreRun(int device_id) {
     at::cuda::set_device(device_id);
     at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream(device_id));
 #elif USING_ROCM
-    hipSetDevice(device_id);
+    ROCM_CHECK(hipSetDevice(device_id));
 #endif
 }
 
@@ -592,7 +592,7 @@ ExecStatus getGpuExecStatus() {
     auto error = cudaMemGetInfo(&mem.free_bytes, &total_bytes);
     RTP_LLM_CHECK(error == cudaSuccess);
 #elif USING_ROCM
-    hipMemGetInfo(&mem.free_bytes, &total_bytes);
+    ROCM_CHECK(hipMemGetInfo(&mem.free_bytes, &total_bytes));
 #endif
     mem.used_bytes      = total_bytes - mem.free_bytes;
     mem.available_bytes = mem.free_bytes;
