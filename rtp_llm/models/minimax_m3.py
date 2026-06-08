@@ -97,6 +97,19 @@ def _mxfp8_dequant_to_bf16(ts: List[torch.Tensor]) -> torch.Tensor:
     return (w * scale_full).to(torch.bfloat16)
 
 
+def add_unit_offset(ts: List[torch.Tensor]) -> torch.Tensor:
+    """Bake the Gemma-style RMSNorm ``+1`` offset into the gamma at load time.
+
+    MiniMax-M3 uses Gemma RMSNorm (``use_gemma_norm=True``): the effective
+    per-channel scale is ``(1 + weight)`` and the checkpoint stores ``weight``
+    centered at 0 (e.g. layer-0 input_layernorm has mean ~-0.94). rtp-llm's
+    runtime RMSNorm ops apply plain ``x_normed * gamma``, so we add 1.0 here to
+    recover the correct scale. Applied to every M3 norm gamma (pre/post layer
+    norm, q/k norm, final norm, MSA index q/k norm).
+    """
+    return (ts[0] + 1.0).contiguous()
+
+
 class MiniMaxM3Weight(ModelDeployWeightInfo):
     """Weight loader for MiniMax-M3 text backbone.
 
@@ -182,7 +195,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                         identity,
                     )
                 ],
-                identity,
+                add_unit_offset,
             ),
             AttnAtomicWeight(
                 W.attn_qkv_w,
@@ -245,7 +258,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                         identity,
                     )
                 ],
-                identity,
+                add_unit_offset,
                 config=attn_config,
             ),
         ]
@@ -262,6 +275,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                                 + "model.layers.{i}.self_attn.q_norm.weight"
                             )
                         ],
+                        add_unit_offset,
                         config=attn_config,
                     ),
                     AttnAtomicWeight(
@@ -272,6 +286,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                                 + "model.layers.{i}.self_attn.k_norm.weight"
                             )
                         ],
+                        add_unit_offset,
                         config=attn_config,
                     ),
                 ]
@@ -340,13 +355,13 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                     AtomicWeight(
                         W.msa_idx_q_norm,
                         [CkptWeightInfo(idx_prefix + "index_q_norm.weight", identity)],
-                        identity,
+                        add_unit_offset,
                         data_type=torch.bfloat16,
                     ),
                     AtomicWeight(
                         W.msa_idx_k_norm,
                         [CkptWeightInfo(idx_prefix + "index_k_norm.weight", identity)],
-                        identity,
+                        add_unit_offset,
                         data_type=torch.bfloat16,
                     ),
                 ]
@@ -571,7 +586,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                         self.prefix + "model.norm.weight", identity
                     )
                 ],
-                identity,
+                add_unit_offset,
             ),
             AtomicWeight(
                 W.lm_head,
