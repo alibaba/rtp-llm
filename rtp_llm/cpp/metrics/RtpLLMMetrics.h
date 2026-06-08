@@ -837,6 +837,23 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMCacheEvictionMetricsCollector final {
+public:
+    int64_t lifetime_ms = 0;
+};
+
+class RtpLLMCacheEvictionMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheEvictionMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* evicted_block_lifetime_ms_metric = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMCacheReuseMetricsCollector final {
 public:
     int64_t kv_cache_reuse_length            = 0;
@@ -1231,6 +1248,7 @@ public:
     int64_t total_block_num     = 0;
     int64_t allocated_block_num = 0;  // 在cache中的block数量
     int64_t available_block_num = 0;  // 可用的block数量
+    float   used_ratio          = 0;
 };
 
 class RtpLLMMemoryCacheMetrics: public kmonitor::MetricsGroup {
@@ -1271,6 +1289,7 @@ public:
     kmonitor::MutableMetric* kv_cache_memory_cache_status_total_block_num_metric     = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_allocated_block_num_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_available_block_num_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_status_used_ratio_metric          = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1317,6 +1336,7 @@ public:
     int64_t write_bytes         = 0;
     int64_t read_bandwidth      = 0;
     int64_t write_bandwidth     = 0;
+    float   used_ratio          = 0;
 };
 
 class RtpLLMDiskCacheMetrics: public kmonitor::MetricsGroup {
@@ -1358,6 +1378,7 @@ public:
     kmonitor::MutableMetric* kv_cache_disk_cache_status_allocated_block_num_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_disk_cache_status_available_block_num_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_disk_cache_status_in_flight_block_num_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_disk_cache_status_used_ratio_metric          = nullptr;
     kmonitor::MutableMetric* kv_cache_disk_cache_read_bytes_metric                 = nullptr;
     kmonitor::MutableMetric* kv_cache_disk_cache_write_bytes_metric                = nullptr;
     kmonitor::MutableMetric* kv_cache_disk_cache_read_bandwidth_metric             = nullptr;

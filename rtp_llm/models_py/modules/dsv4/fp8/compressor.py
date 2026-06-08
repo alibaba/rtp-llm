@@ -101,7 +101,15 @@ def _build_cp_full_state_read_cache(
     block_table: torch.Tensor,
     cp_size: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Gather CP-sliced fixed-state blocks into a compact full-ring read cache."""
+    """Gather CP-sliced fixed-state blocks into a compact full-ring read cache.
+
+    CP prefill stores INDEXER/CSA/HCA state as intra-block slices: each rank
+    owns ``local_eb`` rows of the full ``local_eb * cp_size`` state ring.
+    The fused compressor may still need to read prefix-cache history that
+    spans all state-ring rows.  For that read path only, gather the rows for
+    the current request block table into compact block ids while keeping the
+    write path local/sliced.
+    """
     if cp_size <= 1:
         return state_cache, block_table
     if block_table is None or int(block_table.numel()) == 0:

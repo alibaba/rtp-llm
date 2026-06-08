@@ -763,6 +763,38 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);
+    ASSERT_TRUE(allocator_->init());
+
+    auto block_pool = allocator_->getBlockPool();
+    ASSERT_NE(block_pool, nullptr);
+
+    const size_t total_free_before = allocator_->freeBlocksNum();
+    auto         blocks            = block_pool->malloc(2);
+    ASSERT_EQ(blocks.size(), 2);
+
+    KVCacheResource resource;
+    resource.initGroups(1, config.layer_all_num, config.layer_to_group_id);
+    resource.cacheKeys() = CacheKeysType{101, 103, 999};
+    resource.rebuildLinearBlockDependencies();
+    resource.setLastBlockAligned(false);
+    resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1]});
+
+    auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{101, 103, 999}, /*is_connector=*/true);
+    ASSERT_NE(ref_resource, nullptr);
+    EXPECT_FALSE(ref_resource->lastBlockAligned());
+    EXPECT_EQ(ref_resource->cacheKeys(), (CacheKeysType{101, 103, 999}));
+    EXPECT_EQ(ref_resource->blocks(0), (BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX}));
+
+    block_pool->requestFree(blocks);
+    EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
+
+    ref_resource.reset();
+    EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
+}
+
 TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/8);
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::HOST);

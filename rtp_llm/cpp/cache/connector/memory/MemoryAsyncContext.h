@@ -1,8 +1,10 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
@@ -53,8 +55,15 @@ public:
     void setBroadcastResult(const std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>& result);
 
 private:
+    bool successLocked() const;
+
+private:
+    mutable std::mutex                                                      mutex_;
+    std::condition_variable                                                 cv_;
     std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>> broadcast_result_;
     std::function<void(bool)>                                               done_callback_;
+    bool                                                                    result_ready_{false};
+    bool                                                                    finalizing_{false};
     std::atomic<bool>                                                       already_done_{false};
 };
 

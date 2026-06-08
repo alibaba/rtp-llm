@@ -289,7 +289,9 @@ TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlock
     EXPECT_EQ(config.cache_specs[4]->block_size_bytes(), 2u * 2048u * 4u);
     EXPECT_EQ(config.cache_specs[5]->block_size_bytes(), 32u * 1024u * 4u);
 
-    EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), 32u * 584u);  // contiguous natural CP slice
+    // SWA_KV keeps full logical ring entries for byte-sliced CP layout, but
+    // each prefill rank stores only one aligned byte slice of the full block.
+    EXPECT_EQ(config.cache_specs[6]->block_size_bytes(), 18720u);
     EXPECT_EQ(config.group_kv_block_stride_bytes[3], config.cache_specs[3]->block_size_bytes());
     EXPECT_EQ(config.group_kv_block_stride_bytes[4], config.cache_specs[4]->block_size_bytes());
     EXPECT_EQ(config.group_kv_block_stride_bytes[5], config.cache_specs[5]->block_size_bytes());
@@ -951,11 +953,12 @@ TEST(HybridPoolConfigCreatorTest, PrefillCp8MtpGenNum2PadsStateRingBeforeSlicing
     ASSERT_NE(swa_kv, nullptr);
 
     // gen_num_per_cycle=2 gives raw INDEXER/CSA R=10, HCA/SWA R=130.
-    // CP slicing pads those rings to cp_size before taking each rank's slice.
+    // Fixed state pools are CP-sliced by entries; SWA_KV keeps full logical
+    // entries and slices its packed bytes instead.
     EXPECT_EQ(indexer_state->entries_per_block, 2u);
     EXPECT_EQ(csa_state->entries_per_block, 2u);
     EXPECT_EQ(hca_state->entries_per_block, 17u);
-    EXPECT_EQ(swa_kv->entries_per_block, 17u);
+    EXPECT_EQ(swa_kv->entries_per_block, 136u);
 }
 
 TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2ExpandsFixedAndSwaSlices) {
@@ -982,7 +985,7 @@ TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2ExpandsFixedAndSwaSl
     ASSERT_EQ(prefill_config.cache_specs.size(), 7u);
     ASSERT_EQ(decode_config.cache_specs.size(), 7u);
 
-    for (size_t gid : {3u, 4u, 5u, 6u}) {
+    for (size_t gid : {3u, 4u, 5u}) {
         auto* prefill_spec = dynamic_cast<DSV4StateSpec*>(prefill_config.cache_specs[gid].get());
         auto* decode_spec  = dynamic_cast<DSV4StateSpec*>(decode_config.cache_specs[gid].get());
         ASSERT_NE(prefill_spec, nullptr) << "gid=" << gid;
@@ -992,6 +995,12 @@ TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2ExpandsFixedAndSwaSl
         EXPECT_EQ(decode_spec->entries_per_block, expected_entries)
             << "gid=" << gid << " region=" << static_cast<int>(decode_spec->cache_type);
     }
+    auto* prefill_swa = dynamic_cast<DSV4StateSpec*>(prefill_config.cache_specs[6].get());
+    auto* decode_swa  = dynamic_cast<DSV4StateSpec*>(decode_config.cache_specs[6].get());
+    ASSERT_NE(prefill_swa, nullptr);
+    ASSERT_NE(decode_swa, nullptr);
+    EXPECT_EQ(prefill_swa->entries_per_block, 136u);
+    EXPECT_EQ(decode_swa->entries_per_block, prefill_swa->entries_per_block);
 
     auto* indexer_state = dynamic_cast<DSV4StateSpec*>(decode_config.cache_specs[3].get());
     auto* csa_state     = dynamic_cast<DSV4StateSpec*>(decode_config.cache_specs[4].get());
@@ -1033,7 +1042,7 @@ TEST(HybridPoolConfigCreatorTest, DecodeExplicitPrefillCpSizeHandlesDp16) {
     auto prefill_config = HybridPoolConfigCreator::createConfig(mc, prefill_pc, makeDsv4KvCacheConfig(), false, 2);
     auto decode_config  = HybridPoolConfigCreator::createConfig(mc, decode_pc, makeDsv4KvCacheConfig(), false, 2);
 
-    for (size_t gid : {3u, 4u, 5u, 6u}) {
+    for (size_t gid : {3u, 4u, 5u}) {
         auto* prefill_spec = dynamic_cast<DSV4StateSpec*>(prefill_config.cache_specs[gid].get());
         auto* decode_spec  = dynamic_cast<DSV4StateSpec*>(decode_config.cache_specs[gid].get());
         ASSERT_NE(prefill_spec, nullptr) << "gid=" << gid;
@@ -1044,6 +1053,14 @@ TEST(HybridPoolConfigCreatorTest, DecodeExplicitPrefillCpSizeHandlesDp16) {
         EXPECT_EQ(prefill_config.group_seq_size_per_block[gid], kDsv4TokensPerBlock * cp_size) << "gid=" << gid;
         EXPECT_EQ(decode_config.group_seq_size_per_block[gid], kDsv4TokensPerBlock * cp_size) << "gid=" << gid;
     }
+    auto* prefill_swa = dynamic_cast<DSV4StateSpec*>(prefill_config.cache_specs[6].get());
+    auto* decode_swa  = dynamic_cast<DSV4StateSpec*>(decode_config.cache_specs[6].get());
+    ASSERT_NE(prefill_swa, nullptr);
+    ASSERT_NE(decode_swa, nullptr);
+    EXPECT_EQ(prefill_swa->entries_per_block, 136u);
+    EXPECT_EQ(decode_swa->entries_per_block, prefill_swa->entries_per_block);
+    EXPECT_EQ(prefill_config.group_seq_size_per_block[6], kDsv4TokensPerBlock * cp_size);
+    EXPECT_EQ(decode_config.group_seq_size_per_block[6], kDsv4TokensPerBlock * cp_size);
 }
 
 TEST(CacheConfigTest, DSV4NonMtpSpConfigDoesNotInflateRing) {
@@ -2071,8 +2088,10 @@ TEST_F(DSV4AllocatorTest, IncrMallocDecodeGrowsBlocks) {
         EXPECT_EQ(batch_res->blocksNum(0, gid), 2u) << "group " << gid << " should have 2 blocks after incr";
     }
 
-    // Should have consumed 7 more blocks (1 per group)
-    EXPECT_EQ(allocator->freeBlocksNum(), free_after_init - 7);
+    // HCA_STATE is not reusable: decode may materialize a new tail, but the
+    // skipped old tail is released, so only the other six groups consume a net
+    // additional block.
+    EXPECT_EQ(allocator->freeBlocksNum(), free_after_init - 6);
 
     FreeInfo free_info{batch_res};
     allocator->free(free_info);
