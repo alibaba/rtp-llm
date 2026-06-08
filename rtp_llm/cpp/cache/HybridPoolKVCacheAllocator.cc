@@ -7,6 +7,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
@@ -503,34 +504,47 @@ size_t HybridPoolKVCacheAllocator::notInUseBlocksNum() const {
     return total;
 }
 
-size_t HybridPoolKVCacheAllocator::availableTokensNum() const {
+size_t HybridPoolKVCacheAllocator::minTokenCapacity(bool use_available_blocks, bool full_groups_only) const {
     if (group_block_pools_.empty()) {
         return 0;
     }
-    size_t min_tokens = std::numeric_limits<size_t>::max();
-    for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
-        if (!group_block_pools_[gid]) {
-            continue;
+
+    auto calculate = [&](bool only_full_groups) {
+        size_t min_tokens = std::numeric_limits<size_t>::max();
+        bool   saw_group  = false;
+        for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
+            if (only_full_groups && gid < config_.group_types.size()
+                && config_.group_types[gid] != CacheGroupType::FULL) {
+                continue;
+            }
+            if (!group_block_pools_[gid]) {
+                continue;
+            }
+            saw_group        = true;
+            const auto block = use_available_blocks ? group_block_pools_[gid]->availableBlocksNum() :
+                                                      group_block_pools_[gid]->totalBlocksNum();
+            min_tokens       = std::min(min_tokens, block * logicalSeqSizePerBlockForCapacity(gid));
         }
-        min_tokens =
-            std::min(min_tokens, group_block_pools_[gid]->availableBlocksNum() * logicalSeqSizePerBlockForCapacity(gid));
+        return std::make_pair(saw_group, min_tokens);
+    };
+
+    if (full_groups_only) {
+        const auto [saw_full_group, min_tokens] = calculate(/*only_full_groups=*/true);
+        if (saw_full_group) {
+            return min_tokens;
+        }
     }
-    return min_tokens == std::numeric_limits<size_t>::max() ? 0 : min_tokens;
+
+    const auto [saw_group, min_tokens] = calculate(/*only_full_groups=*/false);
+    return saw_group ? min_tokens : 0;
+}
+
+size_t HybridPoolKVCacheAllocator::availableTokensNum() const {
+    return minTokenCapacity(/*use_available_blocks=*/true, /*full_groups_only=*/true);
 }
 
 size_t HybridPoolKVCacheAllocator::totalTokensNum() const {
-    if (group_block_pools_.empty()) {
-        return 0;
-    }
-    size_t min_tokens = std::numeric_limits<size_t>::max();
-    for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
-        if (!group_block_pools_[gid]) {
-            continue;
-        }
-        min_tokens =
-            std::min(min_tokens, group_block_pools_[gid]->totalBlocksNum() * logicalSeqSizePerBlockForCapacity(gid));
-    }
-    return min_tokens == std::numeric_limits<size_t>::max() ? 0 : min_tokens;
+    return minTokenCapacity(/*use_available_blocks=*/false, /*full_groups_only=*/true);
 }
 
 size_t HybridPoolKVCacheAllocator::totalBlocksNum() const {
@@ -542,32 +556,7 @@ size_t HybridPoolKVCacheAllocator::totalBlocksNum() const {
 }
 
 size_t HybridPoolKVCacheAllocator::maxAvailableTokensNum() const {
-    if (group_block_pools_.empty()) {
-        return 0;
-    }
-    size_t min_tokens     = std::numeric_limits<size_t>::max();
-    bool   saw_full_group = false;
-    for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
-        if (gid < config_.group_types.size() && config_.group_types[gid] != CacheGroupType::FULL) {
-            continue;
-        }
-        if (!group_block_pools_[gid]) {
-            continue;
-        }
-        saw_full_group = true;
-        min_tokens =
-            std::min(min_tokens, group_block_pools_[gid]->totalBlocksNum() * logicalSeqSizePerBlockForCapacity(gid));
-    }
-    if (!saw_full_group) {
-        for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
-            if (!group_block_pools_[gid]) {
-                continue;
-            }
-            min_tokens =
-                std::min(min_tokens, group_block_pools_[gid]->totalBlocksNum() * logicalSeqSizePerBlockForCapacity(gid));
-        }
-    }
-    return min_tokens == std::numeric_limits<size_t>::max() ? 0 : min_tokens;
+    return minTokenCapacity(/*use_available_blocks=*/false, /*full_groups_only=*/true);
 }
 
 void HybridPoolKVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {

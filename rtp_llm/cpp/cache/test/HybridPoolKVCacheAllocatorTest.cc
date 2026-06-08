@@ -425,7 +425,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseDifferentCapacityScope
     ASSERT_TRUE(allocator->init());
 
     EXPECT_EQ(allocator->maxAvailableTokensNum(), 28u);
-    EXPECT_EQ(allocator->availableTokensNum(), 10u);
+    EXPECT_EQ(allocator->availableTokensNum(), 28u);
+    EXPECT_EQ(allocator->totalTokensNum(), 28u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForFullGroups) {
@@ -1009,6 +1010,26 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4HCAStateReuseEnabledAllocatesTailOnly
     EXPECT_TRUE(isNullBlockIdx(hca_blocks[8]));
     EXPECT_FALSE(isNullBlockIdx(hca_blocks[9]));
     EXPECT_EQ(hca_free_before - allocator->groupBlockPools()[hca_state_gid]->freeBlocksNum(), 1u);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsIgnoreSmallHCAStatePool) {
+    auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
+
+    constexpr int hca_state_gid = 5;
+    ASSERT_GT(config.group_block_nums.size(), static_cast<size_t>(hca_state_gid));
+    ASSERT_GT(config.group_region_names.size(), static_cast<size_t>(hca_state_gid));
+    ASSERT_EQ(config.group_region_names[hca_state_gid], KVCacheRegionName::HCA_STATE);
+    config.group_block_nums[hca_state_gid] = 2;
+
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    ASSERT_GT(allocator->groupBlockPools().size(), static_cast<size_t>(hca_state_gid));
+
+    const auto hca_state_tokens = allocator->groupBlockPools()[hca_state_gid]->totalBlocksNum()
+                                  * config.group_seq_size_per_block[hca_state_gid];
+    EXPECT_LT(hca_state_tokens, allocator->totalTokensNum());
+    EXPECT_EQ(allocator->availableTokensNum(), allocator->maxAvailableTokensNum());
+    EXPECT_EQ(allocator->totalTokensNum(), allocator->maxAvailableTokensNum());
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumulator) {
