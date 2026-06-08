@@ -1318,6 +1318,9 @@ class NormType:
 
 
 class PDSepConfig:
+    batch_dispatch_timeout_ms: int
+    batch_load_timeout_ms: int
+    batch_prepare_timeout_ms: int
     cache_store_connect_port: int
     cache_store_listen_port: int
     cache_store_rdma_connect_port: int

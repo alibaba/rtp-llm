@@ -594,7 +594,10 @@ std::string PDSepConfig::to_string() const {
         << "load_cache_timeout_ms: " << load_cache_timeout_ms << "\n"
         << "max_rpc_timeout_ms: " << max_rpc_timeout_ms << "\n"
         << "worker_port_offset: " << worker_port_offset << "\n"
-        << "decode_entrance: " << decode_entrance;
+        << "decode_entrance: " << decode_entrance << "\n"
+        << "batch_dispatch_timeout_ms: " << batch_dispatch_timeout_ms << "\n"
+        << "batch_prepare_timeout_ms: " << batch_prepare_timeout_ms << "\n"
+        << "batch_load_timeout_ms: " << batch_load_timeout_ms;
     return oss.str();
 }
 

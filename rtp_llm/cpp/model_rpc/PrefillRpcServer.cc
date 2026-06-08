@@ -17,6 +17,7 @@
 #include <strings.h>
 #include <cstdlib>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <limits>
 #include <memory>
@@ -171,6 +172,18 @@ void addBatchError(EnqueueBatchResponsePB* response, int64_t request_id, int64_t
     auto* error_info = error->mutable_error_info();
     error_info->set_error_code(code);
     error_info->set_error_message(msg);
+}
+
+void detachLeftoverFutures(std::vector<std::future<void>>& futures) {
+    auto leftover = std::make_shared<std::vector<std::future<void>>>();
+    for (auto& f : futures) {
+        if (f.valid() && f.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+            leftover->push_back(std::move(f));
+        }
+    }
+    if (!leftover->empty()) {
+        std::thread([leftover]() mutable { leftover.reset(); }).detach();
+    }
 }
 
 struct AsyncProducerCancelState {
@@ -1404,10 +1417,13 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
         }
     };
 
-    std::vector<std::thread> dispatch_threads;
-    dispatch_threads.reserve(dispatch_targets.size());
+    const auto dispatch_timeout_ms = maga_init_params_.pd_sep_config.batch_dispatch_timeout_ms;
+    const auto dispatch_deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(dispatch_timeout_ms);
+    std::vector<std::future<void>> dispatch_futures;
+    dispatch_futures.reserve(dispatch_targets.size());
     for (auto& target : dispatch_targets) {
-        dispatch_threads.emplace_back([this, target = std::move(target), merge_response] {
+        dispatch_futures.push_back(std::async(std::launch::async, [this, target = std::move(target), merge_response] {
             EnqueueBatchResponsePB dp_response;
             grpc::Status           status;
             if (target.dp_rank == static_cast<int>(maga_init_params_.parallelism_config.dp_rank)) {
@@ -1439,11 +1455,21 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                 status = grpc::Status(grpc::StatusCode::INTERNAL, "EnqueueGroup forward unknown exception");
             }
             merge_response(target.request, status, dp_response);
-        });
+        }));
     }
-    for (auto& thread : dispatch_threads) {
-        thread.join();
+    for (size_t i = 0; i < dispatch_futures.size(); ++i) {
+        auto remaining = dispatch_deadline - std::chrono::steady_clock::now();
+        if (remaining <= std::chrono::milliseconds(0)
+            || dispatch_futures[i].wait_for(remaining) == std::future_status::timeout) {
+            auto& target = dispatch_targets[i];
+            merge_response(target.request,
+                           grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
+                                        "EnqueueBatch dispatch timeout for dp_rank "
+                                            + std::to_string(target.dp_rank)),
+                           EnqueueBatchResponsePB());
+        }
     }
+    detachLeftoverFutures(dispatch_futures);
 
     response_registry_.gc(std::chrono::minutes(10));
     return grpc::Status::OK;
@@ -1574,7 +1600,9 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*           conte
         std::thread worker([this,
                             slots_ptr,
                             max_retry_times = maga_init_params_.pd_sep_config.prefill_retry_times,
-                            max_retry_timeout_ms = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms]() mutable {
+                            max_retry_timeout_ms = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms,
+                            batch_prepare_timeout_ms = maga_init_params_.pd_sep_config.batch_prepare_timeout_ms,
+                            batch_load_timeout_ms = maga_init_params_.pd_sep_config.batch_load_timeout_ms]() mutable {
             ScopeExit controller_finish_guard([this] { finishAsyncResponseWorker(); });
             auto&     slots = *slots_ptr;
 
@@ -1703,11 +1731,14 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*           conte
                     };
             }
 
-            std::vector<std::thread> prepare_threads;
-            prepare_threads.reserve(slots.size());
+            const auto prepare_deadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(batch_prepare_timeout_ms);
+            std::vector<std::future<void>> prepare_futures;
+            prepare_futures.reserve(slots.size());
             for (auto& slot : slots) {
                 auto* slot_ptr = &slot;
-                prepare_threads.emplace_back([this, slot_ptr, entry_cancelled, max_retry_times, max_retry_timeout_ms] {
+                prepare_futures.push_back(std::async(
+                    std::launch::async, [this, slot_ptr, entry_cancelled, max_retry_times, max_retry_timeout_ms] {
                     auto& slot = *slot_ptr;
                     if (entry_cancelled(slot)) {
                         slot.stage_status =
@@ -1753,11 +1784,21 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*           conte
                         slot.stage_status =
                             grpc::Status(grpc::StatusCode::INTERNAL, "prepareAllocateResource unknown exception");
                     }
-                });
+                }));
             }
-            for (auto& thread : prepare_threads) {
-                thread.join();
+            for (size_t i = 0; i < prepare_futures.size(); ++i) {
+                auto remaining = prepare_deadline - std::chrono::steady_clock::now();
+                if (remaining <= std::chrono::milliseconds(0)
+                    || prepare_futures[i].wait_for(remaining) == std::future_status::timeout) {
+                    auto& slot = slots[i];
+                    if (slot.entry) {
+                        slot.entry->cancelled.store(true);
+                    }
+                    slot.stage_status =
+                        grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "EnqueueGroup prepare timeout");
+                }
             }
+            detachLeftoverFutures(prepare_futures);
 
             std::vector<LocalSlot*> ready_slots;
             ready_slots.reserve(slots.size());
@@ -1824,10 +1865,13 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*           conte
                 stream_ready_slots.push_back(slot);
             }
 
-            std::vector<std::thread> load_threads;
-            load_threads.reserve(stream_ready_slots.size());
+            const auto load_deadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(batch_load_timeout_ms);
+            std::vector<std::future<void>> load_futures;
+            load_futures.reserve(stream_ready_slots.size());
             for (auto* slot : stream_ready_slots) {
-                load_threads.emplace_back([this, slot, entry_cancelled, fail_slot, start_finish_worker] {
+                load_futures.push_back(std::async(
+                    std::launch::async, [this, slot, entry_cancelled, fail_slot, start_finish_worker] {
                     if (entry_cancelled(*slot)) {
                         fail_slot(*slot,
                                   grpc::Status(grpc::StatusCode::CANCELLED, "EnqueueGroup request cancelled"));
@@ -1862,11 +1906,21 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*           conte
                                   grpc::Status(grpc::StatusCode::INTERNAL,
                                                "remoteLoadCacheStart unknown exception"));
                     }
-                });
+                }));
             }
-            for (auto& thread : load_threads) {
-                thread.join();
+            for (size_t i = 0; i < load_futures.size(); ++i) {
+                auto remaining = load_deadline - std::chrono::steady_clock::now();
+                if (remaining <= std::chrono::milliseconds(0)
+                    || load_futures[i].wait_for(remaining) == std::future_status::timeout) {
+                    auto* slot = stream_ready_slots[i];
+                    if (slot->entry) {
+                        slot->entry->cancelled.store(true);
+                    }
+                    fail_slot(*slot,
+                              grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "EnqueueGroup load cache timeout"));
+                }
             }
+            detachLeftoverFutures(load_futures);
         });
         worker.detach();
     } catch (const std::exception& e) {

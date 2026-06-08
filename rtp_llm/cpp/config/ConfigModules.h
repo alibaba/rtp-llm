@@ -433,6 +433,9 @@ struct PDSepConfig {
     int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
     int64_t  worker_port_offset              = 0;
     bool     decode_entrance                 = false;
+    int64_t  batch_dispatch_timeout_ms       = 60000;   // 60s, cross-DP dispatch
+    int64_t  batch_prepare_timeout_ms        = 10000;   // 10s, prepareAllocateResource
+    int64_t  batch_load_timeout_ms           = 10000;   // 10s, remoteLoadCacheStart
 
     std::string to_string() const;
 };
