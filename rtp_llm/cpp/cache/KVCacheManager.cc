@@ -120,6 +120,7 @@ bool KVCacheManager::init() {
         allocator_->setUseCudaMallocBlockPool(true);
     }
 
+    allocator_->setCPSlotMapper(cp_slot_mapper_);
     allocator_->setSharedBlockCache(shared_cache);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
 
@@ -599,34 +600,9 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
     const size_t block_size_tokens = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
                                          cp_slot_mapper_->virtualBlockSize() :
                                          config_.seq_size_per_block;
-
     info.block_size = block_size_tokens;
-    if (auto hybrid = std::dynamic_pointer_cast<rtp_llm::HybridPoolKVCacheAllocator>(allocator_)) {
-        const auto& pools            = hybrid->groupBlockPools();
-        size_t      total_tokens     = std::numeric_limits<size_t>::max();
-        size_t      available_tokens = std::numeric_limits<size_t>::max();
-        bool        has_pool         = false;
-        for (size_t gid = 0; gid < pools.size(); ++gid) {
-            const auto& pool = pools[gid];
-            if (!pool) {
-                continue;
-            }
-            const size_t seq_size =
-                (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
-                    config_.group_seq_size_per_block[gid] :
-                    block_size_tokens;
-            total_tokens     = std::min(total_tokens, pool->totalBlocksNum() * seq_size);
-            available_tokens = std::min(available_tokens, pool->availableBlocksNum() * seq_size);
-            has_pool         = true;
-        }
-        info.total_kv_cache     = has_pool ? total_tokens : 0;
-        info.available_kv_cache = has_pool ? available_tokens : 0;
-    } else {
-        const size_t total_blocks     = allocator_->totalBlocksNum();
-        const size_t available_blocks = allocator_->availableBlocksNum();
-        info.total_kv_cache           = total_blocks * block_size_tokens;
-        info.available_kv_cache       = available_blocks * block_size_tokens;
-    }
+    info.total_kv_cache     = allocator_->totalTokensNum();
+    info.available_kv_cache = allocator_->availableTokensNum();
     // cached_keys left empty for now; can be populated when distributed cache is wired up.
 
     return info;
@@ -749,7 +725,7 @@ void KVCacheManager::reportMetricsLoop() {
         const auto connector_ref_blocks = allocator_->connectorRefBlocksNum();
 
         collector.kv_cache_item_num             = shared_cache ? static_cast<int64_t>(shared_cache->size()) : 0;
-        collector.kv_cache_left_seq             = static_cast<int64_t>(available_blocks * config_.seq_size_per_block);
+        collector.kv_cache_left_seq             = static_cast<int64_t>(allocator_->availableTokensNum());
         collector.kv_cache_available_blocks     = static_cast<int64_t>(available_blocks);
         collector.kv_cache_request_ref_blocks   = static_cast<int64_t>(request_ref_blocks);
         collector.kv_cache_connector_ref_blocks = static_cast<int64_t>(connector_ref_blocks);

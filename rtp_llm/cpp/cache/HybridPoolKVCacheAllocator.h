@@ -41,6 +41,7 @@ public:
     size_t                  blockCacheRefBlocksNum() const override;
     size_t                  notInUseBlocksNum() const override;
     size_t                  availableTokensNum() const override;
+    size_t                  totalTokensNum() const override;
     size_t                  totalBlocksNum() const override;
     size_t                  maxAvailableTokensNum() const override;
     void                    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr) override;

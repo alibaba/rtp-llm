@@ -2080,10 +2080,11 @@ void KVCacheMemoryConnector::reportMatchMetrics(bool    success,
     }
 
     RtpLLMMemoryCacheMatchMetricsCollector collector;
+    const int64_t tokens_per_block = cacheKeyTokensPerBlockForMetrics();
     collector.failed        = !success;
     collector.latency_us    = latency_us;
-    collector.input_token   = input_block_num * cache_config_.seq_size_per_block;
-    collector.matched_token = matched_block_num * cache_config_.seq_size_per_block;
+    collector.input_token   = input_block_num * tokens_per_block;
+    collector.matched_token = matched_block_num * tokens_per_block;
 
     metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheMatchMetricsCollector>(nullptr, &collector);
 }
@@ -2097,10 +2098,11 @@ void KVCacheMemoryConnector::reportReadMetrics(bool    success,
     }
 
     RtpLLMMemoryCacheReadMetricsCollector collector;
+    const int64_t tokens_per_block = cacheKeyTokensPerBlockForMetrics();
     collector.failed      = !success;
     collector.latency_us  = latency_us;
-    collector.input_token = input_block_num * cache_config_.seq_size_per_block;
-    collector.read_token  = read_block_num * cache_config_.seq_size_per_block;
+    collector.input_token = input_block_num * tokens_per_block;
+    collector.read_token  = read_block_num * tokens_per_block;
 
     metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheReadMetricsCollector>(nullptr, &collector);
 }
@@ -2114,10 +2116,11 @@ void KVCacheMemoryConnector::reportWriteMetrics(bool    success,
     }
 
     RtpLLMMemoryCacheWriteMetricsCollector collector;
+    const int64_t tokens_per_block = cacheKeyTokensPerBlockForMetrics();
     collector.failed      = !success;
     collector.latency_us  = latency_us;
-    collector.input_token = input_block_num * cache_config_.seq_size_per_block;
-    collector.write_token = write_block_num * cache_config_.seq_size_per_block;
+    collector.input_token = input_block_num * tokens_per_block;
+    collector.write_token = write_block_num * tokens_per_block;
 
     metrics_reporter_->report<RtpLLMMemoryCacheMetrics, RtpLLMMemoryCacheWriteMetricsCollector>(nullptr, &collector);
 }
@@ -2143,10 +2146,11 @@ void KVCacheMemoryConnector::reportDiskMatchMetrics(bool    success,
         return;
     }
     RtpLLMDiskCacheMatchMetricsCollector collector;
+    const int64_t tokens_per_block = cacheKeyTokensPerBlockForMetrics();
     collector.failed        = !success;
     collector.latency_us    = latency_us;
-    collector.input_token   = input_block_num * cache_config_.seq_size_per_block;
-    collector.matched_token = matched_block_num * cache_config_.seq_size_per_block;
+    collector.input_token   = input_block_num * tokens_per_block;
+    collector.matched_token = matched_block_num * tokens_per_block;
     metrics_reporter_->report<RtpLLMDiskCacheMetrics, RtpLLMDiskCacheMatchMetricsCollector>(nullptr, &collector);
 }
 
@@ -2158,10 +2162,11 @@ void KVCacheMemoryConnector::reportDiskReadMetrics(bool    success,
         return;
     }
     RtpLLMDiskCacheReadMetricsCollector collector;
+    const int64_t tokens_per_block = cacheKeyTokensPerBlockForMetrics();
     collector.failed      = !success;
     collector.latency_us  = latency_us;
-    collector.input_token = input_block_num * cache_config_.seq_size_per_block;
-    collector.read_token  = read_block_num * cache_config_.seq_size_per_block;
+    collector.input_token = input_block_num * tokens_per_block;
+    collector.read_token  = read_block_num * tokens_per_block;
     metrics_reporter_->report<RtpLLMDiskCacheMetrics, RtpLLMDiskCacheReadMetricsCollector>(nullptr, &collector);
 }
 
@@ -2173,11 +2178,31 @@ void KVCacheMemoryConnector::reportDiskWriteMetrics(bool    success,
         return;
     }
     RtpLLMDiskCacheWriteMetricsCollector collector;
+    const int64_t tokens_per_block = cacheKeyTokensPerBlockForMetrics();
     collector.failed      = !success;
     collector.latency_us  = latency_us;
-    collector.input_token = input_block_num * cache_config_.seq_size_per_block;
-    collector.write_token = write_block_num * cache_config_.seq_size_per_block;
+    collector.input_token = input_block_num * tokens_per_block;
+    collector.write_token = write_block_num * tokens_per_block;
     metrics_reporter_->report<RtpLLMDiskCacheMetrics, RtpLLMDiskCacheWriteMetricsCollector>(nullptr, &collector);
+}
+
+int KVCacheMemoryConnector::cpSizeForMetrics() const {
+    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
+    if (!cp_cfg.kv_cache_sharded) {
+        return 1;
+    }
+    if (parallelism_config_.tp_size > 1) {
+        return static_cast<int>(parallelism_config_.tp_size);
+    }
+    if (parallelism_config_.role_type == RoleType::DECODE && cp_cfg.is_prefill_enabled()
+        && cp_cfg.prefill_cp_size > 1) {
+        return static_cast<int>(cp_cfg.prefill_cp_size);
+    }
+    return 1;
+}
+
+int KVCacheMemoryConnector::cacheKeyTokensPerBlockForMetrics() const {
+    return static_cast<int>(cache_config_.seq_size_per_block) * cpSizeForMetrics();
 }
 
 void KVCacheMemoryConnector::reportDiskCopyMetrics(bool success, int64_t latency_us, CopyDirection direction) {

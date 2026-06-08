@@ -205,6 +205,8 @@ private:
     void reportDiskReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
     void reportDiskWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
     void reportDiskCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
+    int  cpSizeForMetrics() const;
+    int  cacheKeyTokensPerBlockForMetrics() const;
     void reportMetricsLoop();
 
 private:

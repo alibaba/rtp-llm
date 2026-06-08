@@ -51,7 +51,8 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
             if (malloc_info.batch_kv_cache_resource) {
                 const auto& cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);
                 size_t      match_keys_size = cache_keys.size();
-                device_input_length         = static_cast<int64_t>(match_keys_size) * config_.seq_size_per_block;
+                device_input_length =
+                    static_cast<int64_t>(match_keys_size) * deviceCacheMetricTokensPerBlock();
             }
 
             if (device_input_length > 0) {
@@ -304,7 +305,11 @@ size_t KVCacheAllocator::notInUseBlocksNum() const {
 }
 
 size_t KVCacheAllocator::availableTokensNum() const {
-    return block_pool_ ? (block_pool_->availableBlocksNum() * seqSizePerBlock()) : 0;
+    return block_pool_ ? (block_pool_->availableBlocksNum() * logicalSeqSizePerBlockForCapacity(/*gid=*/0)) : 0;
+}
+
+size_t KVCacheAllocator::totalTokensNum() const {
+    return block_pool_ ? (block_pool_->totalBlocksNum() * logicalSeqSizePerBlockForCapacity(/*gid=*/0)) : 0;
 }
 
 size_t KVCacheAllocator::totalBlocksNum() const {
@@ -312,7 +317,37 @@ size_t KVCacheAllocator::totalBlocksNum() const {
 }
 
 size_t KVCacheAllocator::maxAvailableTokensNum() const {
-    return block_pool_ ? (block_pool_->totalBlocksNum() * seqSizePerBlock()) : 0;
+    return totalTokensNum();
+}
+
+bool KVCacheAllocator::cpShardThisGroupForCapacity(size_t gid) const {
+    if (!cp_slot_mapper_ || !cp_slot_mapper_->isSharded()) {
+        return false;
+    }
+    return gid >= config_.group_types.size() || config_.group_types[gid] == CacheGroupType::FULL;
+}
+
+size_t KVCacheAllocator::logicalSeqSizePerBlockForCapacity(size_t gid) const {
+    if (cpShardThisGroupForCapacity(gid)) {
+        return static_cast<size_t>(cp_slot_mapper_->virtualBlockSize());
+    }
+    return (gid < config_.group_seq_size_per_block.size() && config_.group_seq_size_per_block[gid] > 0) ?
+               config_.group_seq_size_per_block[gid] :
+               config_.seq_size_per_block;
+}
+
+int KVCacheAllocator::cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const {
+    if (cpShardThisGroupForCapacity(gid)) {
+        return cp_slot_mapper_->effectiveSeqLenForAlloc(seq_len);
+    }
+    return seq_len;
+}
+
+int KVCacheAllocator::deviceCacheMetricTokensPerBlock() const {
+    if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
+        return cp_slot_mapper_->virtualBlockSize();
+    }
+    return seqSizePerBlock();
 }
 
 void KVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {

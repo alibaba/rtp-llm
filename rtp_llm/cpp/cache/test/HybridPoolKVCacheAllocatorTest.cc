@@ -428,6 +428,22 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseDifferentCapacityScope
     EXPECT_EQ(allocator->availableTokensNum(), 10u);
 }
 
+TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForFullGroups) {
+    auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
+    config.group_seq_size_per_block = {100, 4};
+    auto allocator                  = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    EXPECT_EQ(allocator->maxAvailableTokensNum(), 7u * 4u);
+    EXPECT_EQ(allocator->availableTokensNum(), 7u * 4u);
+
+    allocator->setCPSlotMapper(
+        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
+
+    EXPECT_EQ(allocator->maxAvailableTokensNum(), 7u * 8u);
+    EXPECT_EQ(allocator->availableTokensNum(), 7u * 8u);
+}
+
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsFallBackToGlobalSeqSize) {
     auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/6);
     config.group_seq_size_per_block.clear();  // fall back to config.seq_size_per_block
@@ -748,6 +764,30 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksRejectsWhenGroupCannotMeetIt
     malloc_info.verbose             = false;
     auto result                     = allocator->malloc(malloc_info);
     EXPECT_FALSE(result.success);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksUseCPShardedFullGroupNeed) {
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/20, /*full_block_num=*/6);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    allocator->setReserveBlockNum(1);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 104, 105, 106, 107});
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/32, /*seq_size_per_block=*/4);
+
+    MallocInfo malloc_info{batch_res, token_ids};
+    malloc_info.enable_device_cache = false;
+    malloc_info.reuse_cache         = false;
+    malloc_info.cp_slot_mapper      = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4);
+
+    auto result = allocator->malloc(malloc_info);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(validBlockCount(batch_res->blocks(0, /*gid=*/1)), 4u);
+
+    FreeInfo free_info{batch_res, token_ids};
+    allocator->free(free_info);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, ReserveCheckIsBypassedWhenMallocInfoLacksContext) {
