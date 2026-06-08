@@ -81,7 +81,7 @@ void fusedStridedCopy(const FusedStridedCopyParams& params);
 // ===================================================================
 
 GreedyOutput     execSampleGreedy(const GreedyParams& params);
-BeamSearchOutput execSampleBeamSearch(const BeamSearchParams& params);
+BeamSearchOutput execSampleBeamSearch(BeamSearchParams params);
 void             execChainSpeculativeSampling(const SpeculativeSamplingParams& params);
 
 // ===================================================================

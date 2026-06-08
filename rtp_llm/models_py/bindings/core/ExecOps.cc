@@ -31,7 +31,7 @@ using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
 
 namespace rtp_llm {
 GreedyOutput     sampleGreedy(const GreedyParams& params);
-BeamSearchOutput sampleBeamSearch(const BeamSearchParams& params);
+BeamSearchOutput sampleBeamSearch(BeamSearchParams params);
 void             chainSpeculativeSampling(const SpeculativeSamplingParams& params);
 void             multiMergeCopy(const MultiMergeCopyParams& params);
 }  // namespace rtp_llm
@@ -419,8 +419,8 @@ GreedyOutput execSampleGreedy(const GreedyParams& params) {
     return sampleGreedy(params);
 }
 
-BeamSearchOutput execSampleBeamSearch(const BeamSearchParams& params) {
-    return sampleBeamSearch(params);
+BeamSearchOutput execSampleBeamSearch(BeamSearchParams params) {
+    return sampleBeamSearch(std::move(params));
 }
 
 void execChainSpeculativeSampling(const SpeculativeSamplingParams& params) {
