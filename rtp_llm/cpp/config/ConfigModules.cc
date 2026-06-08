@@ -76,7 +76,8 @@ std::string ParallelismConfig::to_string() const {
 std::string ConcurrencyConfig::to_string() const {
     std::ostringstream oss;
     oss << "concurrency_with_block: " << concurrency_with_block << "\n"
-        << "concurrency_limit: " << concurrency_limit;
+        << "concurrency_limit: " << concurrency_limit << "\n"
+        << "engine_async_worker_count: " << engine_async_worker_count;
     return oss.str();
 }
 
