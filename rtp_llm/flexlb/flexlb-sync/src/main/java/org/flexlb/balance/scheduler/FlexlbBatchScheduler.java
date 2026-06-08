@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import com.google.protobuf.Int32Value;
 import com.google.protobuf.Int64Value;
 import com.google.protobuf.InvalidProtocolBufferException;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -300,7 +299,6 @@ public class FlexlbBatchScheduler {
         input.setGroupSize(groupSize);
 
         EngineRpcService.GenerateConfigPB.Builder config = input.getGenerateConfigBuilder();
-        config.setForceGroup(Int32Value.of(1));
         config.clearRoleAddrs();
         addRoleAddr(config, item.prefill);
         addRoleAddr(config, item.decode);

@@ -114,7 +114,6 @@ class FlexlbBatchSchedulerTest {
         assertEquals(2, inputs.get(0).getGroupSize());
         assertEquals(batch.getBatchId(), inputs.get(0).getGroupId().getValue());
         assertEquals(batch.getBatchId(), inputs.get(1).getGroupId().getValue());
-        assertEquals(1, inputs.get(0).getGenerateConfig().getForceGroup().getValue());
         assertEquals(77, inputs.get(0).getGenerateConfig().getGroupTimeout().getValue());
         assertEquals(2, inputs.get(0).getGenerateConfig().getRoleAddrsCount());
         assertEquals(EngineRpcService.RoleAddrPB.RoleType.PREFILL,

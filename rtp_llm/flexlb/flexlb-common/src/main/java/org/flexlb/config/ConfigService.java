@@ -182,7 +182,7 @@ public class ConfigService {
         } else if (targetType == boolean.class || targetType == Boolean.class) {
             return Boolean.parseBoolean(value);
         } else if (targetType.isEnum()) {
-            return Enum.valueOf((Class<Enum>) targetType, value);
+            return JsonUtils.toObject("\"" + value + "\"", targetType);
         }
         throw new IllegalArgumentException("Unsupported type: " + targetType);
     }
