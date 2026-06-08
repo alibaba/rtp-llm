@@ -174,8 +174,9 @@ void addBatchError(EnqueueBatchResponsePB* response, int64_t request_id, int64_t
     error_info->set_error_message(msg);
 }
 
-void detachLeftoverFutures(std::vector<std::future<void>>& futures) {
-    auto leftover = std::make_shared<std::vector<std::future<void>>>();
+template <typename T>
+void detachLeftoverFutures(std::vector<std::future<T>>& futures) {
+    auto leftover = std::make_shared<std::vector<std::future<T>>>();
     for (auto& f : futures) {
         if (f.valid() && f.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
             leftover->push_back(std::move(f));
@@ -1369,11 +1370,53 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
         dispatch_targets.push_back(std::move(dispatch_target));
     }
 
-    std::mutex response_mu;
+    struct DispatchResult {
+        grpc::Status           status;
+        EnqueueBatchResponsePB dp_response;
+    };
+
+    const auto dispatch_timeout_ms = maga_init_params_.pd_sep_config.batch_dispatch_timeout_ms;
+    const auto dispatch_deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(dispatch_timeout_ms);
+    std::vector<std::future<DispatchResult>> dispatch_futures;
+    dispatch_futures.reserve(dispatch_targets.size());
+    for (auto& target : dispatch_targets) {
+        dispatch_futures.push_back(std::async(std::launch::async, [this, target = std::move(target)]() -> DispatchResult {
+            DispatchResult result;
+            if (target.dp_rank == static_cast<int>(maga_init_params_.parallelism_config.dp_rank)) {
+                result.status = EnqueueGroup(/*context=*/nullptr, &target.request, &result.dp_response);
+                return result;
+            }
+
+            try {
+                auto connect_status = resource_.rpc_pool.getConnection(target.addr);
+                if (!connect_status.ok()) {
+                    result.status = grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                                                 "get EnqueueGroup connection failed: "
+                                                     + std::string(connect_status.status().message()));
+                } else {
+                    grpc::ClientContext client_context;
+                    auto timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
+                    if (timeout_ms > 0) {
+                        client_context.set_deadline(std::chrono::system_clock::now()
+                                                    + std::chrono::milliseconds(timeout_ms));
+                    }
+                    result.status =
+                        connect_status.value().stub->EnqueueGroup(&client_context, target.request, &result.dp_response);
+                }
+            } catch (const std::exception& e) {
+                result.status = grpc::Status(grpc::StatusCode::INTERNAL,
+                                             "EnqueueGroup forward exception: " + std::string(e.what()));
+            } catch (...) {
+                result.status = grpc::Status(grpc::StatusCode::INTERNAL, "EnqueueGroup forward unknown exception");
+            }
+            return result;
+        }));
+    }
+
     auto merge_response = [&](const EnqueueGroupRequestPB& dp_request,
                               const grpc::Status&           status,
                               const EnqueueBatchResponsePB& dp_response) {
-        std::lock_guard<std::mutex> lock(response_mu);
         if (!status.ok()) {
             for (const auto& dp_input : dp_request.requests()) {
                 if (dp_input.has_input()) {
@@ -1417,56 +1460,18 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
         }
     };
 
-    const auto dispatch_timeout_ms = maga_init_params_.pd_sep_config.batch_dispatch_timeout_ms;
-    const auto dispatch_deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(dispatch_timeout_ms);
-    std::vector<std::future<void>> dispatch_futures;
-    dispatch_futures.reserve(dispatch_targets.size());
-    for (auto& target : dispatch_targets) {
-        dispatch_futures.push_back(std::async(std::launch::async, [this, target = std::move(target), merge_response] {
-            EnqueueBatchResponsePB dp_response;
-            grpc::Status           status;
-            if (target.dp_rank == static_cast<int>(maga_init_params_.parallelism_config.dp_rank)) {
-                status = EnqueueGroup(/*context=*/nullptr, &target.request, &dp_response);
-                merge_response(target.request, status, dp_response);
-                return;
-            }
-
-            try {
-                auto connect_status = resource_.rpc_pool.getConnection(target.addr);
-                if (!connect_status.ok()) {
-                    status = grpc::Status(grpc::StatusCode::UNAVAILABLE,
-                                          "get EnqueueGroup connection failed: "
-                                              + std::string(connect_status.status().message()));
-                } else {
-                    grpc::ClientContext client_context;
-                    auto timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
-                    if (timeout_ms > 0) {
-                        client_context.set_deadline(std::chrono::system_clock::now()
-                                                    + std::chrono::milliseconds(timeout_ms));
-                    }
-                    status =
-                        connect_status.value().stub->EnqueueGroup(&client_context, target.request, &dp_response);
-                }
-            } catch (const std::exception& e) {
-                status = grpc::Status(grpc::StatusCode::INTERNAL,
-                                      "EnqueueGroup forward exception: " + std::string(e.what()));
-            } catch (...) {
-                status = grpc::Status(grpc::StatusCode::INTERNAL, "EnqueueGroup forward unknown exception");
-            }
-            merge_response(target.request, status, dp_response);
-        }));
-    }
     for (size_t i = 0; i < dispatch_futures.size(); ++i) {
         auto remaining = dispatch_deadline - std::chrono::steady_clock::now();
         if (remaining <= std::chrono::milliseconds(0)
             || dispatch_futures[i].wait_for(remaining) == std::future_status::timeout) {
-            auto& target = dispatch_targets[i];
-            merge_response(target.request,
+            merge_response(dispatch_targets[i].request,
                            grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
                                         "EnqueueBatch dispatch timeout for dp_rank "
-                                            + std::to_string(target.dp_rank)),
+                                            + std::to_string(dispatch_targets[i].dp_rank)),
                            EnqueueBatchResponsePB());
+        } else {
+            auto result = dispatch_futures[i].get();
+            merge_response(dispatch_targets[i].request, result.status, result.dp_response);
         }
     }
     detachLeftoverFutures(dispatch_futures);
