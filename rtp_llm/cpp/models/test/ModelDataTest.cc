@@ -3,6 +3,7 @@
 
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 
 using namespace std;
@@ -57,6 +58,28 @@ TEST_F(ModelDataTest, testConstruct) {
     builder.setSequenceLengths(sampler_inputs, sequence_lengths);
     auto sl = sampler_inputs.sequence_lengths;
     EXPECT_EQ(std::vector<int>(sl.data_ptr<int>(), sl.data_ptr<int>() + sl.numel()), std::vector<int>({1, 2, 3, 4}));
+}
+
+TEST_F(ModelDataTest, testContextParallelRejectsInputEmbeddingsBeforeMicroBatch) {
+    ExecProperties device_props;
+    device_props.enable_prefill_cp        = true;
+    device_props.enable_layer_micro_batch = MicroBatchType::DS_PREFILL;
+
+    GptModelInputs inputs;
+    inputs.input_embeddings = std::vector<torch::Tensor>{torch::rand({1, 8}, torch::kFloat32)};
+
+    EXPECT_THROW(PyWrappedModel::rejectContextParallelInputEmbeddings(device_props, inputs), std::exception);
+}
+
+TEST_F(ModelDataTest, testContextParallelAllowsEmptyInputEmbeddings) {
+    ExecProperties device_props;
+    device_props.enable_prefill_cp        = true;
+    device_props.enable_layer_micro_batch = MicroBatchType::DS_PREFILL;
+
+    GptModelInputs inputs;
+    inputs.input_embeddings = std::vector<torch::Tensor>();
+
+    EXPECT_NO_THROW(PyWrappedModel::rejectContextParallelInputEmbeddings(device_props, inputs));
 }
 
 }  // namespace rtp_llm
