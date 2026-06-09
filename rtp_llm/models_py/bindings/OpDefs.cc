@@ -118,7 +118,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("sequence_lengths_plus_1_d", &PyAttentionInputs::sequence_lengths_plus_1_d)
         .def_readonly("input_lengths_d", &PyAttentionInputs::input_lengths_d)
         .def_readwrite("decode_cu_seqlens_d", &PyAttentionInputs::decode_cu_seqlens_d)
-        .def_readonly("decode_cu_seqlens_host", &PyAttentionInputs::decode_cu_seqlens_host)
+        .def_readwrite("decode_cu_seqlens_host", &PyAttentionInputs::decode_cu_seqlens_host)
         .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
         .def_readwrite("context_parallel_info", &PyAttentionInputs::context_parallel_info)
         .def_readwrite("combo_position_ids", &PyAttentionInputs::combo_position_ids)

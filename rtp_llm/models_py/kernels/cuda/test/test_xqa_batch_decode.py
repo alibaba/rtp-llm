@@ -3,10 +3,16 @@ import os
 import signal
 import unittest
 
-import flashinfer
 import torch
-from flashinfer.utils import get_compute_capability
 from packaging import version
+
+try:
+    import flashinfer
+    from flashinfer.utils import get_compute_capability
+
+    _FLASHINFER_AVAILABLE = True
+except ImportError:
+    _FLASHINFER_AVAILABLE = False
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
@@ -33,10 +39,12 @@ GPU_DEVICE = "cuda:0"
 # Check version requirements
 def check_flashinfer_version():
     """Check if flashinfer version >= 0.5.2"""
+    if not _FLASHINFER_AVAILABLE:
+        return False
     try:
         flashinfer_version = version.parse(flashinfer.__version__)
         return flashinfer_version >= version.parse("0.5.2")
-    except:
+    except Exception:
         return False
 
 
@@ -48,7 +56,7 @@ def check_cuda_version():
             cuda_version = version.parse(cuda_version_str)
             return cuda_version >= version.parse("12.8")
         return False
-    except:
+    except Exception:
         return False
 
 
@@ -60,7 +68,8 @@ VERSION_REQUIREMENTS_MET = FLASHINFER_VERSION_OK and CUDA_VERSION_OK
 # Skip reason
 SKIP_REASON = []
 if not FLASHINFER_VERSION_OK:
-    SKIP_REASON.append(f"flashinfer version {flashinfer.__version__} < 0.5.2")
+    fi_ver = flashinfer.__version__ if _FLASHINFER_AVAILABLE else "not installed"
+    SKIP_REASON.append(f"flashinfer version {fi_ver} < 0.5.2")
 if not CUDA_VERSION_OK:
     SKIP_REASON.append(f"CUDA version {torch.version.cuda} < 12.8")
 SKIP_MESSAGE = "Requirements not met: " + ", ".join(SKIP_REASON) if SKIP_REASON else ""
@@ -305,7 +314,11 @@ class TestXQABatchDecode(unittest.TestCase):
 
         super().__init__(methodName)
 
-        self.compute_capability = get_compute_capability(torch.device(device="cuda"))[0]
+        self.compute_capability = (
+            get_compute_capability(torch.device(device="cuda"))[0]
+            if _FLASHINFER_AVAILABLE
+            else 0
+        )
         self.xqa_supported = self.compute_capability in [9, 10, 12]
 
     @classmethod
@@ -370,9 +383,11 @@ class TestXQABatchDecode(unittest.TestCase):
         attn_inputs.input_lengths = q_lens
         attn_inputs.kv_cache_block_id_device = page_table
         attn_inputs.kv_cache_kernel_block_id_device = page_table
+        attn_inputs.kv_cache_kernel_block_id_host = page_table.cpu()
         attn_inputs.dtype = get_typemeta(q)
         attn_inputs.total_tokens = q.shape[0]
         attn_inputs.decode_cu_seqlens_d = generate_cumsum_lens(q_lens)
+        attn_inputs.decode_cu_seqlens_host = generate_cumsum_lens(q_lens).cpu()
         attn_inputs.cu_seqlens = generate_cumsum_lens(q_lens).cpu()
         attn_inputs.cu_kv_seqlens = generate_cumsum_lens(seq_lens).cpu()
 
@@ -456,6 +471,1054 @@ class TestXQABatchDecode(unittest.TestCase):
         )
 
     @unittest.skipIf(not VERSION_REQUIREMENTS_MET, SKIP_MESSAGE)
+    def test_xqa_decode_cuda_graph_replay(self):
+        """Test prepare_cuda_graph: same batch size, updated sequence_lengths and page_table"""
+        torch.manual_seed(42)
+
+        batch_size = 4
+        page_size = 64
+        num_kv_heads = 1
+        head_grp_size = 8
+        num_qo_heads = num_kv_heads * head_grp_size
+        head_dim = 128
+        q_len_per_req = 1
+        capture_kv_len = 10
+        kv_dtype = "bf16"
+
+        q_lens_cap, in_kv_lens_cap, seq_lens_cap = generate_seq_lens_decode(
+            batch_size, q_len_per_req, capture_kv_len
+        )
+        kv_cache_tensor, k_scale, v_scale, _ = create_kv_cache(
+            batch_size, seq_lens_cap, page_size, num_kv_heads, head_dim, kv_dtype
+        )
+        page_table_cap, _, _ = create_page_table(batch_size, seq_lens_cap, page_size)
+
+        cap_inputs = PyAttentionInputs()
+        cap_inputs.is_prefill = False
+        cap_inputs.sequence_lengths = in_kv_lens_cap
+        cap_inputs.input_lengths = q_lens_cap
+        cap_inputs.kv_cache_block_id_device = page_table_cap
+        cap_inputs.kv_cache_kernel_block_id_device = page_table_cap
+        cap_inputs.kv_cache_kernel_block_id_host = page_table_cap.cpu()
+        cap_inputs.dtype = get_typemeta(
+            torch.empty(1, dtype=DTYPE_MAP["bf16"], device=GPU_DEVICE)
+        )
+        cap_inputs.total_tokens = batch_size * q_len_per_req
+        cap_inputs.decode_cu_seqlens_d = generate_cumsum_lens(q_lens_cap)
+        cap_inputs.decode_cu_seqlens_host = generate_cumsum_lens(q_lens_cap).cpu()
+        cap_inputs.cu_seqlens = generate_cumsum_lens(q_lens_cap).cpu()
+        cap_inputs.cu_kv_seqlens = generate_cumsum_lens(seq_lens_cap).cpu()
+
+        attn_configs = AttentionConfigs()
+        attn_configs.head_num = num_qo_heads
+        attn_configs.kv_head_num = num_kv_heads
+        attn_configs.size_per_head = head_dim
+        attn_configs.tokens_per_block = page_size
+        attn_configs.kernel_tokens_per_block = page_size
+        attn_configs.kv_cache_dtype = KvCacheDataType.BASE
+        attn_configs.dtype = DTYPE_MAP["bf16"]
+
+        original_init = FMHAImplBase.__init__
+
+        def patched_init(
+            self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=True
+        ):
+            original_init(
+                self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=False
+            )
+            self.rope_kvcache_impl = rope_kvcache_impl
+
+        FMHAImplBase.__init__ = patched_init
+        try:
+            attn_configs.need_rope_kv_cache = False
+            xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
+            xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(cap_inputs)
+            xqa_impl.attn_inputs = cap_inputs
+            xqa_impl.rope_params = xqa_impl.rope_kvcache_impl.prepare(cap_inputs)
+        finally:
+            FMHAImplBase.__init__ = original_init
+
+        replay_kv_len = capture_kv_len + 5
+        q_lens_rep, in_kv_lens_rep, seq_lens_rep = generate_seq_lens_decode(
+            batch_size, q_len_per_req, replay_kv_len
+        )
+        kv_cache_tensor_rep, _, _, _ = create_kv_cache(
+            batch_size, seq_lens_rep, page_size, num_kv_heads, head_dim, kv_dtype
+        )
+        page_table_rep, _, _ = create_page_table(batch_size, seq_lens_rep, page_size)
+
+        rep_inputs = PyAttentionInputs()
+        rep_inputs.is_prefill = False
+        rep_inputs.sequence_lengths = in_kv_lens_rep
+        rep_inputs.input_lengths = q_lens_rep
+        rep_inputs.kv_cache_block_id_device = page_table_rep
+        rep_inputs.kv_cache_kernel_block_id_device = page_table_rep
+        rep_inputs.kv_cache_kernel_block_id_host = page_table_rep.cpu()
+        rep_inputs.dtype = get_typemeta(
+            torch.empty(1, dtype=DTYPE_MAP["bf16"], device=GPU_DEVICE)
+        )
+        rep_inputs.total_tokens = batch_size * q_len_per_req
+        rep_inputs.decode_cu_seqlens_d = generate_cumsum_lens(q_lens_rep)
+        rep_inputs.decode_cu_seqlens_host = generate_cumsum_lens(q_lens_rep).cpu()
+        rep_inputs.cu_seqlens = generate_cumsum_lens(q_lens_rep).cpu()
+        rep_inputs.cu_kv_seqlens = generate_cumsum_lens(seq_lens_rep).cpu()
+
+        xqa_impl.prepare_cuda_graph(rep_inputs)
+
+        self.assertEqual(xqa_impl.fmha_params.batch_size, batch_size)
+        self.assertTrue(
+            torch.equal(xqa_impl.fmha_params.seq_lens, in_kv_lens_rep),
+            "sequence_lengths not updated after prepare_cuda_graph",
+        )
+        self.assertTrue(
+            torch.equal(xqa_impl.fmha_params.page_table, page_table_rep),
+            "page_table not updated after prepare_cuda_graph",
+        )
+
+        q_rep, _, _ = create_query_tensor(q_lens_rep, num_qo_heads, head_dim, "bf16")
+        kv_cache_rep = LayerKVCache()
+        kv_cache_rep.kv_cache_base = kv_cache_tensor_rep
+        xqa_impl.attn_inputs = rep_inputs
+
+        output = xqa_impl.forward(q_rep, kv_cache_rep).squeeze(1)
+        output = output.reshape(-1, output.shape[2], output.shape[3])
+
+        output_ref = create_reference_output(
+            q_rep,
+            kv_cache_tensor_rep,
+            None,
+            page_table_rep,
+            seq_lens_rep.to(GPU_DEVICE),
+            page_size,
+            num_kv_heads,
+            head_dim,
+            q_len_per_req,
+        )
+
+        self.assertEqual(output.shape, output_ref.shape)
+        max_diff = (output.float() - output_ref.float()).abs().max().item()
+        self.assertTrue(
+            torch.allclose(output.float(), output_ref.float(), rtol=1e-2, atol=1e-2),
+            f"CUDA graph replay output mismatch: max diff = {max_diff}",
+        )
+
+    @unittest.skipIf(not VERSION_REQUIREMENTS_MET, SKIP_MESSAGE)
+    def test_xqa_decode_cuda_graph_padding_replay(self):
+        """Test prepare_cuda_graph: actual batch < captured graph batch (padding replay).
+
+        Simulates what CudaGraphRunner does: capture at a larger batch size,
+        replay with fewer active requests. Padding rows get zeroed block IDs
+        and seq_lens=0, and output is sliced to the actual batch.
+        """
+        torch.manual_seed(42)
+
+        capture_batch_size = 8
+        page_size = 64
+        num_kv_heads = 1
+        head_grp_size = 8
+        num_qo_heads = num_kv_heads * head_grp_size
+        head_dim = 128
+        q_len_per_req = 1
+        capture_kv_len = 10
+        kv_dtype = "bf16"
+
+        # --- Capture phase: initialize with capture_batch_size ---
+        q_lens_cap, in_kv_lens_cap, seq_lens_cap = generate_seq_lens_decode(
+            capture_batch_size, q_len_per_req, capture_kv_len
+        )
+        _, _, _, _ = create_kv_cache(
+            capture_batch_size,
+            seq_lens_cap,
+            page_size,
+            num_kv_heads,
+            head_dim,
+            kv_dtype,
+        )
+        page_table_cap, _, _ = create_page_table(
+            capture_batch_size, seq_lens_cap, page_size
+        )
+
+        cap_inputs = PyAttentionInputs()
+        cap_inputs.is_prefill = False
+        cap_inputs.sequence_lengths = in_kv_lens_cap
+        cap_inputs.input_lengths = q_lens_cap
+        cap_inputs.kv_cache_block_id_device = page_table_cap
+        cap_inputs.kv_cache_kernel_block_id_device = page_table_cap
+        cap_inputs.kv_cache_kernel_block_id_host = page_table_cap.cpu()
+        cap_inputs.dtype = get_typemeta(
+            torch.empty(1, dtype=DTYPE_MAP["bf16"], device=GPU_DEVICE)
+        )
+        cap_inputs.total_tokens = capture_batch_size * q_len_per_req
+        cap_inputs.decode_cu_seqlens_d = generate_cumsum_lens(q_lens_cap)
+        cap_inputs.decode_cu_seqlens_host = generate_cumsum_lens(q_lens_cap).cpu()
+        cap_inputs.cu_seqlens = generate_cumsum_lens(q_lens_cap).cpu()
+        cap_inputs.cu_kv_seqlens = generate_cumsum_lens(seq_lens_cap).cpu()
+
+        attn_configs = AttentionConfigs()
+        attn_configs.head_num = num_qo_heads
+        attn_configs.kv_head_num = num_kv_heads
+        attn_configs.size_per_head = head_dim
+        attn_configs.tokens_per_block = page_size
+        attn_configs.kernel_tokens_per_block = page_size
+        attn_configs.kv_cache_dtype = KvCacheDataType.BASE
+        attn_configs.dtype = DTYPE_MAP["bf16"]
+
+        original_init = FMHAImplBase.__init__
+
+        def patched_init(
+            self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=True
+        ):
+            original_init(
+                self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=False
+            )
+            self.rope_kvcache_impl = rope_kvcache_impl
+
+        FMHAImplBase.__init__ = patched_init
+        try:
+            attn_configs.need_rope_kv_cache = False
+            xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
+            xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(cap_inputs)
+            xqa_impl.attn_inputs = cap_inputs
+            xqa_impl.rope_params = xqa_impl.rope_kvcache_impl.prepare(cap_inputs)
+        finally:
+            FMHAImplBase.__init__ = original_init
+
+        # --- Replay phase: actual_batch < capture_batch ---
+        for actual_batch_size in [1, 2, 5]:
+            with self.subTest(
+                capture_bs=capture_batch_size, actual_bs=actual_batch_size
+            ):
+                replay_kv_len = capture_kv_len + 5
+
+                # Create real data for actual_batch_size
+                q_lens_real, in_kv_lens_real, seq_lens_real = generate_seq_lens_decode(
+                    actual_batch_size, q_len_per_req, replay_kv_len
+                )
+                kv_cache_tensor_rep, _, _, _ = create_kv_cache(
+                    actual_batch_size,
+                    seq_lens_real,
+                    page_size,
+                    num_kv_heads,
+                    head_dim,
+                    kv_dtype,
+                )
+                page_table_real, _, _ = create_page_table(
+                    actual_batch_size, seq_lens_real, page_size
+                )
+
+                # Pad to capture_batch_size (simulating CudaGraphRunner.prepareInputs)
+                pad_size = capture_batch_size - actual_batch_size
+                padded_seq_lens = torch.cat(
+                    [in_kv_lens_real, torch.zeros(pad_size, dtype=torch.int32)]
+                )
+                padded_q_lens = torch.cat(
+                    [
+                        q_lens_real,
+                        torch.full((pad_size,), q_len_per_req, dtype=torch.int32),
+                    ]
+                )
+                padded_page_table = torch.zeros(
+                    capture_batch_size,
+                    page_table_real.shape[1],
+                    dtype=torch.int32,
+                    device=GPU_DEVICE,
+                )
+                padded_page_table[:actual_batch_size] = page_table_real
+
+                rep_inputs = PyAttentionInputs()
+                rep_inputs.is_prefill = False
+                rep_inputs.sequence_lengths = padded_seq_lens
+                rep_inputs.input_lengths = padded_q_lens
+                rep_inputs.kv_cache_block_id_device = padded_page_table
+                rep_inputs.kv_cache_kernel_block_id_device = padded_page_table
+                rep_inputs.kv_cache_kernel_block_id_host = padded_page_table.cpu()
+                rep_inputs.dtype = get_typemeta(
+                    torch.empty(1, dtype=DTYPE_MAP["bf16"], device=GPU_DEVICE)
+                )
+                rep_inputs.total_tokens = capture_batch_size * q_len_per_req
+                rep_inputs.decode_cu_seqlens_d = generate_cumsum_lens(padded_q_lens)
+                rep_inputs.decode_cu_seqlens_host = generate_cumsum_lens(
+                    padded_q_lens
+                ).cpu()
+                rep_inputs.cu_seqlens = generate_cumsum_lens(padded_q_lens).cpu()
+                padded_full_seq_lens = torch.cat(
+                    [
+                        seq_lens_real,
+                        torch.full((pad_size,), q_len_per_req, dtype=torch.int32),
+                    ]
+                )
+                rep_inputs.cu_kv_seqlens = generate_cumsum_lens(
+                    padded_full_seq_lens
+                ).cpu()
+
+                xqa_impl.prepare_cuda_graph(rep_inputs)
+
+                # batch_size stays at capture_batch_size (padded tensor size)
+                self.assertEqual(xqa_impl.fmha_params.batch_size, capture_batch_size)
+                # First actual_batch_size entries have correct seq_lens
+                self.assertTrue(
+                    torch.equal(
+                        xqa_impl.fmha_params.seq_lens[:actual_batch_size],
+                        in_kv_lens_real,
+                    ),
+                    "Active seq_lens not updated correctly",
+                )
+                # Padding entries have seq_lens=0
+                self.assertTrue(
+                    (xqa_impl.fmha_params.seq_lens[actual_batch_size:] == 0).all(),
+                    "Padding seq_lens should be zero",
+                )
+                # Padding page_table rows are zeroed
+                self.assertTrue(
+                    (xqa_impl.fmha_params.page_table[actual_batch_size:] == 0).all(),
+                    "Padding page_table rows should be zeroed",
+                )
+
+                # Run forward with padded query
+                q_padded = torch.randn(
+                    capture_batch_size * q_len_per_req,
+                    num_qo_heads,
+                    head_dim,
+                    dtype=DTYPE_MAP["bf16"],
+                    device=GPU_DEVICE,
+                )
+                q_real = q_padded[: actual_batch_size * q_len_per_req]
+                kv_cache_rep = LayerKVCache()
+                kv_cache_rep.kv_cache_base = kv_cache_tensor_rep
+                xqa_impl.attn_inputs = rep_inputs
+
+                output = xqa_impl.forward(q_padded, kv_cache_rep).squeeze(1)
+                output = output.reshape(-1, output.shape[2], output.shape[3])
+                # Slice to actual batch
+                output_actual = output[:actual_batch_size]
+
+                output_ref = create_reference_output(
+                    q_real,
+                    kv_cache_tensor_rep,
+                    None,
+                    page_table_real,
+                    seq_lens_real.to(GPU_DEVICE),
+                    page_size,
+                    num_kv_heads,
+                    head_dim,
+                    q_len_per_req,
+                )
+
+                self.assertEqual(output_actual.shape, output_ref.shape)
+                max_diff = (
+                    (output_actual.float() - output_ref.float()).abs().max().item()
+                )
+                self.assertTrue(
+                    torch.allclose(
+                        output_actual.float(),
+                        output_ref.float(),
+                        rtol=1e-2,
+                        atol=1e-2,
+                    ),
+                    f"Padding replay output mismatch (capture_bs={capture_batch_size}, "
+                    f"actual_bs={actual_batch_size}): max diff = {max_diff}",
+                )
+
+    @unittest.skipIf(not VERSION_REQUIREMENTS_MET, SKIP_MESSAGE)
+    def test_xqa_decode_real_cuda_graph_capture_replay(self):
+        """Test real CUDA Graph capture/replay: verify that graph-replayed output
+        matches non-graph output after updating sequence_lengths and page_table
+        via prepare_cuda_graph().
+        """
+        torch.manual_seed(42)
+
+        batch_size = 4
+        page_size = 64
+        num_kv_heads = 1
+        head_grp_size = 8
+        num_qo_heads = num_kv_heads * head_grp_size
+        head_dim = 128
+        q_len_per_req = 1
+        capture_kv_len = 10
+        kv_dtype = "bf16"
+
+        # --- Capture phase setup ---
+        q_lens_cap, in_kv_lens_cap, seq_lens_cap = generate_seq_lens_decode(
+            batch_size, q_len_per_req, capture_kv_len
+        )
+        kv_cache_tensor_cap, _, _, _ = create_kv_cache(
+            batch_size, seq_lens_cap, page_size, num_kv_heads, head_dim, kv_dtype
+        )
+        page_table_cap, _, _ = create_page_table(batch_size, seq_lens_cap, page_size)
+
+        cap_inputs = PyAttentionInputs()
+        cap_inputs.is_prefill = False
+        cap_inputs.sequence_lengths = in_kv_lens_cap
+        cap_inputs.input_lengths = q_lens_cap
+        cap_inputs.kv_cache_block_id_device = page_table_cap
+        cap_inputs.kv_cache_kernel_block_id_device = page_table_cap
+        cap_inputs.kv_cache_kernel_block_id_host = page_table_cap.cpu()
+        cap_inputs.dtype = get_typemeta(
+            torch.empty(1, dtype=DTYPE_MAP["bf16"], device=GPU_DEVICE)
+        )
+        cap_inputs.total_tokens = batch_size * q_len_per_req
+        cap_inputs.decode_cu_seqlens_d = generate_cumsum_lens(q_lens_cap)
+        cap_inputs.decode_cu_seqlens_host = generate_cumsum_lens(q_lens_cap).cpu()
+        cap_inputs.cu_seqlens = generate_cumsum_lens(q_lens_cap).cpu()
+        cap_inputs.cu_kv_seqlens = generate_cumsum_lens(seq_lens_cap).cpu()
+
+        attn_configs = AttentionConfigs()
+        attn_configs.head_num = num_qo_heads
+        attn_configs.kv_head_num = num_kv_heads
+        attn_configs.size_per_head = head_dim
+        attn_configs.tokens_per_block = page_size
+        attn_configs.kernel_tokens_per_block = page_size
+        attn_configs.kv_cache_dtype = KvCacheDataType.BASE
+        attn_configs.dtype = DTYPE_MAP["bf16"]
+
+        original_init = FMHAImplBase.__init__
+
+        def patched_init(
+            self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=True
+        ):
+            original_init(
+                self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=False
+            )
+            self.rope_kvcache_impl = rope_kvcache_impl
+
+        FMHAImplBase.__init__ = patched_init
+        try:
+            attn_configs.need_rope_kv_cache = False
+            xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
+            xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(cap_inputs)
+            xqa_impl.attn_inputs = cap_inputs
+            xqa_impl.rope_params = xqa_impl.rope_kvcache_impl.prepare(cap_inputs)
+        finally:
+            FMHAImplBase.__init__ = original_init
+
+        # Pre-allocate fixed input/output buffers for graph capture
+        q_cap, _, _ = create_query_tensor(q_lens_cap, num_qo_heads, head_dim, "bf16")
+        kv_cache_cap = LayerKVCache()
+        kv_cache_cap.kv_cache_base = kv_cache_tensor_cap
+
+        # Warmup (required before CUDA graph capture)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            _ = xqa_impl.forward(q_cap, kv_cache_cap)
+        torch.cuda.current_stream().wait_stream(stream)
+
+        # Capture CUDA graph
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            graph_output = xqa_impl.forward(q_cap, kv_cache_cap)
+        torch.cuda.current_stream().wait_stream(stream)
+
+        # --- Replay phase: new KV lengths, new page table ---
+        replay_kv_len = capture_kv_len + 5
+        q_lens_rep, in_kv_lens_rep, seq_lens_rep = generate_seq_lens_decode(
+            batch_size, q_len_per_req, replay_kv_len
+        )
+        kv_cache_tensor_rep, _, _, _ = create_kv_cache(
+            batch_size, seq_lens_rep, page_size, num_kv_heads, head_dim, kv_dtype
+        )
+        page_table_rep, _, _ = create_page_table(batch_size, seq_lens_rep, page_size)
+
+        rep_inputs = PyAttentionInputs()
+        rep_inputs.is_prefill = False
+        rep_inputs.sequence_lengths = in_kv_lens_rep
+        rep_inputs.input_lengths = q_lens_rep
+        rep_inputs.kv_cache_block_id_device = page_table_rep
+        rep_inputs.kv_cache_kernel_block_id_device = page_table_rep
+        rep_inputs.kv_cache_kernel_block_id_host = page_table_rep.cpu()
+        rep_inputs.dtype = get_typemeta(
+            torch.empty(1, dtype=DTYPE_MAP["bf16"], device=GPU_DEVICE)
+        )
+        rep_inputs.total_tokens = batch_size * q_len_per_req
+        rep_inputs.decode_cu_seqlens_d = generate_cumsum_lens(q_lens_rep)
+        rep_inputs.decode_cu_seqlens_host = generate_cumsum_lens(q_lens_rep).cpu()
+        rep_inputs.cu_seqlens = generate_cumsum_lens(q_lens_rep).cpu()
+        rep_inputs.cu_kv_seqlens = generate_cumsum_lens(seq_lens_rep).cpu()
+
+        # Update parameters for replay (in-place update of captured tensors)
+        xqa_impl.prepare_cuda_graph(rep_inputs)
+        xqa_impl.attn_inputs = rep_inputs
+
+        # Update captured input buffers in-place (CUDA graph binds GPU addresses at capture time)
+        q_rep, _, _ = create_query_tensor(q_lens_rep, num_qo_heads, head_dim, "bf16")
+        q_cap.copy_(q_rep)
+        kv_cache_tensor_cap.copy_(kv_cache_tensor_rep)
+
+        # Replay the captured graph
+        graph.replay()
+        torch.cuda.synchronize()
+
+        replay_output = graph_output.clone().squeeze(1)
+        replay_output = replay_output.reshape(
+            -1, replay_output.shape[2], replay_output.shape[3]
+        )
+
+        # Reference: non-graph forward with replay inputs
+        output_ref = create_reference_output(
+            q_rep,
+            kv_cache_tensor_rep,
+            None,
+            page_table_rep,
+            seq_lens_rep.to(GPU_DEVICE),
+            page_size,
+            num_kv_heads,
+            head_dim,
+            q_len_per_req,
+        )
+
+        self.assertEqual(replay_output.shape, output_ref.shape)
+        max_diff = (replay_output.float() - output_ref.float()).abs().max().item()
+        self.assertTrue(
+            torch.allclose(
+                replay_output.float(), output_ref.float(), rtol=1e-2, atol=1e-2
+            ),
+            f"Real CUDA graph replay output mismatch: max diff = {max_diff}",
+        )
+
+    @unittest.skipIf(not VERSION_REQUIREMENTS_MET, SKIP_MESSAGE)
+    def test_xqa_decode_real_cuda_graph_cross_page_replay(self):
+        """Test CUDA Graph replay when page_table content genuinely changes between
+        capture and replay (replay crosses a page boundary).
+
+        Simulates production behavior: pre-allocate fixed-address tensors and
+        update them in-place with copy_(), so the CUDA graph reads new data from
+        the same data_ptr().
+        """
+        torch.manual_seed(42)
+
+        batch_size = 4
+        page_size = 64
+        num_kv_heads = 1
+        head_grp_size = 8
+        num_qo_heads = num_kv_heads * head_grp_size
+        head_dim = 128
+        q_len_per_req = 1
+        capture_kv_len = 10  # 1 page per seq
+        replay_kv_len = 70  # 2 pages per seq — page_table content differs
+        kv_dtype = "bf16"
+
+        # Pre-allocate for the max case (replay) so buffers are large enough for both phases
+        max_kv_len = replay_kv_len
+        _, _, max_seq_lens = generate_seq_lens_decode(
+            batch_size, q_len_per_req, max_kv_len
+        )
+        max_pages_per_seq = (
+            torch.max(max_seq_lens).item() + page_size - 1
+        ) // page_size
+        total_max_pages = max_pages_per_seq * batch_size
+
+        # Fixed-address kv_cache buffer (large enough for both phases)
+        kv_cache_fixed = torch.randn(
+            total_max_pages,
+            2,
+            num_kv_heads,
+            page_size,
+            head_dim,
+            dtype=DTYPE_MAP["bf16"],
+            device=GPU_DEVICE,
+        )
+        # Fixed-address page_table buffer
+        page_table_fixed = torch.zeros(
+            batch_size,
+            max_pages_per_seq,
+            dtype=torch.int32,
+            device=GPU_DEVICE,
+        )
+
+        # --- Capture phase ---
+        q_lens_cap, in_kv_lens_cap, seq_lens_cap = generate_seq_lens_decode(
+            batch_size, q_len_per_req, capture_kv_len
+        )
+        kv_cache_cap, _, _, _ = create_kv_cache(
+            batch_size, seq_lens_cap, page_size, num_kv_heads, head_dim, kv_dtype
+        )
+        page_table_cap, _, _ = create_page_table(batch_size, seq_lens_cap, page_size)
+
+        # Fill fixed buffers with capture-phase data
+        cap_pages = kv_cache_cap.shape[0]
+        kv_cache_fixed[:cap_pages].copy_(kv_cache_cap)
+        page_table_fixed[:, : page_table_cap.shape[1]].copy_(page_table_cap)
+
+        cap_inputs = PyAttentionInputs()
+        cap_inputs.is_prefill = False
+        cap_inputs.sequence_lengths = in_kv_lens_cap
+        cap_inputs.input_lengths = q_lens_cap
+        cap_inputs.kv_cache_block_id_device = page_table_fixed
+        cap_inputs.kv_cache_kernel_block_id_device = page_table_fixed
+        cap_inputs.kv_cache_kernel_block_id_host = page_table_fixed.cpu()
+        cap_inputs.dtype = get_typemeta(
+            torch.empty(1, dtype=DTYPE_MAP["bf16"], device=GPU_DEVICE)
+        )
+        cap_inputs.total_tokens = batch_size * q_len_per_req
+        cap_inputs.decode_cu_seqlens_d = generate_cumsum_lens(q_lens_cap)
+        cap_inputs.decode_cu_seqlens_host = generate_cumsum_lens(q_lens_cap).cpu()
+        cap_inputs.cu_seqlens = generate_cumsum_lens(q_lens_cap).cpu()
+        cap_inputs.cu_kv_seqlens = generate_cumsum_lens(seq_lens_cap).cpu()
+
+        attn_configs = AttentionConfigs()
+        attn_configs.head_num = num_qo_heads
+        attn_configs.kv_head_num = num_kv_heads
+        attn_configs.size_per_head = head_dim
+        attn_configs.tokens_per_block = page_size
+        attn_configs.kernel_tokens_per_block = page_size
+        attn_configs.kv_cache_dtype = KvCacheDataType.BASE
+        attn_configs.dtype = DTYPE_MAP["bf16"]
+
+        original_init = FMHAImplBase.__init__
+
+        def patched_init(
+            self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=True
+        ):
+            original_init(
+                self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=False
+            )
+            self.rope_kvcache_impl = rope_kvcache_impl
+
+        FMHAImplBase.__init__ = patched_init
+        try:
+            attn_configs.need_rope_kv_cache = False
+            xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
+            xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(cap_inputs)
+            xqa_impl.attn_inputs = cap_inputs
+            xqa_impl.rope_params = xqa_impl.rope_kvcache_impl.prepare(cap_inputs)
+        finally:
+            FMHAImplBase.__init__ = original_init
+
+        q_cap, _, _ = create_query_tensor(q_lens_cap, num_qo_heads, head_dim, "bf16")
+        kv_cache_layer = LayerKVCache()
+        kv_cache_layer.kv_cache_base = kv_cache_fixed
+
+        # Warmup + capture
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            _ = xqa_impl.forward(q_cap, kv_cache_layer)
+        torch.cuda.current_stream().wait_stream(stream)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            graph_output = xqa_impl.forward(q_cap, kv_cache_layer)
+        torch.cuda.current_stream().wait_stream(stream)
+
+        # --- Replay phase: cross-page, in-place update of fixed buffers ---
+        q_lens_rep, in_kv_lens_rep, seq_lens_rep = generate_seq_lens_decode(
+            batch_size, q_len_per_req, replay_kv_len
+        )
+        kv_cache_rep, _, _, _ = create_kv_cache(
+            batch_size, seq_lens_rep, page_size, num_kv_heads, head_dim, kv_dtype
+        )
+        page_table_rep, _, _ = create_page_table(batch_size, seq_lens_rep, page_size)
+
+        # In-place update fixed buffers (simulates C++ CudaGraphRunner D2D copy)
+        rep_pages = kv_cache_rep.shape[0]
+        kv_cache_fixed[:rep_pages].copy_(kv_cache_rep)
+        page_table_fixed.zero_()
+        page_table_fixed[:, : page_table_rep.shape[1]].copy_(page_table_rep)
+
+        rep_inputs = PyAttentionInputs()
+        rep_inputs.is_prefill = False
+        rep_inputs.sequence_lengths = in_kv_lens_rep
+        rep_inputs.input_lengths = q_lens_rep
+        rep_inputs.kv_cache_block_id_device = page_table_fixed
+        rep_inputs.kv_cache_kernel_block_id_device = page_table_fixed
+        rep_inputs.kv_cache_kernel_block_id_host = page_table_fixed.cpu()
+        rep_inputs.dtype = get_typemeta(
+            torch.empty(1, dtype=DTYPE_MAP["bf16"], device=GPU_DEVICE)
+        )
+        rep_inputs.total_tokens = batch_size * q_len_per_req
+        rep_inputs.decode_cu_seqlens_d = generate_cumsum_lens(q_lens_rep)
+        rep_inputs.decode_cu_seqlens_host = generate_cumsum_lens(q_lens_rep).cpu()
+        rep_inputs.cu_seqlens = generate_cumsum_lens(q_lens_rep).cpu()
+        rep_inputs.cu_kv_seqlens = generate_cumsum_lens(seq_lens_rep).cpu()
+
+        xqa_impl.prepare_cuda_graph(rep_inputs)
+        xqa_impl.attn_inputs = rep_inputs
+
+        q_rep, _, _ = create_query_tensor(q_lens_rep, num_qo_heads, head_dim, "bf16")
+        q_cap.copy_(q_rep)
+
+        graph.replay()
+        torch.cuda.synchronize()
+
+        replay_output = graph_output.clone().squeeze(1)
+        replay_output = replay_output.reshape(
+            -1, replay_output.shape[2], replay_output.shape[3]
+        )
+
+        # Reference: non-graph forward with replay data
+        output_ref = create_reference_output(
+            q_rep,
+            kv_cache_rep,
+            None,
+            page_table_rep,
+            seq_lens_rep.to(GPU_DEVICE),
+            page_size,
+            num_kv_heads,
+            head_dim,
+            q_len_per_req,
+        )
+
+        self.assertEqual(replay_output.shape, output_ref.shape)
+        max_diff = (replay_output.float() - output_ref.float()).abs().max().item()
+        self.assertTrue(
+            torch.allclose(
+                replay_output.float(), output_ref.float(), rtol=1e-2, atol=1e-2
+            ),
+            f"Cross-page CUDA graph replay output mismatch: max diff = {max_diff}",
+        )
+
+    @unittest.skipIf(not VERSION_REQUIREMENTS_MET, SKIP_MESSAGE)
+    def test_xqa_decode_real_cuda_graph_padding_replay(self):
+        """Test real CUDA Graph capture/replay with padding: capture at larger batch size,
+        replay with smaller actual batch (padding rows with zeroed block IDs and seq_lens=0).
+        Verifies that graph-replayed output after slicing matches the non-graph reference.
+
+        This mirrors what CudaGraphRunner does when a smaller batch hits a larger graph key.
+        """
+        torch.manual_seed(42)
+
+        capture_batch_size = 8
+        page_size = 64
+        num_kv_heads = 1
+        head_grp_size = 8
+        num_qo_heads = num_kv_heads * head_grp_size
+        head_dim = 128
+        q_len_per_req = 1
+        capture_kv_len = 10
+        kv_dtype = "bf16"
+
+        # --- Capture phase: allocate buffers for capture_batch_size ---
+        q_lens_cap, in_kv_lens_cap, seq_lens_cap = generate_seq_lens_decode(
+            capture_batch_size, q_len_per_req, capture_kv_len
+        )
+        kv_cache_tensor_cap, _, _, _ = create_kv_cache(
+            capture_batch_size,
+            seq_lens_cap,
+            page_size,
+            num_kv_heads,
+            head_dim,
+            kv_dtype,
+        )
+        page_table_cap, _, _ = create_page_table(
+            capture_batch_size, seq_lens_cap, page_size
+        )
+
+        cap_inputs = PyAttentionInputs()
+        cap_inputs.is_prefill = False
+        cap_inputs.sequence_lengths = in_kv_lens_cap
+        cap_inputs.input_lengths = q_lens_cap
+        cap_inputs.kv_cache_block_id_device = page_table_cap
+        cap_inputs.kv_cache_kernel_block_id_device = page_table_cap
+        cap_inputs.kv_cache_kernel_block_id_host = page_table_cap.cpu()
+        cap_inputs.dtype = get_typemeta(
+            torch.empty(1, dtype=DTYPE_MAP["bf16"], device=GPU_DEVICE)
+        )
+        cap_inputs.total_tokens = capture_batch_size * q_len_per_req
+        cap_inputs.decode_cu_seqlens_d = generate_cumsum_lens(q_lens_cap)
+        cap_inputs.decode_cu_seqlens_host = generate_cumsum_lens(q_lens_cap).cpu()
+        cap_inputs.cu_seqlens = generate_cumsum_lens(q_lens_cap).cpu()
+        cap_inputs.cu_kv_seqlens = generate_cumsum_lens(seq_lens_cap).cpu()
+
+        attn_configs = AttentionConfigs()
+        attn_configs.head_num = num_qo_heads
+        attn_configs.kv_head_num = num_kv_heads
+        attn_configs.size_per_head = head_dim
+        attn_configs.tokens_per_block = page_size
+        attn_configs.kernel_tokens_per_block = page_size
+        attn_configs.kv_cache_dtype = KvCacheDataType.BASE
+        attn_configs.dtype = DTYPE_MAP["bf16"]
+
+        original_init = FMHAImplBase.__init__
+
+        def patched_init(
+            self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=True
+        ):
+            original_init(
+                self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=False
+            )
+            self.rope_kvcache_impl = rope_kvcache_impl
+
+        FMHAImplBase.__init__ = patched_init
+        try:
+            attn_configs.need_rope_kv_cache = False
+            xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
+            xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(cap_inputs)
+            xqa_impl.attn_inputs = cap_inputs
+            xqa_impl.rope_params = xqa_impl.rope_kvcache_impl.prepare(cap_inputs)
+        finally:
+            FMHAImplBase.__init__ = original_init
+
+        # Pre-allocate fixed input/output buffers for graph capture
+        q_cap, _, _ = create_query_tensor(q_lens_cap, num_qo_heads, head_dim, "bf16")
+        kv_cache_cap = LayerKVCache()
+        kv_cache_cap.kv_cache_base = kv_cache_tensor_cap
+
+        # Warmup
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            _ = xqa_impl.forward(q_cap, kv_cache_cap)
+        torch.cuda.current_stream().wait_stream(stream)
+
+        # Capture CUDA graph
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            graph_output = xqa_impl.forward(q_cap, kv_cache_cap)
+        torch.cuda.current_stream().wait_stream(stream)
+
+        # --- Replay with padding: actual batch < capture batch ---
+        for actual_batch_size in [1, 2, 5]:
+            with self.subTest(
+                capture_bs=capture_batch_size, actual_bs=actual_batch_size
+            ):
+                replay_kv_len = capture_kv_len + 5
+
+                pad_size = capture_batch_size - actual_batch_size
+
+                q_lens_real, in_kv_lens_real, seq_lens_real = generate_seq_lens_decode(
+                    actual_batch_size, q_len_per_req, replay_kv_len
+                )
+                # Create kv_cache with capture_batch_size pages for graph compatibility
+                # (CUDA graph binds tensor shapes). Only first actual_batch_size have
+                # valid data; padding entries are masked by page_table zeros.
+                padded_seq_lens = torch.cat(
+                    [seq_lens_real, torch.zeros(pad_size, dtype=torch.int32)]
+                )
+                kv_cache_tensor_rep, _, _, _ = create_kv_cache(
+                    capture_batch_size,
+                    padded_seq_lens,
+                    page_size,
+                    num_kv_heads,
+                    head_dim,
+                    kv_dtype,
+                )
+                page_table_real, _, _ = create_page_table(
+                    actual_batch_size, seq_lens_real, page_size
+                )
+
+                # Pad to capture_batch_size
+                pad_size = capture_batch_size - actual_batch_size
+                padded_seq_lens = torch.cat(
+                    [in_kv_lens_real, torch.zeros(pad_size, dtype=torch.int32)]
+                )
+                padded_q_lens = torch.cat(
+                    [
+                        q_lens_real,
+                        torch.full((pad_size,), q_len_per_req, dtype=torch.int32),
+                    ]
+                )
+                padded_page_table = torch.zeros(
+                    capture_batch_size,
+                    page_table_real.shape[1],
+                    dtype=torch.int32,
+                    device=GPU_DEVICE,
+                )
+                padded_page_table[:actual_batch_size] = page_table_real
+
+                rep_inputs = PyAttentionInputs()
+                rep_inputs.is_prefill = False
+                rep_inputs.sequence_lengths = padded_seq_lens
+                rep_inputs.input_lengths = padded_q_lens
+                rep_inputs.kv_cache_block_id_device = padded_page_table
+                rep_inputs.kv_cache_kernel_block_id_device = padded_page_table
+                rep_inputs.kv_cache_kernel_block_id_host = padded_page_table.cpu()
+                rep_inputs.dtype = get_typemeta(
+                    torch.empty(1, dtype=DTYPE_MAP["bf16"], device=GPU_DEVICE)
+                )
+                rep_inputs.total_tokens = capture_batch_size * q_len_per_req
+                rep_inputs.decode_cu_seqlens_d = generate_cumsum_lens(padded_q_lens)
+                rep_inputs.decode_cu_seqlens_host = generate_cumsum_lens(
+                    padded_q_lens
+                ).cpu()
+                rep_inputs.cu_seqlens = generate_cumsum_lens(padded_q_lens).cpu()
+                padded_full_seq_lens = torch.cat(
+                    [
+                        seq_lens_real,
+                        torch.full((pad_size,), q_len_per_req, dtype=torch.int32),
+                    ]
+                )
+                rep_inputs.cu_kv_seqlens = generate_cumsum_lens(
+                    padded_full_seq_lens
+                ).cpu()
+
+                # In-place update captured parameters
+                xqa_impl.prepare_cuda_graph(rep_inputs)
+                xqa_impl.attn_inputs = rep_inputs
+
+                # In-place update captured input buffers (graph binds GPU addresses)
+                q_rep, _, _ = create_query_tensor(
+                    padded_q_lens, num_qo_heads, head_dim, "bf16"
+                )
+                q_cap.copy_(q_rep)
+                kv_cache_cap.kv_cache_base.copy_(kv_cache_tensor_rep)
+
+                # Replay the graph
+                graph.replay()
+                torch.cuda.synchronize()
+
+                replay_output = graph_output.clone().squeeze(1)
+                replay_output = replay_output.reshape(
+                    -1, replay_output.shape[2], replay_output.shape[3]
+                )
+                # Slice to actual batch size
+                output_actual = replay_output[:actual_batch_size]
+
+                # Reference: non-graph forward with actual batch
+                q_real = q_rep[: actual_batch_size * q_len_per_req]
+                output_ref = create_reference_output(
+                    q_real,
+                    kv_cache_tensor_rep,
+                    None,
+                    page_table_real,
+                    seq_lens_real.to(GPU_DEVICE),
+                    page_size,
+                    num_kv_heads,
+                    head_dim,
+                    q_len_per_req,
+                )
+
+                self.assertEqual(output_actual.shape, output_ref.shape)
+                max_diff = (
+                    (output_actual.float() - output_ref.float()).abs().max().item()
+                )
+                self.assertTrue(
+                    torch.allclose(
+                        output_actual.float(),
+                        output_ref.float(),
+                        rtol=1e-2,
+                        atol=1e-2,
+                    ),
+                    f"Padding graph replay output mismatch (capture_bs={capture_batch_size}, "
+                    f"actual_bs={actual_batch_size}): max diff = {max_diff}",
+                )
+
+    @unittest.skipIf(not VERSION_REQUIREMENTS_MET, SKIP_MESSAGE)
+    def test_xqa_decode_2d_packed_kv_cache(self):
+        """Test XQADecodeImpl with 2D packed KV cache (hybrid cache layout).
+
+        In hybrid attention models, the per-layer KV cache arrives as a raw 2D
+        buffer [block_num, kv_block_stride_elems]. XQAWrapper.forward() must
+        reshape it to 5D via common.reshape_paged_kv_cache() before use.
+        This test constructs a 2D packed cache (with extra stride padding to
+        simulate hybrid mode) and verifies output matches the 5D reference.
+        """
+        torch.manual_seed(42)
+
+        batch_size = 2
+        page_size = 64
+        num_kv_heads = 1
+        head_grp_size = 8
+        num_qo_heads = num_kv_heads * head_grp_size
+        head_dim = 128
+        q_len_per_req = 1
+        max_in_kv_len = 10
+        kv_dtype = "bf16"
+
+        q_lens, in_kv_lens, seq_lens = generate_seq_lens_decode(
+            batch_size, q_len_per_req, max_in_kv_len
+        )
+        kv_cache_5d, k_scale, v_scale, _ = create_kv_cache(
+            batch_size, seq_lens, page_size, num_kv_heads, head_dim, kv_dtype
+        )
+        page_table, _, _ = create_page_table(batch_size, seq_lens, page_size)
+
+        # Reshape 5D [num_pages, 2, num_kv_heads, page_size, head_dim] → 2D packed
+        num_pages = kv_cache_5d.shape[0]
+        elems_per_block = 2 * num_kv_heads * page_size * head_dim
+        # Add extra padding to simulate hybrid stride (e.g. linear attention uses more)
+        hybrid_extra = 1024
+        kv_cache_2d = torch.zeros(
+            num_pages,
+            elems_per_block + hybrid_extra,
+            dtype=kv_cache_5d.dtype,
+            device=kv_cache_5d.device,
+        )
+        kv_cache_2d[:, :elems_per_block] = kv_cache_5d.reshape(
+            num_pages, elems_per_block
+        )
+
+        q, q_scale, ref_q = create_query_tensor(q_lens, num_qo_heads, head_dim, "bf16")
+
+        attn_inputs = PyAttentionInputs()
+        attn_inputs.is_prefill = False
+        attn_inputs.sequence_lengths = in_kv_lens
+        attn_inputs.input_lengths = q_lens
+        attn_inputs.kv_cache_block_id_device = page_table
+        attn_inputs.kv_cache_kernel_block_id_device = page_table
+        attn_inputs.kv_cache_kernel_block_id_host = page_table.cpu()
+        attn_inputs.dtype = get_typemeta(q)
+        attn_inputs.total_tokens = q.shape[0]
+        attn_inputs.decode_cu_seqlens_d = generate_cumsum_lens(q_lens)
+        attn_inputs.decode_cu_seqlens_host = generate_cumsum_lens(q_lens).cpu()
+        attn_inputs.cu_seqlens = generate_cumsum_lens(q_lens).cpu()
+        attn_inputs.cu_kv_seqlens = generate_cumsum_lens(seq_lens).cpu()
+
+        attn_configs = AttentionConfigs()
+        attn_configs.head_num = num_qo_heads
+        attn_configs.kv_head_num = num_kv_heads
+        attn_configs.size_per_head = head_dim
+        attn_configs.tokens_per_block = page_size
+        attn_configs.kernel_tokens_per_block = page_size
+        attn_configs.kv_cache_dtype = KvCacheDataType.BASE
+        attn_configs.dtype = q.dtype
+
+        original_init = FMHAImplBase.__init__
+
+        def patched_init(
+            self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=True
+        ):
+            original_init(
+                self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=False
+            )
+            self.rope_kvcache_impl = rope_kvcache_impl
+
+        FMHAImplBase.__init__ = patched_init
+        try:
+            attn_configs.need_rope_kv_cache = False
+            xqa_impl = XQADecodeImpl(attn_configs, attn_inputs)
+            xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(attn_inputs)
+            xqa_impl.attn_inputs = attn_inputs
+
+            class DummyRopeParams:
+                pass
+
+            xqa_impl.rope_params = DummyRopeParams()
+        finally:
+            FMHAImplBase.__init__ = original_init
+
+        # Forward with 2D packed KV cache
+        kv_cache_packed = LayerKVCache()
+        kv_cache_packed.kv_cache_base = kv_cache_2d
+
+        output_2d = xqa_impl.forward(q, kv_cache_packed).squeeze(1)
+        output_2d = output_2d.reshape(-1, output_2d.shape[2], output_2d.shape[3])
+
+        # Forward with original 5D KV cache for reference
+        kv_cache_normal = LayerKVCache()
+        kv_cache_normal.kv_cache_base = kv_cache_5d
+
+        xqa_impl2 = XQADecodeImpl.__new__(XQADecodeImpl)
+        FMHAImplBase.__init__ = patched_init
+        try:
+            attn_configs.need_rope_kv_cache = False
+            xqa_impl2 = XQADecodeImpl(attn_configs, attn_inputs)
+            xqa_impl2.fmha_params = xqa_impl2.fmha_impl.prepare(attn_inputs)
+            xqa_impl2.attn_inputs = attn_inputs
+            xqa_impl2.rope_params = DummyRopeParams()
+        finally:
+            FMHAImplBase.__init__ = original_init
+
+        output_5d = xqa_impl2.forward(q, kv_cache_normal).squeeze(1)
+        output_5d = output_5d.reshape(-1, output_5d.shape[2], output_5d.shape[3])
+
+        self.assertEqual(output_2d.shape, output_5d.shape)
+        max_diff = (output_2d.float() - output_5d.float()).abs().max().item()
+        self.assertTrue(
+            torch.allclose(output_2d.float(), output_5d.float(), rtol=1e-5, atol=1e-5),
+            f"2D packed KV cache output differs from 5D: max diff = {max_diff}",
+        )
+
+    @unittest.skipIf(not VERSION_REQUIREMENTS_MET, SKIP_MESSAGE)
     def test_xqa_decode_comprehensive(self):
         """Run comprehensive test cases for XQADecodeImpl"""
 
@@ -463,7 +1526,7 @@ class TestXQABatchDecode(unittest.TestCase):
             # (batch_size, q_len_per_req, num_kv_heads, kv_dtype)
             (2, 1, 1, "fp8"),
             (2, 5, 1, "fp8"),
-            # (2, 5, 1, "bf16"), #bazel error
+            (2, 5, 1, "bf16"),
             (2, 1, 1, "bf16"),
         ]
 

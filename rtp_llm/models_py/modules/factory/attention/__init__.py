@@ -69,6 +69,7 @@ else:
             FlashInferTRTLLMSpecDecodeImpl,
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import (
+            XQAImpl,
             get_xqa_impl,
         )
 
@@ -85,7 +86,14 @@ else:
             ]
         )
         DECODE_MHA_IMPS.extend([FlashInferTRTLLMDecodeImpl])
-        DECODE_MHA_IMPS.append(get_xqa_impl())
+        # XQAImpl (TRT GMMA) before XQADecodeImpl (FlashInfer HMMA): different
+        # accumulation paths produce <1 ULP divergence that flips tokens in long
+        # generations.  Existing golden data was generated with XQAImpl, so keep
+        # it higher-priority to avoid unnecessary golden refreshes.
+        DECODE_MHA_IMPS.append(XQAImpl)
+        _xqa_decode_impl = get_xqa_impl()
+        if _xqa_decode_impl is not XQAImpl:
+            DECODE_MHA_IMPS.append(_xqa_decode_impl)
 
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
             MlaFlashInferDecodeImpl,

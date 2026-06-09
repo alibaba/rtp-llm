@@ -171,6 +171,28 @@ class FusedRopeKVCachePrefillOpQOut(FusedRopeKVCachePrefillOpBase):
 class FusedRopeKVCacheDecodeOp:
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.attn_configs = attn_configs
+        self._dummy_scale: Optional[torch.Tensor] = None
+
+    def _get_kv_scale(self, kv_cache: LayerKVCache) -> Optional[torch.Tensor]:
+        # FP8 KV cache uses direct cast (no dynamic scaling), so the kernel always writes
+        # scale = 1.0. The buffer here is an output target for the kernel, not a real scale.
+        #
+        # `is not None` is sufficient here: pybind11 maps an undefined C++ torch::Tensor to
+        # Python None, and the cache allocator only stores defined tensors with numel > 0
+        # (see SingleTypeKVCacheAllocator::allLayerCacheBase). MHAKVCacheSpec guarantees
+        # FP8 dtype always has a scale buffer, so the dummy-scale branch below is purely
+        # defensive and unreachable under normal operation.
+        if kv_cache.kv_scale_base is not None:
+            return kv_cache.kv_scale_base
+        if kv_cache.kv_cache_base.dtype == torch.float8_e4m3fn:
+            num_pages = kv_cache.kv_cache_base.shape[0]
+            # convert_offset_to_block_array encodes K offset = page*2, V offset = page*2+1,
+            # so max offset is 2*num_pages-1 and scale buffer needs 2*num_pages blocks.
+            needed = 2 * num_pages * self.attn_configs.kernel_tokens_per_block * self.attn_configs.kv_head_num
+            if self._dummy_scale is None or self._dummy_scale.numel() < needed:
+                self._dummy_scale = torch.ones(needed, dtype=torch.float32, device=kv_cache.kv_cache_base.device)
+            return self._dummy_scale
+        return None
 
     def forward(
         self,
@@ -194,7 +216,7 @@ class FusedRopeKVCacheDecodeOp:
             params.kv_cache_offset,
             tokens_per_block=self.attn_configs.kernel_tokens_per_block,
             store_kv=False,
-            kv_cache_scale=kv_cache.kv_scale_base,
+            kv_cache_scale=self._get_kv_scale(kv_cache),
             kv_cache_offset_h=params.kv_cache_offset_h,
             rope_cache=(
                 rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
