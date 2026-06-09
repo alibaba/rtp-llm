@@ -84,6 +84,7 @@ cc_library(
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/engine_base:profiler",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
+        "//rtp_llm/cpp/engine_base/stream:input_embeddings_utils",
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:hash_util",
