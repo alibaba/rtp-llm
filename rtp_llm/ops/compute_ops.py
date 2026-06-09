@@ -11,6 +11,7 @@ if is_cuda():
     from .fused_rope_kvcache_op import (
         FusedRopeKVCacheDecodeOp,
         FusedRopeKVCachePrefillOpQKVOut,
+        FusedRopeKVCachePrefillOpQNoTransposeOut,
         FusedRopeKVCachePrefillOpQOut,
     )
 else:

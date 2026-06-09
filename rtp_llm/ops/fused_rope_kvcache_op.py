@@ -167,6 +167,26 @@ class FusedRopeKVCachePrefillOpQOut(FusedRopeKVCachePrefillOpBase):
         )
 
 
+class FusedRopeKVCachePrefillOpQNoTransposeOut(FusedRopeKVCachePrefillOpBase):
+    """RoPE + paged-KV write that returns q in ragged ``[token_num, head_num,
+    size_per_head]`` layout (no per-batch transpose/padding).
+
+    This matches the Python FlashInfer *paged* prefill wrapper, which consumes a
+    ragged query tensor plus a paged KV cache (the FlashInfer-HND ``kv_cache``
+    written here by ``store_cache``).
+    """
+
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        params: FusedRopeAttnParams,
+    ) -> torch.Tensor:
+        return self._forward(
+            qkv, kv_cache, params, True, False, False, False, False, False
+        )
+
+
 class FusedRopeKVCacheDecodeOp:
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.attn_configs = attn_configs
