@@ -131,6 +131,7 @@ class FrontendApp(object):
             asyncio.set_event_loop(asyncio.new_event_loop())
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         logging.info(
             f"server_config.ip = {self.server_config.ip}, port = {self.server_config.server_port}, rank id = {self.server_config.rank_id}, server_id = {self.server_config.frontend_server_id}, separated_frontend = {self.separated_frontend}"
