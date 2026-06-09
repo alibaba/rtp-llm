@@ -217,97 +217,41 @@ def quantize_and_insert_k_cache(
     )
 
 
-@triton.jit(do_not_specialize=["num_tokens"])
-def _quantize_and_insert_k_cp_byte_sliced_kernel(
-    k_ptr,
-    slot_mapping_ptr,
-    k_cache_ptr,
-    num_tokens,
-    input_dim: tl.constexpr,
-    fp8_dim: tl.constexpr,
-    bf16_dim: tl.constexpr,
-    scale_dim: tl.constexpr,
-    quant_block: tl.constexpr,
-    full_entries_per_block: tl.constexpr,
-    token_data_size: tl.constexpr,
-    local_slice_bytes: tl.constexpr,
-    cp_rank: tl.constexpr,
-    block_stride: tl.constexpr,
-    num_cache_blocks: tl.constexpr,
-    fp8_max: tl.constexpr,
-    n_quant_blocks: tl.constexpr,
-    TRAP_INVALID_KV_ACCESS: tl.constexpr,
-):
-    """Write only this CP rank's contiguous byte slice of a full SWA block."""
-    pid = tl.program_id(0).to(tl.int64)
-    if pid >= num_tokens:
-        return
+def _compact_cp_byte_sliced_slots(
+    slot_mapping: torch.Tensor,
+    *,
+    full_entries_per_block: int,
+    num_blocks: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map real full-block slots to compact scratch slots.
 
-    slot_idx = tl.load(slot_mapping_ptr + pid)
-    if slot_idx == -1:
-        return
-
-    block_idx = slot_idx // full_entries_per_block
-    pos_in_block = slot_idx % full_entries_per_block
-    if block_idx < 0:
-        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
-    if block_idx >= num_cache_blocks:
-        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
-
-    input_row_ptr = k_ptr + pid * input_dim
-    cache_block_ptr = k_cache_ptr + block_idx.to(tl.int64) * block_stride
-    slice_start = cp_rank * local_slice_bytes
-    slice_end = slice_start + local_slice_bytes
-
-    token_data_base = pos_in_block * token_data_size
-    token_scale_base = full_entries_per_block * token_data_size + pos_in_block * scale_dim
-
-    for qblock_idx in tl.static_range(n_quant_blocks):
-        qblock_start = qblock_idx * quant_block
-        if qblock_start < fp8_dim:
-            offsets = qblock_start + tl.arange(0, quant_block)
-            mask = offsets < fp8_dim
-
-            x = tl.load(input_row_ptr + offsets, mask=mask, other=0.0)
-            abs_x = tl.abs(x)
-            block_max = tl.max(abs_x, axis=0)
-            block_max = tl.maximum(block_max, 1e-4)
-            exponent = tl.ceil(tl.log2(block_max / fp8_max))
-            scale = tl.exp2(exponent)
-
-            x_fp8 = tl.clamp(x / scale, -fp8_max, fp8_max).to(tl.float8e4nv)
-            x_uint8 = x_fp8.to(tl.uint8, bitcast=True)
-
-            full_offsets = token_data_base + offsets
-            in_slice = mask & (full_offsets >= slice_start) & (full_offsets < slice_end)
-            tl.store(cache_block_ptr + full_offsets - slice_start, x_uint8, mask=in_slice)
-
-            encoded_scale = tl.maximum(tl.minimum(exponent + 127.0, 255.0), 0.0)
-            scale_full_offset = token_scale_base + qblock_idx
-            scale_in_slice = (scale_full_offset >= slice_start) & (scale_full_offset < slice_end)
-            tl.store(
-                cache_block_ptr + scale_full_offset - slice_start,
-                encoded_scale.to(tl.uint8),
-                mask=scale_in_slice,
-            )
-
-    pad_scale_full_offset = token_scale_base + 7
-    pad_scale_in_slice = (pad_scale_full_offset >= slice_start) & (pad_scale_full_offset < slice_end)
-    tl.store(
-        cache_block_ptr + pad_scale_full_offset - slice_start,
-        tl.zeros((), dtype=tl.uint8),
-        mask=pad_scale_in_slice,
+    CP byte slicing is a storage concern. This helper only remaps physical
+    block ids; it does not know anything about the SWA data/scale layout.
+    """
+    if slot_mapping.dtype != torch.long:
+        slot_mapping = slot_mapping.to(torch.long)
+    slots = slot_mapping.reshape(-1).contiguous()
+    validate_slot_mapping(
+        "swa.quantize_and_insert_cp_byte.slot_mapping",
+        slots,
+        block_size=full_entries_per_block,
+        num_blocks=num_blocks,
+        negative_mode="skip_minus_one",
     )
+    valid = slots >= 0
+    valid_slots = slots[valid]
+    if valid_slots.numel() == 0:
+        return (
+            torch.empty((0,), dtype=torch.long, device=slots.device),
+            torch.full_like(slot_mapping, -1),
+        )
 
-    bf16_input_offset = fp8_dim
-    token_bf16_base = token_data_base + fp8_dim
-    for i in tl.static_range(bf16_dim // 16):
-        chunk_offsets = i * 16 + tl.arange(0, 16)
-        bf16_vals = tl.load(input_row_ptr + bf16_input_offset + chunk_offsets)
-        byte_offsets = token_bf16_base + chunk_offsets * 2
-        in_slice = (byte_offsets >= slice_start) & ((byte_offsets + 1) < slice_end)
-        bf16_out_ptr = (cache_block_ptr + byte_offsets - slice_start).to(tl.pointer_type(tl.bfloat16))
-        tl.store(bf16_out_ptr, bf16_vals, mask=in_slice)
+    block_ids = valid_slots // int(full_entries_per_block)
+    block_offsets = valid_slots % int(full_entries_per_block)
+    unique_blocks, inverse = torch.unique(block_ids, sorted=True, return_inverse=True)
+    compact_flat = torch.full_like(slots, -1)
+    compact_flat[valid] = inverse.to(torch.long) * int(full_entries_per_block) + block_offsets
+    return unique_blocks, compact_flat.view_as(slot_mapping).contiguous()
 
 
 def quantize_and_insert_k_cache_cp_byte_sliced(
@@ -337,30 +281,31 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
     num_tokens = int(slot_mapping.shape[0])
     if num_tokens == 0:
         return
-    validate_slot_mapping(
-        "swa.quantize_and_insert_cp_byte.slot_mapping",
+    unique_blocks, compact_slots = _compact_cp_byte_sliced_slots(
         slot_mapping,
-        block_size=full_entries_per_block,
-        num_blocks=int(k_cache_raw.shape[0]),
-        negative_mode="skip_minus_one",
-    )
-    _quantize_and_insert_k_cp_byte_sliced_kernel[(num_tokens,)](
-        k,
-        slot_mapping,
-        k_cache_raw,
-        num_tokens,
-        input_dim=_INPUT_DIM,
-        fp8_dim=_TOKEN_FP8_DIM,
-        bf16_dim=_TOKEN_BF16_DIM,
-        scale_dim=_TOKEN_SCALE_DIM,
-        quant_block=_QUANT_BLOCK_SIZE,
         full_entries_per_block=full_entries_per_block,
-        token_data_size=_TOKEN_DATA_SIZE,
-        local_slice_bytes=int(k_cache_raw.shape[1]),
-        cp_rank=cp_rank,
-        block_stride=int(k_cache_raw.stride(0)),
-        num_cache_blocks=int(k_cache_raw.shape[0]),
-        fp8_max=_FP8_MAX,
-        n_quant_blocks=8,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        num_blocks=int(k_cache_raw.shape[0]),
     )
+    if unique_blocks.numel() == 0:
+        return
+
+    local_slice_bytes = int(k_cache_raw.shape[1])
+    full_stride_bytes = local_slice_bytes * cp_size
+    slice_start = cp_rank * local_slice_bytes
+    slice_end = slice_start + local_slice_bytes
+
+    full_raw = torch.zeros(
+        (int(unique_blocks.numel()), full_stride_bytes),
+        dtype=torch.uint8,
+        device=k_cache_raw.device,
+    )
+    full_view = full_raw.as_strided(
+        (int(unique_blocks.numel()), full_entries_per_block, 584),
+        (full_stride_bytes, 584, 1),
+    )
+    quantize_and_insert_k_cache(
+        k,
+        full_view,
+        compact_slots,
+    )
+    k_cache_raw.index_copy_(0, unique_blocks, full_raw[:, slice_start:slice_end].contiguous())

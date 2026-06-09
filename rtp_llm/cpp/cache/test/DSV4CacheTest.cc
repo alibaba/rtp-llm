@@ -933,7 +933,7 @@ TEST(HybridPoolConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
     EXPECT_EQ(swa_kv->entries_per_block, 130u);
 }
 
-TEST(HybridPoolConfigCreatorTest, PrefillCp8MtpGenNum2PadsStateRingBeforeSlicing) {
+TEST(HybridPoolConfigCreatorTest, PrefillCp8MtpGenNum2SlicesStateAndKeepsFullSwaRingEntries) {
     auto              mc = makeFlashModelConfig();
     ParallelismConfig pc;
     pc.role_type                          = RoleType::PREFILL;
@@ -953,15 +953,15 @@ TEST(HybridPoolConfigCreatorTest, PrefillCp8MtpGenNum2PadsStateRingBeforeSlicing
     ASSERT_NE(swa_kv, nullptr);
 
     // gen_num_per_cycle=2 gives raw INDEXER/CSA R=10, HCA/SWA R=130.
-    // Fixed state pools are CP-sliced by entries; SWA_KV keeps full logical
-    // entries and slices its packed bytes instead.
+    // STATE rings are padded to cp_size before taking each rank's entry slice.
+    // SWA_KV keeps the full logical ring and slices the padded physical bytes.
     EXPECT_EQ(indexer_state->entries_per_block, 2u);
     EXPECT_EQ(csa_state->entries_per_block, 2u);
     EXPECT_EQ(hca_state->entries_per_block, 17u);
     EXPECT_EQ(swa_kv->entries_per_block, 136u);
 }
 
-TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2ExpandsFixedAndSwaSlices) {
+TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2MatchesFixedAndSwaRingEntries) {
     constexpr uint32_t cp_size = 8;
     auto               mc      = makeFlashModelConfig();
 
@@ -991,7 +991,8 @@ TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2ExpandsFixedAndSwaSl
         ASSERT_NE(prefill_spec, nullptr) << "gid=" << gid;
         ASSERT_NE(decode_spec, nullptr) << "gid=" << gid;
         EXPECT_EQ(decode_spec->cache_type, prefill_spec->cache_type) << "gid=" << gid;
-        const auto expected_entries = prefill_spec->entries_per_block * cp_size;
+        const auto expected_entries =
+            gid == 6u ? prefill_spec->entries_per_block : prefill_spec->entries_per_block * cp_size;
         EXPECT_EQ(decode_spec->entries_per_block, expected_entries)
             << "gid=" << gid << " region=" << static_cast<int>(decode_spec->cache_type);
     }
@@ -1047,7 +1048,8 @@ TEST(HybridPoolConfigCreatorTest, DecodeExplicitPrefillCpSizeHandlesDp16) {
         auto* decode_spec  = dynamic_cast<DSV4StateSpec*>(decode_config.cache_specs[gid].get());
         ASSERT_NE(prefill_spec, nullptr) << "gid=" << gid;
         ASSERT_NE(decode_spec, nullptr) << "gid=" << gid;
-        const auto expected_entries = prefill_spec->entries_per_block * cp_size;
+        const auto expected_entries =
+            gid == 6u ? prefill_spec->entries_per_block : prefill_spec->entries_per_block * cp_size;
         EXPECT_EQ(decode_spec->entries_per_block, expected_entries)
             << "gid=" << gid << " region=" << static_cast<int>(decode_spec->cache_type);
         EXPECT_EQ(prefill_config.group_seq_size_per_block[gid], kDsv4TokensPerBlock * cp_size) << "gid=" << gid;
