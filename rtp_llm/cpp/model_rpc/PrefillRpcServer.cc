@@ -210,7 +210,18 @@ void PrefillRpcServer::prepareGenerateInput(PrefillGenerateContext& prefill_cont
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
-    prepareGenerateInput(prefill_context);
+    try {
+        prepareGenerateInput(prefill_context);
+    } catch (const std::exception& e) {
+        setContextError(prefill_context,
+                        ErrorInfo(ErrorCode::INVALID_PARAMS, std::string("Request parsing error: ") + e.what()));
+        return;
+    }
+    auto support_res = validateInputRuntimeSupport(*prefill_context.generate_input);
+    if (!support_res.ok()) {
+        setContextError(prefill_context, support_res);
+        return;
+    }
 
     RTP_LLM_LOG_DEBUG("request [%ld] get rpc connection", prefill_context.request_id);
 
@@ -312,6 +323,13 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
         auto*       ids_ptr = input->input_ids.data_ptr<int32_t>();
         for (size_t i = 0; i < input->input_ids.numel(); ++i) {
             new_request->add_token_ids(ids_ptr[i]);
+        }
+        if (input->input_embeddings_locs.has_value()) {
+            auto* mutable_input_embeddings = new_request->mutable_input_embeddings();
+            mutable_input_embeddings->clear_embedding_locs();
+            for (int32_t loc : input->input_embeddings_locs.value()) {
+                mutable_input_embeddings->add_embedding_locs(loc);
+            }
         }
     }
     for (const auto& address : prefill_context.prefill_worker_cache_store_addrs) {

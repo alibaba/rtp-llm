@@ -47,7 +47,10 @@ def trans_from_tensor(t: torch.Tensor):
     if t is None or t.numel() == 0:
         return TensorPB()
     res = TensorPB()
-    t = t.cpu()
+    # RPC serialization is an inference boundary. Callers may still hand us
+    # tensors produced by an autograd-enabled module, and NumPy rejects such
+    # tensors even though gradients are never meaningful on the wire.
+    t = t.detach().cpu()
     res.shape.extend(list(t.shape))
     if t.dtype == torch.float32:
         res.data_type = TensorPB.DataType.FP32

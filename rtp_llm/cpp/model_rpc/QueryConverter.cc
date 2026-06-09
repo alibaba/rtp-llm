@@ -1,9 +1,11 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 
 #include <numeric>
+#include <stdexcept>
 
 #include "RPCPool.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/engine_base/stream/InputEmbeddingsUtils.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
@@ -230,6 +232,32 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     }
     if (generate_input->generate_config && generate_input->generate_config->trace_id.empty()) {
         generate_input->generate_config->trace_id = generate_input->request_info.trace_id;
+    }
+
+    // 转换 input_embeddings
+    if (input->has_input_embeddings()) {
+        const auto& input_embeddings_pb = input->input_embeddings();
+
+        std::vector<torch::Tensor> embeddings;
+        std::vector<int32_t>       embedding_locs;
+
+        // 转换 embeddings
+        for (int i = 0; i < input_embeddings_pb.embeddings_size(); i++) {
+            embeddings.push_back(transTensor(input_embeddings_pb.embeddings(i)));
+        }
+
+        // 转换 embedding_locs
+        embedding_locs.resize(input_embeddings_pb.embedding_locs_size());
+        memcpy(embedding_locs.data(),
+               input_embeddings_pb.embedding_locs().data(),
+               input_embeddings_pb.embedding_locs_size() * sizeof(int32_t));
+
+        generate_input->input_embeddings      = embeddings;
+        generate_input->input_embeddings_locs = embedding_locs;
+        auto status                           = validateAndNormalizeInputEmbeddings(*generate_input);
+        if (!status.ok()) {
+            throw std::runtime_error(status.ToString());
+        }
     }
 
     return generate_input;
