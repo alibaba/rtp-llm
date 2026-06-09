@@ -23,6 +23,69 @@ from rtp_llm.models_py.triton_kernels.fla.utils import (
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
 
 
+def _debug_tensor_prefix(tensor: torch.Tensor, limit: int = 32) -> list:
+    return tensor[: min(tensor.numel(), limit)].tolist()
+
+
+def _assert_varlen_chunk_metadata(
+    cu_seqlens: torch.Tensor,
+    chunk_offsets: torch.Tensor,
+    nt: int,
+    token_count: int,
+    chunk_size: int,
+) -> None:
+    cu_seqlens_cpu = cu_seqlens.detach().cpu()
+    chunk_offsets_cpu = chunk_offsets.detach().cpu()
+
+    assert cu_seqlens_cpu.dim() == 1, (
+        f"cu_seqlens must be 1D, got shape={tuple(cu_seqlens_cpu.shape)}"
+    )
+    assert chunk_offsets_cpu.dim() == 1, (
+        f"chunk_offsets must be 1D, got shape={tuple(chunk_offsets_cpu.shape)}"
+    )
+    assert cu_seqlens_cpu.numel() >= 2, (
+        f"cu_seqlens must contain at least 2 entries, got {cu_seqlens_cpu.numel()}"
+    )
+    assert chunk_offsets_cpu.numel() == cu_seqlens_cpu.numel(), (
+        "chunk_offsets length must match cu_seqlens length, "
+        f"chunk_offsets={chunk_offsets_cpu.numel()}, cu_seqlens={cu_seqlens_cpu.numel()}"
+    )
+
+    first = int(cu_seqlens_cpu[0].item())
+    last = int(cu_seqlens_cpu[-1].item())
+    assert first == 0, (
+        f"cu_seqlens[0] must be 0, got {first}, "
+        f"cu_seqlens_prefix={_debug_tensor_prefix(cu_seqlens_cpu)}"
+    )
+    assert last <= token_count, (
+        f"cu_seqlens[-1] must be <= token_count, got {last} > {token_count}, "
+        f"cu_seqlens_prefix={_debug_tensor_prefix(cu_seqlens_cpu)}"
+    )
+
+    lens = cu_seqlens_cpu[1:] - cu_seqlens_cpu[:-1]
+    assert bool((lens >= 0).all().item()), (
+        "cu_seqlens must be non-decreasing, "
+        f"cu_seqlens_prefix={_debug_tensor_prefix(cu_seqlens_cpu)}, "
+        f"lens_prefix={_debug_tensor_prefix(lens)}"
+    )
+
+    chunks = (lens + chunk_size - 1) // chunk_size
+    expected_offsets = torch.cat([chunks.new_zeros(1), chunks]).cumsum(0)
+    expected_nt = int(expected_offsets[-1].item())
+
+    assert int(nt) == expected_nt, (
+        f"NT mismatch: wrapper NT={int(nt)}, expected from cu_seqlens={expected_nt}, "
+        f"cu_seqlens_prefix={_debug_tensor_prefix(cu_seqlens_cpu)}, "
+        f"lens_prefix={_debug_tensor_prefix(lens)}, chunks_prefix={_debug_tensor_prefix(chunks)}"
+    )
+    assert torch.equal(chunk_offsets_cpu.to(expected_offsets.dtype), expected_offsets), (
+        "chunk_offsets mismatch with cu_seqlens-derived offsets, "
+        f"chunk_offsets_prefix={_debug_tensor_prefix(chunk_offsets_cpu)}, "
+        f"expected_offsets_prefix={_debug_tensor_prefix(expected_offsets)}, "
+        f"cu_seqlens_prefix={_debug_tensor_prefix(cu_seqlens_cpu)}"
+    )
+
+
 @triton.heuristics(
     {
         "USE_G": lambda args: args["g"] is not None,
@@ -57,6 +120,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     cu_seqlens,
     chunk_offsets,
     T,
+    N: tl.constexpr,
     H: tl.constexpr,
     Hg: tl.constexpr,
     K: tl.constexpr,
@@ -79,7 +143,14 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         ).to(tl.int32)
         T = eos - bos
         NT = tl.cdiv(T, BT)
-        boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+        # Keep the per-sequence chunk base tied to cu_seqlens contents. Host-side
+        # chunk_offsets can be stale after graph input tensors are rewritten.
+        boh = tl.full((), 0, tl.int32)
+        for i_prev in tl.static_range(0, N):
+            prev_bos = tl.load(cu_seqlens + i_prev).to(tl.int32)
+            prev_eos = tl.load(cu_seqlens + i_prev + 1).to(tl.int32)
+            prev_nt = tl.cdiv(prev_eos - prev_bos, BT)
+            boh += tl.where(i_prev < i_n, prev_nt, 0)
     else:
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
@@ -387,6 +458,7 @@ def chunk_gated_delta_rule_fwd_h(
             len(chunk_indices),
             prepare_chunk_offsets(cu_seqlens, BT),
         )
+        _assert_varlen_chunk_metadata(cu_seqlens, chunk_offsets, NT, T, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
     # Generic Triton fallback: the kernel accumulates ``b_h*`` in fp32 and
@@ -421,6 +493,7 @@ def chunk_gated_delta_rule_fwd_h(
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
         T=T,
+        N=N,
         H=H,
         Hg=Hg,
         K=K,
