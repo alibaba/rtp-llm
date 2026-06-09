@@ -80,6 +80,7 @@ class Qwen3DecoderLayer(nn.Module):
 
 
 class Qwen3Model(GptModelBase):
+
     def __init__(
         self,
         config: ModelConfig,
@@ -123,7 +124,7 @@ class Qwen3Model(GptModelBase):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
+        inputs_embeds = self.get_inputs_embeds(input_ids, inputs)
         hidden_states = inputs_embeds
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -141,6 +142,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_device(inputs.combo_position_ids, GptModelInputDeviceBit::kDeviceBitComboPositionIds);
     encode_device(inputs.text_tokens_mask, GptModelInputDeviceBit::kDeviceBitTextTokensMask);
     encode_device(inputs.mm_features_locs, GptModelInputDeviceBit::kDeviceBitMmFeaturesLocs);
+    shape_hints[GptModelInputIndex::inputEmbeddingsRejected] =
+        inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty() ? 1 : 0;
     shape_hints[GptModelInputIndex::tensorDeviceMap]          = static_cast<int64_t>(device_bits);
     shape_hints[GptModelInputIndex::kvCacheKernelBlockIdRank] = kernel_block_table.rank;
     shape_hints[GptModelInputIndex::kvCacheBlockIdRank]       = block_table.rank;
@@ -204,6 +207,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // execBroadcastCpu's fallback path keeps the NCCL+cudaSyncAndCheck
     // contract for cross-node TP.
     execBroadcastCpu({{shape_hints_t}, 0});
+    RTP_LLM_CHECK_WITH_INFO(shape_hints_ptr[GptModelInputIndex::inputEmbeddingsRejected] == 0,
+                            "input_embeddings is not supported with tp_size > 1 (got tp_size=%ld); "
+                            "send the request to a TP=1 deployment or omit input_embeddings.",
+                            (long)parallelism_config.tp_size);
 
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;

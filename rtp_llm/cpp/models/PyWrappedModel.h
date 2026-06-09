@@ -89,6 +89,7 @@ public:
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     std::string     waitCacheStorePublication() override;
+    static void rejectContextParallelInputEmbeddings(const ExecProperties& device_props, const GptModelInputs& inputs);
 
 private:
     friend struct test::PyWrappedModelTestPeer;

@@ -73,6 +73,7 @@ from rtp_llm.telemetry import CURRENT_TRACE_STATE, tracing
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
+    InputEmbeddings,
     RequestInfo,
 )
 
@@ -1217,6 +1218,44 @@ class ClientSpanSettlementTest(TestCase):
         outputs.generate_outputs = [_FakeOut(True), _FakeOut(True)]
         self.assertTrue(_engine_reported_finished(outputs))
 
+    def test_custom_converter_preserves_payload_with_and_without_tracing(self):
+        for tracing_enabled in (False, True):
+            with self.subTest(tracing_enabled=tracing_enabled):
+                span = _FakeClientSpan() if tracing_enabled else None
+                client = self._build_client(span, total=2)
+                payload = {"all_output_ids": [10, 11]}
+                client._trans_output_fn = lambda *_: payload
+
+                async def run():
+                    outputs = [out async for out in client.enqueue(self._make_input())]
+                    self.assertEqual(len(outputs), 2)
+                    self.assertTrue(all(out is payload for out in outputs))
+                    if span is not None:
+                        await asyncio.wait_for(span.finished_event.wait(), timeout=5)
+                        self.assertEqual(span.status, "OK")
+                    self.assertFalse(client._test_stub.iterator.cancelled)
+
+                asyncio.run(run())
+
+    def test_custom_converter_stream_close_uses_engine_finished_flag(self):
+        for finished in (False, True):
+            with self.subTest(finished=finished):
+                span = _FakeClientSpan()
+                client = self._build_client(
+                    span, total=1, finish_last=finished, terminal_delay=0.01
+                )
+                client._trans_output_fn = lambda *_: {"all_output_ids": [10]}
+
+                async def run():
+                    stream = client.enqueue(self._make_input())
+                    self.assertEqual(await stream.__anext__(), {"all_output_ids": [10]})
+                    await stream.aclose()
+                    await asyncio.wait_for(span.finished_event.wait(), timeout=5)
+                    self.assertEqual(span.status, "OK" if finished else "ERROR")
+                    self.assertEqual(client._test_stub.iterator.cancelled, not finished)
+
+                asyncio.run(run())
+
     def test_usage_attributes_skip_non_positive(self):
         span = _FakeClientSpan()
         outputs = GenerateOutputs()
@@ -1720,6 +1759,34 @@ class ClientSpanSettlementTest(TestCase):
 
         self.assertEqual(raised.exception.exception_type, ExceptionType.UNKNOWN_ERROR)
         self.assertEqual(raised.exception.message, "future error")
+
+    def test_trans_input_serializes_input_embeddings(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(),
+            request_id=123,
+            mm_inputs=[],
+            input_embeddings=InputEmbeddings(
+                embeddings=[
+                    torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32),
+                    torch.tensor([[5.0, 6.0]], dtype=torch.float32),
+                ],
+                embedding_locs=[0, 2],
+            ),
+        )
+
+        input_pb = trans_input(input_py)
+
+        self.assertEqual(len(input_pb.input_embeddings.embeddings), 2)
+        self.assertEqual(list(input_pb.input_embeddings.embedding_locs), [0, 2])
+        self.assertEqual(
+            list(input_pb.input_embeddings.embeddings[0].shape),
+            [2, 2],
+        )
+        self.assertEqual(
+            input_pb.input_embeddings.embeddings[0].fp32_data,
+            struct.pack("<ffff", 1.0, 2.0, 3.0, 4.0),
+        )
 
 
 if __name__ == "__main__":
