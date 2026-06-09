@@ -32,6 +32,7 @@ class BackendRPCServerVisitor:
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
         server_config=None,
         master_config=None,
+        trans_output_fn=None,
     ) -> None:
         """Initialize BackendRPCServerVisitor.
 
@@ -45,6 +46,8 @@ class BackendRPCServerVisitor:
             vit_separation: Optional VitSeparation for multimodal models
             server_config: Optional ServerConfig for master configuration
             master_config: Optional MasterConfig for master client configuration
+            trans_output_fn: Custom function to transform protobuf outputs to Python objects.
+                Passed through to ModelRpcClient. If None, uses default implementation.
         """
         self.max_seq_len = max_seq_len
         self.seq_size_per_block = seq_size_per_block
@@ -67,6 +70,7 @@ class BackendRPCServerVisitor:
             client_config=client_config,
             max_rpc_timeout_ms=max_rpc_timeout_ms,
             decode_entrance=decode_entrance,
+            trans_output_fn=trans_output_fn,
         )
 
         host_args = HostServiceArgs.create_from_env()

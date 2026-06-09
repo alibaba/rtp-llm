@@ -1,5 +1,7 @@
 import os
 
+from rtp_llm.server.server_args.util import str2bool
+
 
 def init_server_group_args(parser, server_config):
     ##############################################################################################################
@@ -77,4 +79,28 @@ def init_server_group_args(parser, server_config):
         type=int,
         default=1,
         help="Process manager monitor interval in seconds",
+    )
+    server_group.add_argument(
+        "--enable_prompt_generator",
+        env_name="ENABLE_PROMPT_GENERATOR",
+        bind_to=(server_config, "enable_prompt_generator"),
+        type=str2bool,
+        default=False,
+        help="启用 prompt generator 服务",
+    )
+    server_group.add_argument(
+        "--prompt_generator_server_count",
+        env_name="PROMPT_GENERATOR_SERVER_COUNT",
+        bind_to=(server_config, "prompt_generator_server_count"),
+        type=int,
+        default=1,
+        help="prompt generator 服务器启动进程数量",
+    )
+    server_group.add_argument(
+        "--enable_prompt_generator_mps",
+        env_name="ENABLE_PROMPT_GENERATOR_MPS",
+        bind_to=(server_config, "enable_prompt_generator_mps"),
+        type=str2bool,
+        default=False,
+        help="prompt generator 启用 MPS 服务",
     )
