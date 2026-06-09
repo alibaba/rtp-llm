@@ -370,6 +370,12 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
 
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
+
+    if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+        RTP_LLM_LOG_DEBUG("cuda graph disabled for request: input_embeddings present");
+        return false;
+    }
+
     // Check if this is speculative sampling:
     // 1. prefix_lengths is not empty
     // 2. all values in input_lengths are the same
