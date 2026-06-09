@@ -155,9 +155,9 @@ struct DSV4StateSpec: public KVCacheSpec {
         return static_cast<size_t>(entries_per_block) * state_dim * getTypeSize(store_dtype);
     }
 
-    // Public block size is the physical per-block stride. The full (unsliced)
-    // SWA_KV ring stores the FP8 KV layout and needs TMA padding; a prefill
-    // CP-sliced sub-block (< window) keeps its natural size.
+    // Public block size is the physical per-block stride. A non-zero override
+    // represents one prefill CP byte slice of the full SWA_KV block. Unsliced
+    // SWA_KV stores the FP8 layout and needs TMA padding.
     size_t block_size_bytes() const override {
         if (block_size_bytes_override > 0) {
             return block_size_bytes_override;

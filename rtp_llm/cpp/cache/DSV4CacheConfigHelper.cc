@@ -118,12 +118,13 @@ uint32_t maybeAdjustFixedEntriesForCpSharding(uint32_t                 entries,
         return entries;
     }
 
-    // CP-aligned entries are the real ring capacity, not dead padding. Prefill
-    // stores one CP slice of that ring; decode stores the complete ring.
+    // CP-aligned entries are the real ring capacity, not dead padding. Fixed
+    // STATE rings stay entry-sliced under CP; SWA_KV uses separate physical-byte
+    // slicing because its FP8 layout has a data/scale/padding block stride.
     const auto ring_capacity_entries = alignUpToMultiple(entries, cp_size);
     const bool prefill_sliced        = isPrefillCpSliced(parallelism_config);
     const auto entries_per_block     = prefill_sliced ? ring_capacity_entries / cp_size : ring_capacity_entries;
-    RTP_LLM_LOG_INFO("DSV4 fixed/SWA CP sharding region=%s(%d) min_entries=%u ring_capacity_entries=%u "
+    RTP_LLM_LOG_INFO("DSV4 fixed STATE CP sharding region=%s(%d) min_entries=%u ring_capacity_entries=%u "
                      "entries_per_block=%u cp_size=%u prefill_sliced=%d expanded=%d role=%d",
                      dsv4RegionName(region_name),
                      static_cast<int>(region_name),
