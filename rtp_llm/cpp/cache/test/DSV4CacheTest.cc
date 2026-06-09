@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -30,6 +31,24 @@ constexpr uint32_t kDsv4KvEntryBytes      = 1024;
 constexpr uint32_t kDsv4IndexerEntryBytes = 256;
 constexpr uint32_t kDsv4Fp8KvEntryBytes   = 584;
 constexpr uint32_t kDsv4FixedPoolBlocks   = 256;
+
+class DSV4CacheTestEnvironment: public ::testing::Environment {
+public:
+    void SetUp() override {
+        old_core_dump_on_exception_                  = StaticConfig::user_ft_core_dump_on_exception;
+        StaticConfig::user_ft_core_dump_on_exception = false;
+    }
+
+    void TearDown() override {
+        StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception_;
+    }
+
+private:
+    bool old_core_dump_on_exception_{false};
+};
+
+[[maybe_unused]] auto* const dsv4_cache_test_env =
+    ::testing::AddGlobalTestEnvironment(new DSV4CacheTestEnvironment());
 
 }  // namespace
 

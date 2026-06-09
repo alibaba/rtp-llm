@@ -31,6 +31,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm::test {
 
@@ -210,6 +211,8 @@ private:
 class KVCacheMemoryConnectorTest: public ::testing::Test {
 protected:
     void SetUp() override {
+        old_core_dump_on_exception_                  = StaticConfig::user_ft_core_dump_on_exception;
+        StaticConfig::user_ft_core_dump_on_exception = false;
         createDevice();
 
         cache_config_ = createMockCacheConfig();
@@ -224,7 +227,9 @@ protected:
         ASSERT_TRUE(connector_->init());
     }
 
-    void TearDown() override {}
+    void TearDown() override {
+        StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception_;
+    }
 
     CacheConfig                                 cache_config_;
     KVCacheConfig                               kv_cache_config_;
@@ -232,6 +237,7 @@ protected:
     std::shared_ptr<KVCacheMemoryConnector>     connector_;
     std::vector<std::unique_ptr<TestRpcServer>> servers_;
     std::vector<std::string>                    server_addrs_;
+    bool                                        old_core_dump_on_exception_{false};
 
 private:
     void createDevice() const {
@@ -3226,11 +3232,17 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
 class KVCacheMemoryConnectorDualPoolTest: public ::testing::Test {
 protected:
     void SetUp() override {
+        old_core_dump_on_exception_                  = StaticConfig::user_ft_core_dump_on_exception;
+        StaticConfig::user_ft_core_dump_on_exception = false;
         createDevice();
         startRpcServer(4);
     }
 
-    void TearDown() override {}
+    void TearDown() override {
+        StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception_;
+    }
+
+    bool old_core_dump_on_exception_{false};
 
     CacheConfig
     createHybridCacheConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8, int linear_step = 4) {

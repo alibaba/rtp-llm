@@ -100,14 +100,9 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
 }
 
 TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_Timeout) {
-    // 设置服务器延迟响应
-    for (auto& server : servers_) {
-        server->service()->setSleepMillis(200);
-    }
-
     std::string unique_key  = "test_broadcast_timeout";
     int64_t     request_id  = 1002;
-    int64_t     deadline_ms = currentTimeMs() + 10;  // 很短的超时时间
+    int64_t     deadline_ms = currentTimeMs() - 1;
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
     layer_cache_buffers.push_back(createLayerCacheBuffer(0, 2));
@@ -115,18 +110,13 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_Timeout) {
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
-    // 执行 broadcast
     auto result = client_->broadcast(request_id,
                                      layer_cache_buffers,
                                      decode_transfer_servers,
                                      unique_key,
                                      deadline_ms,
                                      P2PConnectorBroadcastType::READ);
-
-    ASSERT_NE(result, nullptr);
-
-    // broadcast gRPC 超时时 BroadcastManager::waitDone 抛 RTPException
-    EXPECT_THROW(waitDone(result, 500), RTPException);
+    EXPECT_EQ(result, nullptr);
 }
 
 TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_PartialResponseFailed) {

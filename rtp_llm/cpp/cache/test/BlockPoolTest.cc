@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 
@@ -19,14 +20,18 @@ namespace test {
 class BlockPoolTest: public ::testing::Test {
 protected:
     void SetUp() override {
+        old_core_dump_on_exception_                  = StaticConfig::user_ft_core_dump_on_exception;
+        StaticConfig::user_ft_core_dump_on_exception = false;
         createDevice();
     }
 
     void TearDown() override {
+        StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception_;
         block_pool_.reset();
     }
 
     std::shared_ptr<BlockPool> block_pool_;
+    bool                       old_core_dump_on_exception_{false};
 };
 
 namespace {

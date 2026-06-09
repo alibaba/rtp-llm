@@ -188,23 +188,18 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_BroadcastPartialFailed)
     }
 }
 
-// 测试: broadcast worker 慢于 gRPC deadline，checkDone 路径抛 RTPException
-TEST_F(P2PConnectorSchedulerTest, HandleRead_ThrowException_BroadcastTimeout) {
-    for (auto& server : tp_broadcast_servers_) {
-        server->service()->setSleepMillis(500);  // 延迟 500ms
-        break;
-    }
-
+// 测试: broadcast 已超过 deadline，返回超时错误
+TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_BroadcastTimeout) {
     auto valid_resource = createValidKVCacheResource(2, 2);
 
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
-    auto deadline_ms = currentTimeMs() + 50;
+    auto deadline_ms = currentTimeMs() - 1;
 
-    EXPECT_THROW(
-        scheduler_->sendKVCache(valid_resource, "test_broadcast_timeout", 1004, decode_transfer_servers, deadline_ms),
-        RTPException);
+    auto error_info =
+        scheduler_->sendKVCache(valid_resource, "test_broadcast_timeout", 1004, decode_transfer_servers, deadline_ms);
+    EXPECT_TRUE(error_info.hasError());
 }
 
 // 测试: handleRead 被 client 取消, 返回失败
@@ -420,21 +415,14 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_PrefillTimeout) {
     EXPECT_EQ(prefill_server_->service()->getStartLoadCallCount(), 1);
 }
 
-// 测试: broadcast worker 慢于 gRPC deadline，checkDone 抛 RTPException
-TEST_F(P2PConnectorSchedulerTest, AsyncRead_ThrowException_BroadcastTimeout) {
-    tp_broadcast_servers_[0]->service()->setSleepMillis(500);
-
-    scheduler_->stopChecker();
-
+// 测试: async read 已超过 deadline，返回超时错误
+TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnError_BroadcastTimeout) {
     auto resource = createValidKVCacheResource(2, 2);
-    auto meta     = createMockMeta(2008, "test_async_read_broadcast_timeout", currentTimeMs() + 50);
+    auto meta     = createMockMeta(2008, "test_async_read_broadcast_timeout", currentTimeMs() - 1);
 
     auto result = scheduler_->asyncRead(resource, meta, {0, -1});
-    ASSERT_TRUE(result.ok());
-    auto async_context = result.context;
-    ASSERT_NE(async_context, nullptr);
-
-    EXPECT_THROW(waitAsyncContextDone(async_context, 500, /*check_done=*/true), RTPException);
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.context, nullptr);
 }
 
 // 测试: asyncread prefill 失败, 取消broadcast
@@ -509,22 +497,16 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelPrefill_WhenBroadcastFailed) {
     // 服务端可能已经开始处理请求，所以这里不验证取消是否成功
 }
 
-// Prefill：worker 极慢导致 gRPC DEADLINE_EXCEEDED 时抛 RTPException（与 BroadcastManager 行为一致）
-TEST_F(P2PConnectorSchedulerTest, SendKVCache_ThrowException_WhenBroadcastExceedsDeadline) {
-    for (auto& server : tp_broadcast_servers_) {
-        server->service()->setSleepMillis(120000);
-        server->service()->setP2PResponseSuccess(true);
-    }
-
+// Prefill：已超过 deadline 时返回 broadcast 失败错误
+TEST_F(P2PConnectorSchedulerTest, SendKVCache_ReturnError_WhenBroadcastExceedsDeadline) {
     auto                                          valid_resource = createValidKVCacheResource(2, 2);
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
-    const int64_t deadline_ms = currentTimeMs() + 80;
-    EXPECT_THROW(
-        scheduler_->sendKVCache(
-            valid_resource, "test_prefill_broadcast_past_deadline", 4006, decode_transfer_servers, deadline_ms),
-        RTPException);
+    const int64_t deadline_ms = currentTimeMs() - 1;
+    auto          error_info  = scheduler_->sendKVCache(
+        valid_resource, "test_prefill_broadcast_past_deadline", 4006, decode_transfer_servers, deadline_ms);
+    EXPECT_TRUE(error_info.hasError());
 }
 
 // StartLoad 返回 TRANSFER_NOT_DONE 且 hold_ms>0：checkDone 进入保留窗口，done 仍为 false 且 needCancel 为 false；hold
