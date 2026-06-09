@@ -4,9 +4,9 @@ py_library(
     name = "server",
     srcs = glob([
         "*.py",
-        "server_args/*.py"
+        "server_args/*.py",
     ]),
     deps = [
-        "//rtp_llm:vipserver"
-    ]
+        "//rtp_llm:vipserver",
+    ],
 )
