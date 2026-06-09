@@ -106,6 +106,14 @@ class DisaggregateModelBase(GptModelBase):
         self.attn_world_size = ffn_disaggregate_config.attention_dp_size
         self.device = "cuda:" + str(parallelism_config.local_rank)
 
+    def _reject_input_embeddings(self, inputs):
+        candidates = inputs if isinstance(inputs, (list, tuple)) else [inputs]
+        for inp in candidates:
+            if inp.input_embeddings is not None and len(inp.input_embeddings) > 0:
+                raise NotImplementedError(
+                    "Disaggregate model does not support input_embeddings"
+                )
+
 
 class Qwen3GemmLayer(nn.Module):
     def __init__(
@@ -358,6 +366,7 @@ class Qwen3GemmModel(DisaggregateModelBase):
         return t
 
     def forward_micro_batch(self, inputs: List[PyModelInputs]) -> List[PyModelOutputs]:
+        self._reject_input_embeddings(inputs)
         input_ids_list, batch_split_info = self.recv_micro_batch_split_info()
         micro_batch_inputs: List[torch.Tensor] = []
         residuals: List[torch.Tensor] = []
@@ -464,6 +473,7 @@ class Qwen3AttnModel(DisaggregateModelBase):
     def forward_micro_batch(
         self, mirco_batch_inputs: List[PyModelInputs]
     ) -> List[PyModelOutputs]:
+        self._reject_input_embeddings(mirco_batch_inputs)
         self.send_mirco_batch_split_info(mirco_batch_inputs)
         for i, layer in enumerate(self.attention_layers[: self.layer_num]):
             for idx, mirco_batch_input in enumerate(mirco_batch_inputs):

@@ -1006,6 +1006,7 @@ class Qwen3NextDecoderLayer(nn.Module):
 
 
 class Qwen3NextModel(GptModelBase):
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -1114,7 +1115,8 @@ class Qwen3NextModel(GptModelBase):
 
     def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
         input_ids: torch.Tensor = inputs.input_ids
-        return self.embed_tokens(input_ids)
+        inputs_embeds = self.get_inputs_embeds(input_ids, inputs)
+        return inputs_embeds
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         hidden_states = self.word_embedding(inputs)
@@ -1224,6 +1226,13 @@ class Qwen35Model(Qwen3NextModel):
         inputs_embeds = self.embed_tokens(
             input_ids, position_ids, token_type_ids, text_tokens_mask
         )
+        if self._has_input_embeddings(inputs):
+            locs = inputs.input_embeddings_locs
+            for i, emb in enumerate(inputs.input_embeddings):
+                loc = locs[i].item()
+                inputs_embeds[loc : loc + emb.size(0)] = emb.to(
+                    device=inputs_embeds.device, dtype=inputs_embeds.dtype
+                )
         hidden_states = self.multimodal_embedding_injector(
             inputs_embeds, mm_features, mm_feature_locs
         )
