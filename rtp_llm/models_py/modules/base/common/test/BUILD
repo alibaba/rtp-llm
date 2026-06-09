@@ -20,3 +20,17 @@ py_test (
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+py_test (
+    name = "apply_input_embeddings_test",
+    srcs = ["apply_input_embeddings_test.py"],
+    deps = py_test_deps,
+    tags = ["L20_CU13"],
+)
+
+py_test (
+    name = "supports_input_embeddings_test",
+    srcs = ["supports_input_embeddings_test.py"],
+    deps = py_test_deps,
+    tags = ["L20_CU13"],
+)

@@ -222,6 +222,10 @@ void registerPyOpDefs(pybind11::module& m) {
         .def("__repr__", [](const PyMultimodalInputs& self) { return "PyMultimodalInputs"; });
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
+        .def_readwrite("input_embeddings", &PyModelInputs::input_embeddings)
+        .def_readwrite("input_embeddings_locs", &PyModelInputs::input_embeddings_locs)
+        .def_readwrite("cuda_graph_input_embedding_overrides", &PyModelInputs::cuda_graph_input_embedding_overrides)
+        .def_readwrite("cuda_graph_input_embedding_mask", &PyModelInputs::cuda_graph_input_embedding_mask)
         .def(pybind11::init<>())
         .def(pybind11::init([](torch::Tensor       input_ids,
                                torch::Tensor       input_hiddens,

@@ -326,6 +326,10 @@ public:
     int                        multimodalFeaturesLength() const;
     torch::Tensor              multimodalLocations() const;
 
+    bool                              hasInputEmbeddings() const;
+    const std::vector<torch::Tensor>& inputEmbeddings() const;
+    const std::vector<int32_t>&       inputEmbeddingsLocs() const;
+
     int64_t getTimeoutMs() const;
     bool    checkTimeoutAndHasError();
     void    recordWaitLatency();
@@ -837,15 +841,15 @@ public:
 
     bool reuseCache() const {
         const auto& config = *generate_input_->generate_config;
-        return config.reuse_cache && !config.isPrefillOnly();
+        return !hasInputEmbeddings() && config.reuse_cache && !config.isPrefillOnly();
     }
 
     bool enableDeviceCache() const {
-        return generate_input_->generate_config->enable_device_cache;
+        return !hasInputEmbeddings() && generate_input_->generate_config->enable_device_cache;
     }
 
     bool enableMemoryCache() const {
-        return generate_input_->generate_config->enable_memory_cache;
+        return !hasInputEmbeddings() && generate_input_->generate_config->enable_memory_cache;
     }
 
     bool enableDiskCache() const {
@@ -853,7 +857,7 @@ public:
     }
 
     bool enableRemoteCache() const {
-        return generate_input_->generate_config->enable_remote_cache;
+        return !hasInputEmbeddings() && generate_input_->generate_config->enable_remote_cache;
     }
 
     int64_t deadlineMs() const {

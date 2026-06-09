@@ -417,6 +417,27 @@ ErrorInfo LocalRpcServer::updateMultimodalFeaturesWithTrace(
     return result;
 }
 
+ErrorInfo LocalRpcServer::validateInputRuntimeSupport(const GenerateInput& input) const {
+    const bool has_input_embeddings = input.input_embeddings.has_value() && !input.input_embeddings->empty();
+    if (!has_input_embeddings) {
+        return ErrorInfo::OkStatus();
+    }
+
+    const auto& parallelism_config = maga_init_params_.parallelism_config;
+    if (parallelism_config.tp_size > 1) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS,
+                         "input_embeddings is not supported with tp_size > 1 (got tp_size="
+                             + std::to_string(parallelism_config.tp_size)
+                             + "); send the request to a TP=1 deployment or omit input_embeddings.");
+    }
+    if (parallelism_config.prefill_cp_config.is_enabled()) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS,
+                         "input_embeddings is not supported with context parallel (enable_prefill_cp). "
+                         "CP rewrites combo_tokens layout, making input_embeddings_locs invalid.");
+    }
+    return ErrorInfo::OkStatus();
+}
+
 ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB&                                              input_pb,
                                        std::shared_ptr<GenerateInput>&                                     output,
                                        const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
@@ -424,6 +445,8 @@ ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB&                   
     output.reset();
     try {
         output = QueryConverter::transQuery(&input_pb);
+        auto support = validateInputRuntimeSupport(*output);
+        if (!support.ok()) { return support; }
         if (mm_processor_ != nullptr && (output->multimodal_inputs || output->v41_inputs)) {
             RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
             auto mm_res = updateMultimodalFeaturesWithTrace(output, parent_span, server_context);

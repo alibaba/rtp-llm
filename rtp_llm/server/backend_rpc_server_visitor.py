@@ -82,6 +82,20 @@ _TERMINAL_ROUTE_EXCEPTION_TYPES = frozenset(
 )
 
 
+def has_input_embeddings(input: GenerateInput) -> bool:
+    input_embeddings = getattr(input, "input_embeddings", None)
+    return input_embeddings is not None and len(input_embeddings.embeddings) > 0
+
+
+def disable_token_only_reuse_for_input_embeddings(input: GenerateInput) -> None:
+    if not has_input_embeddings(input):
+        return
+    input.generate_config.reuse_cache = False
+    input.generate_config.enable_device_cache = False
+    input.generate_config.enable_memory_cache = False
+    input.generate_config.enable_remote_cache = False
+
+
 class BackendRPCServerVisitor:
     def __init__(
         self,
@@ -429,6 +443,8 @@ class BackendRPCServerVisitor:
             cache_key_seed=self.cache_key_seed,
         )
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
+        if has_input_embeddings(input):
+            block_cache_keys = []
         self._report_recent_cache_key_metrics(block_cache_keys)
         del token_ids, full_block_cache_keys
 
@@ -769,6 +785,9 @@ class BackendRPCServerVisitor:
     def check_sp_supported(self, input: GenerateInput):
         if not self.sp_config or not self.sp_config.model_type:
             return
+        if has_input_embeddings(input):
+            input.generate_config.force_disable_sp_run = True
+            return
         if input.generate_config.force_disable_sp_run:
             return
 
@@ -892,8 +911,11 @@ class BackendRPCServerVisitor:
                 aux_info["pd_sep"] = {"PREFILL", "DECODE"}.issubset(roles)
             e.aux_info = aux_info
 
+        disable_token_only_reuse_for_input_embeddings(input)
+
         try:
             self.fill_request_info(input)
+            disable_token_only_reuse_for_input_embeddings(input)
             input.generate_config.validate()
             self._validate_input(input)
             self.check_sp_supported(input)

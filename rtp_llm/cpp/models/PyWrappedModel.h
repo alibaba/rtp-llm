@@ -84,6 +84,7 @@ public:
                    bool                      track_cache_store_completion = false);
     ~PyWrappedModel();
 
+    static void rejectContextParallelInputEmbeddings(const ExecProperties& properties, const GptModelInputs& inputs);
     GptModelOutputs            forward(const GptModelInputs& inputs) override;
     void                       releaseBuffers() override;
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;

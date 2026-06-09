@@ -79,6 +79,7 @@ from rtp_llm.utils.base_model_datatypes import (
     BatchedTerminalOutputs,
     GenerateInput,
     GenerateOutputs,
+    InputEmbeddings,
     RequestInfo,
 )
 from rtp_llm.utils.grpc_util import trans_tensor
@@ -1725,6 +1726,35 @@ class ModelRpcClientTest(TestCase):
             asyncio.run(run_and_close_after_finished())
 
         self.assertFalse(stub.fetch_iterator.cancelled)
+
+    def test_trans_input_serializes_input_embeddings(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(),
+            request_id=123,
+            mm_inputs=[],
+            input_embeddings=InputEmbeddings(
+                embeddings=[
+                    torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32),
+                    torch.tensor([[5.0, 6.0]], dtype=torch.float32),
+                ],
+                embedding_locs=[0, 2],
+            ),
+        )
+
+        input_pb = trans_input(input_py)
+
+        self.assertEqual(len(input_pb.input_embeddings.embeddings), 2)
+        self.assertEqual(list(input_pb.input_embeddings.embedding_locs), [0, 2])
+        self.assertEqual(
+            list(input_pb.input_embeddings.embeddings[0].shape),
+            [2, 2],
+        )
+        self.assertEqual(
+            input_pb.input_embeddings.embeddings[0].fp32_data,
+            struct.pack("<ffff", 1.0, 2.0, 3.0, 4.0),
+        )
+
 
 
 class _MetadataCaptureServicer(model_rpc_service_pb2_grpc.RpcServiceServicer):

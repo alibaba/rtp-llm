@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -96,6 +97,7 @@ torch::Tensor reorderCacheCopyRows(const torch::Tensor& mapping, const std::vect
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     GptModelInputShapeHints shape_hints{};
+    shape_hints[GptModelInputIndex::inputEmbeddingsRejected] = inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty();
     const auto kernel_block_table = inspectKvBlockTable(inputs.kv_cache_kernel_block_id, "kv_cache_kernel_block_id");
     const auto block_table        = inspectKvBlockTable(inputs.kv_cache_block_id, "kv_cache_block_id");
     shape_hints[GptModelInputIndex::comboTokens]  = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
@@ -323,6 +325,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // execBroadcastCpu's fallback path keeps the NCCL+cudaSyncAndCheck
     // contract for cross-node TP.
     execBroadcastCpu({{shape_hints_t}, 0});
+    RTP_LLM_CHECK_WITH_INFO(shape_hints_ptr[GptModelInputIndex::inputEmbeddingsRejected] == 0,
+                            "input_embeddings is not supported with tp_size > 1 (got tp_size=%ld); "
+                            "send the request to a TP=1 deployment or omit input_embeddings.",
+                            (long)parallelism_config.tp_size);
 
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;

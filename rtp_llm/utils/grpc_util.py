@@ -75,7 +75,7 @@ def trans_from_tensor(t: torch.Tensor):
         return TensorPB()
     res = TensorPB()
     with cuda_graph_gate.operation():
-        t = t.cpu()
+        t = t.detach().cpu()
     res.shape.extend(list(t.shape))
     if t.dtype == torch.float32:
         res.data_type = TensorPB.DataType.FP32

@@ -361,6 +361,10 @@ struct PyModelInputs {
 
     // Internal homogeneous-batch signal; not part of the Generate RPC/config surface.
     bool capture_hidden_states = false;
+    std::optional<std::vector<torch::Tensor>> input_embeddings;
+    torch::Tensor input_embeddings_locs;
+    torch::Tensor cuda_graph_input_embedding_overrides;
+    torch::Tensor cuda_graph_input_embedding_mask;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();
