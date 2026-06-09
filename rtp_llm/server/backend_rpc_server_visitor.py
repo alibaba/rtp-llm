@@ -178,14 +178,14 @@ class BackendRPCServerVisitor:
         full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
-        input_pb_bytes = trans_input(input).SerializeToString()
+        input_pb = trans_input(input)
 
         try:
             route_result = await self.master_client.get_backend_role_addrs(
                 block_cache_keys=block_cache_keys,
                 input=input,
                 request_id=input.request_id,
-                input_pb_bytes=input_pb_bytes,
+                input_pb=input_pb,
             )
         except BaseException as e:
             exception_json = format_exception(e)

@@ -377,6 +377,7 @@ class MasterConfig:
         self.master_connector_limit_per_host: int = 0
         # Session total timeout in seconds. If < 0: auto (3600 when queue mode, 0.5 otherwise).
         self.master_session_timeout_s: float = -1
+        self.flexlb_grpc_port: int = 7003
 
     def to_string(self):
         return (

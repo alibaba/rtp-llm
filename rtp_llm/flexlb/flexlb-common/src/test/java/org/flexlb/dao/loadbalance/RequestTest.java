@@ -20,7 +20,6 @@ class RequestTest {
                   "max_new_tokens": 64,
                   "num_beams": 1,
                   "force_disable_sp_run": false,
-                  "generate_input_pb_b64": "AQID",
                   "debug": false,
                   "request_priority": 100,
                   "generate_timeout": 5000,
@@ -36,7 +35,6 @@ class RequestTest {
         assertEquals(64, request.getMaxNewTokens());
         assertEquals(1, request.getNumBeams());
         assertEquals("engine_service", request.getModel());
-        assertEquals("AQID", request.getGenerateInputPbB64());
     }
 
     @Test

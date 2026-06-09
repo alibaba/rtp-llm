@@ -17,7 +17,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
@@ -665,11 +664,11 @@ class FlexlbBatchSchedulerTest {
         request.setMaxNewTokens(8);
         request.setNumBeams(1);
         request.setModel("test-model");
-        request.setGenerateInputPbB64(generateInput(generateInputRequestId));
 
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);
         ctx.setConfig(new FlexlbConfig());
+        ctx.setGenerateInputPbBytes(generateInputBytes(generateInputRequestId));
         return ctx;
     }
 
@@ -680,15 +679,15 @@ class FlexlbBatchSchedulerTest {
         request.setMaxNewTokens(8);
         request.setNumBeams(1);
         request.setModel("test-model");
-        request.setGenerateInputPbB64(generateInput(requestId));
 
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);
         ctx.setConfig(new FlexlbConfig());
+        ctx.setGenerateInputPbBytes(generateInputBytes(requestId));
         return ctx;
     }
 
-    private static String generateInput(long requestId) {
+    private static byte[] generateInputBytes(long requestId) {
         EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
                 .setRequestId(requestId)
                 .addTokenIds(101)
@@ -698,7 +697,7 @@ class FlexlbBatchSchedulerTest {
                         .setGroupTimeout(com.google.protobuf.Int32Value.of(77))
                         .build())
                 .build();
-        return Base64.getEncoder().encodeToString(input.toByteArray());
+        return input.toByteArray();
     }
 
     private static Response successRoute(long requestId) {

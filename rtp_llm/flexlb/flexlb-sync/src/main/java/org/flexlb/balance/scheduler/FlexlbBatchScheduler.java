@@ -28,7 +28,6 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -297,8 +296,10 @@ public class FlexlbBatchScheduler {
 
     private EngineRpcService.GenerateInputPB buildInput(long batchId, int groupSize, BatchItem item)
             throws InvalidProtocolBufferException {
-        Request dto = item.ctx.getRequest();
-        byte[] bytes = Base64.getDecoder().decode(dto.getGenerateInputPbB64());
+        byte[] bytes = item.ctx().getGenerateInputPbBytes();
+        if (bytes == null || bytes.length == 0) {
+            throw new IllegalArgumentException("generateInputPbBytes is missing for request " + item.requestId());
+        }
         EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.parseFrom(bytes).toBuilder();
         if (input.getRequestId() != item.requestId()) {
             throw new IllegalArgumentException("request_id mismatch between schedule request and GenerateInputPB");

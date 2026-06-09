@@ -183,8 +183,8 @@ public class FlexlbConfig {
     // ========== FlexLB Batch Configuration ==========
 
     /**
-     * Enables master-side request coalescing. Requests that carry a full
-     * generate_input_pb_b64 payload can be routed once, grouped by Prefill worker,
+     * Enables master-side request coalescing. Requests carrying a full
+     * GenerateInputPB are routed once, grouped by Prefill worker,
      * and submitted through EnqueueBatch.
      */
     private boolean flexlbBatchEnabled = true;
@@ -278,6 +278,10 @@ public class FlexlbConfig {
      * admission control gate at the FlexlbBatchScheduler entry.
      */
     private int flexlbBatchMaxInflight = 100000;
+
+    // ========== gRPC Server Configuration ==========
+
+    private int flexlbGrpcPort = 7003;
 
     // ========== Decode Load Balance Hard Filter Configuration ==========
 
