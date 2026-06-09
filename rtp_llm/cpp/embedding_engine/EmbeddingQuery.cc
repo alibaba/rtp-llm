@@ -73,6 +73,10 @@ void EmbeddingInput::checkVaild() {
     if (input_embeddings.has_value() && total_length != input_embeddings.value().size(0)) {
         throw std::runtime_error("sum of token length don't equal to total_length");
     }
+    if (input_embeddings.has_value() && multimodal_features.has_value()) {
+        throw std::runtime_error("input_embeddings cannot be combined with multimodal_features in the same request: "
+                                 "both paths inject into inputs_embeds and have no loc-overlap detection.");
+    }
 }
 
 }  // namespace rtp_llm
