@@ -134,6 +134,11 @@ class MasterClient:
             )
         return self._channels[target]
 
+    async def _close_channel(self, target: str) -> None:
+        channel = self._channels.pop(target, None)
+        if channel is not None:
+            await channel.close()
+
     async def close(self) -> None:
         for channel in self._channels.values():
             await channel.close()
@@ -167,7 +172,7 @@ class MasterClient:
                 e.details(),
                 elapsed,
             )
-            self._channels.pop(target, None)
+            await self._close_channel(target)
             return None
         except Exception as e:
             elapsed = time.time() - start
@@ -177,7 +182,7 @@ class MasterClient:
                 request_id,
                 elapsed,
             )
-            self._channels.pop(target, None)
+            await self._close_channel(target)
             return None
 
     async def get_backend_role_addrs(

@@ -24,6 +24,7 @@ public class FlexlbGrpcServer {
     private final ConfigService configService;
     private final EventLoopGroup workerGroup;
     private Server server;
+    private NioEventLoopGroup bossGroup;
 
     public FlexlbGrpcServer(FlexlbServiceImpl flexlbServiceImpl,
                             ConfigService configService,
@@ -40,7 +41,7 @@ public class FlexlbGrpcServer {
             port = DEFAULT_GRPC_PORT;
         }
 
-        NioEventLoopGroup bossGroup = new NioEventLoopGroup(1);
+        this.bossGroup = new NioEventLoopGroup(1);
 
         server = NettyServerBuilder.forPort(port)
                 .channelType(NioServerSocketChannel.class)
@@ -64,6 +65,9 @@ public class FlexlbGrpcServer {
                 server.shutdownNow();
                 Thread.currentThread().interrupt();
             }
+        }
+        if (bossGroup != null) {
+            bossGroup.shutdownGracefully();
         }
     }
 }
