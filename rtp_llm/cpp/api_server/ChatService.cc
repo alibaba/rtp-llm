@@ -57,8 +57,6 @@ void ChatService::generateResponse(const std::shared_ptr<GenerateConfig>&       
     ctx->init(num_return_sequences, body, chat_render);
 
     GenerateOutputs outputs;
-    // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
-    // 如果流有错误，应该停止消费输出
     while (stream->isActive() || stream->hasOutput()) {
         const auto result = stream->nextOutput();
         if (!result.ok()) {
@@ -81,6 +79,10 @@ void ChatService::generateResponse(const std::shared_ptr<GenerateConfig>&       
         }
         ctx->render_stream_response_blocking(outputs, config, chat_request.stream.value_or(false));
         index += 1;
+    }
+    if (stream->hasError()) {
+        auto error_info = stream->statusInfo();
+        throw HttpApiServerException(transErrorCodeToHttpExceptionType(error_info.code()), error_info.ToString());
     }
     if (index != 0) {
         ctx->render_stream_response_flush_blocking(outputs, config, chat_request.stream.value_or(false));
@@ -131,8 +133,6 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
 
     writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Stream);
     GenerateOutputs outputs;
-    // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
-    // 如果流有错误，应该停止消费输出
     while (stream->isActive()) {
         const auto output_status = stream->nextOutput();
         if (!output_status.ok()) {
@@ -157,6 +157,10 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
         std::string json_response =
             ctx->render_stream_response(output_status.value(), config, chat_request.stream.value_or(false));
         write_sse_response(json_response);
+    }
+    if (stream->hasError()) {
+        auto error_info = stream->statusInfo();
+        throw HttpApiServerException(transErrorCodeToHttpExceptionType(error_info.code()), error_info.ToString());
     }
     if (index != 0) {
         std::string json_response =

@@ -313,7 +313,13 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
         return grpc::Status(grpc::StatusCode::INTERNAL, "malformed prefill dp_addr: " + selected_addr);
     }
     std::string target_ip   = selected_addr.substr(0, colon_pos);
-    uint32_t    target_port = static_cast<uint32_t>(std::stoul(selected_addr.substr(colon_pos + 1)));
+    uint32_t    target_port = 0;
+    try {
+        target_port = static_cast<uint32_t>(std::stoul(selected_addr.substr(colon_pos + 1)));
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("failed to parse port from dp_addr '%s': %s", selected_addr.c_str(), e.what());
+        return grpc::Status(grpc::StatusCode::INTERNAL, "invalid port in prefill dp_addr: " + selected_addr);
+    }
 
     // Update the stream's PREFILL role_addr to point to the selected DP rank
     // so that StartLoad (P2P cache read) goes to the same prefill that runs
