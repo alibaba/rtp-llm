@@ -241,7 +241,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         # M >= 2048: scatter_qkv (Triton, SGLang port) avoids the .view() ->
         # .contiguous() copies that torch.split + view triggers. Below 2048,
         # kernel launch overhead beats the savings (microbench measured).
-        if mixed_qkv.shape[0] >= 2048 and self.head_k_dim == self.head_v_dim:
+        if False and mixed_qkv.shape[0] >= 2048 and self.head_k_dim == self.head_v_dim:
             query, key, value = scatter_qkv(
                 mixed_qkv,
                 self.local_num_k_heads,
@@ -742,7 +742,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 seq_size_per_block,
             )
 
-        if full_mixed_qkv.shape[0] >= 2048 and gdn.head_k_dim == gdn.head_v_dim:
+        if False and full_mixed_qkv.shape[0] >= 2048 and gdn.head_k_dim == gdn.head_v_dim:
             query, key, value = scatter_qkv(
                 full_mixed_qkv,
                 gdn.local_num_k_heads,
