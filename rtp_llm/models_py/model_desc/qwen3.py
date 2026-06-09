@@ -128,38 +128,43 @@ class Qwen3Model(GptModelBase):
         )
 
     def _init_fused(self):
-        """Extract weights for fused forward path."""
+        """Extract weights for fused forward path.
+
+        Activates when: no KV cache (embedding model) + weights have weight_scales attr.
+        Falls back to nn.Module path on any failure.
+        """
         self._fused_ok = False
-        l0 = self.layers[0].self_attn.qkv_proj
-        if not (hasattr(l0, 'weight') and hasattr(l0, 'weight_scales')
-                and l0.weight.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)):
-            return
         if self.kv_cache is not None:
             return
-
-        self._ln1_w = [l.input_layernorm.weight.data for l in self.layers]
-        self._ln2_w = [l.post_attention_layernorm.weight.data for l in self.layers]
-        self._qkv_w = [l.self_attn.qkv_proj.weight for l in self.layers]
-        self._qkv_s = [l.self_attn.qkv_proj.weight_scales for l in self.layers]
-        self._o_w = [l.self_attn.o_proj.weight for l in self.layers]
-        self._o_s = [l.self_attn.o_proj.weight_scales for l in self.layers]
-        self._up_w = [l.mlp.up_proj.weight for l in self.layers]
-        self._up_s = [l.mlp.up_proj.weight_scales for l in self.layers]
-        self._down_w = [l.mlp.down_proj.weight for l in self.layers]
-        self._down_s = [l.mlp.down_proj.weight_scales for l in self.layers]
-        self._final_w = self.norm.weight.data
-        self._eps = self.layers[0].input_layernorm.variance_epsilon
-        self._nheads = self.layers[0].self_attn.head_num
-        self._nkv = self.layers[0].self_attn.qkv_proj.weight.shape[0] // self.layers[0].self_attn.head_dim - self._nheads
-        self._nkv = self._nkv // 2
-        self._hdim = self.layers[0].self_attn.head_dim
-        self._q_size = self._nheads * self._hdim
-        self._kv_size = self._nkv * self._hdim
-        self._K = self._qkv_w[0].shape[1]
-        self._N_up = self._up_w[0].shape[0]
-        self._K_down = self._down_w[0].shape[1]
-        self._buf_M = 0
-        self._fused_ok = True
+        try:
+            l0 = self.layers[0].self_attn.qkv_proj
+            if not (hasattr(l0, 'weight') and hasattr(l0, 'weight_scales')):
+                return
+            self._ln1_w = [l.input_layernorm.weight.data for l in self.layers]
+            self._ln2_w = [l.post_attention_layernorm.weight.data for l in self.layers]
+            self._qkv_w = [l.self_attn.qkv_proj.weight for l in self.layers]
+            self._qkv_s = [l.self_attn.qkv_proj.weight_scales for l in self.layers]
+            self._o_w = [l.self_attn.o_proj.weight for l in self.layers]
+            self._o_s = [l.self_attn.o_proj.weight_scales for l in self.layers]
+            self._up_w = [l.mlp.up_proj.weight for l in self.layers]
+            self._up_s = [l.mlp.up_proj.weight_scales for l in self.layers]
+            self._down_w = [l.mlp.down_proj.weight for l in self.layers]
+            self._down_s = [l.mlp.down_proj.weight_scales for l in self.layers]
+            self._final_w = self.norm.weight.data
+            self._eps = self.layers[0].input_layernorm.variance_epsilon
+            self._nheads = self.layers[0].self_attn.head_num
+            self._nkv = self.layers[0].self_attn.qkv_proj.weight.shape[0] // self.layers[0].self_attn.head_dim - self._nheads
+            self._nkv = self._nkv // 2
+            self._hdim = self.layers[0].self_attn.head_dim
+            self._q_size = self._nheads * self._hdim
+            self._kv_size = self._nkv * self._hdim
+            self._K = self._qkv_w[0].shape[1]
+            self._N_up = self._up_w[0].shape[0]
+            self._K_down = self._down_w[0].shape[1]
+            self._buf_M = 0
+            self._fused_ok = True
+        except Exception:
+            self._fused_ok = False
 
     def _ensure_bufs(self, M, device):
         if M <= self._buf_M:
