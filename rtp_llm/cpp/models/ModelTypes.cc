@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
@@ -65,9 +66,21 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    // input_embeddings is not TP-aware: this function does not broadcast the embedding
+    // tensors themselves, so non-root would race into forward() with empty embeddings.
+    // Root flags the violation here, broadcasts via the shape-hint vector below, and every
+    // rank aborts together after the broadcast — symmetric, no NCCL timeout-wait.
+    shape_hints_ptr[GptModelInputIndex::inputEmbeddingsRejected] =
+        (parallelism_config.tp_rank == 0 && inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) ?
+            1 :
+            0;
     execBroadcast({{shape_hints_t}, 0});
     execSyncCommunication(false);
     cudaSyncAndCheck();
+    RTP_LLM_CHECK_WITH_INFO(shape_hints_ptr[GptModelInputIndex::inputEmbeddingsRejected] == 0,
+                            "input_embeddings is not supported with tp_size > 1 (got tp_size=%ld); "
+                            "send the request to a TP=1 deployment or omit input_embeddings.",
+                            (long)parallelism_config.tp_size);
 
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;
