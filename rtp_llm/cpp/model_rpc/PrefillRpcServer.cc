@@ -187,6 +187,30 @@ void detachLeftoverFutures(std::vector<std::future<T>>& futures) {
     }
 }
 
+template <typename T>
+void drainCancelledFutures(std::vector<std::future<T>>& futures,
+                           std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        bool all_done = true;
+        bool any_ready = false;
+        for (auto& f : futures) {
+            if (f.valid()) {
+                if (f.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+                    try { f.get(); } catch (...) {}
+                    any_ready = true;
+                } else {
+                    all_done = false;
+                }
+            }
+        }
+        if (all_done) break;
+        if (!any_ready) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+}
+
 template <typename T, typename OnReady, typename OnTimeout>
 void collectFutures(std::vector<std::future<T>>& futures,
                     std::chrono::steady_clock::time_point deadline,
@@ -1836,11 +1860,7 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*           conte
                     slots[i].stage_status =
                         grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "EnqueueGroup prepare timeout");
                 });
-            for (auto& f : prepare_futures) {
-                if (f.valid()) {
-                    f.wait_for(std::chrono::seconds(2));
-                }
-            }
+            drainCancelledFutures(prepare_futures, std::chrono::milliseconds(2000));
             detachLeftoverFutures(prepare_futures);
 
             std::vector<LocalSlot*> ready_slots;
@@ -1956,11 +1976,7 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*           conte
                 [&](size_t i) {
                     cancelResponseEntry(stream_ready_slots[i]->entry);
                 });
-            for (auto& f : load_futures) {
-                if (f.valid()) {
-                    f.wait_for(std::chrono::seconds(2));
-                }
-            }
+            drainCancelledFutures(load_futures, std::chrono::milliseconds(2000));
             detachLeftoverFutures(load_futures);
         });
         worker.detach();
