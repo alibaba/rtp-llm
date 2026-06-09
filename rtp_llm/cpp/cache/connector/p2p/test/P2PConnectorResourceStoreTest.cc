@@ -555,11 +555,11 @@ protected:
     std::unique_ptr<P2PConnectorResourceStore> stream_store_;
 };
 
-// Verify that addResource uses the routing deadline directly (no hold_ms cap).
+// Verify that addResource caps deadline to currentTimeMs() + 1h.
 TEST_F(P2PConnectorResourceStoreHoldMsTest, AddResource_CapsDeadlineToHoldMs) {
     const std::string unique_key  = "hold_ms_cap_test";
     const int64_t     request_id  = 4001;
-    const int64_t     deadline_ms = getDeadlineMs(3600000);  // 1 hour from now
+    const int64_t     deadline_ms = getDeadlineMs(7200000);  // 2 hours from now — exceeds 1h cap
     auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto              resource    = createMockKVCacheResource();
 
@@ -567,7 +567,9 @@ TEST_F(P2PConnectorResourceStoreHoldMsTest, AddResource_CapsDeadlineToHoldMs) {
 
     auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 200);
     ASSERT_NE(entry, nullptr);
-    EXPECT_EQ(entry->deadline_ms, deadline_ms);
+    // Should be capped to ~1h from add time, not the full 2h deadline
+    EXPECT_LT(entry->deadline_ms, deadline_ms);
+    EXPECT_GT(entry->deadline_ms, currentTimeMs() + 3500000);  // at least ~58min from now
 }
 
 // Resource expires after its deadline and becomes a cancelled_keys_ tombstone

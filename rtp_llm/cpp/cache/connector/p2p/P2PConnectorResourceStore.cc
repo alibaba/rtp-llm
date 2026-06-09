@@ -10,9 +10,13 @@
 
 namespace {
 
-constexpr int64_t kSideChannelMaxTtlMs = 3600000;  // 1 hour
+constexpr int64_t kSideChannelMaxTtlMs     = 3600000;  // 1 hour
+constexpr int64_t kMaxResourceLifetimeMs   = 3600000;  // 1 hour cap to prevent permanently pinned blocks
 
 std::chrono::system_clock::time_point deadlineToTimeoutPoint(int64_t deadline_ms, int64_t start_time_us) {
+    if (deadline_ms > INT64_MAX / 1000) {
+        return std::chrono::system_clock::time_point::max();
+    }
     const int64_t remaining_us = deadline_ms * 1000 - start_time_us;
     return std::chrono::system_clock::now() + std::chrono::microseconds(remaining_us);
 }
@@ -117,12 +121,7 @@ bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
         entry->request_id        = routing->request_id;
         entry->unique_key        = unique_key;
         entry->kv_cache_resource = kv_cache_resource;
-        // Use the request's business deadline directly. The previous 60s cap
-        // (prefill_resource_hold_ms_) caused premature resource expiration when
-        // decode was slow to schedule — requests stuck in WAITING never got a
-        // chance to call asyncRead before the resource was reclaimed, producing
-        // cascading error_code=8312 failures.
-        entry->deadline_ms        = routing->deadline_ms;
+        entry->deadline_ms        = std::min(routing->deadline_ms, currentTimeMs() + kMaxResourceLifetimeMs);
         entry->add_time_us        = currentTimeUs();
         resource_map_[unique_key] = entry;
     }
