@@ -57,6 +57,9 @@ class ServerConfig:
             50  # Default timeout in seconds, -1 means wait indefinitely
         )
         self.monitor_interval: int = 1  # Monitor interval in seconds
+        self.enable_prompt_generator: bool = False
+        self.prompt_generator_server_count: int = 1
+        self.enable_prompt_generator_mps: bool = False
 
     def _server_base(self) -> int:
         return self.start_port + self.rank_id * self.worker_info_port_num
@@ -110,7 +113,10 @@ class ServerConfig:
             f"cache_store_listen_port: {self.cache_store_listen_port}\n"
             f"cache_store_rdma_listen_port: {self.cache_store_rdma_listen_port}\n"
             f"http_port: {self.http_port}\n"
-            f"embedding_rpc_server_port: {self.embedding_rpc_server_port}"
+            f"embedding_rpc_server_port: {self.embedding_rpc_server_port}\n"
+            f"enable_prompt_generator: {self.enable_prompt_generator}\n"
+            f"prompt_generator_server_count: {self.prompt_generator_server_count}\n"
+            f"enable_prompt_generator_mps: {self.enable_prompt_generator_mps}\n"
         )
 
 

@@ -97,6 +97,55 @@ class ModelLoader:
         self._init_eplb_weight(weights, device)
         return weights
 
+    @timer_wrapper(description="load embedding weights")
+    @torch.inference_mode()
+    def load_embedding_weight(self, device: str) -> Optional[Dict[str, torch.Tensor]]:
+        try:
+            if self._load_config.is_ft_style_weight:
+                return self._load_embedding_from_ft_style(device)
+            return self._load_embedding_from_weight_info(device)
+        finally:
+            self.force_clean_cuda_memory()
+
+    def _load_embedding_from_weight_info(
+        self, device: str
+    ) -> Optional[Dict[str, torch.Tensor]]:
+        if self._model_weights_info is None:
+            return None
+
+        for weight in self._model_weights_info.weights:
+            if weight.name == W.embedding:
+                return weight.load(
+                    tensor_source=DatabaseTensorSource(self._load_config.database),
+                    layer_id=None,
+                    device=device,
+                    load_config=self._load_config,
+                )
+        return None
+
+    def _load_embedding_from_ft_style(
+        self, device: str
+    ) -> Optional[Dict[str, torch.Tensor]]:
+        global_weight_prefix = ModelWeights.global_weight_prefix(
+            self._load_config.tp_rank,
+            self._load_config.dp_rank,
+            self._load_config.ep_rank,
+        )
+        embedding_key = f"{global_weight_prefix}{W.embedding}"
+        tensor_source = DatabaseTensorSource(self._load_config.database)
+        if not tensor_source.has_tensor(embedding_key):
+            return None
+
+        tensors = tensor_source.load_tensor(
+            embedding_key, self._load_config.compute_dtype
+        )
+        check_with_info(
+            len(tensors) == 1,
+            f"{embedding_key} have {len(tensors)} tensor",
+        )
+        embedding = tensors[0].to(device)
+        return {W.embedding: embedding}
+
     def load_lora_weights(self, adapter_name: str, lora_path: str, device: str = "cpu"):
         lora_weights = LoRAWeights(self._load_config.num_layers)
         # set lora rank
