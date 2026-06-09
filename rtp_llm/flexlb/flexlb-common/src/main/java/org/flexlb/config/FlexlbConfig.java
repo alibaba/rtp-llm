@@ -279,7 +279,9 @@ public class FlexlbConfig {
      */
     private int flexlbBatchMaxInflight = 100000;
 
-    // ========== gRPC Server Configuration ==========
+    // ========== gRPC Configuration ==========
+
+    private long prefillLbTimeoutMs = 5000;
 
     private int flexlbGrpcPort = 7003;
 
