@@ -913,6 +913,11 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         return false;
     }
 
+    if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+        RTP_LLM_LOG_DEBUG("cuda graph disabled for request: input_embeddings present");
+        return false;
+    }
+
     // Multimodal injection depends on request-owned tensors that are not copied
     // into captured graph inputs. This is unsafe for every model using the
     // shared injector, so gate on the data contract rather than model identity.
