@@ -170,8 +170,8 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block     = 128;
     kv_cache_config.dsv4_fixed_pool_blocks = block_num;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
-    config.block_num         = block_num;
+    auto config                            = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+    config.block_num                       = block_num;
     return config;
 }
 
@@ -197,9 +197,8 @@ static BatchKVCacheResourcePtr makeBatchResource(int batch_size, const CacheConf
 }
 
 static size_t validBlockCount(const BlockIndicesType& blocks) {
-    return static_cast<size_t>(std::count_if(blocks.begin(), blocks.end(), [](BlockIdxType block) {
-        return !isNullBlockIdx(block);
-    }));
+    return static_cast<size_t>(
+        std::count_if(blocks.begin(), blocks.end(), [](BlockIdxType block) { return !isNullBlockIdx(block); }));
 }
 
 // Create HybridPoolKVCacheAllocator with SharedBlockCache injected (required before init()).
@@ -430,7 +429,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseDifferentCapacityScope
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForFullGroups) {
-    auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
+    auto config                     = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
     config.group_seq_size_per_block = {100, 4};
     auto allocator                  = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
@@ -438,8 +437,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForF
     EXPECT_EQ(allocator->maxAvailableTokensNum(), 7u * 4u);
     EXPECT_EQ(allocator->availableTokensNum(), 7u * 4u);
 
-    allocator->setCPSlotMapper(
-        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
 
     EXPECT_EQ(allocator->maxAvailableTokensNum(), 7u * 8u);
     EXPECT_EQ(allocator->availableTokensNum(), 7u * 8u);
@@ -778,11 +776,11 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksUseCPShardedFullGroupNeed) {
     auto batch_res = makeBatchResource(/*batch_size=*/1, config);
     batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 104, 105, 106, 107});
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/32, /*seq_size_per_block=*/4);
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
 
     MallocInfo malloc_info{batch_res, token_ids};
     malloc_info.enable_device_cache = false;
     malloc_info.reuse_cache         = false;
-    malloc_info.cp_slot_mapper      = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4);
 
     auto result = allocator->malloc(malloc_info);
     ASSERT_TRUE(result.success);
@@ -982,9 +980,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedRegionPoolsOnGpuWhenFixedPoolMem
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4HCAStateReuseEnabledAllocatesTailOnly) {
-    auto config       = makeDSV4HybridPoolConfig(/*block_num=*/200);
+    auto config        = makeDSV4HybridPoolConfig(/*block_num=*/200);
     config.linear_step = 4;
-    auto allocator    = makeAllocator(config);
+    auto allocator     = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
     constexpr int hca_state_gid = 5;
@@ -1026,8 +1024,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsIgnoreSmallHCAStatePool) 
     ASSERT_TRUE(allocator->init());
     ASSERT_GT(allocator->groupBlockPools().size(), static_cast<size_t>(hca_state_gid));
 
-    const auto hca_state_tokens = allocator->groupBlockPools()[hca_state_gid]->totalBlocksNum()
-                                  * config.group_seq_size_per_block[hca_state_gid];
+    const auto hca_state_tokens =
+        allocator->groupBlockPools()[hca_state_gid]->totalBlocksNum() * config.group_seq_size_per_block[hca_state_gid];
     EXPECT_LT(hca_state_tokens, allocator->totalTokensNum());
     EXPECT_EQ(allocator->availableTokensNum(), allocator->maxAvailableTokensNum());
     EXPECT_EQ(allocator->totalTokensNum(), allocator->maxAvailableTokensNum());
@@ -1039,7 +1037,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumul
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block     = 128;
     kv_cache_config.dsv4_fixed_pool_blocks = 200;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+    auto config                            = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
 
     ASSERT_EQ(config.groupNums(), 7);
     ASSERT_EQ(config.group_region_names.size(), 7u);
@@ -1070,7 +1068,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumul
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesFixedPoolBlocks) {
-    auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
+    auto config                       = makeDSV4HybridPoolConfig(/*block_num=*/50);
     config.fixed_pool_uses_pinned_cpu = true;
 
     RuntimeConfig rt;  // unused inside finalizeBlockNums today
@@ -1115,7 +1113,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesConfiguredFixedB
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4PinnedFixedPoolExcludesFixedReserve) {
-    auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
+    auto config                       = makeDSV4HybridPoolConfig(/*block_num=*/50);
     config.fixed_pool_uses_pinned_cpu = true;  // env>0 simulation
 
     RuntimeConfig rt;
@@ -1153,8 +1151,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedPoolBlocksFallbackFollowsLinearS
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block = 128;
-    auto              config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
-    config.linear_step       = 4;
+    auto config                        = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+    config.linear_step                 = 4;
 
     RuntimeConfig rt;
     config.finalizeBlockNums(/*global_block_num=*/128, rt);
@@ -1289,6 +1287,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
     request_keys.push_back(2000);  // partial tail key present on the incoming request.
 
     auto cp_mapper = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, spb);
+    allocator->setCPSlotMapper(cp_mapper);
 
     auto seed_res = makeBatchResource(/*batch_size=*/1, config);
     seed_res->setBatchCacheKeys(0, full_keys);
@@ -1315,7 +1314,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
     hit_malloc.reuse_cache         = true;
     hit_malloc.enable_device_cache = true;
     allocator->setCPSlotMapper(cp_mapper);
-    auto result                    = allocator->malloc(hit_malloc);
+    auto result = allocator->malloc(hit_malloc);
 
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, 5 * spb * 2);
@@ -1338,6 +1337,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResour
     }
 
     auto cp_mapper = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, spb);
+    allocator->setCPSlotMapper(cp_mapper);
 
     auto seed_res = makeBatchResource(/*batch_size=*/1, config);
     seed_res->setBatchCacheKeys(0, full_keys);
@@ -1346,11 +1346,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResour
     MallocInfo seed_malloc{seed_res, seed_tokens};
     seed_malloc.reuse_cache         = true;
     seed_malloc.enable_device_cache = false;
-    seed_malloc.cp_slot_mapper      = cp_mapper;
     ASSERT_TRUE(allocator->malloc(seed_malloc).success);
 
     InsertInfo insert_info{seed_res, seed_tokens, /*is_resident=*/false};
-    insert_info.cp_slot_mapper = cp_mapper;
     allocator->insertIntoCache(insert_info);
 
     FreeInfo seed_free{seed_res, seed_tokens};
