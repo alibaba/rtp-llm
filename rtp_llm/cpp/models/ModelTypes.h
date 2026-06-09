@@ -87,6 +87,12 @@ enum GptModelInputIndex : size_t {
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
+    // Set to 1 by root iff input_embeddings is non-empty under tp_size > 1.
+    // Broadcast as a shape hint so all TP ranks abort symmetrically — input_embeddings
+    // is not TP-aware (tpSyncModelInputs does not broadcast the embedding tensors), so
+    // letting non-root proceed would either deadlock the next collective or produce
+    // silently-wrong output.
+    inputEmbeddingsRejected,
     gptModelInputLength,
 };
 

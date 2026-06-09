@@ -687,6 +687,17 @@ TEST_F(GenerateStreamTest, testDynamicBeamSoftmaxHistoryFollowsParentRows) {
     EXPECT_FLOAT_EQ(probabilities[0][3].item<float>(), 0.6f);
     EXPECT_FLOAT_EQ(probabilities[1][3].item<float>(), 0.7f);
     EXPECT_FLOAT_EQ(probabilities[2][3].item<float>(), 0.8f);
-}
+    TEST_F(GenerateStreamTest, testInputEmbeddingsDisableTokenOnlyReuseCache) {
+        auto builder                              = GenerateStreamBuilder();
+        auto stream                               = builder.createContextStream({1, 2, 3, 4, 5, 6});
+        stream->generate_input_->input_embeddings = std::vector<torch::Tensor>{torch::rand({1, 8}, torch::kFloat32)};
+        stream->generate_input_->input_embeddings_locs = std::vector<int32_t>{2};
+
+        ASSERT_TRUE(stream->hasInputEmbeddings());
+        ASSERT_FALSE(stream->reuseCache());
+        ASSERT_FALSE(stream->enableDeviceCache());
+        ASSERT_FALSE(stream->enableMemoryCache());
+        ASSERT_FALSE(stream->enableRemoteCache());
+    }
 
 }  // namespace rtp_llm

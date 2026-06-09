@@ -1,7 +1,7 @@
 import functools
 import json
 import logging
-from typing import Any, AsyncGenerator, Dict, Optional, Union
+from typing import Any, AsyncGenerator, Callable, Dict, Optional, Union
 
 import grpc
 from google.protobuf.wrappers_pb2 import StringValue
@@ -42,6 +42,7 @@ from rtp_llm.utils.grpc_util import (
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
 JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
+
 
 class StreamState:
     def __init__(self):
@@ -120,6 +121,7 @@ def trans_input(input_py: GenerateInput):
         ) or str(input_pb.request_info.trace_id or input_py.request_id)
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
+    trans_embedding_inputs(input_py, input_pb)
     # Preserve main's regular GenerateConfig validation at the RPC boundary,
     # then assert (without mutating) that the request entrypoint prepared grammar.
     input_py.generate_config.validate()
@@ -323,6 +325,27 @@ def trans_multimodal_input(
         input_pb.multimodal_inputs.append(mm_input_pb)
 
 
+def trans_embedding_inputs(input_py: GenerateInput, input_pb: GenerateInputPB):
+    if input_py.input_embeddings is None:
+        return
+
+    embedding_inputs = input_py.input_embeddings
+    if len(embedding_inputs.embeddings) != len(embedding_inputs.embedding_locs):
+        raise ValueError(
+            f"input_embeddings count ({len(embedding_inputs.embeddings)}) "
+            f"!= embedding_locs count ({len(embedding_inputs.embedding_locs)})"
+        )
+
+    input_embeddings_pb = input_pb.input_embeddings
+
+    # 转换 embeddings
+    for emb in embedding_inputs.embeddings:
+        input_embeddings_pb.embeddings.add().CopyFrom(trans_from_tensor(emb))
+
+    # 转换 embedding_locs
+    input_embeddings_pb.embedding_locs.extend(embedding_inputs.embedding_locs)
+
+
 # 假设 trans_tensor 函数将 Protobuf 的 TensorPB 转换为 numpy array
 # from .utils import trans_tensor
 
@@ -503,6 +526,7 @@ class ModelRpcClient(object):
         client_config,
         max_rpc_timeout_ms: int = 0,
         decode_entrance: bool = False,
+        trans_output_fn: Optional[Callable] = None,
     ):
         """Initialize ModelRpcClient with addresses.
 
@@ -512,10 +536,14 @@ class ModelRpcClient(object):
                 the gRPC deadline. Callers normally pass pd_sep_config.max_rpc_timeout_ms
                 (args: --max_rpc_timeout_ms / env: MAX_RPC_TIMEOUT_MS).
             decode_entrance: Whether this is a decode entrance
+            trans_output_fn: Custom function to transform protobuf outputs to Python objects.
+                Signature: (GenerateInput, GenerateOutputsPB, StreamState) -> GenerateOutputs.
+                If None, uses the default implementation.
         """
         self._addresses = addresses
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
         self._decode_entrance = decode_entrance
+        self._trans_output_fn = trans_output_fn or trans_output
         self._options = []
         for key, value in client_config.items():
             self._options.append((key, value))
@@ -637,11 +665,13 @@ class ModelRpcClient(object):
             response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
-                yield trans_output(input_py, response, stream_state)
+                yield self._trans_output_fn(input_py, response, stream_state)
         except grpc.RpcError as e:
             if response_iterator:
                 response_iterator.cancel()
-            self._handle_grpc_error(e, f"request: [{input_pb.request_id}]", target_address)
+            self._handle_grpc_error(
+                e, f"request: [{input_pb.request_id}]", target_address
+            )
         except Exception as e:
             logging.error(
                 f"request: [{input_pb.request_id}] rpc to [{target_address}] unknown error: {str(e)}"
@@ -687,7 +717,9 @@ class ModelRpcClient(object):
                         f"batch item {i} failed: {result_pb.error_info.error_message}",
                     )
                 stream_state = StreamState()
-                output = trans_output(inputs[i], result_pb.final_output, stream_state)
+                output = self._trans_output_fn(
+                    inputs[i], result_pb.final_output, stream_state
+                )
                 results.append(output)
             return results
 

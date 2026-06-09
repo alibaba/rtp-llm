@@ -184,6 +184,11 @@ message RequestInfoPB {
     string source_role = 5;
 }
 
+message InputEmbeddingsPB {
+    repeated TensorPB embeddings = 1;   // 和embedding_locs一一对应
+    repeated int32 embedding_locs = 2;  // embedding的在token ids中的起始位置
+}
+
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
@@ -194,6 +199,7 @@ message GenerateInputPB {
     int32 batch_group_size = 7;
     google.protobuf.Int64Value batch_group_id = 8;
     RequestInfoPB request_info = 9;
+    InputEmbeddingsPB input_embeddings = 10;
 }
 
 message AuxInfoPB {
