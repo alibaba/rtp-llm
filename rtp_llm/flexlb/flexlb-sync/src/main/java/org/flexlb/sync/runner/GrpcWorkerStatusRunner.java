@@ -212,10 +212,29 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void logWorkerStatusUpdate(long startTime, WorkerStatus workerStatus) {
-        logger.info("gRPC Worker Status - {}, role:{}, running_queue_tokens:{}, cost:{}",
+        logger.info("gRPC Worker Status - {}, role:{}, alive:{}, concurrency:{}, "
+                        + "running_queue_ms:{}, predicted_queue_ms:{}, step_latency_ms:{}, "
+                        + "iterate_count:{}, dp_rank:{}, dp_size:{}, tp_size:{}, "
+                        + "avail_kv_tokens:{}, used_kv_tokens:{}, "
+                        + "waiting_tasks:{}, running_tasks:{}, local_tasks:{}, "
+                        + "version:{}, sync_cost_us:{}",
                 ipPort,
                 workerStatus.getRole(),
+                workerStatus.isAlive(),
+                workerStatus.getAvailableConcurrency(),
                 workerStatus.getRunningQueueTime(),
+                workerStatus.getPredictedQueueTimeMs(),
+                workerStatus.getStepLatencyMs(),
+                workerStatus.getIterateCount(),
+                workerStatus.getDpRank(),
+                workerStatus.getDpSize(),
+                workerStatus.getTpSize(),
+                workerStatus.getAvailableKvCacheTokens(),
+                workerStatus.getUsedKvCacheTokens(),
+                workerStatus.getWaitingTaskList() != null ? workerStatus.getWaitingTaskList().size() : 0,
+                workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().size() : 0,
+                workerStatus.getLocalTaskMap() != null ? workerStatus.getLocalTaskMap().size() : 0,
+                workerStatus.getStatusVersion(),
                 System.nanoTime() / 1000 - startTime);
     }
 

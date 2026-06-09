@@ -177,7 +177,7 @@ public class FlexlbBatchScheduler {
         }
     }
 
-    private void dispatch(List<BatchItem> items, ServerStatus prefill) {
+    private void dispatch(List<BatchItem> items, ServerStatus prefill, DispatchMeta meta) {
         List<BatchItem> activeItems = items.stream()
                 .filter(item -> !isCancelled(item) && !item.future.isDone())
                 .toList();
@@ -225,9 +225,17 @@ public class FlexlbBatchScheduler {
         PrefillTimePredictor predictor = createPredictor(configService.loadBalanceConfig());
         long predMs = predictor.predictBatchMs(profiles);
         ServerStatus entrypoint = batchEntrypoint(prefill);
+        long now = System.currentTimeMillis();
+        BatchItem head = activeItems.get(0);
+        long waitMs = now - head.enqueuedAtMs();
+        long budgetMs = head.deadlineMs() - now;
         Logger.info("flexlb_batch_dispatch batch_id={} batch_size={} total_tokens={} total_hit={} "
-                        + "pred_ms={} prefill={}:{} entrypoint={}:{} items=[{}]",
+                        + "pred_ms={} reason={} wait_ms={} budget_ms={} fill_ratio={} "
+                        + "batch_max_tokens={} queue_remaining={} "
+                        + "prefill={}:{} entrypoint={}:{} items=[{}]",
                 batchId, activeItems.size(), totalTokens, totalHit, predMs,
+                meta.reason(), waitMs, budgetMs, String.format("%.4f", meta.fillRatio()),
+                meta.batchMaxTokens(), meta.queueDepth(),
                 prefill.getServerIp(), prefill.getGrpcPort(),
                 entrypoint.getServerIp(), entrypoint.getGrpcPort(), itemDetail);
 
@@ -801,14 +809,14 @@ public class FlexlbBatchScheduler {
                 // 1. expired → drop
                 if (budgetMs < 0) {
                     queue.poll();
-                    dropItem(head);
+                    dropItem(head, budgetMs);
                     return;
                 }
 
                 // 2. urgent → dispatch head alone
                 if (budgetMs < marginMs) {
                     queue.poll();
-                    flushItems(List.of(head));
+                    flushItems(List.of(head), new DispatchMeta("urgent", 1.0, seqLenOf(head), queue.size()));
                     return;
                 }
 
@@ -853,10 +861,12 @@ public class FlexlbBatchScheduler {
                 long windowMs = cfg.getFlexlbBatchWindowMs();
                 boolean windowExpired = (System.currentTimeMillis() - head.enqueuedAtMs()) >= windowMs;
                 if (fillRatio >= fillThreshold || picked.size() >= batchSizeMax || windowExpired) {
+                    String reason = picked.size() >= batchSizeMax ? "batch_size_max"
+                            : fillRatio >= fillThreshold ? "filled" : "window";
                     for (BatchItem item : picked) {
                         queue.remove(item);
                     }
-                    flushItems(picked);
+                    flushItems(picked, new DispatchMeta(reason, fillRatio, batchMaxTokens, queue.size()));
                     return;
                 }
 
@@ -867,12 +877,12 @@ public class FlexlbBatchScheduler {
             }
         }
 
-        private void flushItems(List<BatchItem> items) {
+        private void flushItems(List<BatchItem> items, DispatchMeta meta) {
             for (BatchItem item : items) {
                 inflight.put(item.requestId(), new InflightEntry(item, item.prefill()));
             }
             try {
-                dispatchExecutor.execute(() -> dispatch(items, prefill));
+                dispatchExecutor.execute(() -> dispatch(items, prefill, meta));
             } catch (java.util.concurrent.RejectedExecutionException e) {
                 Logger.warn("FlexLB batch dispatch rejected (executor shutdown), failing {} items", items.size());
                 for (BatchItem item : items) {
@@ -881,7 +891,10 @@ public class FlexlbBatchScheduler {
             }
         }
 
-        private void dropItem(BatchItem item) {
+        private void dropItem(BatchItem item, long budgetMs) {
+            long waitMs = System.currentTimeMillis() - item.enqueuedAtMs();
+            Logger.warn("flexlb_batch_drop req_id={} seq_len={} wait_ms={} budget_ms={} worker={}",
+                    item.requestId(), seqLenOf(item), waitMs, budgetMs, key);
             rollback(item.routeResponse);
             if (!item.future.isDone()) {
                 item.future.completeExceptionally(
@@ -907,6 +920,8 @@ public class FlexlbBatchScheduler {
             return ctx.getRequestId();
         }
     }
+
+    private record DispatchMeta(String reason, double fillRatio, long batchMaxTokens, int queueDepth) {}
 
     private static final class InflightEntry {
         private final BatchItem item;
