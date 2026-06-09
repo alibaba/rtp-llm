@@ -5,6 +5,7 @@
 #define private public
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -14,6 +15,36 @@ using namespace std;
 namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
+
+class TestLocalRpcServer: public LocalRpcServer {
+public:
+    using LocalRpcServer::prepareInput;
+
+    void setParallelismConfig(const ParallelismConfig& parallelism_config) {
+        maga_init_params_.parallelism_config = parallelism_config;
+    }
+};
+
+class TestPrefillRpcServer: public PrefillRpcServer {
+public:
+    void setParallelismConfig(const ParallelismConfig& parallelism_config) {
+        maga_init_params_.parallelism_config = parallelism_config;
+    }
+};
+
+static void fillValidInputEmbeddingsRequest(GenerateInputPB& input) {
+    input.set_request_id(123);
+    input.add_token_ids(0);
+    input.add_token_ids(1);
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+    auto* embedding_pb        = input_embeddings_pb->add_embeddings();
+    embedding_pb->set_data_type(TensorPB::FP32);
+    embedding_pb->add_shape(1);
+    embedding_pb->add_shape(4);
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f};
+    embedding_pb->set_fp32_data(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+    input_embeddings_pb->add_embedding_locs(0);
+}
 
 TEST_F(QueryConverterTest, testTransInput) {
     GenerateInputPB input;
@@ -390,6 +421,66 @@ TEST_F(QueryConverterTest, testTransInputWithEmbeddingsCountMismatch) {
     input_embeddings_pb->add_embedding_locs(5);
 
     EXPECT_THROW(QueryConverter::transQuery(&input), std::exception);
+}
+
+TEST_F(QueryConverterTest, LocalRpcServerPrepareInputRejectsInputEmbeddingsWithTpGreaterThanOne) {
+    GenerateInputPB input;
+    fillValidInputEmbeddingsRequest(input);
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 2;
+    TestLocalRpcServer server;
+    server.setParallelismConfig(parallelism_config);
+
+    std::shared_ptr<GenerateInput> output;
+    auto                           err = server.prepareInput(input, output);
+
+    EXPECT_FALSE(err.ok());
+    EXPECT_EQ(err.code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(err.ToString().find("tp_size > 1"), std::string::npos);
+}
+
+TEST_F(QueryConverterTest, LocalRpcServerPrepareInputRejectsInputEmbeddingsWithContextParallel) {
+    GenerateInputPB input;
+    fillValidInputEmbeddingsRequest(input);
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    TestLocalRpcServer server;
+    server.setParallelismConfig(parallelism_config);
+
+    std::shared_ptr<GenerateInput> output;
+    auto                           err = server.prepareInput(input, output);
+
+    EXPECT_FALSE(err.ok());
+    EXPECT_EQ(err.code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(err.ToString().find("context parallel"), std::string::npos);
+}
+
+TEST_F(QueryConverterTest, PrefillRpcServerRejectsInputEmbeddingsWithTpGreaterThanOne) {
+    GenerateInputPB input;
+    fillValidInputEmbeddingsRequest(input);
+
+    TestPrefillRpcServer server;
+    ParallelismConfig    parallelism_config;
+    parallelism_config.tp_size = 2;
+    server.setParallelismConfig(parallelism_config);
+
+    RPCContext                   rpc_context{&input, nullptr};
+    grpc::ServerContext          server_context;
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    auto                         meta            = std::make_shared<RpcServerRuntimeMeta>();
+    auto                         prefill_context = PrefillGenerateContext(
+        &server.resource(), rpc_context, input.generate_config().timeout_ms(), &server_context, metrics_reporter, meta);
+
+    server.getRpcConnection(prefill_context);
+
+    EXPECT_EQ(prefill_context.error_status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(prefill_context.error_status.error_message().find("tp_size > 1"), std::string::npos);
+
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(prefill_context.error_status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
 }
 
 TEST_F(QueryConverterTest, testTransInputRejectsBothMultimodalAndInputEmbeddings) {
