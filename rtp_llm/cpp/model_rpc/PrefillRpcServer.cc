@@ -187,6 +187,39 @@ void detachLeftoverFutures(std::vector<std::future<T>>& futures) {
     }
 }
 
+template <typename T, typename OnReady, typename OnTimeout>
+void collectFutures(std::vector<std::future<T>>& futures,
+                    std::chrono::steady_clock::time_point deadline,
+                    OnReady&& on_ready,
+                    OnTimeout&& on_timeout) {
+    std::vector<bool> collected(futures.size(), false);
+    size_t remaining = futures.size();
+    while (remaining > 0 && std::chrono::steady_clock::now() < deadline) {
+        bool any_ready = false;
+        for (size_t i = 0; i < futures.size(); ++i) {
+            if (!collected[i]
+                && futures[i].wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+                collected[i] = true;
+                --remaining;
+                any_ready = true;
+                on_ready(i);
+            }
+        }
+        if (remaining > 0 && !any_ready) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    for (size_t i = 0; i < futures.size(); ++i) {
+        if (!collected[i]) {
+            if (futures[i].wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+                on_ready(i);
+            } else {
+                on_timeout(i);
+            }
+        }
+    }
+}
+
 struct AsyncProducerCancelState {
     std::atomic<bool>                   cancelled{false};
     std::mutex                          mu;
@@ -1460,20 +1493,18 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
         }
     };
 
-    for (size_t i = 0; i < dispatch_futures.size(); ++i) {
-        auto remaining = dispatch_deadline - std::chrono::steady_clock::now();
-        if (remaining <= std::chrono::milliseconds(0)
-            || dispatch_futures[i].wait_for(remaining) == std::future_status::timeout) {
+    collectFutures(dispatch_futures, dispatch_deadline,
+        [&](size_t i) {
+            auto result = dispatch_futures[i].get();
+            merge_response(dispatch_targets[i].request, result.status, result.dp_response);
+        },
+        [&](size_t i) {
             merge_response(dispatch_targets[i].request,
                            grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
                                         "EnqueueBatch dispatch timeout for dp_rank "
                                             + std::to_string(dispatch_targets[i].dp_rank)),
                            EnqueueBatchResponsePB());
-        } else {
-            auto result = dispatch_futures[i].get();
-            merge_response(dispatch_targets[i].request, result.status, result.dp_response);
-        }
-    }
+        });
     detachLeftoverFutures(dispatch_futures);
 
     response_registry_.gc(std::chrono::minutes(10));
@@ -1792,18 +1823,16 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*           conte
                     }
                 }));
             }
-            for (size_t i = 0; i < prepare_futures.size(); ++i) {
-                auto remaining = prepare_deadline - std::chrono::steady_clock::now();
-                if (remaining <= std::chrono::milliseconds(0)
-                    || prepare_futures[i].wait_for(remaining) == std::future_status::timeout) {
+            collectFutures(prepare_futures, prepare_deadline,
+                [&](size_t i) { prepare_futures[i].get(); },
+                [&](size_t i) {
                     auto& slot = slots[i];
                     if (slot.entry) {
                         slot.entry->cancelled.store(true);
                     }
                     slot.stage_status =
                         grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "EnqueueGroup prepare timeout");
-                }
-            }
+                });
             detachLeftoverFutures(prepare_futures);
 
             std::vector<LocalSlot*> ready_slots;
@@ -1914,18 +1943,16 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*           conte
                     }
                 }));
             }
-            for (size_t i = 0; i < load_futures.size(); ++i) {
-                auto remaining = load_deadline - std::chrono::steady_clock::now();
-                if (remaining <= std::chrono::milliseconds(0)
-                    || load_futures[i].wait_for(remaining) == std::future_status::timeout) {
+            collectFutures(load_futures, load_deadline,
+                [&](size_t i) { load_futures[i].get(); },
+                [&](size_t i) {
                     auto* slot = stream_ready_slots[i];
                     if (slot->entry) {
                         slot->entry->cancelled.store(true);
                     }
                     fail_slot(*slot,
                               grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "EnqueueGroup load cache timeout"));
-                }
-            }
+                });
             detachLeftoverFutures(load_futures);
         });
         worker.detach();
