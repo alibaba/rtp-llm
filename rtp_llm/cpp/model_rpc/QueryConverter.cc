@@ -159,6 +159,76 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         generate_input->batch_group_id = input->batch_group_id().value();
     }
 
+    // 转换 input_embeddings
+    if (input->has_input_embeddings() && input->input_embeddings().embeddings_size() > 0) {
+        // input_embeddings and multimodal_inputs both inject into inputs_embeds via
+        // independent locs (input_embeddings_locs vs mm_locs), and the engine has no
+        // loc-overlap detection. Allowing both in one request risks silent
+        // corruption (one path overwrites the other depending on call order).
+        // Reject upstream so the user gets a clear error instead.
+        RTP_LLM_CHECK_WITH_INFO(input->multimodal_inputs_size() == 0,
+                                "input_embeddings cannot be combined with multimodal_inputs in the same request: "
+                                "both paths write into inputs_embeds and have no loc-overlap detection. "
+                                "Send them in separate requests.");
+        const auto& input_embeddings_pb = input->input_embeddings();
+        RTP_LLM_CHECK_WITH_INFO(input_embeddings_pb.embeddings_size() == input_embeddings_pb.embedding_locs_size(),
+                                "input_embeddings count (" + std::to_string(input_embeddings_pb.embeddings_size())
+                                    + ") != embedding_locs count ("
+                                    + std::to_string(input_embeddings_pb.embedding_locs_size()) + ")");
+
+        std::vector<torch::Tensor> embeddings;
+        std::vector<int32_t>       embedding_locs;
+
+        // 转换 embeddings
+        for (int i = 0; i < input_embeddings_pb.embeddings_size(); i++) {
+            embeddings.push_back(transTensor(input_embeddings_pb.embeddings(i)));
+        }
+
+        // 转换 embedding_locs
+        int32_t token_ids_size = generate_input->input_ids.size(0);
+        embedding_locs.resize(input_embeddings_pb.embedding_locs_size());
+        memcpy(embedding_locs.data(),
+               input_embeddings_pb.embedding_locs().data(),
+               input_embeddings_pb.embedding_locs_size() * sizeof(int32_t));
+
+        for (int i = 0; i < (int)embedding_locs.size(); i++) {
+            auto& emb = embeddings[i];
+            RTP_LLM_CHECK_WITH_INFO(emb.dim() >= 1 && emb.dim() <= 2,
+                                    "input_embeddings[%d] must be 1D or 2D, got dim=%d",
+                                    i,
+                                    (int)emb.dim());
+            RTP_LLM_CHECK_WITH_INFO(emb.is_floating_point(),
+                                    "input_embeddings[%d] must be floating point, got dtype=%s",
+                                    i,
+                                    c10::toString(emb.scalar_type()));
+            if (emb.dim() == 1) {
+                emb = emb.unsqueeze(0);
+            }
+            int32_t loc     = embedding_locs[i];
+            int32_t emb_len = emb.size(0);
+            RTP_LLM_CHECK_WITH_INFO(loc >= 0 && loc + emb_len <= token_ids_size,
+                                    "input_embeddings_locs[%d]=%d with emb length %d out of range [0, %d)",
+                                    i,
+                                    loc,
+                                    emb_len,
+                                    token_ids_size);
+            if (i > 0) {
+                int32_t prev_loc = embedding_locs[i - 1];
+                int32_t prev_len = embeddings[i - 1].size(0);
+                RTP_LLM_CHECK_WITH_INFO(loc >= prev_loc + prev_len,
+                                        "input_embeddings_locs[%d]=%d overlaps with previous [%d]=%d+%d",
+                                        i,
+                                        loc,
+                                        i - 1,
+                                        prev_loc,
+                                        prev_len);
+            }
+        }
+
+        generate_input->input_embeddings      = embeddings;
+        generate_input->input_embeddings_locs = embedding_locs;
+    }
+
     return generate_input;
 }
 

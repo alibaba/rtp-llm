@@ -193,4 +193,244 @@ TEST_F(QueryConverterTest, TransTensorPB_UnsupportedType) {
     EXPECT_THROW(QueryConverter::transTensorPB(&tensor_pb, tensor), std::runtime_error);
 }
 
+TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_FP32) {
+    GenerateInputPB input;
+    // Need enough tokens so that embedding_locs + emb_length <= token_ids_size
+    // emb1: loc=5, length=2 => need >=7; emb2: loc=10, length=1 => need >=11
+    for (int i = 0; i < 12; ++i) {
+        input.add_token_ids(i);
+    }
+
+    // 创建 input_embeddings
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+
+    // 添加第一个 embedding (FP32, shape [2, 3])
+    auto* embedding1_pb = input_embeddings_pb->add_embeddings();
+    embedding1_pb->set_data_type(TensorPB::FP32);
+    embedding1_pb->add_shape(2);
+    embedding1_pb->add_shape(3);
+    std::vector<float> embedding1_data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+    embedding1_pb->set_fp32_data(reinterpret_cast<const char*>(embedding1_data.data()),
+                                 embedding1_data.size() * sizeof(float));
+
+    // 添加第二个 embedding (FP32, shape [1, 4])
+    auto* embedding2_pb = input_embeddings_pb->add_embeddings();
+    embedding2_pb->set_data_type(TensorPB::FP32);
+    embedding2_pb->add_shape(1);
+    embedding2_pb->add_shape(4);
+    std::vector<float> embedding2_data = {7.0f, 8.0f, 9.0f, 10.0f};
+    embedding2_pb->set_fp32_data(reinterpret_cast<const char*>(embedding2_data.data()),
+                                 embedding2_data.size() * sizeof(float));
+
+    // 添加 embedding_locs
+    input_embeddings_pb->add_embedding_locs(5);
+    input_embeddings_pb->add_embedding_locs(10);
+
+    auto generate_input = QueryConverter::transQuery(&input);
+
+    // 验证 input_embeddings 转换
+    ASSERT_TRUE(generate_input->input_embeddings.has_value());
+    ASSERT_TRUE(generate_input->input_embeddings_locs.has_value());
+
+    const auto& embeddings = generate_input->input_embeddings.value();
+    const auto& locs       = generate_input->input_embeddings_locs.value();
+
+    ASSERT_EQ(embeddings.size(), 2);
+    ASSERT_EQ(locs.size(), 2);
+
+    // 验证第一个 embedding
+    ASSERT_EQ(embeddings[0].dtype(), torch::kFloat32);
+    ASSERT_EQ(embeddings[0].dim(), 2);
+    ASSERT_EQ(embeddings[0].size(0), 2);
+    ASSERT_EQ(embeddings[0].size(1), 3);
+    auto embedding1_ptr = embeddings[0].data_ptr<float>();
+    for (int i = 0; i < 6; ++i) {
+        EXPECT_FLOAT_EQ(embedding1_ptr[i], embedding1_data[i]);
+    }
+
+    // 验证第二个 embedding
+    ASSERT_EQ(embeddings[1].dtype(), torch::kFloat32);
+    ASSERT_EQ(embeddings[1].dim(), 2);
+    ASSERT_EQ(embeddings[1].size(0), 1);
+    ASSERT_EQ(embeddings[1].size(1), 4);
+    auto embedding2_ptr = embeddings[1].data_ptr<float>();
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_FLOAT_EQ(embedding2_ptr[i], embedding2_data[i]);
+    }
+
+    // 验证 embedding_locs
+    EXPECT_EQ(locs[0], 5);
+    EXPECT_EQ(locs[1], 10);
+}
+
+TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_FP16) {
+    GenerateInputPB input;
+    // Need enough tokens: loc=3, emb_length=2 => need >=5
+    for (int i = 0; i < 5; ++i) {
+        input.add_token_ids(i);
+    }
+
+    // 创建 input_embeddings (FP16)
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+    auto* embedding_pb        = input_embeddings_pb->add_embeddings();
+    embedding_pb->set_data_type(TensorPB::FP16);
+    embedding_pb->add_shape(2);
+    embedding_pb->add_shape(2);
+
+    std::vector<c10::Half> embedding_data = {1.0f, 2.0f, 3.0f, 4.0f};
+    embedding_pb->set_fp16_data(reinterpret_cast<const char*>(embedding_data.data()),
+                                embedding_data.size() * sizeof(c10::Half));
+
+    input_embeddings_pb->add_embedding_locs(3);
+
+    auto generate_input = QueryConverter::transQuery(&input);
+
+    ASSERT_TRUE(generate_input->input_embeddings.has_value());
+    const auto& embeddings = generate_input->input_embeddings.value();
+    const auto& locs       = generate_input->input_embeddings_locs.value();
+
+    ASSERT_EQ(embeddings.size(), 1);
+    ASSERT_EQ(embeddings[0].dtype(), torch::kFloat16);
+    ASSERT_EQ(embeddings[0].dim(), 2);
+    EXPECT_EQ(locs[0], 3);
+}
+
+TEST_F(QueryConverterTest, testTransInputWith1DInputEmbeddingAsSingleToken) {
+    GenerateInputPB input;
+    for (int i = 0; i < 3; ++i) {
+        input.add_token_ids(i);
+    }
+
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+    auto* embedding_pb        = input_embeddings_pb->add_embeddings();
+    embedding_pb->set_data_type(TensorPB::FP32);
+    embedding_pb->add_shape(4);
+    std::vector<float> embedding_data = {1.0f, 2.0f, 3.0f, 4.0f};
+    embedding_pb->set_fp32_data(reinterpret_cast<const char*>(embedding_data.data()),
+                                embedding_data.size() * sizeof(float));
+    input_embeddings_pb->add_embedding_locs(2);
+
+    auto generate_input = QueryConverter::transQuery(&input);
+
+    ASSERT_TRUE(generate_input->input_embeddings.has_value());
+    const auto& embeddings = generate_input->input_embeddings.value();
+    const auto& locs       = generate_input->input_embeddings_locs.value();
+
+    ASSERT_EQ(embeddings.size(), 1);
+    ASSERT_EQ(embeddings[0].dtype(), torch::kFloat32);
+    ASSERT_EQ(embeddings[0].dim(), 2);
+    EXPECT_EQ(embeddings[0].size(0), 1);
+    EXPECT_EQ(embeddings[0].size(1), 4);
+    EXPECT_EQ(locs[0], 2);
+    auto embedding_ptr = embeddings[0].data_ptr<float>();
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_FLOAT_EQ(embedding_ptr[i], embedding_data[i]);
+    }
+}
+
+TEST_F(QueryConverterTest, testTransInputWithInputEmbeddings_BF16) {
+    GenerateInputPB input;
+    // Need enough tokens: loc=2, emb_length=1 => need >=3
+    for (int i = 0; i < 3; ++i) {
+        input.add_token_ids(i);
+    }
+
+    // 创建 input_embeddings (BF16)
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+    auto* embedding_pb        = input_embeddings_pb->add_embeddings();
+    embedding_pb->set_data_type(TensorPB::BF16);
+    embedding_pb->add_shape(1);
+    embedding_pb->add_shape(3);
+
+    std::vector<c10::BFloat16> embedding_data = {1.0f, 2.0f, 3.0f};
+    embedding_pb->set_bf16_data(reinterpret_cast<const char*>(embedding_data.data()),
+                                embedding_data.size() * sizeof(c10::BFloat16));
+
+    input_embeddings_pb->add_embedding_locs(2);
+
+    auto generate_input = QueryConverter::transQuery(&input);
+
+    ASSERT_TRUE(generate_input->input_embeddings.has_value());
+    const auto& embeddings = generate_input->input_embeddings.value();
+
+    ASSERT_EQ(embeddings.size(), 1);
+    ASSERT_EQ(embeddings[0].dtype(), torch::kBFloat16);
+    ASSERT_EQ(embeddings[0].dim(), 2);
+}
+
+TEST_F(QueryConverterTest, testTransInputWithoutInputEmbeddings) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    input.add_token_ids(1);
+
+    auto generate_input = QueryConverter::transQuery(&input);
+
+    // 验证没有 input_embeddings 时，字段为空
+    ASSERT_FALSE(generate_input->input_embeddings.has_value());
+    ASSERT_FALSE(generate_input->input_embeddings_locs.has_value());
+}
+
+TEST_F(QueryConverterTest, testTransInputWithEmbeddingsCountMismatch) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+
+    // 添加 2 个 embeddings
+    for (int i = 0; i < 2; ++i) {
+        auto* embedding_pb = input_embeddings_pb->add_embeddings();
+        embedding_pb->set_data_type(TensorPB::FP32);
+        embedding_pb->add_shape(1);
+        embedding_pb->add_shape(4);
+        std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f};
+        embedding_pb->set_fp32_data(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+    }
+
+    // 只添加 1 个 embedding_loc，制造数量不一致
+    input_embeddings_pb->add_embedding_locs(5);
+
+    EXPECT_THROW(QueryConverter::transQuery(&input), std::exception);
+}
+
+TEST_F(QueryConverterTest, testTransInputRejectsBothMultimodalAndInputEmbeddings) {
+    // input_embeddings 与 multimodal_inputs 同时出现必须被拒绝：两条路径都向
+    // inputs_embeds 写入但没有 loc 重叠检测，混用会静默覆盖。
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    input.add_token_ids(1);
+
+    // 添加 multimodal_inputs
+    auto* mm_input = input.add_multimodal_inputs();
+    mm_input->set_multimodal_url("http://example.com/img.jpg");
+    mm_input->set_multimodal_type(0);
+    mm_input->mutable_mm_preprocess_config();  // 默认值即可
+
+    // 同时添加 input_embeddings
+    auto* input_embeddings_pb = input.mutable_input_embeddings();
+    auto* embedding_pb        = input_embeddings_pb->add_embeddings();
+    embedding_pb->set_data_type(TensorPB::FP32);
+    embedding_pb->add_shape(1);
+    embedding_pb->add_shape(4);
+    std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f};
+    embedding_pb->set_fp32_data(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+    input_embeddings_pb->add_embedding_locs(0);
+
+    EXPECT_THROW(QueryConverter::transQuery(&input), std::exception);
+}
+
+TEST_F(QueryConverterTest, testTransInputAllowsMultimodalAlone) {
+    // multimodal_inputs 单独出现仍然合法 —— 排他性只在与 input_embeddings 共存时生效。
+    GenerateInputPB input;
+    input.add_token_ids(0);
+
+    auto* mm_input = input.add_multimodal_inputs();
+    mm_input->set_multimodal_url("http://example.com/img.jpg");
+    mm_input->set_multimodal_type(0);
+    mm_input->mutable_mm_preprocess_config();
+
+    auto generate_input = QueryConverter::transQuery(&input);
+    ASSERT_TRUE(generate_input->multimodal_inputs.has_value());
+    ASSERT_FALSE(generate_input->input_embeddings.has_value());
+}
+
 }  // namespace rtp_llm
