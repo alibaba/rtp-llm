@@ -7,7 +7,7 @@ import aiter
 import torch
 from aiter.fused_moe import fused_moe
 
-from rtp_llm.device.device_impl import is_gfx950
+from rtp_llm.device.device_impl import is_gfx942, is_gfx950
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -98,12 +98,17 @@ def _flydsl_fused_moe_unsupported_reason(
     topk_ids: torch.Tensor,
     *,
     activation: str,
+    is_prefill: bool = False,
     effective_expert_mask: Optional[torch.Tensor],
     expert_ids_are_local: bool,
     num_experts: int,
     local_num_experts: int,
     ep_size: int,
 ) -> Optional[str]:
+    if is_prefill:
+        return "prefill uses AITER fused_moe"
+    if not is_gfx942():
+        return "FlyDSL fused_moe is enabled only on MI308X/gfx942"
     if activation not in ("silu", "SiGLU"):
         return f"activation={activation!r}"
     if effective_expert_mask is not None:
@@ -148,6 +153,7 @@ def _should_use_flydsl_fused_moe(
     topk_ids: torch.Tensor,
     *,
     activation: str,
+    is_prefill: bool = False,
     effective_expert_mask: Optional[torch.Tensor],
     expert_ids_are_local: bool,
     num_experts: int,
@@ -163,6 +169,7 @@ def _should_use_flydsl_fused_moe(
         w2,
         topk_ids,
         activation=activation,
+        is_prefill=is_prefill,
         effective_expert_mask=effective_expert_mask,
         expert_ids_are_local=expert_ids_are_local,
         num_experts=num_experts,
@@ -171,8 +178,6 @@ def _should_use_flydsl_fused_moe(
     )
     if reason is not None:
         _log_flydsl_fallback(reason)
-        return False
-    if not _load_flydsl_fused_moe():
         return False
     return True
 
@@ -211,6 +216,9 @@ def _flydsl_fused_moe(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
 ) -> torch.Tensor:
+    if not _load_flydsl_fused_moe():
+        raise RuntimeError("fused_moe_flydsl requires FlyDSL fused_moe imports")
+
     s1 = _flatten_per_channel_scale(w1_scale)
     s2 = _flatten_per_channel_scale(w2_scale)
 
@@ -246,6 +254,12 @@ def build_ep_expert_mask(
     return mask
 
 
+def _is_prefill_from_extra_args(extra_expert_args: Optional[dict[str, Any]]) -> bool:
+    if not extra_expert_args:
+        return False
+    return bool(extra_expert_args.get("is_prefill", False))
+
+
 class RocmExpertsBf16(FusedMoeExpertExecutor):
     """ROCm BF16 (no quantization) MoE expert executor."""
 
@@ -278,7 +292,9 @@ class RocmExpertsBf16(FusedMoeExpertExecutor):
         self.w1 = weights[W.moe_w1]
         self.w2 = weights[W.moe_w2]
 
-        self.expert_mask = build_ep_expert_mask(self.num_experts, self.ep_rank, self.ep_size, self.w1)
+        self.expert_mask = build_ep_expert_mask(
+            self.num_experts, self.ep_rank, self.ep_size, self.w1
+        )
 
     @property
     def local_num_experts(self) -> int:
@@ -313,15 +329,21 @@ class RocmExpertsBf16(FusedMoeExpertExecutor):
         # When router has already remapped IDs to local indices (e.g. MoriEpIntranodeRouter),
         # expert_mask (which is based on global IDs) must not be applied.
         effective_expert_mask = (
-            None if payload.expert_ids_are_local else (expert_map if expert_map is not None else self.expert_mask)
+            None
+            if payload.expert_ids_are_local
+            else (expert_map if expert_map is not None else self.expert_mask)
         )
 
         hidden_states = payload.expert_x
 
         if apply_router_weight_on_input:
-            assert topk_weights.dim() == 2, "`topk_weights` should be in shape (num_tokens, topk)"
+            assert (
+                topk_weights.dim() == 2
+            ), "`topk_weights` should be in shape (num_tokens, topk)"
             _, topk = topk_weights.shape
-            assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
+            assert (
+                topk == 1
+            ), "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
 
@@ -352,7 +374,9 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
 
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(quant_method in ("FP8_PER_CHANNEL_COMPRESSED", "FP8_PER_CHANNEL_QUARK"))
+        checker.check(
+            quant_method in ("FP8_PER_CHANNEL_COMPRESSED", "FP8_PER_CHANNEL_QUARK")
+        )
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
@@ -382,7 +406,9 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         self.w1_scale = weights[W.moe_s1]
         self.w2_scale = weights[W.moe_s2]
 
-        self.expert_mask = build_ep_expert_mask(self.num_experts, self.ep_rank, self.ep_size, self.w1)
+        self.expert_mask = build_ep_expert_mask(
+            self.num_experts, self.ep_rank, self.ep_size, self.w1
+        )
 
     @property
     def local_num_experts(self) -> int:
@@ -421,14 +447,20 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         assert self.w2.size(0) == self.local_num_experts
 
         effective_expert_mask = (
-            None if payload.expert_ids_are_local else (expert_map if expert_map is not None else self.expert_mask)
+            None
+            if payload.expert_ids_are_local
+            else (expert_map if expert_map is not None else self.expert_mask)
         )
 
         hidden_states = payload.expert_x
         if apply_router_weight_on_input:
-            assert topk_weights.dim() == 2, "`topk_weights` should be in shape (num_tokens, topk)"
+            assert (
+                topk_weights.dim() == 2
+            ), "`topk_weights` should be in shape (num_tokens, topk)"
             _, topk = topk_weights.shape
-            assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
+            assert (
+                topk == 1
+            ), "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
 
@@ -438,35 +470,22 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             self.w2,
             topk_ids,
             activation=activation,
+            is_prefill=_is_prefill_from_extra_args(extra_expert_args),
             effective_expert_mask=effective_expert_mask,
             expert_ids_are_local=payload.expert_ids_are_local,
             num_experts=self.num_experts,
             local_num_experts=self.local_num_experts,
             ep_size=self.ep_size,
         ):
-            try:
-                output = _flydsl_fused_moe(
-                    hidden_states,
-                    self.w1,
-                    self.w2,
-                    topk_weights,
-                    topk_ids,
-                    w1_scale=self.w1_scale,
-                    w2_scale=self.w2_scale,
-                )
-            except (NotImplementedError, ValueError) as e:
-                _log_flydsl_fallback(str(e))
-                output = _aiter_fp8_per_channel_fused_moe(
-                    hidden_states,
-                    self.w1,
-                    self.w2,
-                    topk_weights,
-                    topk_ids,
-                    self.w1_scale,
-                    self.w2_scale,
-                    activation,
-                    effective_expert_mask,
-                )
+            output = _flydsl_fused_moe(
+                hidden_states,
+                self.w1,
+                self.w2,
+                topk_weights,
+                topk_ids,
+                w1_scale=self.w1_scale,
+                w2_scale=self.w2_scale,
+            )
         else:
             output = _aiter_fp8_per_channel_fused_moe(
                 hidden_states,
@@ -528,8 +547,9 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
         self.w1_scale = weights[W.moe_s1]
         self.w2_scale = weights[W.moe_s2]
 
-        self.expert_mask = build_ep_expert_mask(self.num_experts, self.ep_rank, self.ep_size, self.w1)
-
+        self.expert_mask = build_ep_expert_mask(
+            self.num_experts, self.ep_rank, self.ep_size, self.w1
+        )
     @property
     def local_num_experts(self) -> int:
         return self.w1.size(0)
@@ -560,15 +580,21 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
         assert self.w2.size(0) == self.local_num_experts
 
         effective_expert_mask = (
-            None if payload.expert_ids_are_local else (expert_map if expert_map is not None else self.expert_mask)
+            None
+            if payload.expert_ids_are_local
+            else (expert_map if expert_map is not None else self.expert_mask)
         )
 
         hidden_states = payload.expert_x
 
         if apply_router_weight_on_input:
-            assert topk_weights.dim() == 2, "`topk_weights` should be in shape (num_tokens, topk)"
+            assert (
+                topk_weights.dim() == 2
+            ), "`topk_weights` should be in shape (num_tokens, topk)"
             _, topk = topk_weights.shape
-            assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
+            assert (
+                topk == 1
+            ), "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
 
@@ -639,14 +665,20 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
         self.w2_scale = weights[W.moe_s2]
 
         self.hidden_size_raw = config.hidden_size
-        self.intermediate_size_raw = config.model_config.moe_inter_size // config.tp_size
+        self.intermediate_size_raw = (
+            config.model_config.moe_inter_size // config.tp_size
+        )
         packed_factor = 2 if self.w1.dtype == torch.uint8 else 1
         self.hidden_size_padded = self.w1.size(2) * packed_factor
         self.intermediate_size_padded = self.w2.size(1)
         self.hidden_pad = max(0, self.hidden_size_padded - self.hidden_size_raw)
-        self.intermediate_pad = max(0, self.intermediate_size_padded - self.intermediate_size_raw)
+        self.intermediate_pad = max(
+            0, self.intermediate_size_padded - self.intermediate_size_raw
+        )
 
-        self.expert_mask = build_ep_expert_mask(self.num_experts, self.ep_rank, self.ep_size, self.w1)
+        self.expert_mask = build_ep_expert_mask(
+            self.num_experts, self.ep_rank, self.ep_size, self.w1
+        )
 
     @property
     def local_num_experts(self) -> int:
@@ -681,9 +713,13 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
         hidden_states = payload.expert_x
 
         if apply_router_weight_on_input:
-            assert topk_weights.dim() == 2, "`topk_weights` should be in shape (num_tokens, topk)"
+            assert (
+                topk_weights.dim() == 2
+            ), "`topk_weights` should be in shape (num_tokens, topk)"
             _, topk = topk_weights.shape
-            assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
+            assert (
+                topk == 1
+            ), "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
 
@@ -698,7 +734,9 @@ class RocmExpertsFp4PerGroup(FusedMoeExpertExecutor):
             w2.is_shuffled = True
 
         effective_expert_mask = (
-            None if payload.expert_ids_are_local else (expert_map if expert_map is not None else self.expert_mask)
+            None
+            if payload.expert_ids_are_local
+            else (expert_map if expert_map is not None else self.expert_mask)
         )
 
         # CK moe_sorting kernel requires int32 topk_ids
@@ -771,7 +809,9 @@ class RocmExpertsMXFp4(FusedMoeExpertExecutor):
         self.hidden_size_padded = self.w1.size(2) * packed_factor
         self.intermediate_size_padded = self.w2.size(1)
 
-        self.expert_mask = build_ep_expert_mask(self.num_experts, self.ep_rank, self.ep_size, self.w1)
+        self.expert_mask = build_ep_expert_mask(
+            self.num_experts, self.ep_rank, self.ep_size, self.w1
+        )
 
     @property
     def local_num_experts(self) -> int:
@@ -806,12 +846,16 @@ class RocmExpertsMXFp4(FusedMoeExpertExecutor):
         hidden_states = payload.expert_x
 
         if apply_router_weight_on_input:
-            assert topk_weights.dim() == 2, "`topk_weights` should be in shape (num_tokens, topk)"
+            assert (
+                topk_weights.dim() == 2
+            ), "`topk_weights` should be in shape (num_tokens, topk)"
             _, topk = topk_weights.shape
-            assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
+            assert (
+                topk == 1
+            ), "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
-
+        
         # view w1 and w2 to float4_e2m1fn_x2 if they are uint8
         w1 = self.w1
         w2 = self.w2
@@ -823,7 +867,9 @@ class RocmExpertsMXFp4(FusedMoeExpertExecutor):
             w2.is_shuffled = True
 
         effective_expert_mask = (
-            None if payload.expert_ids_are_local else (expert_map if expert_map is not None else self.expert_mask)
+            None
+            if payload.expert_ids_are_local
+            else (expert_map if expert_map is not None else self.expert_mask)
         )
 
         output = fused_moe(

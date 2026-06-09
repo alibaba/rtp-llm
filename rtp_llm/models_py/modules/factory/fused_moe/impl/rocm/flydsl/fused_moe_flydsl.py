@@ -11,6 +11,7 @@ Weights are expected to already be in the same preshuffled layout produced by
 
 from typing import Optional
 
+import aiter
 import torch
 
 import flydsl.compiler as flyc
@@ -89,6 +90,23 @@ def _quantize_per_token(
     )
 
 
+def _quantize_per_token_aiter(
+    x: torch.Tensor,
+    scale_shape,
+    *,
+    row_weights: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if row_weights is not None:
+        return _quantize_per_token(x, scale_shape, row_weights=row_weights)
+    if not x.is_contiguous():
+        x = x.contiguous()
+
+    out = torch.empty(x.shape, dtype=torch.float8_e4m3fnuz, device=x.device)
+    scales = torch.empty(scale_shape, dtype=torch.float32, device=x.device)
+    aiter.dynamic_per_token_scaled_quant(out, x, scales)
+    return out, scales
+
+
 def _quantize_per_token_with_zero(
     x: torch.Tensor,
     scale_shape,
@@ -144,12 +162,16 @@ def fused_moe_flydsl(
     """
     del dtype, hidden_pad, intermediate_pad, bias1, bias2, out1_ref
     if activation != ActivationType.Silu:
-        raise NotImplementedError(f"fused_moe_flydsl only supports Silu, got {activation}")
+        raise NotImplementedError(
+            f"fused_moe_flydsl only supports Silu, got {activation}"
+        )
 
     quant_type = QuantType(int(quant_type))
     fp8_per_token = quant_type == QuantType.per_Token
     if not fp8_per_token:
-        raise NotImplementedError(f"fused_moe_flydsl currently supports only QuantType.per_Token, got {quant_type}")
+        raise NotImplementedError(
+            f"fused_moe_flydsl currently supports only QuantType.per_Token, got {quant_type}"
+        )
     if fp8_per_token and (w1_scale is None or w2_scale is None):
         raise ValueError("QuantType.per_Token requires w1_scale and w2_scale")
 
@@ -229,7 +251,11 @@ def fused_moe_flydsl(
             # Qwen grouped routing is sparse at small/medium B, but larger B
             # benefits from wider M tiles. These cut points come from the
             # B=1..2048 torch-correct policy probes.
-            default_grouped_tile_m = tuning.grouped_tile_m(B, BLOCK_SIZE_M) if tuning is not None else BLOCK_SIZE_M
+            default_grouped_tile_m = (
+                tuning.grouped_tile_m(B, BLOCK_SIZE_M)
+                if tuning is not None
+                else BLOCK_SIZE_M
+            )
             if default_grouped_tile_m in (16, 32, 64):
                 BLOCK_SIZE_M = default_grouped_tile_m
         if B <= 4 and inter_dim <= 128:
@@ -324,7 +350,9 @@ def fused_moe_flydsl(
             stage2_tile_m_default = 16
     stage2_tile_m = stage2_tile_m_default
     if BLOCK_SIZE_M % stage2_tile_m != 0:
-        raise ValueError(f"stage2_tile_m={stage2_tile_m} must divide routing BLOCK_SIZE_M={BLOCK_SIZE_M}")
+        raise ValueError(
+            f"stage2_tile_m={stage2_tile_m} must divide routing BLOCK_SIZE_M={BLOCK_SIZE_M}"
+        )
     stage2_force_f32_atomic = False
     if _needs_gfx94_bf16_atomic_workaround(hidden_states.dtype):
         # gfx94 bf16 CShuffle atomics can corrupt packed bf16 pairs, while the
@@ -357,28 +385,42 @@ def fused_moe_flydsl(
             topk_weight = topk_weight.float()
         tuning = get_qwen_ptpc_fp8_tuning(inter_dim)
         grouped_route_min_b = tuning.grouped_route_min_b if tuning is not None else 32
-        use_grouped_route = B >= grouped_route_min_b
-        if use_grouped_route:
+        use_route_free = (
+            tuning.use_route_free(B) if tuning is not None else False
+        ) and not doweight_stage1
+        use_grouped_route = (not use_route_free) and B >= grouped_route_min_b
+        if use_route_free:
+            sorted_ids = torch.empty((0,), dtype=torch.int32, device=topk_ids.device)
+            sorted_weights = topk_weight.reshape(B * TOPK).contiguous()
+            sorted_expert_ids = topk_ids.reshape(B * TOPK).contiguous()
+            num_valid_ids = torch.empty((0,), dtype=torch.int32, device=topk_ids.device)
+        elif use_grouped_route:
             from .moe_routing import grouped_moe_route
 
-            sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids = grouped_moe_route(
-                topk_ids,
-                topk_weight,
-                experts=E,
-                topk=TOPK,
-                tile_m=BLOCK_SIZE_M,
-                stream=stream,
+            sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids = (
+                grouped_moe_route(
+                    topk_ids,
+                    topk_weight,
+                    experts=E,
+                    topk=TOPK,
+                    tile_m=BLOCK_SIZE_M,
+                    stream=stream,
+                )
             )
         else:
             from .moe_routing import direct_moe_route
 
-            sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids = direct_moe_route(
-                topk_ids,
-                topk_weight,
-                topk=TOPK,
-                tile_m=BLOCK_SIZE_M,
-                stream=stream,
+            sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids = (
+                direct_moe_route(
+                    topk_ids,
+                    topk_weight,
+                    topk=TOPK,
+                    tile_m=BLOCK_SIZE_M,
+                    stream=stream,
+                )
             )
+    else:
+        use_route_free = False
     del M_ALIGN
 
     # Grouped routing may allocate inactive fixed expert slots; GEMMs skip slots
@@ -392,14 +434,19 @@ def fused_moe_flydsl(
         quant_out_cache_default = 2
     quant_in_cache = quant_in_cache_default
     quant_out_cache = quant_out_cache_default
+    tuning = get_qwen_ptpc_fp8_tuning(inter_dim)
+    use_aiter_quant = tuning.use_aiter_quant(B) if tuning is not None else False
 
     if fp8_per_token:
-        a1_qt, a1_scale = _quantize_per_token(
-            hidden_states,
-            (B, 1),
-            input_cache_modifier=quant_in_cache,
-            output_cache_modifier=quant_out_cache,
-        )
+        if use_aiter_quant:
+            a1_qt, a1_scale = _quantize_per_token_aiter(hidden_states, (B, 1))
+        else:
+            a1_qt, a1_scale = _quantize_per_token(
+                hidden_states,
+                (B, 1),
+                input_cache_modifier=quant_in_cache,
+                output_cache_modifier=quant_out_cache,
+            )
         stage_dtype = "fp8"
     else:
         a1_qt = hidden_states
@@ -445,7 +492,9 @@ def fused_moe_flydsl(
         )
         w2_fused = w2 if fused_1stage_fp8_w2 else w2_bf16
         output_dtype = torch.float16 if cast_fused_output else hidden_states.dtype
-        output = torch.zeros((B, model_dim), dtype=output_dtype, device=hidden_states.device)
+        output = torch.zeros(
+            (B, model_dim), dtype=output_dtype, device=hidden_states.device
+        )
         kernel_fused(
             output,
             a1_qt,
@@ -469,7 +518,7 @@ def fused_moe_flydsl(
     from .moe_gemm_2stage import (
         MoeGemm2Mode,
         compile_moe_gemm1,
-        compile_moe_gemm1_m1,
+        compile_moe_gemm1_route_free,
         compile_moe_gemm2_ex,
     )
 
@@ -482,8 +531,8 @@ def fused_moe_flydsl(
     # V116: fast_barrier + fine_sched synergy for memory-bound shapes.
     stage1_fast_barrier = False
     stage1_fine_sched = False
-    use_m1_stage1 = (
-        B == 1
+    use_route_free_stage1 = (
+        use_route_free
         and use_direct_route
         and fp8_per_token
         and not stage1_cshuffle
@@ -492,8 +541,8 @@ def fused_moe_flydsl(
         and E == 512
         and TOPK == 10
     )
-    if use_m1_stage1:
-        stage1 = compile_moe_gemm1_m1(
+    if use_route_free_stage1:
+        stage1 = compile_moe_gemm1_route_free(
             model_dim=model_dim,
             inter_dim=inter_dim,
             experts=E,
@@ -555,7 +604,12 @@ def fused_moe_flydsl(
     # For inter_dim=256 (TP=4), bf16 stage2 has 2x K-tiles and larger W2 loads,
     # which outweighs the quant kernel savings at small B.
     skip_a2_quant_max_b = 4
-    _skip_a2_quant = w2_bf16 is not None and fp8_per_token and B <= skip_a2_quant_max_b and inter_dim <= 128
+    _skip_a2_quant = (
+        w2_bf16 is not None
+        and fp8_per_token
+        and B <= skip_a2_quant_max_b
+        and inter_dim <= 128
+    )
 
     fold_weight_into_a2_scale = False
     _fuse_quant2_zero = False
@@ -568,8 +622,14 @@ def fused_moe_flydsl(
         w2_scale_for_s2 = _empty_scale_like(hidden_states)
         s2_in_dtype = "bf16"
     elif fp8_per_token:
-        fold_weight_into_a2_scale = E == 512 and TOPK == 10 and model_dim == 4096 and B >= 512
-        a2_row_weights = topk_weight.reshape(B * TOPK) if fold_weight_into_a2_scale and not doweight_stage1 else None
+        fold_weight_into_a2_scale = (
+            E == 512 and TOPK == 10 and model_dim == 4096 and B >= 512
+        )
+        a2_row_weights = (
+            topk_weight.reshape(B * TOPK)
+            if fold_weight_into_a2_scale and not doweight_stage1
+            else None
+        )
         _fuse_quant2_zero = (
             stage2_mode_name == "atomic"
             and not stage2_force_f32_atomic
@@ -581,7 +641,9 @@ def fused_moe_flydsl(
             and (B * model_dim) % 8 == 0
         )
         if _fuse_quant2_zero:
-            _output_for_zero = torch.empty((B, model_dim), dtype=hidden_states.dtype, device=hidden_states.device)
+            _output_for_zero = torch.empty(
+                (B, model_dim), dtype=hidden_states.dtype, device=hidden_states.device
+            )
             a2_qt, a2_scale = _quantize_per_token_with_zero(
                 stage1_out,
                 (B, TOPK, 1),
@@ -592,13 +654,20 @@ def fused_moe_flydsl(
             )
             _fused_zero_output = _output_for_zero
         else:
-            a2_qt, a2_scale = _quantize_per_token(
-                stage1_out,
-                (B, TOPK, 1),
-                row_weights=a2_row_weights,
-                input_cache_modifier=quant_in_cache,
-                output_cache_modifier=quant_out_cache,
-            )
+            if use_aiter_quant:
+                a2_qt, a2_scale = _quantize_per_token_aiter(
+                    stage1_out,
+                    (B, TOPK, 1),
+                    row_weights=a2_row_weights,
+                )
+            else:
+                a2_qt, a2_scale = _quantize_per_token(
+                    stage1_out,
+                    (B, TOPK, 1),
+                    row_weights=a2_row_weights,
+                    input_cache_modifier=quant_in_cache,
+                    output_cache_modifier=quant_out_cache,
+                )
             _fused_zero_output = None
         a2_for_s2 = a2_qt
         a2_scale_for_s2 = a2_scale
@@ -618,7 +687,13 @@ def fused_moe_flydsl(
     stage2_readfirst_metadata = False
     stage2_m_fast_grid = False
     stage2_persist_m_default = 1
-    if E == 512 and TOPK == 10 and model_dim == 4096 and inter_dim <= 128 and 32 <= B < 512:
+    if (
+        E == 512
+        and TOPK == 10
+        and model_dim == 4096
+        and inter_dim <= 128
+        and 32 <= B < 512
+    ):
         # V119: persist_m=2 amortizes single-K-tile (K=128) startup cost for TP=8.
         # Sweep confirms pm=2 optimal for B=32-256; pm=1 for B<32 and B>=512 (already handled below).
         stage2_persist_m_default = 2
@@ -645,7 +720,9 @@ def fused_moe_flydsl(
     if E == 512 and TOPK == 10 and model_dim == 4096 and inter_dim == 256 and B == 2048:
         stage2_group_size_m_default = 4
     stage2_group_size_m = stage2_group_size_m_default
-    stage2_mode = MoeGemm2Mode.REDUCE if stage2_mode_name == "reduce" else MoeGemm2Mode.ATOMIC
+    stage2_mode = (
+        MoeGemm2Mode.REDUCE if stage2_mode_name == "reduce" else MoeGemm2Mode.ATOMIC
+    )
     reduction_in_cache_default = 0
     reduction_out_cache_default = 0
     if E == 512 and TOPK == 10 and model_dim == 4096 and inter_dim == 256 and B >= 2048:
@@ -655,13 +732,17 @@ def fused_moe_flydsl(
     stage2_out_dtype_name = out_dtype
     cast_stage2_output = False
     stage2_reduce_intermediate_dtype_name = None
-    f16_reduce_intermediate_default = E == 512 and TOPK == 10 and model_dim == 4096 and inter_dim == 256 and B >= 2048
+    f16_reduce_intermediate_default = (
+        E == 512 and TOPK == 10 and model_dim == 4096 and inter_dim == 256 and B >= 2048
+    )
     if stage2_force_f32_atomic:
         stage2_out_dtype = torch.float32
         stage2_out_dtype_name = "f32"
         cast_stage2_output = True
     elif (
-        stage2_mode == MoeGemm2Mode.REDUCE and hidden_states.dtype == torch.bfloat16 and f16_reduce_intermediate_default
+        stage2_mode == MoeGemm2Mode.REDUCE
+        and hidden_states.dtype == torch.bfloat16
+        and f16_reduce_intermediate_default
     ):
         # V92: keep the API output in bf16, but let non-atomic GEMM2 write the
         # topk intermediate as f16. This removes bf16 conversion cost from the
@@ -672,7 +753,9 @@ def fused_moe_flydsl(
     if fp8_per_token and _fuse_quant2_zero and _fused_zero_output is not None:
         output = _fused_zero_output
     else:
-        output = torch.empty((B, model_dim), dtype=stage2_out_dtype, device=hidden_states.device)
+        output = torch.empty(
+            (B, model_dim), dtype=stage2_out_dtype, device=hidden_states.device
+        )
     if stage2_mode == MoeGemm2Mode.ATOMIC:
         if fp8_per_token and _fuse_quant2_zero and _fused_zero_output is not None:
             pass
@@ -709,7 +792,9 @@ def fused_moe_flydsl(
         tile_n=stage2_tile_n,
         tile_k=stage2_tile_k,
         doweight_stage2=(not doweight_stage1)
-        and not (fp8_per_token and s2_in_dtype == stage_dtype and fold_weight_into_a2_scale),
+        and not (
+            fp8_per_token and s2_in_dtype == stage_dtype and fold_weight_into_a2_scale
+        ),
         in_dtype=s2_in_dtype,
         out_dtype=stage2_out_dtype_name,
         use_cshuffle_epilog=not stage2_force_f32_atomic,
@@ -731,6 +816,7 @@ def fused_moe_flydsl(
         cshuffle_nlane=stage2_cshuffle_nlane,
         reduction_input_cache_modifier=reduction_in_cache_default,
         reduction_output_cache_modifier=reduction_out_cache_default,
+        single_token_route=use_route_free,
     )
     _s2_args = (
         output,
