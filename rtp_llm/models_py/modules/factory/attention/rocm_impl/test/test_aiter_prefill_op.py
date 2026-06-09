@@ -43,7 +43,13 @@ try:
         AiterPrefillImplPaged,
         FMHAParams,
     )
-    from rtp_llm.ops import AttentionConfigs, PyAttentionInputs, RopeConfig, RopeStyle
+    from rtp_llm.ops import (
+        AttentionConfigs,
+        KvCacheDataType,
+        PyAttentionInputs,
+        RopeConfig,
+        RopeStyle,
+    )
     from rtp_llm.ops.compute_ops import get_typemeta
 
     _OPS_IMPORTABLE = True
@@ -68,6 +74,7 @@ def _make_attn_configs(
     cfg.is_causal = True
     cfg.use_mla = False
     cfg.dtype = torch.float16
+    cfg.kv_cache_dtype = KvCacheDataType.BASE
     return cfg
 
 
@@ -591,13 +598,21 @@ class TestCompactGatherReshape(unittest.TestCase):
     prefill-with-prefix path on GPU.
     """
 
-    def _make_op(self, head_num_kv=4, head_dim=128, tokens_per_block=16):
+    def _make_op(
+        self,
+        head_num_kv=4,
+        head_dim=128,
+        tokens_per_block=16,
+        kv_cache_dtype=None,
+    ):
         cfg = _make_attn_configs(
             head_num=8,
             head_num_kv=head_num_kv,
             head_dim=head_dim,
             tokens_per_block=tokens_per_block,
         )
+        if kv_cache_dtype is not None:
+            cfg.kv_cache_dtype = kv_cache_dtype
         return AiterPrefillAttnOp(cfg, v1_kv_layout=True)
 
     def _make_kv_cache_5d(self, num_blocks, hk, ps, hd, dtype=torch.float16):
@@ -608,11 +623,35 @@ class TestCompactGatherReshape(unittest.TestCase):
         """Create a 2D flat KV cache: [num_blocks, 2*hk*ps*hd]."""
         return torch.randn(num_blocks, 2 * hk * ps * hd, dtype=dtype)
 
+    def _make_compact_bufs(self, block_table, hk, ps, hd, dtype=torch.float16):
+        """Build block_indices, compact_block_table, and compact K/V buffers."""
+        block_indices = block_table.reshape(-1).to(torch.int64)
+        num_gathered = block_indices.numel()
+        compact_block_table = torch.arange(
+            num_gathered, dtype=torch.int32, device=block_table.device
+        ).view_as(block_table)
+        vs = 16 // torch.tensor([], dtype=dtype).element_size()
+        n = num_gathered + 1
+        k_buf = torch.zeros(
+            (n, hk, hd // vs, ps, vs), dtype=dtype, device=block_table.device
+        )
+        v_buf = torch.zeros(
+            (n, hk, ps // vs, hd, vs), dtype=dtype, device=block_table.device
+        )
+        return block_indices, compact_block_table, k_buf, v_buf
+
     def _assert_compact_equiv(self, op, kv_cache, block_table):
         """Assert compact gather plus remap equals full reshape indexed by block_table."""
         k_full, v_full = op._reshape_kv_cache_vectorized(kv_cache)
-        k_compact, v_compact, compact_bt = op._gather_and_reshape_kv_compact(
-            kv_cache, block_table
+        block_indices, compact_bt, k_buf, v_buf = self._make_compact_bufs(
+            block_table,
+            op.head_num_kv,
+            op.tokens_per_block,
+            op.head_dim,
+            kv_cache.dtype,
+        )
+        k_compact, v_compact = op._gather_and_reshape_kv_compact(
+            kv_cache, block_indices, k_buf, v_buf
         )
 
         # Remapped compact K/V should produce the same per-table K/V as the
@@ -621,9 +660,21 @@ class TestCompactGatherReshape(unittest.TestCase):
         orig_indices = block_table.reshape(-1).to(torch.int64)
         torch.testing.assert_close(k_compact[flat_bt], k_full[orig_indices])
         torch.testing.assert_close(v_compact[flat_bt], v_full[orig_indices])
-        # Compact buffer has unique blocks + 1 trailing dummy zero-block for
-        # CK speculative prefetch safety.
-        self.assertEqual(k_compact.shape[0], torch.unique(orig_indices).numel() + 1)
+        # Compact buffer has all referenced blocks + 1 trailing dummy zero-block
+        # for CK speculative prefetch safety.
+        self.assertEqual(k_compact.shape[0], orig_indices.numel() + 1)
+
+    def test_kv_cache_dtype_controls_compact_mode(self):
+        cases = [
+            (KvCacheDataType.BASE, torch.float16, True),
+            (KvCacheDataType.INT8, torch.int8, True),
+            (KvCacheDataType.FP8, torch.float8_e4m3fn, False),
+        ]
+        for kv_cache_dtype, expected_torch_dtype, expected_use_compact in cases:
+            with self.subTest(kv_cache_dtype=kv_cache_dtype):
+                op = self._make_op(kv_cache_dtype=kv_cache_dtype)
+                self.assertEqual(op.kv_cache_torch_dtype, expected_torch_dtype)
+                self.assertEqual(op.use_compact, expected_use_compact)
 
     # ---- 5D cache path ----------------------------------------------------
 
@@ -644,15 +695,18 @@ class TestCompactGatherReshape(unittest.TestCase):
         op = self._make_op()
         kv = self._make_kv_cache_5d(16, 4, 16, 128)
         bt = torch.tensor([[0, 0, 1], [0, 2, 2]], dtype=torch.int32)
-        k_compact, v_compact, compact_bt = op._gather_and_reshape_kv_compact(kv, bt)
-        # Rows that map to the same original block should have identical data
+        block_indices, compact_bt, k_buf, v_buf = self._make_compact_bufs(
+            bt, 4, 16, 128
+        )
+        k_compact, v_compact = op._gather_and_reshape_kv_compact(
+            kv, block_indices, k_buf, v_buf
+        )
         k_full, _ = op._reshape_kv_cache_vectorized(kv)
         orig_indices = bt.reshape(-1).to(torch.int64)
         torch.testing.assert_close(
             k_compact[compact_bt.reshape(-1).to(torch.int64)], k_full[orig_indices]
         )
-        # 3 unique blocks + 1 trailing dummy zero-block
-        self.assertEqual(k_compact.shape[0], 4)
+        self.assertEqual(k_compact.shape[0], bt.numel() + 1)
 
     def test_5d_non_contiguous_blocks(self):
         """Block indices are sparse across a large pool."""
@@ -679,27 +733,95 @@ class TestCompactGatherReshape(unittest.TestCase):
         op = self._make_op()
         kv = self._make_kv_cache_2d(16, 4, 16, 128)
         bt = torch.tensor([[0, 0, 1], [0, 2, 2]], dtype=torch.int32)
-        k_compact, v_compact, compact_bt = op._gather_and_reshape_kv_compact(kv, bt)
+        block_indices, compact_bt, k_buf, v_buf = self._make_compact_bufs(
+            bt, 4, 16, 128
+        )
+        k_compact, v_compact = op._gather_and_reshape_kv_compact(
+            kv, block_indices, k_buf, v_buf
+        )
         k_full, _ = op._reshape_kv_cache_vectorized(kv)
         orig_indices = bt.reshape(-1).to(torch.int64)
         torch.testing.assert_close(
             k_compact[compact_bt.reshape(-1).to(torch.int64)], k_full[orig_indices]
         )
-        # 3 unique blocks + 1 trailing dummy zero-block
-        self.assertEqual(k_compact.shape[0], 4)
+        self.assertEqual(k_compact.shape[0], bt.numel() + 1)
+
+    def test_int8_kv_cache_prepares_int8_compact_buffers(self):
+        """INT8 KV cache keeps compact path with buffers matching storage dtype."""
+        from types import SimpleNamespace
+
+        op = self._make_op(kv_cache_dtype=KvCacheDataType.INT8)
+        block_table = torch.tensor([[0, 1, 2]], dtype=torch.int32)
+        fmha_params = SimpleNamespace(
+            kv_cache_block_id_device=block_table,
+            prefill_seqlen_k_int32=torch.tensor([48], dtype=torch.int32),
+            max_seqlen_k=48,
+        )
+
+        op._prepare_block_table_indices(fmha_params)
+
+        self.assertTrue(op.use_compact)
+        self.assertEqual(fmha_params.k_compact_buf.dtype, torch.int8)
+        self.assertEqual(fmha_params.v_compact_buf.dtype, torch.int8)
+        self.assertEqual(
+            fmha_params.k_compact_buf.shape[0], fmha_params.block_indices.numel() + 1
+        )
+        self.assertEqual(fmha_params.k_compact_buf.shape[1:], (4, 8, 16, 16))
+        self.assertEqual(fmha_params.v_compact_buf.shape[1:], (4, 1, 128, 16))
 
     # ---- FP8 fallback: compact should NOT be used -------------------------
 
     def test_fp8_uses_full_reshape(self):
         """When kv_cache is FP8, _forward_paged should use the full reshape path."""
-        op = self._make_op()
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        op = self._make_op(kv_cache_dtype=KvCacheDataType.FP8)
         fp8_dtype = torch.float8_e4m3fn
         kv = torch.randn(16, 2, 4, 16, 128, dtype=torch.float16).to(fp8_dtype)
-        is_fp8 = kv.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
-        self.assertTrue(is_fp8)
-        # Compact path condition: v1_kv_layout=True AND not FP8
-        use_compact = op.v1_kv_layout and not is_fp8
-        self.assertFalse(use_compact)
+        q = torch.randn(4, 8, 128, dtype=torch.float16)
+        block_table = torch.tensor([[0]], dtype=torch.int32)
+        fmha_params = SimpleNamespace(
+            cu_seqlens_q=torch.tensor([0, 4], dtype=torch.int32),
+            prefill_seqlen_k_int32=torch.tensor([4], dtype=torch.int32),
+            max_seqlen_q=4,
+            max_seqlen_k=4,
+            token_q_num=4,
+            sanitized_block_table=block_table,
+            compact_block_table=torch.tensor([[0]], dtype=torch.int32),
+            block_indices=block_table.reshape(-1).to(torch.int64),
+            k_compact_buf=None,
+            v_compact_buf=None,
+        )
+        kv_cache = SimpleNamespace(kv_cache_base=kv)
+        expected = torch.zeros(4, 8, 128, dtype=torch.float16)
+
+        def fake_full_reshape(kv_cache_base):
+            self.assertIs(kv_cache_base, kv)
+            return expected, expected
+
+        def fake_prefill(query, k_cache, v_cache, *args, **kwargs):
+            self.assertIs(k_cache, expected)
+            self.assertIs(v_cache, expected)
+            self.assertIs(kwargs["block_table"], block_table)
+            return torch.zeros(4, 8, 128, dtype=torch.float16)
+
+        prefill_func = (
+            "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter."
+            "aiter.mha_batch_prefill_func"
+        )
+
+        with patch.object(
+            op, "_gather_and_reshape_kv_compact", side_effect=AssertionError
+        ), patch.object(
+            op, "_reshape_kv_cache_vectorized", side_effect=fake_full_reshape
+        ) as full_reshape, patch(
+            prefill_func, side_effect=fake_prefill
+        ):
+            op._forward_paged(q, kv_cache, fmha_params)
+
+        self.assertFalse(op.use_compact)
+        self.assertEqual(full_reshape.call_count, 1)
 
     # ---- block table sanitization ------------------------------------------
 
@@ -714,7 +836,7 @@ class TestCompactGatherReshape(unittest.TestCase):
         seqlen_k = torch.tensor([16, 33], dtype=torch.int32)
         # Row 0: valid_blocks=ceil(16/16)=1 → only col0 is valid, rest filled with bt[0,0]=3
         # Row 1: valid_blocks=ceil(33/16)=3 → cols 0-2 valid, col3 filled with bt[1,2]=9
-        sanitized = op._sanitize_block_table(bt, block_num=8, seqlen_k=seqlen_k, max_seqlen_k=33)
+        sanitized = op._sanitize_block_table(bt, seqlen_k=seqlen_k, max_seqlen_k=33)
         # Check the first 4 columns (original width) for sanitize correctness.
         first_4 = sanitized[:, :4].tolist()
         self.assertEqual(first_4, [[3, 3, 3, 3], [7, 8, 9, 9]])
@@ -722,8 +844,10 @@ class TestCompactGatherReshape(unittest.TestCase):
         if sanitized.shape[1] > 4:
             for row_idx, expected_fill in enumerate([3, 9]):
                 pad_vals = sanitized[row_idx, 4:].tolist()
-                self.assertTrue(all(v == expected_fill for v in pad_vals),
-                                f"Row {row_idx} pad columns should all be {expected_fill}, got {pad_vals}")
+                self.assertTrue(
+                    all(v == expected_fill for v in pad_vals),
+                    f"Row {row_idx} pad columns should all be {expected_fill}, got {pad_vals}",
+                )
 
     # ---- different head_dim / tokens_per_block configs --------------------
 
@@ -800,8 +924,12 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
 
             # Build prefix-causal attention mask: Q[i] attends to K[j] where j <= p_len + i
             # i.e. for each Q position i, the valid KV range is [0, p_len + i].
-            q_positions = torch.arange(q_len, device=q.device).unsqueeze(1) + p_len  # [q_len, 1]
-            k_positions = torch.arange(kv_len, device=q.device).unsqueeze(0)  # [1, kv_len]
+            q_positions = (
+                torch.arange(q_len, device=q.device).unsqueeze(1) + p_len
+            )  # [q_len, 1]
+            k_positions = torch.arange(kv_len, device=q.device).unsqueeze(
+                0
+            )  # [1, kv_len]
             # mask[i, j] = True means BLOCKED (will be set to -inf)
             causal_mask = k_positions > q_positions  # [q_len, kv_len]
 
@@ -851,8 +979,13 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
         # Allocate paged KV cache pool with random data
         num_pool_blocks = batch_size * blocks_per_seq + 8
         kv_cache_base = torch.randn(
-            num_pool_blocks, 2, head_num_kv, tokens_per_block, head_dim,
-            dtype=dtype, device=device,
+            num_pool_blocks,
+            2,
+            head_num_kv,
+            tokens_per_block,
+            head_dim,
+            dtype=dtype,
+            device=device,
         )
 
         # Build block_table with extra padding columns (-1) to exercise sanitize.
@@ -862,7 +995,9 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
         )
         block_offset = 0
         for b in range(batch_size):
-            num_valid_blocks = (kv_lengths[b] + tokens_per_block - 1) // tokens_per_block
+            num_valid_blocks = (
+                kv_lengths[b] + tokens_per_block - 1
+            ) // tokens_per_block
             for col in range(num_valid_blocks):
                 block_table[b, col] = block_offset + col
             block_offset += num_valid_blocks
@@ -898,7 +1033,9 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
                 k_logical = k_vec.permute(0, 2, 1, 3).reshape(
                     head_num_kv, tokens_per_block, head_dim
                 )
-                k_tokens.append(k_logical[:, :num_toks, :].permute(1, 0, 2))  # [num_toks, hk, hd]
+                k_tokens.append(
+                    k_logical[:, :num_toks, :].permute(1, 0, 2)
+                )  # [num_toks, hk, hd]
 
                 # V: v_vec[h, a, b, c] = V[h, token=a*x+c, dim=b]
                 # Read logical V[h, t, d] = v_vec[h, t//x, d, t%x]
@@ -908,13 +1045,17 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
                 v_logical = v_vec.permute(0, 1, 3, 2).reshape(
                     head_num_kv, tokens_per_block, head_dim
                 )
-                v_tokens.append(v_logical[:, :num_toks, :].permute(1, 0, 2))  # [num_toks, hk, hd]
+                v_tokens.append(
+                    v_logical[:, :num_toks, :].permute(1, 0, 2)
+                )  # [num_toks, hk, hd]
 
             all_k_flat.append(torch.cat(k_tokens, dim=0))
             all_v_flat.append(torch.cat(v_tokens, dim=0))
 
         # Generate Q tokens (only input_lengths, not prefix)
-        q_flat = torch.randn(total_q_tokens, head_num, head_dim, dtype=dtype, device=device)
+        q_flat = torch.randn(
+            total_q_tokens, head_num, head_dim, dtype=dtype, device=device
+        )
 
         # Build operator
         cfg = _make_attn_configs(head_num, head_num_kv, head_dim, tokens_per_block)
@@ -954,9 +1095,14 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
         k_all = torch.cat(all_k_flat, dim=0)
         v_all = torch.cat(all_v_flat, dim=0)
         ref = self._prefix_causal_sdpa_reference(
-            q_flat, k_all, v_all,
-            input_lengths, prefix_lengths,
-            head_num, head_num_kv, head_dim,
+            q_flat,
+            k_all,
+            v_all,
+            input_lengths,
+            prefix_lengths,
+            head_num,
+            head_num_kv,
+            head_dim,
         )
 
         # Numerical regression: kernel output must match reference within fp16 tolerance.
