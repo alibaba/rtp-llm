@@ -131,6 +131,36 @@ static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
     return config;
 }
 
+static bool isHcaStateGroup(const CacheConfig& config, int gid) {
+    return gid >= 0 && static_cast<size_t>(gid) < config.group_region_names.size()
+           && config.group_region_names[static_cast<size_t>(gid)] == KVCacheRegionName::HCA_STATE;
+}
+
+static int dsv4ActiveTailBlocks(const CacheConfig& config, int gid) {
+    return isHcaStateGroup(config, gid) ? 1 : 2;
+}
+
+static void expectDsv4SwaAllocatedBlocks(const CacheConfig& config,
+                                         const BlockIndicesType& blocks,
+                                         int gid,
+                                         const std::string& label,
+                                         bool enable_reuse_cache = false) {
+    const int active_tail_blocks = dsv4ActiveTailBlocks(config, gid);
+    const int tail_begin         = std::max(static_cast<int>(blocks.size()) - active_tail_blocks, 0);
+    const int linear_step        = std::max(1, config.linear_step);
+    const bool effective_reuse   = enable_reuse_cache && !isHcaStateGroup(config, gid);
+    for (int i = 0; i < static_cast<int>(blocks.size()); ++i) {
+        const bool should_allocate = i >= tail_begin || (effective_reuse && ((i + 1) % linear_step == 0));
+        if (should_allocate) {
+            EXPECT_FALSE(isNullBlockIdx(blocks[static_cast<size_t>(i)]))
+                << label << " group " << gid << " pos " << i;
+        } else {
+            EXPECT_TRUE(isNullBlockIdx(blocks[static_cast<size_t>(i)]))
+                << label << " group " << gid << " pos " << i;
+        }
+    }
+}
+
 // Creates an intentionally tight DSV4 config for eviction stress tests: FULL
 // groups use a large paged pool, while SWA groups use a small fixed pool.
 static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, uint32_t swa_batch_size) {
@@ -459,9 +489,7 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
             EXPECT_FALSE(isNullBlockIdx(blocks[1])) << "paged group " << gid;
             EXPECT_FALSE(isNullBlockIdx(blocks[2])) << "paged group " << gid;
         } else {
-            EXPECT_TRUE(isNullBlockIdx(blocks[0])) << "tail group " << gid << " should skip non-tail block";
-            EXPECT_FALSE(isNullBlockIdx(blocks[1])) << "tail group " << gid;
-            EXPECT_FALSE(isNullBlockIdx(blocks[2])) << "tail group " << gid;
+            expectDsv4SwaAllocatedBlocks(manager_config, blocks, gid, "tail group");
         }
     }
 
@@ -577,7 +605,9 @@ TEST_F(KVCacheManagerTest, DSV4BlockCopyPreservesTypedRegionBytes) {
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
         const auto& blocks = resource->blocks(0, gid);
         EXPECT_NE(std::find(blocks.begin(), blocks.end(), src_block), blocks.end()) << "group " << gid;
-        EXPECT_NE(std::find(blocks.begin(), blocks.end(), dst_block), blocks.end()) << "group " << gid;
+        if (!isHcaStateGroup(manager_config, gid)) {
+            EXPECT_NE(std::find(blocks.begin(), blocks.end(), dst_block), blocks.end()) << "group " << gid;
+        }
     }
 
     struct RegionCase {
@@ -692,15 +722,11 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
     first_malloc.enable_device_cache = false;
     ASSERT_TRUE(manager->malloc(first_malloc).success);
 
-    std::vector<std::pair<BlockIdxType, BlockIdxType>> first_swa_tail_blocks;
-    first_swa_tail_blocks.reserve(kDsv4PoolNum - 3);
+    std::vector<BlockIdxType> first_swa_tail_blocks(static_cast<size_t>(kDsv4PoolNum), NULL_BLOCK_IDX);
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
         ASSERT_EQ(first_resource->blocksNum(0, gid), 4) << "first SWA group " << gid;
-        ASSERT_TRUE(isNullBlockIdx(first_resource->blocks(0, gid)[0]));
-        ASSERT_TRUE(isNullBlockIdx(first_resource->blocks(0, gid)[1]));
-        ASSERT_FALSE(isNullBlockIdx(first_resource->blocks(0, gid)[2]));
-        ASSERT_FALSE(isNullBlockIdx(first_resource->blocks(0, gid)[3]));
-        first_swa_tail_blocks.emplace_back(first_resource->blocks(0, gid)[2], first_resource->blocks(0, gid)[3]);
+        expectDsv4SwaAllocatedBlocks(manager_config, first_resource->blocks(0, gid), gid, "first SWA");
+        first_swa_tail_blocks[static_cast<size_t>(gid)] = first_resource->blocks(0, gid)[3];
     }
 
     // Simulate one generated token before inserting into the device cache, so
@@ -727,7 +753,7 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
         const auto& blocks = second_resource->blocks(0, gid);
         ASSERT_EQ(blocks.size(), 24u) << "second SWA group " << gid;
         EXPECT_TRUE(isNullBlockIdx(blocks[2])) << "SWA reuse prefix penultimate block is NULL (no prev lookup)";
-        EXPECT_EQ(blocks[3], first_swa_tail_blocks[static_cast<size_t>(gid - 3)].second)
+        EXPECT_EQ(blocks[3], first_swa_tail_blocks[static_cast<size_t>(gid)])
             << "SWA reuse prefix tail block must stay readable";
         EXPECT_FALSE(isNullBlockIdx(blocks[22])) << "second SWA group " << gid << " fresh tail block 22";
         EXPECT_FALSE(isNullBlockIdx(blocks[23])) << "second SWA group " << gid << " fresh tail block 23";
@@ -1071,14 +1097,15 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     // a new allocation correctly triggers LRU eviction from each group's independent BlockCache.
     //
     // Setup: block_num=8 → 7 usable blocks per group (block 0 reserved).
-    // Request seq_len = 3*spb → FULL groups allocate 3 blocks, SWA groups allocate 2 real blocks.
+    // Request seq_len = 3*spb. FULL groups allocate 3 blocks. Reusable SWA groups allocate
+    // linear-step blocks (step=1 here, so all 3), while HCA_STATE keeps only its active tail block.
     // insertIntoCache drops the active tail slot, so each completed request caches:
     //   FULL groups: 2 blocks per group
-    //   SWA  groups: 1 tail block per group
+    //   SWA/state groups: fixed-window cached blocks; HCA_STATE skips reuse.
     //
     // After 3 requests are cached and request-freed:
     //   FULL groups (0,1,2): 6 blocks cached, 1 free → new request needs 3, triggers eviction
-    //   SWA  groups (3,4,5,6): 3 blocks cached, 4 free → new request needs 2, fits without eviction
+    //   SWA/state groups (3,4,5,6): reusable groups may also evict under their independent pools.
     //
     // The fourth allocation MUST succeed via eviction on FULL groups.
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/8);
@@ -1172,8 +1199,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
                 EXPECT_FALSE(isNullBlockIdx(blocks[i])) << "FULL group " << gid << " pos " << i;
             }
         } else {
-            EXPECT_FALSE(isNullBlockIdx(blocks[1])) << "fixed group " << gid << " pos 1";
-            EXPECT_FALSE(isNullBlockIdx(blocks[2])) << "fixed group " << gid << " pos 2";
+            expectDsv4SwaAllocatedBlocks(manager_config, blocks, gid, "fixed group", /*enable_reuse_cache=*/true);
         }
     }
 
@@ -1184,7 +1210,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     manager->free(free_d);
 
     // After freeing D, its blocks (request_ref→0, cache_ref=0 since we did not insert D into cache)
-    // return to the free pool.  FULL: 0 + 3 = 3 free.  SWA: 1 + 2 = 3 free.
+    // return to the free pool.
     // But cached blocks from eviction of A are fully freed (both refs=0) so they also count.
     // Expect freeBlocksNum >= free_after_c (at least as good as before D was allocated).
     EXPECT_GE(manager->freeBlocksNum(), free_after_c);
@@ -1235,7 +1261,7 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
 
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
         ASSERT_EQ(seed_res->blocksNum(0, gid), 2) << "seed group " << gid;
-        ASSERT_FALSE(isNullBlockIdx(seed_res->blocks(0, gid)[0])) << "seed group " << gid;
+        expectDsv4SwaAllocatedBlocks(manager_config, seed_res->blocks(0, gid), gid, "seed group");
     }
 
     manager->insertIntoCache(InsertInfo{seed_res, seed_tokens, /*is_resident=*/false});
@@ -1357,17 +1383,15 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
                 EXPECT_FALSE(isNullBlockIdx(blocks[i])) << "FULL group " << gid << " pos " << i;
             }
         } else {
-            EXPECT_FALSE(isNullBlockIdx(blocks[1])) << "SWA group " << gid << " pos 1";
-            EXPECT_FALSE(isNullBlockIdx(blocks[2])) << "SWA group " << gid << " pos 2";
+            expectDsv4SwaAllocatedBlocks(manager_config, blocks, gid, "SWA group", /*enable_reuse_cache=*/true);
         }
     }
 
     // === Phase 3: Decode incrKVBlock → SWA removeSkippedBlocks + further SWA eviction ===
 
     // --- Incr to 4*spb ---
-    // SWA state: [NULL, A, B] → removeSkippedBlocks(keep_begin=1): pos 0 NULL → skip. No free.
-    // Then allocate 1 new tail block per group (pos 3 >= tail_begin=2 of total_slots=4).
-    // SWA pool after Phase 2: 1 cached + 2 request = 3 used, 0 free → ensureFreeBlocks evicts 1.
+    // Non-HCA SWA state starts from the reusable linear-step allocation and then keeps the active tail window.
+    // HCA_STATE skips reuse and keeps only its active tail block.
     // FULL pool after Phase 2: 4 cached + 3 request = 7 used, 0 free → ensureFreeBlocks evicts 1.
     tokens_c->setSeqLength(4 * spb);
     MallocInfo incr1{res_c, tokens_c};
@@ -1381,17 +1405,12 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     // SWA/state fixed groups retain the current tail window.
     for (int i = 0; i < 4; ++i) {
         int gid = 3 + i;
-        EXPECT_TRUE(isNullBlockIdx(res_c->blocks(0, gid)[0])) << "SWA group " << gid << " pos 0";
-        EXPECT_TRUE(isNullBlockIdx(res_c->blocks(0, gid)[1])) << "SWA group " << gid << " pos 1";
-        EXPECT_FALSE(isNullBlockIdx(res_c->blocks(0, gid)[2])) << "SWA group " << gid << " pos 2";
-        EXPECT_FALSE(isNullBlockIdx(res_c->blocks(0, gid)[3])) << "SWA group " << gid << " pos 3 new";
+        expectDsv4SwaAllocatedBlocks(manager_config, res_c->blocks(0, gid), gid, "SWA group");
     }
 
     // --- Incr to 5*spb ---
-    // SWA state before: [NULL, A, B, C] (size=4).
-    // removeSkippedBlocks: keep_begin = 4-2 = 2. Loop i=0: NULL skip. i=1: A is real → FREE it!
-    // After remove: [NULL, NULL, B, C].
-    // Then allocate 1 new tail block. SWA pool may need another eviction if 0 free.
+    // Non-HCA SWA removes blocks before the active two-block tail; HCA_STATE keeps a one-block tail.
+    // SWA pools may need another eviction if no free block remains.
     tokens_c->setSeqLength(5 * spb);
     MallocInfo incr2{res_c, tokens_c};
     incr2.reuse_cache         = false;
@@ -1404,11 +1423,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     // SWA/state fixed groups keep only the active tail window.
     for (int i = 0; i < 4; ++i) {
         int gid = 3 + i;
-        EXPECT_TRUE(isNullBlockIdx(res_c->blocks(0, gid)[0])) << "SWA group " << gid << " pos 0";
-        EXPECT_TRUE(isNullBlockIdx(res_c->blocks(0, gid)[1])) << "SWA group " << gid << " pos 1 (A freed)";
-        EXPECT_TRUE(isNullBlockIdx(res_c->blocks(0, gid)[2])) << "SWA group " << gid << " pos 2";
-        EXPECT_FALSE(isNullBlockIdx(res_c->blocks(0, gid)[3])) << "SWA group " << gid << " pos 3";
-        EXPECT_FALSE(isNullBlockIdx(res_c->blocks(0, gid)[4])) << "SWA group " << gid << " pos 4";
+        expectDsv4SwaAllocatedBlocks(manager_config, res_c->blocks(0, gid), gid, "SWA group");
     }
 
     // === Phase 4: Free all and verify full pool recovery ===
@@ -1447,7 +1462,7 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
     ASSERT_EQ(resource->groupNums(), kDsv4PoolNum);
 
     // After init: FULL groups (0,1,2) have 4 real blocks each.
-    //             SWA groups (3,4,5,6) have 4 slots: [NULL, NULL, real, real] (only tail 2 allocated).
+    //             SWA groups keep the active tail window; HCA_STATE keeps a one-block tail.
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
         ASSERT_EQ(resource->blocksNum(0, gid), 4) << "group " << gid;
         const auto& blocks = resource->blocks(0, gid);
@@ -1456,10 +1471,7 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
                 EXPECT_FALSE(isNullBlockIdx(blocks[i])) << "FULL group " << gid << " pos " << i;
             }
         } else {
-            EXPECT_TRUE(isNullBlockIdx(blocks[0])) << "SWA group " << gid << " pos 0 should be NULL";
-            EXPECT_TRUE(isNullBlockIdx(blocks[1])) << "SWA group " << gid << " pos 1 should be NULL";
-            EXPECT_FALSE(isNullBlockIdx(blocks[2])) << "SWA group " << gid << " pos 2 should be real";
-            EXPECT_FALSE(isNullBlockIdx(blocks[3])) << "SWA group " << gid << " pos 3 should be real";
+            expectDsv4SwaAllocatedBlocks(manager_config, blocks, gid, "SWA group");
         }
     }
 
@@ -1496,11 +1508,10 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
     // SWA/state fixed groups keep the current tail window.
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
         const auto& blocks = resource->blocks(0, gid);
-        EXPECT_TRUE(isNullBlockIdx(blocks[0])) << "SWA group " << gid << " pos 0 after incr1";
-        EXPECT_TRUE(isNullBlockIdx(blocks[1])) << "SWA group " << gid << " pos 1 after incr1";
-        EXPECT_TRUE(isNullBlockIdx(blocks[2])) << "SWA group " << gid << " pos 2 after incr1";
-        EXPECT_EQ(blocks[3], init_blocks[gid][3]) << "SWA group " << gid << " old tail pos 3";
-        EXPECT_FALSE(isNullBlockIdx(blocks[4])) << "SWA group " << gid << " new block at pos 4";
+        expectDsv4SwaAllocatedBlocks(manager_config, blocks, gid, "SWA group after incr1");
+        if (!isHcaStateGroup(manager_config, gid)) {
+            EXPECT_EQ(blocks[3], init_blocks[gid][3]) << "SWA group " << gid << " old tail pos 3";
+        }
     }
 
     // Four fixed groups freed one stale block and all seven groups allocated one new block.
@@ -1542,17 +1553,14 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
         }
     }
 
-    // SWA/state fixed groups after incr2 keep only the last two positions.
+    // SWA/state fixed groups after incr2 keep their configured active tail window.
     for (int gid_offset = 0; gid_offset < 4; ++gid_offset) {
         int         gid    = 3 + gid_offset;
         const auto& blocks = resource->blocks(0, gid);
-        // Positions 0,1,2 should all be NULL (position 2 was freed by removeSkippedBlocks).
-        EXPECT_TRUE(isNullBlockIdx(blocks[0])) << "SWA group " << gid << " pos 0 after incr2";
-        EXPECT_TRUE(isNullBlockIdx(blocks[1])) << "SWA group " << gid << " pos 1 after incr2";
-        EXPECT_TRUE(isNullBlockIdx(blocks[2])) << "SWA group " << gid << " pos 2 should be freed by removeSkipped";
-        EXPECT_TRUE(isNullBlockIdx(blocks[3])) << "SWA group " << gid << " pos 3 after incr2";
-        EXPECT_EQ(blocks[4], swa_new_C[gid_offset]) << "SWA group " << gid << " pos 4 = old C";
-        EXPECT_FALSE(isNullBlockIdx(blocks[5])) << "SWA group " << gid << " pos 5 = new D";
+        expectDsv4SwaAllocatedBlocks(manager_config, blocks, gid, "SWA group after incr2");
+        if (!isHcaStateGroup(manager_config, gid)) {
+            EXPECT_EQ(blocks[4], swa_new_C[gid_offset]) << "SWA group " << gid << " pos 4 = old C";
+        }
     }
 
     // Free block accounting: SWA freed 1 block per SWA group (4 groups) at removeSkippedBlocks,
@@ -1576,15 +1584,11 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
         ASSERT_EQ(resource->blocksNum(0, gid), 7) << "group " << gid << " after incr3";
     }
 
-    // SWA/state fixed groups after incr3 keep only the last two positions.
+    // SWA/state fixed groups after incr3 keep their configured active tail window.
     for (int gid_offset = 0; gid_offset < 4; ++gid_offset) {
         int         gid    = 3 + gid_offset;
         const auto& blocks = resource->blocks(0, gid);
-        for (int i = 0; i < 5; ++i) {
-            EXPECT_TRUE(isNullBlockIdx(blocks[i])) << "SWA group " << gid << " pos " << i << " after incr3";
-        }
-        EXPECT_FALSE(isNullBlockIdx(blocks[5])) << "SWA group " << gid << " pos 5";
-        EXPECT_FALSE(isNullBlockIdx(blocks[6])) << "SWA group " << gid << " pos 6 = new E";
+        expectDsv4SwaAllocatedBlocks(manager_config, blocks, gid, "SWA group after incr3");
     }
 
     // SWA freed 1 block per SWA group (4) and allocated 1 per all groups (7). Net: -7+4 = -3.

@@ -14,6 +14,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
 namespace test {
@@ -55,6 +56,8 @@ private:
 class KVCacheConnectorCoordinatorTest: public ::testing::Test {
 protected:
     void SetUp() override {
+        old_core_dump_on_exception_                  = StaticConfig::user_ft_core_dump_on_exception;
+        StaticConfig::user_ft_core_dump_on_exception = false;
         rtp_llm::initLogger();
 
         cache_config_.layer_num        = 1;
@@ -108,6 +111,7 @@ protected:
     }
 
     void TearDown() override {
+        StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception_;
         if (coordinator_) {
             // Ensure all internal contexts/connectors are released before gmock leak checker runs at program exit.
             coordinator_->stop_.store(true);
@@ -195,6 +199,7 @@ private:
 
     std::shared_ptr<MockKVCacheAllocator>        allocator_;
     std::shared_ptr<KVCacheConnectorCoordinator> coordinator_;
+    bool                                         old_core_dump_on_exception_{false};
 };
 
 TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryConfigInvalid) {

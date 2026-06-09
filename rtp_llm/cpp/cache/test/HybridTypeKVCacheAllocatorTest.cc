@@ -57,6 +57,7 @@ static CacheConfig makeTinyHybridConfig() {
     config.cache_specs      = {linear_spec, full_spec};
     config.linear_group_num = 1;
     config.full_group_num   = 1;
+    config.group_types      = {CacheGroupType::LINEAR, CacheGroupType::FULL};
 
     // Physical block strides: take max between full and linear.
     config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
@@ -460,9 +461,12 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
     EXPECT_EQ(allocator->freeBlocksNum(), free_before - 4);
 
     KVCacheResource resource;
+    std::vector<CacheGroupType> group_types = {CacheGroupType::LINEAR, CacheGroupType::FULL};
     resource.initGroups(/*group_nums=*/2,
                         /*layer_num=*/static_cast<int>(config.layer_all_num),
-                        /*layer_to_group_id=*/config.layer_to_group_id);
+                        /*layer_to_group_id=*/config.layer_to_group_id,
+                        /*kernel_blocks_per_kv_block=*/config.kernelBlocksPerKvBlock(),
+                        /*group_types=*/group_types);
     resource.cacheKeys() = CacheKeysType{100, 101, 102};
     resource.mutableBlockIds(/*gid=*/0).assign(
         BlockIndicesType{blocks[0], 0, blocks[1]});  // linear group (contains a 0)
