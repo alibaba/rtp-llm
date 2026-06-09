@@ -139,7 +139,9 @@ def store_ssm_state_to_block_map_kernel(
         dest_block_pos = (
             prefix + chunk * CHUNK_SIZE + CHUNK_SIZE - 1
         ) // SEQ_SIZE_PER_BLOCK
-        source_ptr = h + (i_c + 1) * SSM_PER_BATCH + i_h * SSM_PER_HEAD
+        source_ptr = (
+            h + (i_c.to(tl.int64) + 1) * SSM_PER_BATCH + i_h * SSM_PER_HEAD
+        )
         should_write = True
 
     if not should_write:
