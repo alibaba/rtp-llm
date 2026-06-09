@@ -1504,6 +1504,12 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
                                         "EnqueueBatch dispatch timeout for dp_rank "
                                             + std::to_string(dispatch_targets[i].dp_rank)),
                            EnqueueBatchResponsePB());
+            for (const auto& dp_input : dispatch_targets[i].request.requests()) {
+                if (dp_input.has_input()) {
+                    auto entry = response_registry_.get(dp_input.input().request_id());
+                    cancelResponseEntry(entry);
+                }
+            }
         });
     detachLeftoverFutures(dispatch_futures);
 
@@ -1826,13 +1832,15 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*           conte
             collectFutures(prepare_futures, prepare_deadline,
                 [&](size_t i) { prepare_futures[i].get(); },
                 [&](size_t i) {
-                    auto& slot = slots[i];
-                    if (slot.entry) {
-                        slot.entry->cancelled.store(true);
-                    }
-                    slot.stage_status =
+                    cancelResponseEntry(slots[i].entry);
+                    slots[i].stage_status =
                         grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "EnqueueGroup prepare timeout");
                 });
+            for (auto& f : prepare_futures) {
+                if (f.valid()) {
+                    f.wait_for(std::chrono::seconds(2));
+                }
+            }
             detachLeftoverFutures(prepare_futures);
 
             std::vector<LocalSlot*> ready_slots;
@@ -1946,13 +1954,13 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*           conte
             collectFutures(load_futures, load_deadline,
                 [&](size_t i) { load_futures[i].get(); },
                 [&](size_t i) {
-                    auto* slot = stream_ready_slots[i];
-                    if (slot->entry) {
-                        slot->entry->cancelled.store(true);
-                    }
-                    fail_slot(*slot,
-                              grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "EnqueueGroup load cache timeout"));
+                    cancelResponseEntry(stream_ready_slots[i]->entry);
                 });
+            for (auto& f : load_futures) {
+                if (f.valid()) {
+                    f.wait_for(std::chrono::seconds(2));
+                }
+            }
             detachLeftoverFutures(load_futures);
         });
         worker.detach();
