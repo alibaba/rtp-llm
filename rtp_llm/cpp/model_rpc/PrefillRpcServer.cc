@@ -110,7 +110,13 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
-    auto input                            = QueryConverter::transQuery(prefill_context.rpc_context.request);
+    auto input       = QueryConverter::transQuery(prefill_context.rpc_context.request);
+    auto support_res = validateInputRuntimeSupport(*input);
+    if (!support_res.ok()) {
+        prefill_context.error_info   = support_res;
+        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        return;
+    }
     input->generate_config->pd_separation = true;
     if (engine_->isMTPEagle()) {
         input->generate_config->force_disable_sp_run = false;
