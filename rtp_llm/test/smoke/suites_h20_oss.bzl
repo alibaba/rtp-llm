@@ -494,17 +494,13 @@ def h20_oss_suites():
                 name="kimi_pd_decode_entrance",
                 task_info="data/model/kimi_linear/q_r_bf16_tp2_pd_sep.json",
                 envs={
-                    "prefill": ["DECODE_ENTRANCE=1"],
-                    "decode": ["DECODE_ENTRANCE=1"],
+                    "prefill": ["DECODE_ENTRANCE=1", "TRITON_AUTOTUNE_CACHE_MODE=cached"],
+                    "decode": ["DECODE_ENTRANCE=1", "TRITON_AUTOTUNE_CACHE_MODE=cached"],
                 },
                 enable_decode_entrance=True,
                 smoke_args= {
                     "prefill": "--seq_size_per_block 2048 --act_type BF16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
                     "decode": "--seq_size_per_block 2048 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192"
-                },
-                envs={
-                    "prefill": ["TRITON_AUTOTUNE_CACHE_MODE=cached"],
-                    "decode": ["TRITON_AUTOTUNE_CACHE_MODE=cached"],
                 },
                 gpu_type=["H20"],
             ),
