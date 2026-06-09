@@ -75,6 +75,7 @@ cc_library(
         ":multimodal_error",
         ":mm_processor_config",
         "//rtp_llm/cpp/config:mm_transport_mode",
+        "//rtp_llm/cpp/engine_base/stream:input_embeddings_utils",
         "//rtp_llm/cpp/multimodal_processor/transport:mm_remote_output_transport",
         # Lean RPC targets avoid a dependency cycle through :model_rpc_server.
         "//rtp_llm/cpp/model_rpc:multimodal_pb_converter",

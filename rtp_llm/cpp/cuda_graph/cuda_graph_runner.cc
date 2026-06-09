@@ -1178,6 +1178,11 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
         return false;
     }
 
+    if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+        RTP_LLM_LOG_DEBUG("cuda graph disabled for request: input_embeddings present");
+        return false;
+    }
+
     if (is_target_verify_) {
         if (!inputs.attention_inputs.is_target_verify || !inputs.attention_inputs.is_prefill) {
             return false;

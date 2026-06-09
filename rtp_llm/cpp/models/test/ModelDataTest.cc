@@ -281,4 +281,26 @@ TEST_F(ModelDataTest, testPrefillCudaGraphRejectsDistributedOrEplbMoe) {
     EXPECT_FALSE(supportsPrefillCudaGraphMoe(description, ParallelismConfig{}, makePrefillCudaGraphMoeRuntimeConfig()));
 }
 
+TEST_F(ModelDataTest, testContextParallelRejectsInputEmbeddingsBeforeMicroBatch) {
+    ExecProperties device_props;
+    device_props.enable_prefill_cp        = true;
+    device_props.enable_layer_micro_batch = MicroBatchType::DS_PREFILL;
+
+    GptModelInputs inputs;
+    inputs.input_embeddings = std::vector<torch::Tensor>{torch::rand({1, 8}, torch::kFloat32)};
+
+    EXPECT_THROW(PyWrappedModel::rejectContextParallelInputEmbeddings(device_props, inputs), std::exception);
+}
+
+TEST_F(ModelDataTest, testContextParallelAllowsEmptyInputEmbeddings) {
+    ExecProperties device_props;
+    device_props.enable_prefill_cp        = true;
+    device_props.enable_layer_micro_batch = MicroBatchType::DS_PREFILL;
+
+    GptModelInputs inputs;
+    inputs.input_embeddings = std::vector<torch::Tensor>();
+
+    EXPECT_NO_THROW(PyWrappedModel::rejectContextParallelInputEmbeddings(device_props, inputs));
+}
+
 }  // namespace rtp_llm

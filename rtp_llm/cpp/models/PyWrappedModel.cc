@@ -73,6 +73,18 @@ private:
     bool                                   active_{false};
 };
 
+bool hasMicroBatchIncompatibleEmbeddingInputs(const GptModelInputs& inputs) {
+    const bool has_bert_token_type_ids =
+        inputs.combo_tokens_type_ids.defined() && inputs.combo_tokens_type_ids.numel() > 0;
+    const bool has_text_tokens_mask    = inputs.text_tokens_mask.defined() && inputs.text_tokens_mask.numel() > 0;
+    const bool has_multimodal_features = inputs.multimodal_features && !inputs.multimodal_features->empty();
+    const bool has_multimodal_locs     = inputs.mm_features_locs.defined() && inputs.mm_features_locs.numel() > 0;
+    const bool has_multimodal_extra    = inputs.mm_extra_input && !inputs.mm_extra_input->empty();
+    const bool has_input_embeddings    = inputs.input_embeddings && !inputs.input_embeddings->empty();
+    return has_bert_token_type_ids || has_text_tokens_mask || has_multimodal_features || has_multimodal_locs
+           || has_multimodal_extra || has_input_embeddings;
+}
+
 }  // namespace
 
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
@@ -259,6 +271,15 @@ torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
 
 bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
     return has_mtp_hidden_buffer_;
+}
+
+void PyWrappedModel::rejectContextParallelInputEmbeddings(const ExecProperties& device_props,
+                                                          const GptModelInputs& inputs) {
+    if (device_props.enable_prefill_cp) {
+        RTP_LLM_CHECK_WITH_INFO(!inputs.input_embeddings.has_value() || inputs.input_embeddings->empty(),
+                                "input_embeddings is not supported with context parallel (enable_prefill_cp). "
+                                "CP rewrites combo_tokens layout, making input_embeddings_locs invalid.");
+    }
 }
 
 PyWrappedModel::~PyWrappedModel() {
@@ -685,14 +706,19 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         torch::Tensor token_ids = micro_inputs.combo_tokens.clone().cuda();
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
-        input_list.emplace_back(PyModelInputs{token_ids,
-                                              input_hiddens,
-                                              combo_position_ids,
-                                              embedding_inputs,
-                                              multimodal_inputs,
-                                              py_attn_inputs,
-                                              attention_inputs_by_tag,
-                                              bert_embedding_inputs});
+        auto py_model_input = PyModelInputs{token_ids,
+                                            input_hiddens,
+                                            combo_position_ids,
+                                            embedding_inputs,
+                                            multimodal_inputs,
+                                            py_attn_inputs,
+                                            attention_inputs_by_tag,
+                                            bert_embedding_inputs};
+        if (micro_inputs.input_embeddings.has_value() && !micro_inputs.input_embeddings->empty()) {
+            py_model_input.input_embeddings      = micro_inputs.input_embeddings;
+            py_model_input.input_embeddings_locs = micro_inputs.input_embeddings_locs;
+        }
+        input_list.emplace_back(std::move(py_model_input));
     }
 
     const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
@@ -843,7 +869,8 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
                                            torch_ext::BertEmbeddingInputs()});
     auto* runner          = selectGraphRunner(attention_inputs_);
     auto& state           = selectGraphState(attention_inputs_);
-    if (enable_cuda_graph_ && runner != nullptr
+    if (enable_cuda_graph_ && (!inputs.input_embeddings.has_value() || inputs.input_embeddings->empty())
+        && runner != nullptr
         && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         runner->prepareAttentionInputs(py_model_inputs, state);
@@ -860,7 +887,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     attention_inputs_by_tag_ = setupKVCacheForAttentionInputs(attention_inputs_, inputs);
     fusedCopy(d2d_copies_);
 
-    if (enable_cuda_graph_) {
+    if (enable_cuda_graph_ && (!inputs.input_embeddings.has_value() || inputs.input_embeddings->empty())) {
         auto  empty           = torch::Tensor();
         auto  py_model_inputs = PyModelInputs({empty,
                                                empty,
@@ -906,6 +933,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
+
+        rejectContextParallelInputEmbeddings(device_props_, inputs);
 
         if (int(device_props_.enable_layer_micro_batch)) {
             return with_prefill_cuda_graph_status(forwardMicroBatched(inputs));
@@ -960,14 +989,18 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
         CacheStoreWriteCycleGuard cache_store_write_cycle(cache_store_async_writer_, has_cache_store_work);
 
-        auto           py_model_inputs = PyModelInputs({token_ids,
-                                                        input_hiddens,
-                                                        combo_position_ids,
-                                                        embedding_inputs,
-                                                        multimodal_inputs,
-                                                        attention_inputs_,
-                                                        attention_inputs_by_tag_,
-                                                        bert_embedding_inputs});
+        auto py_model_inputs = PyModelInputs({token_ids,
+                                              input_hiddens,
+                                              combo_position_ids,
+                                              embedding_inputs,
+                                              multimodal_inputs,
+                                              attention_inputs_,
+                                              attention_inputs_by_tag_,
+                                              bert_embedding_inputs});
+        if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+            py_model_inputs.input_embeddings      = inputs.input_embeddings;
+            py_model_inputs.input_embeddings_locs = inputs.input_embeddings_locs;
+        }
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -1282,6 +1315,20 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
 MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
     if (!int(device_props_.enable_layer_micro_batch)) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable_layer_micro_batch is false");
+        return {false, {}};
+    }
+
+    // Bert, request-owned multimodal fields, and input embeddings are token aligned,
+    // but the current micro-batch splitter does not slice or rebase them. Keep the
+    // request on the supported non-splitting plan instead of silently reusing
+    // full-request metadata in every micro batch.
+    if (hasMicroBatchIncompatibleEmbeddingInputs(inputs)) {
+        static std::once_flag warning_once;
+        std::call_once(warning_once, []() {
+            RTP_LLM_LOG_WARNING("Bert, request-owned multimodal, or input embedding inputs are incompatible with "
+                                "layer micro-batch; "
+                                "falling back to the non-splitting plan");
+        });
         return {false, {}};
     }
 

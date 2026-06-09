@@ -107,15 +107,15 @@ protected:
     }
 
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
-    grpc::Status serializeErrorMsg(const std::string& request_key,
-                                   const RequestInfo& request_info,
-                                   ErrorInfo          error_info);
+    grpc::Status
+    serializeErrorMsg(const std::string& request_key, const RequestInfo& request_info, ErrorInfo error_info);
     grpc::Status pollStreamOutput(grpc::ServerContext*             context,
                                   const std::string&               request_key,
                                   WriterInterface*                 writer,
                                   std::shared_ptr<GenerateStream>& stream);
 
     // Shared helpers for single and batch paths
+    ErrorInfo validateInputRuntimeSupport(const GenerateInput& input) const;
     ErrorInfo prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output);
     ErrorInfo collectStreamOutput(grpc::ServerContext*                  context,
                                   std::shared_ptr<GenerateStream>&      stream,
