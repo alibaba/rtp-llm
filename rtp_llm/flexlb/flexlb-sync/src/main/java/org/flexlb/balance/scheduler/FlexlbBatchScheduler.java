@@ -110,7 +110,7 @@ public class FlexlbBatchScheduler {
 
             FlexlbConfig cfg = configService.loadBalanceConfig();
             long deadlineMs = computeDeadlineMs(ctx, prefill, cfg);
-            BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode), deadlineMs);
+            BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode), deadlineMs, System.currentTimeMillis());
             String batcherKey = batcherKey(ctx.getRequest(), prefill);
             batchers.computeIfAbsent(batcherKey, k -> {
                 WorkerBatcher b = new WorkerBatcher(k, copyOf(prefill));
@@ -850,7 +850,9 @@ public class FlexlbBatchScheduler {
 
                 // 5. dispatch or wait
                 double fillRatio = batchMaxTokens > 0 ? (double) sumTokens / batchMaxTokens : 1.0;
-                if (fillRatio >= fillThreshold || picked.size() >= batchSizeMax) {
+                long windowMs = cfg.getFlexlbBatchWindowMs();
+                boolean windowExpired = (System.currentTimeMillis() - head.enqueuedAtMs()) >= windowMs;
+                if (fillRatio >= fillThreshold || picked.size() >= batchSizeMax || windowExpired) {
                     for (BatchItem item : picked) {
                         queue.remove(item);
                     }
@@ -899,7 +901,8 @@ public class FlexlbBatchScheduler {
                              Response routeResponse,
                              ServerStatus prefill,
                              ServerStatus decode,
-                             long deadlineMs) {
+                             long deadlineMs,
+                             long enqueuedAtMs) {
         long requestId() {
             return ctx.getRequestId();
         }

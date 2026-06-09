@@ -197,7 +197,7 @@ public class FlexlbConfig {
     /**
      * Maximum time in milliseconds to wait for more requests before flushing a batch.
      */
-    private long flexlbBatchWindowMs = 30;
+    private long flexlbBatchWindowMs = 500;
 
     /**
      * Deadline in milliseconds for EnqueueBatch.
