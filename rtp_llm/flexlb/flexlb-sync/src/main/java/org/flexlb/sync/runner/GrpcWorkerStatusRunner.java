@@ -88,9 +88,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
             return EngineStatusConverter.convertToWorkerStatusResponse(workerStatusPB);
         } catch (Throwable throwable) {
             handleException(throwable);
-            WorkerStatusResponse errorResponse = new WorkerStatusResponse();
-            errorResponse.setMessage("Worker status gRPC call failed: " + throwable.getMessage());
-            return errorResponse;
+            workerStatus.setAlive(false);
+            return null;
         }
     }
 
@@ -102,11 +101,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 return;
             }
 
-            if (newWorkerStatus.getMessage() != null) {
-                workerStatus.setAlive(false);
-                logger.error("query engine worker status via gRPC, msg={}", newWorkerStatus.getMessage());
-                return;
-            }
 
             // Only report success worker status check info
             engineHealthReporter.reportStatusCheckRemoteInfo(modelName, ipPort, newWorkerStatus.getRole(), startTime);
