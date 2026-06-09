@@ -120,6 +120,7 @@ class SetupPdSepConfigTest(TestCase):
         server_config = SimpleNamespace(
             cache_store_listen_port=0,
             cache_store_rdma_listen_port=0,
+            worker_info_port_num=0,
         )
         distribute_config = SimpleNamespace(
             cache_store_connect_port=0,

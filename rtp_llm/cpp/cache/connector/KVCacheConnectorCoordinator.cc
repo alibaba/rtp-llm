@@ -38,10 +38,15 @@ KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&     
 
 KVCacheConnectorCoordinator::~KVCacheConnectorCoordinator() {
     stop_.store(true);
-    // release all connectors to make sure all async context done
+    // Stop update thread first so updateOnce() no longer accesses connectors
+    if (update_thread_) {
+        update_thread_->stop();
+        update_thread_.reset();
+    }
+    // Now safe to release connectors — no concurrent reader
     memory_connector_.reset();
     connectors_.clear();
-    // connectors already released, all async context should be done
+    // Wait for any in-flight async contexts to drain
     autil::ScopedTime2 timer;
     while (true) {
         if (timer.done_ms() > update_interval_ms_ * 2) {
@@ -59,10 +64,6 @@ KVCacheConnectorCoordinator::~KVCacheConnectorCoordinator() {
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    if (update_thread_) {
-        update_thread_->stop();
-        update_thread_.reset();
     }
 }
 
