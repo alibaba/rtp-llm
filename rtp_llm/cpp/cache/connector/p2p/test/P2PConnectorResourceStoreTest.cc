@@ -513,9 +513,10 @@ TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_CancelRecordConsumedAfterRej
     ASSERT_NE(entry, nullptr);
 }
 
-// ==================== Hold-ms Expiry Tests ====================
-// These tests verify Plan D: prefill_resource_hold_ms caps how long a resource
-// stays pinned when decode never sends StartLoad.
+// ==================== Deadline-based Expiry Tests ====================
+// These tests verify that resources expire when their business deadline
+// passes. The hold_ms cap was removed to avoid premature expiration (8312).
+// Resources now use the routing deadline directly.
 
 class P2PConnectorResourceStoreHoldMsTest: public ::testing::Test {
 protected:
@@ -554,7 +555,7 @@ protected:
     std::unique_ptr<P2PConnectorResourceStore> stream_store_;
 };
 
-// Verify that addResource caps deadline to now + hold_ms even when routing deadline is far future
+// Verify that addResource uses the routing deadline directly (no hold_ms cap).
 TEST_F(P2PConnectorResourceStoreHoldMsTest, AddResource_CapsDeadlineToHoldMs) {
     const std::string unique_key  = "hold_ms_cap_test";
     const int64_t     request_id  = 4001;
@@ -562,29 +563,24 @@ TEST_F(P2PConnectorResourceStoreHoldMsTest, AddResource_CapsDeadlineToHoldMs) {
     auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto              resource    = createMockKVCacheResource();
 
-    const int64_t before_add = currentTimeMs();
     ASSERT_TRUE(stream_store_->addResource(meta, resource));
 
-    // Steal immediately to inspect the capped deadline
     auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 200);
     ASSERT_NE(entry, nullptr);
-    // deadline should be capped to ~before_add + 100ms, not the original 1h
-    EXPECT_LE(entry->deadline_ms, before_add + 150);  // allow small tolerance
-    EXPECT_GE(entry->deadline_ms, before_add + 50);
-    EXPECT_LT(entry->deadline_ms, deadline_ms);  // much less than original
+    EXPECT_EQ(entry->deadline_ms, deadline_ms);
 }
 
-// Resource expires after hold_ms and becomes a cancelled_keys_ tombstone
+// Resource expires after its deadline and becomes a cancelled_keys_ tombstone
 TEST_F(P2PConnectorResourceStoreHoldMsTest, ResourceExpiresAfterHoldMs_BecomesTombstone) {
     const std::string unique_key  = "hold_ms_expire_test";
     const int64_t     request_id  = 4002;
-    const int64_t     deadline_ms = getDeadlineMs(3600000);
+    const int64_t     deadline_ms = currentTimeMs() + 100;  // short deadline
     auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto              resource    = createMockKVCacheResource();
 
     ASSERT_TRUE(stream_store_->addResource(meta, resource));
 
-    // Wait for hold_ms (100ms) + check interval (50ms) + margin
+    // Wait for deadline (100ms) + check interval (50ms) + margin
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
     // Resource should be gone from store
@@ -595,11 +591,11 @@ TEST_F(P2PConnectorResourceStoreHoldMsTest, ResourceExpiresAfterHoldMs_BecomesTo
     EXPECT_TRUE(stream_store_->isMarkedCancelled(unique_key));
 }
 
-// Late-arriving decode gets immediate nullptr (not waiting until business deadline)
+// Late-arriving decode gets immediate nullptr because resource already expired
 TEST_F(P2PConnectorResourceStoreHoldMsTest, LateDecodeGetsImmediateRejection) {
     const std::string unique_key  = "hold_ms_late_decode";
     const int64_t     request_id  = 4003;
-    const int64_t     deadline_ms = getDeadlineMs(3600000);
+    const int64_t     deadline_ms = currentTimeMs() + 100;  // short deadline
     auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto              resource    = createMockKVCacheResource();
 
@@ -609,7 +605,7 @@ TEST_F(P2PConnectorResourceStoreHoldMsTest, LateDecodeGetsImmediateRejection) {
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
     // Late decode tries to wait — should return nullptr almost immediately
-    // (not waiting the full business deadline) because cancelled_keys_ wakes it
+    // because cancelled_keys_ wakes it
     const auto start   = currentTimeMs();
     auto       entry   = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 5000);
     const auto elapsed = currentTimeMs() - start;
@@ -622,15 +618,13 @@ TEST_F(P2PConnectorResourceStoreHoldMsTest, LateDecodeGetsImmediateRejection) {
 TEST_F(P2PConnectorResourceStoreHoldMsTest, TombstoneCleanedUpAfterTTL) {
     const std::string unique_key  = "hold_ms_ttl_cleanup";
     const int64_t     request_id  = 4004;
-    const int64_t     deadline_ms = getDeadlineMs(3600000);
-    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
-    auto              resource    = createMockKVCacheResource();
 
     // Use a store with very short TTL for this test
     auto short_ttl_store = std::make_unique<P2PConnectorResourceStore>(
         nullptr, /*timeout_check_interval_ms=*/50, /*prefill_resource_hold_ms=*/50, /*cancelled_keys_ttl_ms=*/200);
     ASSERT_TRUE(short_ttl_store->init());
 
+    const int64_t deadline_ms = currentTimeMs() + 50;  // short deadline matching store's check interval
     auto short_meta = std::make_shared<MockMeta>();
     short_meta->setUniqueKey(unique_key);
     short_meta->setRequestId(request_id);
@@ -638,9 +632,10 @@ TEST_F(P2PConnectorResourceStoreHoldMsTest, TombstoneCleanedUpAfterTTL) {
     short_meta->setPrefillAddr("127.0.0.1", 12345);
     short_meta->setPrefillTpSize(1);
 
+    auto resource = createMockKVCacheResource();
     ASSERT_TRUE(short_ttl_store->addResource(short_meta, resource));
 
-    // Wait for hold_ms expiry → tombstone created
+    // Wait for deadline expiry → tombstone created
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     EXPECT_TRUE(short_ttl_store->isMarkedCancelled(unique_key));
 
@@ -731,7 +726,7 @@ TEST_F(P2PConnectorResourceStoreTest, NotifySideChannelReady_UsesCappedDeadlineF
 TEST_F(P2PConnectorResourceStoreHoldMsTest, ResourceExpiry_AlsoCleansSideChannelData) {
     const std::string unique_key  = "hold_ms_side_channel_cleanup";
     const int64_t     request_id  = 6001;
-    const int64_t     deadline_ms = getDeadlineMs(3600000);  // 1h business deadline
+    const int64_t     deadline_ms = currentTimeMs() + 100;  // short deadline
     auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto              resource    = createMockKVCacheResource();
 
@@ -743,13 +738,13 @@ TEST_F(P2PConnectorResourceStoreHoldMsTest, ResourceExpiry_AlsoCleansSideChannel
     side_data.first_token_id  = 66;
     stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
 
-    // Wait for hold_ms (100ms) + check interval (50ms) + margin
+    // Wait for deadline (100ms) + check interval (50ms) + margin
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
     // Resource should be expired
     EXPECT_TRUE(stream_store_->isMarkedCancelled(unique_key));
 
-    // Side-channel data should also be cleaned up (not lingering for 1h)
+    // Side-channel data should also be cleaned up
     P2PConnectorResourceEntry::SideChannelData consumed_data;
     EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
 }
