@@ -113,6 +113,7 @@ class BackendRPCServerVisitor:
         source_role: str = "frontend",
         mm_model_config=None,
         model_config=None,
+        trans_output_fn=None,
     ) -> None:
         """Initialize BackendRPCServerVisitor.
 
@@ -129,6 +130,8 @@ class BackendRPCServerVisitor:
             parallelism_config: Optional ParallelismConfig for page-RR route cache keys
             prefill_cp_config: Optional PrefillCPConfig for page-RR route cache keys
             source_role: Caller role used for request-info correlation fields.
+            trans_output_fn: Custom function to transform protobuf outputs to Python objects.
+                Passed through to ModelRpcClient. If None, uses default implementation.
         """
         self.cache_key_seed = (
             get_v41_cache_key_seed(model_config) if model_config is not None else 0
@@ -163,6 +166,7 @@ class BackendRPCServerVisitor:
             client_config=client_config,
             max_rpc_timeout_ms=max_rpc_timeout_ms,
             decode_entrance=decode_entrance,
+            trans_output_fn=trans_output_fn,
         )
 
         host_args = HostServiceArgs.create_from_env()
