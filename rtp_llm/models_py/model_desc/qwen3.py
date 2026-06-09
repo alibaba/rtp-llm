@@ -129,9 +129,10 @@ class Qwen3Model(GptModelBase):
 
     def _init_fused(self):
         """Extract weights for fused forward path."""
-        from rtp_llm.models_py.modules.factory.linear.impl.rocm.fp8_ptpc_linear import RocmFp8PTPCLinear
         self._fused_ok = False
-        if not all(isinstance(l.self_attn.qkv_proj, RocmFp8PTPCLinear) for l in self.layers):
+        l0 = self.layers[0].self_attn.qkv_proj
+        if not (hasattr(l0, 'weight') and hasattr(l0, 'weight_scales')
+                and l0.weight.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)):
             return
         if self.kv_cache is not None:
             return
@@ -194,11 +195,6 @@ class Qwen3Model(GptModelBase):
 
         _block_map = inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group
         _has_block_map = _block_map is not None and len(_block_map) > 0
-        if not hasattr(self, '_path_logged'):
-            self._path_logged = True
-            import logging
-            logging.warning("[QWEN3_PATH] fused_ok=%s has_block_map=%s block_map_type=%s" % (
-                self._fused_ok, _has_block_map, type(_block_map).__name__))
         if not self._fused_ok or _has_block_map:
             for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
                 select_block_map_for_layer(inputs.attention_inputs, i)
