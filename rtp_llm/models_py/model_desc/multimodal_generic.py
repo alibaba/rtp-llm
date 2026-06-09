@@ -14,6 +14,7 @@ class MultimodalGenericModel(GenericMoeModel):
         self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        self._reject_input_embeddings(inputs)
         input_ids: torch.Tensor = inputs.input_ids
 
         position_ids = inputs.combo_position_ids
