@@ -7,6 +7,7 @@ per-(row, 32-col) UE8M0 scale. The GEMMs go through DeepGEMM's
 ``recipe=(1, 32)`` (these handle FP8xFP8 with this recipe). SM100 only.
 """
 
+/home/qb429732/RTP-LLM/github-opensource/rtp_llm/models_py/kernels/cuda/mxfp8_ops.pyimport os
 from typing import Optional, Tuple
 
 import torch
@@ -25,12 +26,8 @@ def ue8m0_uint8_to_fp32(scale_u8: torch.Tensor) -> torch.Tensor:
     return torch.exp2(scale_u8.to(torch.float32) - 127.0)
 
 
-def mxfp8_quant_act(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Dynamic per-(row, 32-col) MXFP8 quant of a 2D activation.
-
-    Returns (e4m3 ``[M, K]``, fp32 power-of-two scale ``[M, K // 32]``).
-    The scale is a pure power of two so it is exactly representable as UE8M0.
-    """
+def mxfp8_quant_act_eager(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Eager reference: per-(row, 32-col) MXFP8 quant. Kept for fallback/tests."""
     assert x.dim() == 2, f"expected 2D activation, got {x.shape}"
     M, K = x.shape
     assert K % MX_BLOCK == 0, f"K={K} must be a multiple of {MX_BLOCK}"
@@ -40,6 +37,23 @@ def mxfp8_quant_act(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     scale = torch.exp2(exp)
     q = (xf / scale.unsqueeze(-1)).clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX)
     return q.view(M, K).to(torch.float8_e4m3fn).contiguous(), scale.contiguous()
+
+
+def mxfp8_quant_act(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Dynamic per-(row, 32-col) MXFP8 quant of a 2D activation.
+
+    Returns (e4m3 ``[M, K]``, fp32 power-of-two scale ``[M, K // 32]``).
+    The scale is a pure power of two so it is exactly representable as UE8M0.
+    Uses a single fused Triton kernel; set ``MXFP8_QUANT_EAGER=1`` to fall back
+    to the eager PyTorch reference.
+    """
+    if os.environ.get("MXFP8_QUANT_EAGER") == "1" or not x.is_cuda:
+        return mxfp8_quant_act_eager(x)
+    from rtp_llm.models_py.triton_kernels.moe.mxfp8_kernels import (
+        mxfp8_quant_act_triton,
+    )
+
+    return mxfp8_quant_act_triton(x)
 
 
 def pack_mxfp8_scale(

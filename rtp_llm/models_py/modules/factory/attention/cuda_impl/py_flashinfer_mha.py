@@ -8,12 +8,6 @@ from flashinfer.prefill import (
 )
 
 from rtp_llm.models_py.modules.factory.attention import common
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
-    MhaRotaryEmbeddingOp,
-)
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
-    KVCacheWriteOp,
-)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm_100, force_py_flashinfer
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     check_attention_inputs,
@@ -24,10 +18,11 @@ from rtp_llm.ops import (
     FMHAType,
     KvCacheDataType,
     ParallelismConfig,
-    RopeStyle,
 )
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
+    FusedRopeKVCachePrefillOpQKVOut,
+    FusedRopeKVCachePrefillOpQNoTransposeOut,
     LayerKVCache,
     ParamsBase,
     PyAttentionInputs,
@@ -435,12 +430,16 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         self.attn_inputs = attn_inputs
 
         self.fmha_impl = self._create_fmha_impl(attn_configs, attn_inputs)
-        self.rope_impl = self._create_rope_impl(attn_configs)
-        # Create KV cache write op
-        self.kv_cache_write_op = KVCacheWriteOp(
-            num_kv_heads=attn_configs.kv_head_num,
-            head_size=attn_configs.size_per_head,
-            token_per_block=attn_configs.kernel_tokens_per_block,
+        # Fused RoPE + paged-KV write (rtp_kernel). SM103 is supported since the
+        # 260608 rtp_kernel wheel, so this replaces the previous FlashInfer
+        # MhaRotaryEmbeddingOp + KVCacheWriteOp workaround. The fused op applies
+        # RoPE, appends K/V to the paged cache (FlashInfer-HND layout, read back
+        # by the Python FlashInfer FMHA wrapper) and returns the FMHA query input
+        # in a single kernel launch.
+        self.rope_kvcache_impl = (
+            self._create_rope_kvcache_impl(attn_configs)
+            if self.need_rope_kv_cache
+            else None
         )
         self.create_params(attn_inputs)
         self.fmha_impl.prepare(attn_inputs)
@@ -448,21 +447,23 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.fmha_impl.prepare(attn_inputs, forbid_realloc=True)
+        if self.rope_kvcache_impl is not None:
+            self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
 
     def create_params(self, attn_inputs: PyAttentionInputs):
-        """Create FlashInfer MLA attention parameters.
+        """Create the FlashInfer FMHA params and the fused-RoPE params.
 
-        Similar to MLA implementation, this creates and initializes the params
-        that will be used for both FMHA and RoPE operations.
+        The Python FlashInfer FMHA keeps its own paged-KV metadata params, while
+        the fused RoPE op owns a separate ``FusedRopeAttnParams`` (kv-cache block
+        array, cu_seqlens, prefix lengths, ...). They are independent.
         """
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
-        self.rope_params = self.fmha_params
-        # Pass the shared params to all ops
         self.fmha_impl.set_params(self.fmha_params)
-        if self.rope_impl is not None:
-            self.rope_impl.set_params(self.rope_params)
-        # KV cache write always needs params (even without RoPE)
-        self.kv_cache_write_op.set_params(self.rope_params)
+        self.rope_params = (
+            self.rope_kvcache_impl.prepare(attn_inputs)
+            if self.rope_kvcache_impl is not None
+            else None
+        )
 
     def _create_fmha_impl(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
@@ -470,41 +471,9 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         """Create FMHA implementation. To be overridden by subclasses."""
         raise NotImplementedError("Subclass must implement _create_fmha_impl")
 
-    def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
-        """Create RoPE implementation. To be overridden by subclasses."""
-        raise NotImplementedError("Subclass must implement _create_rope_impl")
-
-    def _split_qkv(
-        self, qkv: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Split QKV tensor into query, key, value.
-
-        Args:
-            qkv: QKV tensor [total_tokens, (num_heads + 2*num_kv_heads) * head_dim]
-
-        Returns:
-            Tuple of (query, key, value) tensors
-        """
-        qkv = qkv.reshape(qkv.shape[0], -1)
-        num_heads = self.attn_configs.head_num
-        num_kv_heads = self.attn_configs.kv_head_num
-        head_dim = self.attn_configs.size_per_head
-
-        q, k, v = torch.split(
-            qkv,
-            [
-                head_dim * num_heads,
-                head_dim * num_kv_heads,
-                head_dim * num_kv_heads,
-            ],
-            dim=-1,
-        )
-
-        query = q.reshape(q.shape[0], num_heads, head_dim)
-        key = k.reshape(k.shape[0], num_kv_heads, head_dim)
-        value = v.reshape(v.shape[0], num_kv_heads, head_dim)
-
-        return query, key, value
+    def _create_rope_kvcache_impl(self, attn_configs: AttentionConfigs) -> Any:
+        """Create the fused RoPE+KV-write op. To be overridden by subclasses."""
+        raise NotImplementedError("Subclass must implement _create_rope_kvcache_impl")
 
     def forward(
         self,
@@ -513,20 +482,10 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         layer_idx: int = 0,
     ) -> torch.Tensor:
         """Common forward implementation for all prefill implementations."""
-        # Apply RoPE and KV Cache processing
-        if self.need_rope_kv_cache:
-            if self.rope_impl is not None:
-                # Apply RoPE and get Q, K, V
-                query, key, value = self.rope_impl.forward(qkv)
-            else:
-                # No RoPE, just split QKV
-                query, key, value = self._split_qkv(qkv)
-
-            # Write KV to cache
-            self.kv_cache_write_op.forward(key, value, kv_cache)
-
-            # Pass query to FMHA (for paged) or reconstruct qkv (for ragged)
-            qkv = self._prepare_fmha_input(query, key, value)
+        # Fused RoPE + paged-KV write; returns the FMHA query input (qkv for the
+        # ragged layout, q for the paged layout).
+        if self.need_rope_kv_cache and self.rope_kvcache_impl is not None:
+            qkv = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
 
         # Apply write cache store if needed
         common.apply_write_cache_store(
@@ -536,16 +495,9 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         # Execute FMHA forward
         return self.fmha_impl.forward(qkv, kv_cache)
 
-    def _prepare_fmha_input(
-        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
-    ) -> torch.Tensor:
-        """Prepare input for FMHA. To be overridden by subclasses if needed."""
-        # Default: just return query (for paged layout)
-        return query
-
 
 class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
-    """FlashInfer prefill implementation with paged KV cache layout using MhaRotaryEmbeddingOp."""
+    """FlashInfer paged prefill implementation; RoPE+KV-write via the fused rtp_kernel op."""
 
     def _create_fmha_impl(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
@@ -553,17 +505,9 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         """Create paged FMHA implementation."""
         return PyFlashinferPrefillPagedAttnOp(attn_configs, attn_inputs)
 
-    def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
-        """Create RoPE implementation for paged layout."""
-        if attn_configs.rope_config.style == RopeStyle.No:
-            return None
-        return MhaRotaryEmbeddingOp(attn_configs)
-
-    def _prepare_fmha_input(
-        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
-    ) -> torch.Tensor:
-        """For paged layout, only return query (KV is already in cache)."""
-        return query
+    def _create_rope_kvcache_impl(self, attn_configs: AttentionConfigs) -> Any:
+        """Fused RoPE+KV-write returning ragged q [tokens, heads, dim] for paged FMHA."""
+        return FusedRopeKVCachePrefillOpQNoTransposeOut(attn_configs)
 
     @staticmethod
     def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
@@ -581,7 +525,7 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
 
 
 class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
-    """FlashInfer prefill implementation with ragged KV cache layout using MhaRotaryEmbeddingOp."""
+    """FlashInfer ragged prefill implementation; RoPE+KV-write via the fused rtp_kernel op."""
 
     def _create_fmha_impl(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
@@ -589,37 +533,9 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         """Create ragged FMHA implementation."""
         return PyFlashinferPrefillAttnOp(attn_configs)
 
-    def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
-        """Create RoPE implementation for ragged layout."""
-        if attn_configs.rope_config.style == RopeStyle.No:
-            return None
-        return MhaRotaryEmbeddingOp(attn_configs)
-
-    def _prepare_fmha_input(
-        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
-    ) -> torch.Tensor:
-        """For ragged layout, reconstruct full qkv tensor from q, k, v."""
-        # query: [total_tokens, num_heads, head_dim]
-        # key: [total_tokens, num_kv_heads, head_dim]
-        # value: [total_tokens, num_kv_heads, head_dim]
-
-        # Flatten to 2D and concatenate
-        q_flat = query.reshape(
-            query.shape[0], -1
-        )  # [total_tokens, num_heads * head_dim]
-        k_flat = key.reshape(
-            key.shape[0], -1
-        )  # [total_tokens, num_kv_heads * head_dim]
-        v_flat = value.reshape(
-            value.shape[0], -1
-        )  # [total_tokens, num_kv_heads * head_dim]
-
-        # Concatenate along feature dimension
-        qkv = torch.cat(
-            [q_flat, k_flat, v_flat], dim=-1
-        )  # [total_tokens, (num_heads + 2*num_kv_heads) * head_dim]
-
-        return qkv
+    def _create_rope_kvcache_impl(self, attn_configs: AttentionConfigs) -> Any:
+        """Fused RoPE+KV-write returning the full qkv [tokens, (h+2kv)*d] for ragged FMHA."""
+        return FusedRopeKVCachePrefillOpQKVOut(attn_configs)
 
     @staticmethod
     def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
@@ -769,24 +685,20 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         # C++ fill_params_mha_device.
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
 
-        # SM103/B300: the fused C++ decode RoPE+KV-write kernel
-        # (decode_fused_rope_kvcache / invokeDecodeAddFusedQKVBiasTranspose) has
-        # no kernel image and hard-aborts. Mirror the (proven SM103-safe) prefill
-        # paged path instead: apply RoPE with FlashInfer (MhaRotaryEmbeddingOp)
-        # and append K/V to the paged cache with FlashInfer (KVCacheWriteOp),
-        # both sharing the params already filled above.
-        self.rope_impl: Optional[MhaRotaryEmbeddingOp] = None
-        self.kv_cache_write_op: Optional[KVCacheWriteOp] = None
+        # Fused decode RoPE + paged-KV write (rtp_kernel). The fused C++ decode
+        # kernel (decode_fused_rope_kvcache) gained an SM103 image in the 260608
+        # rtp_kernel wheel, so it replaces the previous FlashInfer
+        # MhaRotaryEmbeddingOp + KVCacheWriteOp workaround. It applies RoPE,
+        # appends K/V to the paged cache (FlashInfer-HND layout, read back by the
+        # Python FlashInfer decode wrapper) and returns the rotated query
+        # [tokens, heads, dim] in a single launch. It owns its own
+        # FusedRopeAttnParams (block-array offset + position ids), independent of
+        # the FlashInfer FMHA params filled above.
+        self.rope_kvcache_impl: Optional[FusedRopeKVCacheDecodeOp] = None
+        self.rope_params = None
         if self.need_rope_kv_cache:
-            if attn_configs.rope_config.style != RopeStyle.No:
-                self.rope_impl = MhaRotaryEmbeddingOp(attn_configs)
-                self.rope_impl.set_params(self.fmha_params)
-            self.kv_cache_write_op = KVCacheWriteOp(
-                num_kv_heads=attn_configs.kv_head_num,
-                head_size=attn_configs.size_per_head,
-                token_per_block=attn_configs.kernel_tokens_per_block,
-            )
-            self.kv_cache_write_op.set_params(self.fmha_params)
+            self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
+            self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
 
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
@@ -796,39 +708,16 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
     ) -> bool:
         return not attn_configs.use_mla
 
-    def _split_qkv(
-        self, qkv: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        qkv = qkv.reshape(qkv.shape[0], -1)
-        num_heads = self.attn_configs.head_num
-        num_kv_heads = self.attn_configs.kv_head_num
-        head_dim = self.attn_configs.size_per_head
-        q, k, v = torch.split(
-            qkv,
-            [head_dim * num_heads, head_dim * num_kv_heads, head_dim * num_kv_heads],
-            dim=-1,
-        )
-        return (
-            q.reshape(q.shape[0], num_heads, head_dim),
-            k.reshape(k.shape[0], num_kv_heads, head_dim),
-            v.reshape(v.shape[0], num_kv_heads, head_dim),
-        )
-
     def forward(
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         layer_idx: int = 0,
     ) -> torch.Tensor:
-        # Apply RoPE and write K/V to the paged cache (FlashInfer, SM103-safe).
-        if self.need_rope_kv_cache:
-            if self.rope_impl is not None:
-                query, key, value = self.rope_impl.forward(qkv)
-            else:
-                query, key, value = self._split_qkv(qkv)
-            if self.kv_cache_write_op is not None:
-                self.kv_cache_write_op.forward(key, value, kv_cache)
-            qkv = query
+        # Fused RoPE + paged-KV write; returns the rotated query for decode FMHA.
+        if self.need_rope_kv_cache and self.rope_kvcache_impl is not None:
+            assert kv_cache is not None, "decode requires a paged kv_cache"
+            qkv = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
 
         # Apply write cache store if needed
         common.apply_write_cache_store(
