@@ -51,7 +51,7 @@ class FusedRopeKVCachePrefillOpBase:
             kv_cache_offset = None
         kv_cache_offset_h = None # not used
 
-        position_ids = attn_inputs.combo_position_ids
+        position_ids = attn_inputs.position_ids
         if attn_inputs.context_parallel_info is not None:
             position_ids = attn_inputs.context_parallel_info.prefill_shuffle_indices
 
@@ -229,7 +229,7 @@ class FusedRopeKVCacheDecodeOp:
             kv_cache_offset,
             kv_cache_offset_h,
             attn_inputs.padding_offset,
-            attn_inputs.combo_position_ids,
+            attn_inputs.position_ids,
             attn_inputs.cu_seqlens,
             attn_inputs.cu_kv_seqlens,
             attn_inputs.input_lengths,
