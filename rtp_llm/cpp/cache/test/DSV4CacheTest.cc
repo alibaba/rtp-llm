@@ -1128,7 +1128,7 @@ static CacheConfig makeDSV4CpAllocatorConfig(uint32_t cp_size) {
     pc.role_type                          = RoleType::PREFILL;
     pc.tp_size                            = cp_size;
     pc.prefill_cp_config.kv_cache_sharded = true;
-    auto config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    auto config      = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
     config.block_num = 200;
     config.group_block_nums.assign(config.groupNums(), config.block_num);
     return config;
@@ -1148,7 +1148,7 @@ protected:
 
 TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
     auto config    = makeDSV4AllocatorConfig();
-    auto               allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     // 7 groups → HybridTypeKVCacheAllocator path
@@ -1159,13 +1159,14 @@ TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
 }
 
 TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
-    constexpr uint32_t cp_size = 4;
-    auto               config  = makeDSV4CpAllocatorConfig(cp_size);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    constexpr uint32_t cp_size   = 4;
+    auto               config    = makeDSV4CpAllocatorConfig(cp_size);
+    auto               allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     const int spb     = allocator->seqSizePerBlock();
     const int seq_len = static_cast<int>(cp_size) * spb;
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, static_cast<int>(cp_size), spb));
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();
     batch_res->resetBatchSize(1);
@@ -1186,7 +1187,6 @@ TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
     MallocInfo info{batch_res, cti};
     info.enable_device_cache = false;
     info.reuse_cache         = false;
-    info.cp_slot_mapper      = std::make_shared<CPSlotMapper>(0, static_cast<int>(cp_size), spb);
 
     auto result = allocator->malloc(info);
     ASSERT_TRUE(result.success);
