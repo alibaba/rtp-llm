@@ -479,7 +479,7 @@ def run_rtp_mode(args):
     initial_tokens = torch.tensor([speaker_bos], dtype=torch.int32)
 
     t_talker_start = time.time()
-    codec_tokens = talker_engine.rtp_llm_op_.generate(
+    codec_tokens, _ = talker_engine.rtp_llm_op_.generate(
         initial_tokens, args.max_talker_tokens, 8294
     )
     t_talker_end = time.time()

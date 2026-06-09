@@ -366,7 +366,7 @@ class OmniEngine:
         )
         eos_token_id = self._talker_engine.config.special_tokens.eos_token_id
 
-        codec_tokens = self._talker_engine.rtp_llm_op_.generate(
+        codec_tokens, _ = self._talker_engine.rtp_llm_op_.generate(
             initial_tokens, max_talker_tokens, eos_token_id
         )
 
