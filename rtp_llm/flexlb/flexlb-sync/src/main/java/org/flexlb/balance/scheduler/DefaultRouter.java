@@ -185,21 +185,6 @@ public class DefaultRouter implements Router {
         return BatchScheduleResponse.success(targets);
     }
 
-    public ServerStatus routeSingleRole(BalanceContext balanceContext, RoleType roleType) {
-        Response validationResponse = validateRequest(balanceContext);
-        if (validationResponse != null) {
-            ServerStatus result = ServerStatus.code(StrategyErrorType.INVALID_REQUEST);
-            result.setMessage(validationResponse.getErrorMessage());
-            return result;
-        }
-
-        LoadBalancer loadBalancer = getLoadBalancer(roleType);
-        if (loadBalancer == null) {
-            return ServerStatus.code(roleType.getErrorType());
-        }
-        return loadBalancer.select(balanceContext, roleType, null);
-    }
-
     /**
      * Validates the incoming request and checks model availability.
      *
@@ -267,37 +252,15 @@ public class DefaultRouter implements Router {
      */
     private void rollBackRoutingFailure(BalanceContext balanceContext, RoutingResult routingResult) {
 
-        rollbackServerStatuses(routingResult.serverStatusList(), balanceContext.getRequestId());
-    }
-
-    public void rollbackServerStatuses(List<ServerStatus> serverStatuses) {
-        rollbackServerStatuses(serverStatuses, null);
-    }
-
-    private void rollbackServerStatuses(List<ServerStatus> serverStatuses, Long fallbackRequestId) {
-        for (ServerStatus serverStatus : serverStatuses) {
-            String serverIpPort = toIpPort(serverStatus);
-            long requestId = fallbackRequestId != null ? fallbackRequestId : serverStatus.getRequestId();
+        List<ServerStatus> partialResults = routingResult.serverStatusList();
+        for (ServerStatus serverStatus : partialResults) {
+            String serverIpPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
+            long requestId = balanceContext.getRequestId();
 
             RoleType role = serverStatus.getRole();
-            rollbackLocalTask(role, serverIpPort, requestId);
             LoadBalancer loadBalancer = getLoadBalancer(role);
-            if (loadBalancer != null) {
-                loadBalancer.rollBack(serverIpPort, requestId);
-            }
+            loadBalancer.rollBack(serverIpPort, requestId);
         }
-    }
-
-    private void rollbackLocalTask(RoleType role, String serverIpPort, long requestId) {
-        Map<String, WorkerStatus> roleStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getRoleStatusMap(role);
-        WorkerStatus workerStatus = roleStatusMap.get(serverIpPort);
-        if (workerStatus != null) {
-            workerStatus.removeLocalTask(requestId);
-        }
-    }
-
-    private String toIpPort(ServerStatus serverStatus) {
-        return serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
     }
 
     private Response buildSuccessResponse(long requestId, List<ServerStatus> serverStatusList) {
