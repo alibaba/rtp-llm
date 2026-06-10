@@ -62,6 +62,9 @@ public class WorkerStatusResponse {
     @JsonProperty("alive")
     private boolean alive;
 
+    @JsonProperty("available_kv_cache")
+    private long availableKvCacheTokens;
+
     @JsonProperty("version")
     private long version;
 

@@ -125,6 +125,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 workerStatus.setDpSize(newWorkerStatus.getDpSize());
                 workerStatus.setTpSize(newWorkerStatus.getTpSize());
                 workerStatus.setDpRank(newWorkerStatus.getDpRank());
+                workerStatus.getAvailableKvCacheTokens().set(newWorkerStatus.getAvailableKvCacheTokens());
 
                 // Update status timestamp and record actual sync interval
                 long nowUs = System.nanoTime() / 1000;
@@ -161,6 +162,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setTpSize(newWorkerStatus.getTpSize());
             workerStatus.setDpRank(newWorkerStatus.getDpRank());
             workerStatus.setAlive(newWorkerStatus.isAlive());
+            workerStatus.getAvailableKvCacheTokens().set(newWorkerStatus.getAvailableKvCacheTokens());
             workerStatus.getStatusVersion().set(responseVersion != null ? responseVersion : -1L);
             workerStatus.getLatestFinishedTaskVersion().set(newWorkerStatus.getLatestFinishedVersion() != null ? newWorkerStatus.getLatestFinishedVersion() : -1L);
 

@@ -287,6 +287,8 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     response->set_alive(status_info.alive);
     response->set_precision(status_info.precision);
     response->set_dp_rank(status_info.dp_rank);
+    auto kv_info = engine_->getCacheStatusInfo(-1, false);
+    response->set_available_kv_cache(kv_info.available_kv_cache);
     reportWorkerStatusTime(request_begin_time_us, request_after_ws_time_us);
     return grpc::Status::OK;
 }

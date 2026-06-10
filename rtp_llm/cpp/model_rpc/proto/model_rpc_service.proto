@@ -441,6 +441,7 @@ message WorkerStatusPB {
     string precision = 14;
     int64 latest_finished_version = 15;
     int64 dp_rank = 16;
+    int64 available_kv_cache = 17;
 }
 
 message EmbeddingInputPB {
