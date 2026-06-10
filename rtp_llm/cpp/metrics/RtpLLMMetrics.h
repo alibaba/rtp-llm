@@ -839,7 +839,8 @@ private:
 
 class RtpLLMCacheEvictionMetricsCollector final {
 public:
-    int64_t lifetime_ms = 0;
+    int64_t lifetime_ms          = -1;
+    int64_t evicted_block_count  = -1;
 };
 
 class RtpLLMCacheEvictionMetrics: public kmonitor::MetricsGroup {
@@ -849,6 +850,7 @@ public:
 
 public:
     kmonitor::MutableMetric* evicted_block_lifetime_ms_metric = nullptr;
+    kmonitor::MutableMetric* evicted_block_count_metric       = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

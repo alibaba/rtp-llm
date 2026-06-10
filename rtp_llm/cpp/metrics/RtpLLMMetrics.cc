@@ -516,12 +516,18 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
 bool RtpLLMCacheEvictionMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_lifetime_ms_metric,
                                   "rtp_llm_kv_cache_evicted_block_lifetime_ms");
+    REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_count_metric, "rtp_llm_kv_cache_evicted_block_count");
     return true;
 }
 
 void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*       tags,
                                         RtpLLMCacheEvictionMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(evicted_block_lifetime_ms_metric, collector->lifetime_ms);
+    if (collector->lifetime_ms >= 0) {
+        REPORT_MUTABLE_METRIC(evicted_block_lifetime_ms_metric, collector->lifetime_ms);
+    }
+    if (collector->evicted_block_count >= 0) {
+        REPORT_MUTABLE_METRIC(evicted_block_count_metric, collector->evicted_block_count);
+    }
 }
 
 bool RtpLLMRemoteCacheMatchMetrics::init(kmonitor::MetricsGroupManager* manager) {

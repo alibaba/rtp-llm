@@ -58,6 +58,19 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
         SharedBlockCache::EvictResult evict_result;
         size_t                        freed = shared_cache_->evictAndFreeForGroup(group_id_, need_evict, &evict_result);
         if (metrics_reporter_) {
+            if (freed > 0) {
+                RtpLLMCacheEvictionMetricsCollector collector;
+                collector.evicted_block_count = static_cast<int64_t>(freed);
+                const bool state_only = !evict_result.evicted_state_only_group.empty()
+                                        && evict_result.evicted_state_only_group.size()
+                                               == evict_result.evicted_keys.size();
+                kmonitor::MetricsTags tags("scope", "gpu");
+                tags.AddTag("kind", state_only ? "state_swa_kv" : "chain");
+                tags.AddTag("backing", "device");
+                tags.AddTag("group_id", std::to_string(group_id_));
+                metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
+                                                                                                           &collector);
+            }
             for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
                 RtpLLMCacheEvictionMetricsCollector collector;
                 collector.lifetime_ms = lifetime_ms;
