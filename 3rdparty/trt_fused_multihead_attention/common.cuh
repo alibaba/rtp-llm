@@ -22,9 +22,10 @@
 #error CUDART_VERSION Undefined!
 #elif (CUDART_VERSION >= 11050)
 #include <cub/cub.cuh>
+#include "3rdparty/cub_compat.h"
 #else
 #include "3rdparty/cub/cub.cuh"
-#endif 
+#endif
 
 #define HDI inline __host__ __device__
 

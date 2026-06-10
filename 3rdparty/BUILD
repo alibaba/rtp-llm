@@ -33,3 +33,10 @@ cc_library(
     copts = cuda_copts(),
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "cub_compat",
+    hdrs = ["cub_compat.h"],
+    deps = ["@local_config_cuda//cuda:cuda_headers"],
+    visibility = ["//visibility:public"],
+)

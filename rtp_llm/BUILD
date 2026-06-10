@@ -260,25 +260,34 @@ py_library(
         "//rtp_llm/models_py:models",
         ":multimodal",
     ] + select({
+        "@//:using_cuda13_x86": deep,
+        "@//:using_cuda13_arm": deep,
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
+        "@//:using_cuda13_x86": ["flash-mla", "tilelang"],
+        "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
     }) + select({
+        "@//:using_cuda13_x86": rtp_kernel,
+        "@//:using_cuda13_arm": rtp_kernel,
         "@//:using_cuda12_9_x86": rtp_kernel,
         "@//:using_cuda12_arm": rtp_kernel,
         "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
         "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
         "@//:using_arm": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12_arm": [],
         # "//:xft_use_icx": [
         #     "xfastertransformer_devel_icx",
@@ -290,6 +299,7 @@ py_library(
         "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
+        "@//:using_cuda13_arm": [],
         "@//:using_cuda12_arm": [],
         "//conditions:default": []
     }) + triton_deps(["triton"]) + internal_deps(),

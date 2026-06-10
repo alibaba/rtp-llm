@@ -26,9 +26,20 @@ flash_mla_headers = glob([
 cc_library(
     name = "flashmla_hdrs",
     hdrs = flash_mla_headers,
-    deps = [
-        "@cutlass//:cutlass",
-        "@cutlass//:cutlass_utils",
+    deps = select({
+        "@//:using_cuda13_arm": [
+            "@cutlass_cu13//:cutlass",
+            "@cutlass_cu13//:cutlass_utils",
+        ],
+        "@//:using_cuda13_x86": [
+            "@cutlass_cu13//:cutlass",
+            "@cutlass_cu13//:cutlass_utils",
+        ],
+        "//conditions:default": [
+            "@cutlass//:cutlass",
+            "@cutlass//:cutlass_utils",
+        ],
+    }) + [
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
