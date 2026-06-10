@@ -5,6 +5,7 @@ VIT Proxy Server - 主进程代理服务器
 
 import logging
 import threading
+import time
 from collections import defaultdict
 from concurrent import futures
 from typing import Optional
@@ -25,7 +26,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     add_MultimodalRpcServiceServicer_to_server,
 )
 from rtp_llm.metrics import kmonitor
-from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 
 # Default per-request gRPC timeout for proxy → worker forwarding. Prevents a slow or
@@ -48,6 +49,10 @@ def _resolve_rpc_timeout_seconds(request: "MultimodalInputsPB") -> float:
         if max_timeout_ms > 0
         else DEFAULT_PROXY_RPC_TIMEOUT_SECONDS
     )
+
+
+def _now_us() -> int:
+    return time.monotonic_ns() // 1000
 
 
 class LoadBalancer:
@@ -173,7 +178,29 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         self, request: MultimodalInputsPB, context
     ) -> MultimodalOutputPB:
         """将请求转发到工作进程"""
-        kmonitor.report(AccMetrics.VIT_QPS_METRIC, 1, {"source": "vit_proxy"})
+        tags = {"source": "vit_proxy"}
+        rpc_start_us = _now_us()
+        lifecycle_reported = False
+
+        def _report_lifecycle():
+            nonlocal lifecycle_reported
+            if lifecycle_reported:
+                return
+            lifecycle_reported = True
+            kmonitor.report(
+                GaugeMetrics.VIT_RPC_PROXY_LIFECYCLE_RT_US_METRIC,
+                _now_us() - rpc_start_us,
+                tags,
+            )
+
+        callback_added = False
+        if hasattr(context, "add_callback"):
+            callback_added = context.add_callback(_report_lifecycle)
+
+        kmonitor.report(AccMetrics.VIT_QPS_METRIC, 1, tags)
+        kmonitor.report(
+            GaugeMetrics.VIT_RPC_REQUEST_BYTES_METRIC, request.ByteSize(), tags
+        )
 
         worker_address = None
         try:
@@ -188,7 +215,16 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                 f"connections: {self.load_balancer.connection_counts[worker_address]}, "
                 f"timeout: {timeout_s}s"
             )
+            worker_rpc_start_us = _now_us()
             response = stub.RemoteMultimodalEmbedding(request, timeout=timeout_s)
+            kmonitor.report(
+                GaugeMetrics.VIT_RPC_PROXY_TO_WORKER_RT_US_METRIC,
+                _now_us() - worker_rpc_start_us,
+                {"source": "vit_proxy", "worker": worker_address},
+            )
+            kmonitor.report(
+                GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC, response.ByteSize(), tags
+            )
 
             kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
             self.profiler.on_request_complete()
@@ -199,14 +235,30 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                 f"RPC error when forwarding to worker {worker_address}: {e.code()} - {e.details()}"
             )
             kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
+            kmonitor.report(
+                AccMetrics.VIT_RPC_PROXY_ERROR_QPS_METRIC,
+                1,
+                {
+                    "source": "vit_proxy",
+                    "reason": "grpc_error",
+                    "grpc_code": str(e.code()),
+                },
+            )
             raise
         except Exception as e:
             logging.error(f"Error forwarding request to worker {worker_address}: {e}")
             kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
+            kmonitor.report(
+                AccMetrics.VIT_RPC_PROXY_ERROR_QPS_METRIC,
+                1,
+                {"source": "vit_proxy", "reason": "exception"},
+            )
             raise
         finally:
             if worker_address:
                 self.load_balancer.decrement_connections(worker_address)
+            if not callback_added:
+                _report_lifecycle()
 
     def GetWorkerStatus(self, request: StatusVersionPB, context) -> WorkerStatusPB:
         # Aggregation pending flexlb refactor; explicitly UNIMPLEMENTED so the caller
