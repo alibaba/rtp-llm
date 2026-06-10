@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules import (
     Embedding,
     FMHAImplBase,
     LinearFactory,
+    MultimodalEmbeddingInjector,
     RMSNorm,
     RMSResNorm,
 )
@@ -34,7 +35,12 @@ from rtp_llm.models_py.triton_kernels.fla.block import (
     load_initial_state_from_block_map,
     store_ssm_state_to_block_map,
 )
-from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
+from rtp_llm.models_py.triton_kernels.fla.chunk import (
+    chunk_gated_delta_rule,
+    chunk_gated_delta_rule_flydsl_with_cache_store,
+    is_flydsl_chunk_gdn_enabled,
+    is_flydsl_chunk_gdn_shape_supported,
+)
 from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
@@ -265,18 +271,50 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             value = value.view(
                 1, value.shape[0], self.local_num_v_heads, self.head_v_dim
             )
-        attn_out, h, final_state = chunk_gated_delta_rule(
-            query,
-            key,
-            value,
-            g,
-            beta,
-            initial_state=initial_states,
-            output_final_state=True,
-            cu_seqlens=cu_seqlens_without_padding,
-            use_qk_l2norm_in_kernel=True,
+        use_flydsl_chunk_gdn = (
+            is_flydsl_chunk_gdn_enabled()
+            and is_flydsl_chunk_gdn_shape_supported(query, key, value, beta)
         )
-        if ssm_states is not None:
+        if use_flydsl_chunk_gdn:
+            # When ssm_states is provided the megakernel writes cache blocks
+            # directly, so final_state is not consumed — skip allocation.
+            need_final_state = ssm_states is None
+            attn_out, final_state = chunk_gated_delta_rule_flydsl_with_cache_store(
+                query,
+                key,
+                value,
+                g,
+                beta,
+                prefix_lengths=(
+                    attn_inputs.prefix_lengths_d if ssm_states is not None else None
+                ),
+                block_map=(
+                    attn_inputs.kv_cache_kernel_block_id_device
+                    if ssm_states is not None
+                    else None
+                ),
+                ssm_states=ssm_states,
+                seq_size_per_block=(
+                    seq_size_per_block if ssm_states is not None else None
+                ),
+                initial_state=initial_states,
+                output_final_state=need_final_state,
+                cu_seqlens=cu_seqlens_without_padding,
+                use_qk_l2norm_in_kernel=True,
+            )
+        else:
+            attn_out, h, final_state = chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                g,
+                beta,
+                initial_state=initial_states,
+                output_final_state=True,
+                cu_seqlens=cu_seqlens_without_padding,
+                use_qk_l2norm_in_kernel=True,
+            )
+        if ssm_states is not None and not use_flydsl_chunk_gdn:
             store_ssm_state_to_block_map(
                 h,
                 final_state,
@@ -546,32 +584,22 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             ba_w = weights[W.linear_attn_ba_w]
             self._qkvz_size = qkvz_w.shape[1]
             self._ba_size = ba_w.shape[1]
-            # Allocate the fused buffer ONCE; copy qkvz/ba into it; then
-            # replace the original dict entries with VIEWS into the fused
-            # buffer. This achieves two goals at once:
-            #
-            #  (a) Memory: avoids the ~48MB-per-layer redundant copy from
-            #      torch.cat. The originals get released when this method
-            #      returns (the local vars go out of scope and the dict
-            #      entries no longer reference them).
-            #
-            #  (b) Online weight update: WeightManager.update_layer_weight
-            #      runs `ori_tensor.copy_(data)` against the dict entries.
-            #      With the entries now being views into the fused buffer,
-            #      an update writes directly into the right slice of the
-            #      fused buffer, so in_proj_fused.weight (which references
-            #      the same buffer) sees the update on the next forward.
-            #      copy_ accepts non-contig destinations, so the view's
-            #      stride mismatch is fine.
-            K = qkvz_w.shape[0]
-            fused_w = torch.empty(
-                K,
-                self._qkvz_size + self._ba_size,
-                dtype=qkvz_w.dtype,
-                device=qkvz_w.device,
-            )
-            fused_w[:, : self._qkvz_size].copy_(qkvz_w)
-            fused_w[:, self._qkvz_size :].copy_(ba_w)
+            _is_rocm = hasattr(torch.version, "hip") and torch.version.hip is not None
+            if _is_rocm:
+                # ROCm: cat in [N, K] space then .t() to preserve column-major
+                # physical layout that hipb_mm / swizzle kernels expect.
+                fused_w = torch.cat([qkvz_w.t(), ba_w.t()], dim=0).t()
+            else:
+                # CUDA: row-major contiguous buffer (cuBLAS compatible).
+                K = qkvz_w.shape[0]
+                fused_w = torch.empty(
+                    K,
+                    self._qkvz_size + self._ba_size,
+                    dtype=qkvz_w.dtype,
+                    device=qkvz_w.device,
+                )
+                fused_w[:, : self._qkvz_size].copy_(qkvz_w)
+                fused_w[:, self._qkvz_size :].copy_(ba_w)
             weights[W.linear_attn_qkvz_w] = fused_w[:, : self._qkvz_size]
             weights[W.linear_attn_ba_w] = fused_w[:, self._qkvz_size :]
             del qkvz_w, ba_w
@@ -763,19 +791,51 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             key = key.view(1, -1, gdn.local_num_k_heads, gdn.head_k_dim)
             value = value.view(1, -1, gdn.local_num_v_heads, gdn.head_v_dim)
 
-        attn_out, h, final_state = chunk_gated_delta_rule(
-            query,
-            key,
-            value,
-            g,
-            beta,
-            initial_state=initial_states,
-            output_final_state=True,
-            cu_seqlens=full_cu,
-            use_qk_l2norm_in_kernel=True,
+        use_flydsl_chunk_gdn = (
+            is_flydsl_chunk_gdn_enabled()
+            and is_flydsl_chunk_gdn_shape_supported(query, key, value, beta)
         )
+        if use_flydsl_chunk_gdn:
+            need_final_state = ssm_states is None
+            attn_out, final_state = chunk_gated_delta_rule_flydsl_with_cache_store(
+                query,
+                key,
+                value,
+                g,
+                beta,
+                prefix_lengths=(
+                    attention_inputs.prefix_lengths_d
+                    if ssm_states is not None
+                    else None
+                ),
+                block_map=(
+                    attention_inputs.kv_cache_kernel_block_id_device
+                    if ssm_states is not None
+                    else None
+                ),
+                ssm_states=ssm_states,
+                seq_size_per_block=(
+                    seq_size_per_block if ssm_states is not None else None
+                ),
+                initial_state=initial_states,
+                output_final_state=need_final_state,
+                cu_seqlens=full_cu,
+                use_qk_l2norm_in_kernel=True,
+            )
+        else:
+            attn_out, h, final_state = chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                g,
+                beta,
+                initial_state=initial_states,
+                output_final_state=True,
+                cu_seqlens=full_cu,
+                use_qk_l2norm_in_kernel=True,
+            )
 
-        if ssm_states is not None:
+        if ssm_states is not None and not use_flydsl_chunk_gdn:
             store_ssm_state_to_block_map(
                 h,
                 final_state,
@@ -1052,10 +1112,12 @@ class Qwen3NextModel(GptModelBase):
             cp_local_valid_mask,
         )
 
-    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+    def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
         input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
-        hidden_states = inputs_embeds
+        return self.embed_tokens(input_ids)
+
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        hidden_states = self.word_embedding(inputs)
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         prefill_conv1d_meta = None
@@ -1124,3 +1186,45 @@ class Qwen3NextModel(GptModelBase):
 
         hidden_states, residual = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+
+
+class Qwen35Model(Qwen3NextModel):
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        parallelism_config: ParallelismConfig,
+        weights: ModelWeights,
+        moe_config,
+        max_generate_batch_size: int,
+        fmha_config=None,
+        py_hw_kernel_config=None,
+        device_resource_config=None,
+    ):
+        super().__init__(
+            model_config,
+            parallelism_config,
+            weights,
+            moe_config,
+            max_generate_batch_size,
+            fmha_config,
+            py_hw_kernel_config,
+            device_resource_config,
+        )
+        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
+
+    def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
+        input_ids: torch.Tensor = inputs.input_ids
+
+        position_ids = inputs.combo_position_ids
+        token_type_ids = inputs.embedding_inputs.combo_tokens_type_ids
+        text_tokens_mask = inputs.embedding_inputs.text_tokens_mask
+        mm_features = inputs.multimodal_inputs.multimodal_features
+        mm_feature_locs = inputs.multimodal_inputs.mm_features_locs
+
+        inputs_embeds = self.embed_tokens(
+            input_ids, position_ids, token_type_ids, text_tokens_mask
+        )
+        hidden_states = self.multimodal_embedding_injector(
+            inputs_embeds, mm_features, mm_feature_locs
+        )
+        return hidden_states

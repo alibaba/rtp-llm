@@ -18,6 +18,7 @@ Usage example:
 
 import torch
 
+from rtp_llm.device.device_impl import is_gfx950
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.utils.arch import get_sm, is_cuda
 
@@ -46,6 +47,7 @@ if device_type == DeviceType.ROCm:
         RocmBf16PureTPStrategy,
         RocmEpLowLatencyStrategy,
         RocmEpNormalStrategy,
+        RocmMXFp4PureTPStrategy,
         RocmFp8PerBlockPureTPStrategy,
         RocmFp8PerChannelPureTPStrategy,
     )
@@ -58,7 +60,8 @@ if device_type == DeviceType.ROCm:
     registry.register(RocmBf16PureTPStrategy())
     registry.register(BatchedTritonStrategy())
     FusedMoeFactory.set_registry(registry)
-
+    if is_gfx950():
+        registry.register(RocmMXFp4PureTPStrategy())
 else:
     # ========== CUDA Registry ==========
 

@@ -378,6 +378,13 @@ def h20_oss_suites():
                 gpu_type=["H20"],
             ),
             smoke_test(
+                name="kimi_tool_call",
+                task_info="data/model/kimi_linear/q_r_bf16_tp2_tool_call.json",
+                smoke_args="--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
+                envs=["TRITON_AUTOTUNE_CACHE_MODE=cached"],
+                gpu_type=["H20"],
+            ),
+            smoke_test(
                 name="kimi_pd",
                 task_info="data/model/kimi_linear/q_r_bf16_tp2_pd_sep.json",
                 smoke_args= {
@@ -441,6 +448,44 @@ def h20_oss_suites():
                 sleep_time_qr=20,
                 smoke_args="--warm_up 0 --sp_type eagle --gen_num_per_cycle 4 --sp_model_type qwen_2-mtp --tp_size 2 --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --act_type FP16 --reuse_cache 1 --seq_size_per_block 8 --max_seq_len 16384 --ft_disable_custom_ar 1 --warm_up 0 --reserver_runtime_mem_mb 21954 --test_block_num 500 --enable_remote_cache true --enable_device_cache 0 --enable_memory_cache 0 --reco_put_timeout_ms 12000 --reco_get_timeout_ms 12000 --reco_get_broadcast_timeout 15000 --reco_put_broadcast_timeout 15000",
                 gpu_type=["H20"],
+            ),
+        ],
+    )
+
+    # H20 VL / Multimodal (Qwen3-VL, Qwen3-VL-MoE, etc.)
+    native.test_suite(
+        name = "smoke_h20_vl",
+        tests = [
+            smoke_test(
+                name="qwen3_vl",
+                task_info="data/model/qwen_vl/q_r_3.json",
+                smoke_args = {
+                    "llm": "--act_type BF16 --use_local 1 --tp_size 2 --reuse_cache 1",
+                    "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1"
+                },
+                gpu_type=["H20"],
+                data=native.glob(['data/model/llava/*.jpg']),
+            ),
+            smoke_test(
+                name="qwen3_vl_moe",
+                task_info="data/model/qwen_vl/q_r_3_moe.json",
+                smoke_args = "--act_type BF16 --use_local 1 --enable_xqa off",
+                gpu_type=["H20"],
+                data=native.glob(['data/model/llava/*']),
+            ),
+            smoke_test(
+                name="qwen35_moe_vl_fp8",
+                task_info="data/model/qwen35/q_r_35b_moe_vl_fp8.json",
+                smoke_args = {
+                    "prefill": "--use_local 1 --role_type PREFILL --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 0 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192",
+                    "decode":  "--use_local 1 --role_type DECODE  --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 1 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1",
+                },
+                envs={
+                    "prefill": ["ACCL_LOW_LATENCY_OPTIMIZE=1"],
+                    "decode":  ["ACCL_LOW_LATENCY_OPTIMIZE=1"],
+                },
+                gpu_type=["H20"],
+                data=native.glob(['data/model/qwen_vl/*.jpeg']),
             ),
         ],
     )

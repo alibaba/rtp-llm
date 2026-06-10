@@ -34,6 +34,11 @@ struct GraphParams {
     std::vector<int>     decode_capture_batch_sizes;
     std::vector<int32_t> kv_cache_layer_to_group;  // layer index -> group id for hybrid kv cache
     int32_t              kv_cache_group_num = 0;   // number of kv cache groups
+    // Per-token position-id factor for combo_position_ids capture buffer.
+    // 0 = model does not use combo_position_ids (no buffer allocated, capture skips it).
+    // >0 = factor (e.g. Mrope = rope_config.index_factor). Sourced from
+    //     description_.attention_conf.rope_config in the model wrapper, not Python reflection.
+    int                  position_id_len_factor = 0;
 };
 
 class GraphBase {

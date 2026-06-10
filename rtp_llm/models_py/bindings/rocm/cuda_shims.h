@@ -69,7 +69,7 @@ __host__ __device__ inline float special_cast<float, amd_bfloat16>(amd_bfloat16 
 #define curandState_t hiprandState_t
 
 #define cub hipcub
-#define check_cuda_value ROCM_CHECK
+#define check_cuda_value(val) rtp_llm::rocm::check((val), __FILE__, __LINE__)
 
 #define cudaStream_t hipStream_t
 #define cudaStreamSynchronize hipStreamSynchronize
@@ -85,8 +85,19 @@ __host__ __device__ inline float special_cast<float, amd_bfloat16>(amd_bfloat16 
 #define cudaDeviceGetAttribute hipDeviceGetAttribute
 #define cudaDevAttrMultiProcessorCount hipDeviceAttributeMultiprocessorCount
 #define cudaDevAttrMaxSharedMemoryPerMultiprocessor hipDeviceAttributeMaxSharedMemoryPerMultiprocessor
+#define cudaDevAttrMaxSharedMemoryPerBlockOptin hipDeviceAttributeMaxSharedMemoryPerBlock
 
-#define cudaFuncSetAttribute hipFuncSetAttribute
+template<typename T>
+inline hipError_t cudaFuncSetAttribute(T func, hipFuncAttribute attr, int value) {
+    return hipFuncSetAttribute((const void*)func, attr, value);
+}
+
+template<typename T>
+inline hipError_t cudaFuncGetAttributes(hipFuncAttributes* attr, T func) {
+    return hipFuncGetAttributes(attr, (const void*)func);
+}
+
+#define cudaFuncAttributes hipFuncAttributes
 #define cudaFuncAttributeMaxDynamicSharedMemorySize hipFuncAttributeMaxDynamicSharedMemorySize
 #define cudaOccupancyMaxActiveBlocksPerMultiprocessor hipOccupancyMaxActiveBlocksPerMultiprocessor
 #define cudaDeviceSynchronize hipDeviceSynchronize
@@ -134,3 +145,50 @@ __host__ __device__ inline float special_cast<float, amd_bfloat16>(amd_bfloat16 
 #define cudaIpcMemLazyEnablePeerAccess hipIpcMemLazyEnablePeerAccess
 
 // Taken from cuda_utils.h
+
+// Shim for cuda::atomic_ref used in topkLastDim.cu
+// Provides minimal interface matching libcu++ cuda::atomic_ref
+namespace cuda {
+
+// Map cuda::std to ::std for ROCm
+namespace std = ::std;
+
+enum thread_scope {
+    thread_scope_block,
+    thread_scope_device,
+    thread_scope_system
+};
+
+enum memory_order {
+    memory_order_relaxed
+    // TODO: support other memory orders
+};
+
+// TODO: currently only support device scope and relaxed memory order
+template<typename T, thread_scope Scope = thread_scope_device>
+struct atomic_ref {
+    T* ptr_;
+    __device__ explicit atomic_ref(T& ref): ptr_(&ref) {}
+    __device__ T load(memory_order = memory_order_relaxed) const {
+        return __atomic_load_n(ptr_, __ATOMIC_RELAXED);
+    }
+    // TTAS: cheap cached load filters out obvious mismatches before the expensive atomicCAS
+    __device__ bool compare_exchange_weak(T& expected,
+                                          T  desired,
+                                          memory_order = memory_order_relaxed,
+                                          memory_order = memory_order_relaxed) {
+        T old = __atomic_load_n(ptr_, __ATOMIC_RELAXED);
+        if (old == expected) {
+            T prev = atomicCAS(ptr_, expected, desired);
+            if (prev == expected) {
+                return true;
+            }
+            expected = prev;
+            return false;
+        }
+        expected = old;
+        return false;
+    }
+};
+
+}  // namespace cuda

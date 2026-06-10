@@ -304,9 +304,8 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     tl.store(p_A33, b_Ai33.to(A.dtype.element_ty), boundary_check=(0, 1))
 
 
-def chunk_gated_delta_rule_fwd_intra(
+def chunk_gated_delta_rule_fwd_intra_a_only(
     k: torch.Tensor,
-    v: torch.Tensor,
     beta: torch.Tensor,
     g: Optional[torch.Tensor] = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
@@ -343,7 +342,26 @@ def chunk_gated_delta_rule_fwd_intra(
         num_warps=1,
         num_stages=1,
     )
+    return A
 
+
+def chunk_gated_delta_rule_fwd_intra(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    g: Optional[torch.Tensor] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    chunk_size: int = 64,
+    chunk_indices: Optional[torch.LongTensor] = None,
+):
+    A = chunk_gated_delta_rule_fwd_intra_a_only(
+        k=k,
+        beta=beta,
+        g=g,
+        cu_seqlens=cu_seqlens,
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
+    )
     w, u = recompute_w_u_fwd(
         k=k,
         v=v,
