@@ -96,6 +96,8 @@ DecodeRpcServerNew2::pollStreamOutputWithPrefill(grpc::ServerContext*           
 
     bool first_token_sent        = false;
     bool skip_next_decode_output = false;
+    bool prefill_finished        = false;  // Track if prefill first response indicates termination
+    bool decode_output_sent      = false;  // Track whether any decode output was written
 
     while (stream->isActive() || stream->hasOutput()) {
         auto prefill_status = propagate_prefill_error();
@@ -111,8 +113,16 @@ DecodeRpcServerNew2::pollStreamOutputWithPrefill(grpc::ServerContext*           
         if (!first_token_sent && prefill_ctx) {
             GenerateOutputsPB prefill_output;
             if (prefill_ctx->takeFirstResponse(prefill_output)) {
-                first_token_sent        = true;
-                skip_next_decode_output = true;
+                first_token_sent = true;
+                // Detect if prefill first response indicates termination (e.g., max_new_tokens=1 or first token is EOS).
+                // In that case, do NOT skip the next decode output so the termination frame gets through.
+                for (int i = 0; i < prefill_output.mutable_flatten_output()->finished_size(); ++i) {
+                    if (prefill_output.flatten_output().finished(i)) {
+                        prefill_finished = true;
+                        break;
+                    }
+                }
+                skip_next_decode_output = !prefill_finished;
                 for (int i = 0; i < prefill_output.mutable_flatten_output()->finished_size(); ++i) {
                     prefill_output.mutable_flatten_output()->set_finished(i, false);
                 }
@@ -161,6 +171,7 @@ DecodeRpcServerNew2::pollStreamOutputWithPrefill(grpc::ServerContext*           
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
             return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
         }
+        decode_output_sent = true;
         if (stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
             break;
         }
@@ -173,6 +184,26 @@ DecodeRpcServerNew2::pollStreamOutputWithPrefill(grpc::ServerContext*           
     if (stream->hasError()) {
         return serializeErrorMsg(request_key, stream->statusInfo());
     }
+
+    // If prefill first response indicated termination (e.g., max_new_tokens=1 or first token is EOS)
+    // but decode never produced output (stream finished immediately), we must send a termination
+    // frame to the client so it knows the request is complete.
+    if (prefill_finished && !decode_output_sent && first_token_sent && stream->isFinished()) {
+        GenerateOutputsPB term_output;
+        auto*             flatten = term_output.mutable_flatten_output();
+        // Set finished=true for all sequences
+        for (int i = 0; i < prefill_ctx->response().flatten_output().finished_size(); ++i) {
+            flatten->add_finished(true);
+        }
+        updateDecodeAuxInfo(term_output, stream, prefill_ctx);
+        if (!writer->Write(term_output)) {
+            stream->reportError(ErrorCode::CANCELLED, "write termination frame failed");
+            RTP_LLM_LOG_WARNING("request [%s] write termination frame failed", request_key.c_str());
+            return grpc::Status(grpc::StatusCode::INTERNAL, "write termination frame failed");
+        }
+        RTP_LLM_LOG_DEBUG("request [%s] sent termination frame for first-token-EOS", request_key.c_str());
+    }
+
     RTP_LLM_LOG_DEBUG("request [%s] decode generate done", request_key.c_str());
     return grpc::Status::OK;
 }

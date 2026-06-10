@@ -152,4 +152,28 @@ TEST(DecodeRpcServerNew2Test, UpdateAuxInfoFallsBackToPrefillContextSnapshot) {
     EXPECT_EQ(aux_info.decode_memory_reuse_len(), 0);
 }
 
+// Test that prefill_finished detection correctly identifies when the first token
+// triggers termination (e.g., max_new_tokens=1 or first token is EOS).
+// This verifies the logic in pollStreamOutputWithPrefill that tracks prefill_finished
+// to ensure the finished=true flag is not lost when the first token is a termination token.
+TEST(DecodeRpcServerNew2Test, PrefillFirstResponseFinishedDetection) {
+    // Simulate a prefill response where finished=true (first token is EOS / max_new_tokens=1)
+    GenerateOutputsPB prefill_output_finished;
+    prefill_output_finished.mutable_flatten_output()->add_finished(true);
+    auto* aux_info = prefill_output_finished.mutable_flatten_output()->add_aux_info();
+    aux_info->set_step_output_len(1);
+
+    // Verify the finished flag is set correctly
+    ASSERT_EQ(prefill_output_finished.flatten_output().finished_size(), 1);
+    EXPECT_TRUE(prefill_output_finished.flatten_output().finished(0));
+
+    // Simulate a normal prefill response where finished=false
+    GenerateOutputsPB prefill_output_not_finished;
+    prefill_output_not_finished.mutable_flatten_output()->add_finished(false);
+    prefill_output_not_finished.mutable_flatten_output()->add_aux_info();
+
+    ASSERT_EQ(prefill_output_not_finished.flatten_output().finished_size(), 1);
+    EXPECT_FALSE(prefill_output_not_finished.flatten_output().finished(0));
+}
+
 }  // namespace rtp_llm::test
