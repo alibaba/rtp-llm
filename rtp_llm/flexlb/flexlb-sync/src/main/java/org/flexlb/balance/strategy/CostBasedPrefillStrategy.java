@@ -129,16 +129,16 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         List<WorkerStatus> survivors = new ArrayList<>(eligible.size());
         for (WorkerStatus w : eligible) {
             PrefillEndpoint ep = endpointRegistry.getPrefill(w.getIpPort());
-            long queueMs = ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
+            long endpointWaitMs = ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
             BatcherSnapshot snap = batchScheduler.snapshotForWorker(model, w.getIp(), w.getPort());
 
-            if (queueMs + singlePrefillMs > sloMs - sloRiskMarginMs) {
+            if (endpointWaitMs + singlePrefillMs > sloMs - sloRiskMarginMs) {
                 continue;
             }
             if (hotspotMultiplier > 0 && avgBatcherSize > 0 && snap.queueSize() > avgBatcherSize * hotspotMultiplier) {
                 continue;
             }
-            if (imbalanceMultiplier > 0 && avgWaitMs > 0 && queueMs > avgWaitMs * imbalanceMultiplier) {
+            if (imbalanceMultiplier > 0 && avgWaitMs > 0 && endpointWaitMs > avgWaitMs * imbalanceMultiplier) {
                 continue;
             }
 
@@ -164,21 +164,21 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
                               FlexlbConfig config, PrefillTimePredictor predictor) {
         BatcherSnapshot snap = batchScheduler.snapshotForWorker(model, w.getIp(), w.getPort());
 
-        long waitMs;
+        long batcherWaitMs;
         if (snap.queueSize() == 0) {
             long predMs = predictor.estimateMs(seqLen, cacheHit);
-            waitMs = Math.max(0, config.resolveSloMs(seqLen) - predMs - config.getCostSloRiskMarginMs());
+            batcherWaitMs = Math.max(0, config.resolveSloMs(seqLen) - predMs - config.getCostSloRiskMarginMs());
         } else {
-            waitMs = Math.max(0, snap.headDeadlineMs() - System.currentTimeMillis() - config.getCostSloRiskMarginMs());
+            batcherWaitMs = Math.max(0, snap.headDeadlineMs() - System.currentTimeMillis() - config.getCostSloRiskMarginMs());
         }
         if (snap.queueSize() + 1 >= config.getFlexlbBatchSizeMax()) {
-            waitMs = 0;
+            batcherWaitMs = 0;
         }
 
         PrefillEndpoint ep = endpointRegistry.getPrefill(w.getIpPort());
-        long workerWaitMs = ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
+        long endpointWaitMs = ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
 
-        return waitMs + workerWaitMs;
+        return batcherWaitMs + endpointWaitMs;
     }
 
     private PrefillTimePredictor createPredictor(FlexlbConfig config) {

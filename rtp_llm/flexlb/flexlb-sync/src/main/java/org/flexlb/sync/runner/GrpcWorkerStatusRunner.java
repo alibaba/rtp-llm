@@ -19,6 +19,7 @@ import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -135,11 +136,12 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 }
                 workerStatus.getStatusLastUpdateTime().set(nowUs);
 
-                // Update task state
                 Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
                 Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
-                List<Long> finished = workerStatus.updateTaskStates(runningTaskInfo, finishedTaskInfo);
-                notifyBatchSchedulerFinished(finished);
+                List<Long> finished = extractFinishedRequestIds(finishedTaskInfo);
+                if (batchScheduler != null && !finished.isEmpty()) {
+                    batchScheduler.onRequestsFinished(finished);
+                }
 
                 if (endpointRegistry != null) {
                     calibrateEndpoint(runningTaskInfo, finishedTaskInfo);
@@ -170,8 +172,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
             Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
             workerStatus.setRunningTaskList(runningTaskInfo);
 
-            List<Long> finished2 = workerStatus.updateTaskStates(runningTaskInfo, finishedTaskInfo);
-            notifyBatchSchedulerFinished(finished2);
+            List<Long> finished = extractFinishedRequestIds(finishedTaskInfo);
+            if (batchScheduler != null && !finished.isEmpty()) {
+                batchScheduler.onRequestsFinished(finished);
+            }
 
             if (endpointRegistry != null) {
                 calibrateEndpoint(runningTaskInfo, finishedTaskInfo);
@@ -196,10 +200,15 @@ public class GrpcWorkerStatusRunner implements Runnable {
         }
     }
 
-    private void notifyBatchSchedulerFinished(List<Long> finishedRequestIds) {
-        if (batchScheduler != null && finishedRequestIds != null && !finishedRequestIds.isEmpty()) {
-            batchScheduler.onRequestsFinished(finishedRequestIds);
+    private static List<Long> extractFinishedRequestIds(Map<String, TaskInfo> finishedTaskInfo) {
+        if (finishedTaskInfo == null) {
+            return List.of();
         }
+        List<Long> ids = new ArrayList<>(finishedTaskInfo.size());
+        for (TaskInfo task : finishedTaskInfo.values()) {
+            ids.add(task.getRequestId());
+        }
+        return ids;
     }
 
     private void logWorkerStatusUpdate(long startTime, WorkerStatus workerStatus) {

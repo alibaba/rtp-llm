@@ -195,7 +195,7 @@ class CostBasedPrefillStrategyTest {
     }
 
     @Test
-    void workerWaitMsFavorsEndpointWithLowerEstimate() {
+    void endpointWaitMsFavorsEndpointWithLowerEstimate() {
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         WorkerStatus w1 = createWorker("10.0.0.1", 0);
         WorkerStatus w2 = createWorker("10.0.0.2", 0);

@@ -131,13 +131,9 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
 
             engineHealthReporter.reportCacheStatusCheckRemoteInfo(modelName, ipPort, roleType.name(), startTime);
 
-            // Latest available KvCache tokens
             long latestAvailableKvCacheTokens = newCacheStatus.getAvailableKvCache();
-            // Latest used KvCache tokens
             long latestUsedKvCacheTokens = newCacheStatus.getTotalKvCache() - latestAvailableKvCacheTokens;
-
             workerStatus.getUsedKvCacheTokens().set(latestUsedKvCacheTokens);
-            workerStatus.getAvailableKvCacheTokens().set(latestAvailableKvCacheTokens);
 
             if (validateCacheStatusResponse(workerStatus, newCacheStatus)) {
 

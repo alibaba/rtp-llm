@@ -4,8 +4,6 @@ import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -53,18 +51,6 @@ public class WorkerStatus {
                 Math.max(0, current - decrement));
     }
 
-    /**
-     * Extract finished request IDs from the status report.
-     */
-    public List<Long> updateTaskStates(Map<String, TaskInfo> runningTaskInfo, Map<String, TaskInfo> finishedTaskInfo) {
-        List<Long> finishedRequestIds = new ArrayList<>();
-        if (finishedTaskInfo != null) {
-            for (TaskInfo task : finishedTaskInfo.values()) {
-                finishedRequestIds.add(task.getRequestId());
-            }
-        }
-        return finishedRequestIds;
-    }
 
     /**
      * Update resource availability with hysteresis to prevent state oscillation.
