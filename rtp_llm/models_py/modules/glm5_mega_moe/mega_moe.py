@@ -23,7 +23,13 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from rtp_llm.ops.compute_ops import cuda_graph_warmup_forward_enabled
+try:
+    from rtp_llm.ops.compute_ops import cuda_graph_warmup_forward_enabled
+except ImportError:
+
+    def cuda_graph_warmup_forward_enabled() -> bool:
+        return False
+
 
 from .input_packer import get_mega_moe_input_packer
 from .jit_warmup import (

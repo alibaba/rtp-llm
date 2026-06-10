@@ -12,7 +12,7 @@ deployments:
    ``OnlineMegaMoeFp4Weight`` — BF16 → packed int8 + fp32 scale.
    ``OnlineMegaMoeFp4FromFp8Weight`` — FP8 per-block → BF16 → FP4.
    Both run at load time so the BF16/FP8 tensor is released before
-   ``MegaMoeFusedWrapper.__init__``. Triggered by ``MOE_STRATEGY=mega_moe``
+   ``MegaMoeWrapper.__init__``. Triggered by ``MOE_STRATEGY=mega_moe``
    env var via ``apply_mega_moe_fp4_wrappers`` in
    ``model_weight_info.py``.
 
@@ -431,7 +431,7 @@ class OnlineMegaMoeFp4Weight(CompositeWeight, QuantWeight):
 
     Output layout matches ``GLM5MegaMoE.setup_weights_from_bf16`` bit for bit.
     Doing the work here lets the BF16 tensor be released as soon as it lands
-    on the GPU, instead of staying resident until ``MegaMoeFusedWrapper.__init__``.
+    on the GPU, instead of staying resident until ``MegaMoeWrapper.__init__``.
 
     Wired in by ``apply_mega_moe_fp4_wrappers`` (in ``model_weight_info.py``)
     when ``MOE_STRATEGY=mega_moe``. Inherits ``QuantWeight`` purely so that
@@ -523,7 +523,7 @@ class OnlineMegaMoeFp4Weight(CompositeWeight, QuantWeight):
 
     def _postprocess(self, tensor, device: str, load_config: LoadConfig):
         # No layout transform here: the deepgemm SF layout + mega-moe transform
-        # require the (l1, l2) pair together and run inside MegaMoeFusedWrapper.
+        # require the (l1, l2) pair together and run inside MegaMoeWrapper.
         return {
             self.kernel.name: tensor[self.kernel.name],
             self.scale.name: tensor[self.scale.name],

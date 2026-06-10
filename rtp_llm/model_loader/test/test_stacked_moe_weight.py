@@ -15,12 +15,22 @@ import torch
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import (
+    FfnAtomicWeight,
+    FfnConfig,
+    FfnWeight,
     MoeAtomicWeight,
     MoeConfig,
     MoeWeight,
     iter_stacked_moe_weights,
 )
-from rtp_llm.model_loader.per_block_fp8_quant_weight import V4PerBlockFp8Weight
+from rtp_llm.model_loader.offline_modelopt_fp4_quant_weight import (
+    OfflineMegaMoeFp4SharedExpertWeight,
+    wrap_shared_expert_for_offline_fp4,
+)
+from rtp_llm.model_loader.per_block_fp8_quant_weight import (
+    PerBlockFp8Weight,
+    V4PerBlockFp8Weight,
+)
 from rtp_llm.model_loader.tensor_source import StackSplitTensorSource, TensorSource
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity
 
@@ -75,6 +85,78 @@ class TestV4SharedExpertW13Weight(unittest.TestCase):
         )
         self.assertIs(wrapped.kernel.process_fun, concat_0)
         self.assertIs(wrapped.scale.process_fun, concat_0)
+
+
+class TestOfflineFp4SharedExpertWeight(unittest.TestCase):
+    def _make_shared_ffn(self):
+        config = FfnConfig(align_size=0, is_gated_activation=True)
+        return FfnWeight(
+            sub_weights=[
+                FfnAtomicWeight(
+                    W.ffn_w1,
+                    [
+                        CkptWeightInfo(
+                            "model.layers.{i}.mlp.shared_experts.gate_proj.weight",
+                            identity,
+                        )
+                    ],
+                    identity,
+                    config=config,
+                ),
+                FfnAtomicWeight(
+                    W.ffn_w2,
+                    [
+                        CkptWeightInfo(
+                            "model.layers.{i}.mlp.shared_experts.down_proj.weight",
+                            identity,
+                        )
+                    ],
+                    identity,
+                    config=config,
+                ),
+                FfnAtomicWeight(
+                    W.ffn_w3,
+                    [
+                        CkptWeightInfo(
+                            "model.layers.{i}.mlp.shared_experts.up_proj.weight",
+                            identity,
+                        )
+                    ],
+                    identity,
+                    config=config,
+                ),
+            ],
+            config=config,
+        )
+
+    def test_unwraps_fp8_shared_w13_to_offline_fp4_scale_names(self):
+        ffn = self._make_shared_ffn()
+        fp8_wrapped = ffn.w13.create(ffn.w13, Fp8BlockWiseQuantConfig(is_quanted=True))
+
+        self.assertIsInstance(fp8_wrapped, PerBlockFp8Weight)
+        offline = wrap_shared_expert_for_offline_fp4(fp8_wrapped)
+
+        self.assertIsInstance(offline, OfflineMegaMoeFp4SharedExpertWeight)
+        self.assertEqual(
+            [w.name for w in offline.scale.weights],
+            [
+                "model.layers.{i}.mlp.shared_experts.gate_proj.weight_scale",
+                "model.layers.{i}.mlp.shared_experts.up_proj.weight_scale",
+            ],
+        )
+
+    def test_unwraps_fp8_shared_w2_to_offline_fp4_scale_name(self):
+        ffn = self._make_shared_ffn()
+        fp8_wrapped = ffn.w2.create(ffn.w2, Fp8BlockWiseQuantConfig(is_quanted=True))
+
+        self.assertIsInstance(fp8_wrapped, PerBlockFp8Weight)
+        offline = wrap_shared_expert_for_offline_fp4(fp8_wrapped)
+
+        self.assertIsInstance(offline, OfflineMegaMoeFp4SharedExpertWeight)
+        self.assertEqual(
+            [w.name for w in offline.scale.weights],
+            ["model.layers.{i}.mlp.shared_experts.down_proj.weight_scale"],
+        )
 
 
 class TestStackSplitTensorSource(unittest.TestCase):
