@@ -38,8 +38,7 @@ class DecodeResourceMeasureTest {
         config.setDecodeConcurrencyLimit(0);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         WorkerStatus worker = createAliveDecodeWorker();
-        worker.setWaitingTaskList(taskMap(1L, 2L));
-        worker.setRunningTaskList(taskMap(3L, 4L));
+        worker.setRunningTaskList(taskMap(1L, 2L, 3L, 4L));
         worker.getLocalTaskMap().put(5L, taskInfo(5L));
 
         assertTrue(measure.isResourceAvailable(worker));
@@ -73,8 +72,7 @@ class DecodeResourceMeasureTest {
         config.setDecodeConcurrencyLimit(4);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         WorkerStatus worker = createAliveDecodeWorker();
-        worker.setWaitingTaskList(taskMap(1L));
-        worker.setRunningTaskList(taskMap(2L));
+        worker.setRunningTaskList(taskMap(1L, 2L));
         worker.getLocalTaskMap().put(3L, taskInfo(3L));
 
         assertEquals(75.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));

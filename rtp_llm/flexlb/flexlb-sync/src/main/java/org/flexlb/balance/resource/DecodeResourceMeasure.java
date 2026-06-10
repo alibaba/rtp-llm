@@ -128,9 +128,6 @@ public class DecodeResourceMeasure implements ResourceMeasure {
 
     private long calculateDecodeConcurrency(WorkerStatus workerStatus) {
         Set<String> requestIds = new HashSet<>();
-        if (MapUtils.isNotEmpty(workerStatus.getWaitingTaskList())) {
-            requestIds.addAll(workerStatus.getWaitingTaskList().keySet());
-        }
         if (MapUtils.isNotEmpty(workerStatus.getRunningTaskList())) {
             requestIds.addAll(workerStatus.getRunningTaskList().keySet());
         }

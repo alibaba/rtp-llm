@@ -2,6 +2,8 @@ package org.flexlb.balance.strategy;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
@@ -40,14 +42,17 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
     private final EngineWorkerStatus engineWorkerStatus;
     private final double decayFactor;
     private final ResourceMeasureFactory resourceMeasureFactory;
+    private final EndpointRegistry endpointRegistry;
 
     public WeightedCacheLoadBalancer(ConfigService configService,
                                      EngineWorkerStatus engineWorkerStatus,
-                                     ResourceMeasureFactory resourceMeasureFactory) {
+                                     ResourceMeasureFactory resourceMeasureFactory,
+                                     EndpointRegistry endpointRegistry) {
         this.engineWorkerStatus = engineWorkerStatus;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.decayFactor = config.getWeightedCacheDecayFactor();
         this.resourceMeasureFactory = resourceMeasureFactory;
+        this.endpointRegistry = endpointRegistry;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, this);
     }
 
@@ -85,7 +90,6 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
 
         if (selectedWorker != null) {
             long prefixLength = calcPrefixMatchLength(selectedWorker.getCacheStatus(), balanceContext.getRequest().getBlockCacheKeys());
-            // Update local task state
             return buildServerStatus(selectedWorker, seqLen, prefixLength, roleType, balanceContext.getRequestId());
         }
 
@@ -102,12 +106,15 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
      */
     @Override
     public void rollBack(String ipPort, long requestId) {
+        Logger.debug("Decode rollBack - ip: {}, requestId: {}", ipPort, requestId);
+
+        DecodeEndpoint ep = endpointRegistry.getDecode(ipPort);
+        if (ep != null) {
+            ep.release(requestId);
+        }
 
         Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, null);
-        Logger.debug("Decode rollBack - ip: {}, requestId: {}",
-                ipPort, requestId);
-
-        WorkerStatus workerStatus = workerStatusMap.get(ipPort);
+        WorkerStatus workerStatus = workerStatusMap != null ? workerStatusMap.get(ipPort) : null;
         if (workerStatus != null) {
             workerStatus.removeLocalTask(requestId);
         }
@@ -117,23 +124,27 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         double hotspotMultiplier = config.getDecodeHotspotMultiplier();
         double imbalanceMultiplier = config.getDecodeImbalanceMultiplier();
 
-        long sumLocalTasks = 0;
+        long sumInflight = 0;
         long sumCacheUsed = 0;
         for (WorkerStatus w : eligible) {
-            sumLocalTasks += w.getLocalTaskMap().size();
+            DecodeEndpoint ep = endpointRegistry.getDecode(w.getIpPort());
+            sumInflight += ep != null ? ep.getInflightCount() : w.getLocalTaskMap().size();
             sumCacheUsed += w.getUsedKvCacheTokens().get();
         }
-        long avgLocalTasks = sumLocalTasks / eligible.size();
+        long avgInflight = sumInflight / eligible.size();
         long avgCacheUsed = sumCacheUsed / eligible.size();
 
         List<WorkerStatus> survivors = new ArrayList<>(eligible.size());
         for (WorkerStatus w : eligible) {
+            DecodeEndpoint ep = endpointRegistry.getDecode(w.getIpPort());
+            long availableKv = ep != null ? ep.getAvailableKvTokens() : w.getAvailableKvCacheTokens().get();
             long totalKv = w.getUsedKvCacheTokens().get() + w.getAvailableKvCacheTokens().get();
-            if (totalKv > 0 && w.getAvailableKvCacheTokens().get() < seqLen) {
+            if (totalKv > 0 && availableKv < seqLen) {
                 continue;
             }
-            if (hotspotMultiplier > 0 && avgLocalTasks > 0
-                    && w.getLocalTaskMap().size() > avgLocalTasks * hotspotMultiplier) {
+            long inflightCount = ep != null ? ep.getInflightCount() : w.getLocalTaskMap().size();
+            if (hotspotMultiplier > 0 && avgInflight > 0
+                    && inflightCount > avgInflight * hotspotMultiplier) {
                 continue;
             }
             if (imbalanceMultiplier > 0 && avgCacheUsed > 0
@@ -261,8 +272,12 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             taskInfo.setPrefixLength(prefixLength);
             taskInfo.setRequestId(requestId);
 
-            // Update local task state
             optimalWorker.putLocalTask(requestId, taskInfo);
+
+            DecodeEndpoint ep = endpointRegistry.getDecode(optimalWorker.getIpPort());
+            if (ep != null) {
+                ep.reserve(requestId, seqLen);
+            }
 
             result.setSuccess(true);
             result.setRole(roleType);

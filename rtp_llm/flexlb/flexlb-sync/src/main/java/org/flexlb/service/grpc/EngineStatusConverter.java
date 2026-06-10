@@ -35,15 +35,8 @@ public class EngineStatusConverter {
         response.setLatestFinishedVersion(workerStatusPB.getLatestFinishedVersion());
         response.setAlive(workerStatusPB.getAlive());
 
-        List<EngineRpcService.TaskInfoPB> srcRunningTaskInfoList = workerStatusPB.getRunningTaskInfoList();
-        List<EngineRpcService.TaskInfoPB> waitingTaskInfoList = srcRunningTaskInfoList.stream().filter(taskInfoPB -> taskInfoPB.getIsWaiting()).toList();
-        List<EngineRpcService.TaskInfoPB> runningTaskInfoList = srcRunningTaskInfoList.stream().filter(taskInfoPB -> !taskInfoPB.getIsWaiting()).toList();
-
-        // Convert waiting task info
-        response.setWaitingTaskInfo(convertToTaskInfoList(waitingTaskInfoList));
-
-        // Convert running task info
-        response.setRunningTaskInfo(convertToTaskInfoList(runningTaskInfoList));
+        response.setRunningTaskInfo(convertToTaskInfoList(workerStatusPB.getRunningTaskInfoList()));
+        response.setWaitingTaskInfo(Map.of());
 
         // Convert finished task list
         response.setFinishedTaskInfo(convertToTaskInfoList(workerStatusPB.getFinishedTaskListList()));
@@ -87,6 +80,7 @@ public class EngineStatusConverter {
             taskInfo.setEndTimeMs(taskInfoPB.getEndTimeMs());
             taskInfo.setDpRank(taskInfoPB.getDpRank());
             taskInfo.setBatchId(taskInfoPB.getBatchId());
+            taskInfo.setWaiting(taskInfoPB.getIsWaiting());
             if (taskInfoPB.hasErrorInfo() && taskInfoPB.getErrorInfo().getErrorCode() != 0L) {
                 taskInfo.setErrorCode(taskInfoPB.getErrorInfo().getErrorCode());
                 taskInfo.setErrorMessage(taskInfoPB.getErrorInfo().getErrorMessage());

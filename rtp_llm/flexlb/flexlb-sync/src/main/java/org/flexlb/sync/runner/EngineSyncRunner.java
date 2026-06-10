@@ -1,12 +1,15 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.BalanceStatusEnum;
+import org.flexlb.util.CommonUtils;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -114,6 +117,9 @@ public class EngineSyncRunner implements Runnable {
                     long removalThresholdUs = Math.max(3 * actualIntervalUs, 1_000_000L);
                     if (System.nanoTime() / 1000 - lastTime > removalThresholdUs) {
                         cachedWorkerStatuses.remove(ipPort);
+                        if (endpointRegistry != null) {
+                            endpointRegistry.remove(ipPort);
+                        }
                         logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
                     }
                 }
@@ -205,6 +211,24 @@ public class EngineSyncRunner implements Runnable {
             workerStatuses.put(workerIpPort, workerStatus);
             logger.info("Created new WorkerStatus for worker: {}", workerIpPort);
         }
+        ensureEndpointExists(workerIpPort, workerStatus);
         return workerStatus;
+    }
+
+    private void ensureEndpointExists(String ipPort, WorkerStatus workerStatus) {
+        if (endpointRegistry == null) {
+            return;
+        }
+        String ip = workerStatus.getIp();
+        int httpPort = workerStatus.getPort();
+        int grpcPort = CommonUtils.toGrpcPort(httpPort);
+
+        if (roleType == RoleType.PREFILL) {
+            endpointRegistry.getOrCreatePrefill(ipPort,
+                    k -> new PrefillEndpoint(ip, httpPort, grpcPort, workerStatus, null));
+        } else if (roleType == RoleType.DECODE) {
+            endpointRegistry.getOrCreateDecode(ipPort,
+                    k -> new DecodeEndpoint(ip, httpPort, grpcPort, workerStatus));
+        }
     }
 }

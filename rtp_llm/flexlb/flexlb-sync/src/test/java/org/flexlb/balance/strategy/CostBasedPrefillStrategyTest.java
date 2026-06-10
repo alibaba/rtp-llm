@@ -1,7 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
@@ -205,11 +205,11 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.2:8080", w2);
 
         PrefillTimePredictor predictor = new PrefillTimePredictor(0, 1, 0, 0, 0, 0);
-        WorkerEndpoint ep1 = new WorkerEndpoint("10.0.0.1", 8080, 8081, w1, predictor);
-        ep1.commitBatch(1L, 4000);
-        endpointRegistry.getOrCreate("10.0.0.1:8080", k -> ep1);
-        endpointRegistry.getOrCreate("10.0.0.2:8080", k ->
-                new WorkerEndpoint("10.0.0.2", 8080, 8081, w2, predictor));
+        PrefillEndpoint ep1 = new PrefillEndpoint("10.0.0.1", 8080, 8081, w1, predictor);
+        ep1.commitBatch(1L, 4000, List.of(1L), List.of(new RequestProfile(1000, 0)));
+        endpointRegistry.getOrCreatePrefill("10.0.0.1:8080", k -> ep1);
+        endpointRegistry.getOrCreatePrefill("10.0.0.2:8080", k ->
+                new PrefillEndpoint("10.0.0.2", 8080, 8081, w2, predictor));
 
         ServerStatus result = strategy.select(buildContext(500, 10L), RoleType.PREFILL, null);
 

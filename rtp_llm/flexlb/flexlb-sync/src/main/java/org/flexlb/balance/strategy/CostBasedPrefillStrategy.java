@@ -3,7 +3,7 @@ package org.flexlb.balance.strategy;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
@@ -181,7 +181,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
             waitMs = 0;
         }
 
-        WorkerEndpoint ep = endpointRegistry.get(w.getIpPort());
+        PrefillEndpoint ep = endpointRegistry.getPrefill(w.getIpPort());
         long workerWaitMs = ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
 
         // delta_prefill_ms: marginal cost of adding this request to the batcher batch

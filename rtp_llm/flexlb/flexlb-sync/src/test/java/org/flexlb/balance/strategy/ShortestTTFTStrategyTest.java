@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
@@ -69,10 +70,12 @@ class ShortestTTFTStrategyTest {
         Mockito.when(cacheAwareService.findMatchingEngines(Mockito.anyList(), Mockito.any(), Mockito.any())).thenReturn(new HashMap<>());
 
         ShortestTTFTStrategy staticCacheLoadBalancer =
-                new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService, resourceMeasureFactory);
+                new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
 
+        FlexlbConfig flexlbConfig = new FlexlbConfig();
+        flexlbConfig.setCostSloMs(5000);
         BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setConfig(new FlexlbConfig());
+        balanceContext.setConfig(flexlbConfig);
         balanceContext.setRequest(req);
         ServerStatus result = staticCacheLoadBalancer.select(balanceContext, RoleType.PREFILL, null);
         if (!result.isSuccess()) {

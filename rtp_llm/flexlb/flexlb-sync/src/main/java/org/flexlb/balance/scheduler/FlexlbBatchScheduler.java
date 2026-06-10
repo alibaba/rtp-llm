@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import com.google.protobuf.Int64Value;
 import com.google.protobuf.InvalidProtocolBufferException;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.strategy.BatcherSnapshot;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.balance.strategy.RequestProfile;
@@ -239,9 +239,10 @@ public class FlexlbBatchScheduler {
                 entrypoint.getServerIp(), entrypoint.getGrpcPort(), itemDetail);
 
         String ipPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
-        WorkerEndpoint ep = endpointRegistry.get(ipPort);
+        PrefillEndpoint ep = endpointRegistry.getPrefill(ipPort);
         if (ep != null) {
-            ep.commitBatch(batchId, predMs);
+            List<Long> reqIds = activeItems.stream().map(BatchItem::requestId).toList();
+            ep.commitBatch(batchId, predMs, reqIds, profiles);
         }
 
         try {
@@ -252,8 +253,9 @@ public class FlexlbBatchScheduler {
         } catch (Throwable t) {
             Logger.warn("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
                     batchId, entrypoint.getServerIp(), entrypoint.getGrpcPort(), t.getMessage());
-            if (ep != null) {
-                ep.releaseBatch(batchId);
+            PrefillEndpoint epFail = endpointRegistry.getPrefill(ipPort);
+            if (epFail != null) {
+                epFail.releaseBatch(batchId);
             }
             for (BatchItem item : activeItems) {
                 failAck(item, t);

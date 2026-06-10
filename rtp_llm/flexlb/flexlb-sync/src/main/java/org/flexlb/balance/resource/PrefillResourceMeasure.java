@@ -3,9 +3,9 @@ package org.flexlb.balance.resource;
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.sync.status.EngineWorkerStatus;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -36,7 +36,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return false;
         }
 
-        long queueSize = workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size();
+        long queueSize = countWaitingTasks(workerStatus);
         return workerStatus.updateResourceAvailabilityWithHysteresis(queueSize, queueSizeThreshold, hysteresisBiasPercent);
     }
 
@@ -68,7 +68,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return 0.0;
         }
 
-        long queueSize = workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size();
+        long queueSize = countWaitingTasks(workerStatus);
 
         if (queueSize <= 0) {
             return 0.0;
@@ -77,5 +77,13 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         } else {
             return (queueSize * 100.0) / maxQueueSize;
         }
+    }
+
+    private static long countWaitingTasks(WorkerStatus workerStatus) {
+        if (MapUtils.isEmpty(workerStatus.getRunningTaskList())) {
+            return 0;
+        }
+        return workerStatus.getRunningTaskList().values().stream()
+                .filter(TaskInfo::isWaiting).count();
     }
 }

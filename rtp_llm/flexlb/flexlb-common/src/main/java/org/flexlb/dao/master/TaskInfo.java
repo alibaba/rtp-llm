@@ -3,6 +3,7 @@ package org.flexlb.dao.master;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.enums.TaskStateEnum;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -30,6 +31,10 @@ public class TaskInfo {
     private String errorMessage;
     @JsonProperty("batch_id")
     private long batchId = -1;
+    @JsonProperty("phase")
+    private TaskPhase phase;
+    @JsonProperty("is_waiting")
+    private boolean waiting;
 
     private long predictedMs;
 

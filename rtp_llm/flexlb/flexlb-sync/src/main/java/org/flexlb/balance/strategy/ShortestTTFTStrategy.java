@@ -2,6 +2,8 @@ package org.flexlb.balance.strategy;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
@@ -45,6 +47,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     private final EngineHealthReporter engineHealthReporter;
     private final CacheAwareService cacheAwareService;
     private final ResourceMeasureFactory resourceMeasureFactory;
+    private final EndpointRegistry endpointRegistry;
 
     private static final int MIN_CANDIDATE_COUNT = 1;
     private static final double CANDIDATE_PERCENTAGE = 0.3;
@@ -54,11 +57,13 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     public ShortestTTFTStrategy(EngineWorkerStatus engineWorkerStatus,
                                 EngineHealthReporter engineHealthReporter,
                                 CacheAwareService cacheAwareService,
-                                ResourceMeasureFactory resourceMeasureFactory) {
+                                ResourceMeasureFactory resourceMeasureFactory,
+                                EndpointRegistry endpointRegistry) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.engineHealthReporter = engineHealthReporter;
         this.cacheAwareService = cacheAwareService;
         this.resourceMeasureFactory = resourceMeasureFactory;
+        this.endpointRegistry = endpointRegistry;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, this);
     }
 
@@ -190,7 +195,9 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                     long hitCacheTokens = calculatePrefixMatchLength(w, cacheMatchResults);
                     long prefillMs = predictor.estimateMs(seqLen, hitCacheTokens);
                     long queueMs = w.getPredictedQueueTimeMs().get();
-                    return queueMs + prefillMs <= sloMs;
+                    PrefillEndpoint ep = endpointRegistry.getPrefill(w.getIpPort());
+                    long inflightWaitMs = ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
+                    return queueMs + inflightWaitMs + prefillMs <= sloMs;
                 })
                 .toList();
     }
@@ -225,7 +232,9 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                     long hitCacheTokens = calculatePrefixMatchLength(workerStatus, cacheMatchResults);
                     long prefillTime = TaskInfo.estimatePrefillTimeMs(seqLen, hitCacheTokens);
                     long queueTime = workerStatus.getRunningQueueTime().get();
-                    long newTTFT = prefillTime + queueTime;
+                    PrefillEndpoint ep = endpointRegistry.getPrefill(workerStatus.getIpPort());
+                    long inflightWaitMs = ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
+                    long newTTFT = prefillTime + queueTime + inflightWaitMs;
                     long lastSelectedTime = workerStatus.getLastSelectedTime().get();
                     Logger.debug("Calculate TTFT for worker - ip: {}, port: {}, hitCacheTokens: {}, prefillTime: {}, queueTime: {}, newTTFT: {}",
                             workerStatus.getIp(),

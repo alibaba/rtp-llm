@@ -1,7 +1,8 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -20,7 +21,6 @@ import org.slf4j.LoggerFactory;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicLong;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
@@ -140,6 +140,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 List<Long> finished = workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
                 notifyBatchSchedulerFinished(finished);
 
+                if (endpointRegistry != null) {
+                    calibrateEndpoint(runningTaskInfo, finishedTaskInfo);
+                }
+
                 // Report success even when version is not updated
                 engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
                     Optional.ofNullable(runningTaskInfo).map(Map::size).orElse(0),
@@ -174,10 +178,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.updateRunningQueueTime();
 
             if (endpointRegistry != null) {
-                WorkerEndpoint ep = endpointRegistry.get(ipPort);
-                if (ep != null) {
-                    ep.calibrateWaitingTime();
-                }
+                calibrateEndpoint(runningTaskInfo, finishedTaskInfo);
             }
 
             engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
@@ -225,7 +226,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 workerStatus.getTpSize(),
                 workerStatus.getAvailableKvCacheTokens(),
                 workerStatus.getUsedKvCacheTokens(),
-                workerStatus.getWaitingTaskList() != null ? workerStatus.getWaitingTaskList().size() : 0,
+                workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().values().stream().filter(TaskInfo::isWaiting).count() : 0,
                 workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().size() : 0,
                 workerStatus.getLocalTaskMap() != null ? workerStatus.getLocalTaskMap().size() : 0,
                 workerStatus.getStatusVersion(),
@@ -240,6 +241,22 @@ public class GrpcWorkerStatusRunner implements Runnable {
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, ip, roleType);
         } else {
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, ip, roleType);
+        }
+    }
+
+    private void calibrateEndpoint(Map<String, TaskInfo> runningTaskInfo,
+                                    Map<String, TaskInfo> finishedTaskInfo) {
+        if (roleType == RoleType.PREFILL) {
+            PrefillEndpoint ep = endpointRegistry.getPrefill(ipPort);
+            if (ep != null) {
+                ep.calibrate(finishedTaskInfo, runningTaskInfo);
+            }
+        } else if (roleType == RoleType.DECODE) {
+            DecodeEndpoint ep = endpointRegistry.getDecode(ipPort);
+            if (ep != null) {
+                ep.calibrate(runningTaskInfo, finishedTaskInfo,
+                        workerStatus.getAvailableKvCacheTokens().get());
+            }
         }
     }
 
