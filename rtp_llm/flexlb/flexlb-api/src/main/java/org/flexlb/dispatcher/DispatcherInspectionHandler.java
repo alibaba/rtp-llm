@@ -87,7 +87,7 @@ public class DispatcherInspectionHandler {
                     + ", registered: " + BatchEndpointSpec.BY_PATH.keySet());
         }
         boolean effectivePreAssign = resolvePreAssign(request);
-        return request.bodyToMono(byte[].class).flatMap(bytes -> {
+        return request.bodyToMono(byte[].class).defaultIfEmpty(new byte[0]).flatMap(bytes -> {
             JSONObject body = BatchBodyParser.parseObject(bytes);
             if (body == null) {
                 return badRequest("expected a JSON object body");

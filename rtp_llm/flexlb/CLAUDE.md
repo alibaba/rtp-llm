@@ -171,7 +171,7 @@ Four strategies are available (registered with `LoadBalanceStrategyFactory`):
 - **RANDOM**: Random worker selection
 - **SHORTEST_TTFT**: Select worker with shortest Time-To-First-Token (default for PDFUSION/PREFILL)
 - **WEIGHTED_CACHE**: Cache-aware selection prioritizing workers with matching KV cache blocks (default for DECODE)
-- **ROUND_ROBIN**: Cursor-based round-robin. No load awareness, ~50-200x cheaper than SHORTEST_TTFT (`RoundRobinLoadBalancer`). Supports both `select` and batch-aware `selectBatch`. Use when worker fleets are typically uniform; trades off the ability to avoid hot workers under load skew. See `docs/dispatcher-batch-schedule-comparison-report-2026-05-09.md` for the trade-off data.
+- **ROUND_ROBIN**: Cursor-based round-robin. No load awareness, ~50-200x cheaper than SHORTEST_TTFT (`RoundRobinLoadBalancer`). Supports both `select` and batch-aware `selectBatch`. Use when worker fleets are typically uniform; trades off the ability to avoid hot workers under load skew. See `../../docs/dispatcher-batch-schedule-comparison-report-2026-05-09.md` (repo root) for the trade-off data.
 
 Each `RoleType` can use a different strategy. See `LoadBalanceStrategyEnum` in flexlb-common.
 
@@ -337,20 +337,20 @@ ZooKeeper connection configuration for distributed coordination.
 
 ### DISPATCH_CONFIG (optional, opt-in)
 
-A non-blank `fePoolServiceId` is the enable signal (there is no separate `enabled` flag): every dispatcher bean is gated on `dispatch.fe-pool-service-id`, which Spring's relaxed binding maps from the `DISPATCH_FE_POOL_SERVICE_ID` env. When enabled, FlexLB serves `/dispatcher/<original_fe_path>` on its 7001 listener. Requests are matched against the hard-coded **batch endpoint registry** (`BatchEndpointSpec.SPECS`); registered paths whose array field is present are split across the FE pool and merged; everything else is passthrough-forwarded to one FE.
+A non-blank `fePoolServiceId` is the enable signal (there is no separate `enabled` flag): every dispatcher bean is gated on `dispatch.fe-pool-service-id`, which Spring's relaxed binding maps from the `DISPATCH_FE_POOL_SERVICE_ID` env. When enabled, FlexLB serves `/dispatcher/<original_fe_path>` on its 7001 listener. Requests are matched against the hard-coded **batch endpoint registry** (`BatchEndpointSpec.SPECS`); registered paths whose array field is present (as a JSON array) are split across the FE pool and merged; any other JSON-object body on a registered path — and every unregistered path — is passthrough-forwarded verbatim to one FE. Only non-JSON-object bodies (empty, malformed, top-level array) on registered paths are rejected with 400.
 
 ```json
 {
   "fePoolServiceId": "rtp_llm.frontend.service",
   "subBatch": "count:5",
-  "batchTimeoutMs": 5000,
+  "batchTimeoutMs": 30000,
   "probePath": "/frontend_health",
   "preAssignBe": true
 }
 ```
 
 - `subBatch`: chunk-splitting DSL — `count:N` (exactly N chunks, default), `size:N` (≤N items per chunk), bare integer = `size:N`.
-- `batchTimeoutMs`: per sub-call wait for FE response headers.
+- `batchTimeoutMs`: per sub-call wait for FE response headers (default 30000). For non-streaming generation endpoints FE sends headers only after the whole chunk finishes generating, so this must cover one chunk's full generation time; tune down for embedding-only deployments.
 - `probePath`: FE liveness probe path (`/frontend_health` for rtp_llm, `/health` for vLLM).
 - `preAssignBe`: BE pre-assignment toggle (see Known limits below).
 
@@ -379,7 +379,7 @@ Loading order: defaults → `DISPATCH_CONFIG` JSON → per-field `DISPATCH_*` en
 **Known limits (deferred):**
 - Bare `POST /` aliases `/batch_infer`: it batches only when the body carries `prompt_batch` (rtp_llm FE historically exposes batch generation on the root path with the same wire shape). The `prompt: [...]` variant is NOT batched (known FE-side footgun) — such requests fall through to passthrough-forward to a single FE.
 - `request_id` set by `frontend_server.py` overwrites any upstream id — dispatcher to FE trace linkage is broken. Tracked in `project_frontend_request_id_overwrite.md`.
-- BE pre-assignment is enabled by default (`DISPATCH_PRE_ASSIGN_BE=true`): the dispatcher resolves N BE targets via master `/rtp_llm/batch_schedule` and stamps each chunk's `generate_config.role_addrs` with `{role, ip, http_port, grpc_port}` so FE skips its own master round-trip (existing FE path: `backend_rpc_server_visitor.route_ips` honors non-empty `role_addrs`). `/batch_schedule`'s strategy is decoupled from `/schedule`'s via `FlexlbConfig.batchLoadBalanceStrategy` (default `ROUND_ROBIN`). Failed pre-assigned BE targets still do not auto-failover at the dispatcher; FE handles dead-target fallback by re-invoking `/schedule`.
+- BE pre-assignment is enabled by default (`DISPATCH_PRE_ASSIGN_BE=true`): the dispatcher resolves N BE targets via master `/rtp_llm/batch_schedule` and stamps each chunk's `generate_config.role_addrs` with `{role, ip, http_port, grpc_port}` so FE skips its own master round-trip (existing FE path: `backend_rpc_server_visitor.route_ips` honors non-empty `role_addrs`). **FE version precondition**: the FE build must include `RoleAddr.validate_role` (`@field_validator("role", mode="before")` in `rtp_llm/config/generate_config.py`, on main since `53dc319bd`); older FE builds leave `role_addrs` as `list[dict]` and 500 every stamped request at `model_rpc_client`'s `addr.role` — verified in production 2026-05-28. Against an FE fleet of unknown vintage, start with `DISPATCH_PRE_ASSIGN_BE=false`. `/batch_schedule`'s strategy is decoupled from `/schedule`'s via `FlexlbConfig.batchLoadBalanceStrategy` (default `ROUND_ROBIN`). Failed pre-assigned BE targets still do not auto-failover at the dispatcher; FE handles dead-target fallback by re-invoking `/schedule`.
 - Embedding variants (`/v1/embeddings/{dense,sparse,colbert,similarity}`, `/v1/reranker`, `/v1/classifier`) — not in the registry yet; add one row each after verifying wire shape.
 
 ## Important Implementation Details

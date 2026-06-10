@@ -32,6 +32,43 @@ class DispatcherFePoolRefresherTest {
     }
 
     @Test
+    void bootSeedDiscoveryExceptionDegradesToEmptyPoolAndPollRecovers() {
+        // A transient discovery hiccup at boot must not kill the Spring context: freshness
+        // is owned by the listener + poll paths, so boot degrades to an empty snapshot and
+        // the next poll repairs it.
+        java.util.concurrent.atomic.AtomicBoolean failing = new java.util.concurrent.atomic.AtomicBoolean(true);
+        StubServiceDiscovery inner = new StubServiceDiscovery(
+                "svc.fe", WorkerHost.of("10.0.0.1", 8088));
+        org.flexlb.discovery.ServiceDiscovery flaky = new org.flexlb.discovery.ServiceDiscovery() {
+            @Override
+            public java.util.List<WorkerHost> getHosts(String address) {
+                if (failing.get()) {
+                    throw new IllegalStateException("vipserver cache not ready");
+                }
+                return inner.getHosts(address);
+            }
+
+            @Override
+            public void listen(String address, org.flexlb.discovery.ServiceHostListener listener) {
+                inner.listen(address, listener);
+            }
+
+            @Override
+            public void shutdown() {}
+        };
+
+        DispatcherFePoolRefresher r = refresher(flaky, "svc.fe");
+        assertEquals(0, r.currentSize(),
+                "boot-time discovery failure must degrade to an empty pool, not fail startup");
+        assertNotNull(inner.registeredListener,
+                "listener must still be registered after a failed boot seed");
+
+        failing.set(false);
+        r.refresh();
+        assertEquals(1, r.currentSize(), "poll must repair the pool once discovery recovers");
+    }
+
+    @Test
     void pollPathFillsPoolAfterColdSeed() {
         StubServiceDiscovery discovery = new StubServiceDiscovery("svc.fe");
         DispatcherFePoolRefresher r = refresher(discovery, "svc.fe");

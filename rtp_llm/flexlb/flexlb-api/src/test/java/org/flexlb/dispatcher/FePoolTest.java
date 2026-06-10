@@ -34,6 +34,22 @@ class FePoolTest {
     }
 
     @Test
+    void distributesEvenlyAcrossAliveHostsWhenOneIsDead() {
+        // Skipping a dead host must not funnel its share onto the next host in line:
+        // 12 picks over 3 alive hosts must land 4/4/4, not 4/8/... on b's successor.
+        FePool pool = fePool(
+                () -> List.of("http://a:8088", "http://b:8088", "http://c:8088", "http://d:8088"),
+                url -> !url.contains("b:"));
+        java.util.Map<String, Integer> counts = new java.util.HashMap<>();
+        for (int i = 0; i < 12; i++) {
+            counts.merge(pool.next(), 1, Integer::sum);
+        }
+        assertEquals(4, counts.get("http://a:8088"), "uneven RR after dead-host skip: " + counts);
+        assertEquals(4, counts.get("http://c:8088"), "dead host's successor must not inherit its share: " + counts);
+        assertEquals(4, counts.get("http://d:8088"), "uneven RR after dead-host skip: " + counts);
+    }
+
+    @Test
     void fallsBackToRoundRobinWhenAllDead() {
         FePool pool = fePool(
                 () -> List.of("http://a:8088", "http://b:8088"),

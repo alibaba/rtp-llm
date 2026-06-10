@@ -49,6 +49,7 @@ class DispatcherE2ETest {
     private MockWebServer fe2;
     private MockWebServer fe3;
     private DisposableServer dispatcherServer;
+    private reactor.netty.resources.ConnectionProvider feConnectionProvider;
     private final ObjectMapper mapper = new ObjectMapper();
 
     @BeforeEach
@@ -66,6 +67,10 @@ class DispatcherE2ETest {
         if (dispatcherServer != null) {
             dispatcherServer.disposeNow();
             dispatcherServer = null;
+        }
+        if (feConnectionProvider != null) {
+            feConnectionProvider.disposeLater().block(java.time.Duration.ofSeconds(5));
+            feConnectionProvider = null;
         }
         fe1.shutdown();
         fe2.shutdown();
@@ -195,6 +200,39 @@ class DispatcherE2ETest {
         assertChunkRequest(fe1.takeRequest(), "/v1/embeddings", "input", 2);
         assertChunkRequest(fe2.takeRequest(), "/v1/embeddings", "input", 2);
         assertChunkRequest(fe3.takeRequest(), "/v1/embeddings", "input", 2);
+    }
+
+    @Test
+    void registeredPathWithNonBatchBodyFallsThroughToSingleFe() throws Exception {
+        // /v1/embeddings is a registered batch endpoint, but OpenAI also allows `input` as a
+        // plain string — that request must reach exactly one FE verbatim, not die with 400.
+        String upstream = "{\"object\":\"list\",\"data\":[{\"index\":0,\"embedding\":[0.1,0.2]}]}";
+        fe1.enqueue(jsonResponse(200, upstream));
+
+        WebTestClient client = buildClient(/*subBatchSize=*/2);
+
+        ObjectNode body = mapper.createObjectNode();
+        body.put("model", "embed-model");
+        body.put("input", "hello world");
+
+        byte[] raw = client.post().uri("/dispatcher/v1/embeddings")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(byte[].class).returnResult().getResponseBody();
+        assertNotNull(raw);
+        JsonNode resp = mapper.readTree(raw);
+        assertEquals("list", resp.get("object").asText());
+        assertNull(resp.get("_partial_failure"));
+
+        assertEquals(1, fe1.getRequestCount() + fe2.getRequestCount() + fe3.getRequestCount(),
+                "non-batch body must hit exactly one FE");
+        RecordedRequest rec = fe1.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS);
+        assertNotNull(rec);
+        JsonNode forwarded = mapper.readTree(rec.getBody().readUtf8());
+        assertEquals("hello world", forwarded.get("input").asText(),
+                "body must be forwarded verbatim, single-string input intact");
     }
 
     @Test
@@ -422,10 +460,8 @@ class DispatcherE2ETest {
         cfg.setSubBatchSpec(SubBatchSpec.parse("size:" + subBatchSize));
         cfg.setPreAssignBe(preAssignBe);
 
-        FeClient feClient = new FeClient(
-                WebClient.builder(),
-                reactor.netty.resources.ConnectionProvider.builder("e2e").build(),
-                cfg);
+        feConnectionProvider = reactor.netty.resources.ConnectionProvider.builder("e2e").build();
+        FeClient feClient = new FeClient(WebClient.builder(), feConnectionProvider, cfg);
         org.flexlb.dispatcher.FanoutService fanout =
                 new org.flexlb.dispatcher.FanoutService(feClient, pool);
         BatchScheduleClient batchScheduleClient = new BatchScheduleClient(null) {
@@ -434,11 +470,10 @@ class DispatcherE2ETest {
                 return reactor.core.publisher.Mono.just(targets);
             }
         };
-        org.flexlb.dispatcher.BatchHandler batchHandler =
-                new org.flexlb.dispatcher.BatchHandler(fanout, cfg, batchScheduleClient);
-
         PassthroughClient passthrough =
                 new PassthroughClient(WebClient.create(), pool);
+        org.flexlb.dispatcher.BatchHandler batchHandler =
+                new org.flexlb.dispatcher.BatchHandler(fanout, cfg, batchScheduleClient, passthrough);
 
         // Real inspection handler — refresher source returns the same pool URLs the router fans
         // out to, so /dispatcher/_snapshot reflects what dispatcher actually sees. FeHealthChecker

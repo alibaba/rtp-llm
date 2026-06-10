@@ -37,19 +37,24 @@ public class BatchHandler {
     private final FanoutService fanoutService;
     private final SubBatchSpec subBatch;
     private final BatchScheduleClient batchScheduleClient;
+    private final PassthroughClient passthroughClient;
     private final boolean preAssignBe;
 
     public BatchHandler(FanoutService fanoutService,
                         DispatchConfig cfg,
-                        BatchScheduleClient batchScheduleClient) {
+                        BatchScheduleClient batchScheduleClient,
+                        PassthroughClient passthroughClient) {
         this.fanoutService = fanoutService;
         this.subBatch = cfg.getSubBatchSpec();
         this.batchScheduleClient = batchScheduleClient;
+        this.passthroughClient = passthroughClient;
         this.preAssignBe = cfg.isPreAssignBe();
     }
 
     public Mono<ServerResponse> handle(ServerRequest request, BatchEndpointSpec spec) {
         DispatchPvLogData pv = DispatchPvLogData.batch(spec.getPath(), System.currentTimeMillis());
+        java.util.concurrent.atomic.AtomicBoolean delegatedToPassthrough =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
         return request.bodyToMono(byte[].class).defaultIfEmpty(new byte[0]).flatMap(bytes -> {
             JSONObject body = BatchBodyParser.parseObject(bytes);
             if (body == null) {
@@ -57,7 +62,11 @@ public class BatchHandler {
             }
             JSONArray arr = BatchBodyParser.findArrayField(body, spec.getRequestArrayField());
             if (arr == null) {
-                return badRequest("missing or non-array field: " + spec.getRequestArrayField());
+                // Registered path, but the body is not batch-shaped (legacy `prompt`,
+                // single-string `input`): forward verbatim to one FE per the registry
+                // contract. PassthroughClient emits its own pv record.
+                delegatedToPassthrough.set(true);
+                return passthroughClient.forward(request, bytes);
             }
             if (arr.isEmpty()) {
                 JSONObject emptyEnvelope = new JSONObject();
@@ -75,7 +84,7 @@ public class BatchHandler {
                         return fanoutService.dispatchChunks(spec.getPath(), chunkBodies, spec)
                                 .map(subs -> ResponseMerger.merge(subs, spec))
                                 .flatMap(merged -> {
-                                    pv.setFailedChunks(merged.failedIndices().size());
+                                    pv.setFailedChunks(merged.failedReasons().size());
                                     if (merged.allFailed()) {
                                         return errorResponse(merged);
                                     }
@@ -89,7 +98,11 @@ public class BatchHandler {
             pv.setError(errMsg);
             return DispatcherResponses.error(500, "dispatch_failed", String.valueOf(e.getMessage()));
         }).doOnNext(resp -> pv.setHttpStatus(resp.statusCode().value()))
-          .doFinally(signal -> finalizePvRecord(pv, signal));
+          .doFinally(signal -> {
+              if (!delegatedToPassthrough.get()) {
+                  finalizePvRecord(pv, signal);
+              }
+          });
     }
 
     private void finalizePvRecord(DispatchPvLogData pv, SignalType signal) {

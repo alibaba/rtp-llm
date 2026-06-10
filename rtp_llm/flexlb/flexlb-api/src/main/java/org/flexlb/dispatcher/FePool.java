@@ -57,22 +57,25 @@ public class FePool {
         if (snapshot == null || snapshot.isEmpty()) {
             throw new IllegalStateException("no FE endpoints available");
         }
-        int size = snapshot.size();
-        int start = cursor.getAndIncrement();
-        for (int i = 0; i < size; i++) {
-            String candidate = snapshot.get(Math.floorMod(start + i, size));
+        // Round-robin over the alive subset so a dead host's share spreads across the whole
+        // pool instead of funneling onto its successor.
+        List<String> alive = new java.util.ArrayList<>(snapshot.size());
+        for (String candidate : snapshot) {
             if (isAlive.test(candidate)) {
-                allDeadReported.set(false);
-                return candidate;
+                alive.add(candidate);
             }
         }
-        // All dead — fall through to plain round-robin at the original cursor position. Log
-        // once per outage so the operator knows the dispatcher is gambling rather than refusing,
+        if (!alive.isEmpty()) {
+            allDeadReported.set(false);
+            return alive.get(Math.floorMod(cursor.getAndIncrement(), alive.size()));
+        }
+        // All dead — fall through to plain round-robin over the full snapshot. Log once per
+        // outage so the operator knows the dispatcher is gambling rather than refusing,
         // without flooding the log at request rate.
         if (allDeadReported.compareAndSet(false, true)) {
             Logger.warn("FE pool all-dead fallback: pool size={}, returning RR pick anyway "
-                    + "(stale probe data is preferred over refusing service)", size);
+                    + "(stale probe data is preferred over refusing service)", snapshot.size());
         }
-        return snapshot.get(Math.floorMod(start, size));
+        return snapshot.get(Math.floorMod(cursor.getAndIncrement(), snapshot.size()));
     }
 }

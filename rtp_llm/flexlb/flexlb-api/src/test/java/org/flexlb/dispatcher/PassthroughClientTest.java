@@ -10,6 +10,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.http.codec.HttpMessageWriter;
@@ -31,6 +32,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+@Timeout(30)
 class PassthroughClientTest {
 
     private MockWebServer server;
@@ -66,7 +68,7 @@ class PassthroughClientTest {
                 .assertNext(r -> Assertions.assertEquals(200, r.statusCode().value()))
                 .verifyComplete();
 
-        RecordedRequest rec = server.takeRequest();
+        RecordedRequest rec = takeRequestWithin(server);
         Assertions.assertEquals("/worker_status", rec.getPath());
     }
 
@@ -110,7 +112,7 @@ class PassthroughClientTest {
                 .assertNext(r -> Assertions.assertEquals(200, r.statusCode().value()))
                 .verifyComplete();
 
-        RecordedRequest rec = server.takeRequest();
+        RecordedRequest rec = takeRequestWithin(server);
         Assertions.assertEquals("/worker_status?role=PREFILL&verbose=1", rec.getPath());
     }
 
@@ -130,7 +132,7 @@ class PassthroughClientTest {
                 .assertNext(r -> Assertions.assertEquals(200, r.statusCode().value()))
                 .verifyComplete();
 
-        RecordedRequest recorded = server.takeRequest();
+        RecordedRequest recorded = takeRequestWithin(server);
         Assertions.assertEquals("/worker_status?role=PREFILL", recorded.getPath());
     }
 
@@ -158,7 +160,7 @@ class PassthroughClientTest {
                 .assertNext(r -> Assertions.assertEquals(200, r.statusCode().value()))
                 .verifyComplete();
 
-        RecordedRequest rec = server.takeRequest();
+        RecordedRequest rec = takeRequestWithin(server);
         Assertions.assertNotEquals("phony.example:9999", rec.getHeader("Host"),
                 "inbound Host must not leak — WebClient owns the outbound Host");
         Assertions.assertNull(rec.getHeader("Connection"));
@@ -188,7 +190,7 @@ class PassthroughClientTest {
                 .assertNext(r -> Assertions.assertEquals(200, r.statusCode().value()))
                 .verifyComplete();
 
-        RecordedRequest rec = server.takeRequest();
+        RecordedRequest rec = takeRequestWithin(server);
         Assertions.assertNull(rec.getHeader("Proxy-Authorization"));
         Assertions.assertNull(rec.getHeader("Connection"));
     }
@@ -264,7 +266,7 @@ class PassthroughClientTest {
 
         StepVerifier.create(forwardForStreaming(client))
                 .expectComplete()
-                .verify(Duration.ofSeconds(20));
+                .verify(Duration.ofSeconds(10));
     }
 
     /**
@@ -278,7 +280,7 @@ class PassthroughClientTest {
 
         HttpClient http = HttpClient.create()
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 2000)
-                .responseTimeout(Duration.ofSeconds(2));
+                .responseTimeout(Duration.ofMillis(500));
         WebClient webClient = WebClient.builder()
                 .clientConnector(new ReactorClientHttpConnector(http))
                 .build();
@@ -286,7 +288,7 @@ class PassthroughClientTest {
 
         StepVerifier.create(forwardForStreaming(client))
                 .expectErrorMatches(ex -> hasCause(ex, ReadTimeoutException.class))
-                .verify(Duration.ofSeconds(10));
+                .verify(Duration.ofSeconds(5));
     }
 
     private PassthroughClient streamingPassthroughClient(WebClient webClient) {
@@ -296,7 +298,13 @@ class PassthroughClientTest {
         return new PassthroughClient(webClient, pool);
     }
 
-    /** Body delay must stay comfortably above the 2s responseTimeout in the regression guard. */
+    private static RecordedRequest takeRequestWithin(MockWebServer server) throws InterruptedException {
+        RecordedRequest rec = server.takeRequest(5, TimeUnit.SECONDS);
+        Assertions.assertNotNull(rec, "FE never received the forwarded request within 5s");
+        return rec;
+    }
+
+    /** Body delay must stay comfortably above the responseTimeout in the regression guard. */
     private static MockResponse buildSseResponseWithDelayedBody() {
         Buffer body = new Buffer();
         for (int i = 0; i < 6; i++) {
@@ -305,7 +313,7 @@ class PassthroughClientTest {
         return new MockResponse()
                 .setHeader("content-type", "text/event-stream")
                 .setBody(body)
-                .setBodyDelay(3, TimeUnit.SECONDS);
+                .setBodyDelay(1500, TimeUnit.MILLISECONDS);
     }
 
     private static Mono<Void> forwardForStreaming(PassthroughClient client) {

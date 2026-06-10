@@ -6,6 +6,7 @@ import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
@@ -15,7 +16,6 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.RoutingResult;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -45,8 +45,10 @@ public class DefaultRouter implements Router {
      */
     private final LoadBalancer batchLoadBalancer;
     private final int batchScheduleMaxCount;
+    private final ModelMetaConfig modelMetaConfig;
 
-    public DefaultRouter(ConfigService configService) {
+    public DefaultRouter(ConfigService configService, ModelMetaConfig modelMetaConfig) {
+        this.modelMetaConfig = modelMetaConfig;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.loadBalancerMap = new EnumMap<>(RoleType.class);
 
@@ -59,6 +61,10 @@ public class DefaultRouter implements Router {
         LoadBalanceStrategyEnum batchStrategy = config.getBatchLoadBalanceStrategy();
         this.batchLoadBalancer = LoadBalanceStrategyFactory.getLoadBalancer(batchStrategy);
         this.batchScheduleMaxCount = config.getBatchScheduleMaxCount();
+        if (batchScheduleMaxCount < 1) {
+            throw new IllegalStateException("batchScheduleMaxCount must be >= 1, got "
+                    + batchScheduleMaxCount + "; check BATCH_SCHEDULE_MAX_COUNT");
+        }
         Logger.warn("DefaultRouter batchSchedule={}, batchScheduleMaxCount={}",
                 batchStrategy, batchScheduleMaxCount);
     }
@@ -134,7 +140,18 @@ public class DefaultRouter implements Router {
                     "master not ready or MODEL_SERVICE_CONFIG missing");
         }
 
-        // (3) Role inference: reuse the same data source /schedule uses
+        // (3) Single-role check against deployment configuration first: the runtime view
+        //     can transiently hide a role (workers down or not yet synced), which must not
+        //     make a multi-role deployment look single-role and get a partial pre-assignment.
+        List<RoleType> configuredRoles = modelMetaConfig.getConfiguredRoleTypes();
+        if (configuredRoles.size() > 1) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                    "batch_schedule only supports single-role deployments; "
+                    + "multi-stage deployments (disaggregated PD / VL) should use /schedule per request. "
+                    + "Configured roles: " + configuredRoles);
+        }
+
+        // Role inference: reuse the same data source /schedule uses
         List<RoleType> roleTypes = workerStatus.getRoleTypeList();
         if (CollectionUtils.isEmpty(roleTypes)) {
             return BatchScheduleResponse.error(NO_AVAILABLE_WORKER,

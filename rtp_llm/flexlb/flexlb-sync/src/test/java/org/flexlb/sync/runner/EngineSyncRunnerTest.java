@@ -100,18 +100,6 @@ class EngineSyncRunnerTest {
     }
 
     @Test
-    void should_handle_null_worker_status_gracefully() {
-        // Setup - create runner with null map
-        EngineSyncRunner runnerWithNullMap = newRunner(EngineType.LLM);
-
-        // Execute
-        runnerWithNullMap.run();
-
-        // Verify
-        verify(statusCheckExecutor, never()).submit(any(Runnable.class));
-    }
-
-    @Test
     void embedding_engine_marks_workers_alive_without_probing() {
         when(workerAddressService.getEngineWorkerList(modelName, roleType))
                 .thenReturn(List.of(host("10.0.0.1", 23950), host("10.0.0.2", 23950)));
@@ -144,6 +132,61 @@ class EngineSyncRunnerTest {
 
         assertFalse(workerStatusMap.containsKey("10.0.0.9:23950"));
         assertTrue(workerStatusMap.containsKey("10.0.0.1:23950"));
+    }
+
+    @Test
+    void embedding_engine_marks_worker_dead_when_discovery_returns_empty() {
+        WorkerStatus stale = new WorkerStatus();
+        stale.setIp("10.0.0.9");
+        stale.setPort(23950);
+        stale.setAlive(true);
+        stale.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
+        workerStatusMap.put("10.0.0.9:23950", stale);
+
+        when(workerAddressService.getEngineWorkerList(modelName, roleType))
+                .thenReturn(List.of());
+
+        newRunner(EngineType.EMBEDDING).run();
+
+        assertFalse(stale.isAlive(),
+                "embedding has no probe fallback: a worker gone from discovery must stop being routable "
+                        + "even when the whole discovery list went empty");
+    }
+
+    @Test
+    void embedding_engine_marks_worker_dead_immediately_before_removal_threshold() {
+        WorkerStatus stale = new WorkerStatus();
+        stale.setIp("10.0.0.9");
+        stale.setPort(23950);
+        stale.setAlive(true);
+        // Fresh update time: within max(3 * interval, 1s), so physical removal must not
+        // trigger yet — but routability must drop right away.
+        stale.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
+        workerStatusMap.put("10.0.0.9:23950", stale);
+
+        when(workerAddressService.getEngineWorkerList(modelName, roleType))
+                .thenReturn(List.of(host("10.0.0.1", 23950)));
+
+        newRunner(EngineType.EMBEDDING).run();
+
+        assertTrue(workerStatusMap.containsKey("10.0.0.9:23950"),
+                "physical removal stays thresholded to tolerate discovery flaps");
+        assertFalse(stale.isAlive(),
+                "a worker missing from discovery must be non-routable immediately, not after the removal threshold");
+        assertTrue(workerStatusMap.get("10.0.0.1:23950").isAlive());
+    }
+
+    @Test
+    void embedding_engine_skips_variance_reporting() {
+        // Embedding workers are never probed, so stepLatency/runningQueueTime stay 0 and
+        // the variance is identically 0 — reporting it would only pollute monitoring.
+        when(workerAddressService.getEngineWorkerList(modelName, roleType))
+                .thenReturn(List.of(host("10.0.0.1", 23950), host("10.0.0.2", 23950)));
+
+        newRunner(EngineType.EMBEDDING).run();
+
+        verify(engineHealthReporter, never())
+                .reportLatencyMetric(any(), any(), org.mockito.Mockito.anyDouble(), org.mockito.Mockito.anyDouble());
     }
 
     @Test

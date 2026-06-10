@@ -49,7 +49,7 @@ public class FeHealthChecker {
     private ScheduledExecutorService scheduler;
 
     public FeHealthChecker(DispatcherFePoolRefresher refresher,
-                           @Qualifier("dispatcherPassthroughWebClient") WebClient webClient,
+                           @Qualifier("dispatcherProbeWebClient") WebClient webClient,
                            DispatchConfig cfg) {
         this.urlSupplier = refresher.source();
         this.webClient = webClient;

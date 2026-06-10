@@ -164,6 +164,20 @@ class DispatcherInspectionHandlerTest {
         }
 
         @Test
+        void emptyBodyReturns400InsteadOfEmptyResponse() {
+            BatchScheduleClient client = mock(BatchScheduleClient.class);
+            DispatcherInspectionHandler handler = handlerWith(false, client);
+
+            MockServerRequest req = MockServerRequest.builder()
+                    .method(HttpMethod.POST)
+                    .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
+                    .body(Mono.<byte[]>empty());
+
+            assertResponse(handler.dryRun(req), HttpStatus.BAD_REQUEST, body ->
+                    assertEquals("invalid_inspection_request", body.get("error").asText()));
+        }
+
+        @Test
         void emptyArrayShortCircuitsWithoutCallingBatchScheduleClient() {
             BatchScheduleClient client = mock(BatchScheduleClient.class);
             DispatcherInspectionHandler handler = handlerWith(true, client);

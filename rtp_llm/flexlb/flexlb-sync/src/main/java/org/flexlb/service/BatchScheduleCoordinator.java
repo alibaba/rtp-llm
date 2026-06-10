@@ -1,17 +1,19 @@
 package org.flexlb.service;
 
-import java.net.URI;
-
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.exception.BatchScheduleTransportException;
 import org.flexlb.exception.EngineReadTimeoutException;
+import org.flexlb.exception.HttpErrorResponseException;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
+import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
+
+import java.net.URI;
 
 /**
  * Resolves a {@code /batch_schedule} request against the master node, regardless
@@ -56,7 +58,7 @@ public class BatchScheduleCoordinator {
             return Mono.error(new BatchScheduleTransportException(
                     "master unreachable", "MASTER_NULL"));
         }
-        Logger.info("[BatchSchedule] Forwarding to master {}: {}", master, request);
+        Logger.info("[BatchSchedule] Forwarding to master {}: batchCount={}", master, request.getBatchCount());
         URI uri = URI.create("http://" + master);
         return httpNettyService.request(request, uri, "/rtp_llm/batch_schedule", BatchScheduleResponse.class)
                 .doOnNext(response -> engineHealthReporter.reportForwardToMasterResult(
@@ -64,6 +66,15 @@ public class BatchScheduleCoordinator {
                 .onErrorResume(e -> {
                     if (e instanceof BatchScheduleTransportException) {
                         return Mono.error(e);
+                    }
+                    if (e instanceof HttpErrorResponseException httpError) {
+                        BatchScheduleResponse businessFailure =
+                                JsonUtils.toObjectOrNull(httpError.getBody(), BatchScheduleResponse.class);
+                        if (businessFailure != null) {
+                            engineHealthReporter.reportForwardToMasterResult(
+                                    uri.getHost(), String.valueOf(businessFailure.getCode()));
+                            return Mono.just(businessFailure);
+                        }
                     }
                     String errorCode = e instanceof EngineReadTimeoutException ? "TIMEOUT" : "CONNECT_FAILED";
                     Logger.error("[BatchSchedule] Master unreachable, errorCode={}", errorCode, e);

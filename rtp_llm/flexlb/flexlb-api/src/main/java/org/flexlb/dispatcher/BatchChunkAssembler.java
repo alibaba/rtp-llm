@@ -149,9 +149,10 @@ public final class BatchChunkAssembler {
         int max = Math.min(chunkBodies.size(), targets.size());
         for (int i = 0; i < max; i++) {
             BatchScheduleTarget target = targets.get(i);
-            if (target.getGrpcPort() == null) {
+            if (target.getGrpcPort() == null || target.getRole() == null) {
                 // role_addrs is FE's gRPC pre-assignment mechanism; targets without a gRPC
-                // slot (embedding engines) cannot be pre-assigned through it.
+                // slot (embedding engines) or without a role cannot be pre-assigned through
+                // it — skip rather than fail, pre-assignment never blocks traffic.
                 continue;
             }
             JSONObject chunkBody = chunkBodies.get(i);

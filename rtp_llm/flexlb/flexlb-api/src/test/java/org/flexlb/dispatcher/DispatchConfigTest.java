@@ -30,7 +30,9 @@ class DispatchConfigTest {
         // care about asserting here are the other fields, not the enable signal itself.
         DispatchConfig c = load("{\"fePoolServiceId\":\"x\"}");
         assertEquals("count:5", c.getSubBatch());
-        assertEquals(5000, c.getBatchTimeoutMs());
+        assertEquals(30_000, c.getBatchTimeoutMs(),
+                "non-streaming generation endpoints return headers only after the full "
+                        + "generation completes — 5s killed legitimate large chunks");
     }
 
     @Test
@@ -77,7 +79,7 @@ class DispatchConfigTest {
                 + "\"feConnectTimeoutMs\":1234,\"feResponseTimeoutMs\":6000,"
                 + "\"feMaxStreamDurationMs\":120000,\"feMaxResponseBytes\":2097152}");
         assertEquals("count:5", c.getSubBatch(), "subBatchSize is now unknown — default kept");
-        assertEquals(5000, c.getBatchTimeoutMs(), "feResponseTimeoutMs is unknown — default kept");
+        assertEquals(30_000, c.getBatchTimeoutMs(), "feResponseTimeoutMs is unknown — default kept");
         assertEquals("x", c.getFePoolServiceId());
     }
 
