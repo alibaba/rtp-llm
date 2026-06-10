@@ -184,54 +184,43 @@ std::list<GenerateStreamPtr> FIFOScheduler::flattenRunning() const {
     return result;
 }
 
-bool FIFOScheduler::canAdmitUnit(size_t admitted_count, const ScheduleUnit& unit) const {
-    size_t running_count = countStreams(running_);
+bool FIFOScheduler::canAdmitUnit(size_t admitted_count, size_t admitted_total_tokens, size_t running_count, const ScheduleUnit& unit) const {
     if (pd_sep_config_.role_type == RoleType::DECODE) {
         return running_count + admitted_count + unit.size() <= max_generate_batch_size_;
     }
-    // Prefill: running must be empty
     if (running_count > 0) {
         return false;
     }
-    if (running_count + admitted_count + unit.size() > max_generate_batch_size_) {
+    if (admitted_count + unit.size() > max_generate_batch_size_) {
         return false;
     }
-    // group skips token limit check (FlexLB already budgeted)
     if (unit.isGroup()) {
         return true;
     }
-    // Token limit check
-    int max_token = 0;
+    size_t unit_tokens = 0;
     for (const auto& s : unit.streams) {
-        max_token = std::max(max_token, s->contextLength());
+        unit_tokens += s->contextLength();
     }
-    if (admitted_count == 0 && max_token + static_cast<int>(running_count) < static_cast<int>(max_seq_len_)) {
-        return true;
-    }
-    return max_token * static_cast<int>(admitted_count + unit.size()) + static_cast<int>(running_count)
-           < static_cast<int>(max_batch_tokens_size_);
+    return admitted_total_tokens + unit_tokens < max_batch_tokens_size_;
 }
 
 void FIFOScheduler::admitWaitingUnits() {
     size_t admitted_count = 0;
+    size_t admitted_total_tokens = 0;
+    size_t running_count = countStreams(running_);
     int64_t admitted_group_id = -1;
     for (auto it = waiting_.begin(); it != waiting_.end();) {
         auto& unit = *it;
-        // Batch isolation: group and normal don't mix; different groups don't mix
         if (admitted_count > 0) {
             if (admitted_group_id != -1) {
-                if (!unit.isGroup() || unit.group_id != admitted_group_id) {
-                    ++it;
-                    continue;
-                }
-            } else {
-                if (unit.isGroup()) {
-                    ++it;
-                    continue;
-                }
+                break;
+            }
+            if (unit.isGroup()) {
+                ++it;
+                continue;
             }
         }
-        if (!canAdmitUnit(admitted_count, unit)) {
+        if (!canAdmitUnit(admitted_count, admitted_total_tokens, running_count, unit)) {
             ++it;
             continue;
         }
@@ -244,6 +233,9 @@ void FIFOScheduler::admitWaitingUnits() {
             continue;
         }
         admitted_count += unit.size();
+        for (const auto& s : unit.streams) {
+            admitted_total_tokens += s->contextLength();
+        }
         if (needs_loading) {
             loading_.splice(loading_.end(), waiting_, it++);
         } else {

@@ -49,7 +49,7 @@ private:
     bool waitPredicate();
     bool checkInputLength(const GenerateStreamPtr& stream);
     void admitWaitingUnits();
-    bool canAdmitUnit(size_t admitted_count, const ScheduleUnit& unit) const;
+    bool canAdmitUnit(size_t admitted_count, size_t admitted_total_tokens, size_t running_count, const ScheduleUnit& unit) const;
     std::list<GenerateStreamPtr> flattenRunning() const;
     size_t countStreams(const std::list<ScheduleUnit>& queue) const;
     void cancelUnits(std::list<ScheduleUnit>& units);
