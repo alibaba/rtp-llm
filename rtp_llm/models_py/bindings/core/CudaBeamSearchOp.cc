@@ -73,9 +73,55 @@ BeamSearchOutput sampleBeamSearch(BeamSearchParams params) {
     } while (0)
 
     // compute log softmax for probability calculation
-    // note the computation here is intentionally performed inplace to reduce memory usage
-    at::Tensor log_softmax_logits_tsr = params.logits;
-    at::log_softmax_out(log_softmax_logits_tsr, params.logits, -1);
+    at::Tensor logits_tsr = params.logits;
+
+    // Stochastic Beam Search: Gumbel-Top-k Trick with per-batch noise scale.
+    // Recommended noise_scale ranges:
+    //   0.0    = deterministic (standard beam search)
+    //   0.05-0.15 = light randomness (recommended for quality-first)
+    //   0.2-0.4  = medium randomness (balance quality/diversity)
+    //   0.5-1.0  = strong randomness (diversity-first, quality loss)
+    //   1.0    = standard Stochastic Beam Search (unbiased sampling)
+    if (params.temperature.defined() && params.temperature.numel() > 0) {
+        // params.temperature is on host.
+        auto         temperature_cpu = params.temperature.cpu().contiguous().view(-1);
+        const float* temp_data       = temperature_cpu.data_ptr<float>();
+        const int    temp_per_batch  = temperature_cpu.numel() / batch_size;
+
+        bool   needs_noise     = false;
+        auto   noise_scale_cpu = torch::zeros({batch_size, 1, 1}, torch::kFloat32);
+        float* ns_data         = noise_scale_cpu.data_ptr<float>();
+        for (int b = 0; b < batch_size; ++b) {
+            float t    = temp_data[b * temp_per_batch];
+            float ns   = (t > 0.0f && std::abs(t - 1.0f) > 1e-6f) ? t : 0.0f;
+            ns_data[b] = ns;
+            if (ns > 0.0f)
+                needs_noise = true;
+        }
+
+        if (needs_noise) {
+            auto noise_scale_device = noise_scale_cpu.to(logits_tsr.device());
+            auto gumbel_noise       = torch::empty(logits_tsr.sizes(), logits_tsr.options().dtype(torch::kFloat32));
+            if (!params.generators.empty()) {
+                for (int b = 0; b < batch_size; ++b) {
+                    auto gen_opt = (b < (int)params.generators.size() && params.generators[b].defined()) ?
+                                       c10::make_optional(params.generators[b]) :
+                                       c10::nullopt;
+                    gumbel_noise[b].uniform_(1e-10, 1.0 - 1e-10, gen_opt);
+                }
+            } else {
+                gumbel_noise.uniform_(1e-10, 1.0 - 1e-10);
+            }
+            gumbel_noise.log_().neg_().log_().neg_();
+            logits_tsr = logits_tsr + (gumbel_noise * noise_scale_device).to(logits_tsr.dtype());
+        }
+    }
+
+    // note the computation here is intentionally performed inplace to reduce memory usage.
+    // When Gumbel noise is added above, logits_tsr is a freshly-allocated tensor, so the
+    // in-place log_softmax is safe; otherwise it modifies params.logits in place as before.
+    at::Tensor log_softmax_logits_tsr = logits_tsr;
+    at::log_softmax_out(log_softmax_logits_tsr, logits_tsr, -1);
 
     // beam search heuristic
     auto                           logits_dtype = torchDTypeToDataType(params.logits.dtype());
