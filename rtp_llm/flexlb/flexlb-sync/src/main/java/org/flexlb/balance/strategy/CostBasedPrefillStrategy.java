@@ -114,14 +114,15 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         double imbalanceMultiplier = config.getCostImbalanceMultiplier();
 
         long sumWaitMs = 0;
-        long sumBatcherSize = 0;
+        long sumPendingCount = 0;
         for (WorkerStatus w : eligible) {
             PrefillEndpoint ep = endpointRegistry.getPrefill(w.getIpPort());
             sumWaitMs += ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
-            sumBatcherSize += batchScheduler.snapshotForWorker(model, w.getIp(), w.getPort()).queueSize();
+            sumPendingCount += batchScheduler.snapshotForWorker(model, w.getIp(), w.getPort()).queueSize()
+                    + (ep != null ? ep.getInflightRequestCount() : 0);
         }
         long avgWaitMs = sumWaitMs / eligible.size();
-        long avgBatcherSize = sumBatcherSize / eligible.size();
+        long avgPendingCount = sumPendingCount / eligible.size();
 
         long singlePrefillMs = predictor.predictBatchMs(
                 List.of(new RequestProfile(seqLen, 0)));
@@ -130,12 +131,13 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         for (WorkerStatus w : eligible) {
             PrefillEndpoint ep = endpointRegistry.getPrefill(w.getIpPort());
             long endpointWaitMs = ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
-            BatcherSnapshot snap = batchScheduler.snapshotForWorker(model, w.getIp(), w.getPort());
+            long pendingCount = batchScheduler.snapshotForWorker(model, w.getIp(), w.getPort()).queueSize()
+                    + (ep != null ? ep.getInflightRequestCount() : 0);
 
             if (endpointWaitMs + singlePrefillMs > sloMs - sloRiskMarginMs) {
                 continue;
             }
-            if (hotspotMultiplier > 0 && avgBatcherSize > 0 && snap.queueSize() > avgBatcherSize * hotspotMultiplier) {
+            if (hotspotMultiplier > 0 && avgPendingCount > 0 && pendingCount > avgPendingCount * hotspotMultiplier) {
                 continue;
             }
             if (imbalanceMultiplier > 0 && avgWaitMs > 0 && endpointWaitMs > avgWaitMs * imbalanceMultiplier) {

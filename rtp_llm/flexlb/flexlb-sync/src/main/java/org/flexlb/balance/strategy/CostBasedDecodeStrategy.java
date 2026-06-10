@@ -104,18 +104,14 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
         double hotspotMultiplier = config.getDecodeHotspotMultiplier();
         double imbalanceMultiplier = config.getDecodeImbalanceMultiplier();
 
-        long sumInflight = 0;
+        long sumLoad = 0;
         long sumCacheUsed = 0;
         for (WorkerStatus w : eligible) {
             DecodeEndpoint ep = endpointRegistry.getDecode(w.getIpPort());
-            long inflightCount = ep != null ? ep.getInflightCount() : 0;
-            if (ep == null) {
-                Logger.debug("applyHardFilters: ep==null for {}, using inflightCount=0", w.getIpPort());
-            }
-            sumInflight += inflightCount;
+            sumLoad += ep != null ? ep.getTotalLoad() : 0;
             sumCacheUsed += w.getUsedKvCacheTokens().get();
         }
-        long avgInflight = sumInflight / eligible.size();
+        long avgLoad = sumLoad / eligible.size();
         long avgCacheUsed = sumCacheUsed / eligible.size();
 
         List<WorkerStatus> survivors = new ArrayList<>(eligible.size());
@@ -126,9 +122,9 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
             if (totalKv > 0 && availableKv < seqLen) {
                 continue;
             }
-            long inflightCount = ep != null ? ep.getInflightCount() : 0;
-            if (hotspotMultiplier > 0 && avgInflight > 0
-                    && inflightCount > avgInflight * hotspotMultiplier) {
+            long load = ep != null ? ep.getTotalLoad() : 0;
+            if (hotspotMultiplier > 0 && avgLoad > 0
+                    && load > avgLoad * hotspotMultiplier) {
                 continue;
             }
             if (imbalanceMultiplier > 0 && avgCacheUsed > 0

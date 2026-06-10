@@ -545,7 +545,7 @@ public class FlexlbBatchScheduler {
 
     private long computeDeadlineMs(BalanceContext ctx, ServerStatus prefill, FlexlbConfig cfg) {
         long seqLen = ctx.getRequest().getSeqLen();
-        long hitCache = prefill.getDebugInfo() != null ? prefill.getDebugInfo().getHitCacheLen() : 0;
+        long hitCache = hitCacheOf(prefill);
         PrefillTimePredictor predictor = createPredictor(cfg);
         long predMs = predictor.estimateMs(seqLen, hitCache);
         long sloMs = cfg.resolveSloMs(seqLen);
@@ -573,9 +573,12 @@ public class FlexlbBatchScheduler {
                 ? item.ctx().getRequest().getSeqLen() : 0;
     }
 
+    private static long hitCacheOf(ServerStatus ss) {
+        return ss != null && ss.getDebugInfo() != null ? ss.getDebugInfo().getHitCacheLen() : 0;
+    }
+
     private static long hitOf(BatchItem item) {
-        return item.prefill() != null && item.prefill().getDebugInfo() != null
-                ? item.prefill().getDebugInfo().getHitCacheLen() : 0;
+        return hitCacheOf(item.prefill());
     }
 
     private static Response copyResponse(Response src) {

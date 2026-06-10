@@ -160,6 +160,18 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return snapshot.get();
     }
 
+    public int getInflightBatchCount() {
+        return inflightBatches.size();
+    }
+
+    public int getInflightRequestCount() {
+        int count = 0;
+        for (BatchInflight batch : inflightBatches.values()) {
+            count += batch.requestIds().size();
+        }
+        return count;
+    }
+
     public PrefillTimePredictor getPredictor() {
         return predictor;
     }

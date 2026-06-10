@@ -19,6 +19,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private final AtomicLong totalKvTokens = new AtomicLong();
     private final AtomicReference<Long> snapshot = new AtomicReference<>(0L);
     private volatile long reportedKvAvailable;
+    private volatile int confirmedRunningCount;
 
     public DecodeEndpoint(String ip, int httpPort, int grpcPort, WorkerStatus status) {
         super(ip, httpPort, grpcPort, status);
@@ -80,6 +81,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
         }
 
+        this.confirmedRunningCount = runningTaskInfo != null ? runningTaskInfo.size() : 0;
+
         // Phase 4: recompute cumulative and refresh snapshot
         recomputeTotalAndRefresh();
     }
@@ -90,6 +93,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public int getInflightCount() {
         return inflightRequests.size();
+    }
+
+    public int getTotalLoad() {
+        return confirmedRunningCount + inflightRequests.size();
     }
 
     ConcurrentHashMap<Long, RequestInflight> getInflightRequests() {
