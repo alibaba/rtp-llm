@@ -188,7 +188,7 @@ void detachLeftoverFutures(std::vector<std::future<T>>& futures) {
 }
 
 template <typename T>
-void drainCancelledFutures(std::vector<std::future<T>>& futures,
+void drainReadyFutures(std::vector<std::future<T>>& futures,
                            std::chrono::milliseconds timeout) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -1860,7 +1860,7 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*           conte
                     slots[i].stage_status =
                         grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "EnqueueGroup prepare timeout");
                 });
-            drainCancelledFutures(prepare_futures, std::chrono::milliseconds(2000));
+            drainReadyFutures(prepare_futures, std::chrono::milliseconds(2000));
             detachLeftoverFutures(prepare_futures);
 
             std::vector<LocalSlot*> ready_slots;
@@ -1976,7 +1976,7 @@ grpc::Status PrefillRpcServer::EnqueueGroup(grpc::ServerContext*           conte
                 [&](size_t i) {
                     cancelResponseEntry(stream_ready_slots[i]->entry);
                 });
-            drainCancelledFutures(load_futures, std::chrono::milliseconds(2000));
+            drainReadyFutures(load_futures, std::chrono::milliseconds(2000));
             detachLeftoverFutures(load_futures);
         });
         worker.detach();

@@ -47,7 +47,6 @@ public class Response {
     public static class WorkerRoleSummary {
         private int discovered;
         private int alive;
-        private int available;
         private long maxQueueTokens;
     }
 }
