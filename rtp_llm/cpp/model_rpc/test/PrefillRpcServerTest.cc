@@ -1,11 +1,13 @@
 #include "gtest/gtest.h"
 #include <memory>
+#include <string>
 
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillRpcServerNew2.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 
@@ -109,6 +111,34 @@ TEST_F(PrefillRpcServerTest, collectStreamOutputReturnsErrorForFailedBatchEnqueu
 
     ASSERT_TRUE(err.hasError());
     ASSERT_EQ(err.code(), stream->statusInfo().code());
+}
+
+TEST_F(PrefillRpcServerTest, GetPeerInfoFallbackUsesTpZeroGrpcEntryPerDp) {
+    auto hasSuffix = [](const std::string& value, const std::string& suffix) {
+        return value.size() >= suffix.size()
+               && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+    };
+
+    PrefillRpcServerNew2 server;
+    server.maga_init_params_.parallelism_config.tp_size = 4;
+    server.maga_init_params_.parallelism_config.dp_size = 2;
+    server.maga_init_params_.parallelism_config.tp_rank = 2;
+    server.maga_init_params_.parallelism_config.dp_rank = 1;
+    server.maga_init_params_.pd_sep_config.worker_port_offset = 8;
+    server.local_rpc_port_ = 9049;  // base rpc port 9001 + rank(1*4+2) * 8
+    server.dp_grpc_addrs_.clear();
+
+    grpc::ServerContext  context;
+    GetPeerInfoRequestPB request;
+    GetPeerInfoResponsePB response;
+
+    auto status = server.GetPeerInfo(&context, &request, &response);
+    ASSERT_TRUE(status.ok());
+    ASSERT_EQ(response.tp_size(), 4);
+    ASSERT_EQ(response.dp_size(), 2);
+    ASSERT_EQ(response.dp_grpc_addrs_size(), 2);
+    EXPECT_TRUE(hasSuffix(response.dp_grpc_addrs(0), ":9001"));
+    EXPECT_TRUE(hasSuffix(response.dp_grpc_addrs(1), ":9033"));
 }
 
 }  // namespace rtp_llm

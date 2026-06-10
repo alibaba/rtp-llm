@@ -188,8 +188,14 @@ class CacheStoreConfig:
     p2p_resource_store_timeout_check_interval_ms: int
     p2p_layer_cache_buffer_store_timeout_ms: int
     p2p_cancel_broadcast_timeout_ms: int
+    p2p_prefill_resource_hold_ms: int
+    p2p_max_transfer_deadline_ms: int
+    p2p_cancelled_keys_ttl_ms: int
     cache_store_tcp_anet_rpc_thread_num: int
     cache_store_tcp_anet_rpc_queue_num: int
+    cache_store_tcp_worker_queue_size: int
+    rdma_transfer_worker_thread_count: int
+    rdma_transfer_worker_queue_size: int
 
     def __getstate__(self) -> tuple:
         ...

@@ -173,7 +173,7 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
     const bool has_propose_hidden =
         payload->propose_hidden.shape_size() > 0 || !payload->propose_hidden.fp16_data().empty()
         || !payload->propose_hidden.bf16_data().empty() || !payload->propose_hidden.fp32_data().empty();
-    const bool mtp_requires_propose_tokens = !stream->forceDisableSpRun();
+    const bool mtp_requires_propose_tokens = !stream->disableSpRun();
     if (mtp_requires_propose_tokens && payload->propose_tokens.size() < 2) {
         stream->setContainProposeToken(false);
         stream->setProposeToken({});
@@ -627,9 +627,6 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
         auto error = load_context->errorInfo();
         RTP_LLM_LOG_WARNING(
             "load cache done but not success, stream: [%ld], error: %s", stream_->streamId(), error.ToString().c_str());
-        if (error.hasError()) {
-            stream_->reportErrorWithoutLock(error.code(), error.ToString());
-        }
         return;
     }
     auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_context);

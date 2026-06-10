@@ -317,11 +317,13 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
     } else {
         // Fallback: port arithmetic (kept for backward compatibility when
         // p2p_worker_addrs is not populated).
-        int64_t     stride       = pc.tp_size * pdc.worker_port_offset;
-        int64_t     dp0_rpc_port = local_rpc_port_ - pc.dp_rank * stride;
+        const int64_t rank_stride         = pdc.worker_port_offset;
+        const int64_t dp_stride           = pc.tp_size * rank_stride;
+        const int64_t current_rank_offset = (pc.dp_rank * pc.tp_size + pc.tp_rank) * rank_stride;
+        const int64_t dp0_rpc_port        = local_rpc_port_ - current_rank_offset;
         std::string bind_ip      = autil::NetUtil::getBindIp();
         for (int64_t i = 0; i < pc.dp_size; ++i) {
-            response->add_dp_grpc_addrs(bind_ip + ":" + std::to_string(dp0_rpc_port + i * stride));
+            response->add_dp_grpc_addrs(bind_ip + ":" + std::to_string(dp0_rpc_port + i * dp_stride));
         }
     }
 

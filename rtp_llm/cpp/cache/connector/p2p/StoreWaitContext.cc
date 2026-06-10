@@ -35,6 +35,9 @@ void StoreWaitContextChecker::checkOnce() {
             RTP_LLM_LOG_WARNING("StoreWaitContextChecker: wait timeout, request_id: %ld, deadline_ms: %ld",
                                 context.request_id,
                                 context.deadline_ms);
+            if (computed_buffers_) {
+                computed_buffers_->removeBuffer(context.request_id);
+            }
             if (context.collector) {
                 context.collector->success                 = false;
                 context.collector->store_wait_done_time_us = currentTimeUs() - context.collector->start_time_us;

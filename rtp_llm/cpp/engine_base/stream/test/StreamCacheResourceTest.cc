@@ -28,10 +28,33 @@
 #include <chrono>
 #include <memory>
 #include <thread>
+#include <utility>
 
 using namespace std;
 
 namespace rtp_llm {
+
+class StaticAsyncContext final: public AsyncContext {
+public:
+    StaticAsyncContext(bool done, bool success, ErrorInfo error):
+        done_(done), success_(success), error_(std::move(error)) {}
+
+    void waitDone() override {}
+    bool done() const override {
+        return done_;
+    }
+    bool success() const override {
+        return success_;
+    }
+    ErrorInfo errorInfo() const override {
+        return error_;
+    }
+
+private:
+    bool      done_;
+    bool      success_;
+    ErrorInfo error_;
+};
 
 class StreamCacheResourceTest: public DeviceTestBase {
 protected:
@@ -597,6 +620,57 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_Pending_ReturnsFalse) {
     ASSERT_FALSE(resource.loadCacheDone());
 }
 
+TEST_F(StreamCacheResourceTest, testLoadCacheDone_TransferFailureRetriesWithoutReportingStreamErrorEarly) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    stream_->generate_input_->generate_config->reuse_cache         = true;
+    resource.resource_context_.enable_memory_cache                 = true;
+    stream_->generate_input_->generate_config->enable_memory_cache = true;
+    resource.resource_context_.load_cache_retry_times              = 2;
+
+    auto mock_coord =
+        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
+                                                                             cache_manager_->kv_cache_config_,
+                                                                             cache_manager_->runtime_config_,
+                                                                             cache_manager_->allocator_);
+    ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
+    cache_manager_->coordinator_ = mock_coord;
+
+    auto matched_resource = std::make_shared<KVCacheResource>();
+    matched_resource->initGroups(/*group_num=*/1, /*layer_num=*/1, {0});
+    matched_resource->mutableBlockIds(0).add({7});
+    auto match_ctx = std::make_shared<P2PConnectorAsyncMatchContext>(matched_resource);
+    auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_ctx});
+
+    auto reused_resource = std::make_shared<KVCacheResource>();
+    reused_resource->setDeviceReuseBlockNum(1);
+    reused_resource->setMemoryReuseBlockNum(1);
+    auto failed_read_ctx = std::make_shared<StaticAsyncContext>(
+        /*done=*/true,
+        /*success=*/false,
+        ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE, "transfer not done"));
+    auto fused_read =
+        std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{failed_read_ctx});
+    auto failed_load_ctx =
+        std::make_shared<FusedAsyncReadContext>(fused_match, reused_resource, std::shared_ptr<Meta>());
+    failed_load_ctx->setFusedReadContext(fused_read);
+
+    auto retry_ctx = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    ON_CALL(*retry_ctx, done()).WillByDefault(testing::Return(false));
+
+    EXPECT_CALL(*mock_coord, asyncRead(testing::_))
+        .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(failed_load_ctx)))
+        .WillOnce(testing::Return(std::static_pointer_cast<AsyncContext>(retry_ctx)));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    ASSERT_TRUE(resource.asyncLoadCache());
+    ASSERT_FALSE(resource.loadCacheDone());
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_EQ(resource.load_cache_retry_count_, 1);
+    EXPECT_EQ(resource.load_cache_context_, std::static_pointer_cast<AsyncContext>(retry_ctx));
+}
+
 TEST_F(StreamCacheResourceTest, testLoadCacheDone_Done_ReturnsTrue_ClearsContext) {
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
@@ -864,6 +938,33 @@ TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelReportsErrorWhenMtpHandof
     EXPECT_EQ(stream_->getSPOutputBuffer(), nullptr);
     EXPECT_FALSE(stream_->getContainProposeToken());
     EXPECT_TRUE(stream_->getProposeToken().empty());
+}
+
+TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelBeamSearchDoesNotRequireProposeTokens) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource                                                  = stream_->streamCacheResource();
+    stream_->generate_input_->generate_config->force_disable_sp_run = false;
+    stream_->generate_input_->generate_config->num_beams            = 2;
+
+    auto server_call_result                                  = std::make_shared<PrefillLoadCaller::Result>();
+    server_call_result->side_channel_payload.has_data        = true;
+    server_call_result->side_channel_payload.has_first_token = true;
+    server_call_result->side_channel_payload.first_token_id  = 7;
+
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    auto p2p_ctx = std::make_shared<P2PConnectorAsyncReadContext>(kv_resource, nullptr, server_call_result, nullptr, 0);
+    auto fused_read = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{p2p_ctx});
+    auto read_ctx   = std::make_shared<FusedAsyncReadContext>(
+        std::shared_ptr<FusedAsyncContext>(), kv_resource, std::shared_ptr<Meta>());
+    read_ctx->setFusedReadContext(fused_read);
+
+    resource.updateReuseLengthsFromContext(read_ctx);
+
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_EQ(stream_->getSPOutputBuffer(), nullptr);
+    EXPECT_FALSE(stream_->getContainProposeToken());
+    EXPECT_TRUE(stream_->getProposeToken().empty());
+    EXPECT_EQ(stream_->seqLength(), 7);
 }
 
 TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelPreservesZeroFirstToken) {

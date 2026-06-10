@@ -1,4 +1,5 @@
 #include <atomic>
+#include <condition_variable>
 #include <thread>
 #include <gtest/gtest.h>
 #include <limits>
@@ -64,6 +65,14 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             send_calls_.push_back(info);
+            send_call_cv_.notify_all();
+        }
+
+        {
+            std::unique_lock<std::mutex> lock(block_send_mutex_);
+            if (block_send_) {
+                block_send_cv_.wait(lock, [this]() { return !block_send_; });
+            }
         }
 
         bool success = should_succeed_;
@@ -121,6 +130,21 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         send_calls_.clear();
     }
+    void setBlockSend(bool v) {
+        {
+            std::lock_guard<std::mutex> lock(block_send_mutex_);
+            block_send_ = v;
+        }
+        if (!v) {
+            block_send_cv_.notify_all();
+        }
+    }
+    bool waitForTransferCallCount(int count, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return send_call_cv_.wait_for(lock, timeout, [this, count]() {
+            return static_cast<int>(send_calls_.size()) >= count;
+        });
+    }
 
 private:
     /// @brief Parse layer_id from layer_key = base_key + "_" + layer_id + "_" + partition_id
@@ -148,7 +172,11 @@ private:
     int                       stagger_callback_base_ms_{15};
     std::atomic<int>          stagger_callback_counter_{0};
     mutable std::mutex        mutex_;
+    std::condition_variable   send_call_cv_;
     std::vector<SendCallInfo> send_calls_;
+    std::mutex                block_send_mutex_;
+    std::condition_variable   block_send_cv_;
+    bool                      block_send_{false};
 };
 
 // Mock IKVCacheRecvTask for testing
@@ -197,6 +225,18 @@ public:
     }
 
     transfer::IKVCacheRecvTaskPtr recv(const transfer::RecvRequest& request) override {
+        {
+            std::unique_lock<std::mutex> lock(block_mutex_);
+            if (block_next_recv_) {
+                recv_entered_ = true;
+                recv_entered_cv_.notify_all();
+                block_recv_cv_.wait(lock, [this]() { return !block_next_recv_; });
+            }
+        }
+        const int recv_call_index = recv_call_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (fail_recv_call_index_.load(std::memory_order_relaxed) == recv_call_index) {
+            return nullptr;
+        }
         auto                        task = std::make_shared<MockIKVCacheRecvTask>();
         std::lock_guard<std::mutex> lock(mutex_);
         tasks_[request.unique_key] = task;
@@ -211,7 +251,10 @@ public:
         }
     }
 
-    void stealTask(const std::string& /*unique_key*/) override {
+    void stealTask(const std::string& unique_key) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tasks_.erase(unique_key);
+        stolen_keys_.push_back(unique_key);
         steal_task_count_.fetch_add(1, std::memory_order_relaxed);
     }
     transfer::IKVCacheRecvTaskPtr getTask(const std::string& unique_key) override {
@@ -224,6 +267,32 @@ public:
 
     int stealTaskCount() const {
         return steal_task_count_.load(std::memory_order_relaxed);
+    }
+
+    int taskCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<int>(tasks_.size());
+    }
+
+    void setFailRecvCallIndex(int index) {
+        fail_recv_call_index_.store(index, std::memory_order_relaxed);
+    }
+
+    void blockNextRecv() {
+        std::lock_guard<std::mutex> lock(block_mutex_);
+        block_next_recv_ = true;
+        recv_entered_    = false;
+    }
+
+    bool waitUntilRecvEntered(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(block_mutex_);
+        return recv_entered_cv_.wait_for(lock, timeout, [this]() { return recv_entered_; });
+    }
+
+    void releaseBlockedRecv() {
+        std::lock_guard<std::mutex> lock(block_mutex_);
+        block_next_recv_ = false;
+        block_recv_cv_.notify_all();
     }
 
     /// @brief Check if tasks for a base_key have been created (>= expected_count)
@@ -242,7 +311,15 @@ public:
 private:
     mutable std::mutex                                                     mutex_;
     std::unordered_map<std::string, std::shared_ptr<MockIKVCacheRecvTask>> tasks_;
+    std::vector<std::string>                                               stolen_keys_;
     std::atomic<int>                                                       steal_task_count_{0};
+    std::atomic<int>                                                       recv_call_count_{0};
+    std::atomic<int>                                                       fail_recv_call_index_{-1};
+    mutable std::mutex                                                     block_mutex_;
+    std::condition_variable                                                block_recv_cv_;
+    std::condition_variable                                                recv_entered_cv_;
+    bool                                                                   block_next_recv_{false};
+    bool                                                                   recv_entered_{false};
 };
 
 // Test fixture for P2PConnectorWorker (tests Prefill and Decode sub-objects directly)
@@ -273,6 +350,9 @@ protected:
     }
 
     void TearDown() override {
+        if (mock_sender_) {
+            mock_sender_->setBlockSend(false);
+        }
         prefill_.reset();
         decode_.reset();
     }
@@ -673,6 +753,8 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnTrue_AllLayersSuccess) {
     completion_thread.join();
 
     EXPECT_TRUE(error_info.ok());
+    EXPECT_EQ(mock_receiver_->stealTaskCount(), 2);
+    EXPECT_EQ(mock_receiver_->taskCount(), 0);
 }
 
 TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_PartialLayersFailed) {
@@ -696,6 +778,8 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_PartialLayersFailed) {
     completion_thread.join();
 
     EXPECT_TRUE(error_info.hasError());
+    EXPECT_EQ(mock_receiver_->stealTaskCount(), 2);
+    EXPECT_EQ(mock_receiver_->taskCount(), 0);
 }
 
 TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_Timeout) {
@@ -837,14 +921,8 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_CancelRead) {
         wait_count++;
     }
 
-    // 调用 cancelRead 取消任务（重试直到找到任务，因为 read_tasks_ 在 recv 后才插入）
-    bool cancel_result = false;
-    for (int i = 0; i < 50 && !cancel_result; ++i) {
-        cancel_result = decode_->cancelRead(unique_key);
-        if (!cancel_result) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    }
+    // 调用 cancelRead 取消任务
+    bool cancel_result = decode_->cancelRead(unique_key);
     EXPECT_TRUE(cancel_result);
 
     // 等待 read 完成
@@ -862,6 +940,64 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_CancelRead) {
     EXPECT_TRUE(result.hasError());
     EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);
     EXPECT_TRUE(done);
+    EXPECT_EQ(mock_receiver_->stealTaskCount(), 2);
+    EXPECT_EQ(mock_receiver_->taskCount(), 0);
+}
+
+TEST_F(P2PConnectorWorkerTest, CancelRead_ReturnTrue_DuringRecvRegistrationWindow) {
+    std::string unique_key  = "test_read_cancel_during_build";
+    int64_t     request_id  = 3008;
+    int64_t     deadline_ms = currentTimeMs() + 5000;
+
+    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
+    layer_cache_buffers.push_back(createLayerCacheBuffer(0, 2));
+
+    mock_receiver_->blockNextRecv();
+
+    std::atomic<bool> done{false};
+    ErrorInfo         result;
+    std::thread read_thread([&]() {
+        result = decode_->read(request_id, unique_key, deadline_ms, layer_cache_buffers);
+        done   = true;
+    });
+
+    ASSERT_TRUE(mock_receiver_->waitUntilRecvEntered(std::chrono::seconds(1)));
+    EXPECT_TRUE(decode_->cancelRead(unique_key));
+
+    mock_receiver_->releaseBlockedRecv();
+
+    int wait_count = 0;
+    while (!done && wait_count < 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        wait_count++;
+    }
+
+    if (read_thread.joinable()) {
+        read_thread.join();
+    }
+
+    EXPECT_TRUE(done);
+    EXPECT_TRUE(result.hasError());
+    EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);
+}
+
+TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_BuildRecvTasksFailure_RollsBackRegisteredTasks) {
+    std::string unique_key  = "test_read_build_recv_task_failure";
+    int64_t     request_id  = 3007;
+    int64_t     deadline_ms = currentTimeMs() + 5000;
+
+    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
+    layer_cache_buffers.push_back(createLayerCacheBuffer(0, 2));
+    layer_cache_buffers.push_back(createLayerCacheBuffer(1, 2));
+
+    mock_receiver_->setFailRecvCallIndex(2);
+
+    ErrorInfo error_info = decode_->read(request_id, unique_key, deadline_ms, layer_cache_buffers);
+
+    EXPECT_TRUE(error_info.hasError());
+    EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+    EXPECT_EQ(mock_receiver_->stealTaskCount(), 1);
+    EXPECT_EQ(mock_receiver_->taskCount(), 0);
 }
 
 TEST_F(P2PConnectorWorkerTest, CancelRead_ReturnFalse_TaskNotFound) {
@@ -883,6 +1019,12 @@ TEST_F(P2PConnectorWorkerTest, CancelHandleRead_ReturnTrue_ContextNotFound) {
 
     // 验证返回 true（因为 cancel 是 best-effort）
     EXPECT_TRUE(cancel_result);
+}
+
+TEST_F(P2PConnectorWorkerTest, Init_ReturnFalse_WhenRdmaBackendUnsupported) {
+    worker_config_.transfer_backend_config.cache_store_rdma_mode = true;
+    P2PConnectorWorker worker(worker_config_, mock_layer_block_converter_, nullptr);
+    EXPECT_FALSE(worker.init(10 * 1000));
 }
 
 TEST_F(P2PConnectorWorkerTest, CancelHandleRead_ReturnTrue_ContextFound) {
@@ -926,6 +1068,107 @@ TEST_F(P2PConnectorWorkerTest, CancelHandleRead_ReturnTrue_ContextFound) {
     // 验证返回错误（因为被取消）
     EXPECT_TRUE(result.hasError());
     EXPECT_TRUE(done);
+}
+
+TEST_F(P2PConnectorWorkerTest, CancelHandleRead_SkipsQueuedAsyncSendTasks) {
+    int64_t     request_id  = 3007;
+    std::string unique_key  = "test_cancel_skips_queued_send";
+    int64_t     deadline_ms = currentTimeMs() + 5000;
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    for (uint32_t i = 0; i < 8; ++i) {
+        decode_transfer_servers.push_back({"127.0.0.1", static_cast<uint32_t>(12345 + i)});
+    }
+
+    mock_sender_->setShouldSucceed(true);
+    mock_sender_->setAsyncCallback(false);
+    mock_sender_->setCallbackDelayMs(300);
+
+    addComputedBuffer(request_id, 0, deadline_ms);
+    addComputedBuffer(request_id, 1, deadline_ms);
+
+    std::atomic<bool> done{false};
+    ErrorInfo         result;
+    std::thread       handle_read_thread([&]() {
+        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
+        done   = true;
+    });
+
+    int wait_count = 0;
+    while (mock_sender_->getTransferCallCount() < 4 && wait_count < 400) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        wait_count++;
+    }
+    ASSERT_GE(mock_sender_->getTransferCallCount(), 4);
+
+    EXPECT_TRUE(prefill_->cancelSend(unique_key));
+
+    wait_count = 0;
+    while (!done && wait_count < 200) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        wait_count++;
+    }
+
+    if (handle_read_thread.joinable()) {
+        handle_read_thread.join();
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+
+    EXPECT_TRUE(done);
+    EXPECT_TRUE(result.hasError());
+    EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED);
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 4);
+}
+
+TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackTimeoutSkipsQueuedAsyncSendTasks) {
+    int64_t     request_id  = 3008;
+    std::string unique_key  = "test_timeout_skips_queued_send";
+    int64_t     deadline_ms = currentTimeMs() + 5000;
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    for (uint32_t i = 0; i < 8; ++i) {
+        decode_transfer_servers.push_back({"127.0.0.1", static_cast<uint32_t>(12345 + i)});
+    }
+
+    mock_sender_->setShouldSucceed(true);
+    mock_sender_->setAsyncCallback(false);
+    mock_sender_->setCallbackDelayMs(300);
+    setTransferWaitTimeout(50);
+
+    addComputedBuffer(request_id, 0, deadline_ms);
+    addComputedBuffer(request_id, 1, deadline_ms);
+
+    std::atomic<bool> done{false};
+    ErrorInfo         result;
+    std::thread       handle_read_thread([&]() {
+        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
+        done   = true;
+    });
+
+    int wait_count = 0;
+    while (mock_sender_->getTransferCallCount() < 4 && wait_count < 400) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        wait_count++;
+    }
+    ASSERT_GE(mock_sender_->getTransferCallCount(), 4);
+
+    wait_count = 0;
+    while (!done && wait_count < 200) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        wait_count++;
+    }
+
+    if (handle_read_thread.joinable()) {
+        handle_read_thread.join();
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+
+    EXPECT_TRUE(done);
+    EXPECT_TRUE(result.hasError());
+    EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 4);
 }
 
 // 异步回调错峰完成，覆盖 waitSendCallbacksWithTimeout 中 result_cv 多次 wait_for 唤醒
@@ -1143,6 +1386,74 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_TransferFailure_KVCacheResourceReleas
 
     EXPECT_TRUE(weak_resource.expired()) << "BUG: KVCacheResource still alive after failed sendKVCache() — "
                                             "blocks remain connectorReference'd even when transfer failed";
+}
+
+TEST_F(P2PConnectorWorkerTest, SendKVCache_Timeout_ReleasesQueuedAsyncTaskResources) {
+    worker_config_.tp_size       = 1;
+    worker_config_.tp_rank       = 0;
+    worker_config_.layer_all_num = 6;
+    setTransferWaitTimeout(50);
+
+    const int64_t   request_id  = 5005;
+    const std::string unique_key  = "test_timeout_releases_queued_async_tasks";
+    const int64_t   deadline_ms = currentTimeMs() + 500;
+
+    std::vector<std::weak_ptr<KVCacheResource>> weak_resources;
+    weak_resources.reserve(worker_config_.layer_all_num);
+    for (int layer_id = 0; layer_id < static_cast<int>(worker_config_.layer_all_num); ++layer_id) {
+        auto resource = createKVCacheResource(layer_id, 2);
+        weak_resources.push_back(resource);
+        addComputedBufferWithResource(request_id, layer_id, deadline_ms, resource);
+        resource.reset();
+        ASSERT_FALSE(weak_resources.back().expired());
+    }
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    mock_sender_->setShouldSucceed(true);
+    mock_sender_->setAsyncCallback(true);
+    mock_sender_->setCallbackDelayMs(1);
+    mock_sender_->setBlockSend(true);
+
+    ErrorInfo   result;
+    std::thread send_thread([&]() {
+        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
+    });
+
+    const bool observed_four_sends = mock_sender_->waitForTransferCallCount(4, std::chrono::milliseconds(2000));
+    if (!observed_four_sends) {
+        mock_sender_->setBlockSend(false);
+    }
+    if (send_thread.joinable()) {
+        send_thread.join();
+    }
+    ASSERT_TRUE(observed_four_sends);
+
+    EXPECT_TRUE(result.hasError());
+    EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
+
+    auto wait_until_expired = [](const std::weak_ptr<KVCacheResource>& weak_resource) {
+        for (int i = 0; i < 50; ++i) {
+            if (weak_resource.expired()) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return weak_resource.expired();
+    };
+
+    EXPECT_FALSE(weak_resources[0].expired());
+    EXPECT_FALSE(weak_resources[1].expired());
+    EXPECT_FALSE(weak_resources[2].expired());
+    EXPECT_FALSE(weak_resources[3].expired());
+    EXPECT_TRUE(wait_until_expired(weak_resources[4]));
+    EXPECT_TRUE(wait_until_expired(weak_resources[5]));
+
+    mock_sender_->setBlockSend(false);
+    for (const auto& weak_resource : weak_resources) {
+        EXPECT_TRUE(wait_until_expired(weak_resource));
+    }
 }
 
 // ==================== computed_buffers_ 过期竞态条件测试 ====================

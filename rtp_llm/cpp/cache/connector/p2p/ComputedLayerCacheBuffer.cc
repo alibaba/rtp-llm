@@ -4,6 +4,12 @@
 
 namespace rtp_llm {
 
+namespace {
+
+constexpr int64_t kRemovedIdRetentionMs = 3600000;
+
+}  // namespace
+
 ComputedLayerCacheBuffer::ComputedLayerCacheBuffer(int64_t                                  request_id,
                                                    const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer,
                                                    int64_t                                  deadline_ms):
@@ -86,7 +92,7 @@ std::shared_ptr<ComputedLayerCacheBuffer> ComputedLayerCacheBufferStore::getBuff
 void ComputedLayerCacheBufferStore::removeBuffer(int64_t request_id) {
     std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
     computed_buffers_.erase(request_id);
-    removed_request_ids_[request_id] = currentTimeMs();
+    markRemovedLocked(request_id, currentTimeMs());
 }
 
 int64_t ComputedLayerCacheBufferStore::getBuffersCount() const {
@@ -99,26 +105,29 @@ void ComputedLayerCacheBufferStore::checkTimeout() {
     int64_t                      current_time_ms = currentTimeMs();
     for (auto iter = computed_buffers_.begin(); iter != computed_buffers_.end();) {
         if (current_time_ms >= iter->second->deadlineMs()) {
-            removed_request_ids_[iter->first] = current_time_ms;
+            markRemovedLocked(iter->first, current_time_ms);
             iter                              = computed_buffers_.erase(iter);
         } else {
             ++iter;
         }
     }
-    // Retain removed IDs long enough to cover the longest possible
-    // StoreWaitContext deadline (business deadline, up to ~1h via
-    // request_deadline_ms in writeByLayer). A shorter TTL lets late
-    // GPU-event completions slip past the blacklist and create ghost
-    // ComputedLayerCacheBuffer entries that pin blocks until their
-    // own deadline expires.
-    static constexpr int64_t kRemovedIdRetentionMs = 3600000;
-    for (auto iter = removed_request_ids_.begin(); iter != removed_request_ids_.end();) {
-        if (current_time_ms - iter->second > kRemovedIdRetentionMs) {
-            iter = removed_request_ids_.erase(iter);
-        } else {
-            ++iter;
+    while (!removed_request_expiry_queue_.empty()) {
+        const auto& expiry = removed_request_expiry_queue_.top();
+        if (expiry.expire_at_ms > current_time_ms) {
+            break;
         }
+        auto it = removed_request_ids_.find(expiry.request_id);
+        if (it != removed_request_ids_.end() && it->second == expiry.removed_at_ms) {
+            removed_request_ids_.erase(it);
+        }
+        removed_request_expiry_queue_.pop();
     }
+}
+
+void ComputedLayerCacheBufferStore::markRemovedLocked(int64_t request_id, int64_t removed_at_ms) {
+    removed_request_ids_[request_id] = removed_at_ms;
+    removed_request_expiry_queue_.push(
+        RemovedRequestExpiry{removed_at_ms + kRemovedIdRetentionMs, request_id, removed_at_ms});
 }
 
 }  // namespace rtp_llm

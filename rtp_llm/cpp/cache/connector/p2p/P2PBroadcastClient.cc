@@ -262,14 +262,18 @@ P2PBroadcastClient::LeaseStatusResult P2PBroadcastClient::queryLeaseStatus(const
     for (size_t rank = 0; rank < responses.size(); ++rank) {
         const auto& resp = responses[rank];
         LeaseStatusResult::RankStatus rs;
-        if (resp.has_p2p_response() && resp.p2p_response().has_lease_status()) {
+        if (resp.has_p2p_response() && resp.p2p_response().error_code() == ErrorCodePB::NONE_ERROR
+            && resp.p2p_response().has_lease_status()) {
             const auto& ls = resp.p2p_response().lease_status();
+            rs.valid       = true;
             rs.sealed      = ls.sealed();
             rs.started_ops = ls.started_ops();
             rs.finished_ops = ls.finished_ops();
             rs.stopped     = ls.stopped();
+        } else {
+            RTP_LLM_LOG_WARNING("queryLeaseStatus: rank %zu missing valid lease_status, unique_key=%s",
+                                rank, unique_key.c_str());
         }
-        // If no lease_status in response, default (stopped=true) is safe: rank has no active lease.
         result.ranks.push_back(rs);
     }
     result.success = true;

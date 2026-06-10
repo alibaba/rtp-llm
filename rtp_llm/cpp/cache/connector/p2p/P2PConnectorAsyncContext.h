@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/PrefillLoadCaller.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "autil/LoopThread.h"
 #include <atomic>
 #include <chrono>
@@ -63,6 +64,13 @@ public:
     // once all ranks confirm their transfers have finished.
     void pollLeaseIfNeeded(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
 
+    bool needLeasePoll() const {
+        return lease_hold_pending_.load(std::memory_order_acquire)
+            && !done()
+            && !lease_all_ranks_stopped_.load(std::memory_order_acquire)
+            && currentTimeMs() >= lease_poll_next_ms_.load(std::memory_order_relaxed);
+    }
+
     std::string uniqueKey() const {
         return tp_sync_result_ ? tp_sync_result_->uniqueKey() : "";
     }
@@ -84,9 +92,9 @@ private:
         std::string error_message;
     };
 
-    bool              tryFinishExpiredTransferNotDoneHold();
+    bool              tryFinishExpiredLeaseHold();
     MergedReadOutcome mergeReadResultsWhenBothDone() const;
-    /// @param allow_transfer_not_done_hold 为 false 时不再进入 transfer_not_done 等待窗口（用于 hold 到期后的终态）
+    /// @param allow_lease_hold 为 false 时不再进入 lease 等待窗口（用于 hold 到期后的终态）
     void applyMergedReadOutcome(const MergedReadOutcome& outcome, bool allow_transfer_not_done_hold = true);
 
     const KVCacheResourcePtr                               resource_;
@@ -102,8 +110,8 @@ private:
     bool                    success_{false};
     ErrorCode               error_code_;
     std::string             error_message_;
-    std::atomic<bool>       transfer_not_done_hold_pending_{false};
-    std::atomic<int64_t>    transfer_not_done_hold_until_ms_{0};
+    std::atomic<bool>       lease_hold_pending_{false};
+    std::atomic<int64_t>    lease_hold_until_ms_{0};
     std::atomic<bool>       tp_cancel_broadcast_triggered_{false};
 
     // Lease polling state (active when transfer_not_done_hold_pending_ is true).

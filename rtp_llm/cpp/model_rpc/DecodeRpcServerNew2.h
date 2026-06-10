@@ -39,6 +39,15 @@ public:
                                     grpc::ServerWriter<GenerateOutputsPB>* response_writer);
 
 private:
+    static bool outputContainsFinished(const GenerateOutputsPB& output);
+    static bool refreshIdleStreamState(std::shared_ptr<GenerateStream>& stream);
+    static bool consumePrefillFirstResponse(const std::shared_ptr<PrefillServerCallerContext>& prefill_ctx,
+                                            std::shared_ptr<GenerateStream>&                   stream,
+                                            bool                                               client_first_chunk_sent,
+                                            bool*                                              prefill_finished,
+                                            int*                                               prefill_finished_size,
+                                            bool*                                              skip_next_decode_output,
+                                            GenerateOutputsPB*                                client_output);
     grpc::Status pollStreamOutputWithPrefill(grpc::ServerContext*                               context,
                                              const std::string&                                 request_key,
                                              WriterInterface*                                   writer,

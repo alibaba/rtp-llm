@@ -39,6 +39,75 @@ class DatabaseTest(TestCase):
             ],
         )
 
+    def test_load_tensors_by_prefix_falls_back_when_shm_loader_init_fails(self):
+        class FakeCkptFile:
+            file_name = "model-00001.safetensors"
+
+            def get_tensor_names(self):
+                return ["decoder.weight"]
+
+            def load_tensors(self, device, direct_io):
+                self.last_load_args = (device, direct_io)
+                return {"decoder.weight": "direct-load"}
+
+        class FailingLoadWithShm:
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError("shm init failed")
+
+        db = database.CkptDatabase(None)
+        db.pretrain_file_list = [FakeCkptFile()]
+        db.finetune_file_list = []
+
+        with mock.patch.object(
+            database, "_should_use_fastsafetensors_shm", return_value=True
+        ), mock.patch.dict(
+            "sys.modules",
+            {"fast_safetensors": SimpleNamespace(LoadWithShm=FailingLoadWithShm)},
+        ):
+            result = db.load_tensors_by_prefix(("decoder",), "cuda:0", True)
+
+        self.assertEqual(result, {"decoder.weight": ["direct-load"]})
+        self.assertEqual(
+            db.pretrain_file_list[0].last_load_args,
+            ("cuda:0", True),
+        )
+
+    def test_load_tensors_by_prefix_falls_back_when_shm_loader_load_fails(self):
+        class FakeCkptFile:
+            file_name = "model-00001.safetensors"
+
+            def get_tensor_names(self):
+                return ["decoder.weight"]
+
+            def load_tensors(self, device, direct_io):
+                self.last_load_args = (device, direct_io)
+                return {"decoder.weight": "direct-load"}
+
+        class FailingLoadWithShm:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def load_safetensors_to_device(self, file_name):
+                raise RuntimeError(f"shm load failed for {file_name}")
+
+        db = database.CkptDatabase(None)
+        db.pretrain_file_list = [FakeCkptFile()]
+        db.finetune_file_list = []
+
+        with mock.patch.object(
+            database, "_should_use_fastsafetensors_shm", return_value=True
+        ), mock.patch.dict(
+            "sys.modules",
+            {"fast_safetensors": SimpleNamespace(LoadWithShm=FailingLoadWithShm)},
+        ):
+            result = db.load_tensors_by_prefix(("decoder",), "cuda:0", False)
+
+        self.assertEqual(result, {"decoder.weight": ["direct-load"]})
+        self.assertEqual(
+            db.pretrain_file_list[0].last_load_args,
+            ("cuda:0", False),
+        )
+
 
 if __name__ == "__main__":
     main()

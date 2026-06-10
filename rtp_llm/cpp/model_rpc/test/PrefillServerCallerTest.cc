@@ -343,6 +343,12 @@ TEST_F(PrefillServerCallerTest, LaterChunkReuseLensRefreshSnapshot) {
     EXPECT_TRUE(context->success());
     EXPECT_FALSE(context->failed());
 
+    GenerateOutputsPB first_response;
+    ASSERT_TRUE(context->takeFirstResponse(first_response));
+    ASSERT_TRUE(first_response.has_flatten_output());
+    ASSERT_EQ(first_response.flatten_output().aux_info_size(), 1);
+    EXPECT_EQ(first_response.flatten_output().aux_info(0).step_output_len(), 1);
+
     const auto& response = context->response();
     ASSERT_TRUE(response.has_flatten_output());
     ASSERT_EQ(response.flatten_output().aux_info_size(), 1);
@@ -408,6 +414,31 @@ TEST_F(PrefillServerCallerTest, DestroyContextCancelsOutstandingPrefillRpc) {
     }
 
     EXPECT_TRUE(server.service()->waitCancelled(std::chrono::seconds(1)));
+}
+
+TEST_F(PrefillServerCallerTest, UnstartedContextDoneReturnsImmediately) {
+    auto context = std::make_shared<PrefillServerCallerContext>("127.0.0.1:1", "never-started");
+
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_FALSE(context->failed());
+}
+
+TEST_F(PrefillServerCallerTest, AsyncReaderCreationFailureReturnsNullContext) {
+    caller_.async_reader_factory_ = [](const std::shared_ptr<RpcService::Stub>&,
+                                       grpc::ClientContext*,
+                                       const GenerateInputPB&,
+                                       grpc::CompletionQueue*) {
+        return std::unique_ptr<grpc::ClientAsyncReader<GenerateOutputsPB>>();
+    };
+
+    GenerateInputPB request;
+    request.set_request_id(1012);
+    request.add_token_ids(1);
+    request.mutable_generate_config()->set_timeout_ms(5000);
+
+    auto context = caller_.callPrefill(&request, "127.0.0.1", 1, "null-reader", 5 * 1000 * 1000);
+    EXPECT_EQ(context, nullptr);
 }
 
 TEST_F(PrefillServerCallerTest, RpcFailureWithoutAnyChunkStaysUnsuccessful) {

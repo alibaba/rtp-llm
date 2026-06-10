@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op imp
 )
 from rtp_llm.ops import AttentionConfigs, RopeStyle
 from rtp_llm.ops.compute_ops import (
+    FusedRopeKVCacheDecodeOp,
     FusedRopeKVCachePrefillOpQOut,
     LayerKVCache,
     PyAttentionInputs,
@@ -199,6 +200,58 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
             print(f"Warning: Failed to initialize device: {e}")
             self.device_initialized = False
 
+    def _create_prepare_inputs(self, num_tokens: int) -> PyAttentionInputs:
+        attn_inputs = PyAttentionInputs()
+        attn_inputs.is_prefill = True
+        attn_inputs.input_lengths = torch.tensor(
+            [num_tokens], dtype=torch.int32, device=self.device
+        )
+        attn_inputs.prefix_lengths = torch.zeros(
+            1, dtype=torch.int32, device=self.device
+        )
+        attn_inputs.sequence_lengths = torch.tensor(
+            [num_tokens], dtype=torch.int32, device=self.device
+        )
+        attn_inputs.cu_seqlens = torch.tensor(
+            [0, num_tokens], dtype=torch.int32, device=self.device
+        )
+        attn_inputs.cu_kv_seqlens = attn_inputs.cu_seqlens.clone()
+        attn_inputs.padding_offset = torch.arange(
+            num_tokens, dtype=torch.int32, device=self.device
+        )
+        attn_inputs.combo_position_ids = torch.arange(
+            num_tokens, dtype=torch.int32, device=self.device
+        )
+        attn_inputs.dtype = get_typemeta(
+            torch.empty((num_tokens, 1), dtype=torch.float16, device=self.device)
+        )
+        return attn_inputs
+
+    def test_prefill_prepare_uses_combo_position_ids(self):
+        if not self.device_initialized:
+            self.skipTest("Device not initialized - required for fused rope prepare")
+
+        attn_config = create_test_attn_config()
+        attn_inputs = self._create_prepare_inputs(4)
+
+        params = FusedRopeKVCachePrefillOpQOut(attn_config).prepare(attn_inputs)
+
+        self.assertTrue(torch.equal(params.position_ids, attn_inputs.combo_position_ids))
+
+    def test_decode_prepare_uses_combo_position_ids(self):
+        if not self.device_initialized:
+            self.skipTest("Device not initialized - required for fused rope prepare")
+
+        attn_config = create_test_attn_config()
+        attn_inputs = self._create_prepare_inputs(1)
+        kv_cache_block_id = torch.tensor([[0]], dtype=torch.int32)
+        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
+
+        params = FusedRopeKVCacheDecodeOp(attn_config).prepare(attn_inputs)
+
+        self.assertTrue(torch.equal(params.position_ids, attn_inputs.combo_position_ids))
+
     def test_fused_rope_vs_mha_rope(self):
         """Compare FusedRopeKVCachePrefillOpQOut (C++) vs MhaRotaryEmbeddingOp (Python)"""
         if not self.device_initialized:
@@ -336,6 +389,7 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
         attn_inputs.sequence_lengths = torch.tensor(
             [num_tokens], dtype=torch.int32, device=self.device
         )
+        attn_inputs.combo_position_ids = positions
         # Set dtype from qkv tensor
         attn_inputs.dtype = get_typemeta(qkv)
 

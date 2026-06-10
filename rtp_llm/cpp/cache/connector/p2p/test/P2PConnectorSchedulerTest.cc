@@ -298,6 +298,47 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnFalse_BroadcastCancelled) {
     }
 }
 
+TEST_F(P2PConnectorSchedulerTest, AsyncRead_HoldsCancelledOutcomeUntilLeaseWindowExpires) {
+    auto tp_ctx = std::make_shared<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>();
+    tp_ctx->response.mutable_p2p_response()->set_error_code(
+        transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED));
+    tp_ctx->response.mutable_p2p_response()->set_error_message("worker cancelled");
+
+    auto tp_result = std::make_shared<P2PBroadcastClient::TpBroadcastResult>(
+        std::vector<std::shared_ptr<P2PBroadcastClient::TpBroadcastResult::WorkerRpcContext>>{tp_ctx});
+    tp_result->finished_[0] = true;
+    tp_result->finished_count_.store(1);
+    tp_result->already_done_.store(true);
+    tp_result->all_request_success_.store(false);
+
+    auto broadcast_result = std::make_shared<P2PBroadcastClient::Result>("cancel-hold", tp_result);
+
+    auto server_result          = std::make_shared<PrefillLoadCaller::Result>();
+    server_result->done_        = true;
+    server_result->success_     = true;
+    server_result->error_code   = ErrorCode::NONE_ERROR;
+    server_result->error_message.clear();
+
+    auto resource = createValidKVCacheResource(1, 1);
+    auto collector = std::make_shared<DecodeSchedulerMetricsCollector>(nullptr);
+    auto context = std::make_shared<P2PConnectorAsyncReadContext>(
+        resource, broadcast_result, server_result, collector, /*transfer_not_done_hold_ms=*/80);
+
+    context->checkDone();
+
+    EXPECT_FALSE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_FALSE(context->needCancel());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    context->checkDone();
+
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);
+}
+
 // ==================== asyncRead 测试 (Decode 端功能) ====================
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNotNull_AllSuccess) {
     auto resource = createValidKVCacheResource(2, 2);
@@ -566,7 +607,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelPrefill_WhenBroadcastFailed) {
 // Prefill：worker 极慢导致超过 deadline，返回超时错误
 TEST_F(P2PConnectorSchedulerTest, SendKVCache_ReturnError_WhenBroadcastExceedsDeadline) {
     for (auto& server : tp_broadcast_servers_) {
-        server->service()->setSleepMillis(120000);
+        server->service()->setSleepMillis(200);
         server->service()->setP2PResponseSuccess(true);
     }
 

@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include "grpc++/grpc++.h"
@@ -25,75 +26,113 @@ public:
         // 18-22s on a single peer; we want to know exactly which step is the
         // bottleneck (lock acquire vs GetState vs CreateCustomChannel vs NewStub).
         const auto t_enter = std::chrono::steady_clock::now();
+        auto       t_locked = t_enter;
 
-        std::lock_guard<std::mutex> guard(mutex_);
-        const auto t_locked = std::chrono::steady_clock::now();
-
-        auto iter = connection_pool_.find(peer);
-        // Check if we need to create a new connection
-        bool need_new_connection = iter == connection_pool_.end();
+        Connection<T>               cached_connection;
+        std::shared_ptr<std::mutex> peer_mutex;
+        {
+            std::lock_guard<std::mutex> guard(mutex_);
+            t_locked                = std::chrono::steady_clock::now();
+            auto iter               = connection_pool_.find(peer);
+            if (iter != connection_pool_.end()) {
+                cached_connection = iter->second;
+            }
+            peer_mutex = getPeerMutexLocked(peer);
+        }
         std::chrono::steady_clock::time_point t_after_get_state = t_locked;
         grpc_connectivity_state                channel_state    = GRPC_CHANNEL_IDLE;
+        bool need_new_connection = !cached_connection.channel || !cached_connection.stub;
         if (!need_new_connection) {
             // Check if existing connection is in a bad state. GetState(true) is
             // documented as non-blocking but in practice can sit for seconds when
             // the channel is in TRANSIENT_FAILURE under reconnect backoff.
-            channel_state     = iter->second.channel->GetState(true);
+            channel_state     = cached_connection.channel->GetState(true);
             t_after_get_state = std::chrono::steady_clock::now();
             need_new_connection =
                 (channel_state == GRPC_CHANNEL_SHUTDOWN || channel_state == GRPC_CHANNEL_TRANSIENT_FAILURE);
-            // Remove bad connection from pool if needed
-            if (need_new_connection) {
-                connection_pool_.erase(iter);
+        }
+        if (!need_new_connection) {
+            logSlowGetConnection(peer,
+                                 channel_state,
+                                 false,
+                                 t_enter,
+                                 t_locked,
+                                 t_after_get_state,
+                                 t_after_get_state,
+                                 t_after_get_state);
+            return cached_connection;
+        }
+
+        std::lock_guard<std::mutex> peer_guard(*peer_mutex);
+        {
+            std::lock_guard<std::mutex> guard(mutex_);
+            auto                        iter = connection_pool_.find(peer);
+            if (iter != connection_pool_.end()) {
+                cached_connection = iter->second;
+            } else {
+                cached_connection = Connection<T>();
             }
+        }
+
+        channel_state       = GRPC_CHANNEL_IDLE;
+        t_after_get_state   = t_locked;
+        need_new_connection = !cached_connection.channel || !cached_connection.stub;
+        if (!need_new_connection) {
+            channel_state     = cached_connection.channel->GetState(true);
+            t_after_get_state = std::chrono::steady_clock::now();
+            need_new_connection =
+                (channel_state == GRPC_CHANNEL_SHUTDOWN || channel_state == GRPC_CHANNEL_TRANSIENT_FAILURE);
+        }
+        if (!need_new_connection) {
+            logSlowGetConnection(peer,
+                                 channel_state,
+                                 false,
+                                 t_enter,
+                                 t_locked,
+                                 t_after_get_state,
+                                 t_after_get_state,
+                                 t_after_get_state);
+            return cached_connection;
         }
 
         std::chrono::steady_clock::time_point t_after_create = t_after_get_state;
         std::chrono::steady_clock::time_point t_after_stub   = t_after_get_state;
-        if (need_new_connection) {
-            grpc::ChannelArguments args;
-            args.SetInt(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, -1);
-            args.SetInt(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, -1);
-            args.SetInt(GRPC_ARG_MAX_CONCURRENT_STREAMS, 100000);
-            args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, 10000);
-            // 需配合 GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS 使用，例如 500
-            args.SetInt(GRPC_ARG_KEEPALIVE_TIMEOUT_MS, 5000);
-            args.SetInt(GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS, 1);
-            auto grpc_channel = grpc::CreateCustomChannel(peer, grpc::InsecureChannelCredentials(), args);
-            t_after_create    = std::chrono::steady_clock::now();
-            if (!grpc_channel) {
-                std::string error_msg = "create grpc channel for " + peer + " failed";
-                return absl::InternalError(error_msg);
-            }
-
-            auto grpc_stub = T::NewStub(grpc_channel);
-            t_after_stub   = std::chrono::steady_clock::now();
-            if (!grpc_stub) {
-                std::string error_msg = "create grpc stub for " + peer + " failed";
-                return absl::InternalError(error_msg);
-            }
-            Connection<T> connection = {grpc_channel, std::move(grpc_stub)};
-            connection_pool_[peer]   = connection;
-            logSlowGetConnection(peer,
-                                 channel_state,
-                                 need_new_connection,
-                                 t_enter,
-                                 t_locked,
-                                 t_after_get_state,
-                                 t_after_create,
-                                 t_after_stub);
-            return connection;
-        } else {
-            logSlowGetConnection(peer,
-                                 channel_state,
-                                 need_new_connection,
-                                 t_enter,
-                                 t_locked,
-                                 t_after_get_state,
-                                 t_after_create,
-                                 t_after_stub);
-            return iter->second;
+        grpc::ChannelArguments args;
+        args.SetInt(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, -1);
+        args.SetInt(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, -1);
+        args.SetInt(GRPC_ARG_MAX_CONCURRENT_STREAMS, 100000);
+        args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, 10000);
+        // 需配合 GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS 使用，例如 500
+        args.SetInt(GRPC_ARG_KEEPALIVE_TIMEOUT_MS, 5000);
+        args.SetInt(GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS, 1);
+        auto grpc_channel = grpc::CreateCustomChannel(peer, grpc::InsecureChannelCredentials(), args);
+        t_after_create    = std::chrono::steady_clock::now();
+        if (!grpc_channel) {
+            std::string error_msg = "create grpc channel for " + peer + " failed";
+            return absl::InternalError(error_msg);
         }
+
+        auto grpc_stub = T::NewStub(grpc_channel);
+        t_after_stub   = std::chrono::steady_clock::now();
+        if (!grpc_stub) {
+            std::string error_msg = "create grpc stub for " + peer + " failed";
+            return absl::InternalError(error_msg);
+        }
+
+        Connection<T> connection = {grpc_channel, std::move(grpc_stub)};
+        {
+            std::lock_guard<std::mutex> guard(mutex_);
+            connection_pool_[peer] = connection;
+        }
+        logSlowGetConnection(peer,
+                             channel_state,
+                             true,
+                             t_enter,
+                             t_locked,
+                             t_after_get_state,
+                             t_after_create,
+                             t_after_stub);
+        return connection;
     }
 
     void removeConnection(std::string peer) {
@@ -104,6 +143,14 @@ public:
     // TODO(xinfei.sxf) add watch for grpc channel state changed to closed
 
 private:
+    std::shared_ptr<std::mutex> getPeerMutexLocked(const std::string& peer) {
+        auto [it, inserted] = peer_mutexes_.try_emplace(peer, nullptr);
+        if (!it->second) {
+            it->second = std::make_shared<std::mutex>();
+        }
+        return it->second;
+    }
+
     static const char* channelStateName(grpc_connectivity_state s) {
         switch (s) {
             case GRPC_CHANNEL_IDLE: return "IDLE";
@@ -154,6 +201,7 @@ private:
 
     std::mutex                                     mutex_;
     std::unordered_map<std::string, Connection<T>> connection_pool_;
+    std::unordered_map<std::string, std::shared_ptr<std::mutex>> peer_mutexes_;
 };
 
 using RPCPool           = Pool<RpcService>;

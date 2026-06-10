@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
@@ -27,7 +28,48 @@ public:
 public:
     explicit BroadcastResult(const std::vector<std::shared_ptr<WorkerRpcContext>>& worker_rpc_contexts):
         worker_contexts_(worker_rpc_contexts), finished_(worker_rpc_contexts.size(), false) {}
-    ~BroadcastResult() = default;
+    ~BroadcastResult() {
+        std::unique_lock<std::mutex> lock(wait_done_mutex_);
+        for (size_t rank = 0; rank < worker_contexts_.size(); ++rank) {
+            if (!finished_[rank] && worker_contexts_[rank] && worker_contexts_[rank]->client_context) {
+                worker_contexts_[rank]->client_context->TryCancel();
+            }
+        }
+        for (const auto& worker_rpc_context : worker_contexts_) {
+            if (worker_rpc_context) {
+                worker_rpc_context->completion_queue.Shutdown();
+            }
+        }
+
+        constexpr int64_t kDrainBudgetMs = 100;
+        const auto        deadline       = std::chrono::system_clock::now() + std::chrono::milliseconds(kDrainBudgetMs);
+        bool              drain_timed_out = false;
+        for (const auto& worker_rpc_context : worker_contexts_) {
+            if (!worker_rpc_context) {
+                continue;
+            }
+            void* got_tag = nullptr;
+            bool  ok      = false;
+            while (true) {
+                auto next_status = worker_rpc_context->completion_queue.AsyncNext(&got_tag, &ok, deadline);
+                if (next_status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+                    break;
+                }
+                if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
+                    drain_timed_out = true;
+                    break;
+                }
+            }
+            if (drain_timed_out) {
+                break;
+            }
+        }
+        if (drain_timed_out) {
+            RTP_LLM_LOG_WARNING("[PD-DIAG] BroadcastResult destructor timed out draining CQ, worker_count=%zu",
+                                worker_contexts_.size());
+            drainWorkerContextsAsync(std::move(worker_contexts_));
+        }
+    }
 
 public:
     /// Snapshot of internal completion counters, not a live probe of RPC completion.
@@ -135,6 +177,28 @@ public:
     }
 
 private:
+    static void drainWorkerContextsAsync(std::vector<std::shared_ptr<WorkerRpcContext>> worker_contexts) {
+        if (worker_contexts.empty()) {
+            return;
+        }
+        std::thread([contexts = std::move(worker_contexts)]() mutable {
+            for (const auto& worker_rpc_context : contexts) {
+                if (!worker_rpc_context) {
+                    continue;
+                }
+                void* got_tag = nullptr;
+                bool  ok      = false;
+                while (true) {
+                    auto next_status = worker_rpc_context->completion_queue.AsyncNext(
+                        &got_tag, &ok, std::chrono::system_clock::now() + std::chrono::seconds(1));
+                    if (next_status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+                        break;
+                    }
+                }
+            }
+        }).detach();
+    }
+
     std::vector<std::shared_ptr<WorkerRpcContext>> worker_contexts_;
     std::vector<bool>                              finished_;
     std::atomic<int>                               finished_count_{0};
@@ -212,6 +276,10 @@ public:
         for (int rank = 0; rank < worker_size; ++rank) {
             auto& ctx    = contexts.at(rank);
             auto  reader = rpc_call(ctx->stub, ctx->client_context, ctx->request, &ctx->completion_queue);
+            if (!reader) {
+                RTP_LLM_LOG_WARNING("broadcast: create async reader failed rank=%d addr=%s", rank, ctx->server_addr.c_str());
+                return nullptr;
+            }
             reader->Finish(&ctx->response, &ctx->status, reinterpret_cast<void*>(static_cast<intptr_t>(rank)));
         }
 

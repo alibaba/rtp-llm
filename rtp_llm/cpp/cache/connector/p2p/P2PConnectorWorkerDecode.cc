@@ -53,6 +53,7 @@ P2PConnectorWorkerDecode::buildRecvTasks(const std::vector<std::shared_ptr<Layer
 
             auto task = receiver_->recv(recv_req);
             if (!task) {
+                cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/true);
                 const std::string error_msg = "read: create recv task failed for layer=" + std::to_string(layer_id)
                                               + " partition=" + std::to_string(partition_id)
                                               + " unique_key=" + unique_key;
@@ -72,6 +73,24 @@ namespace {
 constexpr int kBackoffInitialMs = 1;
 constexpr int kBackoffCapMs     = 8;
 }  // namespace
+
+void P2PConnectorWorkerDecode::cleanupRecvTaskStore(const std::shared_ptr<ReadTaskGroup>& task_group,
+                                                    bool                                   cancel_pending_tasks) const {
+    if (!task_group) {
+        return;
+    }
+    const size_t cleanup_count = std::min(task_group->partition_keys.size(), task_group->tasks.size());
+    for (size_t i = 0; i < cleanup_count; ++i) {
+        const auto& task = task_group->tasks[i];
+        if (cancel_pending_tasks && task) {
+            task->cancel();
+            if (!task->done()) {
+                task->forceCancel();
+            }
+        }
+        receiver_->stealTask(task_group->partition_keys[i]);
+    }
+}
 
 P2PConnectorWorkerDecode::ReadWaitOutcome
 P2PConnectorWorkerDecode::waitRecvTasksWithReadDeadlinePolicy(const std::shared_ptr<ReadTaskGroup>& task_group,
@@ -172,19 +191,39 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                                
     auto          task_group         = std::make_shared<ReadTaskGroup>();
     task_group->lease                = std::make_shared<DecodeTargetWriteLease>();
     int total_block_count            = 0;
+    {
+        std::lock_guard<std::mutex> lock(read_tasks_mutex_);
+        building_read_keys_.insert(unique_key);
+    }
 
     ErrorInfo build_result = buildRecvTasks(
         layer_cache_buffers, recv_partition_count, unique_key, deadline_ms, task_group, total_block_count);
     if (build_result.hasError()) {
+        std::lock_guard<std::mutex> lock(read_tasks_mutex_);
+        building_read_keys_.erase(unique_key);
+        pending_cancel_keys_.erase(unique_key);
         return build_result;
     }
+
+    bool pending_cancel = false;
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
+        building_read_keys_.erase(unique_key);
         read_tasks_[unique_key] = task_group;
+        pending_cancel          = pending_cancel_keys_.erase(unique_key) > 0;
     }
     {
         std::lock_guard<std::mutex> lock(lease_map_mutex_);
         lease_map_[unique_key] = LeaseMapEntry{task_group, 0, currentTimeMs()};
+    }
+
+    if (pending_cancel) {
+        task_group->cancelled.store(true);
+        for (const auto& task : task_group->tasks) {
+            if (task) {
+                task->cancel();
+            }
+        }
     }
 
     const ReadWaitOutcome outcome =
@@ -192,6 +231,8 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                                
 
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
+        building_read_keys_.erase(unique_key);
+        pending_cancel_keys_.erase(unique_key);
         read_tasks_.erase(unique_key);
     }
 
@@ -220,6 +261,7 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                                
 
     // Seal the lease — no more recv tasks will be created.
     task_group->lease->seal();
+    cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/false);
 
     if (outcome == ReadWaitOutcome::AllDone) {
         // All tasks confirmed done. Safe to remove from lease_map immediately.
@@ -289,6 +331,12 @@ bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key) {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
         auto                        it = read_tasks_.find(unique_key);
         if (it == read_tasks_.end()) {
+            if (building_read_keys_.count(unique_key) > 0) {
+                pending_cancel_keys_.insert(unique_key);
+                RTP_LLM_LOG_INFO("cancelRead: queued pending cancel during recv registration, unique_key: %s",
+                                 unique_key.c_str());
+                return true;
+            }
             RTP_LLM_LOG_INFO("cancelRead: task not found, unique_key: %s", unique_key.c_str());
             return false;
         }

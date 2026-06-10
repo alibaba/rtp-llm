@@ -513,10 +513,10 @@ TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_CancelRecordConsumedAfterRej
     ASSERT_NE(entry, nullptr);
 }
 
-// ==================== Deadline-based Expiry Tests ====================
-// These tests verify that resources expire when their business deadline
-// passes. The hold_ms cap was removed to avoid premature expiration (8312).
-// Resources now use the routing deadline directly.
+// ==================== Hold-ms Deadline Tests ====================
+// These tests verify the current contract: stream-store entries are capped by
+// prefill_resource_hold_ms so prefill does not pin KV blocks for the full
+// business deadline when decode never starts loading them.
 
 class P2PConnectorResourceStoreHoldMsTest: public ::testing::Test {
 protected:
@@ -555,21 +555,22 @@ protected:
     std::unique_ptr<P2PConnectorResourceStore> stream_store_;
 };
 
-// Verify that addResource caps deadline to currentTimeMs() + 1h.
-TEST_F(P2PConnectorResourceStoreHoldMsTest, AddResource_CapsDeadlineToHoldMs) {
+// Verify that addResource caps deadline to currentTimeMs() + hold_ms.
+TEST_F(P2PConnectorResourceStoreHoldMsTest, AddResource_CapsDeadlineToPrefillHoldMs) {
     const std::string unique_key  = "hold_ms_cap_test";
     const int64_t     request_id  = 4001;
-    const int64_t     deadline_ms = getDeadlineMs(7200000);  // 2 hours from now — exceeds 1h cap
+    const int64_t     deadline_ms = getDeadlineMs(7200000);  // 2 hours from now — exceeds hold_ms cap
     auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
     auto              resource    = createMockKVCacheResource();
+    const int64_t     add_start_ms = currentTimeMs();
 
     ASSERT_TRUE(stream_store_->addResource(meta, resource));
 
     auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 200);
     ASSERT_NE(entry, nullptr);
-    // Should be capped to ~1h from add time, not the full 2h deadline
+    // Should be capped to roughly hold_ms from add time, not the full 2h deadline.
     EXPECT_LT(entry->deadline_ms, deadline_ms);
-    EXPECT_GT(entry->deadline_ms, currentTimeMs() + 3500000);  // at least ~58min from now
+    EXPECT_NEAR(entry->deadline_ms, add_start_ms + 100, 100);
 }
 
 // Resource expires after its deadline and becomes a cancelled_keys_ tombstone

@@ -326,8 +326,14 @@ std::string CacheStoreConfig::to_string() const {
         << "p2p_resource_store_timeout_check_interval_ms: " << p2p_resource_store_timeout_check_interval_ms << "\n"
         << "p2p_layer_cache_buffer_store_timeout_ms: " << p2p_layer_cache_buffer_store_timeout_ms << "\n"
         << "p2p_cancel_broadcast_timeout_ms: " << p2p_cancel_broadcast_timeout_ms << "\n"
+        << "p2p_prefill_resource_hold_ms: " << p2p_prefill_resource_hold_ms << "\n"
+        << "p2p_max_transfer_deadline_ms: " << p2p_max_transfer_deadline_ms << "\n"
+        << "p2p_cancelled_keys_ttl_ms: " << p2p_cancelled_keys_ttl_ms << "\n"
         << "cache_store_tcp_anet_rpc_thread_num: " << cache_store_tcp_anet_rpc_thread_num << "\n"
-        << "cache_store_tcp_anet_rpc_queue_num: " << cache_store_tcp_anet_rpc_queue_num << "\n";
+        << "cache_store_tcp_anet_rpc_queue_num: " << cache_store_tcp_anet_rpc_queue_num << "\n"
+        << "cache_store_tcp_worker_queue_size: " << cache_store_tcp_worker_queue_size << "\n"
+        << "rdma_transfer_worker_thread_count: " << rdma_transfer_worker_thread_count << "\n"
+        << "rdma_transfer_worker_queue_size: " << rdma_transfer_worker_queue_size << "\n";
     return oss.str();
 }
 
