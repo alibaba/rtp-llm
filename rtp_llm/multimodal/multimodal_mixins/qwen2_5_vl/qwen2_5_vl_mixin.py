@@ -1,6 +1,8 @@
-from typing import Any, List, Optional, Tuple
+import contextlib
+from typing import Any, Dict, List, Optional, Tuple
 
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseMultiModalDeployWeightInfo,
     VitParameters,
@@ -50,6 +52,11 @@ from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.qwen2_vl_mixin import (
     ceil_by_factor,
     floor_by_factor,
     smart_resize,
+)
+from rtp_llm.multimodal.vit_metrics import (
+    record_vit_preprocess_value,
+    video_resized_pixel_count,
+    vit_preprocess_timer,
 )
 from rtp_llm.utils.model_weight import CkptWeightInfo, identity, sp_id
 from rtp_llm.utils.swizzle_utils import swizzle_tensor
@@ -109,14 +116,25 @@ class Qwen2_5_VLImageEmbedding(Qwen2_VLImageEmbedding):
                 "decord is required for video processing in Qwen2.5-VL. "
                 "Install it with `pip install decord`."
             )
-        vr = VideoReader(data, ctx=cpu(0), num_threads=1)
-        total_frames, video_fps = len(vr), vr.get_avg_fps()
-        nframes = smart_nframes(configs, total_frames=total_frames, video_fps=video_fps)
-        idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
-        height, width = vr[0].shape[:2]
+        vit_metrics_tags: Optional[Dict[str, str]] = kwargs.get("vit_metrics_tags")
+        decode_timer = (
+            vit_preprocess_timer(
+                GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC, vit_metrics_tags
+            )
+            if vit_metrics_tags
+            else contextlib.nullcontext()
+        )
+        with decode_timer:
+            vr = VideoReader(data, ctx=cpu(0), num_threads=1)
+            total_frames, video_fps = len(vr), vr.get_avg_fps()
+            nframes = smart_nframes(
+                configs, total_frames=total_frames, video_fps=video_fps
+            )
+            idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
+            height, width = vr[0].shape[:2]
 
-        video = torch.tensor(vr.get_batch(idx).asnumpy()).permute(0, 3, 1, 2)
-        del vr
+            video = torch.tensor(vr.get_batch(idx).asnumpy()).permute(0, 3, 1, 2)
+            del vr
 
         image_factor = IMAGE_FACTOR
 
@@ -147,12 +165,28 @@ class Qwen2_5_VLImageEmbedding(Qwen2_VLImageEmbedding):
                 min_pixels=min_pixels,
                 max_pixels=max_pixels,
             )
-        video = transforms.functional.resize(
-            video,
-            [resized_height, resized_width],
-            interpolation=InterpolationMode.BICUBIC,
-            antialias=True,
-        ).float()
+        resize_timer = (
+            vit_preprocess_timer(
+                GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC, vit_metrics_tags
+            )
+            if vit_metrics_tags
+            else contextlib.nullcontext()
+        )
+        with resize_timer:
+            video = transforms.functional.resize(
+                video,
+                [resized_height, resized_width],
+                interpolation=InterpolationMode.BICUBIC,
+                antialias=True,
+            ).float()
+        if vit_metrics_tags:
+            record_vit_preprocess_value(
+                GaugeMetrics.VIT_RESIZED_PIXEL_COUNT_METRIC,
+                video_resized_pixel_count(
+                    video.shape[0], resized_height, resized_width
+                ),
+                vit_metrics_tags,
+            )
         return video
 
     @staticmethod
@@ -164,20 +198,35 @@ class Qwen2_5_VLImageEmbedding(Qwen2_VLImageEmbedding):
         assert len(mm_inputs) == 1
         mm_input = mm_inputs[0]
         mm_type = mm_input.mm_type
-        data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
         if mm_type == MMUrlType.DEFAULT:
             raise Exception("cannot infer multimodal input type")
         elif mm_type == MMUrlType.IMAGE:
+            tags = {"model": "qwen2_5_vl", "mm_type": "image"}
+            with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, tags):
+                data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
             data = Qwen2_VLImageEmbedding.load_image(
-                data, mm_input.mm_preprocess_config
+                data,
+                mm_input.mm_preprocess_config,
+                vit_metrics_tags=tags,
             )
-            res = processor(images=data, videos=None, return_tensors="pt")
+            with vit_preprocess_timer(
+                GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, tags
+            ):
+                res = processor(images=data, videos=None, return_tensors="pt")
             return res["pixel_values"], res["image_grid_thw"]
         elif mm_type == MMUrlType.VIDEO:
+            tags = {"model": "qwen2_5_vl", "mm_type": "video"}
+            with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, tags):
+                data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
             data = Qwen2_5_VLImageEmbedding.load_video(
-                data, mm_input.mm_preprocess_config
+                data,
+                mm_input.mm_preprocess_config,
+                vit_metrics_tags=tags,
             )
-            res = processor(images=None, videos=data, return_tensors="pt")
+            with vit_preprocess_timer(
+                GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, tags
+            ):
+                res = processor(images=None, videos=data, return_tensors="pt")
             return res["pixel_values_videos"], res["video_grid_thw"]
         else:
             raise Exception("unknown mm url type")

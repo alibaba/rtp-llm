@@ -4,6 +4,7 @@ VIT Proxy Server - 主进程代理服务器
 """
 
 import logging
+import queue
 import threading
 import time
 from collections import defaultdict
@@ -33,6 +34,10 @@ from rtp_llm.multimodal.mm_profiler import MMProfiler
 # hung worker from exhausting the 200-thread proxy pool (see RemoteMultimodalEmbedding).
 # Per-request override comes from MMPreprocessConfigPB.mm_timeout_ms if set (>0).
 DEFAULT_PROXY_RPC_TIMEOUT_SECONDS = 30.0
+STATUS_CHECK_TIMEOUT_SEC = 1.0
+RETRYABLE_WORKER_RPC_CODES = {
+    grpc.StatusCode.UNAVAILABLE,
+}
 
 
 def _resolve_rpc_timeout_seconds(request: "MultimodalInputsPB") -> float:
@@ -55,6 +60,87 @@ def _now_us() -> int:
     return time.monotonic_ns() // 1000
 
 
+def _get_context_time_remaining_seconds(context) -> Optional[float]:
+    if context is None or not hasattr(context, "time_remaining"):
+        return None
+    try:
+        return context.time_remaining()
+    except Exception as e:
+        logging.warning("Failed to read gRPC context time remaining: %s", e)
+        return None
+
+
+def _resolve_status_check_deadline_seconds(context) -> Optional[float]:
+    context_remaining_s = _get_context_time_remaining_seconds(context)
+    if context_remaining_s is not None and context_remaining_s <= 0:
+        return None
+    timeout_s = STATUS_CHECK_TIMEOUT_SEC
+    if context_remaining_s is not None:
+        timeout_s = min(timeout_s, context_remaining_s)
+    return time.monotonic() + timeout_s
+
+
+def _resolve_status_check_timeout_seconds(deadline_s: float) -> Optional[float]:
+    remaining_s = deadline_s - time.monotonic()
+    if remaining_s <= 0:
+        return None
+    return remaining_s
+
+
+def _set_worker_status_role(worker_status: WorkerStatusPB) -> WorkerStatusPB:
+    if not worker_status.role:
+        worker_status.role = "VIT"
+    return worker_status
+
+
+def _log_worker_status_rpc_error(worker_address: str, error: grpc.RpcError):
+    logging.warning(
+        "VIT worker %s status check failed: %s - %s",
+        worker_address,
+        error.code(),
+        error.details(),
+    )
+
+
+def _log_worker_status_error(worker_address: str, error: Exception):
+    logging.warning(
+        "VIT worker %s status check failed: %s",
+        worker_address,
+        error,
+    )
+
+
+def _cancel_status_calls(status_calls: list[tuple[str, grpc.Future]]):
+    for _, status_call in status_calls:
+        if not status_call.done():
+            status_call.cancel()
+
+
+def _get_status_call_result(
+    worker_address: str, status_call: grpc.Future
+) -> Optional[WorkerStatusPB]:
+    try:
+        worker_status = status_call.result(timeout=0)
+        if worker_status.alive:
+            return _set_worker_status_role(worker_status)
+        logging.warning(
+            "VIT worker %s reported not alive during proxy status check",
+            worker_address,
+        )
+    except grpc.RpcError as e:
+        _log_worker_status_rpc_error(worker_address, e)
+    except Exception as e:
+        _log_worker_status_error(worker_address, e)
+    return None
+
+
+def _is_retryable_worker_rpc_error(error: grpc.RpcError) -> bool:
+    try:
+        return error.code() in RETRYABLE_WORKER_RPC_CODES
+    except Exception:
+        return False
+
+
 class LoadBalancer:
     """负载均衡器，支持轮询和最少连接算法"""
 
@@ -68,42 +154,61 @@ class LoadBalancer:
         self.strategy = strategy
         self.current_index = 0
         self.connection_counts = defaultdict(int)  # 记录每个工作进程的连接数
+        self.worker_alive = {addr: True for addr in worker_addresses}
         self.lock = threading.Lock()
 
     def get_worker_address(self) -> str:
         """获取工作进程地址"""
         return self.worker_addresses
 
-    def get_worker(self) -> str:
+    def set_worker_alive(self, worker_address: str, alive: bool):
+        with self.lock:
+            if worker_address in self.worker_alive:
+                self.worker_alive[worker_address] = alive
+
+    def get_alive_worker_addresses(self) -> list[str]:
+        with self.lock:
+            return [
+                addr
+                for addr in self.worker_addresses
+                if self.worker_alive.get(addr, True)
+            ]
+
+    def _candidate_workers(
+        self, excluded_workers: Optional[set[str]] = None
+    ) -> list[str]:
+        excluded_workers = excluded_workers or set()
+        return [
+            addr
+            for addr in self.worker_addresses
+            if self.worker_alive.get(addr, True) and addr not in excluded_workers
+        ]
+
+    def get_worker(self, excluded_workers: Optional[set[str]] = None) -> str:
         """获取下一个工作进程地址"""
         with self.lock:
-            if not self.worker_addresses:
-                raise RuntimeError("No worker addresses available")
+            worker_addresses = self._candidate_workers(excluded_workers)
+            if not worker_addresses:
+                raise RuntimeError("No healthy worker addresses available")
 
             if self.strategy == "round_robin":
-                worker = self.worker_addresses[self.current_index]
-                self.current_index = (self.current_index + 1) % len(
-                    self.worker_addresses
-                )
+                worker = worker_addresses[self.current_index % len(worker_addresses)]
+                self.current_index += 1
                 return worker
             elif self.strategy == "least_connections":
                 # 选择连接数最少的工作进程
                 min_connections = min(
-                    self.connection_counts[addr] for addr in self.worker_addresses
+                    self.connection_counts[addr] for addr in worker_addresses
                 )
                 candidates = [
                     addr
-                    for addr in self.worker_addresses
+                    for addr in worker_addresses
                     if self.connection_counts[addr] == min_connections
                 ]
-                # 如果有多个候选，使用轮询选择。current_index 单调自增（mod
-                # worker_addresses 长度防溢出），仅在选择时对 candidates 取模——
-                # 否则 candidates 长度变化会把 current_index 截到一个很小的值，
-                # 导致后续轮询偏向 worker_addresses 头部。
+                # 如果有多个候选，使用轮询选择。current_index 保持单调递增，
+                # 仅在选择时对 candidates 取模，避免候选集合变化时偏向头部。
                 worker = candidates[self.current_index % len(candidates)]
-                self.current_index = (self.current_index + 1) % len(
-                    self.worker_addresses
-                )
+                self.current_index += 1
                 return worker
             else:
                 raise ValueError(f"Unknown strategy: {self.strategy}")
@@ -174,6 +279,16 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         self.profiler = MMProfiler()
         kmonitor.init()
 
+    @staticmethod
+    def _abort_unavailable(context, details: str):
+        abort = getattr(context, "abort", None) if context is not None else None
+        if abort is not None:
+            abort(grpc.StatusCode.UNAVAILABLE, details)
+        if context is not None:
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details(details)
+        raise RuntimeError(details)
+
     def RemoteMultimodalEmbedding(
         self, request: MultimodalInputsPB, context
     ) -> MultimodalOutputPB:
@@ -202,76 +317,221 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             GaugeMetrics.VIT_RPC_REQUEST_BYTES_METRIC, request.ByteSize(), tags
         )
 
-        worker_address = None
+        attempted_workers: set[str] = set()
+        last_error: Optional[Exception] = None
+        exhausted_workers = False
         try:
-            worker_address = self.load_balancer.get_worker()
-            self.load_balancer.increment_connections(worker_address)
-
-            stub = self.connection_pool.get_stub(worker_address)
-
             timeout_s = _resolve_rpc_timeout_seconds(request)
-            logging.debug(
-                f"Forwarding request to worker {worker_address}, "
-                f"connections: {self.load_balancer.connection_counts[worker_address]}, "
-                f"timeout: {timeout_s}s"
-            )
-            worker_rpc_start_us = _now_us()
-            response = stub.RemoteMultimodalEmbedding(request, timeout=timeout_s)
-            kmonitor.report(
-                GaugeMetrics.VIT_RPC_PROXY_TO_WORKER_RT_US_METRIC,
-                _now_us() - worker_rpc_start_us,
-                {"source": "vit_proxy", "worker": worker_address},
-            )
-            kmonitor.report(
-                GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC, response.ByteSize(), tags
-            )
+            while len(attempted_workers) < len(self.load_balancer.worker_addresses):
+                worker_address = None
+                try:
+                    worker_address = self.load_balancer.get_worker(attempted_workers)
+                except RuntimeError as e:
+                    last_error = e
+                    break
 
-            kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
-            self.profiler.on_request_complete()
+                attempted_workers.add(worker_address)
+                self.load_balancer.increment_connections(worker_address)
+                try:
+                    try:
+                        stub = self.connection_pool.get_stub(worker_address)
+                    except Exception as e:
+                        last_error = e
+                        logging.error(
+                            "Error getting stub for worker %s: %s",
+                            worker_address,
+                            e,
+                        )
+                        kmonitor.report(
+                            AccMetrics.VIT_RPC_PROXY_ERROR_QPS_METRIC,
+                            1,
+                            {
+                                "source": "vit_proxy",
+                                "reason": "exception",
+                                "worker": worker_address,
+                            },
+                        )
+                        self.load_balancer.set_worker_alive(worker_address, False)
+                        continue
 
-            return response
+                    logging.debug(
+                        f"Forwarding request to worker {worker_address}, "
+                        "connections: "
+                        f"{self.load_balancer.connection_counts[worker_address]}, "
+                        f"timeout: {timeout_s}s"
+                    )
+                    worker_rpc_start_us = _now_us()
+                    response = stub.RemoteMultimodalEmbedding(
+                        request, timeout=timeout_s
+                    )
+                    self.load_balancer.set_worker_alive(worker_address, True)
+                    kmonitor.report(
+                        GaugeMetrics.VIT_RPC_PROXY_TO_WORKER_RT_US_METRIC,
+                        _now_us() - worker_rpc_start_us,
+                        {"source": "vit_proxy", "worker": worker_address},
+                    )
+                    kmonitor.report(
+                        GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC,
+                        response.ByteSize(),
+                        tags,
+                    )
+
+                    kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
+                    self.profiler.on_request_complete()
+
+                    return response
+                except grpc.RpcError as e:
+                    last_error = e
+                    logging.error(
+                        "RPC error when forwarding to worker %s: %s - %s",
+                        worker_address,
+                        e.code(),
+                        e.details(),
+                    )
+                    kmonitor.report(
+                        AccMetrics.VIT_RPC_PROXY_ERROR_QPS_METRIC,
+                        1,
+                        {
+                            "source": "vit_proxy",
+                            "reason": "grpc_error",
+                            "grpc_code": str(e.code()),
+                            "worker": worker_address or "unknown",
+                        },
+                    )
+                    if worker_address and _is_retryable_worker_rpc_error(e):
+                        self.load_balancer.set_worker_alive(worker_address, False)
+                        continue
+                    raise
+                except Exception as e:
+                    logging.error(
+                        "Error forwarding request to worker %s: %s",
+                        worker_address,
+                        e,
+                    )
+                    kmonitor.report(
+                        AccMetrics.VIT_RPC_PROXY_ERROR_QPS_METRIC,
+                        1,
+                        {
+                            "source": "vit_proxy",
+                            "reason": "exception",
+                            "worker": worker_address or "unknown",
+                        },
+                    )
+                    raise
+                finally:
+                    if worker_address:
+                        self.load_balancer.decrement_connections(worker_address)
+
+            exhausted_workers = True
+            details = "No healthy VIT worker behind proxy"
+            if last_error:
+                details += f": {last_error}"
+            self._abort_unavailable(context, details)
         except grpc.RpcError as e:
-            logging.error(
-                f"RPC error when forwarding to worker {worker_address}: {e.code()} - {e.details()}"
-            )
             kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
-            kmonitor.report(
-                AccMetrics.VIT_RPC_PROXY_ERROR_QPS_METRIC,
-                1,
-                {
-                    "source": "vit_proxy",
-                    "reason": "grpc_error",
-                    "grpc_code": str(e.code()),
-                },
-            )
             raise
         except Exception as e:
-            logging.error(f"Error forwarding request to worker {worker_address}: {e}")
+            logging.error("Error forwarding request after proxy retries: %s", e)
             kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
-            kmonitor.report(
-                AccMetrics.VIT_RPC_PROXY_ERROR_QPS_METRIC,
-                1,
-                {"source": "vit_proxy", "reason": "exception"},
-            )
+            if exhausted_workers:
+                kmonitor.report(
+                    AccMetrics.VIT_RPC_PROXY_ERROR_QPS_METRIC,
+                    1,
+                    {"source": "vit_proxy", "reason": "all_workers_unavailable"},
+                )
             raise
         finally:
-            if worker_address:
-                self.load_balancer.decrement_connections(worker_address)
             if not callback_added:
                 _report_lifecycle()
 
+    def _get_alive_worker_status(
+        self, request: StatusVersionPB, context=None
+    ) -> Optional[WorkerStatusPB]:
+        deadline_s = _resolve_status_check_deadline_seconds(context)
+        if deadline_s is None:
+            logging.warning(
+                "VIT proxy status check stopped before probing workers: no "
+                "status-check deadline remains"
+            )
+            return None
+
+        completed_status_calls = queue.Queue()
+        status_calls: list[tuple[str, grpc.Future]] = []
+
+        for worker_address in list(self.load_balancer.worker_addresses):
+            timeout_s = _resolve_status_check_timeout_seconds(deadline_s)
+            if timeout_s is None:
+                break
+            try:
+                stub = self.connection_pool.get_stub(worker_address)
+                status_call = stub.GetWorkerStatus.future(request, timeout=timeout_s)
+                status_call.add_done_callback(
+                    lambda done_call, addr=worker_address: completed_status_calls.put(
+                        (addr, done_call)
+                    )
+                )
+                status_calls.append((worker_address, status_call))
+            except grpc.RpcError as e:
+                self.load_balancer.set_worker_alive(worker_address, False)
+                _log_worker_status_rpc_error(worker_address, e)
+            except Exception as e:
+                self.load_balancer.set_worker_alive(worker_address, False)
+                _log_worker_status_error(worker_address, e)
+
+        pending_status_call_count = len(status_calls)
+        alive_worker_status = None
+        try:
+            while pending_status_call_count > 0:
+                timeout_s = _resolve_status_check_timeout_seconds(deadline_s)
+                if timeout_s is None:
+                    break
+                try:
+                    worker_address, status_call = completed_status_calls.get(
+                        timeout=timeout_s
+                    )
+                except queue.Empty:
+                    break
+
+                pending_status_call_count -= 1
+                worker_status = _get_status_call_result(worker_address, status_call)
+                self.load_balancer.set_worker_alive(
+                    worker_address, worker_status is not None
+                )
+                if worker_status and alive_worker_status is None:
+                    alive_worker_status = worker_status
+
+            if pending_status_call_count > 0:
+                logging.warning(
+                    "VIT proxy status check timed out waiting for %s/%s workers",
+                    pending_status_call_count,
+                    len(status_calls),
+                )
+                for worker_address, status_call in status_calls:
+                    if not status_call.done():
+                        self.load_balancer.set_worker_alive(worker_address, False)
+        finally:
+            _cancel_status_calls(status_calls)
+        return alive_worker_status
+
+    @staticmethod
+    def _set_no_alive_worker_status(context):
+        context.set_code(grpc.StatusCode.UNAVAILABLE)
+        context.set_details("No alive VIT worker behind proxy")
+
     def GetWorkerStatus(self, request: StatusVersionPB, context) -> WorkerStatusPB:
-        # Aggregation pending flexlb refactor; explicitly UNIMPLEMENTED so the caller
-        # doesn't mistake a default WorkerStatusPB() (alive=false) for "all workers down".
-        # todo: refactor status interface with flexlb
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details("VitProxy.GetWorkerStatus pending flexlb status refactor")
-        return WorkerStatusPB()
+        worker_status = self._get_alive_worker_status(request, context)
+        if worker_status:
+            return worker_status
+        self._set_no_alive_worker_status(context)
+        return WorkerStatusPB(role="VIT", alive=False)
 
     def GetCacheStatus(self, request: CacheVersionPB, context) -> CacheStatusPB:
-        # todo: refactor status interface with flexlb
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details("VitProxy.GetCacheStatus pending flexlb status refactor")
+        status_request = StatusVersionPB(
+            latest_cache_version=request.latest_cache_version
+        )
+        if self._get_alive_worker_status(status_request, context):
+            return CacheStatusPB()
+        self._set_no_alive_worker_status(context)
         return CacheStatusPB()
 
 

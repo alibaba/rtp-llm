@@ -64,3 +64,9 @@ def record_vit_preprocess_value(
     metrics = _current_metrics.get()
     if metrics is not None:
         metrics.report(metric, float(value), tags)
+
+
+def video_resized_pixel_count(
+    frame_count: int, resized_height: int, resized_width: int
+) -> int:
+    return int(frame_count) * int(resized_height) * int(resized_width)

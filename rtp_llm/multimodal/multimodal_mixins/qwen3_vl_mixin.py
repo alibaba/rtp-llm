@@ -84,7 +84,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         mm_type = mm_input.mm_type
         do_resize = True
         if mm_type == MMUrlType.DEFAULT or mm_type == MMUrlType.IMAGE:
-            tags = {"model": "qwen3_vl"}
+            tags = {"model": "qwen3_vl", "mm_type": "image"}
             with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, tags):
                 image_data = get_bytes_io_from_url(
                     mm_input.url, vit_config.download_headers
@@ -156,7 +156,9 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
                     mm_input.url, vit_config.download_headers
                 )
             video = Qwen3_VLImageEmbedding.load_video(
-                video_data, mm_input.mm_preprocess_config
+                video_data,
+                mm_input.mm_preprocess_config,
+                vit_metrics_tags=tags,
             )
             with vit_preprocess_timer(
                 GaugeMetrics.VIT_IMAGE_PROCESSOR_RT_US_METRIC, tags

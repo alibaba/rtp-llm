@@ -31,6 +31,22 @@ private:
     MultimodalRpcPool pool_;
     std::string       vit_cluster_name_;
 
+    void reportRpcClientError(const std::string& ip_port,
+                              const std::string& reason,
+                              const std::string& grpc_code = "") const {
+        if (!metrics_reporter_) {
+            return;
+        }
+        kmonitor::MetricsTags error_tags;
+        error_tags.AddTag("source", "inference_client");
+        error_tags.AddTag("target", ip_port);
+        error_tags.AddTag("reason", reason);
+        if (!grpc_code.empty()) {
+            error_tags.AddTag("grpc_code", grpc_code);
+        }
+        metrics_reporter_->report(1, "rtp_llm_vit_rpc_client_error_qps", kmonitor::MetricType::QPS, &error_tags, true);
+    }
+
     void reportRpcMetrics(const std::string&  ip_port,
                           int64_t             cost_us,
                           int64_t             request_bytes,
@@ -43,16 +59,14 @@ private:
         kmonitor::MetricsTags tags;
         tags.AddTag("source", "inference_client");
         tags.AddTag("target", ip_port);
-        metrics_reporter_->report(cost_us, "rtp_llm_vit_rpc_client_rt_us", kmonitor::MetricType::GAUGE, &tags);
-        metrics_reporter_->report(request_bytes, "rtp_llm_vit_rpc_request_bytes", kmonitor::MetricType::GAUGE, &tags);
-        metrics_reporter_->report(response_bytes, "rtp_llm_vit_rpc_response_bytes", kmonitor::MetricType::GAUGE, &tags);
+        metrics_reporter_->report(cost_us, "rtp_llm_vit_rpc_client_rt_us", kmonitor::MetricType::GAUGE, &tags, true);
+        metrics_reporter_->report(
+            request_bytes, "rtp_llm_vit_rpc_request_bytes", kmonitor::MetricType::GAUGE, &tags, true);
+        metrics_reporter_->report(
+            response_bytes, "rtp_llm_vit_rpc_response_bytes", kmonitor::MetricType::GAUGE, &tags, true);
 
         if (status != nullptr && !status->ok()) {
-            kmonitor::MetricsTags error_tags;
-            error_tags.AddTag("source", "inference_client");
-            error_tags.AddTag("target", ip_port);
-            error_tags.AddTag("grpc_code", std::to_string(static_cast<int>(status->error_code())));
-            metrics_reporter_->report(1, "rtp_llm_vit_rpc_client_error_qps", kmonitor::MetricType::QPS, &error_tags);
+            reportRpcClientError(ip_port, "grpc_error", std::to_string(static_cast<int>(status->error_code())));
         }
     }
 
@@ -63,6 +77,7 @@ private:
         }
         auto connection_status = pool_.getConnection(ip_port);
         if (!connection_status.ok()) {
+            reportRpcClientError(ip_port, "connection_error");
             return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, connection_status.status().ToString());
         }
         auto&               connection = connection_status.value();
