@@ -406,21 +406,12 @@ class BackendRPCServerVisitor:
                         continue
 
                     # Decode-entrance fallback reuses the streaming RPC path, where
-                    # chunks may carry either per-step deltas or cumulative ids.
-                    # Prefer the explicit aux_info lengths; only fall back to the
-                    # old shape heuristic when the stream does not provide them.
+                    # chunks are expected to be incremental by default. Only an
+                    # explicit aux_info cumulative marker should suppress concat.
                     if _is_cumulative_output(final_output) and not _is_delta_output(
                         final_output
                     ):
                         continue
-                    if not any(output.aux_info is not None for output in chunk_outputs):
-                        max_len = max(ids.shape[-1] for ids in chunk_output_ids)
-                        if (
-                            final_output.output_ids is not None
-                            and final_output.output_ids.shape[-1] == max_len
-                            and max_len > 1
-                        ):
-                            continue
                     final_output.output_ids = torch.cat(chunk_output_ids, dim=-1)
                 return merged
 

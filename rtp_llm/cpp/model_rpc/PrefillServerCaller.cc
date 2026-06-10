@@ -75,7 +75,17 @@ private:
 }  // namespace
 
 PrefillServerCaller::PrefillServerCaller(const std::string& process_id):
-    rpc_pool_(std::make_shared<RPCPool>()), process_id_(process_id) {}
+    rpc_pool_(std::make_shared<RPCPool>()),
+    process_id_(process_id),
+    async_reader_factory_([](const std::shared_ptr<RpcService::Stub>& stub,
+                             grpc::ClientContext*                     client_context,
+                             const GenerateInputPB&                   request,
+                             grpc::CompletionQueue*                   completion_queue) {
+        if (!stub) {
+            return std::unique_ptr<grpc::ClientAsyncReader<GenerateOutputsPB>>();
+        }
+        return stub->AsyncGenerateStreamCall(client_context, request, completion_queue, reinterpret_cast<void*>(0));
+    }) {}
 
 std::shared_ptr<PrefillServerCallerContext> PrefillServerCaller::callPrefill(const GenerateInputPB* request,
                                                                              const std::string&     ip,
@@ -106,13 +116,15 @@ std::shared_ptr<PrefillServerCallerContext> PrefillServerCaller::callPrefill(con
 
     context->client_context_->set_deadline(std::chrono::system_clock::now() + std::chrono::microseconds(deadline_us));
 
-    std::unique_ptr<grpc::ClientAsyncReader<GenerateOutputsPB>> reader(
-        context->stub_->AsyncGenerateStreamCall(context->client_context_.get(),
-                                                context->request_,
-                                                context->completion_queue_.get(),
-                                                reinterpret_cast<void*>(0)));
-
-    context->reader_ = std::move(reader);
+    context->reader_ =
+        async_reader_factory_(context->stub_, context->client_context_.get(), context->request_, context->completion_queue_.get());
+    if (!context->reader_) {
+        RTP_LLM_LOG_WARNING("request [%lld] create async prefill reader failed, addr: %s",
+                            request->request_id(),
+                            prefill_addr.c_str());
+        return nullptr;
+    }
+    context->rpc_started_ = true;
     context->startPolling();
 
     return context;

@@ -163,6 +163,30 @@ def init_cache_store_group_args(parser, cache_store_config):
         help="P2P Scheduler 广播 CANCEL 时的 gRPC 超时（毫秒）。",
     )
     cache_store_group.add_argument(
+        "--p2p_prefill_resource_hold_ms",
+        env_name="P2P_PREFILL_RESOURCE_HOLD_MS",
+        bind_to=(cache_store_config, "p2p_prefill_resource_hold_ms"),
+        type=int,
+        default=300000,
+        help="Prefill 侧 resource / side-channel 在未被 decode 消费时的最大保留时长（毫秒）。",
+    )
+    cache_store_group.add_argument(
+        "--p2p_max_transfer_deadline_ms",
+        env_name="P2P_MAX_TRANSFER_DEADLINE_MS",
+        bind_to=(cache_store_config, "p2p_max_transfer_deadline_ms"),
+        type=int,
+        default=300000,
+        help="单次 P2P 传输 deadline 的硬上限（毫秒），业务超时会被 clamp 到 now + 该值。",
+    )
+    cache_store_group.add_argument(
+        "--p2p_cancelled_keys_ttl_ms",
+        env_name="P2P_CANCELLED_KEYS_TTL_MS",
+        bind_to=(cache_store_config, "p2p_cancelled_keys_ttl_ms"),
+        type=int,
+        default=3600000,
+        help="P2P cancelled key tombstone 的 TTL（毫秒），用于拒绝迟到的 prefill 资源。",
+    )
+    cache_store_group.add_argument(
         "--cache_store_tcp_anet_rpc_thread_num",
         env_name="CACHE_STORE_TCP_ANET_RPC_THREAD_NUM",
         bind_to=(cache_store_config, "cache_store_tcp_anet_rpc_thread_num"),

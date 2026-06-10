@@ -70,6 +70,11 @@ public:
     // Routing fields (unique_key, deadline_ms, request_id) are read from Meta::P2PRoutingContext
     bool addResource(const std::shared_ptr<Meta>& meta, const KVCacheResourcePtr& kv_cache_resource);
 
+    // Init-time hook used to release per-request side resources (for example
+    // computed per-layer buffers) when the stream-store drops the request due
+    // to timeout or cancellation before decode consumes it.
+    void setOnRequestReleased(std::function<void(int64_t)> on_request_released);
+
     // Mark unique_key as cancelled: if the resource is already in the store, remove it
     // immediately; otherwise record the cancellation so that a future addResource() call
     // for the same key is rejected on arrival, preventing blocks from being pinned until
@@ -133,6 +138,7 @@ private:
     // skew between addResource and a late-arriving StartLoad so handleRead can
     // distinguish "expired on prefill" from "never seen".
     int64_t cancelled_keys_ttl_ms_;
+    std::function<void(int64_t)> on_request_released_;
 
 public:
     // Test hook: peek whether a unique_key is currently in cancelled_keys_.

@@ -14,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace rtp_llm {
@@ -81,6 +82,8 @@ private:
 
     void reportReadMetrics(int total_block_count, bool success, int64_t read_start_time_us) const;
 
+    void cleanupRecvTaskStore(const std::shared_ptr<ReadTaskGroup>& task_group, bool cancel_pending_tasks) const;
+
 private:
     P2PConnectorWorkerConfig             config_;
     std::shared_ptr<LayerBlockConverter> layer_block_converter_;
@@ -89,6 +92,8 @@ private:
 
     mutable std::mutex                                              read_tasks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<ReadTaskGroup>> read_tasks_;
+    std::unordered_set<std::string>                                 building_read_keys_;
+    std::unordered_set<std::string>                                 pending_cancel_keys_;
 
     // Leases kept alive after read() returns (for TRANSFER_NOT_DONE path) until all ops finish.
     // Keyed by unique_key. Cleaned up lazily when polled via queryLeaseStatus.

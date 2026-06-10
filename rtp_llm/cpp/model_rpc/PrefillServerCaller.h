@@ -57,8 +57,15 @@ private:
 private:
     friend class test::PrefillServerCallerTest;
 
+    using AsyncReaderFactory = std::function<std::unique_ptr<grpc::ClientAsyncReader<GenerateOutputsPB>>(
+        const std::shared_ptr<RpcService::Stub>&,
+        grpc::ClientContext*,
+        const GenerateInputPB&,
+        grpc::CompletionQueue*)>;
+
     std::shared_ptr<RPCPool> rpc_pool_;
     std::string              process_id_;
+    AsyncReaderFactory       async_reader_factory_;
 
     mutable std::shared_mutex                              prefill_peer_cache_mutex_;
     std::unordered_map<std::string, PrefillPeerInfo>       prefill_peer_cache_;

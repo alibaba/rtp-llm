@@ -12,6 +12,22 @@ namespace {
 constexpr int64_t kLeasePollInitialIntervalMs = 10;
 constexpr int64_t kLeasePollMaxIntervalMs     = 100;
 constexpr int64_t kLeasePollRpcTimeoutMs      = 500;
+
+bool shouldHoldReadOutcomeUntilLeaseStops(ErrorCode error_code) {
+    return error_code == ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE
+        || error_code == ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED;
+}
+
+const char* readOutcomeHoldReason(ErrorCode error_code) {
+    switch (error_code) {
+        case ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE:
+            return "TRANSFER_NOT_DONE";
+        case ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED:
+            return "READ_CANCELLED";
+        default:
+            return "UNKNOWN";
+    }
+}
 }  // namespace
 
 /*----------------------------------------------- P2PConnectorAsyncMatchContext
@@ -56,7 +72,7 @@ void P2PConnectorAsyncReadContext::checkDone() {
     if (done()) {
         return;
     }
-    if (tryFinishExpiredTransferNotDoneHold()) {
+    if (tryFinishExpiredLeaseHold()) {
         return;
     }
     if (!tp_sync_result_->done()) {
@@ -73,20 +89,21 @@ void P2PConnectorAsyncReadContext::checkDone() {
     applyMergedReadOutcome(mergeReadResultsWhenBothDone());
 }
 
-// `TRANSFER_NOT_DONE` 保留窗口在 `checkDone()` 里的闸门（方法名中 tryFinish 仅对应**到期**分支）。
+// lease 保留窗口在 `checkDone()` 里的闸门（方法名中 tryFinish 仅对应**到期**分支）。
 //
-// 当 `applyMergedReadOutcome` 因 `P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE` 进入 hold 时，`done_` 仍为 false，
+// 当 `applyMergedReadOutcome` 因 `P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE` /
+// `P2P_CONNECTOR_WORKER_READ_CANCELLED` 进入 hold 时，`done_` 仍为 false，
 // 在窗口结束前不走常规 merge（避免反复失败/取消）。本函数仅在 `checkDone()` 开头调用，语义：
 // - 未 hold → 返回 false，调用方继续 `tp_sync` / `server_call` 的 checkDone 与 merge。
 // - hold 且当前时间仍早于 until_ms → 返回 true，调用方必须直接 return（短路），不推进子 result、不 merge。
 // - hold 且已到期 → 清 hold、刷新两侧 result；若都已 done 则 applyMergedReadOutcome(..., false)
 // 终态合并（含成功补救），
 //   否则仅 done_=true；返回 true，调用方 return。
-bool P2PConnectorAsyncReadContext::tryFinishExpiredTransferNotDoneHold() {
-    if (!transfer_not_done_hold_pending_.load(std::memory_order_acquire)) {
+bool P2PConnectorAsyncReadContext::tryFinishExpiredLeaseHold() {
+    if (!lease_hold_pending_.load(std::memory_order_acquire)) {
         return false;
     }
-    const int64_t until_ms    = transfer_not_done_hold_until_ms_.load(std::memory_order_relaxed);
+    const int64_t until_ms    = lease_hold_until_ms_.load(std::memory_order_relaxed);
     const bool    timed_out   = currentTimeMs() >= until_ms;
     const bool    all_stopped = lease_all_ranks_stopped_.load(std::memory_order_acquire);
 
@@ -96,18 +113,18 @@ bool P2PConnectorAsyncReadContext::tryFinishExpiredTransferNotDoneHold() {
 
     if (all_stopped) {
         RTP_LLM_LOG_INFO(
-            "tryFinishExpiredTransferNotDoneHold: all ranks stopped via lease poll, unique_key=%s retries=%d",
+            "tryFinishExpiredLeaseHold: all ranks stopped via lease poll, unique_key=%s retries=%d",
             uniqueKey().c_str(),
             lease_poll_retry_count_.load());
     } else {
         RTP_LLM_LOG_WARNING(
-            "tryFinishExpiredTransferNotDoneHold: final_timeout reached without all ranks stopped, unique_key=%s retries=%d",
+            "tryFinishExpiredLeaseHold: final_timeout reached without all ranks stopped, unique_key=%s retries=%d",
             uniqueKey().c_str(),
             lease_poll_retry_count_.load());
     }
 
-    transfer_not_done_hold_pending_.store(false, std::memory_order_release);
-    transfer_not_done_hold_until_ms_.store(0, std::memory_order_relaxed);
+    lease_hold_pending_.store(false, std::memory_order_release);
+    lease_hold_until_ms_.store(0, std::memory_order_relaxed);
 
     if (!tp_sync_result_->done()) {
         tp_sync_result_->checkDone();
@@ -149,21 +166,22 @@ void P2PConnectorAsyncReadContext::applyMergedReadOutcome(const MergedReadOutcom
     ErrorCode   error_code = outcome.error_code;
     std::string error_message{outcome.error_message};
 
-    if (allow_transfer_not_done_hold && !success && error_code == ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE
-        && transfer_not_done_hold_ms_ > 0) {
-        RTP_LLM_LOG_WARNING("[PD-DIAG] TRANSFER_NOT_DONE, entering %ldms hold, unique_key=%s, "
+    if (allow_transfer_not_done_hold && !success && transfer_not_done_hold_ms_ > 0
+        && shouldHoldReadOutcomeUntilLeaseStops(error_code)) {
+        RTP_LLM_LOG_WARNING("[PD-DIAG] %s, entering %ldms lease hold, unique_key=%s, "
                             "tp_sync_cost_us=%ld, server_call_cost_us=%ld",
+                            readOutcomeHoldReason(error_code),
                             transfer_not_done_hold_ms_,
                             uniqueKey().c_str(),
                             tp_sync_result_->totalCostTimeUs(),
                             server_call_result_->totalCostTimeUs());
-        transfer_not_done_hold_until_ms_.store(currentTimeMs() + transfer_not_done_hold_ms_, std::memory_order_relaxed);
+        lease_hold_until_ms_.store(currentTimeMs() + transfer_not_done_hold_ms_, std::memory_order_relaxed);
         // Initialise lease polling state for this hold window.
         lease_all_ranks_stopped_.store(false, std::memory_order_relaxed);
         lease_poll_interval_ms_.store(kLeasePollInitialIntervalMs, std::memory_order_relaxed);
         lease_poll_next_ms_.store(currentTimeMs() + kLeasePollInitialIntervalMs, std::memory_order_relaxed);
         lease_poll_retry_count_.store(0, std::memory_order_relaxed);
-        transfer_not_done_hold_pending_.store(true, std::memory_order_release);
+        lease_hold_pending_.store(true, std::memory_order_release);
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             success_       = false;
@@ -205,7 +223,7 @@ ErrorInfo P2PConnectorAsyncReadContext::errorInfo() const {
 }
 
 bool P2PConnectorAsyncReadContext::needCancel() const {
-    if (transfer_not_done_hold_pending_.load()) {
+    if (lease_hold_pending_.load()) {
         return false;
     }
     {
@@ -245,7 +263,7 @@ void P2PConnectorAsyncReadContext::cancel(const std::shared_ptr<P2PBroadcastClie
 }
 
 void P2PConnectorAsyncReadContext::pollLeaseIfNeeded(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client) {
-    if (!transfer_not_done_hold_pending_.load(std::memory_order_acquire)) {
+    if (!lease_hold_pending_.load(std::memory_order_acquire)) {
         return;
     }
     if (done()) {
@@ -359,19 +377,26 @@ void P2PConnectorAsyncReadContextChecker::checkOnce() {
     //                         mutex across it would back-pressure addContext on the scheduler
     //                         thread, freezing the whole decode read path.
     //   Phase 3 (under lock): emit WARN logs for failures and erase done contexts.
+    std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> to_poll;
     std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> to_cancel;
     {
         std::lock_guard<std::mutex> lock(async_contexts_mutex_);
         for (auto& async_context : async_contexts_) {
             async_context->checkDone();
-            // Drive lease polling while TRANSFER_NOT_DONE hold is active.
-            async_context->pollLeaseIfNeeded(tp_broadcast_client_);
+            if (async_context->needLeasePoll()) {
+                to_poll.push_back(async_context);
+            }
             if (async_context->needCancel()) {
                 RTP_LLM_LOG_DEBUG("P2PConnectorAsyncReadContextChecker checkOnce: needCancel, unique_key: %s",
                                   async_context->uniqueKey().c_str());
                 to_cancel.push_back(async_context);
             }
         }
+    }
+
+    // Drive lease polling outside the lock to avoid blocking addContext on synchronous RPC.
+    for (auto& ctx : to_poll) {
+        ctx->pollLeaseIfNeeded(tp_broadcast_client_);
     }
 
     // cancel() is idempotent (server_call_result_->done() / tp_sync_result_->done() guards inside).

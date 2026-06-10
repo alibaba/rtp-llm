@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include <thread>
 
 namespace rtp_llm {
 
@@ -14,8 +15,17 @@ PrefillServerCallerContext::PrefillServerCallerContext(const std::string& prefil
 }
 
 PrefillServerCallerContext::~PrefillServerCallerContext() {
+    {
+        std::unique_lock<std::shared_mutex> lock(state_mutex_);
+        if (!rpc_started_ || !reader_) {
+            finished_ = true;
+        }
+    }
     cancel();
     wait();
+    if (!completion_queue_) {
+        return;
+    }
     completion_queue_->Shutdown();
     // Drain all remaining events per gRPC contract: after Shutdown(), Next() must be
     // called until it returns SHUTDOWN to avoid leaking pending async operations.
@@ -24,7 +34,8 @@ PrefillServerCallerContext::~PrefillServerCallerContext() {
     while (completion_queue_->Next(&drain_tag, &drain_ok)) {}
 }
 
-bool PrefillServerCallerContext::getPrefillReuseLensSnapshot(ReuseLensSnapshot& snapshot) const {
+bool PrefillServerCallerContext::getPrefillReuseLensSnapshot(ReuseLensSnapshot& snapshot) {
+    checkDone();
     std::shared_lock<std::shared_mutex> lock(state_mutex_);
     if (reuse_lens_valid_) {
         snapshot = reuse_lens_snapshot_;
@@ -102,60 +113,20 @@ void PrefillServerCallerContext::cancel() {
 }
 
 void PrefillServerCallerContext::wait() {
-    joinPollingThread();
+    while (!done()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 
 void PrefillServerCallerContext::startPolling() {
-    if (polling_thread_.joinable()) {
-        return;
-    }
-    polling_thread_ = std::thread([this]() {
-        try {
-            while (!done()) {
-                checkDone();
-                if (!done()) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
-            }
-        } catch (const std::exception& e) {
-            {
-                std::unique_lock<std::shared_mutex> lock(state_mutex_);
-                if (!finished_) {
-                    finished_ = true;
-                    status_   = grpc::Status(grpc::StatusCode::INTERNAL, e.what());
-                }
-            }
-            if (client_context_) {
-                client_context_->TryCancel();
-            }
-            RTP_LLM_LOG_ERROR(
-                "PrefillServerCallerContext::startPolling: unexpected exception, prefill_addr: %s, error: %s",
-                prefill_addr_.c_str(),
-                e.what());
-        } catch (...) {
-            {
-                std::unique_lock<std::shared_mutex> lock(state_mutex_);
-                if (!finished_) {
-                    finished_ = true;
-                    status_   = grpc::Status(grpc::StatusCode::INTERNAL, "unknown exception in prefill poll thread");
-                }
-            }
-            if (client_context_) {
-                client_context_->TryCancel();
-            }
-            RTP_LLM_LOG_ERROR("PrefillServerCallerContext::startPolling: unknown exception, prefill_addr: %s",
-                              prefill_addr_.c_str());
-        }
-    });
-}
-
-void PrefillServerCallerContext::joinPollingThread() {
-    if (polling_thread_.joinable() && polling_thread_.get_id() != std::this_thread::get_id()) {
-        polling_thread_.join();
-    }
+    checkDone();
 }
 
 void PrefillServerCallerContext::handleReadChunkLocked(const GenerateOutputsPB& response) {
+    if (!first_response_received_) {
+        first_response_.CopyFrom(response);
+        first_response_received_ = true;
+    }
     response_.CopyFrom(response);
     response_received_ = true;
     updateReuseLensSnapshotLocked(response);
@@ -184,6 +155,11 @@ void PrefillServerCallerContext::handleReadChunkLocked(const GenerateOutputsPB& 
 void PrefillServerCallerContext::checkDone() {
     std::unique_lock<std::shared_mutex> lock(state_mutex_);
     if (finished_) {
+        return;
+    }
+
+    if (!rpc_started_ || !reader_) {
+        finished_ = true;
         return;
     }
 

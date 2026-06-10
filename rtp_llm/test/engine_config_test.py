@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest import TestCase, main
 
 from rtp_llm.config.engine_config import setup_pd_sep_config, update_worker_addrs
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.ops import (
     CacheStoreConfig,
     ParallelismConfig,
@@ -9,6 +10,8 @@ from rtp_llm.ops import (
     RoleType,
     RuntimeConfig,
 )
+from rtp_llm.server.server_args.cache_store_group_args import init_cache_store_group_args
+from rtp_llm.server.server_args.server_args import EnvArgumentParser
 
 
 class EngineConfigTest(TestCase):
@@ -183,6 +186,30 @@ class SetupPdSepConfigTest(TestCase):
             pd_sep_config, cache_store_config, server_config, distribute_config
         )
         self.assertTrue(pd_sep_config.cache_store_rdma_mode)
+
+
+class CacheStoreGroupArgsBindingTest(TestCase):
+    def test_new_p2p_deadline_args_bind_to_cache_store_config(self):
+        py_env_configs = PyEnvConfigs()
+        parser = EnvArgumentParser(add_help=False)
+        parser.set_root_config(py_env_configs)
+        init_cache_store_group_args(parser, py_env_configs.cache_store_config)
+
+        parser.parse_args(
+            [
+                "--p2p_prefill_resource_hold_ms",
+                "1234",
+                "--p2p_max_transfer_deadline_ms",
+                "5678",
+                "--p2p_cancelled_keys_ttl_ms",
+                "9012",
+            ]
+        )
+
+        config = py_env_configs.cache_store_config
+        self.assertEqual(config.p2p_prefill_resource_hold_ms, 1234)
+        self.assertEqual(config.p2p_max_transfer_deadline_ms, 5678)
+        self.assertEqual(config.p2p_cancelled_keys_ttl_ms, 9012)
 
 
 if __name__ == "__main__":

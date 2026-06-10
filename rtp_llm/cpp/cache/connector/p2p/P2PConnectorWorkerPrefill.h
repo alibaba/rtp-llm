@@ -82,7 +82,16 @@ private:
                               const std::vector<AsymmetricTPContext>&    tp_partition_ctxs,
                               const std::string&                         unique_key,
                               int64_t                                    transfer_deadline_ms,
+                              int                                        scheduled_transfer_count,
+                              int                                        max_outstanding_tasks,
+                              const std::shared_ptr<std::atomic<bool>>&  cancel_flag,
                               const std::shared_ptr<SendTransferResult>& transfer_result);
+
+    bool waitForAsyncSendSlot(const std::shared_ptr<SendTransferResult>& transfer_result,
+                              int                                        scheduled_transfer_count,
+                              int                                        max_outstanding_tasks,
+                              int64_t                                    return_deadline_ms,
+                              const std::shared_ptr<std::atomic<bool>>&  cancel_flag) const;
 
     bool waitSendCallbacksWithTimeout(const std::shared_ptr<SendTransferResult>& transfer_result,
                                       int                                        sent_transfer_count,
@@ -97,11 +106,30 @@ private:
 
     SendResultInfo determineSendResult(const std::shared_ptr<SendTransferResult>& transfer_result,
                                        const std::shared_ptr<std::atomic<bool>>&  cancel_flag,
+                                       bool                                       timeout_cancelled_pending_tasks,
                                        bool                                       all_callbacks_received,
                                        int                                        sent_transfer_count,
                                        int                                        total_transfers,
                                        int64_t                                    return_deadline_ms,
                                        const std::string&                         unique_key) const;
+
+    struct AsyncSendTaskState {
+        bool takeForStart(transfer::SendRequestPtr*              send_request_out,
+                          std::shared_ptr<LayerCacheBuffer>*     buffer_keepalive_out);
+        bool releaseIfNotStarted();
+
+        mutable std::mutex               mutex;
+        transfer::SendRequestPtr         send_request;
+        std::shared_ptr<LayerCacheBuffer> buffer_keepalive;
+        bool                             started{false};
+        bool                             released{false};
+    };
+
+    void registerAsyncSendTask(const std::string&                     unique_key,
+                               const std::shared_ptr<AsyncSendTaskState>& task_state);
+    int  releasePendingAsyncSendTasks(const std::string& unique_key,
+                                      std::shared_ptr<SendTransferResult>* transfer_result_out = nullptr);
+    static int releaseNotStartedTaskStates(const std::vector<std::shared_ptr<AsyncSendTaskState>>& task_states);
 
 private:
     // IMPORTANT: Declaration order determines initialization order in the constructor
@@ -124,6 +152,7 @@ private:
     struct HandleCancelEntry {
         std::shared_ptr<std::atomic<bool>> cancel_flag;
         std::weak_ptr<SendTransferResult>  transfer_result;
+        std::vector<std::weak_ptr<AsyncSendTaskState>> async_send_tasks;
     };
     mutable std::mutex                                  handle_cancel_mutex_;
     std::unordered_map<std::string, HandleCancelEntry>  handle_cancel_flags_;

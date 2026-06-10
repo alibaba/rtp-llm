@@ -53,6 +53,7 @@ struct P2PConnectorWorkerConfig {
     int64_t p2p_read_steal_before_deadline_ms       = 250;
     int64_t p2p_read_return_before_deadline_ms      = 100;
     int64_t p2p_layer_cache_buffer_store_timeout_ms = 100 * 1000;
+    int64_t p2p_prefill_resource_hold_ms            = 300 * 1000;
 
     int64_t  tp_size       = 1;
     int64_t  tp_rank       = 0;
@@ -86,6 +87,7 @@ struct P2PConnectorWorkerConfig {
         config.p2p_layer_cache_buffer_store_timeout_ms = cache_store_config.p2p_layer_cache_buffer_store_timeout_ms;
         config.p2p_read_steal_before_deadline_ms       = cache_store_config.p2p_read_steal_before_deadline_ms;
         config.p2p_read_return_before_deadline_ms      = cache_store_config.p2p_read_return_before_deadline_ms;
+        config.p2p_prefill_resource_hold_ms            = cache_store_config.p2p_prefill_resource_hold_ms;
         config.tp_size                                 = parallelism_config.tp_size;
         config.tp_rank                                 = parallelism_config.tp_rank;
         config.layer_all_num                           = layer_all_num;

@@ -3,7 +3,9 @@
 #include <gtest/gtest.h>
 #include "torch/all.h"
 
+#define private public
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew2.h"
+#undef private
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 
 namespace rtp_llm::test {
@@ -174,6 +176,100 @@ TEST(DecodeRpcServerNew2Test, PrefillFirstResponseFinishedDetection) {
 
     ASSERT_EQ(prefill_output_not_finished.flatten_output().finished_size(), 1);
     EXPECT_FALSE(prefill_output_not_finished.flatten_output().finished(0));
+}
+
+TEST(DecodeRpcServerNew2Test, ConsumePrefillFirstResponseWritesFirstChunkAndClearsFinishedFlag) {
+    auto stream      = makeStream({31, 32, 33});
+    auto prefill_ctx = std::make_shared<PrefillServerCallerContext>("127.0.0.1:9000", "first-response");
+
+    prefill_ctx->first_response_received_ = true;
+    prefill_ctx->response_received_ = true;
+    prefill_ctx->first_response_.mutable_flatten_output()->add_finished(true);
+    prefill_ctx->first_response_.mutable_flatten_output()->add_aux_info()->set_step_output_len(1);
+
+    bool              prefill_finished      = false;
+    int               prefill_finished_size = 0;
+    bool              skip_next_decode      = false;
+    GenerateOutputsPB client_output;
+
+    EXPECT_TRUE(DecodeRpcServerNew2::consumePrefillFirstResponse(prefill_ctx,
+                                                                 stream,
+                                                                 /*client_first_chunk_sent=*/false,
+                                                                 &prefill_finished,
+                                                                 &prefill_finished_size,
+                                                                 &skip_next_decode,
+                                                                 &client_output));
+    EXPECT_TRUE(prefill_finished);
+    EXPECT_EQ(prefill_finished_size, 1);
+    EXPECT_TRUE(skip_next_decode);
+    ASSERT_EQ(client_output.flatten_output().finished_size(), 1);
+    EXPECT_FALSE(client_output.flatten_output().finished(0));
+    EXPECT_TRUE(prefill_ctx->first_response_consumed_);
+}
+
+TEST(DecodeRpcServerNew2Test, ConsumePrefillFirstResponseAfterDecodeFirstChunkStillRecordsTermination) {
+    auto stream      = makeStream({41, 42, 43});
+    auto prefill_ctx = std::make_shared<PrefillServerCallerContext>("127.0.0.1:9000", "late-first-response");
+
+    prefill_ctx->first_response_received_ = true;
+    prefill_ctx->response_received_ = true;
+    prefill_ctx->first_response_.mutable_flatten_output()->add_finished(true);
+    prefill_ctx->first_response_.mutable_flatten_output()->add_aux_info()->set_step_output_len(1);
+
+    bool              prefill_finished      = false;
+    int               prefill_finished_size = 0;
+    bool              skip_next_decode      = true;
+    GenerateOutputsPB client_output;
+
+    EXPECT_FALSE(DecodeRpcServerNew2::consumePrefillFirstResponse(prefill_ctx,
+                                                                  stream,
+                                                                  /*client_first_chunk_sent=*/true,
+                                                                  &prefill_finished,
+                                                                  &prefill_finished_size,
+                                                                  &skip_next_decode,
+                                                                  &client_output));
+    EXPECT_TRUE(prefill_finished);
+    EXPECT_EQ(prefill_finished_size, 1);
+    EXPECT_FALSE(skip_next_decode);
+    EXPECT_TRUE(prefill_ctx->first_response_consumed_);
+    EXPECT_EQ(client_output.flatten_output().finished_size(), 0);
+}
+
+TEST(DecodeRpcServerNew2Test, RefreshIdleStreamStateReportsTimeout) {
+    auto stream = makeStream({51, 52, 53});
+    stream->generateConfig()->timeout_ms = 1;
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+    EXPECT_TRUE(DecodeRpcServerNew2::refreshIdleStreamState(stream));
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+}
+
+TEST(DecodeRpcServerNew2Test, ConsumePrefillFirstResponseSkipsErrorChunk) {
+    auto stream      = makeStream({61, 62, 63});
+    auto prefill_ctx = std::make_shared<PrefillServerCallerContext>("127.0.0.1:9000", "error-first-response");
+
+    prefill_ctx->first_response_received_ = true;
+    prefill_ctx->first_response_.mutable_flatten_output()->add_finished(false);
+    prefill_ctx->first_response_.mutable_flatten_output()->add_aux_info()->set_step_output_len(1);
+    prefill_ctx->error_info_ = ErrorInfo(ErrorCode::UNKNOWN_ERROR, "prefill chunk failed");
+
+    bool              prefill_finished      = false;
+    int               prefill_finished_size = 0;
+    bool              skip_next_decode      = false;
+    GenerateOutputsPB client_output;
+
+    EXPECT_TRUE(prefill_ctx->failed());
+    EXPECT_FALSE(DecodeRpcServerNew2::consumePrefillFirstResponse(prefill_ctx,
+                                                                  stream,
+                                                                  /*client_first_chunk_sent=*/false,
+                                                                  &prefill_finished,
+                                                                  &prefill_finished_size,
+                                                                  &skip_next_decode,
+                                                                  &client_output));
+    EXPECT_FALSE(prefill_ctx->first_response_consumed_);
+    EXPECT_EQ(client_output.flatten_output().finished_size(), 0);
 }
 
 }  // namespace rtp_llm::test

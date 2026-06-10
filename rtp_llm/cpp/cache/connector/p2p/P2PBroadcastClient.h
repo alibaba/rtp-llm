@@ -70,10 +70,11 @@ public:
         bool success{false};
         // Per-rank lease status. Empty on broadcast failure.
         struct RankStatus {
+            bool valid{false};
             bool sealed{true};
             int  started_ops{0};
             int  finished_ops{0};
-            bool stopped{true};
+            bool stopped{false};
         };
         std::vector<RankStatus> ranks;
 
@@ -82,7 +83,7 @@ public:
                 return false;
             }
             for (const auto& r : ranks) {
-                if (!r.stopped) {
+                if (!r.valid || !r.stopped) {
                     return false;
                 }
             }

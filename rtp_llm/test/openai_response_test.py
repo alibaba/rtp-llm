@@ -2798,6 +2798,62 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         )
         self.assertTrue(results[0].generate_outputs[0].finished)
 
+    async def test_batch_enqueue_decode_entrance_merges_multi_token_delta_chunks_without_aux_info(
+        self,
+    ):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = RoleType.FRONTEND
+        pd_sep_config.decode_entrance = True
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=pd_sep_config,
+            addresses=["localhost:8080"],
+        )
+        visitor.host_service.service_available = False
+
+        def _fake_enqueue(_input_obj: GenerateInput):
+            async def _generator():
+                outputs1 = GenerateOutputs()
+                outputs1.generate_outputs.append(
+                    GenerateOutput(
+                        output_ids=torch.tensor([[10, 11]], dtype=torch.int32),
+                        finished=False,
+                        aux_info=None,
+                    )
+                )
+                yield outputs1
+
+                outputs2 = GenerateOutputs()
+                outputs2.generate_outputs.append(
+                    GenerateOutput(
+                        output_ids=torch.tensor([[12, 13]], dtype=torch.int32),
+                        finished=True,
+                        aux_info=None,
+                    )
+                )
+                yield outputs2
+
+            return _generator()
+
+        visitor.model_rpc_client.enqueue = _fake_enqueue
+
+        results = await visitor.batch_enqueue(
+            [
+                GenerateInput(
+                    request_id=23,
+                    token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+                    mm_inputs=[],
+                    generate_config=GenerateConfig(),
+                )
+            ]
+        )
+
+        self.assertEqual(
+            results[0].generate_outputs[0].output_ids.tolist(), [[10, 11, 12, 13]]
+        )
+        self.assertTrue(results[0].generate_outputs[0].finished)
+
     async def test_batch_enqueue_decode_entrance_cancels_other_streams_on_error(self):
         pd_sep_config = PDSepConfig()
         pd_sep_config.role_type = RoleType.FRONTEND

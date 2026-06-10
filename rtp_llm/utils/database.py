@@ -270,15 +270,31 @@ class CkptDatabase(BaseDatabase):
     def load_tensors_by_prefix(
         self, prefix_list: List[str], device: str, direct_io: bool
     ) -> dict[str, List[torch.Tensor]]:
+        shm_loader = None
         try:
             from fast_safetensors import LoadWithShm
 
-            loader = LoadWithShm(2 * 1024 * 1024 * 1024, device, direct_io)
-            load_tensors = lambda ckptfile: loader.load_safetensors_to_device(
-                ckptfile.file_name
-            )
+            if _should_use_fastsafetensors_shm(2 * 1024):
+                shm_loader = LoadWithShm(2 * 1024 * 1024 * 1024, device, direct_io)
         except (ModuleNotFoundError, ImportError):
-            load_tensors = lambda ckptfile: ckptfile.load_tensors(device, direct_io)
+            pass
+        except RuntimeError as e:
+            logging.warning(
+                "fastsafetensors shm init failed for prefix load, fallback to direct checkpoint load: %s",
+                e,
+            )
+
+        def load_tensors(ckptfile: CkptFileInfo) -> Dict[str, torch.Tensor]:
+            if shm_loader is not None:
+                try:
+                    return shm_loader.load_safetensors_to_device(ckptfile.file_name)
+                except RuntimeError as e:
+                    logging.warning(
+                        "fastsafetensors shm load failed for %s, fallback to direct checkpoint load: %s",
+                        ckptfile.file_name,
+                        e,
+                    )
+            return ckptfile.load_tensors(device, direct_io)
 
         res = {}
         for ckptfile in self.pretrain_file_list:

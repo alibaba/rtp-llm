@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferBackendFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <cstdlib>
+#include <exception>
 
 namespace rtp_llm {
 
@@ -41,8 +42,25 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
         rdma_mode ? "kBarexRdma" : "kTcp",
         env_raw ? env_raw : "(unset)");
 
-    auto [sender, receiver] =
-        transfer::createTransferBackend(backend, config_.transfer_backend_config, metrics_reporter_);
+    if (rdma_mode) {
+        RTP_LLM_LOG_ERROR("init failed: BarexRdma backend is not supported in this build, set cache_store_rdma_mode=0");
+        return false;
+    }
+
+    transfer::TransferBackendPair backend_pair;
+    try {
+        backend_pair = transfer::createTransferBackend(backend, config_.transfer_backend_config, metrics_reporter_);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("init failed: createTransferBackend threw for backend=%s, error=%s",
+                          rdma_mode ? "kBarexRdma" : "kTcp",
+                          e.what());
+        return false;
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("init failed: createTransferBackend threw unknown exception for backend=%s",
+                          rdma_mode ? "kBarexRdma" : "kTcp");
+        return false;
+    }
+    auto [sender, receiver] = std::move(backend_pair);
     if (!sender || !receiver) {
         RTP_LLM_LOG_ERROR("init failed: createTransferBackend failed for backend=%s",
                           rdma_mode ? "kBarexRdma" : "kTcp");

@@ -48,6 +48,11 @@ bool P2PConnector::init() {
         config_.scheduler_config.p2p_resource_store_timeout_check_interval_ms,
         config_.scheduler_config.p2p_prefill_resource_hold_ms,
         config_.scheduler_config.p2p_cancelled_keys_ttl_ms);
+    stream_store_->setOnRequestReleased([computed_buffers = worker_->getComputedBuffersStore()](int64_t request_id) {
+        if (computed_buffers) {
+            computed_buffers->removeBuffer(request_id);
+        }
+    });
     if (!stream_store_->init()) {
         RTP_LLM_LOG_ERROR("init failed: stream_store init failed");
         return false;
@@ -170,7 +175,13 @@ void P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
                             unique_key.c_str(),
                             wait_resource_cost_us,
                             wait_status.error_message().c_str());
-        response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
+        ErrorCode error_code = ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED;
+        if (wait_status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+            error_code = ErrorCode::GENERATE_TIMEOUT;
+        } else if (wait_status.error_code() == grpc::StatusCode::CANCELLED) {
+            error_code = ErrorCode::CANCELLED;
+        }
+        response.set_error_code(transErrorCodeToRPC(error_code));
         response.set_error_message("waitForResourceEntry failed: " + wait_status.error_message());
         return;
     }
@@ -346,6 +357,22 @@ bool P2PConnector::executeRead(int64_t                                 request_i
         auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id);
         auto cache_keys         = layer_block_pb.cache_keys();
         auto block_ids          = layer_block_pb.block_ids();
+        if (cache_keys.size() != block_ids.size()) {
+            ErrorInfo error_info(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                                 "cache_keys size "
+                                     + std::to_string(cache_keys.size()) + " != block_ids size "
+                                     + std::to_string(block_ids.size()) + " for unique_key=" + unique_key
+                                     + ", layer_id=" + std::to_string(layer_id));
+            RTP_LLM_LOG_WARNING("executeRead rejected malformed request, request_id=%ld, unique_key=%s, layer_id=%d, "
+                                "cache_keys=%d, block_ids=%d",
+                                request_id,
+                                unique_key.c_str(),
+                                layer_id,
+                                cache_keys.size(),
+                                block_ids.size());
+            setP2PResponse(response, error_info);
+            return false;
+        }
         for (size_t i = 0; i < cache_keys.size(); i++) {
             layer_cache_buffer->addBlockId(cache_keys[i], block_ids[i]);
         }

@@ -170,8 +170,8 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenStreamStoreIsNull) {
     EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
 }
 
-// 测试: waitForResourceEntry 超时，返回 INTERNAL 错误
-TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenWaitResourceEntryTimeout) {
+// 测试: waitForResourceEntry 超时，映射为 GENERATE_TIMEOUT
+TEST_F(P2PConnectorTest, HandleRead_ReturnGenerateTimeout_WhenWaitResourceEntryTimeout) {
     // 1. 创建并初始化 P2PConnector（已在 SetUp 中完成）
     // 2. 不添加 resource entry 到 stream_store_
     // 3. 调用 handleRead，使用已过期的 deadline_ms
@@ -182,7 +182,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenWaitResourceEntryTimeout)
     P2PConnectorStartLoadResponsePB response;
     connector_->handleRead(request, response);
 
-    EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
 }
 
 // 测试: waitForResourceEntry 被取消，返回 CANCELLED 错误
@@ -200,7 +200,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnCancelled_WhenWaitResourceEntryCancell
     P2PConnectorStartLoadResponsePB response;
     connector_->handleRead(request, response, is_cancelled);
 
-    EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::CANCELLED));
     EXPECT_NE(response.error_message().find("cancelled"), std::string::npos);
 }
 
@@ -256,6 +256,27 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenWaitSideChannelTimeout) {
 
     // 4. 由于没有调用 notifySideChannelReady，waitSideChannelReady 会超时
     EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
+}
+
+TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasMismatchedCacheKeysAndBlockIds) {
+    FunctionRequestPB request;
+    auto*             p2p_request = request.mutable_p2p_request();
+    p2p_request->set_type(P2PConnectorBroadcastType::READ);
+    p2p_request->set_request_id(6001);
+    p2p_request->set_unique_key("malformed-read");
+    p2p_request->set_deadline_ms(currentTimeMs() + 5000);
+
+    auto* layer_block = p2p_request->add_layer_blocks();
+    layer_block->set_layer_id(3);
+    layer_block->add_cache_keys(101);
+    layer_block->add_cache_keys(102);
+    layer_block->add_block_ids(7);
+
+    FunctionResponsePB response;
+    EXPECT_FALSE(connector_->executeFunction(request, response));
+    ASSERT_TRUE(response.has_p2p_response());
+    EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_NE(response.p2p_response().error_message().find("cache_keys size 2 != block_ids size 1"), std::string::npos);
 }
 
 // 测试: 成功场景，使用 notifySideChannelReady 机制，返回 OK, 验证 response 中包含了所有字段
