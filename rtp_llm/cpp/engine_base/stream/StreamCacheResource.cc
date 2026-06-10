@@ -374,6 +374,7 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
     malloc_info.request_id              = stream_->streamId();
+    malloc_info.input_token_length      = stream_->inputLength();
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
 
     const bool disable_first_malloc_reuse =
@@ -418,6 +419,7 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step, int seq_len_o
     malloc_info.batch_kv_cache_resource      = batch_kv_cache_resource_;
     malloc_info.complete_token_ids           = stream_->completeTokenIdsPtr();
     malloc_info.request_id                   = stream_->streamId();
+    malloc_info.input_token_length           = stream_->inputLength();
     malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.reuse_cache                  = reuseCache();
     malloc_info.enable_device_cache          = reuseCache() && enableDeviceCache();

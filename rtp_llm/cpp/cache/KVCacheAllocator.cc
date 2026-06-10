@@ -47,13 +47,7 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         return incr_result;
     } else {
         if (metrics_reporter_ && malloc_info.enable_device_cache) {
-            int64_t device_input_length = 0;
-            if (malloc_info.batch_kv_cache_resource) {
-                const auto& cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);
-                size_t      match_keys_size = cache_keys.size();
-                device_input_length =
-                    static_cast<int64_t>(match_keys_size) * deviceCacheMetricTokensPerBlock();
-            }
+            const int64_t device_input_length = static_cast<int64_t>(malloc_info.input_token_length);
 
             if (device_input_length > 0) {
                 RtpLLMDeviceCacheReuseMetricsCollector collector;

@@ -65,6 +65,8 @@ struct MallocInfo {
     // Override for incrMalloc's seqLength read; -1 = fall back to complete_token_ids->seqLength().
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
+    // Original request input length. Used by device-cache metrics to align with rtp_llm_input_token_length.
+    int input_token_length = -1;
 
     int incrSeqLen() const;
 };
