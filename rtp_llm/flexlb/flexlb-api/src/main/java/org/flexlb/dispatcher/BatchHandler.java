@@ -1,14 +1,9 @@
 package org.flexlb.dispatcher;
 
-import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
-import com.alibaba.fastjson2.JSONWriter;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.pv.DispatchPvLogData;
-import org.flexlb.dispatcher.BatchScheduleClient;
-import org.flexlb.dispatcher.DispatchConfig;
-import org.flexlb.dispatcher.SubBatchSpec;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -68,7 +63,7 @@ public class BatchHandler {
             if (arr.isEmpty()) {
                 JSONObject emptyEnvelope = new JSONObject();
                 emptyEnvelope.put(spec.getResponseArrayField(), new JSONArray());
-                return jsonBytes(200, serialize(emptyEnvelope));
+                return jsonBytes(200, BatchBodyParser.serialize(emptyEnvelope));
             }
             pv.setTotalItems(arr.size());
             List<JSONArray> chunks = BatchChunkAssembler.split(arr, subBatch);
@@ -85,7 +80,7 @@ public class BatchHandler {
                                     if (merged.allFailed()) {
                                         return errorResponse(merged);
                                     }
-                                    return jsonBytes(200, serialize(merged.body()));
+                                    return jsonBytes(200, BatchBodyParser.serialize(merged.body()));
                                 });
                     });
         }).onErrorResume(e -> {
@@ -95,7 +90,7 @@ public class BatchHandler {
             JSONObject err = new JSONObject();
             err.put("error", "dispatch_failed");
             err.put("message", String.valueOf(e.getMessage()));
-            return jsonBytes(500, serialize(err));
+            return jsonBytes(500, BatchBodyParser.serialize(err));
         }).doOnNext(resp -> pv.setHttpStatus(resp.statusCode().value()))
           .doFinally(signal -> finalizePvRecord(pv, signal));
     }
@@ -119,7 +114,7 @@ public class BatchHandler {
         JSONObject err = new JSONObject();
         err.put("error", "invalid_batch_request");
         err.put("message", message);
-        return jsonBytes(400, serialize(err));
+        return jsonBytes(400, BatchBodyParser.serialize(err));
     }
 
     private Mono<ServerResponse> errorResponse(ResponseMerger.MergedResponse merged) {
@@ -130,17 +125,7 @@ public class BatchHandler {
         JSONArray reasons = new JSONArray();
         merged.failedReasons().stream().distinct().forEach(reasons::add);
         body.put("failed_reasons", reasons);
-        return jsonBytes(500, serialize(body));
-    }
-
-    /**
-     * WriteNulls preserves explicit nulls on the wire (e.g. {@code embedding: null} from
-     * {@link BatchEndpointSpec.FailedItemFactory#EMBEDDING_NULL}); without it fastjson2
-     * strips null entries by default, which would diverge from the Jackson handler's
-     * {@code mapper.nullNode()} behavior.
-     */
-    private static byte[] serialize(JSONObject body) {
-        return JSON.toJSONBytes(body, JSONWriter.Feature.WriteNulls);
+        return jsonBytes(500, BatchBodyParser.serialize(body));
     }
 
     private Mono<List<BatchScheduleTarget>> resolvePreAssignedTargets(int chunkCount) {

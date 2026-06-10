@@ -1,6 +1,7 @@
 package org.flexlb.sync.synchronizer;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
+import org.flexlb.config.EnvConfigOverrides;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.service.address.WorkerAddressService;
@@ -74,6 +75,7 @@ public abstract class AbstractEngineStatusSynchronizer {
         } else {
             masterConfig = new FlexlbConfig();
         }
+        EnvConfigOverrides.apply(masterConfig, "");
         this.flexlbConfig = masterConfig;
     }
 

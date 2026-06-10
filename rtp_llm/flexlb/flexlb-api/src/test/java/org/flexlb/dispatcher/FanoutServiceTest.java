@@ -43,13 +43,13 @@ class FanoutServiceTest {
                 .assertNext(subs -> {
                     assertEquals(2, subs.size());
                     SubBatchResult s0 = subs.get(0);
-                    assertTrue(s0.isSuccess());
+                    assertTrue(s0.success());
                     assertEquals(0, s0.startIndex());
                     assertEquals(2, s0.chunkSize());
                     assertEquals("r0",
                             s0.body().getJSONArray("response_batch").getJSONObject(0).getString("response"));
                     SubBatchResult s1 = subs.get(1);
-                    assertTrue(s1.isSuccess());
+                    assertTrue(s1.success());
                     assertEquals(2, s1.startIndex());
                     assertEquals(1, s1.chunkSize());
                     assertEquals("r2",
@@ -73,8 +73,8 @@ class FanoutServiceTest {
                         "/batch_infer", List.of(chunk("p0", "p1"), chunk("p2")), BATCH_INFER))
                 .assertNext(subs -> {
                     assertEquals(2, subs.size());
-                    assertTrue(subs.get(0).isSuccess());
-                    assertFalse(subs.get(1).isSuccess());
+                    assertTrue(subs.get(0).success());
+                    assertFalse(subs.get(1).success());
                     assertEquals(2, subs.get(1).startIndex());
                     assertEquals(1, subs.get(1).chunkSize());
                     assertNotNull(subs.get(1).reason());
@@ -94,7 +94,7 @@ class FanoutServiceTest {
                         "/batch_infer", List.of(chunk("p0", "p1")), BATCH_INFER))
                 .assertNext(subs -> {
                     assertEquals(1, subs.size());
-                    assertFalse(subs.get(0).isSuccess());
+                    assertFalse(subs.get(0).success());
                     assertEquals(0, subs.get(0).startIndex());
                     assertEquals(2, subs.get(0).chunkSize());
                     assertTrue(subs.get(0).reason().contains("IllegalStateException"));

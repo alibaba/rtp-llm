@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -7,6 +8,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.EngineType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
@@ -48,10 +50,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class RoundRobinLoadBalancer implements BatchLoadBalancer {
 
     private final EngineWorkerStatus engineWorkerStatus;
+    private final ConfigService configService;
     private final Map<RoleType, AtomicInteger> cursors = new EnumMap<>(RoleType.class);
 
-    public RoundRobinLoadBalancer(EngineWorkerStatus engineWorkerStatus) {
+    public RoundRobinLoadBalancer(EngineWorkerStatus engineWorkerStatus, ConfigService configService) {
         this.engineWorkerStatus = engineWorkerStatus;
+        this.configService = configService;
         for (RoleType role : RoleType.values()) {
             cursors.put(role, new AtomicInteger(0));
         }
@@ -151,8 +155,11 @@ public class RoundRobinLoadBalancer implements BatchLoadBalancer {
         BatchScheduleTarget target = new BatchScheduleTarget();
         target.setServerIp(worker.getIp());
         target.setHttpPort(worker.getPort());
-        target.setGrpcPort(CommonUtils.toGrpcPort(worker.getPort()));
-        target.setArpcPort(CommonUtils.toArpcPort(worker.getPort()));
+        if (configService.loadBalanceConfig().getEngineType() == EngineType.EMBEDDING) {
+            target.setArpcPort(CommonUtils.toArpcPort(worker.getPort()));
+        } else {
+            target.setGrpcPort(CommonUtils.toGrpcPort(worker.getPort()));
+        }
         target.setRole(roleType);
         return target;
     }

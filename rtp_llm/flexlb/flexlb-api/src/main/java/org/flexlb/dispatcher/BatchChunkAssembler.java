@@ -1,6 +1,5 @@
 package org.flexlb.dispatcher;
 
-import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
@@ -105,12 +104,15 @@ public final class BatchChunkAssembler {
     public static List<JSONObject> buildChunkBodies(JSONObject envelope, List<JSONArray> chunks,
                                                     String requestArrayField) {
         JSONObject sourceGc = envelope.getJSONObject("generate_config");
+        boolean gcNeedsDeepCopy = sourceGc != null && sourceGc.containsKey("role_addrs");
         List<JSONObject> chunkBodies = new ArrayList<>(chunks.size());
         for (JSONArray chunk : chunks) {
             JSONObject copy = new JSONObject(envelope);
             copy.put(requestArrayField, chunk);
             if (sourceGc != null) {
-                copy.put("generate_config", deepCopy(sourceGc));
+                copy.put("generate_config", gcNeedsDeepCopy
+                        ? BatchBodyParser.deepCopy(sourceGc)
+                        : new JSONObject(sourceGc));
             }
             injectForceBatch(copy);
             chunkBodies.add(copy);
@@ -124,11 +126,7 @@ public final class BatchChunkAssembler {
      * (e.g. for scheduler interleaving measurements) and must not be overwritten.
      */
     public static void injectForceBatch(JSONObject chunkBody) {
-        JSONObject gc = chunkBody.getJSONObject("generate_config");
-        if (gc == null) {
-            gc = new JSONObject();
-            chunkBody.put("generate_config", gc);
-        }
+        JSONObject gc = ensureGenerateConfig(chunkBody);
         if (!gc.containsKey("force_batch")) {
             gc.put("force_batch", true);
         }
@@ -152,12 +150,13 @@ public final class BatchChunkAssembler {
         int max = Math.min(chunkBodies.size(), targets.size());
         for (int i = 0; i < max; i++) {
             BatchScheduleTarget target = targets.get(i);
-            JSONObject chunkBody = chunkBodies.get(i);
-            JSONObject gc = chunkBody.getJSONObject("generate_config");
-            if (gc == null) {
-                gc = new JSONObject();
-                chunkBody.put("generate_config", gc);
+            if (target.getGrpcPort() == null) {
+                // role_addrs is FE's gRPC pre-assignment mechanism; targets without a gRPC
+                // slot (embedding engines) cannot be pre-assigned through it.
+                continue;
             }
+            JSONObject chunkBody = chunkBodies.get(i);
+            JSONObject gc = ensureGenerateConfig(chunkBody);
             JSONArray roleAddrs = gc.getJSONArray("role_addrs");
             if (roleAddrs == null) {
                 roleAddrs = new JSONArray();
@@ -172,7 +171,12 @@ public final class BatchChunkAssembler {
         }
     }
 
-    private static JSONObject deepCopy(JSONObject source) {
-        return JSON.parseObject(JSON.toJSONBytes(source));
+    private static JSONObject ensureGenerateConfig(JSONObject chunkBody) {
+        JSONObject gc = chunkBody.getJSONObject("generate_config");
+        if (gc == null) {
+            gc = new JSONObject();
+            chunkBody.put("generate_config", gc);
+        }
+        return gc;
     }
 }

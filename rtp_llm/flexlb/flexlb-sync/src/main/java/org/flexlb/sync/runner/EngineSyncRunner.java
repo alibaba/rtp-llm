@@ -5,6 +5,7 @@ import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.BalanceStatusEnum;
+import org.flexlb.enums.EngineType;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -45,6 +46,8 @@ public class EngineSyncRunner implements Runnable {
 
     private final Long syncEngineStatusInterval;
 
+    private final EngineType engineType;
+
     public EngineSyncRunner(String modelName,
                             Map<String, WorkerStatus> workerStatusMap,
                             WorkerAddressService workerAddressService,
@@ -55,7 +58,8 @@ public class EngineSyncRunner implements Runnable {
                             CacheAwareService localKvCacheAwareManager,
                             long syncRequestTimeoutMs,
                             LongAdder syncCount,
-                            Long syncEngineStatusInterval) {
+                            Long syncEngineStatusInterval,
+                            EngineType engineType) {
 
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
@@ -68,6 +72,7 @@ public class EngineSyncRunner implements Runnable {
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
+        this.engineType = engineType;
     }
 
     @Override
@@ -121,6 +126,11 @@ public class EngineSyncRunner implements Runnable {
                 String site = host.getSite();
 
                 WorkerStatus workerStatus = getOrCreateWorkerStatus(cachedWorkerStatuses, workerIpPort);
+
+                if (engineType == EngineType.EMBEDDING) {
+                    markAliveFromDiscovery(workerStatus, host);
+                    continue;
+                }
 
                 if (workerStatus.getStatusCheckInProgress().compareAndSet(false, true)) {
                     logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
@@ -183,6 +193,27 @@ public class EngineSyncRunner implements Runnable {
                 logger.debug("Less than 2 workers, skipping variance calculation for model: {}", modelName);
             }
         }
+    }
+
+    /**
+     * EMBEDDING engines expose no {@code GetWorkerStatus}, so the host appearing in the
+     * service-discovery list is the liveness signal: register it alive without probing.
+     * Engine-level liveness degrades to the discovery service's own health check; no load
+     * metrics are collected (callers are limited to load-unaware strategies, enforced at
+     * boot). Refreshing statusLastUpdateTime keeps the stale-worker removal above working
+     * unchanged when discovery drops a host.
+     */
+    private void markAliveFromDiscovery(WorkerStatus workerStatus, WorkerHost host) {
+        workerStatus.setSite(host.getSite());
+        workerStatus.setGroup(host.getGroup());
+        workerStatus.setRole(roleType.toString());
+        workerStatus.setAlive(true);
+        long nowUs = System.nanoTime() / 1000;
+        long prevUpdateTime = workerStatus.getStatusLastUpdateTime().get();
+        if (prevUpdateTime > 0) {
+            workerStatus.getStatusUpdateIntervalUs().set(nowUs - prevUpdateTime);
+        }
+        workerStatus.getStatusLastUpdateTime().set(nowUs);
     }
 
     private WorkerStatus getOrCreateWorkerStatus(Map<String, WorkerStatus> workerStatuses, String workerIpPort) {

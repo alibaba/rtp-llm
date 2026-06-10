@@ -1,6 +1,8 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.enums.EngineType;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.Request;
@@ -30,13 +32,15 @@ import java.util.concurrent.atomic.AtomicInteger;
 class RoundRobinLoadBalancerTest {
 
     private EngineWorkerStatus engineWorkerStatus;
+    private ConfigService configService;
     private RoundRobinLoadBalancer rr;
 
     @BeforeEach
     void setUp() {
         clearWorkerMaps();
         engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
-        rr = new RoundRobinLoadBalancer(engineWorkerStatus);
+        configService = new ConfigService();
+        rr = new RoundRobinLoadBalancer(engineWorkerStatus, configService);
         populatePdFusion(4);
     }
 
@@ -71,10 +75,25 @@ class RoundRobinLoadBalancerTest {
         Set<String> workers = new HashSet<>();
         for (BatchScheduleTarget t : targets) {
             workers.add(t.getServerIp() + ":" + t.getHttpPort());
-            Assertions.assertEquals(t.getHttpPort() + 1, t.getGrpcPort(),
+            Assertions.assertEquals(t.getHttpPort() + 1, t.getGrpcPort().intValue(),
                     "grpc_port should be http_port + 1");
+            Assertions.assertNull(t.getArpcPort(), "LLM targets must not carry an arpc slot");
         }
         Assertions.assertEquals(4, workers.size(), "4 slots and 4 workers must hit all 4");
+    }
+
+    @Test
+    void selectBatch_embedding_engine_fills_arpc_slot_only() {
+        configService.loadBalanceConfig().setEngineType(EngineType.EMBEDDING);
+
+        List<BatchScheduleTarget> targets = rr.selectBatch(4, RoleType.PDFUSION, null);
+
+        Assertions.assertEquals(4, targets.size());
+        for (BatchScheduleTarget t : targets) {
+            Assertions.assertEquals(t.getHttpPort() + 1, t.getArpcPort().intValue(),
+                    "arpc_port should be http_port + 1");
+            Assertions.assertNull(t.getGrpcPort(), "embedding targets must not carry a grpc slot");
+        }
     }
 
     @Test

@@ -4,6 +4,7 @@ import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONException;
 import com.alibaba.fastjson2.JSONObject;
+import com.alibaba.fastjson2.JSONWriter;
 
 import java.util.Objects;
 
@@ -51,5 +52,19 @@ public final class BatchBodyParser {
         Objects.requireNonNull(fieldName, "fieldName");
         Object value = body.get(fieldName);
         return value instanceof JSONArray arr ? arr : null;
+    }
+
+    static JSONObject deepCopy(JSONObject source) {
+        return JSON.parseObject(JSON.toJSONBytes(source));
+    }
+
+    /**
+     * WriteNulls preserves explicit nulls on the wire (e.g. {@code embedding: null} from
+     * {@link BatchEndpointSpec.FailedItemFactory#EMBEDDING_NULL}); without it fastjson2
+     * strips null entries by default, which would diverge from the Jackson handler's
+     * {@code mapper.nullNode()} behavior.
+     */
+    static byte[] serialize(JSONObject body) {
+        return JSON.toJSONBytes(body, JSONWriter.Feature.WriteNulls);
     }
 }
