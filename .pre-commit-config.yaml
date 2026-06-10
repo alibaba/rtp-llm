@@ -1,31 +1,35 @@
 repos:
   # Standard hooks
-  - repo: https://github.com/pre-commit/pre-commit-hooks
+  - repo: git@gitlab.alibaba-inc.com:foundation_models/pre-commit-hooks.git
     rev: v5.0.0
     hooks:
       - id: check-merge-conflict
       - id: check-symlinks
       - id: mixed-line-ending
+        exclude: ^3rdparty/
       - id: trailing-whitespace
+        exclude: ^3rdparty/
 
-    # Formatters
-  - repo: https://github.com/psf/black-pre-commit-mirror
+  # Python Formatters
+  - repo: git@gitlab.alibaba-inc.com:foundation_models/black-pre-commit-mirror.git
     rev: 24.8.0
     hooks:
       - id: black
         types_or: [python]
+        exclude: ^3rdparty/
 
-  - repo: https://github.com/pycqa/isort
+  # Python header Formatters
+  - repo: git@gitlab.alibaba-inc.com:foundation_models/isort.git
     rev: 5.13.2
     hooks:
       - id: isort
         args: ["--profile=black"]
+        exclude: ^3rdparty/
 
-  - repo: https://github.com/pre-commit/mirrors-clang-format
+  # C++ Formatters
+  - repo: git@gitlab.alibaba-inc.com:foundation_models/mirrors-clang-format.git
     rev: v19.1.1
     hooks:
       - id: clang-format
         types_or: [c++, c, cuda]
-        exclude: ^rtp_llm/cpp/cutlass/
-
-exclude: ^rtp_llm/ops|^3rdparty
+        exclude: ^3rdparty/|^rtp_llm/cpp/cutlass/
