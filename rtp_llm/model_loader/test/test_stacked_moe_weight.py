@@ -24,7 +24,9 @@ from rtp_llm.model_loader.ffn_weight import (
     iter_stacked_moe_weights,
 )
 from rtp_llm.model_loader.offline_modelopt_fp4_quant_weight import (
+    OfflineMegaMoeFp4MoeWeight,
     OfflineMegaMoeFp4SharedExpertWeight,
+    wrap_for_offline_fp4,
     wrap_shared_expert_for_offline_fp4,
 )
 from rtp_llm.model_loader.per_block_fp8_quant_weight import (
@@ -156,6 +158,36 @@ class TestOfflineFp4SharedExpertWeight(unittest.TestCase):
         self.assertEqual(
             [w.name for w in offline.scale.weights],
             ["model.layers.{i}.mlp.shared_experts.down_proj.weight_scale"],
+        )
+
+    def test_strategy_wrapper_skips_shared_expert_unless_requested(self):
+        ffn = self._make_shared_ffn()
+        fp8_wrapped = ffn.w13.create(ffn.w13, Fp8BlockWiseQuantConfig(is_quanted=True))
+
+        self.assertIs(wrap_for_offline_fp4(fp8_wrapped), fp8_wrapped)
+
+        offline = wrap_for_offline_fp4(fp8_wrapped, include_shared_expert=True)
+        self.assertIsInstance(offline, OfflineMegaMoeFp4SharedExpertWeight)
+
+    def test_strategy_wrapper_always_wraps_routed_moe(self):
+        moe = MoeAtomicWeight(
+            W.moe_w1,
+            [
+                CkptWeightInfo(
+                    "model.layers.{i}.mlp.experts.0.gate_proj.weight",
+                    identity,
+                )
+            ],
+            identity,
+            config=MoeConfig(expert_num=1),
+        )
+
+        offline = wrap_for_offline_fp4(moe)
+
+        self.assertIsInstance(offline, OfflineMegaMoeFp4MoeWeight)
+        self.assertEqual(
+            [w.name for w in offline.scale.weights],
+            ["model.layers.{i}.mlp.experts.0.gate_proj.weight_scale"],
         )
 
 

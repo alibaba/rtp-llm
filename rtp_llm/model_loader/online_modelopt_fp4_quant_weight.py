@@ -12,8 +12,8 @@ deployments:
    ``OnlineMegaMoeFp4Weight`` — BF16 → packed int8 + fp32 scale.
    ``OnlineMegaMoeFp4FromFp8Weight`` — FP8 per-block → BF16 → FP4.
    Both run at load time so the BF16/FP8 tensor is released before
-   ``MegaMoeWrapper.__init__``. Triggered by ``MOE_STRATEGY=mega_moe``
-   env var via ``apply_mega_moe_fp4_wrappers`` in
+   ``MegaMoeWrapper.__init__``. Triggered by ``MOE_STRATEGY=mega_moe`` or
+   ``MOE_STRATEGY=mega_moe_fused`` env var via ``apply_mega_moe_fp4_wrappers`` in
    ``model_weight_info.py``.
 
 3. Hybrid FP8_PER_BLOCK for non-MoE weights when MODELOPT_FP4 hybrid mode is
@@ -434,7 +434,7 @@ class OnlineMegaMoeFp4Weight(CompositeWeight, QuantWeight):
     on the GPU, instead of staying resident until ``MegaMoeWrapper.__init__``.
 
     Wired in by ``apply_mega_moe_fp4_wrappers`` (in ``model_weight_info.py``)
-    when ``MOE_STRATEGY=mega_moe``. Inherits ``QuantWeight`` purely so that
+    when a MegaMoE strategy is selected. Inherits ``QuantWeight`` purely so that
     ``MoeWeight``'s sub-weight assertion passes; the ``support()`` classmethod
     is gated to never fire from the regular ``QuantWeight.create()`` registry
     (the explicit wrap pass is the only entry point).
@@ -542,7 +542,7 @@ class OnlineMegaMoeFp4FromFp8Weight(CompositeWeight, QuantWeight):
     ``float32`` scale) and produces FP4 packed int8 + fp32 UE8M0 scale at
     load time, matching ``GLM5MegaMoE.setup_weights_from_fp8`` numerically.
 
-    Wired in by ``apply_mega_moe_fp4_wrappers`` when ``MOE_STRATEGY=mega_moe``
+    Wired in by ``apply_mega_moe_fp4_wrappers`` when a MegaMoE strategy is selected
     and the original MoE weight was a ``PerBlockFp8Weight``.
     """
 
@@ -740,10 +740,17 @@ class OnlineModelOptFp4HybridFp8AttnWeight(LoadQuantPerBlockFp8Weight):
 
 
 def is_mega_moe_strategy() -> bool:
-    """Return True when MOE_STRATEGY=mega_moe is set in the env."""
+    """Return True when a MegaMoE strategy is set in the env."""
     import os
 
-    return os.environ.get("MOE_STRATEGY") == "mega_moe"
+    return os.environ.get("MOE_STRATEGY") in {"mega_moe", "mega_moe_fused"}
+
+
+def is_mega_moe_fused_strategy() -> bool:
+    """Return True when MOE_STRATEGY=mega_moe_fused is set in the env."""
+    import os
+
+    return os.environ.get("MOE_STRATEGY") == "mega_moe_fused"
 
 
 def is_online_fp4gemm_enabled() -> bool:

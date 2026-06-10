@@ -49,7 +49,10 @@ class BackendManager(object):
         )
 
         need_dist = engine_config.parallelism_config.world_size > 1
-        if not need_dist and os.environ.get("MOE_STRATEGY") == "mega_moe":
+        if not need_dist and os.environ.get("MOE_STRATEGY") in (
+            "mega_moe",
+            "mega_moe_fused",
+        ):
             need_dist = True
         if need_dist:
             init_distributed_environment(
