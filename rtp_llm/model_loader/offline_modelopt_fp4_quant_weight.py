@@ -357,3 +357,17 @@ def wrap_shared_expert_for_offline_fp4(weight: WeightModule) -> WeightModule:
     if _is_shared_expert_weight(weight):
         return OfflineMegaMoeFp4SharedExpertWeight(weight)
     return weight
+
+
+def wrap_for_offline_fp4(
+    weight: WeightModule, include_shared_expert: bool = False
+) -> WeightModule:
+    """Replace offline FP4 MoE weights, optionally including shared experts.
+
+    ``mega_moe`` only consumes routed expert weights. ``mega_moe_fused``
+    consumes routed expert and shared-expert FP4 weights.
+    """
+    wrapped = wrap_moe_for_offline_fp4(weight)
+    if wrapped is not weight or not include_shared_expert:
+        return wrapped
+    return wrap_shared_expert_for_offline_fp4(weight)

@@ -48,12 +48,15 @@ def _apply_mega_moe_fp4_wrappers(
     database: Optional[BaseDatabase] = None,
 ) -> "ModelWeightInfo":
     """Walk ``weight_info`` and replace MoE w1/w2 weights with mega-MoE FP4
-    load-time quantizers when ``MOE_STRATEGY=mega_moe``.
+    load-time quantizers when a MegaMoE strategy is selected.
 
     Three cases are handled:
       - **Offline FP4 ckpt** (auto-detected via ``database``: experts have
         ``.weight_scale`` entries): replace with
         :class:`OfflineMegaMoeFp4MoeWeight` (no quantization, direct load).
+        ``MOE_STRATEGY=mega_moe_fused`` additionally loads shared-expert FP4
+        weights; ``MOE_STRATEGY=mega_moe`` leaves shared experts on their
+        normal FFN path.
       - ``MoeAtomicWeight`` (BF16 ckpt): wrap with
         :class:`OnlineMegaMoeFp4Weight` (BF16 → FP4).
       - ``PerBlockFp8Weight`` for moe_w1/moe_w2 (FP8 ckpt under
@@ -62,10 +65,10 @@ def _apply_mega_moe_fp4_wrappers(
     """
     from rtp_llm.model_loader.offline_modelopt_fp4_quant_weight import (
         is_offline_mega_moe_fp4_ckpt,
-        wrap_moe_for_offline_fp4,
-        wrap_shared_expert_for_offline_fp4,
+        wrap_for_offline_fp4,
     )
     from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+        is_mega_moe_fused_strategy,
         is_mega_moe_strategy,
         wrap_moe_for_mega_moe,
     )
@@ -73,20 +76,22 @@ def _apply_mega_moe_fp4_wrappers(
     if not is_mega_moe_strategy():
         return weight_info
 
+    include_shared_expert = is_mega_moe_fused_strategy()
     is_offline = is_offline_mega_moe_fp4_ckpt(database)
     if is_offline:
         logging.info(
             "[mega_moe] offline FP4 MoE detected in ckpt; using "
-            "OfflineMegaMoeFp4MoeWeight (skip online quantization)"
+            "OfflineMegaMoeFp4MoeWeight%s (skip online quantization)",
+            " and OfflineMegaMoeFp4SharedExpertWeight" if include_shared_expert else "",
         )
 
     from rtp_llm.model_loader.ffn_weight import FfnWeight, MoeWeight
 
     def _walk(weight: WeightModule) -> WeightModule:
         if is_offline:
-            wrapped = wrap_moe_for_offline_fp4(weight)
-            if wrapped is weight:
-                wrapped = wrap_shared_expert_for_offline_fp4(weight)
+            wrapped = wrap_for_offline_fp4(
+                weight, include_shared_expert=include_shared_expert
+            )
         else:
             wrapped = wrap_moe_for_mega_moe(weight)
         if wrapped is not weight:
@@ -422,8 +427,8 @@ class ModelDeployWeightInfo:
         if self._quant_algo is not None and self._quant_algo.isQuant():
             weight_info = weight_info.to_quant_weight_info(self._quant_config)
 
-        # MOE_STRATEGY=mega_moe forces load-time FP4 quantization for MoE
-        # weights regardless of whether a quant_config is set. This must run
+        # MegaMoE strategies force load-time FP4 quantization for MoE weights
+        # regardless of whether a quant_config is set. This must run
         # AFTER `to_quant_weight_info` so we can replace any PerBlockFp8Weight
         # MoE wrapper with the FP8→FP4 variant. `database` lets us auto-detect
         # offline FP4 MoE ckpt (experts with `.weight_scale` keys).
