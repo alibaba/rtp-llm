@@ -4,6 +4,7 @@ import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.domain.worker.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.enums.TaskPhase;
 
 import java.util.HashMap;
 import java.util.List;
@@ -79,7 +80,7 @@ public class EngineStatusConverter {
             taskInfo.setEndTimeMs(taskInfoPB.getEndTimeMs());
             taskInfo.setDpRank(taskInfoPB.getDpRank());
             taskInfo.setBatchId(taskInfoPB.getBatchId());
-            taskInfo.setWaiting(taskInfoPB.getIsWaiting());
+            taskInfo.setPhase(convertPhase(taskInfoPB.getPhase()));
             if (taskInfoPB.hasErrorInfo() && taskInfoPB.getErrorInfo().getErrorCode() != 0L) {
                 taskInfo.setErrorCode(taskInfoPB.getErrorInfo().getErrorCode());
                 taskInfo.setErrorMessage(taskInfoPB.getErrorInfo().getErrorMessage());
@@ -89,5 +90,18 @@ public class EngineStatusConverter {
         }
 
         return taskInfoMap;
+    }
+
+    private static TaskPhase convertPhase(EngineRpcService.TaskPhase protoPhase) {
+        switch (protoPhase) {
+            case TASK_PHASE_RECEIVED:
+                return TaskPhase.RECEIVED;
+            case TASK_PHASE_KV_ALLOCATED:
+                return TaskPhase.KV_ALLOCATED;
+            case TASK_PHASE_RUNNING:
+                return TaskPhase.RUNNING;
+            default:
+                return TaskPhase.PENDING;
+        }
     }
 }

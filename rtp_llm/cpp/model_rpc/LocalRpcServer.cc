@@ -256,7 +256,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_iterate_count(task.iterate_count);
         task_info->set_end_time_ms(task.end_time_ms);
         task_info->set_dp_rank(status_info.dp_rank);
-        task_info->set_is_waiting(task.is_waiting);
+        task_info->set_phase(static_cast<::TaskPhase>(task.phase));
         task_info->set_batch_id(task.batch_id);
         if (task.error_code != 0) {
             task_info->mutable_error_info()->set_error_code(task.error_code);
@@ -273,7 +273,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_iterate_count(task.iterate_count);
         task_info->set_end_time_ms(task.end_time_ms);
         task_info->set_dp_rank(status_info.dp_rank);
-        task_info->set_is_waiting(task.is_waiting);
+        task_info->set_phase(static_cast<::TaskPhase>(task.phase));
         task_info->set_batch_id(task.batch_id);
         if (task.error_code != 0) {
             task_info->mutable_error_info()->set_error_code(task.error_code);
@@ -371,17 +371,8 @@ size_t LocalRpcServer::onflightRequestNum() {
 }
 
 EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finished_version) {
-    EngineScheduleInfo                        info = meta_->getEngineScheduleInfo(latest_finished_version);
-    std::vector<EngineScheduleInfo::TaskInfo> running_task_info_list = engine_->getScheduler().runningTaskList();
-    for (auto& task_info : info.running_task_info_list) {
-        for (auto& running_task : running_task_info_list) {
-            if (task_info.request_id == running_task.request_id) {
-                task_info.is_waiting = false;
-            }
-        }
-    }
+    EngineScheduleInfo info = meta_->getEngineScheduleInfo(latest_finished_version);
     auto last_schedule_time = engine_->getLastScheduleTime();
-    // in case last_schedule_delta is negative
     info.last_schedule_delta =
         std::max((int64_t)0, autil::TimeUtility::currentTimeInMilliSeconds() - last_schedule_time);
     return info;

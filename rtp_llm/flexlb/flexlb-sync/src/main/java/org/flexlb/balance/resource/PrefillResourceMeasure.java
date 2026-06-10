@@ -6,6 +6,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
+import org.flexlb.enums.TaskPhase;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -84,6 +85,6 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return 0;
         }
         return workerStatus.getRunningTaskList().values().stream()
-                .filter(TaskInfo::isWaiting).count();
+                .filter(t -> t.getPhase() != TaskPhase.RUNNING).count();
     }
 }

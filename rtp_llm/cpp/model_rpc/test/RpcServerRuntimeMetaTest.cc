@@ -4,7 +4,7 @@
 
 namespace rtp_llm::test {
 
-TEST(RpcServerRuntimeMetaTest, EnqueuePendingAppearsAsWaitingRunningTask) {
+TEST(RpcServerRuntimeMetaTest, EnqueuePendingReportsPendingPhase) {
     RpcServerRuntimeMeta meta;
 
     meta.enqueuePending(/*request_id=*/101, /*input_length=*/2048);
@@ -15,7 +15,7 @@ TEST(RpcServerRuntimeMetaTest, EnqueuePendingAppearsAsWaitingRunningTask) {
     EXPECT_EQ(info.running_task_info_list[0].request_id, 101);
     EXPECT_EQ(info.running_task_info_list[0].input_length, 2048);
     EXPECT_EQ(info.running_task_info_list[0].prefix_length, 0);
-    EXPECT_TRUE(info.running_task_info_list[0].is_waiting);
+    EXPECT_EQ(info.running_task_info_list[0].phase, TaskPhase::PENDING);
 }
 
 TEST(RpcServerRuntimeMetaTest, FinishTaskMovesPendingToFinishedWithErrorDetails) {

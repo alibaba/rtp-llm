@@ -33,8 +33,6 @@ public class TaskInfo {
     private long batchId = -1;
     @JsonProperty("phase")
     private TaskPhase phase;
-    @JsonProperty("is_waiting")
-    private boolean waiting;
 
     private long predictedMs;
 

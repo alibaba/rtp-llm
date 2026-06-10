@@ -10,6 +10,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.worker.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.BalanceStatusEnum;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -204,7 +205,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                         + "step_latency_ms:{}, iterate_count:{}, "
                         + "dp_rank:{}, dp_size:{}, tp_size:{}, "
                         + "avail_kv_tokens:{}, used_kv_tokens:{}, "
-                        + "kv_allocated_tasks:{}, running_tasks:{}, "
+                        + "waiting_tasks:{}, running_tasks:{}, "
                         + "version:{}, sync_cost_us:{}",
                 ipPort,
                 workerStatus.getRole(),
@@ -217,7 +218,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 workerStatus.getTpSize(),
                 workerStatus.getAvailableKvCacheTokens(),
                 workerStatus.getUsedKvCacheTokens(),
-                workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().values().stream().filter(TaskInfo::isWaiting).count() : 0,
+                workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().values().stream().filter(t -> t.getPhase() != TaskPhase.RUNNING).count() : 0,
                 workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().size() : 0,
                 workerStatus.getStatusVersion(),
                 System.nanoTime() / 1000 - startTime);

@@ -8,8 +8,9 @@ import lombok.Getter;
 public enum TaskPhase {
 
     PENDING("pending"),
-    RUNNING("running"),
-    KV_ALLOCATED("kv_allocated");
+    RECEIVED("received"),
+    KV_ALLOCATED("kv_allocated"),
+    RUNNING("running");
 
     @JsonValue
     private final String value;

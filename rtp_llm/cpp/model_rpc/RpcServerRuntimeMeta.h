@@ -8,16 +8,28 @@
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 
 namespace rtp_llm {
+
+struct RunningEntry {
+    EngineScheduleInfo::TaskInfo task_info;
+    GenerateStreamPtr            stream;
+};
+
 class RpcServerRuntimeMeta {
 public:
+    static TaskPhase derivePhase(const GenerateStreamPtr& stream) {
+        if (!stream) return TaskPhase::PENDING;
+        if (stream->getStatus() == StreamState::RUNNING) return TaskPhase::RUNNING;
+        if (stream->curBlocksNum() > 0) return TaskPhase::KV_ALLOCATED;
+        return TaskPhase::RECEIVED;
+    }
+
     EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finished_version) {
         std::shared_lock<std::shared_mutex> lock(read_write_lock_);
         EngineScheduleInfo                  info;
-        for (auto& iter : running_streams_) {
-            info.running_task_info_list.push_back(iter.second);
+        for (auto& [id, entry] : running_streams_) {
+            entry.task_info.phase = derivePhase(entry.stream);
+            info.running_task_info_list.push_back(entry.task_info);
         }
-        // When no new finished tasks, keep client's version (monotonic). Otherwise client/flexlb
-        // would overwrite latestFinishedTaskVersion with 0 when finished queue is empty.
         int64_t version = latest_finished_version;
         for (auto& iter : finished_streams_) {
             if (iter.first > latest_finished_version) {
@@ -33,8 +45,10 @@ public:
 
     void enqueue(int64_t request_id, const GenerateStreamPtr& stream) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
-        running_streams_[request_id] = EngineScheduleInfo::TaskInfo(
-            {request_id, stream->prefixLength(), stream->inputLength(), stream->getTimeInfo().wait_time_us});
+        running_streams_[request_id] = RunningEntry{
+            EngineScheduleInfo::TaskInfo(
+                {request_id, stream->prefixLength(), stream->inputLength(), stream->getTimeInfo().wait_time_us}),
+            stream};
     }
 
     void enqueuePending(int64_t request_id, int64_t input_length, int64_t batch_id = -1) {
@@ -44,10 +58,9 @@ public:
                                                   input_length,
                                                   /*waiting_time_ms=*/0,
                                                   /*iterate_count=*/0,
-                                                  /*end_time_ms=*/-1,
-                                                  /*is_waiting=*/true});
+                                                  /*end_time_ms=*/-1});
         task.batch_id = batch_id;
-        running_streams_[request_id] = task;
+        running_streams_[request_id] = RunningEntry{task, nullptr};
     }
 
     void dequeue(int64_t request_id, const GenerateStreamPtr& stream) {
@@ -56,7 +69,7 @@ public:
         if (ptr == running_streams_.end()) {
             return;
         }
-        auto& task_info = ptr->second;
+        auto& task_info = ptr->second.task_info;
         if (finished_streams_.size() >= finished_capacity_) {
             finished_streams_.pop_front();
         }
@@ -87,11 +100,10 @@ public:
                                                input_length,
                                                /*waiting_time_ms=*/0,
                                                /*iterate_count=*/0,
-                                               /*end_time_ms=*/-1,
-                                               /*is_waiting=*/true};
+                                               /*end_time_ms=*/-1};
         auto                         ptr = running_streams_.find(request_id);
         if (ptr != running_streams_.end()) {
-            task_info = ptr->second;
+            task_info = ptr->second.task_info;
             if (input_length > 0) {
                 task_info.input_length = input_length;
             }
@@ -111,10 +123,6 @@ public:
     }
 
 protected:
-    // Note: finished_streams_ pairs are (monotonic_version, TaskInfo).
-    // The list is ordered by insertion time (append-only via push_back), so end_time_ms
-    // is approximately monotonic. The break below relies on this approximate time ordering
-    // to stop early — it does NOT use pair.first (version) for trimming decisions.
     void trimFinishedStreams() {
         auto current = autil::TimeUtility::currentTimeInMilliSeconds();
         auto iter    = finished_streams_.begin();
@@ -133,7 +141,7 @@ protected:
             }
         }
     }
-    std::unordered_map<int64_t, EngineScheduleInfo::TaskInfo>   running_streams_;
+    std::unordered_map<int64_t, RunningEntry>                   running_streams_;
     std::list<std::pair<int64_t, EngineScheduleInfo::TaskInfo>> finished_streams_;
     std::atomic<int64_t>                                        version_{0};
     mutable std::shared_mutex                                   read_write_lock_;
