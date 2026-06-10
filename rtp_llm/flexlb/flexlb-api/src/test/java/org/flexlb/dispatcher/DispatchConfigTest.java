@@ -103,7 +103,7 @@ class DispatchConfigTest {
     @Test
     void subBatchSpecAccessorParsesEagerly() {
         DispatchConfig c = load("{\"fePoolServiceId\":\"x\",\"subBatch\":\"count:7\"}");
-        SubBatchSpec spec = c.subBatchSpec();
+        SubBatchSpec spec = c.getSubBatchSpec();
         assertEquals(SubBatchSpec.Mode.COUNT, spec.mode());
         assertEquals(7, spec.value());
     }

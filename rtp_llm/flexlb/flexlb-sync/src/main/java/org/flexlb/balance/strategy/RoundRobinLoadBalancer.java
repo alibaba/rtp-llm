@@ -82,10 +82,11 @@ public class RoundRobinLoadBalancer implements BatchLoadBalancer {
         }
         int aliveSize = alive.size();
         int start = cursors.get(roleType).getAndAdd(count);
+        boolean embedding = configService.loadBalanceConfig().getEngineType() == EngineType.EMBEDDING;
         List<BatchScheduleTarget> targets = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             int idx = Math.floorMod(start + i, aliveSize);
-            targets.add(buildTarget(alive.get(idx), roleType));
+            targets.add(buildTarget(alive.get(idx), roleType, embedding));
         }
         return targets;
     }
@@ -151,11 +152,11 @@ public class RoundRobinLoadBalancer implements BatchLoadBalancer {
         return result;
     }
 
-    private BatchScheduleTarget buildTarget(WorkerStatus worker, RoleType roleType) {
+    private BatchScheduleTarget buildTarget(WorkerStatus worker, RoleType roleType, boolean embedding) {
         BatchScheduleTarget target = new BatchScheduleTarget();
         target.setServerIp(worker.getIp());
         target.setHttpPort(worker.getPort());
-        if (configService.loadBalanceConfig().getEngineType() == EngineType.EMBEDDING) {
+        if (embedding) {
             target.setArpcPort(CommonUtils.toArpcPort(worker.getPort()));
         } else {
             target.setGrpcPort(CommonUtils.toGrpcPort(worker.getPort()));

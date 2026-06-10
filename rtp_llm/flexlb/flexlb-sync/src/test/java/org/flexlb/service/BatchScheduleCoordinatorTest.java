@@ -48,7 +48,7 @@ class BatchScheduleCoordinatorTest {
     }
 
     @Test
-    void schedule_master_returnsLocalOutcomeAndStampsMasterHost() {
+    void schedule_master_resolvesLocallyAndStampsMasterHost() {
         when(consistency.isNeedConsistency()).thenReturn(true);
         when(consistency.isMaster()).thenReturn(true);
         when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.1:7001");
@@ -56,12 +56,11 @@ class BatchScheduleCoordinatorTest {
         BatchScheduleResponse response = BatchScheduleResponse.success(null);
         when(routeService.batchSchedule(any())).thenReturn(Mono.just(response));
 
-        BatchScheduleCoordinator.Outcome outcome =
+        BatchScheduleResponse returned =
                 coordinator.schedule(new BatchScheduleRequest()).block();
 
-        assertEquals(BatchScheduleCoordinator.Source.LOCAL, outcome.getSource());
-        assertSame(response, outcome.getResponse());
-        assertEquals("10.0.0.1:7001", outcome.getResponse().getRealMasterHost());
+        assertSame(response, returned);
+        assertEquals("10.0.0.1:7001", returned.getRealMasterHost());
         verifyNoInteractions(httpNettyService, engineHealthReporter);
     }
 
@@ -72,15 +71,15 @@ class BatchScheduleCoordinatorTest {
         BatchScheduleResponse response = BatchScheduleResponse.success(null);
         when(routeService.batchSchedule(any())).thenReturn(Mono.just(response));
 
-        BatchScheduleCoordinator.Outcome outcome =
+        BatchScheduleResponse returned =
                 coordinator.schedule(new BatchScheduleRequest()).block();
 
-        assertEquals(BatchScheduleCoordinator.Source.LOCAL, outcome.getSource());
+        assertSame(response, returned);
         verifyNoInteractions(httpNettyService);
     }
 
     @Test
-    void schedule_slave_forwardsAndReturnsForwardedOutcome() {
+    void schedule_slave_forwardsToMaster() {
         when(consistency.isNeedConsistency()).thenReturn(true);
         when(consistency.isMaster()).thenReturn(false);
         when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.2:7001");
@@ -94,11 +93,10 @@ class BatchScheduleCoordinatorTest {
                 eq(BatchScheduleResponse.class)))
                 .thenReturn(Mono.just(response));
 
-        BatchScheduleCoordinator.Outcome outcome =
+        BatchScheduleResponse returned =
                 coordinator.schedule(new BatchScheduleRequest()).block();
 
-        assertEquals(BatchScheduleCoordinator.Source.FORWARDED, outcome.getSource());
-        assertSame(response, outcome.getResponse());
+        assertSame(response, returned);
         verify(engineHealthReporter).reportForwardToMasterResult("10.0.0.2", "200");
         verifyNoInteractions(routeService);
     }
@@ -153,7 +151,7 @@ class BatchScheduleCoordinatorTest {
     }
 
     @Test
-    void schedule_slave_masterReturnsBusinessError_stillReturnsForwardedOutcome() {
+    void schedule_slave_masterReturnsBusinessError_stillReturnsResponse() {
         when(consistency.isNeedConsistency()).thenReturn(true);
         when(consistency.isMaster()).thenReturn(false);
         when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.2:7001");
@@ -164,11 +162,11 @@ class BatchScheduleCoordinatorTest {
                 eq("/rtp_llm/batch_schedule"), eq(BatchScheduleResponse.class)))
                 .thenReturn(Mono.just(response));
 
-        BatchScheduleCoordinator.Outcome outcome =
+        BatchScheduleResponse returned =
                 coordinator.schedule(new BatchScheduleRequest()).block();
 
-        assertEquals(BatchScheduleCoordinator.Source.FORWARDED, outcome.getSource());
-        assertFalse(outcome.getResponse().isSuccess());
+        assertSame(response, returned);
+        assertFalse(returned.isSuccess());
         verify(engineHealthReporter).reportForwardToMasterResult(
                 "10.0.0.2", String.valueOf(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode()));
     }

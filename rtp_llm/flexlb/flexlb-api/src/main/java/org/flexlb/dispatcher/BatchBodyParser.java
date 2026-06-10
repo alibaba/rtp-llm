@@ -9,9 +9,9 @@ import com.alibaba.fastjson2.JSONWriter;
 import java.util.Objects;
 
 /**
- * Thin entry point for parsing dispatcher batch request bodies with fastjson2. Replaces the
- * hand-rolled byte-level scanner; fastjson2's {@link JSON#parseObject(byte[])} consumes UTF-8
- * input directly without an intermediate {@code String} allocation.
+ * Thin entry point for parsing dispatcher batch request bodies with fastjson2.
+ * {@link JSON#parseObject(byte[])} consumes UTF-8 input directly without an intermediate
+ * {@code String} allocation.
  *
  * <p>The dispatcher is array-only by design — every batch endpoint declares a
  * {@code requestArrayField} that must be present and shaped as a JSON array. {@link
@@ -47,8 +47,7 @@ public final class BatchBodyParser {
 
     /**
      * Returns the value of a top-level field as a {@link JSONArray}, or {@code null} when the
-     * field is missing or not an array. Mirrors the validation
-     * {@code GenericBatchHandler} performs on the Jackson side.
+     * field is missing or not an array.
      */
     public static JSONArray findArrayField(JSONObject body, String fieldName) {
         Objects.requireNonNull(body, "body");
@@ -63,9 +62,8 @@ public final class BatchBodyParser {
 
     /**
      * WriteNulls preserves explicit nulls on the wire (e.g. {@code embedding: null} from
-     * {@link BatchEndpointSpec.FailedItemFactory#EMBEDDING_NULL}); without it fastjson2
-     * strips null entries by default, which would diverge from the Jackson handler's
-     * {@code mapper.nullNode()} behavior.
+     * {@link BatchEndpointSpec.FailedItemFactory#EMBEDDING_NULL}); fastjson2 strips null
+     * entries by default.
      */
     static byte[] serialize(JSONObject body) {
         return JSON.toJSONBytes(body, JSONWriter.Feature.WriteNulls);

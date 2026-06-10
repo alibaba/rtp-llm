@@ -9,8 +9,6 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.Ordered;
-import org.springframework.core.annotation.Order;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.server.RouterFunction;
@@ -37,13 +35,14 @@ import java.util.Map;
 public class DispatcherConfiguration {
 
     /**
-     * TCP three-way-handshake timeout for dispatcher → FE connections. Aligned with the
-     * codebase's {@code HttpNettyConfig.syncNettyClient}'s value — same deployment class
+     * TCP three-way-handshake timeout for every dispatcher → FE connection (passthrough and
+     * batch fanout — {@link FeClient} reads it too). Aligned with the codebase's
+     * {@code HttpNettyConfig.syncNettyClient}'s value — same deployment class
      * (same-cluster HTTP). Hardcoded rather than exposed as config because connect timeout is
      * almost never an operator-tuned knob; if a deployment ever needs different here it's a
      * deployment-topology change, not a runtime config.
      */
-    private static final int FE_CONNECT_TIMEOUT_MS = 1000;
+    static final int FE_CONNECT_TIMEOUT_MS = 1000;
 
     /**
      * How long a request waits for an available connection from the FE pool before failing. Fires
@@ -77,11 +76,11 @@ public class DispatcherConfiguration {
     /**
      * Exposes the dispatcher's batch endpoint table as a Spring bean for {@link DispatchRouter}
      * to autowire. Single source of truth — every batch endpoint the dispatcher serves is one
-     * row in {@link org.flexlb.dispatcher.BatchEndpointSpec#SPECS}.
+     * row in {@link BatchEndpointSpec#SPECS}.
      */
     @Bean
-    public List<org.flexlb.dispatcher.BatchEndpointSpec> batchEndpointSpecs() {
-        return org.flexlb.dispatcher.BatchEndpointSpec.SPECS;
+    public List<BatchEndpointSpec> batchEndpointSpecs() {
+        return BatchEndpointSpec.SPECS;
     }
 
     /**
@@ -154,11 +153,11 @@ public class DispatcherConfiguration {
     }
 
     /**
-     * Dispatcher routes on the SHARED 7001 listener, ordered last so the catch-all never shadows
-     * the Master's /rtp_llm/* (which are @Order(0) — see {@code HttpLoadBalanceServer}).
+     * Dispatcher routes on the SHARED 7001 listener. All dispatcher routes are anchored under
+     * {@code /dispatcher/**}, disjoint from the Master's {@code /rtp_llm/*}, so no relative
+     * ordering between the RouterFunction beans is needed.
      */
     @Bean
-    @Order(Ordered.LOWEST_PRECEDENCE)
     public RouterFunction<ServerResponse> dispatcherRoutes(DispatchRouter router) {
         return router.routes();
     }
@@ -174,7 +173,7 @@ public class DispatcherConfiguration {
                 "dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatch={}, batchSpecs={}, "
                         + "batchTimeoutMs={}, probePath={}, preAssignBe={}",
                 cfg.getFePoolServiceId(), refresher.currentSize(), cfg.getSubBatch(),
-                org.flexlb.dispatcher.BatchEndpointSpec.SPECS.size(),
+                BatchEndpointSpec.SPECS.size(),
                 cfg.getBatchTimeoutMs(), cfg.getProbePath(), cfg.isPreAssignBe());
     }
 }

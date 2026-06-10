@@ -3,7 +3,6 @@ package org.flexlb.dispatcher;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
-import org.flexlb.dispatcher.SubBatchSpec;
 
 import java.util.ArrayList;
 import java.util.List;

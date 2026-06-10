@@ -35,51 +35,32 @@ import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 @DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy", "roundRobinStrategy"})
 public class DefaultRouter implements Router {
 
-    private static final int DEFAULT_BATCH_SCHEDULE_MAX_COUNT = 1000;
-
     private final Map<RoleType, LoadBalancer> loadBalancerMap;
     /**
-     * Strategy registry for {@code /batch_schedule}, separate from {@link #loadBalancerMap}
-     * which governs {@code /schedule}. Decoupling lets operators keep e.g. SHORTEST_TTFT for
+     * Balancer for {@code /batch_schedule}, separate from {@link #loadBalancerMap} which
+     * governs {@code /schedule}. Decoupling lets operators keep e.g. SHORTEST_TTFT for
      * single-request routing while the batch endpoint defaults to ROUND_ROBIN — the only
      * batch-capable strategy today and the source of batch_schedule's atomic-distribution
-     * guarantee. See {@link FlexlbConfig#getBatchStrategyForRoleType}.
+     * guarantee. See {@link FlexlbConfig#getBatchLoadBalanceStrategy}.
      */
-    private final Map<RoleType, LoadBalancer> batchLoadBalancerMap;
-    private final ConfigService configService;
+    private final LoadBalancer batchLoadBalancer;
     private final int batchScheduleMaxCount;
 
     public DefaultRouter(ConfigService configService) {
-        this.configService = configService;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.loadBalancerMap = new EnumMap<>(RoleType.class);
-        this.batchLoadBalancerMap = new EnumMap<>(RoleType.class);
 
         for (RoleType roleType : RoleType.values()) {
             LoadBalanceStrategyEnum strategy = config.getStrategyForRoleType(roleType);
             loadBalancerMap.put(roleType, LoadBalanceStrategyFactory.getLoadBalancer(strategy));
-
-            LoadBalanceStrategyEnum batchStrategy = config.getBatchStrategyForRoleType(roleType);
-            batchLoadBalancerMap.put(roleType, LoadBalanceStrategyFactory.getLoadBalancer(batchStrategy));
-            Logger.warn("DefaultRouter role={}: schedule={}, batchSchedule={}",
-                    roleType, strategy, batchStrategy);
+            Logger.warn("DefaultRouter role={}: schedule={}", roleType, strategy);
         }
 
-        this.batchScheduleMaxCount = readBatchScheduleMaxCount();
-    }
-
-    private static int readBatchScheduleMaxCount() {
-        String raw = System.getenv("BATCH_SCHEDULE_MAX_COUNT");
-        if (raw == null || raw.isBlank()) {
-            return DEFAULT_BATCH_SCHEDULE_MAX_COUNT;
-        }
-        try {
-            int parsed = Integer.parseInt(raw.trim());
-            return parsed > 0 ? parsed : DEFAULT_BATCH_SCHEDULE_MAX_COUNT;
-        } catch (NumberFormatException e) {
-            Logger.warn("Invalid BATCH_SCHEDULE_MAX_COUNT='{}', falling back to default {}", raw, DEFAULT_BATCH_SCHEDULE_MAX_COUNT);
-            return DEFAULT_BATCH_SCHEDULE_MAX_COUNT;
-        }
+        LoadBalanceStrategyEnum batchStrategy = config.getBatchLoadBalanceStrategy();
+        this.batchLoadBalancer = LoadBalanceStrategyFactory.getLoadBalancer(batchStrategy);
+        this.batchScheduleMaxCount = config.getBatchScheduleMaxCount();
+        Logger.warn("DefaultRouter batchSchedule={}, batchScheduleMaxCount={}",
+                batchStrategy, batchScheduleMaxCount);
     }
 
     /**
@@ -170,8 +151,7 @@ public class DefaultRouter implements Router {
         // (4) Batch strategy (independent of /schedule's strategy) must support batch.
         //     Default is ROUND_ROBIN; an operator-configured non-batch-capable batchStrategy
         //     fails loudly here rather than silently falling back, so misconfiguration is loud.
-        LoadBalancer loadBalancer = batchLoadBalancerMap.get(roleType);
-        if (!(loadBalancer instanceof BatchLoadBalancer batchLoadBalancer)) {
+        if (!(this.batchLoadBalancer instanceof BatchLoadBalancer batchLoadBalancer)) {
             return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
                     "batchStrategy for role " + roleType.getCode() + " does not support batch_schedule");
         }

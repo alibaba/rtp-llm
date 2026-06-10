@@ -5,7 +5,6 @@ import java.util.concurrent.CompletableFuture;
 
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.QueueManager;
-import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -19,8 +18,7 @@ import reactor.core.publisher.Mono;
 public class RouteService {
 
     private final ConfigService configService;
-    private final Router router;
-    private final DefaultRouter defaultRouter;
+    private final DefaultRouter router;
     private final QueueManager queueManager;
 
     public RouteService(ConfigService configService,
@@ -28,7 +26,6 @@ public class RouteService {
                         QueueManager queueManager) {
         this.configService = configService;
         this.router = defaultScheduler;
-        this.defaultRouter = defaultScheduler;
         this.queueManager = queueManager;
     }
 
@@ -76,6 +73,6 @@ public class RouteService {
      * available on this path. Multi-role deployments must use {@link #route} per request.
      */
     public Mono<BatchScheduleResponse> batchSchedule(BatchScheduleRequest batchScheduleRequest) {
-        return Mono.fromCallable(() -> defaultRouter.batchSchedule(batchScheduleRequest));
+        return Mono.fromCallable(() -> router.batchSchedule(batchScheduleRequest));
     }
 }

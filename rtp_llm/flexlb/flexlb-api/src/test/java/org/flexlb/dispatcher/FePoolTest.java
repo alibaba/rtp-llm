@@ -22,18 +22,6 @@ class FePoolTest {
     }
 
     @Test
-    void rejectsNullRefresher() {
-        FeHealthChecker hc = org.mockito.Mockito.mock(FeHealthChecker.class);
-        assertThrows(IllegalArgumentException.class, () -> new FePool(null, hc));
-    }
-
-    @Test
-    void rejectsNullHealthChecker() {
-        DispatcherFePoolRefresher refresher = org.mockito.Mockito.mock(DispatcherFePoolRefresher.class);
-        assertThrows(IllegalArgumentException.class, () -> new FePool(refresher, null));
-    }
-
-    @Test
     void skipsDeadHostsPerPredicate() {
         FePool pool = fePool(
                 () -> List.of("http://a:8088", "http://b:8088", "http://c:8088"),

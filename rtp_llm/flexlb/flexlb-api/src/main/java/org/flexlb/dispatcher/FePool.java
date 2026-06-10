@@ -41,12 +41,6 @@ public class FePool {
     private final AtomicBoolean allDeadReported = new AtomicBoolean(false);
 
     public FePool(DispatcherFePoolRefresher refresher, FeHealthChecker healthChecker) {
-        if (refresher == null) {
-            throw new IllegalArgumentException("DispatcherFePoolRefresher must not be null");
-        }
-        if (healthChecker == null) {
-            throw new IllegalArgumentException("FeHealthChecker must not be null");
-        }
         this.source = refresher.source();
         this.isAlive = healthChecker::isAlive;
     }

@@ -36,8 +36,7 @@ public class BatchScheduleClient {
         BatchScheduleRequest req = new BatchScheduleRequest();
         req.setBatchCount(count);
         return coordinator.schedule(req)
-                .map(outcome -> {
-                    BatchScheduleResponse resp = outcome.getResponse();
+                .map(resp -> {
                     if (resp == null || !resp.isSuccess() || resp.getServerStatus() == null) {
                         Logger.warn("dispatcher batch_schedule returned no targets: count={}, success={}, msg={}",
                                 count,

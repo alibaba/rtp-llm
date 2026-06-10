@@ -104,12 +104,9 @@ public class DispatcherInspectionHandler {
         if (e instanceof DecodingException) {
             return badRequest("malformed JSON body: " + e.getMessage());
         }
-        Logger.warn("dispatcher dry-run unexpected error: {}: {}",
-                e.getClass().getSimpleName(), e.getMessage());
-        JSONObject err = new JSONObject();
-        err.put("error", "dryrun_internal_error");
-        err.put("message", e.getClass().getSimpleName() + ": " + e.getMessage());
-        return ServerResponse.status(500).contentType(MediaType.APPLICATION_JSON).bodyValue(BatchBodyParser.serialize(err));
+        String reason = DispatcherResponses.briefReason(e);
+        Logger.warn("dispatcher dry-run unexpected error: {}", reason);
+        return DispatcherResponses.error(500, "dryrun_internal_error", reason);
     }
 
     private String extractFePath(ServerRequest request) {
@@ -136,10 +133,10 @@ public class DispatcherInspectionHandler {
 
     private Mono<ServerResponse> buildDryRunResponse(BatchEndpointSpec spec, JSONObject envelope,
                                                      JSONArray arr, boolean effectivePreAssign) {
-        List<JSONArray> chunks = BatchChunkAssembler.split(arr, cfg.subBatchSpec());
+        List<JSONArray> chunks = BatchChunkAssembler.split(arr, cfg.getSubBatchSpec());
         List<JSONObject> chunkBodies = BatchChunkAssembler.buildChunkBodies(
                 envelope, chunks, spec.getRequestArrayField());
-        boolean shouldResolveTargets = effectivePreAssign && batchScheduleClient != null && !chunks.isEmpty();
+        boolean shouldResolveTargets = effectivePreAssign && !chunks.isEmpty();
         Mono<List<BatchScheduleTarget>> targetsMono = shouldResolveTargets
                 ? batchScheduleClient.requestTargets(chunks.size())
                 : Mono.just(List.of());
@@ -170,9 +167,6 @@ public class DispatcherInspectionHandler {
     }
 
     private Mono<ServerResponse> badRequest(String message) {
-        JSONObject err = new JSONObject();
-        err.put("error", "invalid_inspection_request");
-        err.put("message", message);
-        return ServerResponse.badRequest().contentType(MediaType.APPLICATION_JSON).bodyValue(BatchBodyParser.serialize(err));
+        return DispatcherResponses.error(400, "invalid_inspection_request", message);
     }
 }

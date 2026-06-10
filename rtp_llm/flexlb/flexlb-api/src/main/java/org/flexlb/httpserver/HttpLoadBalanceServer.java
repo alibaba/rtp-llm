@@ -24,11 +24,9 @@ import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
-import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
-import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.RouterFunction;
@@ -70,7 +68,6 @@ public class HttpLoadBalanceServer {
     }
 
     @Bean
-    @Order(0)
     public RouterFunction<ServerResponse> loadBalancePrefill() {
         return route()
                 .POST("/rtp_llm/schedule", accept(MediaType.APPLICATION_JSON),
@@ -135,8 +132,7 @@ public class HttpLoadBalanceServer {
 
     private Mono<ServerResponse> processBatchScheduleRequest(BatchScheduleContext bctx) {
         return batchScheduleCoordinator.schedule(bctx.getBatchRequest())
-                .flatMap(outcome -> {
-                    BatchScheduleResponse response = outcome.getResponse();
+                .flatMap(response -> {
                     bctx.setBatchResponse(response);
                     bctx.setSuccess(response.isSuccess());
                     if (!response.isSuccess()) {
@@ -356,19 +352,7 @@ public class HttpLoadBalanceServer {
      * @param ctx the balance context containing PV log data
      */
     private void logPvRecord(BalanceContext ctx) {
-
-        PvLogData pvLogData = new PvLogData(ctx);
-
-        try {
-            String jsonLog = JsonUtils.toStringOrEmpty(pvLogData);
-            if (pvLogData.isSuccess()) {
-                pvLogger.info(jsonLog);
-            } else {
-                pvLogger.error(jsonLog);
-            }
-        } catch (Exception ex) {
-            Logger.error("Failed to serialize PV log data", ex);
-        }
+        new PvLogData(ctx).emit(pvLogger);
     }
 
     /**
@@ -378,28 +362,7 @@ public class HttpLoadBalanceServer {
      */
     private void finalizeBatchContext(BatchScheduleContext bctx) {
         engineHealthReporter.reportBatchSchedule(bctx);
-        logBatchPvRecord(bctx);
-    }
-
-    /**
-     * Logs the batch PV record with appropriate log level based on success status.
-     *
-     * @param bctx the batch schedule context containing PV log data
-     */
-    private void logBatchPvRecord(BatchScheduleContext bctx) {
-
-        BatchPvLogData pvLogData = new BatchPvLogData(bctx);
-
-        try {
-            String jsonLog = JsonUtils.toStringOrEmpty(pvLogData);
-            if (pvLogData.isSuccess()) {
-                pvLogger.info(jsonLog);
-            } else {
-                pvLogger.error(jsonLog);
-            }
-        } catch (Exception ex) {
-            Logger.error("Failed to serialize batch PV log data", ex);
-        }
+        new BatchPvLogData(bctx).emit(pvLogger);
     }
 
 }

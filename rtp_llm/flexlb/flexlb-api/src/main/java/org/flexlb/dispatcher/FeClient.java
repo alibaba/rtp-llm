@@ -26,13 +26,6 @@ public class FeClient {
      */
     private static final int MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 
-    /**
-     * TCP three-way-handshake timeout for dispatcher → FE batch connections. Aligned with the
-     * codebase's sync-side HTTP defaults; same deployment class. Hardcoded because connect
-     * timeout is almost never operator-tuned.
-     */
-    private static final int FE_CONNECT_TIMEOUT_MS = 1000;
-
     private final WebClient webClient;
 
     public FeClient(WebClient.Builder builder,
@@ -42,7 +35,7 @@ public class FeClient {
                 .codecs(c -> c.defaultCodecs().maxInMemorySize(MAX_RESPONSE_BYTES))
                 .build();
         HttpClient httpClient = HttpClient.create(provider)
-                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, FE_CONNECT_TIMEOUT_MS)
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, DispatcherConfiguration.FE_CONNECT_TIMEOUT_MS)
                 .responseTimeout(Duration.ofMillis(cfg.getBatchTimeoutMs()));
         this.webClient = builder.clone()
                 .clientConnector(new ReactorClientHttpConnector(httpClient))

@@ -17,7 +17,7 @@ import java.util.List;
  * sharing the same {@code pv.log} file.
  */
 @Data
-public class BatchPvLogData {
+public class BatchPvLogData implements PvRecord {
 
     private String type = "batch_schedule";
     private int batchCount;

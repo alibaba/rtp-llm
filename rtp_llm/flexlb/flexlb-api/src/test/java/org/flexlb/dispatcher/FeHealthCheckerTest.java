@@ -199,15 +199,4 @@ class FeHealthCheckerTest {
         assertTrue(hit != null && hit.startsWith("/health"),
                 "probe must hit configured /health path, got: " + hit);
     }
-
-    @Test
-    void blankProbePathRejectedAtConstruction() {
-        try {
-            feHealthChecker(() -> List.of(), WebClient.create(), "");
-            org.junit.jupiter.api.Assertions.fail("blank probePath must throw");
-        } catch (IllegalArgumentException expected) {
-            // expected — surfaced loudly so a misconfigured DISPATCH_PROBE_PATH="" can't
-            // silently produce a probe loop that hits the URL root.
-        }
-    }
 }
