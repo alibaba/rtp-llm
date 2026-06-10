@@ -104,15 +104,11 @@ public class HttpLoadBalanceServer {
             }
             Response.WorkerRoleSummary rs = new Response.WorkerRoleSummary();
             rs.setDiscovered(statusMap.size());
-            long maxQueue = 0;
             for (WorkerStatus ws : statusMap.values()) {
                 if (ws.isAlive()) {
                     rs.setAlive(rs.getAlive() + 1);
-                    long qt = ws.getRunningQueueTime().get();
-                    if (qt > maxQueue) maxQueue = qt;
                 }
             }
-            rs.setMaxQueueTokens(maxQueue);
             summary.put(role.getCode(), rs);
         }
         return summary.isEmpty() ? null : summary;

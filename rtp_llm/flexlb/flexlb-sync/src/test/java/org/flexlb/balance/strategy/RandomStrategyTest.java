@@ -348,7 +348,6 @@ class RandomStrategyTest {
         // Then: RandomStrategy should honor serviceability filtering
         assertTrue(result.isSuccess());
         assertEquals("127.0.0.2", result.getServerIp());
-        assertTrue(availableWorker.getLocalTaskMap().containsKey(12345L));
     }
 
     @Test

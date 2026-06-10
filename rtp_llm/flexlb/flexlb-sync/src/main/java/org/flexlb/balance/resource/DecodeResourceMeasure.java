@@ -7,9 +7,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.springframework.stereotype.Component;
 
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Decode role resource measure
@@ -127,15 +125,9 @@ public class DecodeResourceMeasure implements ResourceMeasure {
     }
 
     private long calculateDecodeConcurrency(WorkerStatus workerStatus) {
-        Set<String> requestIds = new HashSet<>();
         if (MapUtils.isNotEmpty(workerStatus.getRunningTaskList())) {
-            requestIds.addAll(workerStatus.getRunningTaskList().keySet());
+            return workerStatus.getRunningTaskList().size();
         }
-        if (MapUtils.isNotEmpty(workerStatus.getLocalTaskMap())) {
-            workerStatus.getLocalTaskMap().keySet().stream()
-                    .map(String::valueOf)
-                    .forEach(requestIds::add);
-        }
-        return requestIds.size();
+        return 0;
     }
 }

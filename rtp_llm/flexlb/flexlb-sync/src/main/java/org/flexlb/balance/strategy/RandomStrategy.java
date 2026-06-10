@@ -10,7 +10,6 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
@@ -45,11 +44,6 @@ public class RandomStrategy implements LoadBalancer {
 
     @Override
     public void rollBack(String ipPort, long requestId) {
-        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, null);
-        WorkerStatus workerStatus = workerStatusMap.get(ipPort);
-        if (workerStatus != null) {
-            workerStatus.removeLocalTask(requestId);
-        }
     }
 
     @Override
@@ -105,13 +99,6 @@ public class RandomStrategy implements LoadBalancer {
     private ServerStatus buildServerStatus(WorkerStatus worker, RoleType roleType, long requestId, Request request) {
         ServerStatus result = new ServerStatus();
         try {
-            if (RoleType.DECODE == roleType) {
-                TaskInfo taskInfo = new TaskInfo();
-                taskInfo.setRequestId(requestId);
-                taskInfo.setInputLength(request == null ? 0 : request.getSeqLen());
-                taskInfo.setPrefixLength(0);
-                worker.putLocalTask(requestId, taskInfo);
-            }
             result.setSuccess(true);
             result.setServerIp(worker.getIp());
             result.setHttpPort(worker.getPort());

@@ -45,20 +45,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
                            long latestAvailableKvCacheTokens) {
         this.reportedKvAvailable = latestAvailableKvCacheTokens;
 
-        // Phase 1: process running requests with KV_ALLOCATED phase
+        // Phase 1: process running requests — KV_ALLOCATED or RUNNING means the engine
+        // has taken ownership, so we can release our inflight reservation.
         if (runningTaskInfo != null) {
             for (TaskInfo task : runningTaskInfo.values()) {
-                if (task.getPhase() == TaskPhase.KV_ALLOCATED) {
-                    RequestInflight removed = inflightRequests.remove(task.getRequestId());
-                    if (removed == null) {
-                        logger.warn("Decode calibrate: running KV_ALLOCATED request reqId={} not in inflight",
-                                task.getRequestId());
-                    }
-                } else {
-                    if (!inflightRequests.containsKey(task.getRequestId())) {
-                        logger.warn("Decode calibrate: running request reqId={} phase={} not in inflight",
-                                task.getRequestId(), task.getPhase());
-                    }
+                TaskPhase phase = task.getPhase();
+                if (phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING) {
+                    inflightRequests.remove(task.getRequestId());
                 }
             }
         }

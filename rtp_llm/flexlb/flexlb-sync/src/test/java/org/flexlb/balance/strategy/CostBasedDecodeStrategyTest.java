@@ -6,11 +6,9 @@ import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -24,7 +22,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 @Slf4j
-class WeightedCacheLoadBalancerTest {
+class CostBasedDecodeStrategyTest {
 
     private ConfigService configService;
 
@@ -55,7 +53,7 @@ class WeightedCacheLoadBalancerTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
 
         Request req = new Request();
         req.setSeqLen(1000);
@@ -64,7 +62,7 @@ class WeightedCacheLoadBalancerTest {
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
-        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
+        ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
 
         Assertions.assertFalse(status.isSuccess());
         Assertions.assertNotNull(status.getMessage());
@@ -94,13 +92,13 @@ class WeightedCacheLoadBalancerTest {
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
+        ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertNotNull(status.getServerIp());
@@ -111,15 +109,12 @@ class WeightedCacheLoadBalancerTest {
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
-        // Worker1: cacheUsed = 500 (well below average)
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
         worker1.getUsedKvCacheTokens().set(500);
 
-        // Worker2: cacheUsed = 1500 (above average)
         WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
         worker2.getUsedKvCacheTokens().set(1500);
 
-        // Worker3: cacheUsed = 1000 (average)
         WorkerStatus worker3 = createWorkerStatus("127.0.0.3");
         worker3.getUsedKvCacheTokens().set(1000);
 
@@ -135,13 +130,13 @@ class WeightedCacheLoadBalancerTest {
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
+        ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertNotNull(status.getServerIp());
@@ -152,7 +147,6 @@ class WeightedCacheLoadBalancerTest {
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         ModelWorkerStatus modelStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
 
-        // Create workers for specific group
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
         worker1.setGroup("group-a");
         worker1.getUsedKvCacheTokens().set(1000);
@@ -167,13 +161,13 @@ class WeightedCacheLoadBalancerTest {
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, "group-a");
+        ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, "group-a");
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.1", status.getServerIp());
@@ -184,14 +178,12 @@ class WeightedCacheLoadBalancerTest {
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
-        // Create two workers to test exponential decay weight distribution
-        // Normalized values are -500 and +500
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
-        worker1.getUsedKvCacheTokens().set(500);  // Below average 1000, normalizedValue = -500
+        worker1.getUsedKvCacheTokens().set(500);
         worker1.getAvailableKvCacheTokens().set(9500);
 
         WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
-        worker2.getUsedKvCacheTokens().set(1500); // Above average 1000, normalizedValue = +500
+        worker2.getUsedKvCacheTokens().set(1500);
         worker2.getAvailableKvCacheTokens().set(8500);
 
         decodeMap.put("127.0.0.1:8080", worker1);
@@ -204,25 +196,23 @@ class WeightedCacheLoadBalancerTest {
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
-        // Run multiple iterations to verify weight distribution
         int totalRuns = 10000;
         Map<String, Integer> selectionCount = new HashMap<>();
 
         for (int i = 0; i < totalRuns; i++) {
             balanceContext.getRequest().setRequestId(1000L + i);
-            ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
+            ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
 
             if (status.isSuccess()) {
                 String selectedIp = status.getServerIp();
                 selectionCount.put(selectedIp, selectionCount.getOrDefault(selectedIp, 0) + 1);
-                // Rollback to reset local tasks and cache usage
-                weightedCacheLoadBalancer.rollBack(selectedIp + ":8080", 1000L + i);
+                costBasedDecodeStrategy.rollBack(selectedIp + ":8080", 1000L + i);
             }
         }
 
@@ -231,20 +221,12 @@ class WeightedCacheLoadBalancerTest {
         log.info("Exponential decay weight distribution verification: worker1={} ({}%), worker2={} ({}%)",
                 worker1Count, worker1Count * 100.0 / totalRuns, worker2Count, worker2Count * 100.0 / totalRuns);
 
-        // Verify worker1 (lower cache usage) is selected more frequently
         Assertions.assertTrue(worker1Count > worker2Count,
                 "Worker with lower cache usage should be selected more frequently");
 
-        // Verify weight ratio is more balanced (improvement from exponential decay algorithm)
         double ratio = (double) worker1Count / worker2Count;
         Assertions.assertTrue(ratio >= 1.5 && ratio <= 3.0,
                 "Weight ratio should be between 1.5-3.0, actual ratio: %.2f".formatted(ratio));
-
-        double worker1Ratio = (double) worker1Count / totalRuns;
-        double worker2Ratio = (double) worker2Count / totalRuns;
-
-        log.info("Exponential decay weight distribution verification: worker1={} ({}%), worker2={} ({}%), weight ratio: {}",
-                worker1Count, worker1Ratio * 100, worker2Count, worker2Ratio * 100, "%.2f".formatted(ratio));
     }
 
     @Test
@@ -271,13 +253,13 @@ class WeightedCacheLoadBalancerTest {
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
+        ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.2", status.getServerIp());
@@ -307,61 +289,13 @@ class WeightedCacheLoadBalancerTest {
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
-
-        Assertions.assertTrue(status.isSuccess());
-        Assertions.assertEquals("127.0.0.2", status.getServerIp());
-    }
-
-    @Test
-    void should_skip_hotspot_worker_with_disproportionate_local_tasks() {
-        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
-        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
-
-        WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
-        worker1.getUsedKvCacheTokens().set(500);
-        worker1.getAvailableKvCacheTokens().set(500);
-        for (long i = 1; i <= 10; i++) {
-            TaskInfo task = new TaskInfo();
-            task.setRequestId(i);
-            task.setInputLength(50);
-            worker1.getLocalTaskMap().put(i, task);
-        }
-
-        WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
-        worker2.getUsedKvCacheTokens().set(500);
-        worker2.getAvailableKvCacheTokens().set(500);
-        TaskInfo singleTask = new TaskInfo();
-        singleTask.setRequestId(100L);
-        singleTask.setInputLength(50);
-        worker2.getLocalTaskMap().put(100L, singleTask);
-
-        decodeMap.put("127.0.0.1:8080", worker1);
-        decodeMap.put("127.0.0.2:8080", worker2);
-
-        Request req = new Request();
-        req.setSeqLen(100);
-        req.setRequestId(4000L);
-
-        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
-        DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
-        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
-
-        FlexlbConfig testConfig = configService.loadBalanceConfig();
-        testConfig.setDecodeHotspotMultiplier(1.5);
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
-        balanceContext.setConfig(testConfig);
-
-        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
+        ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.2", status.getServerIp());

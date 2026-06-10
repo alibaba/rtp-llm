@@ -9,11 +9,9 @@ public enum LoadBalanceStrategyEnum {
 
     RANDOM("Random"),
 
-    SHORTEST_TTFT("ShortestTTFT"),
+    COST_BASED_PREFILL("CostBasedPrefill"),
 
-    WEIGHTED_CACHE("WeightedCache"),
-
-    COST_BASED_PREFILL("CostBasedPrefill")
+    COST_BASED_DECODE("CostBasedDecode")
 
     ;
     private final String name;

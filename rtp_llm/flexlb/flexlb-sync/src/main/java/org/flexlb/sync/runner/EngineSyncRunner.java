@@ -173,27 +173,19 @@ public class EngineSyncRunner implements Runnable {
 
             if (size >= 2) {
                 double sumStepLatency = 0.0;
-                double sumRunningQueryTime = 0.0;
                 for (WorkerStatus workerStatus : workerStatusMap.values()) {
                     sumStepLatency += workerStatus.getStepLatencyMs();
-                    sumRunningQueryTime += workerStatus.getRunningQueueTime().get();
                 }
                 double meanStepLatency = sumStepLatency / size;
-                double meanRunningQueryLen = sumRunningQueryTime / size;
 
-                // Calculate variance (sample variance using Bessel correction)
                 double sumStepLatencyOfSquaredDiffs = 0.0;
-                double sumRunningQueryLenOfSquaredDiffs = 0.0;
                 for (WorkerStatus workerStatus : workerStatusMap.values()) {
                     double diff = workerStatus.getStepLatencyMs() - meanStepLatency;
-                    double diff2 = workerStatus.getRunningQueueTime().get() - meanRunningQueryLen;
                     sumStepLatencyOfSquaredDiffs += diff * diff;
-                    sumRunningQueryLenOfSquaredDiffs += diff2 * diff2;
                 }
-                double variance = sumStepLatencyOfSquaredDiffs / (size - 1); // Sample variance
-                double variance2 = sumRunningQueryLenOfSquaredDiffs / (size - 1);
+                double variance = sumStepLatencyOfSquaredDiffs / (size - 1);
 
-                engineHealthReporter.reportLatencyMetric(modelName, this.roleType.toString(), variance, variance2);
+                engineHealthReporter.reportLatencyMetric(modelName, this.roleType.toString(), variance);
                 logger.info("EngineSyncRunner finished for model: {}, role: {}", modelName, roleType);
             } else {
                 logger.debug("Less than 2 workers, skipping variance calculation for model: {}", modelName);

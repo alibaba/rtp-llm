@@ -541,18 +541,6 @@ public class FlexlbBatchScheduler {
     }
 
     private void rollback(ServerStatus serverStatus) {
-        if (serverStatus == null || serverStatus.getRole() == null) {
-            return;
-        }
-        Map<String, WorkerStatus> workerStatusMap =
-                engineWorkerStatus.selectModelWorkerStatus(serverStatus.getRole(), serverStatus.getGroup());
-        WorkerStatus workerStatus = null;
-        if (workerStatusMap != null) {
-            workerStatus = workerStatusMap.get(serverStatus.getServerIp() + ":" + serverStatus.getHttpPort());
-        }
-        if (workerStatus != null) {
-            workerStatus.removeLocalTask(serverStatus.getRequestId());
-        }
     }
 
     private long computeDeadlineMs(BalanceContext ctx, ServerStatus prefill, FlexlbConfig cfg) {
@@ -569,16 +557,9 @@ public class FlexlbBatchScheduler {
         if (prefill == null || prefill.getRole() == null) {
             return 0;
         }
-        Map<String, WorkerStatus> workerStatusMap =
-                engineWorkerStatus.selectModelWorkerStatus(prefill.getRole(), prefill.getGroup());
-        if (workerStatusMap == null) {
-            return 0;
-        }
-        WorkerStatus workerStatus = workerStatusMap.get(prefill.getServerIp() + ":" + prefill.getHttpPort());
-        if (workerStatus == null) {
-            return 0;
-        }
-        return workerStatus.getPredictedQueueTimeMs().get();
+        String ipPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
+        PrefillEndpoint ep = endpointRegistry.getPrefill(ipPort);
+        return ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
     }
 
     private static PrefillTimePredictor createPredictor(FlexlbConfig cfg) {

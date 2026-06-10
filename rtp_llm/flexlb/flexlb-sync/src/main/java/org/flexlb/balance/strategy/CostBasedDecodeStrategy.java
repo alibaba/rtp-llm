@@ -13,7 +13,6 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.CacheStatus;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
@@ -30,30 +29,24 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
-/**
- * @author saichen.sm
- * description: Weighted random load balancing strategy based on normalized cache usage
- * Performs weighted random selection by normalizing cache usage across all workers
- * date: 2025/3/21
- */
-@Component("weightedCacheStrategy")
-public class WeightedCacheLoadBalancer implements LoadBalancer {
+@Component("costBasedDecodeStrategy")
+public class CostBasedDecodeStrategy implements LoadBalancer {
 
     private final EngineWorkerStatus engineWorkerStatus;
     private final double decayFactor;
     private final ResourceMeasureFactory resourceMeasureFactory;
     private final EndpointRegistry endpointRegistry;
 
-    public WeightedCacheLoadBalancer(ConfigService configService,
-                                     EngineWorkerStatus engineWorkerStatus,
-                                     ResourceMeasureFactory resourceMeasureFactory,
-                                     EndpointRegistry endpointRegistry) {
+    public CostBasedDecodeStrategy(ConfigService configService,
+                                    EngineWorkerStatus engineWorkerStatus,
+                                    ResourceMeasureFactory resourceMeasureFactory,
+                                    EndpointRegistry endpointRegistry) {
         this.engineWorkerStatus = engineWorkerStatus;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.decayFactor = config.getWeightedCacheDecayFactor();
         this.resourceMeasureFactory = resourceMeasureFactory;
         this.endpointRegistry = endpointRegistry;
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, this);
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_DECODE, this);
     }
 
     private record WeightedWorker(WorkerStatus worker, long normalizedCacheUsed, double weight) {
@@ -93,17 +86,10 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             return buildServerStatus(selectedWorker, seqLen, prefixLength, roleType, balanceContext.getRequestId());
         }
 
-        // Return failure if no suitable worker found
         Logger.warn("Failed to select worker, no suitable worker available");
         return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
     }
 
-    /**
-     * Release local cached tasks on the specified worker
-     *
-     * @param ipPort Worker IP address
-     * @param requestId Request ID
-     */
     @Override
     public void rollBack(String ipPort, long requestId) {
         Logger.debug("Decode rollBack - ip: {}, requestId: {}", ipPort, requestId);
@@ -111,12 +97,6 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         DecodeEndpoint ep = endpointRegistry.getDecode(ipPort);
         if (ep != null) {
             ep.release(requestId);
-        }
-
-        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, null);
-        WorkerStatus workerStatus = workerStatusMap != null ? workerStatusMap.get(ipPort) : null;
-        if (workerStatus != null) {
-            workerStatus.removeLocalTask(requestId);
         }
     }
 
@@ -128,7 +108,11 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         long sumCacheUsed = 0;
         for (WorkerStatus w : eligible) {
             DecodeEndpoint ep = endpointRegistry.getDecode(w.getIpPort());
-            sumInflight += ep != null ? ep.getInflightCount() : w.getLocalTaskMap().size();
+            long inflightCount = ep != null ? ep.getInflightCount() : 0;
+            if (ep == null) {
+                Logger.debug("applyHardFilters: ep==null for {}, using inflightCount=0", w.getIpPort());
+            }
+            sumInflight += inflightCount;
             sumCacheUsed += w.getUsedKvCacheTokens().get();
         }
         long avgInflight = sumInflight / eligible.size();
@@ -142,7 +126,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             if (totalKv > 0 && availableKv < seqLen) {
                 continue;
             }
-            long inflightCount = ep != null ? ep.getInflightCount() : w.getLocalTaskMap().size();
+            long inflightCount = ep != null ? ep.getInflightCount() : 0;
             if (hotspotMultiplier > 0 && avgInflight > 0
                     && inflightCount > avgInflight * hotspotMultiplier) {
                 continue;
@@ -177,39 +161,28 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             return 0;
         }
 
-        // Iterate from beginning to find first mismatch position
         for (int index = 0; index < promptCacheKeys.size(); index++) {
             long hash = promptCacheKeys.get(index);
             if (!cachePrefixHash.contains(hash)) {
-                // Return matching prefix length (matched block count * block size)
                 return blockSize * index;
             }
         }
 
-        // Return total length if all match
         return blockSize * promptCacheKeys.size();
     }
 
-    /**
-     * Weighted random selection algorithm: performs weighted random selection based on normalized cache usage
-     *
-     * @param candidateWorkers Candidate worker list
-     * @return Selected WorkerStatus, or null if no suitable worker found
-     */
     private WorkerStatus weightedRandomSelection(List<WorkerStatus> candidateWorkers) {
         int workerCount = candidateWorkers.size();
         if (workerCount == 0) {
             return null;
         }
 
-        // 1. Calculate sum and average of cacheUsed
         long totalCacheUsed = 0;
         for (WorkerStatus worker : candidateWorkers) {
             totalCacheUsed += worker.getUsedKvCacheTokens().get();
         }
         double avgCacheUsed = (double) totalCacheUsed / workerCount;
 
-        // 2. Normalize cacheUsed and calculate weights
         List<WeightedWorker> weightedWorkers = new ArrayList<>();
         boolean allSameUsage = true;
         double totalWeight = 0;
@@ -231,20 +204,17 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             totalWeight += weight;
         }
 
-        // Check if total weight is valid
         if (totalWeight <= 0) {
             Logger.warn("Total weight is zero or negative: {}, using uniform random selection", totalWeight);
             int randomIndex = ThreadLocalRandom.current().nextInt(workerCount);
             return candidateWorkers.get(randomIndex);
         }
 
-        // If all workers have same cache usage, use uniform random
         if (allSameUsage) {
             int randomIndex = ThreadLocalRandom.current().nextInt(workerCount);
             return candidateWorkers.get(randomIndex);
         }
 
-        // 3. Perform weighted random selection using roulette wheel algorithm
         double randomValue = ThreadLocalRandom.current().nextDouble() * totalWeight;
         double cumulativeWeight = 0;
 
@@ -255,7 +225,6 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             }
         }
 
-        // Fallback: select worker with minimum cacheUsed
         return weightedWorkers.stream()
                 .min(Comparator.comparingLong(w -> w.worker.getUsedKvCacheTokens().get()))
                 .map(w -> w.worker)
@@ -265,15 +234,6 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
     private ServerStatus buildServerStatus(WorkerStatus optimalWorker, long seqLen, long prefixLength, RoleType roleType, long requestId) {
         ServerStatus result = new ServerStatus();
         try {
-            TaskInfo taskInfo = new TaskInfo();
-            taskInfo.setPrefillTime(0);
-            taskInfo.setWaitingTime(0);
-            taskInfo.setInputLength(seqLen);
-            taskInfo.setPrefixLength(prefixLength);
-            taskInfo.setRequestId(requestId);
-
-            optimalWorker.putLocalTask(requestId, taskInfo);
-
             DecodeEndpoint ep = endpointRegistry.getDecode(optimalWorker.getIpPort());
             if (ep != null) {
                 ep.reserve(requestId, seqLen);

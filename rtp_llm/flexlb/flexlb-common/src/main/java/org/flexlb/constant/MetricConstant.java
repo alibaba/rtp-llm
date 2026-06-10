@@ -51,16 +51,6 @@ public class MetricConstant {
     public static final String ENGINE_BALANCING_MASTER_SELECT_DETAIL = "app.engine.balancing.master.select.detail";
 
     /**
-     * Engine queue wait time
-     */
-    public static final String ENGINE_RUNNING_QUEUE_TIME = "app.engine.health.check.running.queue.time";
-
-    /**
-     * Engine local task map size
-     */
-    public static final String ENGINE_LOCAL_TASK_MAP_SIZE = "app.engine.health.check.local.task.map.size";
-
-    /**
      * Engine finished task list size
      */
     public static final String ENGINE_FINISHED_TASK_LIST_SIZE = "app.engine.health.check.finished.task.list.size";
@@ -94,8 +84,6 @@ public class MetricConstant {
      * Engine worker info service step latency variance
      */
     public static final String ENGINE_WORKER_INFO_STEP_LATENCY_VAR = "app.engine.worker.info.step.latency.var";
-
-    public static final String ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR = "app.engine.worker.info.running.query.len.var";
 
     /* ------------------------ Cache Health Monitoring -------------------------- */
 

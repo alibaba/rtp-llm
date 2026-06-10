@@ -36,7 +36,6 @@ public class EngineStatusConverter {
         response.setAlive(workerStatusPB.getAlive());
 
         response.setRunningTaskInfo(convertToTaskInfoList(workerStatusPB.getRunningTaskInfoList()));
-        response.setWaitingTaskInfo(Map.of());
 
         // Convert finished task list
         response.setFinishedTaskInfo(convertToTaskInfoList(workerStatusPB.getFinishedTaskListList()));

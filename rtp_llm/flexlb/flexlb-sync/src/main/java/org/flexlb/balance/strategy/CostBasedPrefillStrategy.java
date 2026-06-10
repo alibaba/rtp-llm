@@ -12,7 +12,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
@@ -65,11 +64,6 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
 
     @Override
     public void rollBack(String ipPort, long requestId) {
-        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
-        WorkerStatus workerStatus = workerStatusMap != null ? workerStatusMap.get(ipPort) : null;
-        if (workerStatus != null) {
-            workerStatus.removeLocalTask(requestId);
-        }
     }
 
     private ServerStatus doSelect(BalanceContext balanceContext, RoleType roleType, String group) {
@@ -108,11 +102,6 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         }
 
         reportCacheHitMetrics(roleType, best.getIp(), bestCacheHit, seqLen);
-        TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
-        task.setInputLength(seqLen);
-        task.setPrefixLength(bestCacheHit);
-        best.putLocalTask(requestId, task);
 
         return buildServerStatus(best, roleType, requestId, bestScore);
     }
@@ -124,13 +113,14 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         double hotspotMultiplier = config.getCostHotspotMultiplier();
         double imbalanceMultiplier = config.getCostImbalanceMultiplier();
 
-        long sumQueueTime = 0;
+        long sumWaitMs = 0;
         long sumBatcherSize = 0;
         for (WorkerStatus w : eligible) {
-            sumQueueTime += w.getRunningQueueTime().get();
+            PrefillEndpoint ep = endpointRegistry.getPrefill(w.getIpPort());
+            sumWaitMs += ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
             sumBatcherSize += batchScheduler.snapshotForWorker(model, w.getIp(), w.getPort()).queueSize();
         }
-        long avgQueueTime = sumQueueTime / eligible.size();
+        long avgWaitMs = sumWaitMs / eligible.size();
         long avgBatcherSize = sumBatcherSize / eligible.size();
 
         long singlePrefillMs = predictor.predictBatchMs(
@@ -138,7 +128,8 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
 
         List<WorkerStatus> survivors = new ArrayList<>(eligible.size());
         for (WorkerStatus w : eligible) {
-            long queueMs = w.getRunningQueueTime().get();
+            PrefillEndpoint ep = endpointRegistry.getPrefill(w.getIpPort());
+            long queueMs = ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
             BatcherSnapshot snap = batchScheduler.snapshotForWorker(model, w.getIp(), w.getPort());
 
             if (queueMs + singlePrefillMs > sloMs - sloRiskMarginMs) {
@@ -147,7 +138,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
             if (hotspotMultiplier > 0 && avgBatcherSize > 0 && snap.queueSize() > avgBatcherSize * hotspotMultiplier) {
                 continue;
             }
-            if (imbalanceMultiplier > 0 && avgQueueTime > 0 && queueMs > avgQueueTime * imbalanceMultiplier) {
+            if (imbalanceMultiplier > 0 && avgWaitMs > 0 && queueMs > avgWaitMs * imbalanceMultiplier) {
                 continue;
             }
 
@@ -156,7 +147,10 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
 
         if (survivors.isEmpty()) {
             WorkerStatus leastLoaded = eligible.stream()
-                    .min(Comparator.comparingLong(w -> w.getRunningQueueTime().get()))
+                    .min(Comparator.comparingLong(w -> {
+                        PrefillEndpoint ep = endpointRegistry.getPrefill(w.getIpPort());
+                        return ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
+                    }))
                     .orElse(null);
             if (leastLoaded != null) {
                 survivors.add(leastLoaded);
@@ -184,13 +178,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         PrefillEndpoint ep = endpointRegistry.getPrefill(w.getIpPort());
         long workerWaitMs = ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
 
-        // delta_prefill_ms: marginal cost of adding this request to the batcher batch
-        List<RequestProfile> oldBatch = snap.requests();
-        List<RequestProfile> newBatch = new ArrayList<>(oldBatch);
-        newBatch.add(new RequestProfile(seqLen, cacheHit));
-        long deltaPrefillMs = predictor.predictBatchMs(newBatch) - predictor.predictBatchMs(oldBatch);
-
-        return waitMs + workerWaitMs + deltaPrefillMs;
+        return waitMs + workerWaitMs;
     }
 
     private PrefillTimePredictor createPredictor(FlexlbConfig config) {

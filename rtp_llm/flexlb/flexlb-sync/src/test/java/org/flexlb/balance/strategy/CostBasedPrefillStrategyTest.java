@@ -183,17 +183,15 @@ class CostBasedPrefillStrategyTest {
     }
 
     @Test
-    void rollBackRemovesLocalTask() {
+    void rollBackDoesNotThrow() {
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         WorkerStatus w = createWorker("10.0.0.1", 0);
         prefillMap.put("10.0.0.1:8080", w);
 
         ServerStatus result = strategy.select(buildContext(500, 9L), RoleType.PREFILL, null);
         assertTrue(result.isSuccess());
-        assertFalse(w.getLocalTaskMap().isEmpty());
 
-        strategy.rollBack("10.0.0.1:8080", 9L);
-        assertTrue(w.getLocalTaskMap().isEmpty());
+        assertDoesNotThrow(() -> strategy.rollBack("10.0.0.1:8080", 9L));
     }
 
     @Test
@@ -239,7 +237,7 @@ class CostBasedPrefillStrategyTest {
         assertEquals(0, predictor.predictBatchMs(List.of()));
     }
 
-    private WorkerStatus createWorker(String ip, long runningQueueTime) {
+    private WorkerStatus createWorker(String ip, long estimatedWaitMs) {
         WorkerStatus w = new WorkerStatus();
         w.setIp(ip);
         w.setPort(8080);
@@ -249,8 +247,6 @@ class CostBasedPrefillStrategyTest {
         cacheStatus.setAvailableKvCache(10000);
         cacheStatus.setBlockSize(256);
         w.setCacheStatus(cacheStatus);
-        w.getRunningQueueTime().set(runningQueueTime);
-        w.setWaitingTaskList(new HashMap<>());
         w.setRunningTaskList(new HashMap<>());
         return w;
     }

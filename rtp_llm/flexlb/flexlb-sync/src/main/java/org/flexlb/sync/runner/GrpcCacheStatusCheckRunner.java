@@ -136,8 +136,8 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             // Latest used KvCache tokens
             long latestUsedKvCacheTokens = newCacheStatus.getTotalKvCache() - latestAvailableKvCacheTokens;
 
-            // Update KvCache tokens
-            workerStatus.updateKvCacheTokens(latestUsedKvCacheTokens, latestAvailableKvCacheTokens);
+            workerStatus.getUsedKvCacheTokens().set(latestUsedKvCacheTokens);
+            workerStatus.getAvailableKvCacheTokens().set(latestAvailableKvCacheTokens);
 
             if (validateCacheStatusResponse(workerStatus, newCacheStatus)) {
 

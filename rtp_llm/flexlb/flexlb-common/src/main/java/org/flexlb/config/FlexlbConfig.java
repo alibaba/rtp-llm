@@ -10,9 +10,9 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
+import static org.flexlb.enums.LoadBalanceStrategyEnum.COST_BASED_DECODE;
+import static org.flexlb.enums.LoadBalanceStrategyEnum.COST_BASED_PREFILL;
 import static org.flexlb.enums.LoadBalanceStrategyEnum.RANDOM;
-import static org.flexlb.enums.LoadBalanceStrategyEnum.SHORTEST_TTFT;
-import static org.flexlb.enums.LoadBalanceStrategyEnum.WEIGHTED_CACHE;
 import static org.flexlb.enums.ResourceMeasureIndicatorEnum.REMAINING_KV_CACHE;
 import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
 
@@ -28,12 +28,12 @@ public class FlexlbConfig {
     /**
      * Load balancing strategy
      */
-    private LoadBalanceStrategyEnum loadBalanceStrategy = LoadBalanceStrategyEnum.SHORTEST_TTFT;
+    private LoadBalanceStrategyEnum loadBalanceStrategy = LoadBalanceStrategyEnum.COST_BASED_PREFILL;
 
     /**
      * Load balancing strategy for DECODE role
      */
-    private LoadBalanceStrategyEnum decodeLoadBalanceStrategy = LoadBalanceStrategyEnum.WEIGHTED_CACHE;
+    private LoadBalanceStrategyEnum decodeLoadBalanceStrategy = LoadBalanceStrategyEnum.COST_BASED_DECODE;
 
     /**
      * Load balancing strategy for VIT role
@@ -301,13 +301,13 @@ public class FlexlbConfig {
     public LoadBalanceStrategyEnum getStrategyForRoleType(RoleType roleType) {
         switch (roleType) {
             case PDFUSION -> {
-                return this.loadBalanceStrategy != null ? loadBalanceStrategy : SHORTEST_TTFT;
+                return this.loadBalanceStrategy != null ? loadBalanceStrategy : COST_BASED_PREFILL;
             }
             case PREFILL -> {
-                return this.loadBalanceStrategy != null ? loadBalanceStrategy : SHORTEST_TTFT;
+                return this.loadBalanceStrategy != null ? loadBalanceStrategy : COST_BASED_PREFILL;
             }
             case DECODE -> {
-                return this.decodeLoadBalanceStrategy != null ? decodeLoadBalanceStrategy : WEIGHTED_CACHE;
+                return this.decodeLoadBalanceStrategy != null ? decodeLoadBalanceStrategy : COST_BASED_DECODE;
             }
             case VIT -> {
                 return this.vitLoadBalanceStrategy != null ? vitLoadBalanceStrategy : RANDOM;

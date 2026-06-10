@@ -134,10 +134,9 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 workerStatus.getStatusLastUpdateTime().set(nowUs);
 
                 // Update task state
-                Map<String, TaskInfo> waitingTaskInfo = newWorkerStatus.getWaitingTaskInfo();
                 Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
                 Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
-                List<Long> finished = workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
+                List<Long> finished = workerStatus.updateTaskStates(runningTaskInfo, finishedTaskInfo);
                 notifyBatchSchedulerFinished(finished);
 
                 if (endpointRegistry != null) {
@@ -164,18 +163,12 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.getStatusVersion().set(responseVersion != null ? responseVersion : -1L);
             workerStatus.getLatestFinishedTaskVersion().set(newWorkerStatus.getLatestFinishedVersion() != null ? newWorkerStatus.getLatestFinishedVersion() : -1L);
 
-            Map<String, TaskInfo> waitingTaskInfo = newWorkerStatus.getWaitingTaskInfo();
             Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
             Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
-            workerStatus.setWaitingTaskList(waitingTaskInfo);
             workerStatus.setRunningTaskList(runningTaskInfo);
 
-            // Update local task state (including checking lost, updating running, and cleaning completed)
-            List<Long> finished2 = workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
+            List<Long> finished2 = workerStatus.updateTaskStates(runningTaskInfo, finishedTaskInfo);
             notifyBatchSchedulerFinished(finished2);
-
-            // Correct running queue total wait time
-            workerStatus.updateRunningQueueTime();
 
             if (endpointRegistry != null) {
                 calibrateEndpoint(runningTaskInfo, finishedTaskInfo);
@@ -208,17 +201,15 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
     private void logWorkerStatusUpdate(long startTime, WorkerStatus workerStatus) {
         logger.info("gRPC Worker Status - {}, role:{}, alive:{}, concurrency:{}, "
-                        + "running_queue_ms:{}, predicted_queue_ms:{}, step_latency_ms:{}, "
-                        + "iterate_count:{}, dp_rank:{}, dp_size:{}, tp_size:{}, "
+                        + "step_latency_ms:{}, iterate_count:{}, "
+                        + "dp_rank:{}, dp_size:{}, tp_size:{}, "
                         + "avail_kv_tokens:{}, used_kv_tokens:{}, "
-                        + "waiting_tasks:{}, running_tasks:{}, local_tasks:{}, "
+                        + "kv_allocated_tasks:{}, running_tasks:{}, "
                         + "version:{}, sync_cost_us:{}",
                 ipPort,
                 workerStatus.getRole(),
                 workerStatus.isAlive(),
                 workerStatus.getAvailableConcurrency(),
-                workerStatus.getRunningQueueTime(),
-                workerStatus.getPredictedQueueTimeMs(),
                 workerStatus.getStepLatencyMs(),
                 workerStatus.getIterateCount(),
                 workerStatus.getDpRank(),
@@ -228,7 +219,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 workerStatus.getUsedKvCacheTokens(),
                 workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().values().stream().filter(TaskInfo::isWaiting).count() : 0,
                 workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().size() : 0,
-                workerStatus.getLocalTaskMap() != null ? workerStatus.getLocalTaskMap().size() : 0,
                 workerStatus.getStatusVersion(),
                 System.nanoTime() / 1000 - startTime);
     }
