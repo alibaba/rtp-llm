@@ -23,8 +23,19 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     memcpy(generate_config->variable_num_beams.data(),
            config_proto->variable_num_beams().data(),
            config_proto->variable_num_beams_size() * sizeof(int));
-    generate_config->num_return_sequences     = config_proto->num_return_sequences();
-    generate_config->return_logits            = config_proto->return_logits();
+    generate_config->num_return_sequences = config_proto->num_return_sequences();
+    generate_config->return_logits        = config_proto->return_logits();
+    generate_config->return_prompt_logits = config_proto->return_prompt_logits();
+    if (generate_config->return_prompt_logits) {
+        generate_config->prompt_logits_top_k =
+            config_proto->prompt_logits_top_k() > 0 ? config_proto->prompt_logits_top_k() : 64;
+        generate_config->prompt_logits_start = config_proto->prompt_logits_start();
+        generate_config->prompt_logits_end   = config_proto->prompt_logits_end();
+        // Python client (GenerateConfig.return_target_logprob defaults true) always sets this
+        // explicitly. proto3 unset bool = false, which is acceptable for raw gRPC clients
+        // that explicitly opt out of target_logprobs.
+        generate_config->return_target_logprob = config_proto->return_target_logprob();
+    }
     generate_config->return_incremental       = config_proto->return_incremental();
     generate_config->return_hidden_states     = config_proto->return_hidden_states();
     generate_config->return_all_hidden_states = config_proto->return_all_hidden_states();
@@ -406,6 +417,18 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
 
     stackBuffersToTensorPB(
         flatten_output->mutable_all_hidden_states(), source_outputs, [](const auto& r) { return r.all_hidden_states; });
+
+    if (!source_outputs.empty() && source_outputs[0].prompt_logits.has_value()) {
+        auto*       pb = flatten_output->mutable_prompt_logits();
+        const auto& pl = source_outputs[0].prompt_logits.value();
+        transTensorPB(pb->mutable_topk_logprobs(), pl.topk_logprobs);
+        transTensorPB(pb->mutable_topk_token_ids(), pl.topk_token_ids);
+        if (pl.target_logprobs.defined()) {
+            transTensorPB(pb->mutable_target_logprobs(), pl.target_logprobs);
+        }
+        pb->set_start_pos(pl.start_pos);
+        pb->set_end_pos(pl.end_pos);
+    }
 
     RTP_LLM_LOG_DEBUG("transResponse done");
 }

@@ -40,6 +40,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutputs,
     MMUrlType,
 )
+from rtp_llm.utils.prompt_logits_utils import build_prompt_logits_dict
 from rtp_llm.utils.util import has_overlap_kmp
 from rtp_llm.utils.word_util import (
     get_stop_word_slices,
@@ -214,6 +215,7 @@ class StreamResponseObject:
     usage: Optional[UsageInfo] = None
     aux_info: Optional[AuxInfo] = None
     extra_outputs: Optional[ChatCompletionExtraOutputs] = None
+    prompt_logits: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -448,14 +450,54 @@ class CustomChatRenderer:
             )
         )
 
+        prompt_logits_data = None
+        if generate_config.return_prompt_logits:
+            output_generator, prompt_logits_data = await self._extract_prompt_logits(
+                output_generator
+            )
+
         # 处理非流式请求的合并逻辑
         if not generate_config.is_streaming:
             output_generator = await self._merge_non_streaming_outputs(output_generator)
 
-        async for response in self.render_response_stream(
-            output_generator, request, generate_config
-        ):
-            yield response
+        if generate_config.return_prompt_logits:
+            last_response = None
+            async for response in self.render_response_stream(
+                output_generator, request, generate_config
+            ):
+                if last_response is not None:
+                    yield last_response
+                last_response = response
+            if last_response is not None:
+                if prompt_logits_data is not None:
+                    last_response.prompt_logits = prompt_logits_data
+                yield last_response
+        else:
+            async for response in self.render_response_stream(
+                output_generator, request, generate_config
+            ):
+                yield response
+
+    async def _extract_prompt_logits(
+        self, output_generator: AsyncGenerator[GenerateOutputs, None]
+    ) -> Tuple[AsyncGenerator[GenerateOutputs, None], Optional[Dict[str, Any]]]:
+        # Safe to drain: prompt scoring forces max_new_tokens=1 + non-streaming,
+        # so the generator yields only a single output. Memory overhead is negligible.
+        collected = []
+        prompt_logits_data = None
+        async for outputs in output_generator:
+            if prompt_logits_data is None:
+                for out in outputs.generate_outputs:
+                    if out.prompt_logits is not None:
+                        prompt_logits_data = build_prompt_logits_dict(out.prompt_logits)
+                        break
+            collected.append(outputs)
+
+        async def replay():
+            for o in collected:
+                yield o
+
+        return replay(), prompt_logits_data
 
     async def _merge_non_streaming_outputs(
         self, output_generator: AsyncGenerator[GenerateOutputs, None]
