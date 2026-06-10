@@ -385,7 +385,7 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
         # When True, the MoE atomic weights (moe_w1, moe_w2) skip FP8_PER_BLOCK
         # quantization in the loader and stay in compute dtype (BF16). This is
         # used by the mega_moe path which performs its own internal BF16->FP4
-        # conversion in MegaMoeFusedWrapper.
+        # conversion in MegaMoeWrapper.
         self.skip_moe = kwargs.get("skip_moe", False)
 
     @classmethod

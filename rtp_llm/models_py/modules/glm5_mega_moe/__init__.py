@@ -29,9 +29,11 @@ from .mega_buf import (
     mega_moe_enabled,
 )
 from .mega_moe import GLM5MegaMoE
+from .mega_moe_fused import GLM5MegaMoEFused
 
 __all__ = [
     "GLM5MegaMoE",
+    "GLM5MegaMoEFused",
     "get_or_create_mega_buf",
     "get_or_create_mega_output",
     "mega_moe_available",

@@ -1,4 +1,4 @@
-"""Drop-in replacement for FusedMoe that uses GLM5MegaMoE internally.
+"""Drop-in replacement for routed FusedMoe that uses GLM5MegaMoE internally.
 
 This wrapper implements the same interface as FusedMoe so it can be used
 directly in GenericMoeLayer without changing the forward() call site.
@@ -44,14 +44,17 @@ def _restack_gate_up(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return torch.cat([gate, up], dim=1).contiguous()
 
 
-class MegaMoeFusedWrapper(nn.Module):
+class MegaMoeWrapper(nn.Module):
     """FusedMoe-compatible wrapper around GLM5MegaMoE.
 
     Usage in GenericMoeLayer:
-        self.fused_moe = MegaMoeFusedWrapper(config, parallelism_config, weights)
+        self.fused_moe = MegaMoeWrapper(config, parallelism_config, weights)
         # then forward as usual:
         output = self.fused_moe(hidden_states, topk_weights, topk_ids, activation="SiGLU")
     """
+
+    def _get_mega_moe_cls(self):
+        return GLM5MegaMoE
 
     def __init__(
         self,
@@ -80,8 +83,8 @@ class MegaMoeFusedWrapper(nn.Module):
             else:
                 raise ValueError("Cannot determine moe_intermediate_size")
 
-        max_seq_len = getattr(config, "max_seq_len", 0)
-        max_tokens_per_rank = max(8192, max_seq_len) if max_seq_len > 0 else 8192
+        max_seq_len = int(getattr(config, "max_seq_len", 0) or 0)
+        max_tokens_per_rank = max(max_seq_len, 128) if max_seq_len > 0 else 8192
         if moe_config is not None:
             ll = getattr(moe_config, "ll_num_max_token", 0)
             if ll and ll > 0:
@@ -139,7 +142,7 @@ class MegaMoeFusedWrapper(nn.Module):
             )
             max_tokens_per_rank = resolved
 
-        self.mega_moe = GLM5MegaMoE.from_params(
+        self.mega_moe = self._get_mega_moe_cls().from_params(
             layer_id=layer_idx,
             dim=dim,
             moe_inter_dim=moe_inter_dim_raw,
@@ -157,13 +160,13 @@ class MegaMoeFusedWrapper(nn.Module):
 
         if w1 is None or w2 is None or s1 is None or s2 is None:
             raise ValueError(
-                "MegaMoeFusedWrapper requires load-time FP4 MoE weights "
+                "MegaMoeWrapper requires load-time FP4 MoE weights "
                 "(moe_w1, moe_w2, moe_s1, moe_s2). Runtime/module-init "
                 "FP4 quantization is not supported."
             )
         if w1.dtype != torch.int8 or w2.dtype != torch.int8:
             raise ValueError(
-                "MegaMoeFusedWrapper only accepts load-time FP4 int8 weights. "
+                "MegaMoeWrapper only accepts load-time FP4 int8 weights. "
                 "Runtime/module-init FP4 quantization is not supported. "
                 f"Got moe_w1 dtype={w1.dtype}, moe_w2 dtype={w2.dtype}."
             )
@@ -182,7 +185,7 @@ class MegaMoeFusedWrapper(nn.Module):
 
         self.expert_num = n_routed_experts
 
-    def clone_for_cuda_graph(self) -> "MegaMoeFusedWrapper":
+    def clone_for_cuda_graph(self) -> "MegaMoeWrapper":
         clone = object.__new__(type(self))
         nn.Module.__init__(clone)
         clone.mega_moe = self.mega_moe.clone_for_cuda_graph()

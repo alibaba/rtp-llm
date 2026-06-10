@@ -45,6 +45,15 @@ except ImportError:
     fused_add_rmsnorm_fp8_quant_with_bf16_output = None
 
 
+class _FusedSharedExpertSentinel(nn.Module):
+    """Marker for shared expert folded into ``fp8_fp4_mega_moe_fused``."""
+
+    accepts_fp8_input = False
+
+    def forward(self, *args, **kwargs):
+        raise RuntimeError("shared expert is fused into MegaMoE")
+
+
 class GenericMoeLayer(nn.Module):
     """Generic MoE layer supporting both Qwen3 and internal model."""
 
@@ -84,12 +93,35 @@ class GenericMoeLayer(nn.Module):
             )
         else:
             self.fake_balance_expert = None
+        self.add_shared_expert = config.moe_style == 2
+        self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
+        self.ep_size = parallelism_config.ep_size
+        shared_expert_gate_weight = weights.get(W.shared_expert_gate, None)
+        is_ep_mode = self.ep_size > 1
+        use_ep_shared_allreduce_at_init = (
+            self.add_shared_expert and self.ffn_tp_size > 1 and is_ep_mode
+        )
+        self._use_mega_moe_fused_shared = (
+            moe_config.moe_strategy == "mega_moe"
+            and self.add_shared_expert
+            and shared_expert_gate_weight is None
+            and not use_ep_shared_allreduce_at_init
+        )
         if moe_config.moe_strategy == "mega_moe":
-            from rtp_llm.models_py.modules.glm5_mega_moe.fused_moe_wrapper import (
-                MegaMoeFusedWrapper,
-            )
+            if self._use_mega_moe_fused_shared:
+                from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fused_wrapper import (
+                    MegaMoeFusedWrapper,
+                )
 
-            self.fused_moe = MegaMoeFusedWrapper(
+                wrapper_cls = MegaMoeFusedWrapper
+            else:
+                from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_wrapper import (
+                    MegaMoeWrapper,
+                )
+
+                wrapper_cls = MegaMoeWrapper
+
+            self.fused_moe = wrapper_cls(
                 config,
                 parallelism_config,
                 weights,
@@ -117,20 +149,20 @@ class GenericMoeLayer(nn.Module):
             raise ValueError(
                 "Cannot determine num_local_experts: no w1 weight and fused_moe has no expert_num"
             )
-        self.add_shared_expert = config.moe_style == 2
-        self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
-        self.ep_size = parallelism_config.ep_size
         if self.add_shared_expert:
-            self.shared_expert = DenseMLP(
-                config.activation_type,
-                parallelism_config,
-                weights,
-                quant_config,
-                hw_kernel_config=hw_kernel_config,
-            )
+            if self._use_mega_moe_fused_shared:
+                self.shared_expert = _FusedSharedExpertSentinel()
+            else:
+                self.shared_expert = DenseMLP(
+                    config.activation_type,
+                    parallelism_config,
+                    weights,
+                    quant_config,
+                    hw_kernel_config=hw_kernel_config,
+                )
         else:
             self.shared_expert = None
-        if weights.get(W.shared_expert_gate, None) is not None:
+        if shared_expert_gate_weight is not None:
             self.shared_expert_gate = LinearFactory.create_linear_from_weights(
                 weights, W.shared_expert_gate, None, None, config
             )
@@ -169,6 +201,7 @@ class GenericMoeLayer(nn.Module):
         clone.shared_expert_gate = self.shared_expert_gate
         clone.sigmoid_gate_scale_add = self.sigmoid_gate_scale_add
         clone.correction_bias = self.correction_bias
+        clone._use_mega_moe_fused_shared = self._use_mega_moe_fused_shared
         return clone
 
     def forward(
@@ -228,6 +261,12 @@ class GenericMoeLayer(nn.Module):
         use_ep_shared_allreduce = (
             self.shared_expert is not None and self.ffn_tp_size > 1 and is_ep_mode
         )
+        use_mega_moe_fused_shared = (
+            self.shared_expert is not None
+            and self.shared_expert_gate is None
+            and not use_ep_shared_allreduce
+            and self._use_mega_moe_fused_shared
+        )
 
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
@@ -235,6 +274,8 @@ class GenericMoeLayer(nn.Module):
             topk_ids=topk_ids,
             activation="SiGLU",
         )
+        if use_mega_moe_fused_shared:
+            return experts_output
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
                 hidden_states,

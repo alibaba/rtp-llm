@@ -63,6 +63,7 @@ def _apply_mega_moe_fp4_wrappers(
     from rtp_llm.model_loader.offline_modelopt_fp4_quant_weight import (
         is_offline_mega_moe_fp4_ckpt,
         wrap_moe_for_offline_fp4,
+        wrap_shared_expert_for_offline_fp4,
     )
     from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
         is_mega_moe_strategy,
@@ -79,11 +80,13 @@ def _apply_mega_moe_fp4_wrappers(
             "OfflineMegaMoeFp4MoeWeight (skip online quantization)"
         )
 
-    from rtp_llm.model_loader.ffn_weight import MoeWeight
+    from rtp_llm.model_loader.ffn_weight import FfnWeight, MoeWeight
 
     def _walk(weight: WeightModule) -> WeightModule:
         if is_offline:
             wrapped = wrap_moe_for_offline_fp4(weight)
+            if wrapped is weight:
+                wrapped = wrap_shared_expert_for_offline_fp4(weight)
         else:
             wrapped = wrap_moe_for_mega_moe(weight)
         if wrapped is not weight:
@@ -95,6 +98,18 @@ def _apply_mega_moe_fp4_wrappers(
                 weight.moe_w1 = weight.sub_weights[W.moe_w1]
             if W.moe_w2 in weight.sub_weights:
                 weight.moe_w2 = weight.sub_weights[W.moe_w2]
+            return weight
+        if isinstance(weight, FfnWeight):
+            for name, sw in list(weight.sub_weights.items()):
+                weight.sub_weights[name] = _walk(sw)
+            weight.w1 = weight.sub_weights.get(W.ffn_w1)
+            weight.w2 = weight.sub_weights.get(W.ffn_w2)
+            weight.w3 = weight.sub_weights.get(W.ffn_w3)
+            weight.w13 = weight.sub_weights.get(W.ffn_w13)
+            weight.b1 = weight.sub_weights.get(W.ffn_b1)
+            weight.b2 = weight.sub_weights.get(W.ffn_b2)
+            weight.b3 = weight.sub_weights.get(W.ffn_b3)
+            weight.b13 = weight.sub_weights.get(W.ffn_b13)
             return weight
         return weight
 

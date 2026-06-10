@@ -4,7 +4,10 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.glm5_mega_moe import fused_moe_wrapper
+from rtp_llm.models_py.modules.glm5_mega_moe import (
+    mega_moe_fused_wrapper,
+    mega_moe_wrapper,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -19,6 +22,12 @@ class _FakeMegaMoE:
 
     def setup_weights_from_fp4(self, **kwargs):
         self.fp4_kwargs = kwargs
+
+    def setup_shared_expert_from_fp4(self, **kwargs):
+        self.shared_fp4_kwargs = kwargs
+
+    def maybe_warmup_fused_shared_jit_once(self):
+        self.fused_shared_jit_warmed = True
 
 
 def _config(hidden_size=8, inter=4, max_seq_len=16, gen_num_per_cycle=0):
@@ -36,7 +45,7 @@ def _parallelism(role_type=None):
     return SimpleNamespace(ep_size=1, ep_rank=0, role_type=role_type)
 
 
-class MegaMoeFusedWrapperLayoutTest(unittest.TestCase):
+class MegaMoeWrapperLayoutTest(unittest.TestCase):
     def test_bf16_stacked_moe_w1_is_rejected(self):
         config = _config(hidden_size=8, inter=4)
         up = torch.full((2, 4, 8), 3, dtype=torch.bfloat16)
@@ -46,9 +55,9 @@ class MegaMoeFusedWrapperLayoutTest(unittest.TestCase):
             W.moe_w2: torch.ones((2, 8, 4), dtype=torch.bfloat16),
         }
 
-        with patch.object(fused_moe_wrapper, "GLM5MegaMoE", _FakeMegaMoE):
+        with patch.object(mega_moe_wrapper, "GLM5MegaMoE", _FakeMegaMoE):
             with self.assertRaisesRegex(ValueError, "load-time FP4"):
-                fused_moe_wrapper.MegaMoeFusedWrapper(
+                mega_moe_wrapper.MegaMoeWrapper(
                     config, _parallelism(), weights, moe_config=None, layer_idx=0
                 )
 
@@ -63,9 +72,9 @@ class MegaMoeFusedWrapperLayoutTest(unittest.TestCase):
             W.moe_s2: torch.ones((2, 8, 1), dtype=torch.float32),
         }
 
-        with patch.object(fused_moe_wrapper, "GLM5MegaMoE", _FakeMegaMoE):
+        with patch.object(mega_moe_wrapper, "GLM5MegaMoE", _FakeMegaMoE):
             with self.assertRaisesRegex(ValueError, "load-time FP4 int8"):
-                fused_moe_wrapper.MegaMoeFusedWrapper(
+                mega_moe_wrapper.MegaMoeWrapper(
                     config, _parallelism(), weights, moe_config=None, layer_idx=0
                 )
 
@@ -82,8 +91,8 @@ class MegaMoeFusedWrapperLayoutTest(unittest.TestCase):
             W.moe_s2: torch.ones((2, 8, 1), dtype=torch.float32),
         }
 
-        with patch.object(fused_moe_wrapper, "GLM5MegaMoE", _FakeMegaMoE):
-            fused_moe_wrapper.MegaMoeFusedWrapper(
+        with patch.object(mega_moe_wrapper, "GLM5MegaMoE", _FakeMegaMoE):
+            mega_moe_wrapper.MegaMoeWrapper(
                 config, _parallelism(), weights, moe_config=None, layer_idx=0
             )
 
@@ -109,8 +118,8 @@ class MegaMoeFusedWrapperLayoutTest(unittest.TestCase):
             W.moe_s2: torch.ones((2, 8, 1), dtype=torch.float32),
         }
 
-        with patch.object(fused_moe_wrapper, "GLM5MegaMoE", _FakeMegaMoE):
-            fused_moe_wrapper.MegaMoeFusedWrapper(
+        with patch.object(mega_moe_wrapper, "GLM5MegaMoE", _FakeMegaMoE):
+            mega_moe_wrapper.MegaMoeWrapper(
                 config,
                 _parallelism(role_type=RoleType.DECODE),
                 weights,
@@ -120,6 +129,39 @@ class MegaMoeFusedWrapperLayoutTest(unittest.TestCase):
             )
 
         self.assertEqual(_FakeMegaMoE.instance.params["max_tokens_per_rank"], 32)
+
+    def test_fused_wrapper_loads_shared_expert_fp4(self):
+        config = _config(hidden_size=8, inter=4)
+        weights = {
+            W.moe_w1: torch.zeros((2, 8, 4), dtype=torch.int8),
+            W.moe_s1: torch.ones((2, 8, 2), dtype=torch.float32),
+            W.moe_w2: torch.ones((2, 8, 2), dtype=torch.int8),
+            W.moe_s2: torch.ones((2, 8, 1), dtype=torch.float32),
+            W.ffn_w13: torch.full((8, 4), 3, dtype=torch.int8),
+            W.ffn_s13: torch.full((8, 2), 5, dtype=torch.float32),
+            W.ffn_w2: torch.full((8, 2), 7, dtype=torch.int8),
+            W.ffn_s2: torch.full((8, 1), 11, dtype=torch.float32),
+        }
+
+        with patch.object(mega_moe_fused_wrapper, "GLM5MegaMoEFused", _FakeMegaMoE):
+            mega_moe_fused_wrapper.MegaMoeFusedWrapper(
+                config, _parallelism(), weights, moe_config=None, layer_idx=0
+            )
+
+        captured = _FakeMegaMoE.instance.shared_fp4_kwargs
+        self.assertTrue(_FakeMegaMoE.instance.fused_shared_jit_warmed)
+        torch.testing.assert_close(
+            captured["w1_w"], torch.full((8, 4), 3, dtype=torch.int8)
+        )
+        torch.testing.assert_close(
+            captured["w1_s"], torch.full((8, 2), 5, dtype=torch.float32)
+        )
+        torch.testing.assert_close(
+            captured["w2_w"], torch.full((8, 2), 7, dtype=torch.int8)
+        )
+        torch.testing.assert_close(
+            captured["w2_s"], torch.full((8, 1), 11, dtype=torch.float32)
+        )
 
 
 if __name__ == "__main__":
