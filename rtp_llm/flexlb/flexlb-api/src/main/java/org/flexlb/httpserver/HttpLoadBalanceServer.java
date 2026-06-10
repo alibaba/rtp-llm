@@ -113,6 +113,7 @@ public class HttpLoadBalanceServer {
     public Mono<ServerResponse> batchScheduleRequest(ServerRequest request) {
         BatchScheduleContext bctx = new BatchScheduleContext();
         return request.bodyToMono(BatchScheduleRequest.class)
+                .switchIfEmpty(Mono.error(new IllegalArgumentException("empty request body")))
                 .flatMap(batchRequest -> {
                     bctx.setBatchRequest(batchRequest);
                     return Mono.using(
@@ -122,10 +123,12 @@ public class HttpLoadBalanceServer {
                 })
                 .onErrorResume(e -> {
                     Logger.error("Batch schedule request processing error", e);
+                    BatchScheduleResponse errorResponse = BatchScheduleResponse.error(
+                            StrategyErrorType.INVALID_REQUEST, e.getMessage());
+                    bctx.setBatchResponse(errorResponse);
                     bctx.setSuccess(false);
                     bctx.setErrorMessage(e.getMessage());
-                    return json(500, BatchScheduleResponse.error(
-                            StrategyErrorType.INVALID_REQUEST, e.getMessage()));
+                    return json(500, errorResponse);
                 })
                 .doFinally(signal -> finalizeBatchContext(bctx));
     }
@@ -263,7 +266,7 @@ public class HttpLoadBalanceServer {
             engineHealthReporter.reportForwardToMasterResult("LOCAL", "MASTER_NULL");
             return fallbackToLocalRouting(ctx);
         }
-        Logger.info("Forwarding request to master: {}, request: {}", master, request);
+        Logger.info("Forwarding request to master: {}, requestId: {}", master, request.getRequestId());
         URI uri = URI.create("http://" + master);
         return generalHttpNettyService.request(request, uri, "/rtp_llm/schedule", Response.class)
                 .flatMap(resp -> {

@@ -4,6 +4,7 @@ import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
@@ -43,6 +44,9 @@ class DefaultRouterTest {
 
     @Mock
     private ConfigService configService;
+
+    @Mock
+    private ModelMetaConfig modelMetaConfig;
 
     @Mock
     private FlexlbConfig loadBalanceConfig;
@@ -95,6 +99,10 @@ class DefaultRouterTest {
         lenient().when(loadBalanceConfig.getBatchLoadBalanceStrategy())
                 .thenReturn(LoadBalanceStrategyEnum.ROUND_ROBIN);
         lenient().when(loadBalanceConfig.getBatchScheduleMaxCount()).thenReturn(1000);
+        // Default: no configured service routes — role inference falls back to the runtime
+        // view, matching the pre-existing single-role tests. Multi-role-config tests
+        // override this stub explicitly.
+        lenient().when(modelMetaConfig.getConfiguredRoleTypes()).thenReturn(List.of());
 
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, prefillLoadBalancer);
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, decodeLoadBalancer);
@@ -105,7 +113,7 @@ class DefaultRouterTest {
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.ROUND_ROBIN, fusionLoadBalancer);
 
         // Create scheduler instance
-        defaultRouter = new DefaultRouter(configService);
+        defaultRouter = new DefaultRouter(configService, modelMetaConfig);
 
         // Mock LoadBalanceStrategyFactory to return our mock load balancers
         mockStaticLoadBalanceStrategyFactory();
@@ -350,6 +358,18 @@ class DefaultRouterTest {
     }
 
     @Test
+    void should_fail_startup_when_batch_schedule_max_count_is_not_positive() {
+        // A non-positive upper bound would make `count > batchScheduleMaxCount` true for
+        // every request — /batch_schedule silently rejecting 100% of traffic. Misconfig
+        // must fail at boot, mirroring validateEngineTypeConfig.
+        when(loadBalanceConfig.getBatchScheduleMaxCount()).thenReturn(0);
+
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                () -> new DefaultRouter(configService, modelMetaConfig),
+                "batchScheduleMaxCount=0 must fail startup");
+    }
+
+    @Test
     void should_reject_batch_schedule_when_batch_count_is_zero() {
         BatchScheduleRequest batchRequest = new BatchScheduleRequest();
         batchRequest.setBatchCount(0);
@@ -492,6 +512,63 @@ class DefaultRouterTest {
                 "error should mention single-role: " + response.getErrorMessage());
         assertTrue(response.getErrorMessage().contains("/schedule"),
                 "error should point caller to /schedule: " + response.getErrorMessage());
+    }
+
+    @Test
+    void should_reject_batch_schedule_when_config_declares_multiple_roles_but_only_one_has_synced_workers() {
+        // Config declares a disaggregated PD deployment, but DECODE workers are all down
+        // (or the master just started and has not synced them yet) — the runtime view
+        // shows a single role. batch_schedule must still reject: pre-assigning targets
+        // for only one stage of a multi-stage deployment would be wrong.
+        when(modelMetaConfig.getConfiguredRoleTypes()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
+
+        org.flexlb.dao.master.WorkerStatus prefillWorker = new org.flexlb.dao.master.WorkerStatus();
+        prefillWorker.setIp("192.168.1.1");
+        prefillWorker.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", prefillWorker);
+
+        ScriptedBatchLoadBalancer scripted = new ScriptedBatchLoadBalancer(List.of(
+                target("192.168.1.1", 8080),
+                target("192.168.1.2", 8080)
+        ));
+        replaceBatchLoadBalancer(scripted);
+
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(2);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertFalse(response.isSuccess(),
+                "multi-role config with one role alive must not be treated as single-role");
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+        assertTrue(response.getErrorMessage().contains("single-role"),
+                "error should mention single-role: " + response.getErrorMessage());
+        assertEquals(0, scripted.selectBatchCalls, "no targets may be pre-assigned");
+    }
+
+    @Test
+    void should_batch_schedule_success_when_config_declares_single_role() {
+        when(modelMetaConfig.getConfiguredRoleTypes()).thenReturn(List.of(RoleType.PDFUSION));
+
+        org.flexlb.dao.master.WorkerStatus dummy = new org.flexlb.dao.master.WorkerStatus();
+        dummy.setIp("192.168.1.10");
+        dummy.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.10:8080", dummy);
+
+        ScriptedBatchLoadBalancer scripted = new ScriptedBatchLoadBalancer(List.of(
+                target("192.168.1.10", 8080),
+                target("192.168.1.11", 8080)
+        ));
+        replaceBatchLoadBalancer(scripted);
+
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(2);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertTrue(response.isSuccess(),
+                "single-role config must keep batch_schedule available: " + response.getErrorMessage());
+        assertEquals(2, response.getServerStatus().size());
     }
 
     @Test

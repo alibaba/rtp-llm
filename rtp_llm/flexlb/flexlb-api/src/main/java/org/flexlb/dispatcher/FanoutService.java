@@ -29,9 +29,19 @@ public class FanoutService {
 
     private static final JSONWriter.Feature[] WRITE_NULLS = { JSONWriter.Feature.WriteNulls };
     private static final JSONWriter.Feature[] NO_FEATURES = {};
+    /**
+     * Failure WARNs are capped at one per interval with a suppressed-count rider: during an
+     * FE outage the fanout path fails per chunk, and at production QPS an uncapped WARN
+     * stream is tens of thousands of log lines per second — enough to cost real throughput.
+     */
+    private static final long FAILURE_WARN_INTERVAL_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(1);
 
     private final FeClient feClient;
     private final FePool fePool;
+    private final java.util.concurrent.atomic.AtomicLong lastFailureWarnNanos =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong suppressedFailureWarns =
+            new java.util.concurrent.atomic.AtomicLong();
 
     public Mono<List<SubBatchResult>> dispatchChunks(String fePath,
                                                      List<JSONObject> chunkBodies,
@@ -48,21 +58,39 @@ public class FanoutService {
                             .map(bytes -> SubBatchResult.ok(
                                     JSON.parseObject(bytes), chunkSize, startIndex))
                             .onErrorResume(e -> {
-                                Logger.warn("FE chunk failed: url={}, path={}, size={}, err={}",
-                                        feUrl, fePath, chunkSize, DispatcherResponses.briefReason(e));
-                                return Mono.just(SubBatchResult.failed(
-                                        chunkSize, startIndex, DispatcherResponses.briefReason(e)));
+                                String reason = DispatcherResponses.briefReason(e);
+                                warnRateLimited("FE chunk failed: url={}, path={}, size={}, err={}, suppressed={}",
+                                        feUrl, fePath, chunkSize, reason);
+                                return Mono.just(SubBatchResult.failed(chunkSize, startIndex, reason));
                             }))
                     .onErrorResume(e -> {
-                        Logger.warn("FE pick failed for chunk size={}, err={}",
-                                chunkSize, DispatcherResponses.briefReason(e));
-                        return Mono.just(SubBatchResult.failed(
-                                chunkSize, startIndex, DispatcherResponses.briefReason(e)));
+                        String reason = DispatcherResponses.briefReason(e);
+                        warnRateLimited("FE pick failed for chunk size={}, err={}, suppressed={}",
+                                chunkSize, reason);
+                        return Mono.just(SubBatchResult.failed(chunkSize, startIndex, reason));
                     }));
             start += chunkSize;
         }
         return Flux.mergeSequential(Flux.fromIterable(calls))
                 .collectList()
                 .publishOn(Schedulers.parallel());
+    }
+
+    /**
+     * Emits at most one failure WARN per {@link #FAILURE_WARN_INTERVAL_NANOS}; calls landing
+     * inside the window are counted and reported via the emitting call's trailing
+     * {@code suppressed=} placeholder, so outage magnitude stays visible without the volume.
+     */
+    private void warnRateLimited(String format, Object... argsWithoutSuppressed) {
+        long now = System.nanoTime();
+        long last = lastFailureWarnNanos.get();
+        if (now - last >= FAILURE_WARN_INTERVAL_NANOS && lastFailureWarnNanos.compareAndSet(last, now)) {
+            Object[] args = new Object[argsWithoutSuppressed.length + 1];
+            System.arraycopy(argsWithoutSuppressed, 0, args, 0, argsWithoutSuppressed.length);
+            args[argsWithoutSuppressed.length] = suppressedFailureWarns.getAndSet(0);
+            Logger.warn(format, args);
+        } else {
+            suppressedFailureWarns.incrementAndGet();
+        }
     }
 }

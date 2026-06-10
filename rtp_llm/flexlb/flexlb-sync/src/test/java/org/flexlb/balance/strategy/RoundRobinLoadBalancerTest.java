@@ -2,7 +2,6 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.enums.EngineType;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.Request;
@@ -10,6 +9,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.EngineType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
@@ -197,7 +197,8 @@ class RoundRobinLoadBalancerTest {
                 }
                 ready.await();
                 start.countDown();
-                done.await(5, TimeUnit.SECONDS);
+                Assertions.assertTrue(done.await(5, TimeUnit.SECONDS),
+                        "trial " + t + " did not finish in time");
 
                 List<BatchScheduleTarget> b = batchOut.get(0);
                 Set<String> batchWorkers = new HashSet<>();
@@ -206,6 +207,18 @@ class RoundRobinLoadBalancerTest {
                 }
                 if (batchWorkers.size() != 4) {
                     violations.incrementAndGet();
+                }
+                Set<String> poolWorkers =
+                        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().keySet();
+                synchronized (singleOut) {
+                    Assertions.assertEquals(concurrentSingles, singleOut.size(),
+                            "every concurrent select() must produce a result");
+                    for (ServerStatus s : singleOut) {
+                        Assertions.assertTrue(s.isSuccess(),
+                                "concurrent select() must succeed under batch pressure: " + s.getMessage());
+                        Assertions.assertTrue(poolWorkers.contains(s.getServerIp() + ":" + s.getHttpPort()),
+                                "single pick must be a pool worker: " + s.getServerIp() + ":" + s.getHttpPort());
+                    }
                 }
             }
         } finally {

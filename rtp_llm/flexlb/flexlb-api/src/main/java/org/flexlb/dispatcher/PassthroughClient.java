@@ -7,7 +7,9 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.client.reactive.ClientHttpRequest;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.BodyInserter;
 import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.server.ServerRequest;
@@ -93,8 +95,23 @@ public class PassthroughClient {
      * JSON envelope the batch path uses, so callers parse one error shape regardless of which
      * dispatcher path handled them.
      */
-    @SuppressWarnings("deprecation")
     public Mono<ServerResponse> forward(ServerRequest request) {
+        return forwardInternal(request,
+                BodyInserters.fromDataBuffers(request.bodyToFlux(DataBuffer.class)));
+    }
+
+    /**
+     * Variant for callers that already drained the request body (the batch handler sniffs the
+     * body shape before deciding batch-vs-passthrough): forwards the captured bytes, since the
+     * request's own stream can no longer be read.
+     */
+    public Mono<ServerResponse> forward(ServerRequest request, byte[] body) {
+        return forwardInternal(request, BodyInserters.fromValue(body));
+    }
+
+    @SuppressWarnings("deprecation")
+    private Mono<ServerResponse> forwardInternal(ServerRequest request,
+                                                 BodyInserter<?, ? super ClientHttpRequest> bodyInserter) {
         URI src = request.uri();
         String rawPath = src.getRawPath();
         String fePath = rawPath.startsWith("/dispatcher/")
@@ -106,11 +123,10 @@ public class PassthroughClient {
                 .flatMap(feBaseUrl -> {
                     String pathAndQuery = src.getRawQuery() == null ? fePath : fePath + "?" + src.getRawQuery();
                     URI target = URI.create(feBaseUrl + pathAndQuery);
-                    Flux<DataBuffer> bodyStream = request.bodyToFlux(DataBuffer.class);
                     return webClient.method(request.method())
                             .uri(target)
                             .headers(h -> copyEndToEndHeaders(request.headers().asHttpHeaders(), h))
-                            .body(BodyInserters.fromDataBuffers(bodyStream))
+                            .body(bodyInserter)
                             .exchange()
                             .flatMap(clientResponse -> {
                                 pv.finish(clientResponse.statusCode().value(), null);

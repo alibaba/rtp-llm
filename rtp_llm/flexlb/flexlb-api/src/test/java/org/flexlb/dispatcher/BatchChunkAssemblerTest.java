@@ -4,7 +4,6 @@ import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.dispatcher.SubBatchSpec;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -12,6 +11,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BatchChunkAssemblerTest {
@@ -122,6 +122,24 @@ class BatchChunkAssemblerTest {
         assertEquals("10.0.0.1", addr.getString("ip"));
         assertEquals(8088, addr.getIntValue("http_port"));
         assertEquals(50051, addr.getIntValue("grpc_port"));
+    }
+
+    @Test
+    void stampPreAssignedBeSkipsTargetWithoutRole() {
+        // Pre-assignment must never be able to fail a request: a target missing its role
+        // (heterogeneous master response) is skipped like a missing grpc_port, not an NPE
+        // that turns the whole batch into a 500.
+        JSONObject body = new JSONObject();
+        BatchScheduleTarget target = new BatchScheduleTarget();
+        target.setServerIp("10.0.0.1");
+        target.setHttpPort(8088);
+        target.setGrpcPort(50051);
+        // role left null
+
+        BatchChunkAssembler.stampPreAssignedBe(List.of(body), List.of(target));
+
+        assertNull(body.getJSONObject("generate_config"),
+                "role-less target must be skipped without stamping anything");
     }
 
     @Test

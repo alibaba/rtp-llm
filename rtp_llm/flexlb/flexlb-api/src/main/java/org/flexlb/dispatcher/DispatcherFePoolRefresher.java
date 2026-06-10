@@ -48,7 +48,14 @@ public class DispatcherFePoolRefresher {
         this.serviceId = cfg.getFePoolServiceId();
         // Boot seed first — guarantees source() returns the freshest available view by the
         // time downstream beans (FePool, FeHealthChecker) read it during their own init.
-        applyUrls(toUrls(serviceDiscovery.getHosts(serviceId)), "boot");
+        // A discovery hiccup here degrades to an empty snapshot that the listener and poll
+        // paths repair; it must not take the whole application down with it.
+        try {
+            applyUrls(toUrls(serviceDiscovery.getHosts(serviceId)), "boot");
+        } catch (Exception e) {
+            Logger.warn("dispatcher FE pool boot seed failed (listener/poll will retry): serviceId={}, err={}: {}",
+                    serviceId, e.getClass().getSimpleName(), e.getMessage());
+        }
         serviceDiscovery.listen(serviceId, hosts -> applyUrls(toUrls(hosts), "listener"));
     }
 

@@ -1,7 +1,5 @@
 package org.flexlb.service;
 
-import java.net.URI;
-
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
@@ -16,6 +14,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import reactor.core.publisher.Mono;
+
+import java.net.URI;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -141,6 +141,49 @@ class BatchScheduleCoordinatorTest {
         when(httpNettyService.request(any(BatchScheduleRequest.class), any(URI.class),
                 eq("/rtp_llm/batch_schedule"), eq(BatchScheduleResponse.class)))
                 .thenReturn(Mono.error(new RuntimeException("connection refused")));
+
+        BatchScheduleTransportException ex = assertThrows(
+                BatchScheduleTransportException.class,
+                () -> coordinator.schedule(new BatchScheduleRequest()).block());
+
+        assertEquals("CONNECT_FAILED", ex.getErrorCode());
+        verify(engineHealthReporter).reportForwardToMasterResult("LOCAL", "CONNECT_FAILED");
+    }
+
+    @Test
+    void schedule_slave_masterBusinessFailureOverHttp500_returnsTypedResponse() {
+        // The master answers business failures as HTTP 500 with a full BatchScheduleResponse
+        // body. The transport layer surfaces that as HttpErrorResponseException; the
+        // coordinator must reconstruct the typed response instead of reporting CONNECT_FAILED.
+        when(consistency.isNeedConsistency()).thenReturn(true);
+        when(consistency.isMaster()).thenReturn(false);
+        when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.2:7001");
+
+        BatchScheduleResponse masterError = BatchScheduleResponse.error(
+                StrategyErrorType.INVALID_REQUEST, "batch_count must be in [1, 1000]");
+        String body = org.flexlb.util.JsonUtils.toString(masterError);
+        when(httpNettyService.request(any(BatchScheduleRequest.class), any(URI.class),
+                eq("/rtp_llm/batch_schedule"), eq(BatchScheduleResponse.class)))
+                .thenReturn(Mono.error(new org.flexlb.exception.HttpErrorResponseException(500, body)));
+
+        BatchScheduleResponse returned =
+                coordinator.schedule(new BatchScheduleRequest()).block();
+
+        assertFalse(returned.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), returned.getCode());
+        assertEquals("batch_count must be in [1, 1000]", returned.getErrorMessage());
+        verify(engineHealthReporter).reportForwardToMasterResult(
+                "10.0.0.2", String.valueOf(StrategyErrorType.INVALID_REQUEST.getErrorCode()));
+    }
+
+    @Test
+    void schedule_slave_http500WithUnparseableBody_throwsConnectFailed() {
+        when(consistency.isNeedConsistency()).thenReturn(true);
+        when(consistency.isMaster()).thenReturn(false);
+        when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.2:7001");
+        when(httpNettyService.request(any(BatchScheduleRequest.class), any(URI.class),
+                eq("/rtp_llm/batch_schedule"), eq(BatchScheduleResponse.class)))
+                .thenReturn(Mono.error(new org.flexlb.exception.HttpErrorResponseException(502, "Bad Gateway")));
 
         BatchScheduleTransportException ex = assertThrows(
                 BatchScheduleTransportException.class,

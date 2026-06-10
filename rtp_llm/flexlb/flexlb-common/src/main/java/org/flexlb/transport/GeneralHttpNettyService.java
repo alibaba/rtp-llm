@@ -19,6 +19,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.netty.HttpNettyChannelContext;
 import org.flexlb.enums.StatusEnum;
 import org.flexlb.exception.FlexLBException;
+import org.flexlb.exception.HttpErrorResponseException;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.NettyUtils;
 import org.springframework.stereotype.Component;
@@ -177,7 +178,7 @@ public class GeneralHttpNettyService {
             NettyUtils.cacheBuffer(nettyCtx, obj);
             String body = NettyUtils.readBody(nettyCtx);
             NettyUtils.finishNettyWithException(nettyCtx,
-                    new RuntimeException("http error, httpStatusCode=" + httpStatusCode + ", body=" + body));
+                    new HttpErrorResponseException(httpStatusCode, body));
             return;
         }
 

@@ -83,6 +83,21 @@ public class EngineSyncRunner implements Runnable {
             List<WorkerHost> latestEngineWorkerList = workerAddressService.getEngineWorkerList(modelName, roleType);
             logger.info("workerAddressService getEngineWorkerList, model: {}, role: {}, size: {}", modelName, roleType, latestEngineWorkerList.size());
             engineHealthReporter.reportServiceDiscoveryResult(modelName, latestEngineWorkerList.size(), roleType.toString());
+            Set<String> latestValidIpPorts = latestEngineWorkerList.stream()
+                    .map(WorkerHost::getIpPort)
+                    .collect(Collectors.toSet());
+            if (engineType == EngineType.EMBEDDING) {
+                // Discovery presence is the only liveness signal for embedding engines
+                // (no gRPC probe): a worker missing from the list stops being routable
+                // immediately, while physical removal below stays thresholded.
+                for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
+                    if (!latestValidIpPorts.contains(entry.getKey()) && entry.getValue().isAlive()) {
+                        entry.getValue().setAlive(false);
+                        logger.info("[dead] embedding worker dropped by discovery, model={}, role={}, ipPort={}",
+                                modelName, roleType, entry.getKey());
+                    }
+                }
+            }
             if (CollectionUtils.isEmpty(latestEngineWorkerList)) {
                 logger.error("get engine worker list is empty, cost={}μs, model={}", System.nanoTime() / 1000 - startTimeInUs, modelName);
                 return;
@@ -95,9 +110,6 @@ public class EngineSyncRunner implements Runnable {
             }
 
             // Remove if not in latest engine list
-            Set<String> latestValidIpPorts = latestEngineWorkerList.stream()
-                    .map(WorkerHost::getIpPort)
-                    .collect(Collectors.toSet());
             logger.info("Current cached worker size: {}, latest worker list size: {}", cachedWorkerStatuses.size(), latestEngineWorkerList.size());
             for (Map.Entry<String, WorkerStatus> entry: cachedWorkerStatuses.entrySet()) {
                 WorkerStatus workerStatus = entry.getValue();
@@ -165,7 +177,7 @@ public class EngineSyncRunner implements Runnable {
             int size = workerStatusMap.size();
             logger.debug("Worker status map size: {}", size);
 
-            if (size >= 2) {
+            if (size >= 2 && engineType != EngineType.EMBEDDING) {
                 double sumStepLatency = 0.0;
                 double sumRunningQueryTime = 0.0;
                 for (WorkerStatus workerStatus : workerStatusMap.values()) {

@@ -2,10 +2,6 @@ package org.flexlb.dispatcher;
 
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
-import org.flexlb.dispatcher.DispatcherFePoolRefresher;
-import org.flexlb.dispatcher.FeClient;
-import org.flexlb.dispatcher.FeHealthChecker;
-import org.flexlb.dispatcher.FePool;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
@@ -26,6 +22,47 @@ import static org.mockito.Mockito.when;
 class FanoutServiceTest {
 
     private static final BatchEndpointSpec BATCH_INFER = BatchEndpointSpec.BY_PATH.get("/batch_infer");
+
+    @Test
+    void chunkFailureWarnsAreRateLimitedDuringOutage() {
+        // During an FE outage at production QPS, per-chunk WARNs reach tens of thousands of
+        // lines per second — enough to cost real throughput. Failures must still produce
+        // SubBatchResult.failed per chunk, but the WARN stream must be rate-limited.
+        FeClient feClient = mock(FeClient.class);
+        FePool pool = fePool(List.of("http://a"));
+        when(feClient.postBytes(anyString(), anyString(), any()))
+                .thenReturn(Mono.error(new RuntimeException("connection refused")));
+        FanoutService svc = new FanoutService(feClient, pool);
+
+        ch.qos.logback.classic.Logger flexlbLogger =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger("flexlbLogger");
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+                new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        flexlbLogger.addAppender(appender);
+        try {
+            java.util.List<JSONObject> chunks = new java.util.ArrayList<>();
+            for (int i = 0; i < 200; i++) {
+                chunks.add(chunk("p" + i));
+            }
+            List<SubBatchResult> subs =
+                    svc.dispatchChunks("/batch_infer", chunks, BATCH_INFER).block();
+
+            assertNotNull(subs);
+            assertEquals(200, subs.size(), "every chunk must still resolve to a result");
+            assertTrue(subs.stream().noneMatch(SubBatchResult::success));
+
+            long warns = appender.list.stream()
+                    .filter(e -> e.getFormattedMessage().contains("FE chunk failed"))
+                    .count();
+            assertTrue(warns >= 1, "outage must still be visible in the log");
+            assertTrue(warns <= 5,
+                    "chunk-failure WARNs must be rate-limited, got " + warns + " for 200 failures");
+        } finally {
+            flexlbLogger.detachAppender(appender);
+            appender.stop();
+        }
+    }
 
     @Test
     void fansOutChunksAndPreservesOrder() {

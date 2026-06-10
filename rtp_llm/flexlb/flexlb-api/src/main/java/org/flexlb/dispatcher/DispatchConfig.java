@@ -44,8 +44,13 @@ public class DispatchConfig {
      * Per batch sub-call: how long to wait for the FE to start responding (first byte). Stops once
      * the response header arrives — body read is bounded by infra defaults, not this. Same idea as
      * ft_proxy's {@code -t}, but only covers the header-wait window in reactor-netty's model.
+     *
+     * <p>Note for non-streaming generation endpoints ({@code /batch_infer} etc.): FE sends the
+     * response headers only after the whole chunk finishes generating, so this must cover the
+     * full generation time of one chunk — not a network-level header latency. Tune down for
+     * embedding-only deployments where sub-second responses are the norm.
      */
-    private int batchTimeoutMs = 5000;
+    private int batchTimeoutMs = 30_000;
 
     /**
      * Path the {@link FeHealthChecker} probes via {@code GET <feUrl><probePath>} every 1s. Default
@@ -67,8 +72,16 @@ public class DispatchConfig {
      * {@code generate_config.role_addrs} — is a field FE has supported in production for a
      * long time (see {@code rtp_llm.server.backend_rpc_server_visitor.route_ips}: when
      * {@code role_addrs} is non-empty the FE skips master entirely; the same mechanism powers
-     * PD-disagg's prefill→decode handoff). No FE-side change is required for this toggle to
-     * take effect end-to-end.
+     * PD-disagg's prefill→decode handoff).
+     *
+     * <p><strong>FE version precondition:</strong> the FE build must include
+     * {@code RoleAddr.validate_role} (the {@code @field_validator("role", mode="before")} in
+     * {@code rtp_llm/config/generate_config.py}, on main since commit {@code 53dc319bd}).
+     * Older FE builds leave {@code role_addrs} as {@code list[dict]} and fail every stamped
+     * request with HTTP 500 at {@code model_rpc_client}'s {@code addr.role} access — the
+     * dispatcher is the first caller to deliver {@code role_addrs} via the HTTP body, so the
+     * latent FE bug only fires with this toggle on. Against an FE fleet of unknown vintage,
+     * set {@code DISPATCH_PRE_ASSIGN_BE=false} first and flip it on after verifying.
      *
      * <p>Operators can flip {@code DISPATCH_PRE_ASSIGN_BE=false} (or set
      * {@code preAssignBe: false} in {@code DISPATCH_CONFIG}) to opt out for diagnostics or

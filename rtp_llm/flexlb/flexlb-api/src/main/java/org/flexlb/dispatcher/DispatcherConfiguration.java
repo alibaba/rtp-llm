@@ -153,6 +153,26 @@ public class DispatcherConfiguration {
     }
 
     /**
+     * Health probes get their own tiny connection pool, isolated from the fanout/passthrough
+     * data plane: when {@link #FE_MAX_CONNECTIONS_PER_HOST} is saturated under load, a probe
+     * queued behind data traffic exceeds its 500ms budget and marks a healthy FE dead —
+     * exactly when accurate liveness matters most. Two connections per host cover the
+     * one-probe-per-interval cadence with headroom.
+     */
+    @Bean("dispatcherProbeWebClient")
+    public WebClient dispatcherProbeWebClient(WebClient.Builder builder) {
+        ConnectionProvider probeProvider = ConnectionProvider.builder("dispatcher-fe-probe")
+                .maxConnections(2)
+                .pendingAcquireTimeout(Duration.ofMillis(FE_PENDING_ACQUIRE_TIMEOUT_MS))
+                .build();
+        HttpClient probeHttp = HttpClient.create(probeProvider)
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, FE_CONNECT_TIMEOUT_MS);
+        return builder.clone()
+                .clientConnector(new ReactorClientHttpConnector(probeHttp))
+                .build();
+    }
+
+    /**
      * Dispatcher routes on the SHARED 7001 listener. All dispatcher routes are anchored under
      * {@code /dispatcher/**}, disjoint from the Master's {@code /rtp_llm/*}, so no relative
      * ordering between the RouterFunction beans is needed.
