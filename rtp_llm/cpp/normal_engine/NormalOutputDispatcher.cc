@@ -122,6 +122,49 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                    .to(torch::kFloat32);
     }
 
+    std::optional<PromptLogitsOutput> prompt_logits_output;
+    if (stream->returnPromptLogits() && model_output.all_logits.defined()) {
+        auto config    = stream->generateConfig();
+        int  ts        = (int)token_size;
+        int  start_pos = std::clamp(config->prompt_logits_start >= 0 ? config->prompt_logits_start : 0, 0, ts);
+        int  end_pos   = std::clamp(config->prompt_logits_end >= 0 ? config->prompt_logits_end : ts, start_pos, ts);
+        int  slice_len = end_pos - start_pos;
+        if (slice_len > 0) {
+            int top_k = std::min(config->prompt_logits_top_k, (int)model_output.all_logits.size(1));
+
+            auto sliced_logits =
+                model_output.all_logits.narrow(0, token_offset + start_pos, slice_len).to(torch::kFloat32);
+
+            // topk on raw logits (monotonicity of softmax preserves ranking)
+            auto [topk_values_raw, topk_indices] = sliced_logits.topk(top_k, -1);
+
+            // single reduce for log-normalizer, avoids materializing [slice_len, vocab_size]
+            auto log_sum_exp   = sliced_logits.logsumexp(-1, /*keepdim=*/true);
+            auto topk_logprobs = topk_values_raw - log_sum_exp;
+
+            torch::Tensor target_logprobs;
+            if (config->return_target_logprob) {
+                auto tokens      = stream->currentExecuteTokens(0);
+                int  label_start = start_pos + 1;
+                int  label_end   = std::min(end_pos + 1, (int)tokens.size());
+                int  logprob_len = label_end - label_start;
+                if (logprob_len > 0) {
+                    auto label_tensor = torch::from_blob(const_cast<int*>(tokens.data() + label_start),
+                                                         {(int64_t)logprob_len},
+                                                         torch::kInt32)
+                                            .to(torch::kCUDA)
+                                            .toType(torch::kInt64)
+                                            .unsqueeze(1);
+                    auto target_raw = sliced_logits.narrow(0, 0, logprob_len).gather(1, label_tensor).squeeze(1);
+                    target_logprobs = (target_raw - log_sum_exp.narrow(0, 0, logprob_len).squeeze(1)).cpu();
+                }
+            }
+
+            prompt_logits_output = PromptLogitsOutput{
+                topk_logprobs.cpu(), topk_indices.to(torch::kInt32).cpu(), target_logprobs, start_pos, end_pos};
+        }
+    }
+
     torch::Tensor all_hidden_states;
     if (stream->needReturnHiddenStates()) {
         all_hidden_states = model_output.all_hidden_states.narrow(0, token_offset, token_size);
@@ -165,7 +208,10 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                     all_probs,
                     loss,
                     src_batch_indices,
-                    all_hidden_states});
+                    all_hidden_states,
+                    true,
+                    false,
+                    prompt_logits_output});
 }
 
 }  // namespace rtp_llm

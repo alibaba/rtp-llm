@@ -38,6 +38,7 @@ class PipelineResponse(BaseModel):
     logits: Optional[Union[List[float], List[List[float]]]] = None
     output_ids: Optional[List[List[int]]] = None
     input_ids: Optional[List[List[int]]] = None
+    prompt_logits: Optional[Dict[str, Any]] = None
 
 
 class MultiSequencesPipelineResponse(BaseModel):
@@ -295,6 +296,23 @@ class FrontendWorker:
         input_ids = gen_responses.generate_outputs.generate_outputs[0].input_ids
         loss = gen_responses.generate_outputs.generate_outputs[0].loss
         logits = gen_responses.generate_outputs.generate_outputs[0].logits
+        prompt_logits_raw = gen_responses.generate_outputs.generate_outputs[
+            0
+        ].prompt_logits
+
+        prompt_logits_dict = None
+        if generate_config.return_prompt_logits and prompt_logits_raw is not None:
+            prompt_logits_dict = {
+                "start_pos": prompt_logits_raw.get("start_pos", 0),
+                "end_pos": prompt_logits_raw.get("end_pos", 0),
+                "top_k": generate_config.prompt_logits_top_k,
+                "topk_logprobs": prompt_logits_raw["topk_logprobs"].tolist(),
+                "topk_token_ids": prompt_logits_raw["topk_token_ids"].tolist(),
+            }
+            if prompt_logits_raw.get("target_logprobs") is not None:
+                prompt_logits_dict["target_logprobs"] = prompt_logits_raw[
+                    "target_logprobs"
+                ].tolist()
 
         response = PipelineResponse(
             response=generate_texts[0],
@@ -325,6 +343,7 @@ class FrontendWorker:
                 if generate_config.return_input_ids and input_ids is not None
                 else None
             ),
+            prompt_logits=prompt_logits_dict,
         )
 
         return response

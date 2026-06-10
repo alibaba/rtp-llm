@@ -105,6 +105,11 @@ message GenerateConfigPB {
     IntMatrix banned_combo_token_ids = 59;
     // 0=unset(fallback to bool return_all_probs), 1=NONE, 2=DEFAULT, 3=ORIGINAL
     int32 return_all_probs_mode = 60;
+    bool return_prompt_logits = 61;
+    int32 prompt_logits_top_k = 62;
+    int32 prompt_logits_start = 63;
+    int32 prompt_logits_end = 64;
+    bool return_target_logprob = 65;
 }
 
 message MMPreprocessConfigPB {
@@ -177,6 +182,14 @@ message AuxInfoPB {
     map<int32, int32> multimodal_lengths = 27;
 }
 
+message PromptLogitsOutputPB {
+    TensorPB topk_logprobs = 1;
+    TensorPB topk_token_ids = 2;
+    TensorPB target_logprobs = 3;
+    int32 start_pos = 4;
+    int32 end_pos = 5;
+}
+
 message FlattenOutputPB {
     repeated bool finished = 1;
     repeated AuxInfoPB aux_info = 2;
@@ -186,6 +199,7 @@ message FlattenOutputPB {
     TensorPB logits = 6;
     TensorPB all_probs = 7;
     TensorPB all_hidden_states = 8;
+    PromptLogitsOutputPB prompt_logits = 9;
 }
 
 message GenerateOutputsPB {
