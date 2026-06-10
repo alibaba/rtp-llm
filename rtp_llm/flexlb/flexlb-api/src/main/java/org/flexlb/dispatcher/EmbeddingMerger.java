@@ -34,7 +34,7 @@ public final class EmbeddingMerger implements BatchEndpointSpec.PostMerger {
         long promptTokens = 0;
         long totalTokens = 0;
         for (SubBatchResult s : subs) {
-            if (!s.isSuccess() || s.body() == null) {
+            if (!s.success() || s.body() == null) {
                 continue;
             }
             JSONObject usage = s.body().getJSONObject("usage");

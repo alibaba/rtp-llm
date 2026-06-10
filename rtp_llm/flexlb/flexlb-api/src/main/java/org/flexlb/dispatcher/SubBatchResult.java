@@ -25,8 +25,4 @@ public record SubBatchResult(boolean success,
     public static SubBatchResult failed(int chunkSize, int startIndex, String reason) {
         return new SubBatchResult(false, null, chunkSize, startIndex, reason);
     }
-
-    public boolean isSuccess() {
-        return success;
-    }
 }

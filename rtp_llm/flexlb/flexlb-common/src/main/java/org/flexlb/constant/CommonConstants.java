@@ -16,16 +16,15 @@ public class CommonConstants {
     public static final String DEADLINE_EXCEEDED_MESSAGE = "DEADLINE_EXCEEDED";
 
     /**
-     * Port offset between HTTP port and gRPC port = HTTP port + GRPC_PORT_OFFSET
+     * Both engines bind their RPC service to rpc_server_port = registered port + 1
+     * (RTP-LLM deployments register base+0, the frontend HTTP port, into service discovery;
+     * port layout: {@code rtp_llm/config/py_config_modules.py}). The LLM engine serves gRPC
+     * ({@code LocalRpcServer}) there, the embedding engine serves ARPC
+     * ({@code MainseArpcServiceImpl}) — same offset, protocol differs by engine type, and
+     * each caller reads the field matching the protocol it speaks.
      */
     public static final int GRPC_PORT_OFFSET = 1;
 
-    /**
-     * Port offset between HTTP port and ARPC port = HTTP port + ARPC_PORT_OFFSET.
-     * Embedding/BERT workers expose MainseBertRpcService over ARPC on rpc_server_port (= base+1),
-     * while http_port = base+5 in the rtp_llm ServerConfig port layout, so ARPC = http_port - 4.
-     * Kept as a named constant (not a magic number) since the layout has shifted before.
-     */
-    public static final int ARPC_PORT_OFFSET = -4;
+    public static final int ARPC_PORT_OFFSET = 1;
 
 }

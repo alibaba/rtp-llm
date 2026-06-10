@@ -1,9 +1,7 @@
 package org.flexlb.dispatcher;
 
-import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
-import com.alibaba.fastjson2.JSONWriter;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.util.Logger;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -76,7 +74,7 @@ public class DispatcherInspectionHandler {
         }
         fePool.put("hosts", hosts);
         root.put("fePool", fePool);
-        return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(serialize(root));
+        return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(BatchBodyParser.serialize(root));
     }
 
     // ───────────────────────── dryRun ─────────────────────────
@@ -111,7 +109,7 @@ public class DispatcherInspectionHandler {
         JSONObject err = new JSONObject();
         err.put("error", "dryrun_internal_error");
         err.put("message", e.getClass().getSimpleName() + ": " + e.getMessage());
-        return ServerResponse.status(500).contentType(MediaType.APPLICATION_JSON).bodyValue(serialize(err));
+        return ServerResponse.status(500).contentType(MediaType.APPLICATION_JSON).bodyValue(BatchBodyParser.serialize(err));
     }
 
     private String extractFePath(ServerRequest request) {
@@ -168,17 +166,13 @@ public class DispatcherInspectionHandler {
             chunksOut.addAll(chunkBodies);
             out.put("chunks", chunksOut);
             return out;
-        }).flatMap(out -> ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(serialize(out)));
+        }).flatMap(out -> ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(BatchBodyParser.serialize(out)));
     }
 
     private Mono<ServerResponse> badRequest(String message) {
         JSONObject err = new JSONObject();
         err.put("error", "invalid_inspection_request");
         err.put("message", message);
-        return ServerResponse.badRequest().contentType(MediaType.APPLICATION_JSON).bodyValue(serialize(err));
-    }
-
-    private static byte[] serialize(JSONObject body) {
-        return JSON.toJSONBytes(body, JSONWriter.Feature.WriteNulls);
+        return ServerResponse.badRequest().contentType(MediaType.APPLICATION_JSON).bodyValue(BatchBodyParser.serialize(err));
     }
 }

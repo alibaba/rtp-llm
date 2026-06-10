@@ -1,6 +1,5 @@
 package org.flexlb.dispatcher;
 
-import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 
@@ -43,7 +42,7 @@ public final class ResponseMerger {
         for (SubBatchResult s : subs) {
             totalItems += s.chunkSize();
             if (envelope == null && wellFormed(s, spec)) {
-                envelope = deepCopy(s.body());
+                envelope = BatchBodyParser.deepCopy(s.body());
                 envelope.put(spec.getResponseArrayField(), new JSONArray());
             }
         }
@@ -89,16 +88,12 @@ public final class ResponseMerger {
         return new MergedResponse(envelope, succeededChunks, subs.size(), failedIndices, failedReasons);
     }
 
-    private static JSONObject deepCopy(JSONObject source) {
-        return JSON.parseObject(JSON.toJSONBytes(source));
-    }
-
     private static String reasonFor(SubBatchResult s) {
-        return s.isSuccess() ? "malformed_sub_batch" : s.reason();
+        return s.success() ? "malformed_sub_batch" : s.reason();
     }
 
     private static boolean wellFormed(SubBatchResult s, BatchEndpointSpec spec) {
-        if (!s.isSuccess() || s.body() == null) {
+        if (!s.success() || s.body() == null) {
             return false;
         }
         JSONArray arr = s.body().getJSONArray(spec.getResponseArrayField());
