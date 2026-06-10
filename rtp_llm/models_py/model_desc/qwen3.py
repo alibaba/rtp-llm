@@ -127,12 +127,18 @@ class Qwen3Model(GptModelBase):
         hidden_states = inputs_embeds
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
+        kv_block_id = inputs.attention_inputs.kv_cache_kernel_block_id_device
+        is_embedding = kv_block_id is None or (hasattr(kv_block_id, 'numel') and kv_block_id.numel() == 0)
+        if is_embedding and hasattr(fmha_impl, 'need_rope_kv_cache'):
+            fmha_impl.need_rope_kv_cache = False
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)
             hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=None if is_embedding else (
+                    self.kv_cache.get_layer_cache(i) if self.kv_cache else None
+                ),
             )
         hidden_states = self.norm(hidden_states)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
