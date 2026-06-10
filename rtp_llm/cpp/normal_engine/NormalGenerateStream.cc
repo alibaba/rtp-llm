@@ -29,7 +29,9 @@ bool NormalGenerateStream::hasOutput() {
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
-    generate_results.request_id = request_id_;
+    generate_results.request_id       = request_id_;
+    const bool emit_all_hidden_states = generate_input_->generate_config->return_all_hidden_states
+                                        && first_all_hidden_states_ && !all_hidden_states_emitted_;
 
     for (int i = 0; i < nextBatchSize(); i++) {
         GenerateOutput generate_output;
@@ -75,10 +77,8 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                     device_->clone({update_info.hidden_states->view(i, 1), rtp_llm::AllocationType::HOST});
             }
         }
-        if (generate_input_->generate_config->return_all_hidden_states && update_info.all_hidden_states
-            && iter_count_ == 1) {
-            generate_output.all_hidden_states =
-                device_->clone({*update_info.all_hidden_states, rtp_llm::AllocationType::HOST});
+        if (emit_all_hidden_states) {
+            generate_output.all_hidden_states = first_all_hidden_states_;
         }
         if (loss_) {
             RTP_LLM_CHECK_WITH_INFO(loss_index_ == inputLength() - 1,
@@ -150,6 +150,9 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
         generate_results.generate_outputs.emplace_back(std::move(generate_output));
     }
+    if (emit_all_hidden_states) {
+        all_hidden_states_emitted_ = true;
+    }
     return generate_results;
 }
 
@@ -175,6 +178,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     if (needReturnHiddenStates() && update_info.all_hidden_states) {
         RTP_LLM_CHECK(update_info.all_hidden_states != nullptr);
         last_hidden_states_ = update_info.all_hidden_states;
+    }
+    if (generate_input_->generate_config->return_all_hidden_states && update_info.all_hidden_states && iter_count_ == 1
+        && !first_all_hidden_states_) {
+        first_all_hidden_states_ = device_->clone({*update_info.all_hidden_states, rtp_llm::AllocationType::HOST});
     }
 
     if (generate_input_->generate_config->return_softmax_probs && update_info.softmax_probs) {

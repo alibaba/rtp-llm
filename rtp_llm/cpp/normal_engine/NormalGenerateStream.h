@@ -18,7 +18,13 @@ public:
                          kmonitor::MetricsReporterPtr          metrics_reporter,
                          size_t                                extra_reserve_token_num = 0,
                          bool                                  perf_test               = false):
-        GenerateStream(query, model_config, runtime_config, resource_context, metrics_reporter, extra_reserve_token_num, perf_test),
+        GenerateStream(query,
+                       model_config,
+                       runtime_config,
+                       resource_context,
+                       metrics_reporter,
+                       extra_reserve_token_num,
+                       perf_test),
         request_id_(query->request_id) {
         generate_outputs_queue_.setCapacity(1000);
     }
@@ -37,6 +43,8 @@ private:
 
     int64_t                                   request_id_{0};
     bool                                      finished_{false};
+    rtp_llm::BufferPtr                        first_all_hidden_states_ = nullptr;
+    bool                                      all_hidden_states_emitted_{false};
     autil::SynchronizedQueue<GenerateOutputs> generate_outputs_queue_;
 };
 }  // namespace rtp_llm
