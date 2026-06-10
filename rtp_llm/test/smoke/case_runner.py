@@ -239,6 +239,9 @@ class CaseRunner(object):
             return ClassifierComparer
         elif request_endpoint == "/v1/reranker":
             return RerankerComparer
+        elif q_r.get("pg_module", None) == True:
+            from internal_source.rtp_llm.test.smoke.pg.pg_comparer import PgComparer
+            return PgComparer
         elif q_r.get("mainse_module", None) == True:
             if q_r.get("use_decode_arpc", None) == True:
                 from smoke.mainse.mainse_decode_arpc_comparer import MainseDecodeArpcComparer
