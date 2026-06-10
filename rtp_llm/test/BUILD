@@ -121,6 +121,28 @@ py_test(
 )
 
 py_test(
+    name = "prompt_scoring_test",
+    srcs = [
+        "prompt_scoring_test.py",
+    ],
+    data = [
+        "//rtp_llm:sdk",
+        "//rtp_llm/test/prompt_scoring_data:testdata",
+    ],
+    deps = [
+        "//rtp_llm/test/utils:maga_server_manager",
+        "//rtp_llm:uvicorn",
+        "//rtp_llm:fastapi",
+        "//rtp_llm:psutil",
+        "//rtp_llm:tiktoken",
+        "//rtp_llm:testlib",
+    ],
+    imports = ["aios/kmonitor/python_client"],
+    tags = ["manual"],
+    timeout = 'eternal',
+)
+
+py_test(
     name = "concurrency_limit_test",
     srcs = [
         "concurrency_limit_test.py"

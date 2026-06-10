@@ -139,6 +139,7 @@ class ChatCompletionRequest(BaseModel):
     logprobs: Optional[bool] = None
     logprobs_mode: Optional[Literal["original", "default"]] = None
     top_logprobs: Optional[int] = None
+    prompt_logprobs: Optional[int] = None
 
     # ---- These functions are not implemented yet.
     # presence_penalty: Optional[float] = 0.0
@@ -285,6 +286,7 @@ class ChatCompletionResponse(BaseModel):
     debug_info: Optional[Union[DebugInfo, str]] = None
     aux_info: Optional[AuxInfo] = None
     extra_outputs: Optional[ChatCompletionExtraOutputs] = None
+    prompt_logprobs: Optional[Dict[str, Any]] = None
 
 
 class DeltaMessage(BaseModel):
