@@ -1,5 +1,6 @@
 package org.flexlb.dispatcher;
 
+import com.alibaba.fastjson2.JSONObject;
 import org.flexlb.dao.pv.DispatchPvLogData;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
@@ -7,6 +8,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -88,13 +90,18 @@ public class PassthroughClient {
      * any upstream step throws (pool pick, connect, response-timeout); body-stream errors during
      * SSE consumption are intentionally not captured — there's no meaningful "request time" for a
      * 10-minute stream and the response was already handed off downstream.
+     *
+     * <p>Upstream failures surface to the client as a 502 with the same {@code {error, message}}
+     * JSON envelope the batch path uses, so callers parse one error shape regardless of which
+     * dispatcher path handled them.
      */
     @SuppressWarnings("deprecation")
     public Mono<ServerResponse> forward(ServerRequest request) {
         URI src = request.uri();
-        String fePath = src.getRawPath().startsWith("/dispatcher/")
-                ? src.getRawPath().substring("/dispatcher".length())
-                : src.getRawPath();
+        String rawPath = src.getRawPath();
+        String fePath = rawPath.startsWith("/dispatcher/")
+                ? rawPath.substring("/dispatcher".length())
+                : rawPath;
         DispatchPvLogData pv = DispatchPvLogData.passthrough(fePath, System.currentTimeMillis());
         return Mono.fromCallable(fePool::next)
                 .doOnNext(pv::setFeHost)
@@ -122,8 +129,16 @@ public class PassthroughClient {
                     Logger.warn("passthrough forward failed: path={}, feHost={}, err={}",
                             fePath, pv.getFeHost(),
                             e.getClass().getSimpleName() + ": " + e.getMessage());
-                    pv.finish(500, e.getClass().getSimpleName() + ": " + e.getMessage());
+                    pv.finish(502, e.getClass().getSimpleName() + ": " + e.getMessage());
                     pv.emit(pvLogger);
+                })
+                .onErrorResume(e -> {
+                    JSONObject err = new JSONObject();
+                    err.put("error", "passthrough_failed");
+                    err.put("message", String.valueOf(e.getMessage()));
+                    return ServerResponse.status(502)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .bodyValue(BatchBodyParser.serialize(err));
                 });
     }
 

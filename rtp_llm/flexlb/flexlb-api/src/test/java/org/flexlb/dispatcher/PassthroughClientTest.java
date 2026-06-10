@@ -71,7 +71,7 @@ class PassthroughClientTest {
     }
 
     @Test
-    void emptyFePoolBecomesErrorMono() {
+    void emptyFePoolBecomes502JsonError() {
         FePool pool = DispatcherTestSupport.fePool(List::of, url -> true);
         PassthroughClient client =
                 new PassthroughClient(WebClient.builder().build(), pool);
@@ -82,8 +82,12 @@ class PassthroughClientTest {
                 .body(Flux.empty());
 
         StepVerifier.create(client.forward(request))
-                .expectError(IllegalStateException.class)
-                .verify();
+                .assertNext(r -> {
+                    Assertions.assertEquals(502, r.statusCode().value());
+                    Assertions.assertEquals(org.springframework.http.MediaType.APPLICATION_JSON,
+                            r.headers().getContentType());
+                })
+                .verifyComplete();
     }
 
     @Test
@@ -244,12 +248,12 @@ class PassthroughClientTest {
 
     /**
      * Production-equivalent wiring: ChannelOption.CONNECT_TIMEOUT_MILLIS for dead-FE fast-fail,
-     * but no {@code responseTimeout} — mid-stream silence is normal for SSE. A 6-second body
-     * delay must not be cut off.
+     * but no {@code responseTimeout} — mid-stream silence is normal for SSE. A body delay
+     * longer than any plausible response timeout must not be cut off.
      */
     @Test
     void streamingResponseWithLongBodyDelayIsNotCutOff() {
-        server.enqueue(buildSseResponseWith6sBodyDelay());
+        server.enqueue(buildSseResponseWithDelayedBody());
 
         HttpClient http = HttpClient.create()
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 2000);
@@ -265,12 +269,12 @@ class PassthroughClientTest {
 
     /**
      * Regression guard: if anyone reintroduces {@code responseTimeout} on the passthrough
-     * HttpClient, ReadTimeoutHandler fires during the 6-second body delay and the stream dies.
+     * HttpClient, ReadTimeoutHandler fires during the body delay and the stream dies.
      * This test pins that behavior so the failure is loud the moment the wiring drifts.
      */
     @Test
     void addingResponseTimeoutWouldKillTheStream() {
-        server.enqueue(buildSseResponseWith6sBodyDelay());
+        server.enqueue(buildSseResponseWithDelayedBody());
 
         HttpClient http = HttpClient.create()
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 2000)
@@ -292,7 +296,8 @@ class PassthroughClientTest {
         return new PassthroughClient(webClient, pool);
     }
 
-    private static MockResponse buildSseResponseWith6sBodyDelay() {
+    /** Body delay must stay comfortably above the 2s responseTimeout in the regression guard. */
+    private static MockResponse buildSseResponseWithDelayedBody() {
         Buffer body = new Buffer();
         for (int i = 0; i < 6; i++) {
             body.writeUtf8("data: chunk" + i + "\n\n");
@@ -300,7 +305,7 @@ class PassthroughClientTest {
         return new MockResponse()
                 .setHeader("content-type", "text/event-stream")
                 .setBody(body)
-                .setBodyDelay(6, TimeUnit.SECONDS);
+                .setBodyDelay(3, TimeUnit.SECONDS);
     }
 
     private static Mono<Void> forwardForStreaming(PassthroughClient client) {

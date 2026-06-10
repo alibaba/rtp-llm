@@ -1,7 +1,6 @@
 package org.flexlb.service;
 
 import java.net.URI;
-import java.util.concurrent.TimeoutException;
 
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -9,6 +8,7 @@ import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.exception.BatchScheduleTransportException;
+import org.flexlb.exception.EngineReadTimeoutException;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.Logger;
@@ -84,7 +84,7 @@ public class BatchScheduleCoordinator {
                     if (e instanceof BatchScheduleTransportException) {
                         return Mono.error(e);
                     }
-                    String errorCode = e instanceof TimeoutException ? "TIMEOUT" : "CONNECT_FAILED";
+                    String errorCode = e instanceof EngineReadTimeoutException ? "TIMEOUT" : "CONNECT_FAILED";
                     Logger.error("[BatchSchedule] Master unreachable, errorCode={}", errorCode, e);
                     engineHealthReporter.reportForwardToMasterResult("LOCAL", errorCode);
                     return Mono.error(new BatchScheduleTransportException(

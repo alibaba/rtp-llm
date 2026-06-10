@@ -9,6 +9,7 @@ import okhttp3.mockwebserver.RecordedRequest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.springframework.http.MediaType;
 import org.springframework.http.server.reactive.ReactorHttpHandlerAdapter;
 import org.springframework.test.web.reactive.server.WebTestClient;
@@ -41,6 +42,7 @@ import static org.mockito.Mockito.when;
  * {@link org.flexlb.dispatcher.BatchEndpointSpec#SPECS} is exercised with
  * one chunk induced to fail (HTTP 500), and the non-batch path falls through to passthrough.
  */
+@Timeout(30)
 class DispatcherE2ETest {
 
     private MockWebServer fe1;
@@ -275,6 +277,24 @@ class DispatcherE2ETest {
         verifyChunkHasRoleAddr(fe1.takeRequest(), "10.0.0.1");
         verifyChunkHasRoleAddr(fe2.takeRequest(), "10.0.0.2");
         verifyChunkHasRoleAddr(fe3.takeRequest(), "10.0.0.3");
+    }
+
+    @Test
+    void emptyBodyOnBatchEndpointIsRejectedWith400() {
+        WebTestClient client = buildClient(/*subBatchSize=*/2);
+
+        JsonNode resp = client.post().uri("/dispatcher/batch_infer")
+                .contentType(MediaType.APPLICATION_JSON)
+                .exchange()
+                .expectStatus().isBadRequest()
+                .expectBody(JsonNode.class)
+                .returnResult().getResponseBody();
+
+        assertNotNull(resp);
+        assertEquals("invalid_batch_request", resp.get("error").asText());
+        assertEquals(0, fe1.getRequestCount());
+        assertEquals(0, fe2.getRequestCount());
+        assertEquals(0, fe3.getRequestCount());
     }
 
     @Test

@@ -34,6 +34,12 @@ class BatchBodyParserTest {
     }
 
     @Test
+    void parseObjectReturnsNullForEmptyBytes() {
+        // A body-less POST reaches the handler as zero bytes via defaultIfEmpty.
+        assertNull(BatchBodyParser.parseObject(new byte[0]));
+    }
+
+    @Test
     void parseObjectReturnsNullOnMalformedJson() {
         // Malformed input and "valid JSON but not an object" both map to 400 at the handler with
         // the same envelope, so parser collapses both into null rather than throw a JSONException

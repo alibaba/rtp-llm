@@ -51,7 +51,7 @@ public class BatchHandler {
 
     public Mono<ServerResponse> handle(ServerRequest request, BatchEndpointSpec spec) {
         DispatchPvLogData pv = DispatchPvLogData.batch(spec.getPath(), System.currentTimeMillis());
-        return request.bodyToMono(byte[].class).flatMap(bytes -> {
+        return request.bodyToMono(byte[].class).defaultIfEmpty(new byte[0]).flatMap(bytes -> {
             JSONObject body = BatchBodyParser.parseObject(bytes);
             if (body == null) {
                 return badRequest("expected a JSON object body");

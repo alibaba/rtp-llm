@@ -18,6 +18,7 @@ import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.exception.BatchScheduleTransportException;
+import org.flexlb.exception.EngineReadTimeoutException;
 import org.flexlb.service.BatchScheduleCoordinator;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
@@ -36,7 +37,6 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
-import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 
 import static org.springframework.web.reactive.function.server.RequestPredicates.accept;
@@ -127,9 +127,8 @@ public class HttpLoadBalanceServer {
                     Logger.error("Batch schedule request processing error", e);
                     bctx.setSuccess(false);
                     bctx.setErrorMessage(e.getMessage());
-                    return ServerResponse.status(500)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(e.getMessage()), String.class);
+                    return json(500, BatchScheduleResponse.error(
+                            StrategyErrorType.INVALID_REQUEST, e.getMessage()));
                 })
                 .doFinally(signal -> finalizeBatchContext(bctx));
     }
@@ -279,7 +278,7 @@ public class HttpLoadBalanceServer {
                         }
                 )
                 .onErrorResume(e -> {
-                    String errorCode = e instanceof TimeoutException ? "TIMEOUT" : "CONNECT_FAILED";
+                    String errorCode = e instanceof EngineReadTimeoutException ? "TIMEOUT" : "CONNECT_FAILED";
                     Logger.error("[Fallback] Master unreachable, routing locally: {}, errorCode: {}", e.getMessage(), errorCode);
                     engineHealthReporter.reportForwardToMasterResult("LOCAL", errorCode);
                     return fallbackToLocalRouting(ctx);

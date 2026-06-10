@@ -250,8 +250,9 @@ class DispatcherInspectionHandlerTest {
 
             ObjectNode out = invokeDryRun(handler, "false", List.of("a", "b"));
             for (JsonNode chunk : (ArrayNode) out.get("chunks")) {
+                // buildChunkBodies guarantees generate_config exists on every chunk.
                 JsonNode gc = chunk.get("generate_config");
-                assertNull(gc == null ? null : gc.get("role_addrs"),
+                assertNull(gc.get("role_addrs"),
                         "preAssign=false must not stamp role_addrs even though config default is true");
                 assertTrue(gc.get("force_batch").asBoolean(),
                         "force_batch still injected — that's independent of preAssign");
