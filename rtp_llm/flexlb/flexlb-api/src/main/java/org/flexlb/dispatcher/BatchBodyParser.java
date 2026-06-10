@@ -35,6 +35,9 @@ public final class BatchBodyParser {
      */
     public static JSONObject parseObject(byte[] body) {
         Objects.requireNonNull(body, "body");
+        if (body.length == 0) {
+            return null;
+        }
         try {
             return JSON.parseObject(body);
         } catch (JSONException e) {

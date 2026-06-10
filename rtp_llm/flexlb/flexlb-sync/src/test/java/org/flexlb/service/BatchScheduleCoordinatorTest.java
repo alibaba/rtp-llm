@@ -1,12 +1,12 @@
 package org.flexlb.service;
 
 import java.net.URI;
-import java.util.concurrent.TimeoutException;
 
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.enums.StatusEnum;
 import org.flexlb.exception.BatchScheduleTransportException;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
@@ -125,7 +125,7 @@ class BatchScheduleCoordinatorTest {
         when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.2:7001");
         when(httpNettyService.request(any(BatchScheduleRequest.class), any(URI.class),
                 eq("/rtp_llm/batch_schedule"), eq(BatchScheduleResponse.class)))
-                .thenReturn(Mono.error(new TimeoutException("read timeout")));
+                .thenReturn(Mono.error(StatusEnum.READ_TIME_OUT.toException()));
 
         BatchScheduleTransportException ex = assertThrows(
                 BatchScheduleTransportException.class,

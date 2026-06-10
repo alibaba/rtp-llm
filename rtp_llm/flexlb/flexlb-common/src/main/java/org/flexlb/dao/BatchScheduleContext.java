@@ -1,7 +1,6 @@
 package org.flexlb.dao;
 
 import lombok.Data;
-import lombok.ToString;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
@@ -17,7 +16,6 @@ import org.flexlb.dao.loadbalance.BatchScheduleResponse;
  * makes the abstraction concrete.
  */
 @Data
-@ToString
 public class BatchScheduleContext {
 
     //======================== Basic =======================//

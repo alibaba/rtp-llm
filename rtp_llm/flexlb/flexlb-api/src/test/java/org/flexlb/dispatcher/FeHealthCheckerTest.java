@@ -9,9 +9,11 @@ import org.springframework.web.reactive.function.client.WebClient;
 import reactor.test.StepVerifier;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.flexlb.dispatcher.DispatcherTestSupport.fePool;
 import static org.flexlb.dispatcher.DispatcherTestSupport.feHealthChecker;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -157,6 +159,29 @@ class FeHealthCheckerTest {
         // when probe data is stale is worse than gambling on a possibly-recovered host.
         String picked = pool.next();
         assertTrue(picked.equals(url(feA)) || picked.equals(url(feB)));
+    }
+
+    @Test
+    void departedHostCounterIsEvictedOnNextProbeRound() {
+        feA.enqueue(new MockResponse().setResponseCode(500));
+        feA.enqueue(new MockResponse().setResponseCode(500));
+        feB.enqueue(new MockResponse().setResponseCode(200).setBody("ok"));
+        feB.enqueue(new MockResponse().setResponseCode(200).setBody("ok"));
+        AtomicReference<List<String>> urls = new AtomicReference<>(List.of(url(feA), url(feB)));
+        FeHealthChecker checker = feHealthChecker(urls::get, WebClient.create(), PROBE_PATH);
+
+        StepVerifier.create(checker.probeOnce()).verifyComplete();
+        StepVerifier.create(checker.probeOnce()).verifyComplete();
+        assertFalse(checker.isAlive(url(feA)));
+
+        // feA leaves the pool; the next probe round drops its counter so a re-added feA
+        // starts from the optimistic default instead of inheriting stale dead state.
+        urls.set(List.of(url(feB)));
+        feB.enqueue(new MockResponse().setResponseCode(200).setBody("ok"));
+        StepVerifier.create(checker.probeOnce()).verifyComplete();
+
+        assertEquals(0, checker.consecFails(url(feA)));
+        assertTrue(checker.isAlive(url(feA)));
     }
 
     @Test

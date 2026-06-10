@@ -95,6 +95,17 @@ class EnvConfigOverridesTest {
     }
 
     @Test
+    void booleanKeepsParseBooleanSemanticsAnythingButTrueIsFalse() {
+        // Deliberately Boolean.parseBoolean, matching the pre-extraction ConfigService behavior:
+        // any value other than (case-insensitive) "true" — including "1"/"yes"/typos — reads as
+        // false. Stricter parsing would be a backward-incompatible change for live deployments.
+        Sample s = new Sample();
+        s.booleanField = true;
+        EnvConfigOverrides.apply(s, "TEST_", Map.of("TEST_BOOLEAN_FIELD", "1"));
+        assertFalse(s.booleanField);
+    }
+
+    @Test
     void noMatchingEnvVarsLeavesAllDefaults() {
         Sample s = new Sample();
         EnvConfigOverrides.apply(s, "TEST_", Map.of());

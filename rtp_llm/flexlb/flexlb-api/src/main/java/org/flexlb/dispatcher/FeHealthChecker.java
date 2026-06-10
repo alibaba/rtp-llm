@@ -12,6 +12,7 @@ import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.time.Duration;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
@@ -94,6 +95,9 @@ public class FeHealthChecker {
         if (urls == null || urls.isEmpty()) {
             return Mono.empty();
         }
+        // Counters are keyed by FE url; drop entries for hosts that left the pool so the map
+        // stays bounded by the live fleet even when FE identities churn (autoscaling).
+        consecFails.keySet().retainAll(Set.copyOf(urls));
         return Flux.fromIterable(urls)
                 .flatMap(url -> webClient.get()
                         .uri(url + probePath)

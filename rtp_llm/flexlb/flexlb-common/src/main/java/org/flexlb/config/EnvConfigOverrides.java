@@ -43,13 +43,17 @@ public final class EnvConfigOverrides {
             }
             String envName = prefix + camelToUpperSnakeCase(field.getName());
             String raw = env.get(envName);
-            if (raw == null || raw.trim().isEmpty()) {
+            if (raw == null) {
+                continue;
+            }
+            String value = raw.trim();
+            if (value.isEmpty()) {
                 continue;
             }
             try {
                 field.setAccessible(true);
                 Object oldValue = field.get(config);
-                Object parsed = parseValue(raw.trim(), type);
+                Object parsed = parseValue(value, type);
                 field.set(config, parsed);
                 log.info("env override: {} = {} (field: {}, old: {})",
                         envName, parsed, field.getName(), oldValue);
@@ -92,12 +96,7 @@ public final class EnvConfigOverrides {
             return Double.parseDouble(value);
         }
         if (targetType == boolean.class || targetType == Boolean.class) {
-            return switch (value.toLowerCase(Locale.ROOT)) {
-                case "true", "1", "yes", "on"  -> true;
-                case "false", "0", "no", "off" -> false;
-                default -> throw new IllegalArgumentException(
-                        "boolean must be one of true|false|1|0|yes|no|on|off, got: '" + value + "'");
-            };
+            return Boolean.parseBoolean(value);
         }
         if (targetType == String.class) {
             return value;
