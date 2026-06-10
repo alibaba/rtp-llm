@@ -27,6 +27,7 @@ from rtp_llm.utils.base_model_datatypes import GenerateResponse
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
+from rtp_llm.utils.prompt_logits_utils import build_prompt_logits_dict
 
 
 class PipelineResponse(BaseModel):
@@ -38,6 +39,7 @@ class PipelineResponse(BaseModel):
     logits: Optional[Union[List[float], List[List[float]]]] = None
     output_ids: Optional[List[List[int]]] = None
     input_ids: Optional[List[List[int]]] = None
+    prompt_logprobs: Optional[Dict[str, Any]] = None
 
 
 class MultiSequencesPipelineResponse(BaseModel):
@@ -194,6 +196,11 @@ class FrontendWorker:
                 if gc.has_num_beams():
                     aux.beam_responses = generate_texts
                 aux_info_dict = asdict(aux)
+            prompt_logits_dict = (
+                build_prompt_logits_dict(out.prompt_logits)
+                if gc.return_prompt_logits
+                else None
+            )
             pipeline_responses.append(
                 PipelineResponse(
                     response=generate_texts[0],
@@ -214,6 +221,7 @@ class FrontendWorker:
                         if gc.return_logits and out.logits is not None
                         else None
                     ),
+                    prompt_logprobs=prompt_logits_dict,
                 )
             )
         return BatchPipelineResponse(response_batch=pipeline_responses)
@@ -295,6 +303,15 @@ class FrontendWorker:
         input_ids = gen_responses.generate_outputs.generate_outputs[0].input_ids
         loss = gen_responses.generate_outputs.generate_outputs[0].loss
         logits = gen_responses.generate_outputs.generate_outputs[0].logits
+        prompt_logits_raw = gen_responses.generate_outputs.generate_outputs[
+            0
+        ].prompt_logits
+
+        prompt_logits_dict = (
+            build_prompt_logits_dict(prompt_logits_raw)
+            if generate_config.return_prompt_logits
+            else None
+        )
 
         response = PipelineResponse(
             response=generate_texts[0],
@@ -325,6 +342,7 @@ class FrontendWorker:
                 if generate_config.return_input_ids and input_ids is not None
                 else None
             ),
+            prompt_logprobs=prompt_logits_dict,
         )
 
         return response
