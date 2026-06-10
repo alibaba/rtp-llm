@@ -1,6 +1,5 @@
 package org.flexlb.dispatcher;
 
-import com.alibaba.fastjson2.JSONObject;
 import org.flexlb.dao.pv.DispatchPvLogData;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
@@ -8,7 +7,6 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -126,20 +124,14 @@ public class PassthroughClient {
                             });
                 })
                 .doOnError(e -> {
+                    String reason = DispatcherResponses.briefReason(e);
                     Logger.warn("passthrough forward failed: path={}, feHost={}, err={}",
-                            fePath, pv.getFeHost(),
-                            e.getClass().getSimpleName() + ": " + e.getMessage());
-                    pv.finish(502, e.getClass().getSimpleName() + ": " + e.getMessage());
+                            fePath, pv.getFeHost(), reason);
+                    pv.finish(502, reason);
                     pv.emit(pvLogger);
                 })
-                .onErrorResume(e -> {
-                    JSONObject err = new JSONObject();
-                    err.put("error", "passthrough_failed");
-                    err.put("message", String.valueOf(e.getMessage()));
-                    return ServerResponse.status(502)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .bodyValue(BatchBodyParser.serialize(err));
-                });
+                .onErrorResume(e -> DispatcherResponses.error(
+                        502, "passthrough_failed", String.valueOf(e.getMessage())));
     }
 
     private static void copyEndToEndHeaders(HttpHeaders source, HttpHeaders sink) {

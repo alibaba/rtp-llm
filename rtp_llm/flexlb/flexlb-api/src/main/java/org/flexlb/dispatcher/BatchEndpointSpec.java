@@ -14,10 +14,6 @@ import java.util.stream.Collectors;
  * placeholders and {@link PostMerger} for cross-chunk aggregation — plus the hardcoded
  * {@link #SPECS} table.
  *
- * <p>Type-for-type mirror of {@code BatchEndpointSpec} on the Jackson side. The two specs
- * stay parallel so the equivalence test can run both handlers against the same input bodies
- * with the same endpoint configuration.
- *
  * <p>Bare {@code POST /} aliases {@code /batch_infer} semantics — rtp_llm FE historically
  * exposes batch generation on the root path and accepts the same {@code prompt_batch} /
  * {@code response_batch} wire shape. Embedding variants
@@ -88,8 +84,7 @@ public class BatchEndpointSpec {
     }
 
     /**
-     * Hardcoded spec table for the dispatcher's batch endpoints. Mirrors
-     * {@code BatchEndpointSpec.SPECS} row-for-row.
+     * Hardcoded spec table for the dispatcher's batch endpoints.
      */
     public static final List<BatchEndpointSpec> SPECS = List.of(
             new BatchEndpointSpec("/",

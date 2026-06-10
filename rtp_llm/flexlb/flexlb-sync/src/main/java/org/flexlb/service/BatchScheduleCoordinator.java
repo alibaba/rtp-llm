@@ -2,8 +2,6 @@ package org.flexlb.service;
 
 import java.net.URI;
 
-import lombok.AllArgsConstructor;
-import lombok.Getter;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
@@ -20,25 +18,12 @@ import reactor.core.publisher.Mono;
  * of whether the caller runs on the master itself or on a slave that must
  * forward to the elected master.
  *
- * <p>Callers receive an {@link Outcome} carrying the response and its origin
- * ({@link Source#LOCAL} or {@link Source#FORWARDED}). Transport failures
- * (master address unknown, network error talking to master) are signalled as
- * {@link BatchScheduleTransportException}; business failures from the master
- * are returned as a normal {@code Outcome} with {@code response.success=false}.
+ * <p>Transport failures (master address unknown, network error talking to master) are
+ * signalled as {@link BatchScheduleTransportException}; business failures from the master
+ * are returned as a normal response with {@code success=false}.
  */
 @Component
 public class BatchScheduleCoordinator {
-
-    public enum Source {
-        LOCAL, FORWARDED
-    }
-
-    @Getter
-    @AllArgsConstructor
-    public static class Outcome {
-        private final BatchScheduleResponse response;
-        private final Source source;
-    }
 
     private final RouteService routeService;
     private final LBStatusConsistencyService consistency;
@@ -55,18 +40,15 @@ public class BatchScheduleCoordinator {
         this.engineHealthReporter = engineHealthReporter;
     }
 
-    public Mono<Outcome> schedule(BatchScheduleRequest request) {
+    public Mono<BatchScheduleResponse> schedule(BatchScheduleRequest request) {
         if (consistency.isNeedConsistency() && !consistency.isMaster()) {
             return forwardToMaster(request);
         }
         return routeService.batchSchedule(request)
-                .map(response -> {
-                    response.setRealMasterHost(consistency.getMasterHostIpPort());
-                    return new Outcome(response, Source.LOCAL);
-                });
+                .doOnNext(response -> response.setRealMasterHost(consistency.getMasterHostIpPort()));
     }
 
-    private Mono<Outcome> forwardToMaster(BatchScheduleRequest request) {
+    private Mono<BatchScheduleResponse> forwardToMaster(BatchScheduleRequest request) {
         String master = consistency.getMasterHostIpPort();
         if (master == null) {
             Logger.error("[BatchSchedule] Master unreachable");
@@ -79,7 +61,6 @@ public class BatchScheduleCoordinator {
         return httpNettyService.request(request, uri, "/rtp_llm/batch_schedule", BatchScheduleResponse.class)
                 .doOnNext(response -> engineHealthReporter.reportForwardToMasterResult(
                         uri.getHost(), String.valueOf(response.getCode())))
-                .map(response -> new Outcome(response, Source.FORWARDED))
                 .onErrorResume(e -> {
                     if (e instanceof BatchScheduleTransportException) {
                         return Mono.error(e);

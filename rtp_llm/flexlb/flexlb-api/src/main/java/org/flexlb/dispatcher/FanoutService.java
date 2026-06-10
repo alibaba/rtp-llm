@@ -4,8 +4,6 @@ import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
 import com.alibaba.fastjson2.JSONWriter;
 import lombok.RequiredArgsConstructor;
-import org.flexlb.dispatcher.FeClient;
-import org.flexlb.dispatcher.FePool;
 import org.flexlb.util.Logger;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -29,17 +27,18 @@ import java.util.List;
 @RequiredArgsConstructor
 public class FanoutService {
 
+    private static final JSONWriter.Feature[] WRITE_NULLS = { JSONWriter.Feature.WriteNulls };
+    private static final JSONWriter.Feature[] NO_FEATURES = {};
+
     private final FeClient feClient;
     private final FePool fePool;
 
     public Mono<List<SubBatchResult>> dispatchChunks(String fePath,
-                                                              List<JSONObject> chunkBodies,
-                                                              BatchEndpointSpec spec) {
+                                                     List<JSONObject> chunkBodies,
+                                                     BatchEndpointSpec spec) {
         List<Mono<SubBatchResult>> calls = new ArrayList<>(chunkBodies.size());
         int start = 0;
-        JSONWriter.Feature[] features = spec.isFanoutWriteNulls()
-                ? new JSONWriter.Feature[] { JSONWriter.Feature.WriteNulls }
-                : new JSONWriter.Feature[0];
+        JSONWriter.Feature[] features = spec.isFanoutWriteNulls() ? WRITE_NULLS : NO_FEATURES;
         for (JSONObject body : chunkBodies) {
             int chunkSize = body.getJSONArray(spec.getRequestArrayField()).size();
             int startIndex = start;
@@ -50,25 +49,20 @@ public class FanoutService {
                                     JSON.parseObject(bytes), chunkSize, startIndex))
                             .onErrorResume(e -> {
                                 Logger.warn("FE chunk failed: url={}, path={}, size={}, err={}",
-                                        feUrl, fePath, chunkSize, briefReason(e));
+                                        feUrl, fePath, chunkSize, DispatcherResponses.briefReason(e));
                                 return Mono.just(SubBatchResult.failed(
-                                        chunkSize, startIndex, briefReason(e)));
+                                        chunkSize, startIndex, DispatcherResponses.briefReason(e)));
                             }))
                     .onErrorResume(e -> {
                         Logger.warn("FE pick failed for chunk size={}, err={}",
-                                chunkSize, briefReason(e));
+                                chunkSize, DispatcherResponses.briefReason(e));
                         return Mono.just(SubBatchResult.failed(
-                                chunkSize, startIndex, briefReason(e)));
+                                chunkSize, startIndex, DispatcherResponses.briefReason(e)));
                     }));
             start += chunkSize;
         }
         return Flux.mergeSequential(Flux.fromIterable(calls))
                 .collectList()
                 .publishOn(Schedulers.parallel());
-    }
-
-    private static String briefReason(Throwable e) {
-        String m = e.getClass().getSimpleName();
-        return e.getMessage() == null ? m : m + ": " + e.getMessage();
     }
 }

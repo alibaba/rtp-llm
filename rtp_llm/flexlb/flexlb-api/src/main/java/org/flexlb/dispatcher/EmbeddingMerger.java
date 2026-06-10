@@ -13,8 +13,6 @@ import java.util.List;
  * in the merged array and sums {@code usage.prompt_tokens} / {@code usage.total_tokens} across
  * all successful sub-bodies. Failed sub-batches contribute zero to {@code usage}; their
  * pre-assigned absolute indices are preserved.
- *
- * <p>Mirror of {@code EmbeddingPostMerger} on the Jackson side.
  */
 public final class EmbeddingMerger implements BatchEndpointSpec.PostMerger {
 

@@ -13,9 +13,6 @@ import java.util.List;
  * {@code spec.postMerger} for cross-chunk aggregation. Failed sub-batches are padded
  * item-by-item via {@code spec.failedItemFactory}, and an {@code _partial_failure} object
  * is appended when any items failed.
- *
- * <p>Type-for-type mirror of {@code PartialFailureMerger} on the Jackson side — behavior is
- * intentionally identical so the equivalence test holds.
  */
 public final class ResponseMerger {
 
@@ -42,7 +39,11 @@ public final class ResponseMerger {
         for (SubBatchResult s : subs) {
             totalItems += s.chunkSize();
             if (envelope == null && wellFormed(s, spec)) {
-                envelope = BatchBodyParser.deepCopy(s.body());
+                // Top-level copy only: the template's fields (including the array slot we
+                // overwrite next) land on a private map, while nested values stay shared with
+                // the sub-body — which is dead after merge, so no isolation is lost and the
+                // largest object on the merge path is never serialized+reparsed.
+                envelope = new JSONObject(s.body());
                 envelope.put(spec.getResponseArrayField(), new JSONArray());
             }
         }

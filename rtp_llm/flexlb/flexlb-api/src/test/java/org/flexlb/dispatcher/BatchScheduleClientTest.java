@@ -26,9 +26,7 @@ class BatchScheduleClientTest {
         List<BatchScheduleTarget> targets = List.of(
                 new BatchScheduleTarget("10.0.0.1", 23840, 23841),
                 new BatchScheduleTarget("10.0.0.2", 23840, 23841));
-        when(coordinator.schedule(any())).thenReturn(Mono.just(
-                new BatchScheduleCoordinator.Outcome(BatchScheduleResponse.success(targets),
-                        BatchScheduleCoordinator.Source.LOCAL)));
+        when(coordinator.schedule(any())).thenReturn(Mono.just(BatchScheduleResponse.success(targets)));
 
         BatchScheduleClient client = new BatchScheduleClient(coordinator);
 
@@ -50,9 +48,7 @@ class BatchScheduleClientTest {
     void businessFailureCollapsesToEmptyList() {
         BatchScheduleCoordinator coordinator = mock(BatchScheduleCoordinator.class);
         when(coordinator.schedule(any())).thenReturn(Mono.just(
-                new BatchScheduleCoordinator.Outcome(
-                        BatchScheduleResponse.error(StrategyErrorType.NO_AVAILABLE_WORKER, "no BE"),
-                        BatchScheduleCoordinator.Source.LOCAL)));
+                BatchScheduleResponse.error(StrategyErrorType.NO_AVAILABLE_WORKER, "no BE")));
 
         BatchScheduleClient client = new BatchScheduleClient(coordinator);
 
@@ -81,8 +77,7 @@ class BatchScheduleClientTest {
         BatchScheduleResponse resp = new BatchScheduleResponse();
         resp.setSuccess(true);
         // serverStatus left null — coordinator returned success but no targets
-        when(coordinator.schedule(any())).thenReturn(Mono.just(
-                new BatchScheduleCoordinator.Outcome(resp, BatchScheduleCoordinator.Source.LOCAL)));
+        when(coordinator.schedule(any())).thenReturn(Mono.just(resp));
 
         BatchScheduleClient client = new BatchScheduleClient(coordinator);
 

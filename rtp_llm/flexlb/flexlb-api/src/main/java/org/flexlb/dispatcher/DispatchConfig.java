@@ -82,8 +82,4 @@ public class DispatchConfig {
 
     /** Parsed sub-batch spec; populated by {@link DispatcherConfiguration} during loading. */
     private transient SubBatchSpec subBatchSpec;
-
-    public SubBatchSpec subBatchSpec() {
-        return subBatchSpec;
-    }
 }

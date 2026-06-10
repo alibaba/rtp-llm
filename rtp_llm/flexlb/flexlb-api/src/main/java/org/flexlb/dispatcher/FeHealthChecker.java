@@ -51,14 +51,9 @@ public class FeHealthChecker {
     public FeHealthChecker(DispatcherFePoolRefresher refresher,
                            @Qualifier("dispatcherPassthroughWebClient") WebClient webClient,
                            DispatchConfig cfg) {
-        String probePath = cfg.getProbePath();
-        if (probePath == null || probePath.isBlank()) {
-            throw new IllegalArgumentException(
-                    "probePath must not be blank — pass /frontend_health, /health, etc.");
-        }
         this.urlSupplier = refresher.source();
         this.webClient = webClient;
-        this.probePath = probePath;
+        this.probePath = cfg.getProbePath();
     }
 
     /**

@@ -57,6 +57,12 @@ public class FlexlbConfig {
     private LoadBalanceStrategyEnum batchLoadBalanceStrategy = LoadBalanceStrategyEnum.ROUND_ROBIN;
 
     /**
+     * Upper bound accepted for {@code batch_count} on {@code /batch_schedule}. Like every other
+     * field, overridable via the {@code BATCH_SCHEDULE_MAX_COUNT} env var.
+     */
+    private int batchScheduleMaxCount = 1000;
+
+    /**
      * Engine type of the workers behind this instance. Default {@link EngineType#LLM}
      * (existing behavior: gRPC liveness probing, targets carry grpc_port). Set
      * {@link EngineType#EMBEDDING} for embedding/BERT services: liveness trusts the
@@ -160,17 +166,11 @@ public class FlexlbConfig {
     private int nettyWorkerThreadMultiplier = 2;
 
     /**
-     * Get the {@code /batch_schedule} load balancing strategy for a role. Defaults to
+     * The {@code /batch_schedule} load balancing strategy. Never null — falls back to
      * {@link LoadBalanceStrategyEnum#ROUND_ROBIN} so the batch path works out of the box
      * regardless of how {@link #getStrategyForRoleType} is configured.
-     *
-     * @param roleType Role type
-     * @return Load balancing strategy to use for this role on the batch path
      */
-    public LoadBalanceStrategyEnum getBatchStrategyForRoleType(RoleType roleType) {
-        // Per-role override hook — currently a single global field; extend with per-role fields
-        // (e.g. decodeBatchLoadBalanceStrategy) if/when a future batch-capable strategy makes
-        // role-specific tuning meaningful.
+    public LoadBalanceStrategyEnum getBatchLoadBalanceStrategy() {
         return batchLoadBalanceStrategy != null ? batchLoadBalanceStrategy : ROUND_ROBIN;
     }
 

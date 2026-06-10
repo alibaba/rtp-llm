@@ -88,12 +88,13 @@ class DefaultRouterTest {
             }
             return LoadBalanceStrategyEnum.SHORTEST_TTFT;
         });
-        // batchStrategy is decoupled from regular strategy: defaults to ROUND_ROBIN per role.
-        // mockStaticLoadBalanceStrategyFactory below pre-populates the batch map with the same
-        // mocks as the regular map so tests can override per-role with replaceBatchLoadBalancer
-        // when they need a batch-capable scripted impl.
-        lenient().when(loadBalanceConfig.getBatchStrategyForRoleType(any(RoleType.class)))
+        // batchStrategy is decoupled from regular strategy: defaults to ROUND_ROBIN.
+        // mockStaticLoadBalanceStrategyFactory below resets the batch balancer to a plain
+        // (non-batch-capable) mock; tests that exercise the batch path swap in a scripted
+        // batch-capable impl via replaceBatchLoadBalancer.
+        lenient().when(loadBalanceConfig.getBatchLoadBalanceStrategy())
                 .thenReturn(LoadBalanceStrategyEnum.ROUND_ROBIN);
+        lenient().when(loadBalanceConfig.getBatchScheduleMaxCount()).thenReturn(1000);
 
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, prefillLoadBalancer);
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, decodeLoadBalancer);
@@ -139,16 +140,10 @@ class DefaultRouterTest {
             loadBalancerMap.put(RoleType.VIT, vitLoadBalancer);
             loadBalancerMap.put(RoleType.PDFUSION, fusionLoadBalancer);
 
-            // Mirror into the batch map so tests start from a known state. Tests that exercise
-            // the batch path with a scripted batch-capable LB call replaceBatchLoadBalancer.
-            Field batchLoadBalancerMapField = DefaultRouter.class.getDeclaredField("batchLoadBalancerMap");
-            batchLoadBalancerMapField.setAccessible(true);
-            @SuppressWarnings("unchecked")
-            Map<RoleType, LoadBalancer> batchMap = (Map<RoleType, LoadBalancer>) batchLoadBalancerMapField.get(defaultRouter);
-            batchMap.put(RoleType.PREFILL, prefillLoadBalancer);
-            batchMap.put(RoleType.DECODE, decodeLoadBalancer);
-            batchMap.put(RoleType.VIT, vitLoadBalancer);
-            batchMap.put(RoleType.PDFUSION, fusionLoadBalancer);
+            // Reset the batch balancer to a plain mock so tests start from a known state.
+            // Tests that exercise the batch path with a scripted batch-capable LB call
+            // replaceBatchLoadBalancer.
+            replaceBatchLoadBalancer(fusionLoadBalancer);
         } catch (Exception e) {
             fail("Failed to mock LoadBalanceStrategyFactory: " + e.getMessage());
         }
@@ -277,7 +272,7 @@ class DefaultRouterTest {
                 target("192.168.1.10", 8080),
                 target("192.168.1.11", 8080)
         ));
-        replaceBatchLoadBalancer(RoleType.PDFUSION, scripted);
+        replaceBatchLoadBalancer(scripted);
 
         BatchScheduleRequest batchRequest = new BatchScheduleRequest();
         batchRequest.setBatchCount(2);
@@ -338,7 +333,7 @@ class DefaultRouterTest {
                 target("192.168.1.10", 8080),
                 target("192.168.1.11", 8080)
         ));
-        replaceBatchLoadBalancer(RoleType.PDFUSION, scripted);
+        replaceBatchLoadBalancer(scripted);
 
         BatchScheduleRequest batchRequest = new BatchScheduleRequest();
         batchRequest.setBatchCount(2);
@@ -351,7 +346,7 @@ class DefaultRouterTest {
         assertEquals(2, response.getServerStatus().size());
         // Confirm the scripted batch LB was actually consulted, not the regular map's mock.
         assertEquals(1, scripted.selectBatchCalls,
-                "batch_schedule must query batchLoadBalancerMap, not loadBalancerMap");
+                "batch_schedule must query batchLoadBalancer, not loadBalancerMap");
     }
 
     @Test
@@ -418,7 +413,7 @@ class DefaultRouterTest {
                 target("192.168.1.10", 8080),
                 target("192.168.1.11", 8080)
         ));
-        replaceBatchLoadBalancer(RoleType.PDFUSION, scripted);
+        replaceBatchLoadBalancer(scripted);
 
         BatchScheduleRequest batchRequest = new BatchScheduleRequest();
         batchRequest.setBatchCount(2);
@@ -446,7 +441,7 @@ class DefaultRouterTest {
                 target("192.168.1.10", 8080),
                 target("192.168.1.11", 8080)
         ));
-        replaceBatchLoadBalancer(RoleType.PDFUSION, scripted);
+        replaceBatchLoadBalancer(scripted);
 
         BatchScheduleRequest batchRequest = new BatchScheduleRequest();
         batchRequest.setBatchCount(2);
@@ -507,7 +502,7 @@ class DefaultRouterTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.10:8080", dummy);
 
         ScriptedBatchLoadBalancer scripted = new ScriptedBatchLoadBalancer(List.of());
-        replaceBatchLoadBalancer(RoleType.PDFUSION, scripted);
+        replaceBatchLoadBalancer(scripted);
 
         BatchScheduleRequest batchRequest = new BatchScheduleRequest();
         batchRequest.setBatchCount(2);
@@ -829,17 +824,15 @@ class DefaultRouterTest {
     }
 
     /**
-     * Replace the batch-path LoadBalancer for a role. Mirrors {@link #replaceRoleLoadBalancer}
-     * but operates on the {@code batchLoadBalancerMap} that {@code /batch_schedule} consults
-     * — independent of the regular {@code loadBalancerMap} that {@code /schedule} uses.
+     * Replace the batch-path LoadBalancer. Mirrors {@link #replaceRoleLoadBalancer} but
+     * operates on the {@code batchLoadBalancer} that {@code /batch_schedule} consults —
+     * independent of the regular {@code loadBalancerMap} that {@code /schedule} uses.
      */
-    private void replaceBatchLoadBalancer(RoleType roleType, LoadBalancer loadBalancer) {
+    private void replaceBatchLoadBalancer(LoadBalancer loadBalancer) {
         try {
-            Field batchMapField = DefaultRouter.class.getDeclaredField("batchLoadBalancerMap");
-            batchMapField.setAccessible(true);
-            @SuppressWarnings("unchecked")
-            Map<RoleType, LoadBalancer> batchMap = (Map<RoleType, LoadBalancer>) batchMapField.get(defaultRouter);
-            batchMap.put(roleType, loadBalancer);
+            Field batchField = DefaultRouter.class.getDeclaredField("batchLoadBalancer");
+            batchField.setAccessible(true);
+            batchField.set(defaultRouter, loadBalancer);
         } catch (Exception e) {
             fail("Failed to replace batch load balancer: " + e.getMessage());
         }

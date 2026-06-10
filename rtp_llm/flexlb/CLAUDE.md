@@ -337,29 +337,30 @@ ZooKeeper connection configuration for distributed coordination.
 
 ### DISPATCH_CONFIG (optional, opt-in)
 
-When set with `enabled=true`, FlexLB serves `/dispatcher/<original_fe_path>` on its 7001 listener. Requests are matched against a hard-coded **batch endpoint registry** (see `BatchEndpointRegistry`); batch-shaped requests (whose registered array field is a list larger than `subBatchSize`) are split across the FE pool and merged; everything else (including small-batch requests) is passthrough-forwarded to one FE.
+A non-blank `fePoolServiceId` is the enable signal (there is no separate `enabled` flag): every dispatcher bean is gated on `dispatch.fe-pool-service-id`, which Spring's relaxed binding maps from the `DISPATCH_FE_POOL_SERVICE_ID` env. When enabled, FlexLB serves `/dispatcher/<original_fe_path>` on its 7001 listener. Requests are matched against the hard-coded **batch endpoint registry** (`BatchEndpointSpec.SPECS`); registered paths whose array field is present are split across the FE pool and merged; everything else is passthrough-forwarded to one FE.
 
 ```json
 {
-  "enabled": true,
   "fePoolServiceId": "rtp_llm.frontend.service",
-  "subBatchSize": 5,
-  "feRequestTimeoutMs": 3000,
-  "feConnectTimeoutMs": 2000,
-  "feResponseTimeoutMs": 5000,
-  "feMaxStreamDurationMs": 600000,
-  "feMaxConnections": 200,
-  "feMaxPendingAcquire": 1000,
-  "feMaxResponseBytes": 16777216
+  "subBatch": "count:5",
+  "batchTimeoutMs": 5000,
+  "probePath": "/frontend_health",
+  "preAssignBe": true
 }
 ```
 
-`feRequestTimeoutMs` is legacy and only feeds `ConnectionProvider.pendingAcquireTimeout`; per-call deadlines are governed by `feConnectTimeoutMs` / `feResponseTimeoutMs` / `feMaxStreamDurationMs`. Production configs typically still set it.
+- `subBatch`: chunk-splitting DSL — `count:N` (exactly N chunks, default), `size:N` (≤N items per chunk), bare integer = `size:N`.
+- `batchTimeoutMs`: per sub-call wait for FE response headers.
+- `probePath`: FE liveness probe path (`/frontend_health` for rtp_llm, `/health` for vLLM).
+- `preAssignBe`: BE pre-assignment toggle (see Known limits below).
+
+Loading order: defaults → `DISPATCH_CONFIG` JSON → per-field `DISPATCH_*` env overrides (e.g. `DISPATCH_BATCH_TIMEOUT_MS`, `DISPATCH_PROBE_PATH`), matching the `FLEXLB_CONFIG` contract. Connection-pool/timeout knobs that are never operator-tuned (connect timeout, max connections, pending acquire, stream duration cap, max response bytes) are constants in `DispatcherConfiguration` / `FeClient` / `PassthroughClient`.
 
 **Batch endpoint registry (built-in):**
 
 | Path under `/dispatcher/` | Request array field | Response array field | Failure shape | Cross-chunk aggregation |
 |---|---|---|---|---|
+| `/` | `prompt_batch` | `response_batch` | `null` | — |
 | `/batch_infer` | `prompt_batch` | `response_batch` | `null` | — |
 | `/v1/batch/chat/completions` | `requests` | `responses` | `{index, error: {code, message}}` | — |
 | `/v1/embeddings` | `input` (when list) | `data` | `{index, embedding: null, error: <reason>}` | `data[i].index` renumbered to absolute offset; `usage.{prompt_tokens, total_tokens}` summed across successful sub-bodies |
@@ -372,11 +373,11 @@ When set with `enabled=true`, FlexLB serves `/dispatcher/<original_fe_path>` on 
 
 **Migration:**
 - Pre-dispatcher clients calling `<fe>/batch_infer` keep working — they hit FE directly. To opt in, change the URL to `<master>:7001/dispatcher/batch_infer` (everything else stays the same; the registered field names match FE's existing wire format).
-- Streaming endpoints (e.g. `/v1/chat/completions` with `stream=true`) work through the passthrough as long as `feMaxStreamDurationMs` exceeds the longest expected response time.
+- Streaming endpoints (e.g. `/v1/chat/completions` with `stream=true`) work through the passthrough as long as `PassthroughClient.STREAM_TIMEOUT_MS` (10 min) exceeds the longest expected response time.
 - Direct-to-FE remains the bypass for any client that can't change URLs.
 
 **Known limits (deferred):**
-- Bare `POST /` is intentionally not in the registry: it triggers batch mode only when the body carries `prompt_batch` (same wire shape as `/batch_infer`), and the `prompt: [...]` variant has a known FE-side footgun. Such requests fall through to passthrough-forward to a single FE. Add `/` once it's decided whether to alias it to `/batch_infer` or leave it as passthrough.
+- Bare `POST /` aliases `/batch_infer`: it batches only when the body carries `prompt_batch` (rtp_llm FE historically exposes batch generation on the root path with the same wire shape). The `prompt: [...]` variant is NOT batched (known FE-side footgun) — such requests fall through to passthrough-forward to a single FE.
 - `request_id` set by `frontend_server.py` overwrites any upstream id — dispatcher to FE trace linkage is broken. Tracked in `project_frontend_request_id_overwrite.md`.
 - BE pre-assignment is enabled by default (`DISPATCH_PRE_ASSIGN_BE=true`): the dispatcher resolves N BE targets via master `/rtp_llm/batch_schedule` and stamps each chunk's `generate_config.role_addrs` with `{role, ip, http_port, grpc_port}` so FE skips its own master round-trip (existing FE path: `backend_rpc_server_visitor.route_ips` honors non-empty `role_addrs`). `/batch_schedule`'s strategy is decoupled from `/schedule`'s via `FlexlbConfig.batchLoadBalanceStrategy` (default `ROUND_ROBIN`). Failed pre-assigned BE targets still do not auto-failover at the dispatcher; FE handles dead-target fallback by re-invoking `/schedule`.
 - Embedding variants (`/v1/embeddings/{dense,sparse,colbert,similarity}`, `/v1/reranker`, `/v1/classifier`) — not in the registry yet; add one row each after verifying wire shape.

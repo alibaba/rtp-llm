@@ -8,7 +8,7 @@ import org.flexlb.dao.loadbalance.Response;
  * PV log data
  */
 @Data
-public class PvLogData {
+public class PvLogData implements PvRecord {
 
     private long requestId;
     private long seqLen;

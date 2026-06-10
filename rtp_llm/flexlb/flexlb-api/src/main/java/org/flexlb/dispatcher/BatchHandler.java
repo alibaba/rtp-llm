@@ -7,23 +7,22 @@ import org.flexlb.dao.pv.DispatchPvLogData;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.SignalType;
 
 import java.util.List;
 
 /**
- * Dispatcher batch handler. Reads each batch request body as raw bytes (no Jackson
- * round-trip), parses with fastjson2, splits the request array per {@link SubBatchSpec},
- * builds per-chunk bodies, stamps any pre-assigned BE targets, fans out via
- * {@link FanoutService}, and merges with {@link ResponseMerger}.
+ * Dispatcher batch handler. Reads each batch request body as raw bytes, parses with
+ * fastjson2, splits the request array per {@link SubBatchSpec}, builds per-chunk bodies,
+ * stamps any pre-assigned BE targets, fans out via {@link FanoutService}, and merges with
+ * {@link ResponseMerger}.
  *
- * <p>Behavior-equivalent to {@code GenericBatchHandler} on the Jackson side — same status
- * mapping (400 on missing/non-array field, 500 only when every sub-batch failed, 200 on
- * full or partial success), same pv.log shape, same partial-failure envelope.
+ * <p>Status mapping: 400 on missing/non-array field, 500 only when every sub-batch failed,
+ * 200 on full or partial success.
  *
  * <p>Single-element batches still fan out as one chunk so partial-failure semantics stay
  * uniform; router-level rejection of non-batch traffic happens upstream.
@@ -41,10 +40,10 @@ public class BatchHandler {
     private final boolean preAssignBe;
 
     public BatchHandler(FanoutService fanoutService,
-                                 DispatchConfig cfg,
-                                 BatchScheduleClient batchScheduleClient) {
+                        DispatchConfig cfg,
+                        BatchScheduleClient batchScheduleClient) {
         this.fanoutService = fanoutService;
-        this.subBatch = cfg.subBatchSpec();
+        this.subBatch = cfg.getSubBatchSpec();
         this.batchScheduleClient = batchScheduleClient;
         this.preAssignBe = cfg.isPreAssignBe();
     }
@@ -63,7 +62,7 @@ public class BatchHandler {
             if (arr.isEmpty()) {
                 JSONObject emptyEnvelope = new JSONObject();
                 emptyEnvelope.put(spec.getResponseArrayField(), new JSONArray());
-                return jsonBytes(200, BatchBodyParser.serialize(emptyEnvelope));
+                return DispatcherResponses.jsonBytes(200, BatchBodyParser.serialize(emptyEnvelope));
             }
             pv.setTotalItems(arr.size());
             List<JSONArray> chunks = BatchChunkAssembler.split(arr, subBatch);
@@ -80,25 +79,23 @@ public class BatchHandler {
                                     if (merged.allFailed()) {
                                         return errorResponse(merged);
                                     }
-                                    return jsonBytes(200, BatchBodyParser.serialize(merged.body()));
+                                    return DispatcherResponses.jsonBytes(
+                                            200, BatchBodyParser.serialize(merged.body()));
                                 });
                     });
         }).onErrorResume(e -> {
-            String errMsg = e.getClass().getSimpleName() + ": " + e.getMessage();
+            String errMsg = DispatcherResponses.briefReason(e);
             Logger.warn("dispatcher request failed: spec={}, err={}", spec.getPath(), errMsg);
             pv.setError(errMsg);
-            JSONObject err = new JSONObject();
-            err.put("error", "dispatch_failed");
-            err.put("message", String.valueOf(e.getMessage()));
-            return jsonBytes(500, BatchBodyParser.serialize(err));
+            return DispatcherResponses.error(500, "dispatch_failed", String.valueOf(e.getMessage()));
         }).doOnNext(resp -> pv.setHttpStatus(resp.statusCode().value()))
           .doFinally(signal -> finalizePvRecord(pv, signal));
     }
 
-    private void finalizePvRecord(DispatchPvLogData pv, reactor.core.publisher.SignalType signal) {
+    private void finalizePvRecord(DispatchPvLogData pv, SignalType signal) {
         int status = pv.getHttpStatus();
         String error = pv.getError();
-        if (signal == reactor.core.publisher.SignalType.CANCEL && status == 0) {
+        if (signal == SignalType.CANCEL && status == 0) {
             status = 499;
             error = error != null ? error : "client cancelled";
         }
@@ -106,15 +103,8 @@ public class BatchHandler {
         pv.emit(pvLogger);
     }
 
-    private static Mono<ServerResponse> jsonBytes(int status, byte[] body) {
-        return ServerResponse.status(status).contentType(MediaType.APPLICATION_JSON).bodyValue(body);
-    }
-
     private Mono<ServerResponse> badRequest(String message) {
-        JSONObject err = new JSONObject();
-        err.put("error", "invalid_batch_request");
-        err.put("message", message);
-        return jsonBytes(400, BatchBodyParser.serialize(err));
+        return DispatcherResponses.error(400, "invalid_batch_request", message);
     }
 
     private Mono<ServerResponse> errorResponse(ResponseMerger.MergedResponse merged) {
@@ -125,13 +115,10 @@ public class BatchHandler {
         JSONArray reasons = new JSONArray();
         merged.failedReasons().stream().distinct().forEach(reasons::add);
         body.put("failed_reasons", reasons);
-        return jsonBytes(500, BatchBodyParser.serialize(body));
+        return DispatcherResponses.jsonBytes(500, BatchBodyParser.serialize(body));
     }
 
     private Mono<List<BatchScheduleTarget>> resolvePreAssignedTargets(int chunkCount) {
-        if (!preAssignBe || batchScheduleClient == null) {
-            return Mono.just(List.of());
-        }
-        return batchScheduleClient.requestTargets(chunkCount);
+        return preAssignBe ? batchScheduleClient.requestTargets(chunkCount) : Mono.just(List.of());
     }
 }
