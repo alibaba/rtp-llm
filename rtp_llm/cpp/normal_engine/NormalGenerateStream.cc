@@ -174,6 +174,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
+    torch::Tensor all_hidden_states_cpu;
 
     // CompleteTokenIds has already applied this step, so currentBatchSize is the output row count.
     for (int i = 0; i < currentBatchSize(); i++) {
@@ -220,9 +221,19 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 generate_output.hidden_states = update_info.hidden_states.narrow(0, i, 1).cpu();
             }
         }
-        if (generate_input_->generate_config->return_all_hidden_states && update_info.all_hidden_states.defined()
-            && iter_count_ == 1) {
-            generate_output.all_hidden_states = update_info.all_hidden_states.cpu();
+        if (generate_input_->generate_config->return_all_hidden_states) {
+            const torch::Tensor* all_hidden_states = nullptr;
+            if (update_info.all_hidden_states.defined() && iter_count_ == 1) {
+                all_hidden_states = &update_info.all_hidden_states;
+            } else if (!isStreaming() && generate_output.finished && all_hidden_states_.defined()) {
+                all_hidden_states = &all_hidden_states_;
+            }
+            if (all_hidden_states != nullptr) {
+                if (!all_hidden_states_cpu.defined()) {
+                    all_hidden_states_cpu = all_hidden_states->cpu();
+                }
+                generate_output.all_hidden_states = all_hidden_states_cpu;
+            }
         }
         if (loss_.defined()) {
             RTP_LLM_CHECK_WITH_INFO(loss_index_ == inputLength() - 1,
@@ -320,6 +331,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     // TODO(wangyin.yx): check behaviour of update_info.hidden_states under mtp/eagle model
     if (needReturnHiddenStates() && update_info.all_hidden_states.defined()) {
         last_hidden_states_ = update_info.all_hidden_states;
+    }
+    if (generate_input_->generate_config->return_all_hidden_states && update_info.all_hidden_states.defined()
+        && !all_hidden_states_.defined()) {
+        all_hidden_states_ = update_info.all_hidden_states;
     }
 
     if (calculateSoftmaxProbs() && update_info.softmax_probs.defined()) {
