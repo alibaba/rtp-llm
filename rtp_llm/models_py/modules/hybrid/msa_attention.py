@@ -449,8 +449,17 @@ class MSAAttention(nn.Module):
         hidden_states: torch.Tensor,
         attn_inputs: PyAttentionInputs,
         kv_cache: LayerKVCache,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """CP-aware prefill: local Q attends to all-gathered full-sequence KV."""
+        """CP-aware prefill: local Q attends to all-gathered full-sequence KV.
+
+        When ``x_fp8`` / ``x_scale`` are supplied (the upstream fused
+        norm+quant path in GenericMoeDecoderLayer), feed them straight into
+        ``qkv_proj`` to skip the per-token-group quant that the projection
+        would otherwise run on its bf16 input. ``hidden_states`` still drives
+        the index-branch F.linear paths (which are bf16 GEMMs).
+        """
         from rtp_llm.models_py.triton_kernels.sparse_msa.minimax_sparse import (
             minimax_sparse_prefill,
         )
@@ -459,7 +468,10 @@ class MSAAttention(nn.Module):
         device = hidden_states.device
         local_tokens = hidden_states.shape[0]
 
-        qkv = self.qkv_proj(hidden_states)
+        if x_fp8 is not None and x_scale is not None:
+            qkv = self.qkv_proj(x_fp8, input_scales=x_scale)
+        else:
+            qkv = self.qkv_proj(hidden_states)
         if self.qk_fuse_norm is not None:
             qkv = self.qk_fuse_norm(qkv)
         q, k, v = torch.split(qkv, [self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -620,7 +632,10 @@ class MSAAttention(nn.Module):
             and attn_inputs.is_prefill
             and attn_inputs.context_parallel_info is not None
         ):
-            return self._forward_cp_prefill(hidden_states, attn_inputs, kv_cache)
+            return self._forward_cp_prefill(
+                hidden_states, attn_inputs, kv_cache,
+                x_fp8=x_fp8, x_scale=x_scale,
+            )
 
         input_shape = hidden_states.shape[:-1]
         total_tokens = hidden_states.shape[0]
