@@ -5,7 +5,9 @@ import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.StrategyConfigs;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -45,20 +47,21 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     private final EngineHealthReporter engineHealthReporter;
     private final CacheAwareService cacheAwareService;
     private final ResourceMeasureFactory resourceMeasureFactory;
+    private final ConfigService configService;
 
-    private static final int MIN_CANDIDATE_COUNT = 1;
-    private static final double CANDIDATE_PERCENTAGE = 0.3;
     private static final double TTFT_THRESHOLD_PERCENTAGE = 0.1;
     private static final double STDDEV_THRESHOLD_FACTOR = 0.5;
 
     public ShortestTTFTStrategy(EngineWorkerStatus engineWorkerStatus,
                                 EngineHealthReporter engineHealthReporter,
                                 CacheAwareService cacheAwareService,
-                                ResourceMeasureFactory resourceMeasureFactory) {
+                                ResourceMeasureFactory resourceMeasureFactory,
+                                ConfigService configService) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.engineHealthReporter = engineHealthReporter;
         this.cacheAwareService = cacheAwareService;
         this.resourceMeasureFactory = resourceMeasureFactory;
+        this.configService = configService;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, this);
     }
 
@@ -125,7 +128,10 @@ public class ShortestTTFTStrategy implements LoadBalancer {
 
         List<ScoredWorker> scoredWorkers = scoreWorkers(availableWorkers, cacheMatchResults, seqLen);
 
-        ScoredWorker bestWorker = selectBestWorker(scoredWorkers);
+        StrategyConfigs.CandidatePoolConfig candidatePoolConfig = configService.getStrategyConfigs()
+                .getShortestTtft()
+                .getCandidatePool();
+        ScoredWorker bestWorker = selectBestWorker(scoredWorkers, candidatePoolConfig);
         if (bestWorker == null) {
             Logger.warn("Failed to find best worker for role: {}", roleType);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
@@ -279,22 +285,29 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     /**
      * Select best worker considering TTFT and scheduling fairness
      *
-     * <p>Algorithm: 1. Sort workers by TTFT 2. Select top 30% as candidates (at least 1) 3. Among candidates with similar TTFT, prioritize recently unscheduled workers
+     * <p>Algorithm: 1. Sort workers by TTFT 2. Select strategy-configured candidates 3. Among candidates with similar TTFT, prioritize recently unscheduled workers
      *
      * @param scoredWorkers List of scored workers
+     * @param candidatePoolConfig candidate pool config
      * @return Best worker
      */
-    private ScoredWorker selectBestWorker(List<ScoredWorker> scoredWorkers) {
+    private ScoredWorker selectBestWorker(List<ScoredWorker> scoredWorkers,
+                                          StrategyConfigs.CandidatePoolConfig candidatePoolConfig) {
         if (scoredWorkers.isEmpty()) {
             return null;
         }
 
         List<ScoredWorker> sortedWorkers = sortByTTFT(scoredWorkers);
-        List<ScoredWorker> candidates = selectTopCandidates(sortedWorkers);
+        List<ScoredWorker> candidates = selectTopCandidates(sortedWorkers, candidatePoolConfig);
         Logger.debug("Select best worker, sortedWorkers size: {}, candidates size: {}", sortedWorkers.size(), candidates.size());
 
         if (candidates.isEmpty()) {
             return null;
+        }
+
+        if (candidates.size() == 1) {
+            Logger.debug("Select best worker with single candidate shortcut, sortedWorkers size: {}", sortedWorkers.size());
+            return candidates.getFirst();
         }
 
         long minTTFT = candidates.getFirst().ttft();
@@ -327,8 +340,9 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param sortedWorkers Sorted worker list
      * @return Candidate worker list
      */
-    private List<ScoredWorker> selectTopCandidates(List<ScoredWorker> sortedWorkers) {
-        int candidateCount = Math.max(MIN_CANDIDATE_COUNT, (int) (sortedWorkers.size() * CANDIDATE_PERCENTAGE));
+    private List<ScoredWorker> selectTopCandidates(List<ScoredWorker> sortedWorkers,
+                                                   StrategyConfigs.CandidatePoolConfig candidatePoolConfig) {
+        int candidateCount = candidatePoolConfig.resolveCandidateCount(sortedWorkers.size());
         return sortedWorkers.stream().limit(candidateCount).toList();
     }
 

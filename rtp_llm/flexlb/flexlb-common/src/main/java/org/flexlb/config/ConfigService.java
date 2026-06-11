@@ -19,10 +19,12 @@ import java.util.Map;
 public class ConfigService {
 
     private static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
+    private static final String STRATEGY_CONFIGS_ENV = "STRATEGY_CONFIGS";
     private static final String TRAFFIC_POLICY_CONFIG_ENV = "TRAFFIC_POLICY_CONFIG";
     private static final String TRAFFIC_POLICY_CONFIG_FILE_ENV = "TRAFFIC_POLICY_CONFIG_FILE";
 
     private final FlexlbConfig flexlbConfig;
+    private final StrategyConfigs strategyConfigs;
 
     public ConfigService() {
         this(System.getenv());
@@ -43,10 +45,31 @@ public class ConfigService {
         applyTrafficPolicyOverride(config, environment);
 
         this.flexlbConfig = config;
+        this.strategyConfigs = loadStrategyConfigs(environment);
     }
 
     public FlexlbConfig loadBalanceConfig() {
         return flexlbConfig;
+    }
+
+    private StrategyConfigs loadStrategyConfigs(Map<String, String> environment) {
+        String strategyConfigsStr = environment.get(STRATEGY_CONFIGS_ENV);
+
+        StrategyConfigs configs;
+        if (StringUtils.isNotBlank(strategyConfigsStr)) {
+            log.warn("STRATEGY_CONFIGS = {}", strategyConfigsStr);
+            configs = JsonUtils.toObjectOrNull(strategyConfigsStr, StrategyConfigs.class);
+            if (configs == null) {
+                log.warn("Failed to parse STRATEGY_CONFIGS, use default strategy configs");
+                configs = new StrategyConfigs();
+            }
+        } else {
+            log.debug("STRATEGY_CONFIGS is not set, use default strategy configs");
+            configs = new StrategyConfigs();
+        }
+
+        configs.normalize();
+        return configs;
     }
 
     public synchronized void updateTrafficPolicy(TrafficPolicyConfig trafficPolicy) {
