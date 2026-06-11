@@ -184,6 +184,7 @@ py_library(
         "ops/**/*.py",
     ]),
     deps = [
+        "//:flash_attn_interface_shim",
         ":torch",
         ":utils",
     ],

@@ -158,8 +158,14 @@ def get_fmha_impl(
         if _is_fmha_impl_disabled(impl_class_name, fmha_config):
             continue
 
-        # Check support before creating instance
-        if not impl.support(attn_configs, attn_inputs):
+        # Check support before creating instance.  support() may itself probe
+        # native runners that throw on unsupported archs (e.g. TRT fmha on
+        # SM 10.3) — treat any exception as "not supported" and fall through.
+        try:
+            if not impl.support(attn_configs, attn_inputs):
+                continue
+        except Exception as e:
+            logging.warning(f"{impl_class_name}.support() raised, skipping: {e}")
             continue
 
         # Check if implementation supports parallelism config

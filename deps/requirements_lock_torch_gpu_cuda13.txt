@@ -2901,8 +2901,8 @@ rich==14.1.0 \
     --hash=sha256:536f5f1785986d6dbdea3c75205c473f970777b4a0d6c6dd1b696aa05a3fa04f \
     --hash=sha256:e497a48b844b0320d45007cdebfeaeed8db2a4f4bcf49f15e455cfc4af11eaa8
     # via typer
-rtp-kernel @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/rtp_kernel-0.1.0%2Bcu13.4a1a7e3-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:69992ef98016b1f176a092741841b79c9eba540c819fcaec663ad7550eb6aa52
+rtp-kernel @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/serina.wzq/whl/06_11/rtp_kernel-0.1.0-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:bd8a8672e13b98afcc3632d2cc2658d766c18f9b60b065c363a104bdc32e0c9f
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
 safetensors==0.7.0 \
     --hash=sha256:0071bffba4150c2f46cae1432d31995d77acfd9f8db598b5d1a2ce67e8440ad2 \

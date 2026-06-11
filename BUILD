@@ -190,6 +190,12 @@ py_runtime(
     visibility = ["//visibility:public"],
 )
 
+py_library(
+    name = "flash_attn_interface_shim",
+    srcs = ["flash_attn_interface.py"],
+    visibility = ["//visibility:public"],
+)
+
 refresh_compile_commands(
     name = "refresh_compdb",
     targets = {
