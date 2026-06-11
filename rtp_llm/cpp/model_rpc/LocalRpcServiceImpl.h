@@ -97,6 +97,20 @@ public:
         return local_server_->SetRestart(context, request, response);
     }
 
+    ::grpc::Status
+    FreezeServing(::grpc::ServerContext* context, const FreezeRequestPB* request, EmptyPB* response) override {
+        return local_server_->FreezeServing(context, request, response);
+    }
+
+    ::grpc::Status ResumeServing(::grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) override {
+        return local_server_->ResumeServing(context, request, response);
+    }
+
+    ::grpc::Status
+    GetFreezeStatus(::grpc::ServerContext* context, const EmptyPB* request, FreezeStatusResponsePB* response) override {
+        return local_server_->GetFreezeStatus(context, request, response);
+    }
+
     WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version) {
         return local_server_->getWorkerStatusInfo(latest_finished_version);
     }

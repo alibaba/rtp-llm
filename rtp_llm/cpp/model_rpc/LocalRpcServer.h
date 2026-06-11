@@ -8,6 +8,9 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/AtomicUtil.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
+#include "rtp_llm/cpp/engine_base/freeze/AdmissionGate.h"
+#include "rtp_llm/cpp/engine_base/freeze/DrainManager.h"
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WorkerStatusInfo.h"
@@ -58,6 +61,13 @@ public:
 
     grpc::Status SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);
 
+    grpc::Status FreezeServing(grpc::ServerContext* context, const FreezeRequestPB* request, EmptyPB* response);
+
+    grpc::Status ResumeServing(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response);
+
+    grpc::Status
+    GetFreezeStatus(grpc::ServerContext* context, const EmptyPB* request, FreezeStatusResponsePB* response);
+
     grpc::Status SetLogLevel(grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response);
 
     grpc::Status StartProfile(grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response);
@@ -102,6 +112,16 @@ public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
 
 protected:
+    // M4 unified admission gate (constraint C5): every inference entry calls
+    // this first; non-RUNNING states get a retryable ENGINE_UNAVAILABLE.
+    grpc::Status checkAdmission() const {
+        return admission_gate_ ? admission_gate_->check() : grpc::Status::OK;
+    }
+
+    // Wire the freeze/resume FreezeHooks (M3 drain counters, M5 KV memory,
+    // M6 weights, engine quiesce) into engine_->freezeController().
+    void installFreezeHooks();
+
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
     grpc::Status pollStreamOutput(grpc::ServerContext*             context,
                                   const std::string&               request_key,
@@ -117,6 +137,9 @@ protected:
 
 protected:
     std::shared_ptr<EngineBase>           engine_;
+    std::shared_ptr<AdmissionGate>        admission_gate_;
+    std::shared_ptr<DrainManager>         drain_manager_;
+    std::shared_ptr<TmsBackend>           tms_backend_;
     std::shared_ptr<MultimodalProcessor>  mm_processor_;
     EngineInitParams                      maga_init_params_;
     ProposeModelEngineInitParams*         propose_maga_init_params_;

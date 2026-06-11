@@ -170,6 +170,36 @@ cc_test(
     exec_properties = {'gpu':'H20'},
 )
 
+# CPU-only: uses a mock PhysicalMemoryBackend, no CUDA/torch dependency.
+cc_test(
+    name = "kv_cache_physical_memory_controller_test",
+    srcs = [
+        "KVCachePhysicalMemoryControllerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:kv_cache_physical_memory_controller",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
+cc_test(
+    name = "kv_cache_metadata_reset_test",
+    srcs = [
+        "KVCacheMetadataResetTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
 cc_test(
     name = "kv_cache_resource_test",
     srcs = [

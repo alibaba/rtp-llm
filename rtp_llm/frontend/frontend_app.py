@@ -287,6 +287,43 @@ class FrontendApp(object):
             result = await self.grpc_client.post_request("set_log_level", req)
             return result
 
+        # freeze/resume lifecycle admin proxy (design doc M2)
+        # request format (all fields optional):
+        #   {"mode": "graceful"|"force", "drain_timeout_ms": 30000, "reason": "..."}
+        @app.post("/admin/freeze")
+        async def admin_freeze(req: Optional[Dict[Any, Any]] = Body(None)):
+            req = req or {}
+            mode = req.get("mode", "graceful")
+            if mode not in ("graceful", "force"):
+                return ORJSONResponse(
+                    status_code=400,
+                    content={"error": 'freeze mode must be "graceful" or "force"'},
+                )
+            response = await self.grpc_client.post_request("freeze", req)
+            if "error" in response:
+                status_code = (
+                    409 if response.get("grpc_status") == "FAILED_PRECONDITION" else 500
+                )
+                return ORJSONResponse(status_code=status_code, content=response)
+            return response
+
+        @app.post("/admin/resume")
+        async def admin_resume(req: Optional[Dict[Any, Any]] = Body(None)):
+            response = await self.grpc_client.post_request("resume", req or {})
+            if "error" in response:
+                status_code = (
+                    409 if response.get("grpc_status") == "FAILED_PRECONDITION" else 500
+                )
+                return ORJSONResponse(status_code=status_code, content=response)
+            return response
+
+        @app.get("/admin/freeze_status")
+        async def admin_freeze_status():
+            response = await self.grpc_client.post_request("freeze_status", {})
+            if "error" in response:
+                return ORJSONResponse(status_code=500, content=response)
+            return response
+
         # request format: '{"trace_name":"normal_profiler", "start_step": 0, "num_steps": 3, "enable_all_rank": false}'
         @app.post("/rtp_llm/start_profile")
         @app.post("/start_profile")

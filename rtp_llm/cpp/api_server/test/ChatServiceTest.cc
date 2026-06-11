@@ -107,6 +107,24 @@ protected:
     std::vector<int>                                     data_;
 };
 
+TEST_F(ChatServiceTest, ChatCompletions_FrozenRejectsBeforeEnqueue) {
+    ASSERT_TRUE(mock_engine_->freezeController().freeze(FreezeOptions()).ok);
+    http_server::HttpRequest request;
+
+    EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([](const std::string& data) {
+        EXPECT_THAT(data, HasSubstr(R"("error_code":8600)"));
+        EXPECT_THAT(data, HasSubstr(R"("state":"FROZEN")"));
+        return true;
+    }));
+
+    chat_service_->chatCompletions(writer_, request, 1);
+
+    EXPECT_EQ(writer_->_type, http_server::HttpResponseWriter::WriteType::Normal);
+    EXPECT_EQ(writer_->_headers.at("Content-Type"), "application/json");
+    EXPECT_EQ(writer_->_statusCode, 503);
+    EXPECT_EQ(writer_->_statusMessage, "Service Unavailable");
+}
+
 TEST_F(ChatServiceTest, ChatCompletions_ThrowException) {
     http_server::HttpRequest request;
     const std::string        body = R"del({

@@ -12,6 +12,7 @@ import torch
 from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.tensor_source import TensorSource
+from rtp_llm.model_loader.weight_memory_saver import weights_region
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, WeightStyle, identity, sp_id
 
@@ -161,30 +162,34 @@ class WeightModule(ABC):
         device: str,
         load_config: LoadConfig,
     ):
-        raw_tensors = self._load_raw_tensor(
-            tensor_source, layer_id, device, load_config
-        )
-
-        if load_config.merge_lora:
-            merged_tensors = self._merge_lora(
-                raw_tensors, tensor_source.get_database(), layer_id, load_config
+        # Freeze/Resume M6: this is the final `.to(device)` landing point for
+        # every weight tensor (incl. quant scale/zeros); register the GPU
+        # allocations as pausable weight memory (no-op unless enabled).
+        with weights_region():
+            raw_tensors = self._load_raw_tensor(
+                tensor_source, layer_id, device, load_config
             )
-        else:
-            merged_tensors = raw_tensors
 
-        split_tensors = self._split(merged_tensors, load_config)
+            if load_config.merge_lora:
+                merged_tensors = self._merge_lora(
+                    raw_tensors, tensor_source.get_database(), layer_id, load_config
+                )
+            else:
+                merged_tensors = raw_tensors
 
-        processed_tensors = self._postprocess(split_tensors, device, load_config)
-        flat_res = {}
+            split_tensors = self._split(merged_tensors, load_config)
 
-        def __extract_tensor(tensors):
-            for k, v in tensors.items():
-                if isinstance(v, dict):
-                    __extract_tensor(v)
-                else:
-                    flat_res.update({k: v.to(device)})
+            processed_tensors = self._postprocess(split_tensors, device, load_config)
+            flat_res = {}
 
-        __extract_tensor(processed_tensors)
+            def __extract_tensor(tensors):
+                for k, v in tensors.items():
+                    if isinstance(v, dict):
+                        __extract_tensor(v)
+                    else:
+                        flat_res.update({k: v.to(device)})
+
+            __extract_tensor(processed_tensors)
         shape_info = {k: (v.shape, v.dtype) for k, v in flat_res.items()}
         return flat_res
 
@@ -192,18 +197,20 @@ class WeightModule(ABC):
     def update(
         self, tensor: torch.Tensor, device: str, load_config: LoadConfig, **kwargs
     ):
-        split_tensors = self._split(tensor, load_config)
-        processed_tensors = self._postprocess(split_tensors, device, load_config)
-        flat_res = {}
+        # Freeze/Resume M6: dynamic weight update also lands via `.to(device)`.
+        with weights_region():
+            split_tensors = self._split(tensor, load_config)
+            processed_tensors = self._postprocess(split_tensors, device, load_config)
+            flat_res = {}
 
-        def __extract_tensor(tensors):
-            for k, v in tensors.items():
-                if isinstance(v, dict):
-                    __extract_tensor(v)
-                else:
-                    flat_res.update({k: v.to(device)})
+            def __extract_tensor(tensors):
+                for k, v in tensors.items():
+                    if isinstance(v, dict):
+                        __extract_tensor(v)
+                    else:
+                        flat_res.update({k: v.to(device)})
 
-        __extract_tensor(processed_tensors)
+            __extract_tensor(processed_tensors)
         shape_info = {k: (v.shape, v.dtype) for k, v in flat_res.items()}
         return flat_res
 

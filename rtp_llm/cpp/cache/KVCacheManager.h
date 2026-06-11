@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -89,8 +90,24 @@ public:
     size_t                  maxAvailableTokensNum() const;
     KVCacheInfo             getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
 
+    // Freeze/resume (M5): physical KV memory pause/resume + metadata reset.
+    // pauseKVCacheMemory: releases the physical pages of the KV big buffer while keeping its VA.
+    //   The caller (M1 FreezeLifecycleController) must guarantee the engine is drained and
+    //   MRs are deregistered (M7) before calling.
+    // resumeKVCacheMemory: re-maps physical pages at the same VA (content discarded), then
+    //   resets all KV metadata: BlockPool::resetMetadata + BlockCache::clear (generation++).
+    //   device_kv_cache_valid bookkeeping is owned by M1; system prompt rebuild and
+    //   MemoryBlockCache cleanup are handled at integration time (normal_engine side).
+    bool pauseKVCacheMemory();
+    bool resumeKVCacheMemory();
+
+    KVCachePhysicalMemoryControllerPtr kvMemoryController() const {
+        return kv_memory_controller_;
+    }
+
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
+    void deregUserMr();
 
     // CacheStore ownership (set by RemoteRpcServer, read during model forward)
     void                        setCacheStore(std::shared_ptr<CacheStore> cache_store);
@@ -125,6 +142,7 @@ public:
     incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true);
 
 private:
+    void initKVMemoryController();
     void initConnectorCoordinator();
     void allocateAndSync();
     void reportMetricsLoop();
@@ -132,6 +150,8 @@ private:
     // 成员变量
     CacheConfig         config_;
     KVCacheAllocatorPtr allocator_;
+
+    KVCachePhysicalMemoryControllerPtr kv_memory_controller_;
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const KVCacheConfig                kv_cache_config_;

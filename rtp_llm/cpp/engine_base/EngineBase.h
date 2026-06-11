@@ -3,6 +3,7 @@
 #include "absl/status/status.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
+#include "rtp_llm/cpp/engine_base/freeze/FreezeLifecycleController.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -90,7 +91,15 @@ public:
 
     std::shared_ptr<KVCacheManager> getCacheManager() const;
 
+    // Freeze/resume lifecycle (design doc M1). Distinct from pause()/restart(),
+    // which only stall the scheduling loop and are kept for RL training flows.
+    FreezeLifecycleController& freezeController() {
+        return freeze_controller_;
+    }
+
 protected:
+    FreezeLifecycleController freeze_controller_;
+
     ResourceContext                resource_context_;
     MlaOpsType                     mla_ops_type_       = MlaOpsType::AUTO;
     int32_t                        kv_cache_group_num_ = 1;

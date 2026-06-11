@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/api_server/http_server/http_server/HttpRequest.h"
 #include "rtp_llm/cpp/api_server/AccessLogWrapper.h"
 #include "rtp_llm/cpp/api_server/Exception.h"
+#include "rtp_llm/cpp/engine_base/freeze/AdmissionGate.h"
 
 using namespace autil::legacy;
 using namespace autil::legacy::json;
@@ -11,6 +12,22 @@ using namespace autil::legacy::json;
 namespace rtp_llm {
 
 // ChatService::ChatService() {}
+
+bool ChatService::rejectIfUnavailable(const std::unique_ptr<http_server::HttpResponseWriter>& writer) const {
+    if (!engine_) {
+        return false;
+    }
+    AdmissionGate gate(&engine_->freezeController());
+    const auto    result = gate.checkDetail();
+    if (result.admitted) {
+        return false;
+    }
+    writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+    writer->AddHeader("Content-Type", "application/json");
+    writer->SetStatus(503, "Service Unavailable");
+    writer->Write(AdmissionGate::toJson(result));
+    return true;
+}
 
 std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(int64_t                      request_id,
                                                               const ChatCompletionRequest& chat_request,
@@ -177,6 +194,10 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
 void ChatService::chatCompletions(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                   const http_server::HttpRequest&                         request,
                                   int64_t                                                 request_id) {
+    if (rejectIfUnavailable(writer)) {
+        return;
+    }
+
     auto             start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     autil::StageTime iterate_stage_timer;
 

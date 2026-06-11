@@ -169,6 +169,80 @@ class GrpcClientWrapper:
             logging.error(f"Set log level failed: {e}")
             return {"error": f"Failed to set log level: {str(e)}"}
 
+    async def freeze_serving(self, req: Any) -> Dict[str, Any]:
+        """Trigger engine freeze (drain -> release GPU resources, design doc M2)."""
+        try:
+            await self._ensure_connection()
+            if isinstance(req, str):
+                req = json.loads(req)
+            if req is None:
+                req = {}
+            mode = str(req.get("mode", "graceful"))
+            drain_timeout_ms = int(req.get("drain_timeout_ms", 0))
+            request = pb2.FreezeRequestPB(
+                mode=mode,
+                drain_timeout_ms=drain_timeout_ms,
+                force=(mode == "force"),
+                reason=str(req.get("reason", "")),
+            )
+            # freeze blocks on drain; leave headroom on top of drain timeout
+            timeout_s = max(60.0, drain_timeout_ms / 1000.0 + 30.0)
+            await self.stub.FreezeServing(request, timeout=timeout_s)
+            status = await self.get_freeze_status()
+            return {
+                "status": "ok",
+                "state": status.get("state", ""),
+                # MessageToDict renders int64 as str, normalize back to int
+                "freeze_epoch": int(status.get("freeze_epoch", 0)),
+            }
+        except grpc.aio.AioRpcError as e:
+            logging.error(f"Freeze serving failed: {e.details()}")
+            return {
+                "error": f"Failed to freeze serving: {e.details()}",
+                "grpc_status": e.code().name,
+            }
+        except Exception as e:
+            logging.error(f"Freeze serving failed: {e}")
+            return {"error": f"Failed to freeze serving: {str(e)}"}
+
+    async def resume_serving(self, req: Any = None) -> Dict[str, Any]:
+        """Trigger engine resume (re-back GPU resources -> back online)."""
+        try:
+            await self._ensure_connection()
+            request = pb2.EmptyPB()
+            await self.stub.ResumeServing(request, timeout=600)
+            status = await self.get_freeze_status()
+            return {
+                "status": "ok",
+                "state": status.get("state", ""),
+                # MessageToDict renders int64 as str, normalize back to int
+                "freeze_epoch": int(status.get("freeze_epoch", 0)),
+            }
+        except grpc.aio.AioRpcError as e:
+            logging.error(f"Resume serving failed: {e.details()}")
+            return {
+                "error": f"Failed to resume serving: {e.details()}",
+                "grpc_status": e.code().name,
+            }
+        except Exception as e:
+            logging.error(f"Resume serving failed: {e}")
+            return {"error": f"Failed to resume serving: {str(e)}"}
+
+    async def get_freeze_status(self, req: Any = None) -> Dict[str, Any]:
+        """Get freeze lifecycle status (FreezeStatusResponsePB as dict)."""
+        try:
+            await self._ensure_connection()
+            request = pb2.EmptyPB()
+            response = await self.stub.GetFreezeStatus(request, timeout=3)
+            return MessageToDict(
+                response,
+                preserving_proto_field_name=True,
+                including_default_value_fields=True,
+            )
+        except Exception as e:
+            logging.error(f"Get freeze status failed: {e}")
+            return {"error": f"Failed to get freeze status: {str(e)}"}
+
     async def start_profile(self, req: Any) -> Dict[str, Any]:
         """Start profiling switch in backend process"""
         try:
@@ -253,6 +327,12 @@ class GrpcClientWrapper:
                 return await self.get_worker_status(req)
             elif uri == "set_log_level":
                 return await self.set_log_level(req)
+            elif uri == "freeze":
+                return await self.freeze_serving(req)
+            elif uri == "resume":
+                return await self.resume_serving(req)
+            elif uri == "freeze_status":
+                return await self.get_freeze_status(req)
             elif uri == "start_profile":
                 return await self.start_profile(req)
             elif uri == "update_eplb_config":

@@ -1,7 +1,13 @@
 #include "rtp_llm/cpp/api_server/common/HealthService.h"
+
+#include <utility>
+
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+
+HealthService::HealthService(ReadinessStateProvider readiness_state_provider):
+    readiness_state_provider_(std::move(readiness_state_provider)) {}
 
 void HealthService::healthCheck(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                 const http_server::HttpRequest&                         request) {
@@ -12,6 +18,17 @@ void HealthService::healthCheck(const std::unique_ptr<http_server::HttpResponseW
         RTP_LLM_LOG_WARNING("called health route, but server has been shutdown");
         writer->SetStatus(503, "Service Unavailable");
         writer->Write(R"({"detail":"this server has been shutdown"})");
+        return;
+    }
+    if (readiness_state_provider_) {
+        const auto state = readiness_state_provider_();
+        if (state.empty()) {
+            writer->Write(R"("ok")");
+            return;
+        }
+        RTP_LLM_LOG_WARNING("called health route, but engine is not ready: state=%s", state.c_str());
+        writer->SetStatus(503, "Service Unavailable");
+        writer->Write(R"({"detail":"engine is not ready","state":")" + state + R"("})");
         return;
     }
     writer->Write(R"("ok")");

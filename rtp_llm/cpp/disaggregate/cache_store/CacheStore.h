@@ -6,7 +6,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RemoteStoreTask.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreMetricsCollector.h"
 
-
 #include <memory>
 
 namespace rtp_llm {
@@ -43,15 +42,21 @@ public:
     storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers, int64_t timeout_ms) = 0;
 
     virtual std::shared_ptr<RemoteStoreTask>
-                 submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>& request,
+                 submitRemoteStoreTask(const std::shared_ptr<RemoteStoreRequest>&                    request,
                                        const std::shared_ptr<CacheStoreRemoteStoreMetricsCollector>& collector,
-                                       RemoteStoreTask::CheckCancelFunc           check_cancel_func) = 0;
+                                       RemoteStoreTask::CheckCancelFunc                              check_cancel_func) = 0;
     virtual void releaseRemoteStoreTask(const std::shared_ptr<RemoteStoreTask>& task)      = 0;
 
     virtual bool                         regUserBuffers(const std::vector<std::shared_ptr<BlockBuffer>>& buffers) = 0;
     virtual std::shared_ptr<BlockBuffer> findUserBuffer(const std::string& buffer_key)                            = 0;
 
     virtual const std::shared_ptr<MemoryUtil>& getMemoryUtil() const = 0;
+
+    // Global in-flight transfer count (store/load tasks + remote store tasks).
+    // Used by DrainManager (M3) to decide drain completion before freeze.
+    virtual size_t activeTransferCount() const {
+        return 0;
+    }
 
     virtual void debugInfo() = 0;
 };

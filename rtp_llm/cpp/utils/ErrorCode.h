@@ -78,6 +78,9 @@ enum class ErrorCode {
     // load balance error
     GET_PART_NODE_STATUS_FAILED = 8400,
     GET_ALL_NODE_STATUS_FAILED  = 8401,
+
+    // engine freeze/resume error (M4 AdmissionGate): instance not RUNNING, retryable
+    ENGINE_UNAVAILABLE = 8600,
 };
 
 inline std::string ErrorCodeToString(ErrorCode code) {
@@ -206,6 +209,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "GET_PART_NODE_STATUS_FAILED";
         case ErrorCode::GET_ALL_NODE_STATUS_FAILED:
             return "GET_ALL_NODE_STATUS_FAILED";
+        case ErrorCode::ENGINE_UNAVAILABLE:
+            return "ENGINE_UNAVAILABLE";
         default:
             return "Error: Unrecognized ErrorCode";
     }

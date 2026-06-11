@@ -1,6 +1,10 @@
+#include <algorithm>
 #include <memory>
 #include <chrono>
+#include <thread>
+#include <unistd.h>
 #include <c10/core/InferenceMode.h>
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -10,10 +14,28 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+// Best-effort instance identity for the M4 admission error body: scheduler
+// role when deployed (hippo), hostname otherwise.
+std::string resolveInstanceId() {
+    std::string instance_id = autil::EnvUtil::getEnv("HIPPO_ROLE", "");
+    if (instance_id.empty()) {
+        char hostname[256] = {0};
+        if (gethostname(hostname, sizeof(hostname) - 1) == 0) {
+            instance_id = hostname;
+        }
+    }
+    return instance_id;
+}
+
+}  // namespace
 
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params,
@@ -39,6 +61,8 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                                 "running engine init with gil held may cause program hang, please check");
         engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
     }
+    admission_gate_ = std::make_shared<AdmissionGate>(&engine_->freezeController(), resolveInstanceId());
+    installFreezeHooks();
     if (maga_init_params.model_config_.mm_model_config.is_multimodal) {
         if (mm_process_engine.is_none()) {
             mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
@@ -51,6 +75,94 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     }
 
     return grpc::Status::OK;
+}
+
+void LocalRpcServer::installFreezeHooks() {
+    // --- M3: drain counters. ---
+    drain_manager_ = std::make_shared<DrainManager>();
+    drain_manager_->registerCounter(
+        "rpc_onflight", [this]() { return onflightRequestNum(); }, DrainManager::CounterKind::REQUEST);
+    auto engine = engine_;
+    drain_manager_->registerCounter(
+        "scheduler_onflight",
+        [engine]() { return static_cast<size_t>(std::max<int64_t>(0, engine->getScheduler().onflightStreams())); },
+        DrainManager::CounterKind::REQUEST);
+    if (auto cache_manager = engine_->getCacheManager()) {
+        if (auto coordinator = cache_manager->connectorCoordinator()) {
+            drain_manager_->registerCounter(
+                "connector_inflight",
+                [coordinator]() { return static_cast<size_t>(coordinator->inflightTransferCount()); },
+                DrainManager::CounterKind::CACHE_TRANSFER);
+        }
+    }
+
+    tms_backend_ = std::make_shared<TmsBackend>();
+    RTP_LLM_LOG_INFO("freeze hooks: tms backend available=%d", static_cast<int>(tms_backend_->isAvailable()));
+
+    FreezeHooks hooks;
+    drain_manager_->installHooks(hooks);  // drain + activeRequestCount + activeCacheTransferCount
+
+    auto tms                      = tms_backend_;
+    hooks.deregMrAndQuiesceEngine = [engine](const FreezeOptions&) {
+        // Stall the scheduling loop (no destruction) so nothing touches KV memory
+        // while its physical pages are dropped. The engine is already drained.
+        engine->pause();
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        if (auto cache_manager = engine->getCacheManager()) {
+            cache_manager->deregUserMr();
+        }
+        // TODO(M7): CUDA stream/device sync before page drop.
+        return true;
+    };
+    hooks.pauseKvMemory = [engine](const FreezeOptions&) {
+        auto cache_manager = engine->getCacheManager();
+        if (!cache_manager) {
+            return true;
+        }
+        auto controller = cache_manager->kvMemoryController();
+        if (!controller || !controller->backendAvailable()) {
+            RTP_LLM_LOG_WARNING("pauseKvMemory skipped: tms preload shim not present");
+            return true;
+        }
+        return cache_manager->pauseKVCacheMemory();
+    };
+    // M6: weights are tagged by rtp_llm/model_loader/weight_memory_saver.py under
+    // "weights" with cpu backup; pausing an unknown/empty tag is a harmless no-op.
+    hooks.pauseWeights = [tms](const FreezeOptions&) {
+        if (!tms->isAvailable()) {
+            RTP_LLM_LOG_WARNING("pauseWeights skipped: tms preload shim not present");
+            return true;
+        }
+        return tms->pause("weights");
+    };
+    hooks.resumeKvMemory = [engine]() {
+        auto cache_manager = engine->getCacheManager();
+        if (!cache_manager) {
+            return true;
+        }
+        auto controller = cache_manager->kvMemoryController();
+        if (!controller || !controller->isPaused()) {
+            return true;  // pause was skipped (no shim); keep metadata untouched
+        }
+        // Re-maps pages at the same VA, then resets BlockPool metadata + BlockCache.
+        return cache_manager->resumeKVCacheMemory();
+    };
+    hooks.resumeWeights = [tms]() {
+        if (!tms->isAvailable()) {
+            return true;
+        }
+        return tms->resume("weights");
+    };
+    hooks.regMrAndResumeEngine = [this, engine]() {
+        if (auto cache_manager = engine->getCacheManager()) {
+            cache_manager->regUserMr(maga_init_params_.model_id, cache_manager->getCacheStore());
+        }
+        // TODO(M7): mr_epoch refresh before the loop restarts.
+        engine->restart();
+        return true;
+    };
+
+    engine_->freezeController().setHooks(hooks);
 }
 
 grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorInfo error_info) {
@@ -156,6 +268,9 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
                                                 const GenerateInputPB*                 request,
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
     RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
+    if (auto admission = checkAdmission(); !admission.ok()) {
+        return admission;
+    }
     c10::InferenceMode inference_guard(true);
     AtomicGuard        request_guard(onflight_requests_);
     auto               request_id = request->request_id();
@@ -189,6 +304,10 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
                                                const BatchGenerateInputPB* request,
                                                BatchGenerateOutputsPB*     response) {
     RTP_LLM_PROFILE_SCOPE("rpc.batch_generate_call");
+    // Whole-batch rejection: a non-RUNNING instance must not run any of them.
+    if (auto admission = checkAdmission(); !admission.ok()) {
+        return admission;
+    }
     c10::InferenceMode inference_guard(true);
     AtomicGuard        request_guard(onflight_requests_);
     const int          batch_size = request->inputs_size();
@@ -349,8 +468,10 @@ WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_ver
     status_info.dp_rank                 = maga_init_params_.parallelism_config.dp_rank;
     status_info.status_version          = currentTimeUs();
     status_info.latest_finished_version = status_info.engine_schedule_info.latest_finished_version;
-    status_info.alive                   = true;
-    auto quant_method                   = maga_init_params_.model_config_.quant_algo.getQuantMethod();
+    // M8: freeze takes the worker out of LB rotation. alive doubles as the
+    // schedulable signal in WorkerStatusPB; non-RUNNING -> not schedulable.
+    status_info.alive = engine_ ? engine_->freezeController().admit() : true;
+    auto quant_method = maga_init_params_.model_config_.quant_algo.getQuantMethod();
 
     switch (quant_method) {
         case QuantMethod::WeightOnlyPerCol:
@@ -511,6 +632,12 @@ grpc::Status LocalRpcServer::StartProfileInternal(grpc::ServerContext*          
 grpc::Status
 LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
+    // M8: a freezing/frozen instance is not ready; report the freeze state and
+    // a retryable UNAVAILABLE so LB health checks take it out of rotation.
+    if (auto admission = checkAdmission(); !admission.ok()) {
+        response->set_health(freezeStateToString(engine_->freezeController().state()));
+        return admission;
+    }
     response->set_health("OK");
     return grpc::Status::OK;
 }
@@ -593,6 +720,49 @@ grpc::Status LocalRpcServer::SetPause(grpc::ServerContext* context, const EmptyP
 grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s,", context->peer().c_str());
     engine_->restart();
+    return grpc::Status::OK;
+}
+
+grpc::Status
+LocalRpcServer::FreezeServing(grpc::ServerContext* context, const FreezeRequestPB* request, EmptyPB* response) {
+    RTP_LLM_LOG_INFO("receive FreezeServing rpc request from client: %s, mode: %s, reason: %s",
+                     context->peer().c_str(),
+                     request->mode().c_str(),
+                     request->reason().c_str());
+    FreezeOptions options;
+    options.mode             = request->mode().empty() ? "graceful" : request->mode();
+    options.drain_timeout_ms = request->drain_timeout_ms();
+    options.force            = request->force();
+    options.reason           = request->reason();
+    const auto result        = engine_->freezeController().freeze(options);
+    if (!result.ok) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, result.message);
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::ResumeServing(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
+    RTP_LLM_LOG_INFO("receive ResumeServing rpc request from client: %s", context->peer().c_str());
+    const auto result = engine_->freezeController().resume();
+    if (!result.ok) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, result.message);
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::GetFreezeStatus(grpc::ServerContext*    context,
+                                             const EmptyPB*          request,
+                                             FreezeStatusResponsePB* response) {
+    RTP_LLM_LOG_DEBUG("receive GetFreezeStatus rpc request from client: %s", context->peer().c_str());
+    const auto status = engine_->freezeController().status();
+    response->set_state(freezeStateToString(status.state));
+    response->set_freeze_epoch(status.freeze_epoch);
+    response->set_kv_memory_state(status.kv_memory_state);
+    response->set_device_kv_cache_valid(status.device_kv_cache_valid);
+    response->set_active_request_count(status.active_request_count);
+    response->set_active_cache_transfer_count(status.active_cache_transfer_count);
+    response->set_gpu_resource_state(status.gpu_resource_state);
+    response->set_last_error(status.last_error);
     return grpc::Status::OK;
 }
 

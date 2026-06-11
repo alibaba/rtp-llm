@@ -112,13 +112,14 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
 
     auto collector = std::make_shared<CacheStoreStoreMetricsCollector>(
         metrics_reporter_, request_block_buffer->getBlocksCount(), request_block_buffer->getBlocksSize());
+    auto counted_callback = countTransfer(std::move(callback));
     // task 只在threadpool中运行, threadpool退出前会清理所有running task, 用this是安全的
-    auto task = [this, request_block_buffer, callback, collector]() {
-        this->runStoreTask(request_block_buffer, callback, collector);
+    auto task = [this, request_block_buffer, counted_callback, collector]() {
+        this->runStoreTask(request_block_buffer, counted_callback, collector);
     };
 
     std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
-    store_tasks_[request_block_buffer] = {callback, task};
+    store_tasks_[request_block_buffer] = {counted_callback, task};
 }
 
 std::shared_ptr<StoreContext>
@@ -182,9 +183,10 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
     auto collector = std::make_shared<CacheStoreClientLoadMetricsCollector>(
         metrics_reporter_, request_block_buffer->getBlocksCount(), request_block_buffer->getBlocksSize());
 
-    auto task = [this,
+    auto counted_callback = countTransfer(std::move(callback));
+    auto task             = [this,
                  request_block_buffer,
-                 callback,
+                 counted_callback,
                  ip,
                  port,
                  rdma_port,
@@ -192,15 +194,22 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
                  collector,
                  partition_count,
                  partition_id]() {
-        this->runLoadTask(
-            request_block_buffer, callback, ip, port, rdma_port, timeout_ms, collector, partition_count, partition_id);
+        this->runLoadTask(request_block_buffer,
+                          counted_callback,
+                          ip,
+                          port,
+                          rdma_port,
+                          timeout_ms,
+                          collector,
+                          partition_count,
+                          partition_id);
     };
 
     if (thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
         RTP_LLM_LOG_WARNING("normal cache store push load task for request id [%s] to thread pool failed",
                             request_block_buffer->getRequestId().c_str());
         collector->markEnd(false);
-        callback(false, CacheStoreErrorCode::PushWorkerItemFailed);
+        counted_callback(false, CacheStoreErrorCode::PushWorkerItemFailed);
         return;
     }
 }
@@ -303,6 +312,15 @@ std::shared_ptr<BlockBuffer> NormalCacheStore::findUserBuffer(const std::string&
 
 const std::shared_ptr<MemoryUtil>& NormalCacheStore::getMemoryUtil() const {
     return memory_util_;
+}
+
+size_t NormalCacheStore::activeTransferCount() const {
+    size_t                              count = active_transfer_count_.load(std::memory_order_relaxed);
+    std::shared_lock<std::shared_mutex> lock(remote_store_tasks_mutex_);
+    for (const auto& [request_id, tasks] : remote_store_tasks_) {
+        count += tasks.size();
+    }
+    return count;
 }
 
 const std::shared_ptr<RequestBlockBufferStore>& NormalCacheStore::getRequestBlockBufferStore() const {

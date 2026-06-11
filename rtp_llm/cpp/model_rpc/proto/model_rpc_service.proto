@@ -204,6 +204,12 @@ message GenerateOutputsPB {
 message ErrorDetailsPB {
     int64 error_code = 1;
     string error_message = 2;
+    // M4 AdmissionGate (ENGINE_UNAVAILABLE) context: lets the frontend retry-route
+    // away from a freezing/frozen instance.
+    string error_code_str = 3;
+    string instance_id = 4;
+    int64 freeze_epoch = 5;
+    string state = 6;        // RUNNING|DRAINING|FREEZING|FROZEN|RESUMING|ERROR
 }
 
 enum ErrorCodePB {
@@ -601,6 +607,25 @@ message BatchGenerateOutputsPB {
     repeated BatchGenerateResultPB results = 1;
 }
 
+// Engine freeze/resume (distinct from SetPause/SetRestart semantics).
+message FreezeRequestPB {
+    string mode = 1;              // "graceful" (default) | "force"
+    int64 drain_timeout_ms = 2;
+    bool force = 3;
+    string reason = 4;
+}
+
+message FreezeStatusResponsePB {
+    string state = 1;             // RUNNING|DRAINING|FREEZING|FROZEN|RESUMING|ERROR
+    int64 freeze_epoch = 2;
+    string kv_memory_state = 3;   // ACTIVE|PAUSING|PAUSED|RESUMING
+    bool device_kv_cache_valid = 4;
+    int64 active_request_count = 5;
+    int64 active_cache_transfer_count = 6;
+    string gpu_resource_state = 7;
+    string last_error = 8;
+}
+
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
@@ -615,6 +640,9 @@ service RpcService {
     rpc UpdateEplbConfig(UpdateEplbConfigRequestPB) returns (EmptyPB);
     rpc SetPause(EmptyPB) returns (EmptyPB);
     rpc SetRestart(EmptyPB) returns (EmptyPB);
+    rpc FreezeServing(FreezeRequestPB) returns (EmptyPB);
+    rpc ResumeServing(EmptyPB) returns (EmptyPB);
+    rpc GetFreezeStatus(EmptyPB) returns (FreezeStatusResponsePB);
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
     rpc StartProfile(StartProfileRequestPB) returns (EmptyPB);
     rpc StartProfileInternal(StartProfileInternalRequestPB) returns (EmptyPB);

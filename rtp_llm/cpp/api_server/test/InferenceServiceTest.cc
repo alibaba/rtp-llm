@@ -95,6 +95,31 @@ protected:
     ModelConfig                                          model_config_;
 };
 
+TEST_F(InferenceServiceTest, Inference_FrozenRejectsBeforeParsing) {
+    SetToMaster();
+    ASSERT_TRUE(mock_engine_->freezeController().freeze(FreezeOptions()).ok);
+
+    auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
+    ASSERT_TRUE(writer != nullptr);
+    std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer);
+    http_server::HttpRequest                         request;
+
+    EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([](const std::string& data) {
+        EXPECT_THAT(data, HasSubstr(R"("error_code":8600)"));
+        EXPECT_THAT(data, HasSubstr(R"("state":"FROZEN")"));
+        return true;
+    }));
+
+    inference_service_->inference(writer_ptr, request, false);
+
+    EXPECT_EQ(writer_ptr->_type, http_server::HttpResponseWriter::WriteType::Normal);
+    EXPECT_EQ(writer_ptr->_headers.at("Content-Type"), "application/json");
+    EXPECT_EQ(writer_ptr->_statusCode, 503);
+    EXPECT_EQ(writer_ptr->_statusMessage, "Service Unavailable");
+
+    writer_ptr.release();
+}
+
 TEST_F(InferenceServiceTest, Inference_IsInternal_IsNotWorker) {
     // 模拟不是 worker 的情况
     SetToMaster();

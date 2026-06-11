@@ -12,6 +12,19 @@ py_test(
 )
 
 py_test(
+    name = "admin_freeze_routes_test",
+    srcs = [
+        "admin_freeze_routes_test.py",
+    ],
+    deps = [
+        "//rtp_llm:ops",
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu': 'H20'},
+    tags = ["frontend"],
+)
+
+py_test(
     name = "frontend_start_test",
     srcs = [
         "frontend_app_test.py",

@@ -3,8 +3,10 @@
 #include "rtp_llm/cpp/api_server/WorkerStatusService.h"
 #include "rtp_llm/cpp/api_server/ModelStatusService.h"
 #include "rtp_llm/cpp/api_server/SysCmdService.h"
+#include "rtp_llm/cpp/api_server/FreezeService.h"
 #include "rtp_llm/cpp/api_server/TokenizerService.h"
 #include "rtp_llm/cpp/api_server/Exception.h"
+#include "rtp_llm/cpp/engine_base/freeze/FreezeLifecycleController.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -94,6 +96,14 @@ bool HttpApiServer::registerServices() {
     }
 
     // add uri:
+    // POST: /admin/freeze /admin/resume
+    // GET: /admin/freeze_status
+    if (!registerFreezeService()) {
+        RTP_LLM_LOG_WARNING("HttpApiServer register freeze service failed.");
+        return false;
+    }
+
+    // add uri:
     // POST: /tokenizer/encode
     if (!registerTokenizerService()) {
         RTP_LLM_LOG_WARNING("HttpApiServer register tokenizer service failed.");
@@ -131,7 +141,13 @@ bool HttpApiServer::registerHealthService() {
         return false;
     }
 
-    health_service_.reset(new HealthService());
+    auto readiness_state_provider = [engine = engine_]() -> std::string {
+        if (!engine || engine->freezeController().admit()) {
+            return "";
+        }
+        return freezeStateToString(engine->freezeController().state());
+    };
+    health_service_.reset(new HealthService(readiness_state_provider));
     return registerHealthServiceStatic(*http_server_, health_service_);
 }
 
@@ -178,6 +194,31 @@ bool HttpApiServer::registerSysCmdService() {
         sys_cmd_service->setLogLevel(writer, request);
     };
     return http_server_->RegisterRoute("POST", "/set_log_level", set_log_level_callback);
+}
+
+bool HttpApiServer::registerFreezeService() {
+    if (!http_server_) {
+        RTP_LLM_LOG_WARNING("register freeze service failed, http server is null");
+        return false;
+    }
+
+    freeze_service_.reset(new FreezeService(engine_));
+    auto freeze_callback = [freeze_service = freeze_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                              const http_server::HttpRequest& request) -> void {
+        freeze_service->freeze(writer, request);
+    };
+    auto resume_callback = [freeze_service = freeze_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                              const http_server::HttpRequest& request) -> void {
+        freeze_service->resume(writer, request);
+    };
+    auto freeze_status_callback = [freeze_service =
+                                       freeze_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                        const http_server::HttpRequest& request) -> void {
+        freeze_service->freezeStatus(writer, request);
+    };
+    return http_server_->RegisterRoute("POST", "/admin/freeze", freeze_callback)
+           && http_server_->RegisterRoute("POST", "/admin/resume", resume_callback)
+           && http_server_->RegisterRoute("GET", "/admin/freeze_status", freeze_status_callback);
 }
 
 bool HttpApiServer::registerTokenizerService() {
