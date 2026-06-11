@@ -53,6 +53,13 @@ struct AttentionConfigs {
     KvCacheDataType kv_cache_dtype      = KvCacheDataType::BASE;
     bool            need_rope_kv_cache  = true;
 
+    // When true, allocate the FP8 MLA KV cache using the aiter layout
+    // (576 bytes/token: 512 fp8 nope + 64 fp8 rope, single per-tensor scale passed
+    // separately) instead of the rtp-llm native layout (656 bytes/token with
+    // interleaved per-128-group fp32 scales and bf16 rope). Only affects the fp8
+    // branch; bf16 MLA is unchanged.
+    bool            mla_use_aiter_fp8_layout = false;
+
     // sparse attention config
     bool is_sparse        = false;
     int  indexer_head_dim = 0;

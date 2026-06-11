@@ -14,22 +14,28 @@ namespace rtp_llm {
 struct MLAKVCacheSpec: public KVCacheSpec {
     uint32_t kv_lora_rank;
     uint32_t rope_head_dim;
+    bool     use_aiter_fp8_layout = false;
 
     MLAKVCacheSpec() = default;
 
     MLAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config) {
-        type               = KVCacheSpecType::MultiHeadLatentAttention;
-        layer_num          = 1;  // Will be set by caller
-        local_head_num_kv  = 1;  // mla set local_head_num_kv to 1
-        seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
-        kv_lora_rank       = static_cast<uint32_t>(attn_config.kv_lora_rank);
-        rope_head_dim      = static_cast<uint32_t>(attn_config.rope_head_dim);
+        type                 = KVCacheSpecType::MultiHeadLatentAttention;
+        layer_num            = 1;  // Will be set by caller
+        local_head_num_kv    = 1;  // mla set local_head_num_kv to 1
+        seq_size_per_block   = static_cast<uint32_t>(attn_config.tokens_per_block);
+        kv_lora_rank         = static_cast<uint32_t>(attn_config.kv_lora_rank);
+        rope_head_dim        = static_cast<uint32_t>(attn_config.rope_head_dim);
+        use_aiter_fp8_layout = attn_config.mla_use_aiter_fp8_layout;
     }
 
     size_t block_size() const override {
         auto is_fp8      = (dtype == DataType::TYPE_FP8_E4M3 || dtype == DataType::TYPE_FP8_E8M0);
         auto single_size = local_head_num_kv * (kv_lora_rank + rope_head_dim);
-        if (is_fp8) {
+        if (is_fp8 && use_aiter_fp8_layout) {
+            // aiter layout: 512 fp8 nope + 64 fp8 rope = 576 bytes/token, single
+            // per-tensor scale passed separately to the kernel (not stored in cache).
+            single_size = local_head_num_kv * (kv_lora_rank + rope_head_dim);
+        } else if (is_fp8) {
             // First 512 bytes: The "quantized NoPE" part, containing 512 float8_e4m3 values.
             // Next 16 bytes: Scale factors, containing 4 float32 values. The first float32 is the scale for the first
             // 128 float8_e4m3 values, the second for the next 128, and so on. Last 128 bytes: The "RoPE" part,
