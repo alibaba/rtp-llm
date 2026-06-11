@@ -15,11 +15,11 @@ from .prefill.topk_bt_fused import (
 from .prefill.topk_sparse import flash_prefill_with_gqa_share_sparse
 
 
-# trtllm-gen sparse-decode kernel crashes with CUDA_ERROR_INVALID_VALUE in
-# fmhaKernels.cuh:328 when q_len > this threshold (observed: 8192 OK, 16384
-# FAIL on L20D). CP4 splits the prompt 4-way so q_len/rank <= 8192 is the
-# normal case; longer per-rank chunks fall back to the triton path.
-_TRTLLM_GEN_MAX_QLEN = 8192
+# trtllm-gen's sparse-decode kernel launches with grid_dim_x = total_q *
+# num_kv_heads. The CUDA grid_dim_x hardware cap is 2**16 - 1 = 65535, so a
+# single call covers up to 65535 // num_kv_heads queries (16383 for NUM_KV=4).
+# flash_prefill_with_trtllm_gen chunks beyond this internally, so the caller
+# does NOT need a max_q gate any more — any q_len works.
 
 
 def minimax_sparse_prefill(
@@ -56,21 +56,19 @@ def minimax_sparse_prefill(
     idx_group_size = num_idx_heads // num_kv_heads
 
     # Fastest path: mega topk-to-block-tables + trtllm-gen sparse decode.
-    # Only when caller supplied a workspace AND shape is in trtllm-gen's safe
-    # range. Both the fused-topk_idx path and the legacy 3-stage path stay as
-    # fallbacks: idx_group_size > 1 still routes there via topk_index_reduce,
-    # and so do CP-prefill segments longer than 8192 tokens / rank.
+    # The fused-topk_idx and legacy 3-stage paths stay as fallbacks:
+    # idx_group_size > 1 routes there via topk_index_reduce, and so does any
+    # multi-request batch (cu_seqlens-1 > 2) because the mega kernel's page
+    # id layout (pid_h * num_pages + block_idx, no per-segment offset)
+    # requires a single contiguous KV cache slice across all segments.
+    # No per-call q_len cap — flash_prefill_with_trtllm_gen chunks internally
+    # to stay under CUDA's grid_dim_x = 65535 limit.
     use_trtllm = (
         workspace is not None
         and idx_group_size == 1
         and disable_index_value
         and idx_sink is None
         and sink is None
-        and max_seqlen_q <= _TRTLLM_GEN_MAX_QLEN
-        # topk_bt_fused emits page id = pid_h * num_pages + block_idx without a
-        # per-segment offset, so all segments must share one contiguous KV
-        # cache slice. Single-request CP prefill (the production case)
-        # satisfies this; multi-request batching does not.
         and (cu_seqlens.numel() - 1) <= 2
     )
     if use_trtllm:

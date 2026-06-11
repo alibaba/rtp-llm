@@ -1,6 +1,6 @@
 """Unified dense MLP implementation supporting multiple activation types."""
 
-from typing import Dict, Optional, Tuple, Type
+from typing import Any, Dict, NamedTuple, Optional, Tuple, Type
 
 import torch
 from torch import nn
@@ -12,14 +12,19 @@ from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import ActivationType, HWKernelConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
-# CUDA-only fused silu_and_mul + per-token-group fp8 quant. Activated when
-# down_proj is CudaFp8GEMMLinear with UE8M0 scales — saves one launch
-# (silu_and_mul) and one launch (per_token_group_quant_8bit) per forward.
+# CUDA-only fused activation + per-token-group fp8 quant. Activated when
+# down_proj accepts externally quantized fp8 input (FP8 per-block or MXFP8).
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
         CudaFp8GEMMLinear,
     )
+    try:
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
+            CudaMxfp8Linear,
+        )
+    except ImportError:
+        CudaMxfp8Linear = None  # type: ignore
     from rtp_llm.models_py.triton_kernels.common.activation import (
         silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd,
     )
@@ -28,6 +33,7 @@ if _DEVICE_TYPE == DeviceType.Cuda:
     )
 else:
     CudaFp8GEMMLinear = None  # type: ignore
+    CudaMxfp8Linear = None  # type: ignore
     swiglu_oai_torch = None  # type: ignore
 
 _ACTIVATION_FUNC_MAP: Dict[ActivationType, Type[nn.Module]] = {
@@ -36,6 +42,30 @@ _ACTIVATION_FUNC_MAP: Dict[ActivationType, Type[nn.Module]] = {
 }
 
 _GATED_ACTIVATION_TYPE_LIST = [ActivationType.Swiglu]
+
+
+class _FusedFp8QuantParams(NamedTuple):
+    group_size: int
+    scale_ue8m0: bool
+    round_to_pow2: bool
+
+
+def _get_fused_fp8_quant_params(linear: Any) -> Optional[_FusedFp8QuantParams]:
+    if CudaFp8GEMMLinear is not None and isinstance(linear, CudaFp8GEMMLinear):
+        return _FusedFp8QuantParams(
+            group_size=getattr(linear, "input_quant_group_size", 128),
+            scale_ue8m0=getattr(
+                linear, "input_quant_scale_ue8m0", linear.scale_ue8m0
+            ),
+            round_to_pow2=getattr(linear, "input_quant_round_to_pow2", False),
+        )
+    if CudaMxfp8Linear is not None and isinstance(linear, CudaMxfp8Linear):
+        return _FusedFp8QuantParams(
+            group_size=getattr(linear, "input_quant_group_size", 32),
+            scale_ue8m0=getattr(linear, "input_quant_scale_ue8m0", False),
+            round_to_pow2=getattr(linear, "input_quant_round_to_pow2", True),
+        )
+    return None
 
 
 class DenseMLP(nn.Module):
@@ -129,26 +159,32 @@ class DenseMLP(nn.Module):
 
         from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 
+        self._down_proj_fp8_quant_params = _get_fused_fp8_quant_params(
+            self.down_proj
+        )
         self._fuse_silu_quant = (
             fuse_kernels_enabled(hw_kernel_config)
             and self.is_gated
-            and CudaFp8GEMMLinear is not None
-            and isinstance(self.down_proj, CudaFp8GEMMLinear)
-            and (self.down_proj.K % 128 == 0)
+            and self._down_proj_fp8_quant_params is not None
+            and (self.down_proj.K % self._down_proj_fp8_quant_params.group_size == 0)
         )
-        if self._fuse_silu_quant and self.down_proj.scale_ue8m0:
-            self._fuse_silu_quant = self.down_proj.K % 512 == 0
-        # SwiGLU-OAI has no fused FP8-quant kernel (and M3's dense FFN is MXFP8,
-        # not the 128-block FP8 GEMM the fused path targets), so always run the
-        # bf16 reference activation (``act_fn``) followed by a plain down_proj.
-        if self.swiglu_oai_params is not None:
-            self._fuse_silu_quant = False
+        if (
+            self._fuse_silu_quant
+            and self._down_proj_fp8_quant_params.scale_ue8m0
+        ):
+            self._fuse_silu_quant = (
+                self.down_proj.K
+                % (self._down_proj_fp8_quant_params.group_size * 4)
+                == 0
+            )
+
+    @property
+    def fp8_input_quant_params(self) -> Optional[_FusedFp8QuantParams]:
+        return _get_fused_fp8_quant_params(self.up_proj)
 
     @property
     def accepts_fp8_input(self) -> bool:
-        return CudaFp8GEMMLinear is not None and isinstance(
-            self.up_proj, CudaFp8GEMMLinear
-        )
+        return self.fp8_input_quant_params is not None
 
     def forward(
         self,
@@ -162,11 +198,16 @@ class DenseMLP(nn.Module):
         else:
             up = self.up_proj(x)
         if self._fuse_silu_quant and up.dim() == 2:
-            scale_ue8m0 = self.down_proj.scale_ue8m0
+            _params = self._down_proj_fp8_quant_params
+            assert _params is not None
+            _alpha, _limit = self.swiglu_oai_params or (0.0, 0.0)
             fp8_out, scale_out = silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
                 up.contiguous(),
-                quant_group_size=128,
-                scale_ue8m0=scale_ue8m0,
+                quant_group_size=_params.group_size,
+                scale_ue8m0=_params.scale_ue8m0,
+                round_to_pow2=_params.round_to_pow2,
+                gemm1_alpha=_alpha,
+                gemm1_clamp_limit=_limit,
             )
             output = self.down_proj(fp8_out, input_scales=scale_out)
         else:

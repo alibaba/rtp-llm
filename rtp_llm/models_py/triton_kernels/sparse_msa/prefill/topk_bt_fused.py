@@ -283,12 +283,20 @@ def flash_prefill_with_trtllm_gen(
 
     Constraints (caller must check, otherwise fall back to legacy):
       * idx_group_size == 1  (num_idx_heads == num_kv_heads)
-      * max_seqlen_q <= 8192 (trtllm-gen kernel crashes with INVALID_VALUE on
-        L20D for q_len in [16384, 32768])
       * The fused topk-to-block-table kernel assumes a single contiguous KV
         cache slice (page id = pid_h * num_pages + block_idx with no per-batch
         offset). CP prefill on a single request satisfies this; multi-request
         batching would need a kernel extension.
+
+    trtllm-gen's sparse-decode kernel launches with grid_dim_x = total_q *
+    num_kv_heads. The CUDA hardware caps grid_dim_x at 2**16 - 1 = 65535, so
+    a single call cannot cover more than ``65535 // num_kv_heads`` queries
+    (16383 for NUM_KV=4). When ``total_q`` exceeds that bound we slice the
+    q_packed / block_tables / seq_lens tensors along the (query, kv_head)
+    row axis and issue multiple kernel calls sharing the same paged KV
+    cache; the per-query independence of sparse decode means no LSE merge
+    is needed. Verified bit-equivalent (cos >= 0.999997) up to q=65536 in
+    m3_test/test_trtllm_gen_q_limit.py.
     """
     from flashinfer.decode import trtllm_batch_decode_with_kv_cache
 
@@ -337,18 +345,36 @@ def flash_prefill_with_trtllm_gen(
         .contiguous()
     )
 
-    out = trtllm_batch_decode_with_kv_cache(
-        query=q_packed,
-        kv_cache=(k_paged, v_paged),
-        workspace_buffer=workspace,
-        block_tables=bt,
-        seq_lens=sl,
-        max_seq_len=max_seqlen_q,
-        bmm1_scale=sm_scale,
-        bmm2_scale=1.0,
-        backend="trtllm-gen",
-        out_dtype=torch.bfloat16,
-    )
+    # Chunk q_packed along axis 0 (= (token, kv_head) interleaved rows) so each
+    # call's grid_dim_x stays <= 65535. block_tables and seq_lens share the
+    # same row layout so they slice identically. KV cache + workspace are
+    # shared across chunks; sparse-decode queries are mutually independent,
+    # no LSE / softmax merge needed.
+    CUDA_GRID_MAX = 65535
+    rows_per_chunk = (CUDA_GRID_MAX // num_kv_heads) * num_kv_heads
+    nrows = q_packed.shape[0]
+
+    if nrows <= rows_per_chunk:
+        out = trtllm_batch_decode_with_kv_cache(
+            query=q_packed, kv_cache=(k_paged, v_paged),
+            workspace_buffer=workspace,
+            block_tables=bt, seq_lens=sl, max_seq_len=max_seqlen_q,
+            bmm1_scale=sm_scale, bmm2_scale=1.0, backend="trtllm-gen",
+            out_dtype=torch.bfloat16,
+        )
+    else:
+        out_chunks = []
+        for start in range(0, nrows, rows_per_chunk):
+            end = min(start + rows_per_chunk, nrows)
+            out_chunks.append(trtllm_batch_decode_with_kv_cache(
+                query=q_packed[start:end], kv_cache=(k_paged, v_paged),
+                workspace_buffer=workspace,
+                block_tables=bt[start:end], seq_lens=sl[start:end],
+                max_seq_len=max_seqlen_q,
+                bmm1_scale=sm_scale, bmm2_scale=1.0, backend="trtllm-gen",
+                out_dtype=torch.bfloat16,
+            ))
+        out = torch.cat(out_chunks, dim=0)
 
     return (
         out.view(total_q, num_kv_heads, gqa, head_dim)

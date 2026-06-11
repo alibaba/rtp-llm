@@ -10,15 +10,23 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
+    MX_BLOCK,
+    mxfp8_linear,
+    pack_mxfp8_scale,
+)
 from rtp_llm.models_py.modules.factory.linear import LinearBase
-from rtp_llm.models_py.kernels.cuda.mxfp8_ops import mxfp8_linear
 from rtp_llm.ops import HWKernelConfig
 
 
 class CudaMxfp8Linear(LinearBase):
-    # Read by fused norm+quant gates in generic_moe / mla_attention; MXFP8
-    # always emits UE8M0-packed scales.
+    # The unfused path quantizes and packs UE8M0 scales internally. Upstream
+    # fused kernels should emit fp32 power-of-two scales with group=32; forward()
+    # packs them before DeepGEMM.
     scale_ue8m0: bool = True
+    input_quant_group_size: int = MX_BLOCK
+    input_quant_scale_ue8m0: bool = False
+    input_quant_round_to_pow2: bool = True
 
     @classmethod
     def can_handle(
@@ -53,15 +61,37 @@ class CudaMxfp8Linear(LinearBase):
         self.weight = weight
         self.weight_scale = weight_scales
         self.bias = bias
+        self.K = weight.shape[1]
         self.N = weight.shape[0]
         self._weight_scale_packed = None
 
     def _packed_weight_scale(self) -> torch.Tensor:
         if self._weight_scale_packed is None:
-            from rtp_llm.models_py.kernels.cuda.mxfp8_ops import pack_mxfp8_scale
-            n, k = self.weight.shape
-            self._weight_scale_packed = pack_mxfp8_scale(self.weight_scale, mn=n, k=k)
+            self._weight_scale_packed = pack_mxfp8_scale(
+                self.weight_scale, mn=self.N, k=self.K
+            )
         return self._weight_scale_packed
+
+    def _packed_input_scale(
+        self,
+        input_scales: torch.Tensor,
+        m: int,
+        k: int,
+    ) -> torch.Tensor:
+        if input_scales.dtype == torch.int32:
+            return input_scales
+        if input_scales.dtype != torch.float32:
+            raise ValueError(
+                f"MXFP8 input_scales must be fp32 row-major or int32 packed, "
+                f"got {input_scales.dtype}"
+            )
+        expected_shape = (m, k // MX_BLOCK)
+        if tuple(input_scales.shape) != expected_shape:
+            raise ValueError(
+                f"MXFP8 fp32 input_scales expected shape {expected_shape}, "
+                f"got {tuple(input_scales.shape)}"
+            )
+        return pack_mxfp8_scale(input_scales, mn=m, k=k)
 
     def forward(
         self,
@@ -71,9 +101,14 @@ class CudaMxfp8Linear(LinearBase):
         orig_shape = input.shape
         x = input.reshape(-1, orig_shape[-1])
         if input_scales is not None:
-            from rtp_llm.models_py.kernels.cuda.mxfp8_ops import MX_BLOCK
             from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_fp4_gemm_nt
+
             M = x.shape[0]
+            if M == 0:
+                return torch.empty(
+                    *orig_shape[:-1], self.N, device=x.device, dtype=torch.bfloat16
+                )
+            input_scales = self._packed_input_scale(input_scales, M, x.shape[1])
             out = torch.empty(M, self.N, device=x.device, dtype=torch.bfloat16)
             with torch.cuda.device(x.device):
                 fp8_fp4_gemm_nt(
