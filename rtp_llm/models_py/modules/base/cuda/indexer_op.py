@@ -26,6 +26,15 @@ except Exception as e:
 
 
 _PD_DEBUG_INDEXER_LOG_COUNTS: Dict[str, int] = {}
+_persistent_topk_workspace: Dict[torch.device, torch.Tensor] = {}
+
+
+def _get_topk_workspace(device: torch.device) -> torch.Tensor:
+    ws = _persistent_topk_workspace.get(device)
+    if ws is None:
+        ws = torch.empty(1 << 20, dtype=torch.uint8, device=device)
+        _persistent_topk_workspace[device] = ws
+    return ws
 
 
 def _pd_debug_enabled() -> bool:
@@ -592,8 +601,6 @@ class IndexerOp(nn.Module):
         Returns:
             TopK indices tensor
         """
-        from rtp_llm.models_py.kernels.cuda.fast_topk import fast_topk_transform_fused
-
         weights = weights.view(-1, self.index_n_heads)
         kv_cache_fp8 = kv_cache.kv_scale_base
         is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
@@ -665,17 +672,19 @@ class IndexerOp(nn.Module):
         assert (
             fmha_params.expanded_seq_lens.device == logits.device
         ), "expanded_seq_lens must be on the same device as logits"
-        assert (
-            cu_seqlens_q is not None and cu_seqlens_q.device == logits.device
-        ), "cu_seqlens must be on the same device as logits"
 
-        topk_result = fast_topk_transform_fused(
-            score=logits,
-            lengths=lengths,
-            cu_seqlens_q=cu_seqlens_q,
-            topk=self.index_topk,
-            row_starts=None,
+        topk_result = logits.new_empty(
+            (logits.shape[0], self.index_topk), dtype=torch.int32
         )
+        rtp_llm_ops.dsv4_persistent_topk(
+            logits,
+            lengths,
+            topk_result,
+            _get_topk_workspace(logits.device),
+            self.index_topk,
+            max_seq_len,
+        )
+
         if _pd_debug_enabled():
             if _pd_debug_take(f"paged:{self.index_topk}", 32):
                 logging.info(

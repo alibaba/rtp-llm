@@ -36,7 +36,8 @@ constexpr uint32_t RADIX_THRESHOLD = 32768;
 
 // Decode path constants
 constexpr int kDecodeBins = 2048;
-constexpr uint32_t HIST2048_THRESHOLD = 8192;
+// FIXME: temporary disable hist256 topk due to potential precision issues
+constexpr uint32_t HIST2048_THRESHOLD = 32768;
 
 // Large path: fixed shared memory for histograms + scalars
 constexpr size_t kFixedSmemLarge =
