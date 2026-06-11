@@ -1,9 +1,17 @@
 #include <algorithm>
 #include <memory>
 #include <chrono>
+#include <optional>
 #include <thread>
 #include <unistd.h>
 #include <c10/core/InferenceMode.h>
+#if USING_CUDA
+#include <c10/cuda/CUDAGuard.h>
+#include <cuda_runtime_api.h>
+#elif USING_ROCM
+#include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
+#include <hip/hip_runtime.h>
+#endif
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -33,6 +41,45 @@ std::string resolveInstanceId() {
         }
     }
     return instance_id;
+}
+
+class OptionalFreezeDeviceGuard {
+public:
+    explicit OptionalFreezeDeviceGuard(int64_t local_rank) {
+#if USING_CUDA
+        guard_.emplace(static_cast<int>(local_rank));
+#elif USING_ROCM
+        guard_.emplace(static_cast<int>(local_rank));
+#else
+        (void)local_rank;
+#endif
+    }
+
+private:
+#if USING_CUDA
+    std::optional<at::cuda::CUDAGuard> guard_;
+#elif USING_ROCM
+    std::optional<c10::hip::HIPGuardMasqueradingAsCUDA> guard_;
+#endif
+};
+
+bool synchronizeFreezeDevice(const char* stage) {
+#if USING_CUDA
+    const auto err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        RTP_LLM_LOG_ERROR("freeze device synchronize failed at %s: %s", stage, cudaGetErrorString(err));
+        return false;
+    }
+#elif USING_ROCM
+    const auto err = hipDeviceSynchronize();
+    if (err != hipSuccess) {
+        RTP_LLM_LOG_ERROR("freeze device synchronize failed at %s: %s", stage, hipGetErrorString(err));
+        return false;
+    }
+#else
+    (void)stage;
+#endif
+    return true;
 }
 
 }  // namespace
@@ -102,20 +149,28 @@ void LocalRpcServer::installFreezeHooks() {
     FreezeHooks hooks;
     drain_manager_->installHooks(hooks);  // drain + activeRequestCount + activeCacheTransferCount
 
-    auto tms                      = tms_backend_;
-    hooks.deregMrAndQuiesceEngine = [engine](const FreezeOptions&) {
+    const auto local_rank         = maga_init_params_.parallelism_config.local_rank;
+    auto       tms                = tms_backend_;
+    hooks.deregMrAndQuiesceEngine = [engine, local_rank](const FreezeOptions&) {
+        OptionalFreezeDeviceGuard device_guard(local_rank);
         // Stall the scheduling loop (no destruction) so nothing touches KV memory
         // while its physical pages are dropped. The engine is already drained.
         engine->pause();
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        if (!synchronizeFreezeDevice("before_dereg_mr")) {
+            return false;
+        }
         if (auto cache_manager = engine->getCacheManager()) {
             cache_manager->deregUserMr();
         }
-        // TODO(M7): CUDA stream/device sync before page drop.
+        if (!synchronizeFreezeDevice("after_dereg_mr")) {
+            return false;
+        }
         return true;
     };
-    hooks.pauseKvMemory = [engine](const FreezeOptions&) {
-        auto cache_manager = engine->getCacheManager();
+    hooks.pauseKvMemory = [engine, local_rank](const FreezeOptions&) {
+        OptionalFreezeDeviceGuard device_guard(local_rank);
+        auto                      cache_manager = engine->getCacheManager();
         if (!cache_manager) {
             return true;
         }
@@ -128,15 +183,17 @@ void LocalRpcServer::installFreezeHooks() {
     };
     // M6: weights are tagged by rtp_llm/model_loader/weight_memory_saver.py under
     // "weights" with cpu backup; pausing an unknown/empty tag is a harmless no-op.
-    hooks.pauseWeights = [tms](const FreezeOptions&) {
+    hooks.pauseWeights = [tms, local_rank](const FreezeOptions&) {
+        OptionalFreezeDeviceGuard device_guard(local_rank);
         if (!tms->isAvailable()) {
             RTP_LLM_LOG_WARNING("pauseWeights skipped: tms preload shim not present");
             return true;
         }
         return tms->pause("weights");
     };
-    hooks.resumeKvMemory = [engine]() {
-        auto cache_manager = engine->getCacheManager();
+    hooks.resumeKvMemory = [engine, local_rank]() {
+        OptionalFreezeDeviceGuard device_guard(local_rank);
+        auto                      cache_manager = engine->getCacheManager();
         if (!cache_manager) {
             return true;
         }
@@ -147,13 +204,18 @@ void LocalRpcServer::installFreezeHooks() {
         // Re-maps pages at the same VA, then resets BlockPool metadata + BlockCache.
         return cache_manager->resumeKVCacheMemory();
     };
-    hooks.resumeWeights = [tms]() {
+    hooks.resumeWeights = [tms, local_rank]() {
+        OptionalFreezeDeviceGuard device_guard(local_rank);
         if (!tms->isAvailable()) {
             return true;
         }
         return tms->resume("weights");
     };
-    hooks.regMrAndResumeEngine = [this, engine]() {
+    hooks.regMrAndResumeEngine = [this, engine, local_rank]() {
+        OptionalFreezeDeviceGuard device_guard(local_rank);
+        if (!synchronizeFreezeDevice("before_reg_mr")) {
+            return false;
+        }
         if (auto cache_manager = engine->getCacheManager()) {
             cache_manager->regUserMr(maga_init_params_.model_id, cache_manager->getCacheStore());
         }
@@ -725,15 +787,20 @@ grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const Empt
 
 grpc::Status
 LocalRpcServer::FreezeServing(grpc::ServerContext* context, const FreezeRequestPB* request, EmptyPB* response) {
-    RTP_LLM_LOG_INFO("receive FreezeServing rpc request from client: %s, mode: %s, reason: %s",
+    RTP_LLM_LOG_INFO("receive FreezeServing rpc request from client: %s, mode: %s, reason: %s, prepare_only: %d, "
+                     "commit_only: %d",
                      context->peer().c_str(),
                      request->mode().c_str(),
-                     request->reason().c_str());
+                     request->reason().c_str(),
+                     request->prepare_only(),
+                     request->commit_only());
     FreezeOptions options;
     options.mode             = request->mode().empty() ? "graceful" : request->mode();
     options.drain_timeout_ms = request->drain_timeout_ms();
     options.force            = request->force();
     options.reason           = request->reason();
+    options.prepare_only     = request->prepare_only();
+    options.commit_only      = request->commit_only();
     const auto result        = engine_->freezeController().freeze(options);
     if (!result.ok) {
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, result.message);

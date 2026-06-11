@@ -26,7 +26,10 @@ from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
 from rtp_llm.frontend.frontend_server import FrontendServer
-from rtp_llm.frontend.frontend_worker import get_dp_addrs_from_world_info
+from rtp_llm.frontend.frontend_worker import (
+    get_control_addrs_from_world_info,
+    get_dp_addrs_from_world_info,
+)
 from rtp_llm.openai.api_datatype import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -71,7 +74,8 @@ class FrontendApp(object):
         )
         self.separated_frontend = separated_frontend
 
-        # Compute all DP addresses for broadcast operations (e.g. update_scheduler_info)
+        # DP addresses are serving route targets; lifecycle control must fan out
+        # to every backend rank because freeze/resume is process-local.
         engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
         world_info = get_world_info(
             server_config=py_env_configs.server_config,
@@ -82,8 +86,11 @@ class FrontendApp(object):
             world_info=world_info,
             parallelism_config=engine_config.parallelism_config,
         )
+        control_addresses = get_control_addrs_from_world_info(world_info)
         self.grpc_client = GrpcClientWrapper(
-            self.server_config.rpc_server_port, dp_addresses=dp_addresses
+            self.server_config.rpc_server_port,
+            dp_addresses=dp_addresses,
+            control_addresses=control_addresses,
         )
 
         logging.info(

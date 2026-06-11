@@ -37,6 +37,8 @@ struct FreezeOptions {
     int64_t     drain_timeout_ms = 0;
     bool        force            = false;
     std::string reason;
+    bool        prepare_only = false;  // DRAINING + drained, no GPU release
+    bool        commit_only  = false;  // DRAINING -> FREEZING -> FROZEN
 };
 
 // Snapshot returned by status() / GetFreezeStatus RPC (proto FreezeStatusResponsePB).
@@ -114,6 +116,11 @@ public:
 
     // Trigger freeze: RUNNING -> DRAINING -> FREEZING -> FROZEN. Idempotent when
     // already draining/freezing/frozen. Illegal from RESUMING.
+    //
+    // prepare_only is used by the instance-level all-rank coordinator: it closes
+    // admission and waits for local drain, but deliberately leaves the rank in
+    // DRAINING so no rank releases GPU memory until every rank has prepared.
+    // commit_only then performs the release from DRAINING.
     FreezeResult freeze(const FreezeOptions& opt);
 
     // Trigger resume: FROZEN -> RESUMING -> RUNNING. Idempotent when already

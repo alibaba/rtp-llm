@@ -104,6 +104,27 @@ def get_dp_addrs_from_world_info(
     return addresses
 
 
+def get_control_addrs_from_world_info(world_info: WorldInfo) -> list[str]:
+    """Get all backend RPC addresses that must receive lifecycle control.
+
+    Traffic routing deliberately talks to one rank per DP group, but
+    freeze/resume is process-local: every backend rank owns its own CUDA
+    context, KV buffer, weights, and FreezeLifecycleController. Therefore the
+    control-plane lifecycle RPCs must fan out to all ranks visible to this
+    frontend process.
+    """
+    addresses: list[str] = []
+    seen: Set[str] = set()
+    for member in sorted(world_info.members, key=lambda x: x.world_rank):
+        address = f"{member.ip}:{member.rpc_server_port}"
+        if address in seen:
+            continue
+        seen.add(address)
+        addresses.append(address)
+    logging.info("using control-plane addresses from world_info: %s", addresses)
+    return addresses
+
+
 class FrontendWorker:
     def __init__(
         self,

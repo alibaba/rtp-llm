@@ -10,9 +10,17 @@ import unittest
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
 
+import grpc
 from fastapi.testclient import TestClient
 
+from rtp_llm.distribute.distributed_server import WorldInfo
+from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.frontend.frontend_app import FrontendApp
+from rtp_llm.frontend.frontend_worker import (
+    get_control_addrs_from_world_info,
+    get_dp_addrs_from_world_info,
+)
+from rtp_llm.ops import ParallelismConfig
 
 FREEZE_STATUS_OK: Dict[str, Any] = {
     "state": "FROZEN",
@@ -132,55 +140,104 @@ class AdminFreezeRoutesTest(unittest.TestCase):
 
 class GrpcClientWrapperFreezeTest(unittest.IsolatedAsyncioTestCase):
 
-    def _build_wrapper(self):
+    def _build_wrapper(self, control_addresses=None):
         import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
         from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
 
-        wrapper = GrpcClientWrapper(server_port=12345)
+        wrapper = GrpcClientWrapper(
+            server_port=12345,
+            control_addresses=control_addresses or ["127.0.0.1:10001"],
+        )
         wrapper.channel = MagicMock()
         wrapper.stub = MagicMock()
+        for address in wrapper.control_addresses:
+            wrapper._dp_channels[address] = MagicMock()
+            wrapper._dp_stubs[address] = MagicMock()
         return wrapper, pb2
 
-    async def test_freeze_serving_builds_request_and_reports_status(self):
-        wrapper, pb2 = self._build_wrapper()
-        wrapper.stub.FreezeServing = AsyncMock(return_value=pb2.EmptyPB())
-        status_response = pb2.FreezeStatusResponsePB(
-            state="FROZEN",
-            freeze_epoch=1,
-            kv_memory_state="PAUSED",
-            device_kv_cache_valid=False,
-            gpu_resource_state="RELEASED",
+    def _aio_error(self, code, details):
+        return grpc.aio.AioRpcError(
+            code=code,
+            initial_metadata=grpc.aio.Metadata(),
+            trailing_metadata=grpc.aio.Metadata(),
+            details=details,
         )
-        wrapper.stub.GetFreezeStatus = AsyncMock(return_value=status_response)
+
+    async def test_freeze_serving_broadcasts_all_control_ranks(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        wrapper, pb2 = self._build_wrapper(control_addresses=addresses)
+        for address in addresses:
+            wrapper._dp_stubs[address].FreezeServing = AsyncMock(
+                return_value=pb2.EmptyPB()
+            )
+            wrapper._dp_stubs[address].GetFreezeStatus = AsyncMock(
+                return_value=pb2.FreezeStatusResponsePB(
+                    state="FROZEN",
+                    freeze_epoch=1,
+                    kv_memory_state="PAUSED",
+                    device_kv_cache_valid=False,
+                    gpu_resource_state="RELEASED",
+                )
+            )
 
         result = await wrapper.freeze_serving(
             {"mode": "force", "drain_timeout_ms": 1000, "reason": "test"}
         )
 
-        self.assertEqual(result, {"status": "ok", "state": "FROZEN", "freeze_epoch": 1})
-        request = wrapper.stub.FreezeServing.await_args.args[0]
-        self.assertEqual(request.mode, "force")
-        self.assertEqual(request.drain_timeout_ms, 1000)
-        self.assertTrue(request.force)
-        self.assertEqual(request.reason, "test")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["state"], "FROZEN")
+        self.assertEqual(result["freeze_epoch"], 1)
+        self.assertEqual(result["rank_count"], 2)
+        for address in addresses:
+            stub = wrapper._dp_stubs[address]
+            self.assertEqual(stub.FreezeServing.await_count, 2)
+            prepare_request = stub.FreezeServing.await_args_list[0].args[0]
+            commit_request = stub.FreezeServing.await_args_list[1].args[0]
+            self.assertEqual(prepare_request.mode, "force")
+            self.assertEqual(prepare_request.drain_timeout_ms, 1000)
+            self.assertTrue(prepare_request.force)
+            self.assertEqual(prepare_request.reason, "test")
+            self.assertTrue(prepare_request.prepare_only)
+            self.assertFalse(prepare_request.commit_only)
+            self.assertFalse(commit_request.prepare_only)
+            self.assertTrue(commit_request.commit_only)
+            self.assertEqual(commit_request.drain_timeout_ms, 0)
 
     async def test_resume_serving_success(self):
-        wrapper, pb2 = self._build_wrapper()
-        wrapper.stub.ResumeServing = AsyncMock(return_value=pb2.EmptyPB())
-        wrapper.stub.GetFreezeStatus = AsyncMock(
-            return_value=pb2.FreezeStatusResponsePB(state="RUNNING", freeze_epoch=1)
-        )
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        wrapper, pb2 = self._build_wrapper(control_addresses=addresses)
+        for address in addresses:
+            wrapper._dp_stubs[address].ResumeServing = AsyncMock(
+                return_value=pb2.EmptyPB()
+            )
+            wrapper._dp_stubs[address].GetFreezeStatus = AsyncMock(
+                return_value=pb2.FreezeStatusResponsePB(
+                    state="RUNNING",
+                    freeze_epoch=1,
+                    kv_memory_state="ACTIVE",
+                    device_kv_cache_valid=False,
+                    gpu_resource_state="ACTIVE",
+                )
+            )
 
         result = await wrapper.resume_serving()
 
-        self.assertEqual(
-            result, {"status": "ok", "state": "RUNNING", "freeze_epoch": 1}
-        )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["state"], "RUNNING")
+        self.assertEqual(result["rank_count"], 2)
+        for address in addresses:
+            wrapper._dp_stubs[address].ResumeServing.assert_awaited_once()
 
     async def test_get_freeze_status_returns_full_schema(self):
         wrapper, pb2 = self._build_wrapper()
-        wrapper.stub.GetFreezeStatus = AsyncMock(
-            return_value=pb2.FreezeStatusResponsePB(state="RUNNING")
+        address = wrapper.control_addresses[0]
+        wrapper._dp_stubs[address].GetFreezeStatus = AsyncMock(
+            return_value=pb2.FreezeStatusResponsePB(
+                state="RUNNING",
+                kv_memory_state="ACTIVE",
+                device_kv_cache_valid=True,
+                gpu_resource_state="ACTIVE",
+            )
         )
 
         result = await wrapper.get_freeze_status()
@@ -194,27 +251,177 @@ class GrpcClientWrapperFreezeTest(unittest.IsolatedAsyncioTestCase):
             "active_cache_transfer_count",
             "gpu_resource_state",
             "last_error",
+            "rank_count",
+            "rank_success_count",
+            "results",
         }
-        self.assertEqual(expected_keys, set(result.keys()))
+        self.assertTrue(expected_keys.issubset(set(result.keys())))
         self.assertEqual(result["state"], "RUNNING")
 
-    async def test_freeze_serving_error_carries_grpc_status(self):
-        import grpc
-
-        wrapper, _ = self._build_wrapper()
-
-        error = grpc.aio.AioRpcError(
-            code=grpc.StatusCode.FAILED_PRECONDITION,
-            initial_metadata=grpc.aio.Metadata(),
-            trailing_metadata=grpc.aio.Metadata(),
-            details="freeze rejected in state RESUMING",
+    async def test_get_freeze_status_reports_mixed_state(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        wrapper, pb2 = self._build_wrapper(control_addresses=addresses)
+        wrapper._dp_stubs[addresses[0]].GetFreezeStatus = AsyncMock(
+            return_value=pb2.FreezeStatusResponsePB(state="FROZEN", freeze_epoch=2)
         )
-        wrapper.stub.FreezeServing = AsyncMock(side_effect=error)
+        wrapper._dp_stubs[addresses[1]].GetFreezeStatus = AsyncMock(
+            return_value=pb2.FreezeStatusResponsePB(state="RUNNING", freeze_epoch=1)
+        )
+
+        result = await wrapper.get_freeze_status()
+
+        self.assertEqual(result["state"], "MIXED")
+        self.assertEqual(result["freeze_epoch"], 2)
+        self.assertEqual(result["rank_count"], 2)
+        self.assertEqual(len(result["results"]), 2)
+
+    async def test_freeze_serving_error_carries_per_rank_status(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        wrapper, pb2 = self._build_wrapper(control_addresses=addresses)
+        wrapper._dp_stubs[addresses[0]].FreezeServing = AsyncMock(
+            return_value=pb2.EmptyPB()
+        )
+        wrapper._dp_stubs[addresses[0]].ResumeServing = AsyncMock(
+            return_value=pb2.EmptyPB()
+        )
+        wrapper._dp_stubs[addresses[1]].FreezeServing = AsyncMock(
+            side_effect=self._aio_error(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "freeze rejected in state RESUMING",
+            )
+        )
+        wrapper._dp_stubs[addresses[1]].ResumeServing = AsyncMock(
+            return_value=pb2.EmptyPB()
+        )
 
         result = await wrapper.freeze_serving({})
 
         self.assertIn("error", result)
         self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertEqual(result["rank_count"], 2)
+        self.assertEqual(result["rank_success_count"], 1)
+        self.assertEqual(len(result["results"]), 2)
+        self.assertEqual(len(result["abort_results"]), 2)
+        for address in addresses:
+            wrapper._dp_stubs[address].ResumeServing.assert_awaited_once()
+
+    async def test_freeze_serving_rejects_non_converged_final_state(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        wrapper, pb2 = self._build_wrapper(control_addresses=addresses)
+        for address in addresses:
+            wrapper._dp_stubs[address].FreezeServing = AsyncMock(
+                return_value=pb2.EmptyPB()
+            )
+        wrapper._dp_stubs[addresses[0]].GetFreezeStatus = AsyncMock(
+            return_value=pb2.FreezeStatusResponsePB(state="FROZEN", freeze_epoch=1)
+        )
+        wrapper._dp_stubs[addresses[1]].GetFreezeStatus = AsyncMock(
+            return_value=pb2.FreezeStatusResponsePB(state="RUNNING", freeze_epoch=1)
+        )
+
+        result = await wrapper.freeze_serving({})
+
+        self.assertIn("error", result)
+        self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertEqual(result["freeze_status"]["state"], "MIXED")
+
+    async def test_resume_serving_rejects_non_converged_final_state(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        wrapper, pb2 = self._build_wrapper(control_addresses=addresses)
+        for address in addresses:
+            wrapper._dp_stubs[address].ResumeServing = AsyncMock(
+                return_value=pb2.EmptyPB()
+            )
+        wrapper._dp_stubs[addresses[0]].GetFreezeStatus = AsyncMock(
+            return_value=pb2.FreezeStatusResponsePB(state="RUNNING", freeze_epoch=1)
+        )
+        wrapper._dp_stubs[addresses[1]].GetFreezeStatus = AsyncMock(
+            return_value=pb2.FreezeStatusResponsePB(state="FROZEN", freeze_epoch=1)
+        )
+
+        result = await wrapper.resume_serving()
+
+        self.assertIn("error", result)
+        self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertEqual(result["freeze_status"]["state"], "MIXED")
+
+
+class FreezeControlAddressTest(unittest.TestCase):
+
+    def test_control_addresses_include_all_ranks_but_dp_addresses_do_not(self):
+        members = [
+            WorkerInfo(
+                ip="127.0.0.1",
+                local_rank=rank,
+                world_rank=rank,
+                name=f"rank_{rank}",
+                server_port=20000,
+                worker_info_port_num=8,
+            )
+            for rank in range(4)
+        ]
+        world_info = WorldInfo(
+            members=members,
+            master=members[0],
+            self=members[0],
+            num_nodes=1,
+            initialized=True,
+        )
+        pc = ParallelismConfig()
+        pc.tp_size = 2
+
+        dp_addresses = get_dp_addrs_from_world_info(world_info, pc)
+        control_addresses = get_control_addrs_from_world_info(world_info)
+
+        self.assertEqual(dp_addresses, ["127.0.0.1:20001", "127.0.0.1:20017"])
+        self.assertEqual(
+            control_addresses,
+            [
+                "127.0.0.1:20001",
+                "127.0.0.1:20009",
+                "127.0.0.1:20017",
+                "127.0.0.1:20025",
+            ],
+        )
+
+    def test_ffn_disaggregate_control_addresses_still_include_all_ranks(self):
+        members = [
+            WorkerInfo(
+                ip="127.0.0.1",
+                local_rank=rank,
+                world_rank=rank,
+                name=f"rank_{rank}",
+                server_port=20000,
+                worker_info_port_num=8,
+            )
+            for rank in range(4)
+        ]
+        world_info = WorldInfo(
+            members=members,
+            master=members[0],
+            self=members[0],
+            num_nodes=1,
+            initialized=True,
+        )
+        pc = ParallelismConfig()
+        pc.tp_size = 1
+        pc.ffn_disaggregate_config.enable_ffn_disaggregate = True
+        pc.ffn_disaggregate_config.attention_tp_size = 1
+        pc.ffn_disaggregate_config.attention_dp_size = 2
+
+        dp_addresses = get_dp_addrs_from_world_info(world_info, pc)
+        control_addresses = get_control_addrs_from_world_info(world_info)
+
+        self.assertEqual(dp_addresses, ["127.0.0.1:20001", "127.0.0.1:20009"])
+        self.assertEqual(
+            control_addresses,
+            [
+                "127.0.0.1:20001",
+                "127.0.0.1:20009",
+                "127.0.0.1:20017",
+                "127.0.0.1:20025",
+            ],
+        )
 
 
 if __name__ == "__main__":

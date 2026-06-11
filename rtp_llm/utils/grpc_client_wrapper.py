@@ -14,16 +14,47 @@ from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.utils.time_util import Timer
 
 
+def _dedupe_addresses(addresses: List[str]) -> List[str]:
+    deduped: List[str] = []
+    seen = set()
+    for address in addresses:
+        if address in seen:
+            continue
+        seen.add(address)
+        deduped.append(address)
+    return deduped
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class GrpcClientWrapper:
     """Wrapper for direct gRPC calls to replace async_request_server"""
 
-    def __init__(self, server_port: int, dp_addresses: Optional[List[str]] = None):
+    def __init__(
+        self,
+        server_port: int,
+        dp_addresses: Optional[List[str]] = None,
+        control_addresses: Optional[List[str]] = None,
+    ):
         self.server_port = server_port
         self.address = f"localhost:{server_port}"
         self.channel = None
         self.stub = None
-        # All DP addresses for broadcast operations (defaults to local address)
-        self.dp_addresses = dp_addresses if dp_addresses else [self.address]
+        # Serving-route broadcast targets, normally one representative per DP
+        # group. Do not use these for freeze/resume: lifecycle control must
+        # reach every backend rank process that owns GPU resources.
+        self.dp_addresses = _dedupe_addresses(
+            dp_addresses if dp_addresses else [self.address]
+        )
+        self.control_addresses = _dedupe_addresses(
+            control_addresses if control_addresses else [self.address]
+        )
+        self._lifecycle_lock = asyncio.Lock()
         self._dp_channels: Dict[str, Any] = {}
         self._dp_stubs: Dict[str, Any] = {}
 
@@ -169,10 +200,98 @@ class GrpcClientWrapper:
             logging.error(f"Set log level failed: {e}")
             return {"error": f"Failed to set log level: {str(e)}"}
 
-    async def freeze_serving(self, req: Any) -> Dict[str, Any]:
-        """Trigger engine freeze (drain -> release GPU resources, design doc M2)."""
+    async def _call_control_rpc(
+        self, address: str, rpc_name: str, request: Any, timeout_s: float
+    ) -> Dict[str, Any]:
         try:
-            await self._ensure_connection()
+            await self._ensure_dp_connection(address)
+            rpc = getattr(self._dp_stubs[address], rpc_name)
+            response = await rpc(request, timeout=timeout_s)
+            result: Dict[str, Any] = {"address": address, "status": "ok"}
+            if response is not None and not isinstance(response, pb2.EmptyPB):
+                result.update(
+                    MessageToDict(
+                        response,
+                        preserving_proto_field_name=True,
+                        including_default_value_fields=True,
+                    )
+                )
+            return result
+        except grpc.aio.AioRpcError as e:
+            logging.error("%s failed on %s: %s", rpc_name, address, e.details())
+            return {
+                "address": address,
+                "error": str(e.details()),
+                "grpc_status": e.code().name,
+            }
+        except Exception as e:
+            logging.error("%s failed on %s: %s", rpc_name, address, e)
+            return {"address": address, "error": str(e)}
+
+    async def _broadcast_control_rpc(
+        self, rpc_name: str, request: Any, timeout_s: float
+    ) -> List[Dict[str, Any]]:
+        tasks = [
+            self._call_control_rpc(address, rpc_name, request, timeout_s)
+            for address in self.control_addresses
+        ]
+        return await asyncio.gather(*tasks)
+
+    def _aggregate_freeze_status(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        successes = [result for result in results if "error" not in result]
+        failures = [result for result in results if "error" in result]
+        if not successes:
+            return {
+                "error": "Failed to get freeze status from all control ranks",
+                "results": results,
+                "rank_count": len(results),
+                "rank_success_count": 0,
+                "state": "MIXED",
+            }
+
+        states = {str(result.get("state", "")) for result in successes}
+        gpu_states = {str(result.get("gpu_resource_state", "")) for result in successes}
+        kv_states = {str(result.get("kv_memory_state", "")) for result in successes}
+        aggregate = dict(successes[0])
+        aggregate["state"] = (
+            next(iter(states)) if len(states) == 1 and not failures else "MIXED"
+        )
+        aggregate["gpu_resource_state"] = (
+            next(iter(gpu_states)) if len(gpu_states) == 1 and not failures else "MIXED"
+        )
+        aggregate["kv_memory_state"] = (
+            next(iter(kv_states)) if len(kv_states) == 1 and not failures else "MIXED"
+        )
+        aggregate["freeze_epoch"] = max(
+            _as_int(result.get("freeze_epoch", 0)) for result in successes
+        )
+        aggregate["active_request_count"] = sum(
+            _as_int(result.get("active_request_count", 0)) for result in successes
+        )
+        aggregate["active_cache_transfer_count"] = sum(
+            _as_int(result.get("active_cache_transfer_count", 0))
+            for result in successes
+        )
+        aggregate["device_kv_cache_valid"] = all(
+            bool(result.get("device_kv_cache_valid", False)) for result in successes
+        )
+        aggregate["rank_count"] = len(results)
+        aggregate["rank_success_count"] = len(successes)
+        aggregate["results"] = results
+        aggregate.pop("address", None)
+        aggregate.pop("status", None)
+        if failures:
+            aggregate["error"] = "Failed to get freeze status from some control ranks"
+            aggregate["grpc_status"] = failures[0].get("grpc_status", "UNAVAILABLE")
+        return aggregate
+
+    async def freeze_serving(self, req: Any) -> Dict[str, Any]:
+        """Trigger engine freeze on every lifecycle control rank."""
+        async with self._lifecycle_lock:
+            return await self._freeze_serving_locked(req)
+
+    async def _freeze_serving_locked(self, req: Any) -> Dict[str, Any]:
+        try:
             if isinstance(req, str):
                 req = json.loads(req)
             if req is None:
@@ -185,15 +304,71 @@ class GrpcClientWrapper:
                 force=(mode == "force"),
                 reason=str(req.get("reason", "")),
             )
-            # freeze blocks on drain; leave headroom on top of drain timeout
+            prepare_request = pb2.FreezeRequestPB()
+            prepare_request.CopyFrom(request)
+            prepare_request.prepare_only = True
+            commit_request = pb2.FreezeRequestPB()
+            commit_request.CopyFrom(request)
+            commit_request.commit_only = True
+            commit_request.drain_timeout_ms = 0
+
+            # prepare blocks on drain; leave headroom on top of drain timeout.
+            # Only after every rank is drained do we send commit, avoiding a
+            # half-frozen instance when one rank times out.
             timeout_s = max(60.0, drain_timeout_ms / 1000.0 + 30.0)
-            await self.stub.FreezeServing(request, timeout=timeout_s)
+            prepare_results = await self._broadcast_control_rpc(
+                "FreezeServing", prepare_request, timeout_s
+            )
+            failures = [result for result in prepare_results if "error" in result]
+            if failures:
+                abort_results = await self._broadcast_control_rpc(
+                    "ResumeServing", pb2.EmptyPB(), timeout_s=60
+                )
+                return {
+                    "error": "Failed to prepare freeze on some control ranks",
+                    "grpc_status": failures[0].get("grpc_status", "UNKNOWN"),
+                    "results": prepare_results,
+                    "abort_results": abort_results,
+                    "rank_count": len(prepare_results),
+                    "rank_success_count": len(prepare_results) - len(failures),
+                }
+
+            commit_results = await self._broadcast_control_rpc(
+                "FreezeServing", commit_request, timeout_s=60
+            )
+            failures = [result for result in commit_results if "error" in result]
+            if failures:
+                status = await self.get_freeze_status()
+                return {
+                    "error": "Failed to commit freeze on some control ranks",
+                    "grpc_status": failures[0].get("grpc_status", "UNKNOWN"),
+                    "results": commit_results,
+                    "freeze_status": status,
+                    "rank_count": len(commit_results),
+                    "rank_success_count": len(commit_results) - len(failures),
+                }
             status = await self.get_freeze_status()
+            if "error" in status:
+                return status
+            if status.get("state") != "FROZEN":
+                return {
+                    "error": "Freeze did not converge to FROZEN on all control ranks",
+                    "grpc_status": "FAILED_PRECONDITION",
+                    "freeze_status": status,
+                    "rank_count": status.get("rank_count", len(commit_results)),
+                    "rank_success_count": status.get(
+                        "rank_success_count", len(commit_results)
+                    ),
+                }
             return {
                 "status": "ok",
                 "state": status.get("state", ""),
-                # MessageToDict renders int64 as str, normalize back to int
-                "freeze_epoch": int(status.get("freeze_epoch", 0)),
+                "freeze_epoch": _as_int(status.get("freeze_epoch", 0)),
+                "results": status.get("results", commit_results),
+                "rank_count": status.get("rank_count", len(commit_results)),
+                "rank_success_count": status.get(
+                    "rank_success_count", len(commit_results)
+                ),
             }
         except grpc.aio.AioRpcError as e:
             logging.error(f"Freeze serving failed: {e.details()}")
@@ -206,17 +381,45 @@ class GrpcClientWrapper:
             return {"error": f"Failed to freeze serving: {str(e)}"}
 
     async def resume_serving(self, req: Any = None) -> Dict[str, Any]:
-        """Trigger engine resume (re-back GPU resources -> back online)."""
+        """Trigger engine resume on every lifecycle control rank."""
+        async with self._lifecycle_lock:
+            return await self._resume_serving_locked(req)
+
+    async def _resume_serving_locked(self, req: Any = None) -> Dict[str, Any]:
         try:
-            await self._ensure_connection()
             request = pb2.EmptyPB()
-            await self.stub.ResumeServing(request, timeout=600)
+            results = await self._broadcast_control_rpc(
+                "ResumeServing", request, timeout_s=600
+            )
+            failures = [result for result in results if "error" in result]
+            if failures:
+                return {
+                    "error": "Failed to resume serving on some control ranks",
+                    "grpc_status": failures[0].get("grpc_status", "UNKNOWN"),
+                    "results": results,
+                    "rank_count": len(results),
+                    "rank_success_count": len(results) - len(failures),
+                }
             status = await self.get_freeze_status()
+            if "error" in status:
+                return status
+            if status.get("state") != "RUNNING":
+                return {
+                    "error": "Resume did not converge to RUNNING on all control ranks",
+                    "grpc_status": "FAILED_PRECONDITION",
+                    "freeze_status": status,
+                    "rank_count": status.get("rank_count", len(results)),
+                    "rank_success_count": status.get(
+                        "rank_success_count", len(results)
+                    ),
+                }
             return {
                 "status": "ok",
                 "state": status.get("state", ""),
-                # MessageToDict renders int64 as str, normalize back to int
-                "freeze_epoch": int(status.get("freeze_epoch", 0)),
+                "freeze_epoch": _as_int(status.get("freeze_epoch", 0)),
+                "results": status.get("results", results),
+                "rank_count": status.get("rank_count", len(results)),
+                "rank_success_count": status.get("rank_success_count", len(results)),
             }
         except grpc.aio.AioRpcError as e:
             logging.error(f"Resume serving failed: {e.details()}")
@@ -229,16 +432,13 @@ class GrpcClientWrapper:
             return {"error": f"Failed to resume serving: {str(e)}"}
 
     async def get_freeze_status(self, req: Any = None) -> Dict[str, Any]:
-        """Get freeze lifecycle status (FreezeStatusResponsePB as dict)."""
+        """Get aggregate freeze lifecycle status from every control rank."""
         try:
-            await self._ensure_connection()
             request = pb2.EmptyPB()
-            response = await self.stub.GetFreezeStatus(request, timeout=3)
-            return MessageToDict(
-                response,
-                preserving_proto_field_name=True,
-                including_default_value_fields=True,
+            results = await self._broadcast_control_rpc(
+                "GetFreezeStatus", request, timeout_s=3
             )
+            return self._aggregate_freeze_status(results)
         except Exception as e:
             logging.error(f"Get freeze status failed: {e}")
             return {"error": f"Failed to get freeze status: {str(e)}"}

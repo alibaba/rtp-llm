@@ -613,6 +613,8 @@ message FreezeRequestPB {
     int64 drain_timeout_ms = 2;
     bool force = 3;
     string reason = 4;
+    bool prepare_only = 5;        // close admission + drain; do not release GPU
+    bool commit_only = 6;         // release GPU after all ranks prepared/drained
 }
 
 message FreezeStatusResponsePB {

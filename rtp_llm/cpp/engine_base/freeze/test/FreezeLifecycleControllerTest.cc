@@ -116,6 +116,48 @@ TEST(FreezeLifecycleControllerTest, FreezeRetryFromDrainingCanComplete) {
     EXPECT_EQ(controller.freezeEpoch(), 1);
 }
 
+TEST(FreezeLifecycleControllerTest, PrepareOnlyStaysDrainingUntilCommit) {
+    FreezeLifecycleController controller;
+    std::atomic<int>          pause_kv_called{0};
+    FreezeHooks               hooks;
+    hooks.pauseKvMemory = [&pause_kv_called](const FreezeOptions&) {
+        pause_kv_called++;
+        return true;
+    };
+    controller.setHooks(hooks);
+
+    FreezeOptions prepare = gracefulOptions();
+    prepare.prepare_only  = true;
+    const auto prepared   = controller.freeze(prepare);
+    EXPECT_TRUE(prepared.ok) << prepared.message;
+    EXPECT_EQ(controller.state(), FreezeState::DRAINING);
+    EXPECT_FALSE(controller.admit());
+    EXPECT_EQ(controller.freezeEpoch(), 1);
+    EXPECT_TRUE(controller.status().device_kv_cache_valid);
+    EXPECT_EQ(pause_kv_called.load(), 0);
+
+    FreezeOptions commit = gracefulOptions();
+    commit.commit_only   = true;
+    const auto committed = controller.freeze(commit);
+    EXPECT_TRUE(committed.ok) << committed.message;
+    EXPECT_EQ(controller.state(), FreezeState::FROZEN);
+    EXPECT_EQ(pause_kv_called.load(), 1);
+}
+
+TEST(FreezeLifecycleControllerTest, ResumeFromPreparedDrainingAbortsFreeze) {
+    FreezeLifecycleController controller;
+    FreezeOptions             prepare = gracefulOptions();
+    prepare.prepare_only              = true;
+    ASSERT_TRUE(controller.freeze(prepare).ok);
+    ASSERT_EQ(controller.state(), FreezeState::DRAINING);
+
+    const auto result = controller.resume();
+    EXPECT_TRUE(result.ok) << result.message;
+    EXPECT_EQ(controller.state(), FreezeState::RUNNING);
+    EXPECT_TRUE(controller.admit());
+    EXPECT_EQ(controller.freezeEpoch(), 1);
+}
+
 TEST(FreezeLifecycleControllerTest, FreezeRetryFromDrainingCanEscalateToForce) {
     FreezeLifecycleController controller;
     std::atomic<int>          force_seen{0};
@@ -184,7 +226,7 @@ TEST(FreezeLifecycleControllerTest, ResumeFromErrorIsAllowedAsRecovery) {
     EXPECT_EQ(controller.state(), FreezeState::RUNNING);
 }
 
-TEST(FreezeLifecycleControllerTest, ResumeRejectedWhileDraining) {
+TEST(FreezeLifecycleControllerTest, ResumeWhileDrainingAbortsFreeze) {
     FreezeLifecycleController controller;
     FreezeHooks               hooks;
     hooks.drain = [](const FreezeOptions&) { return false; };
@@ -193,8 +235,9 @@ TEST(FreezeLifecycleControllerTest, ResumeRejectedWhileDraining) {
     ASSERT_EQ(controller.state(), FreezeState::DRAINING);
 
     const auto result = controller.resume();
-    EXPECT_FALSE(result.ok);
-    EXPECT_EQ(controller.state(), FreezeState::DRAINING);
+    EXPECT_TRUE(result.ok) << result.message;
+    EXPECT_EQ(controller.state(), FreezeState::RUNNING);
+    EXPECT_TRUE(controller.admit());
 }
 
 TEST(FreezeLifecycleControllerTest, StatusExposesLiveCounters) {

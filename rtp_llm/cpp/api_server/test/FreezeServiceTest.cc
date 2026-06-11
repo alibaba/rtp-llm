@@ -177,7 +177,7 @@ TEST_F(FreezeServiceTest, ResumeSuccess_FromFrozen) {
     writer_ptr.release();
 }
 
-TEST_F(FreezeServiceTest, ResumeFailed_WhileDraining) {
+TEST_F(FreezeServiceTest, ResumeWhileDrainingAbortsFreeze) {
     FreezeHooks hooks;
     hooks.drain = [](const FreezeOptions&) { return false; };
     mock_engine_->freezeController().setHooks(hooks);
@@ -193,9 +193,10 @@ TEST_F(FreezeServiceTest, ResumeFailed_WhileDraining) {
 
     freeze_service_->resume(writer_ptr, request);
 
-    EXPECT_EQ(writer_ptr->_statusCode, 409);
-    EXPECT_THAT(written_, HasSubstr("error"));
-    EXPECT_EQ(mock_engine_->freezeController().state(), FreezeState::DRAINING);
+    EXPECT_EQ(writer_ptr->_statusCode, 200);
+    EXPECT_THAT(written_, HasSubstr(R"("status":"ok")"));
+    EXPECT_THAT(written_, HasSubstr(R"("state":"RUNNING")"));
+    EXPECT_EQ(mock_engine_->freezeController().state(), FreezeState::RUNNING);
 
     writer_ptr.release();
 }

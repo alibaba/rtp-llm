@@ -90,12 +90,19 @@ void FreezeLifecycleController::setLastError(const std::string& msg) {
 FreezeResult FreezeLifecycleController::freeze(const FreezeOptions& opt) {
     std::lock_guard<std::mutex> lock(transition_mutex_);
 
+    if (opt.prepare_only && opt.commit_only) {
+        return FreezeResult::error("freeze rejected: prepare_only and commit_only cannot both be true");
+    }
+
     const FreezeState current = state_.load(std::memory_order_acquire);
     // Idempotency: already frozen or inside the release section. DRAINING is
     // intentionally retriable so a timeout can later progress, or be escalated
     // with force=true.
     if (current == FreezeState::FREEZING || current == FreezeState::FROZEN) {
         return FreezeResult::success();
+    }
+    if (opt.commit_only && current != FreezeState::DRAINING) {
+        return FreezeResult::error("freeze commit rejected in state " + freezeStateToString(current));
     }
     if (current != FreezeState::RUNNING && current != FreezeState::DRAINING) {
         return FreezeResult::error("freeze rejected in state " + freezeStateToString(current));
@@ -119,6 +126,11 @@ FreezeResult FreezeLifecycleController::freeze(const FreezeOptions& opt) {
             setLastError("drain not finished (timeout or aborted), staying in DRAINING");
             return FreezeResult::error("drain not finished, state=DRAINING");
         }
+    }
+
+    if (opt.prepare_only) {
+        RTP_LLM_LOG_INFO("freeze prepare completed, staying in DRAINING (epoch=%ld)", freeze_epoch_.load());
+        return FreezeResult::success();
     }
 
     if (!transitionLocked(FreezeState::DRAINING, FreezeState::FREEZING)) {
@@ -170,6 +182,15 @@ FreezeResult FreezeLifecycleController::resume() {
     const FreezeState current = state_.load(std::memory_order_acquire);
     // Idempotency: already running.
     if (current == FreezeState::RUNNING) {
+        return FreezeResult::success();
+    }
+    // Instance-level coordinator uses resume as the abort path for a prepared
+    // freeze that never committed. No GPU resource was released in DRAINING.
+    if (current == FreezeState::DRAINING) {
+        setLastError("");
+        if (!transitionLocked(FreezeState::DRAINING, FreezeState::RUNNING)) {
+            return FreezeResult::error(status().last_error);
+        }
         return FreezeResult::success();
     }
     if (current != FreezeState::FROZEN && current != FreezeState::ERROR) {
