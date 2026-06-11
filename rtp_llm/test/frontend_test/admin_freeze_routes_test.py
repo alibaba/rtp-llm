@@ -52,9 +52,7 @@ def build_test_client(grpc_post_request: AsyncMock) -> TestClient:
 class AdminFreezeRoutesTest(unittest.TestCase):
 
     def test_freeze_success(self):
-        post_request = AsyncMock(
-            return_value={"status": "ok", "state": "FROZEN", "freeze_epoch": 1}
-        )
+        post_request = AsyncMock(return_value={"status": "ok"})
         client = build_test_client(post_request)
         with client:
             response = client.post(
@@ -62,17 +60,13 @@ class AdminFreezeRoutesTest(unittest.TestCase):
                 json={"mode": "graceful", "drain_timeout_ms": 1000, "reason": "test"},
             )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.json(), {"status": "ok", "state": "FROZEN", "freeze_epoch": 1}
-        )
+        self.assertEqual(response.json(), {"status": "ok"})
         post_request.assert_awaited_once_with(
             "freeze", {"mode": "graceful", "drain_timeout_ms": 1000, "reason": "test"}
         )
 
     def test_freeze_empty_body(self):
-        post_request = AsyncMock(
-            return_value={"status": "ok", "state": "FROZEN", "freeze_epoch": 1}
-        )
+        post_request = AsyncMock(return_value={"status": "ok"})
         client = build_test_client(post_request)
         with client:
             response = client.post("/admin/freeze")
@@ -102,14 +96,12 @@ class AdminFreezeRoutesTest(unittest.TestCase):
         self.assertIn("error", response.json())
 
     def test_resume_success(self):
-        post_request = AsyncMock(
-            return_value={"status": "ok", "state": "RUNNING", "freeze_epoch": 1}
-        )
+        post_request = AsyncMock(return_value={"status": "ok"})
         client = build_test_client(post_request)
         with client:
             response = client.post("/admin/resume")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["state"], "RUNNING")
+        self.assertEqual(response.json(), {"status": "ok"})
         post_request.assert_awaited_once_with("resume", {})
 
     def test_resume_backend_error_maps_to_500(self):
@@ -185,9 +177,7 @@ class GrpcClientWrapperFreezeTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["state"], "FROZEN")
-        self.assertEqual(result["freeze_epoch"], 1)
-        self.assertEqual(result["rank_count"], 2)
+        self.assertEqual(set(result.keys()), {"status"})
         for address in addresses:
             stub = wrapper._dp_stubs[address]
             self.assertEqual(stub.FreezeServing.await_count, 2)
@@ -223,8 +213,7 @@ class GrpcClientWrapperFreezeTest(unittest.IsolatedAsyncioTestCase):
         result = await wrapper.resume_serving()
 
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["state"], "RUNNING")
-        self.assertEqual(result["rank_count"], 2)
+        self.assertEqual(set(result.keys()), {"status"})
         for address in addresses:
             wrapper._dp_stubs[address].ResumeServing.assert_awaited_once()
 
@@ -251,14 +240,11 @@ class GrpcClientWrapperFreezeTest(unittest.IsolatedAsyncioTestCase):
             "active_cache_transfer_count",
             "gpu_resource_state",
             "last_error",
-            "rank_count",
-            "rank_success_count",
-            "results",
         }
-        self.assertTrue(expected_keys.issubset(set(result.keys())))
+        self.assertEqual(expected_keys, set(result.keys()))
         self.assertEqual(result["state"], "RUNNING")
 
-    async def test_get_freeze_status_reports_mixed_state(self):
+    async def test_get_freeze_status_reports_non_converged_as_error(self):
         addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
         wrapper, pb2 = self._build_wrapper(control_addresses=addresses)
         wrapper._dp_stubs[addresses[0]].GetFreezeStatus = AsyncMock(
@@ -270,10 +256,9 @@ class GrpcClientWrapperFreezeTest(unittest.IsolatedAsyncioTestCase):
 
         result = await wrapper.get_freeze_status()
 
-        self.assertEqual(result["state"], "MIXED")
-        self.assertEqual(result["freeze_epoch"], 2)
-        self.assertEqual(result["rank_count"], 2)
-        self.assertEqual(len(result["results"]), 2)
+        self.assertIn("error", result)
+        self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertNotIn("state", result)
 
     async def test_freeze_serving_error_carries_per_rank_status(self):
         addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
@@ -298,10 +283,7 @@ class GrpcClientWrapperFreezeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("error", result)
         self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
-        self.assertEqual(result["rank_count"], 2)
-        self.assertEqual(result["rank_success_count"], 1)
-        self.assertEqual(len(result["results"]), 2)
-        self.assertEqual(len(result["abort_results"]), 2)
+        self.assertEqual(result["details"][0]["address"], addresses[1])
         for address in addresses:
             wrapper._dp_stubs[address].ResumeServing.assert_awaited_once()
 
@@ -323,7 +305,7 @@ class GrpcClientWrapperFreezeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("error", result)
         self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
-        self.assertEqual(result["freeze_status"]["state"], "MIXED")
+        self.assertNotIn("state", result)
 
     async def test_resume_serving_rejects_non_converged_final_state(self):
         addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
@@ -343,7 +325,7 @@ class GrpcClientWrapperFreezeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("error", result)
         self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
-        self.assertEqual(result["freeze_status"]["state"], "MIXED")
+        self.assertNotIn("state", result)
 
 
 class FreezeControlAddressTest(unittest.TestCase):

@@ -32,6 +32,21 @@ def _as_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _error_details(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    details = []
+    for result in results:
+        if "error" not in result:
+            continue
+        detail = {
+            "address": result.get("address", ""),
+            "error": result.get("error", ""),
+        }
+        if "grpc_status" in result:
+            detail["grpc_status"] = result["grpc_status"]
+        details.append(detail)
+    return details
+
+
 class GrpcClientWrapper:
     """Wrapper for direct gRPC calls to replace async_request_server"""
 
@@ -243,25 +258,30 @@ class GrpcClientWrapper:
         if not successes:
             return {
                 "error": "Failed to get freeze status from all control ranks",
-                "results": results,
-                "rank_count": len(results),
-                "rank_success_count": 0,
-                "state": "MIXED",
+                "grpc_status": (
+                    failures[0].get("grpc_status", "UNAVAILABLE")
+                    if failures
+                    else "UNAVAILABLE"
+                ),
+                "details": _error_details(results),
+            }
+        if failures:
+            return {
+                "error": "Failed to get freeze status from some control ranks",
+                "grpc_status": failures[0].get("grpc_status", "UNAVAILABLE"),
+                "details": _error_details(results),
             }
 
         states = {str(result.get("state", "")) for result in successes}
         gpu_states = {str(result.get("gpu_resource_state", "")) for result in successes}
         kv_states = {str(result.get("kv_memory_state", "")) for result in successes}
+        if len(states) != 1 or len(gpu_states) != 1 or len(kv_states) != 1:
+            return {
+                "error": "Freeze status did not converge across control ranks",
+                "grpc_status": "FAILED_PRECONDITION",
+            }
+
         aggregate = dict(successes[0])
-        aggregate["state"] = (
-            next(iter(states)) if len(states) == 1 and not failures else "MIXED"
-        )
-        aggregate["gpu_resource_state"] = (
-            next(iter(gpu_states)) if len(gpu_states) == 1 and not failures else "MIXED"
-        )
-        aggregate["kv_memory_state"] = (
-            next(iter(kv_states)) if len(kv_states) == 1 and not failures else "MIXED"
-        )
         aggregate["freeze_epoch"] = max(
             _as_int(result.get("freeze_epoch", 0)) for result in successes
         )
@@ -275,14 +295,8 @@ class GrpcClientWrapper:
         aggregate["device_kv_cache_valid"] = all(
             bool(result.get("device_kv_cache_valid", False)) for result in successes
         )
-        aggregate["rank_count"] = len(results)
-        aggregate["rank_success_count"] = len(successes)
-        aggregate["results"] = results
         aggregate.pop("address", None)
         aggregate.pop("status", None)
-        if failures:
-            aggregate["error"] = "Failed to get freeze status from some control ranks"
-            aggregate["grpc_status"] = failures[0].get("grpc_status", "UNAVAILABLE")
         return aggregate
 
     async def freeze_serving(self, req: Any) -> Dict[str, Any]:
@@ -327,10 +341,8 @@ class GrpcClientWrapper:
                 return {
                     "error": "Failed to prepare freeze on some control ranks",
                     "grpc_status": failures[0].get("grpc_status", "UNKNOWN"),
-                    "results": prepare_results,
-                    "abort_results": abort_results,
-                    "rank_count": len(prepare_results),
-                    "rank_success_count": len(prepare_results) - len(failures),
+                    "details": _error_details(prepare_results)
+                    or _error_details(abort_results),
                 }
 
             commit_results = await self._broadcast_control_rpc(
@@ -338,38 +350,20 @@ class GrpcClientWrapper:
             )
             failures = [result for result in commit_results if "error" in result]
             if failures:
-                status = await self.get_freeze_status()
                 return {
                     "error": "Failed to commit freeze on some control ranks",
                     "grpc_status": failures[0].get("grpc_status", "UNKNOWN"),
-                    "results": commit_results,
-                    "freeze_status": status,
-                    "rank_count": len(commit_results),
-                    "rank_success_count": len(commit_results) - len(failures),
+                    "details": _error_details(commit_results),
                 }
             status = await self.get_freeze_status()
             if "error" in status:
                 return status
             if status.get("state") != "FROZEN":
                 return {
-                    "error": "Freeze did not converge to FROZEN on all control ranks",
+                    "error": "Freeze did not converge on all control ranks",
                     "grpc_status": "FAILED_PRECONDITION",
-                    "freeze_status": status,
-                    "rank_count": status.get("rank_count", len(commit_results)),
-                    "rank_success_count": status.get(
-                        "rank_success_count", len(commit_results)
-                    ),
                 }
-            return {
-                "status": "ok",
-                "state": status.get("state", ""),
-                "freeze_epoch": _as_int(status.get("freeze_epoch", 0)),
-                "results": status.get("results", commit_results),
-                "rank_count": status.get("rank_count", len(commit_results)),
-                "rank_success_count": status.get(
-                    "rank_success_count", len(commit_results)
-                ),
-            }
+            return {"status": "ok"}
         except grpc.aio.AioRpcError as e:
             logging.error(f"Freeze serving failed: {e.details()}")
             return {
@@ -396,31 +390,17 @@ class GrpcClientWrapper:
                 return {
                     "error": "Failed to resume serving on some control ranks",
                     "grpc_status": failures[0].get("grpc_status", "UNKNOWN"),
-                    "results": results,
-                    "rank_count": len(results),
-                    "rank_success_count": len(results) - len(failures),
+                    "details": _error_details(results),
                 }
             status = await self.get_freeze_status()
             if "error" in status:
                 return status
             if status.get("state") != "RUNNING":
                 return {
-                    "error": "Resume did not converge to RUNNING on all control ranks",
+                    "error": "Resume did not converge on all control ranks",
                     "grpc_status": "FAILED_PRECONDITION",
-                    "freeze_status": status,
-                    "rank_count": status.get("rank_count", len(results)),
-                    "rank_success_count": status.get(
-                        "rank_success_count", len(results)
-                    ),
                 }
-            return {
-                "status": "ok",
-                "state": status.get("state", ""),
-                "freeze_epoch": _as_int(status.get("freeze_epoch", 0)),
-                "results": status.get("results", results),
-                "rank_count": status.get("rank_count", len(results)),
-                "rank_success_count": status.get("rank_success_count", len(results)),
-            }
+            return {"status": "ok"}
         except grpc.aio.AioRpcError as e:
             logging.error(f"Resume serving failed: {e.details()}")
             return {
