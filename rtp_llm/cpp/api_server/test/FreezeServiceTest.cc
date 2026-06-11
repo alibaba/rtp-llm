@@ -62,8 +62,8 @@ TEST_F(FreezeServiceTest, FreezeSuccess_EmptyBody) {
     EXPECT_EQ(writer_ptr->_headers.at("Content-Type"), "application/json");
     EXPECT_EQ(writer_ptr->_statusCode, 200);
     EXPECT_THAT(written_, HasSubstr(R"("status":"ok")"));
-    EXPECT_THAT(written_, HasSubstr(R"("state":"FROZEN")"));
-    EXPECT_THAT(written_, HasSubstr(R"("freeze_epoch":1)"));
+    EXPECT_THAT(written_, Not(HasSubstr(R"("state")")));
+    EXPECT_THAT(written_, Not(HasSubstr(R"("freeze_epoch")")));
     EXPECT_EQ(mock_engine_->freezeController().state(), FreezeState::FROZEN);
 
     writer_ptr.release();
@@ -84,7 +84,8 @@ TEST_F(FreezeServiceTest, FreezeSuccess_WithBody) {
 
     EXPECT_EQ(writer_ptr->_statusCode, 200);
     EXPECT_THAT(written_, HasSubstr(R"("status":"ok")"));
-    EXPECT_THAT(written_, HasSubstr(R"("state":"FROZEN")"));
+    EXPECT_THAT(written_, Not(HasSubstr(R"("state")")));
+    EXPECT_THAT(written_, Not(HasSubstr(R"("freeze_epoch")")));
     EXPECT_EQ(mock_engine_->freezeController().freezeEpoch(), 1);
 
     writer_ptr.release();
@@ -170,8 +171,8 @@ TEST_F(FreezeServiceTest, ResumeSuccess_FromFrozen) {
 
     EXPECT_EQ(writer_ptr->_statusCode, 200);
     EXPECT_THAT(written_, HasSubstr(R"("status":"ok")"));
-    EXPECT_THAT(written_, HasSubstr(R"("state":"RUNNING")"));
-    EXPECT_THAT(written_, HasSubstr(R"("freeze_epoch":1)"));
+    EXPECT_THAT(written_, Not(HasSubstr(R"("state")")));
+    EXPECT_THAT(written_, Not(HasSubstr(R"("freeze_epoch")")));
     EXPECT_EQ(mock_engine_->freezeController().state(), FreezeState::RUNNING);
 
     writer_ptr.release();
@@ -195,7 +196,8 @@ TEST_F(FreezeServiceTest, ResumeWhileDrainingAbortsFreeze) {
 
     EXPECT_EQ(writer_ptr->_statusCode, 200);
     EXPECT_THAT(written_, HasSubstr(R"("status":"ok")"));
-    EXPECT_THAT(written_, HasSubstr(R"("state":"RUNNING")"));
+    EXPECT_THAT(written_, Not(HasSubstr(R"("state")")));
+    EXPECT_THAT(written_, Not(HasSubstr(R"("freeze_epoch")")));
     EXPECT_EQ(mock_engine_->freezeController().state(), FreezeState::RUNNING);
 
     writer_ptr.release();

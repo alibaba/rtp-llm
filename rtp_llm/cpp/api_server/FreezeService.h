@@ -39,14 +39,10 @@ public:
 public:
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("status", status);
-        json.Jsonize("state", state);
-        json.Jsonize("freeze_epoch", freeze_epoch);
     }
 
 public:
     std::string status = "ok";
-    std::string state;
-    int64_t     freeze_epoch = 0;
 };
 
 // Response of GET /admin/freeze_status. Mirrors proto FreezeStatusResponsePB.

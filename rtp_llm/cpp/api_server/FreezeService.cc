@@ -80,8 +80,6 @@ void FreezeService::freeze(const std::unique_ptr<http_server::HttpResponseWriter
     }
 
     FreezeActionResponse response;
-    response.state        = freezeStateToString(controller.state());
-    response.freeze_epoch = controller.freezeEpoch();
     writer->Write(ToJsonString(response, /*isCompact=*/true));
 }
 
@@ -102,8 +100,6 @@ void FreezeService::resume(const std::unique_ptr<http_server::HttpResponseWriter
     }
 
     FreezeActionResponse response;
-    response.state        = freezeStateToString(controller.state());
-    response.freeze_epoch = controller.freezeEpoch();
     writer->Write(ToJsonString(response, /*isCompact=*/true));
 }
 
