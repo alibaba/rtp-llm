@@ -232,6 +232,7 @@ class MasterClient:
     async def get_backend_role_addrs(
         self,
         block_cache_keys: list[int],
+        cache_key_block_size: int,
         input: GenerateInput,
         request_id: int,
     ) -> FlexlbResponse:
@@ -266,6 +267,7 @@ class MasterClient:
         payload: Dict[str, Any] = {
             "model": "engine_service",
             "block_cache_keys": block_cache_keys,
+            "cache_key_block_size": cache_key_block_size,
             "seq_len": input.prompt_length,
             "debug": False,
             "request_priority": request_priority,
