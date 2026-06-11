@@ -86,7 +86,7 @@ cc_test(
     ],
     copts = test_copts,
     deps = [
-        "//rtp_llm/cpp/model_rpc:recent_cache_key_window",
+        "//rtp_llm/cpp/cache:recent_cache_key_window",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],

@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/model_rpc/RecentCacheKeyWindow.h"
+#include "rtp_llm/cpp/cache/RecentCacheKeyWindow.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -50,8 +50,7 @@ RecentCacheKeyWindow::RecentCacheKeyWindow():
     RecentCacheKeyWindow(resolveTimeWindowMsFromEnv(), []() { return currentTimeMs(); }) {}
 
 RecentCacheKeyWindow::RecentCacheKeyWindow(int64_t time_window_ms, NowSupplier now_supplier):
-    time_window_ms_(normalizeTimeWindowMs(time_window_ms)),
-    now_supplier_(std::move(now_supplier)) {
+    time_window_ms_(normalizeTimeWindowMs(time_window_ms)), now_supplier_(std::move(now_supplier)) {
     if (!now_supplier_) {
         now_supplier_ = []() { return currentTimeMs(); };
     }
@@ -139,12 +138,11 @@ void RecentCacheKeyWindow::evictExpiredLocked(int64_t now_ms) {
 RecentCacheKeyWindow::Snapshot RecentCacheKeyWindow::snapshotLocked(int64_t request_occurrences,
                                                                     int64_t request_hit_occurrences) const {
     Snapshot snapshot;
-    snapshot.time_window_ms             = time_window_ms_;
-    snapshot.request_occurrences        = request_occurrences;
-    snapshot.request_hit_occurrences    = request_hit_occurrences;
-    snapshot.request_hit_ratio          = request_occurrences > 0 ?
-                                             static_cast<double>(request_hit_occurrences) / request_occurrences :
-                                             0.0;
+    snapshot.time_window_ms          = time_window_ms_;
+    snapshot.request_occurrences     = request_occurrences;
+    snapshot.request_hit_occurrences = request_hit_occurrences;
+    snapshot.request_hit_ratio =
+        request_occurrences > 0 ? static_cast<double>(request_hit_occurrences) / request_occurrences : 0.0;
     snapshot.retained_occurrences       = retained_occurrences_;
     snapshot.retained_unique_cache_keys = cache_key_counts_.size();
     return snapshot;

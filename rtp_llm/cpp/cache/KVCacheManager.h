@@ -22,6 +22,7 @@ namespace rtp_llm {
 class CacheStore;
 class KVCacheConnectorCoordinator;
 class KVCacheConnectorReadWriteContext;
+class PrefillCacheHitMetricsReporter;
 
 class KVCacheManager {
 public:
@@ -141,6 +142,7 @@ private:
     void initConnectorCoordinator();
     void allocateAndSync();
     void reportMetricsLoop();
+    void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
 
     // 成员变量
     CacheConfig         config_;
@@ -157,7 +159,8 @@ private:
 
     // REBASE CONFLICT CONTEXT(2413e8e03): preserve new base CP cache-key sharding
     // state while the source branch adds cudaMalloc block-pool backing.
-    std::shared_ptr<CPSlotMapper> cp_slot_mapper_;
+    std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
+    std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;

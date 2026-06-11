@@ -40,7 +40,7 @@ public:
 
 private:
     struct WindowEntry {
-        int64_t                                      timestamp_ms = 0;
+        int64_t                                   timestamp_ms = 0;
         std::unordered_map<CacheKeyType, int64_t> cache_key_counts;
     };
 
@@ -48,12 +48,12 @@ private:
     Snapshot snapshotLocked(int64_t request_occurrences, int64_t request_hit_occurrences) const;
 
 private:
-    int64_t                                      time_window_ms_;
-    NowSupplier                                  now_supplier_;
-    std::deque<WindowEntry>                      window_entries_;
+    int64_t                                   time_window_ms_;
+    NowSupplier                               now_supplier_;
+    std::deque<WindowEntry>                   window_entries_;
     std::unordered_map<CacheKeyType, int64_t> cache_key_counts_;
-    int64_t                                      retained_occurrences_ = 0;
-    mutable std::mutex                           mutex_;
+    int64_t                                   retained_occurrences_ = 0;
+    mutable std::mutex                        mutex_;
 };
 
 }  // namespace rtp_llm

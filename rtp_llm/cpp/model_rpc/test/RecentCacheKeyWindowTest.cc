@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/model_rpc/RecentCacheKeyWindow.h"
+#include "rtp_llm/cpp/cache/RecentCacheKeyWindow.h"
 
 #include <atomic>
 #include <cstdlib>
@@ -55,7 +55,7 @@ TEST(RecentCacheKeyWindowTest, ExpiredEntriesDecrementCountsAndRemoveZeroKeys) {
     EXPECT_EQ(snapshot.retained_occurrences, 4);
     EXPECT_EQ(snapshot.retained_unique_cache_keys, 3);
 
-    now = 2001;
+    now      = 2001;
     snapshot = window.snapshot();
     EXPECT_EQ(snapshot.retained_occurrences, 2);
     EXPECT_EQ(snapshot.retained_unique_cache_keys, 2);

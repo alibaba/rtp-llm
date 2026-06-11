@@ -157,21 +157,9 @@ public:
     int64_t retained_unique_cache_keys = 0;
     int64_t time_window_ms             = 0;
 
-    int64_t theory_all_hit_count       = 0;
-    int64_t theory_all_total_count     = 0;
-    double  theory_all_hit_ratio       = 0.0;
-    int64_t theory_1m_hit_count        = 0;
-    int64_t theory_1m_total_count      = 0;
-    double  theory_1m_hit_ratio        = 0.0;
-    int64_t theory_5m_hit_count        = 0;
-    int64_t theory_5m_total_count      = 0;
-    double  theory_5m_hit_ratio        = 0.0;
-    int64_t theory_10m_hit_count       = 0;
-    int64_t theory_10m_total_count     = 0;
-    double  theory_10m_hit_ratio       = 0.0;
-    int64_t theory_15m_hit_count       = 0;
-    int64_t theory_15m_total_count     = 0;
-    double  theory_15m_hit_ratio       = 0.0;
+    int64_t theory_all_hit_count   = 0;
+    int64_t theory_all_total_count = 0;
+    double  theory_all_hit_ratio   = 0.0;
 };
 
 class PrefillRecentCacheKeyMetrics: public kmonitor::MetricsGroup {
@@ -189,21 +177,9 @@ public:
     kmonitor::MutableMetric* retained_unique_cache_keys_metric = nullptr;
     kmonitor::MutableMetric* time_window_ms_metric             = nullptr;
 
-    kmonitor::MutableMetric* theory_all_hit_count_metric    = nullptr;
-    kmonitor::MutableMetric* theory_all_total_count_metric  = nullptr;
-    kmonitor::MutableMetric* theory_all_hit_ratio_metric    = nullptr;
-    kmonitor::MutableMetric* theory_1m_hit_count_metric     = nullptr;
-    kmonitor::MutableMetric* theory_1m_total_count_metric   = nullptr;
-    kmonitor::MutableMetric* theory_1m_hit_ratio_metric     = nullptr;
-    kmonitor::MutableMetric* theory_5m_hit_count_metric     = nullptr;
-    kmonitor::MutableMetric* theory_5m_total_count_metric   = nullptr;
-    kmonitor::MutableMetric* theory_5m_hit_ratio_metric     = nullptr;
-    kmonitor::MutableMetric* theory_10m_hit_count_metric    = nullptr;
-    kmonitor::MutableMetric* theory_10m_total_count_metric  = nullptr;
-    kmonitor::MutableMetric* theory_10m_hit_ratio_metric    = nullptr;
-    kmonitor::MutableMetric* theory_15m_hit_count_metric    = nullptr;
-    kmonitor::MutableMetric* theory_15m_total_count_metric  = nullptr;
-    kmonitor::MutableMetric* theory_15m_hit_ratio_metric    = nullptr;
+    kmonitor::MutableMetric* theory_all_hit_count_metric   = nullptr;
+    kmonitor::MutableMetric* theory_all_total_count_metric = nullptr;
+    kmonitor::MutableMetric* theory_all_hit_ratio_metric   = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -599,7 +575,7 @@ private:
     bool                         stop_ = false;
     CollectType                  collector_;
     int                          active_count_ = 0;
-    int                          interval_ms_ = 1000;
+    int                          interval_ms_  = 1000;
     std::thread                  metrics_reporter_thread_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 };

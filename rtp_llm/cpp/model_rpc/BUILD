@@ -44,24 +44,10 @@ cc_library(
 
 
 cc_library(
-    name = "recent_cache_key_window",
-    srcs = ["RecentCacheKeyWindow.cc"],
-    hdrs = ["RecentCacheKeyWindow.h"],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        "//rtp_llm/cpp/cache:cache_types",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:time_util",
-    ],
-)
-
-cc_library(
     name = "model_rpc_server",
     srcs = glob(
         ["*.cc"],
         exclude = [
-            "RecentCacheKeyWindow.cc",
             "TensorPbConvert.cc",
         ],
     ),
@@ -73,7 +59,6 @@ cc_library(
     deps = [
         ":embedding_arpc_deps",
         ":model_rpc_pool",
-        ":recent_cache_key_window",
         ":rpc_error_code",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:cache_types",
