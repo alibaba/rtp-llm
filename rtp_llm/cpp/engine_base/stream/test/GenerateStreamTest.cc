@@ -507,4 +507,50 @@ TEST_F(GenerateStreamTest, publicReadinessReaderIsSafeDuringPublication) {
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
 }
 
+TEST_F(GenerateStreamTest, testNonStreamingFinalOutputReturnsCachedAllHiddenStates) {
+    auto builder                                                       = GenerateStreamBuilder();
+    auto stream                                                        = builder.createContextStream({1, 2});
+    stream->generate_input_->generate_config->max_new_tokens           = 2;
+    stream->generate_input_->generate_config->return_all_hidden_states = true;
+    stream->generate_input_->generate_config->return_incremental       = true;
+    stream->generate_input_->generate_config->is_streaming             = false;
+
+    auto first_all_hidden_states = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}).reshape({2, 2});
+    stream->step();
+    stream->update(StreamUpdateInfo{torch::tensor({10}, torch::kInt32).reshape({1, 1}),
+                                    1,
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    first_all_hidden_states,
+                                    false});
+    ASSERT_FALSE(stream->hasOutput());
+
+    stream->step();
+    stream->update(StreamUpdateInfo{torch::tensor({11}, torch::kInt32).reshape({1, 1}),
+                                    1,
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    false});
+
+    ASSERT_TRUE(stream->hasOutput());
+    auto output = stream->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs.size(), 1);
+    const auto& generate_output = output.value().generate_outputs[0];
+    ASSERT_TRUE(generate_output.finished);
+    ASSERT_TRUE(generate_output.all_hidden_states.has_value());
+    ASSERT_TRUE(torch::equal(generate_output.all_hidden_states.value(), first_all_hidden_states));
+}
+
 }  // namespace rtp_llm
