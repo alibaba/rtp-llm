@@ -472,8 +472,18 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
 
     stackBuffersToTensorPB(flatten_output->mutable_logits(), source_outputs, [](const auto& r) { return r.logits; });
 
-    stackBuffersToTensorPB(
-        flatten_output->mutable_all_hidden_states(), source_outputs, [](const auto& r) { return r.all_hidden_states; });
+    {
+        torch::Tensor all_hidden_states;
+        for (const auto& resp : source_outputs) {
+            if (resp.all_hidden_states.has_value()) {
+                all_hidden_states = resp.all_hidden_states.value();
+                break;
+            }
+        }
+        if (all_hidden_states.defined()) {
+            transTensorPB(flatten_output->mutable_all_hidden_states(), all_hidden_states.contiguous());
+        }
+    }
 
     RTP_LLM_LOG_DEBUG("transResponse done");
 }
