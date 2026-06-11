@@ -1,7 +1,11 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.BatchDecisionHandler;
+import org.flexlb.balance.scheduler.WorkerBatcher;
+import org.flexlb.balance.strategy.BatcherSnapshot;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
-import org.flexlb.balance.strategy.RequestProfile;
+import org.flexlb.balance.strategy.BatchRequest;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.slf4j.Logger;
@@ -24,24 +28,56 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private volatile PrefillTimePredictor predictor;
     private final ConcurrentHashMap<Long, BatchInflight> inflightBatches = new ConcurrentHashMap<>();
     private final AtomicLong totalPredictTimeMs = new AtomicLong();
-    private final AtomicReference<Long> snapshot = new AtomicReference<>(0L);
+    private final AtomicReference<Long> estimatedWaitingTimeMs = new AtomicReference<>(0L);
+    private volatile WorkerBatcher batcher;
 
-    public PrefillEndpoint(String ip, int httpPort, int grpcPort, WorkerStatus status, PrefillTimePredictor predictor) {
+    public PrefillEndpoint(String ip, int httpPort, int grpcPort, WorkerStatus status, FlexlbConfig config,
+                           BatchDecisionHandler handler) {
         super(ip, httpPort, grpcPort, status);
-        this.predictor = predictor;
+        this.predictor = createPredictor(config);
+        this.batcher = createBatcher(config, handler);
+        this.batcher.start();
     }
 
-    public void commitBatch(long batchId, long predictMs, List<Long> requestIds, List<RequestProfile> profiles) {
-        inflightBatches.put(batchId, new BatchInflight(batchId, predictMs, requestIds, profiles));
+    private WorkerBatcher createBatcher(FlexlbConfig config, BatchDecisionHandler handler) {
+        String key = getIp() + ":" + getGrpcPort();
+        return new WorkerBatcher(key, this, config, handler);
+    }
+
+    public WorkerBatcher getBatcher() {
+        return batcher;
+    }
+
+    @Override
+    public void close() {
+        batcher.shutdown();
+    }
+
+    public int getBatcherQueueSize() {
+        return batcher.queueSize();
+    }
+
+    public BatcherSnapshot getBatcherSnapshot() {
+        return batcher.snapshot();
+    }
+
+    private static PrefillTimePredictor createPredictor(FlexlbConfig cfg) {
+        return new PrefillTimePredictor(
+                cfg.getCostAlpha0(), cfg.getCostAlpha1(), cfg.getCostAlpha2(),
+                cfg.getCostAlpha3(), cfg.getCostAlpha4(), cfg.getCostAlpha5());
+    }
+
+    public void commitBatch(long batchId, long predictMs, List<BatchRequest> requests) {
+        inflightBatches.put(batchId, new BatchInflight(batchId, predictMs, requests));
         totalPredictTimeMs.addAndGet(predictMs);
-        refreshSnapshot();
+        refreshEstimatedWaitingTime();
     }
 
     public void releaseBatch(long batchId) {
         BatchInflight removed = inflightBatches.remove(batchId);
         if (removed != null) {
-            safeDecrement(totalPredictTimeMs, removed.predictTimeMs());
-            refreshSnapshot();
+            totalPredictTimeMs.addAndGet(-removed.predictTimeMs());
+            refreshEstimatedWaitingTime();
         }
     }
 
@@ -56,28 +92,23 @@ public class PrefillEndpoint extends WorkerEndpoint {
             return null;
         }
 
-        List<Long> survivingIds = new ArrayList<>();
-        List<RequestProfile> survivingProfiles = new ArrayList<>();
-        for (int i = 0; i < old.requestIds().size(); i++) {
-            if (!failedRequestIds.contains(old.requestIds().get(i))) {
-                survivingIds.add(old.requestIds().get(i));
-                survivingProfiles.add(old.profiles().get(i));
-            }
-        }
+        List<BatchRequest> survivors = old.requests().stream()
+                .filter(r -> !failedRequestIds.contains(r.requestId()))
+                .toList();
 
         long oldPredMs = old.predictTimeMs();
-        if (survivingIds.isEmpty()) {
+        if (survivors.isEmpty()) {
             inflightBatches.remove(batchId);
-            safeDecrement(totalPredictTimeMs, oldPredMs);
-            refreshSnapshot();
+            totalPredictTimeMs.addAndGet(-oldPredMs);
+            refreshEstimatedWaitingTime();
             return null;
         }
 
-        long newPredMs = predictor != null ? predictor.predictBatchMs(survivingProfiles) : 0;
-        BatchInflight newBatch = new BatchInflight(batchId, newPredMs, survivingIds, survivingProfiles);
+        long newPredMs = predictor != null ? predictor.predictBatchMs(survivors) : 0;
+        BatchInflight newBatch = new BatchInflight(batchId, newPredMs, survivors);
         inflightBatches.put(batchId, newBatch);
         totalPredictTimeMs.addAndGet(newPredMs - oldPredMs);
-        refreshSnapshot();
+        refreshEstimatedWaitingTime();
         return newBatch;
     }
 
@@ -157,7 +188,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     public long getEstimatedWaitingTimeMs() {
-        return snapshot.get();
+        return estimatedWaitingTimeMs.get();
+    }
+
+    public long computeDeadlineMs(long seqLen, long hitCache, long sloMs) {
+        long predMs = predictor != null ? predictor.estimateMs(seqLen, hitCache) : 0;
+        long workerQueueMs = estimatedWaitingTimeMs.get();
+        return System.currentTimeMillis() + Math.max(0, sloMs - predMs - workerQueueMs);
     }
 
     public int getInflightBatchCount() {
@@ -167,17 +204,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public int getInflightRequestCount() {
         int count = 0;
         for (BatchInflight batch : inflightBatches.values()) {
-            count += batch.requestIds().size();
+            count += batch.requests().size();
         }
         return count;
     }
 
     public PrefillTimePredictor getPredictor() {
         return predictor;
-    }
-
-    public void setPredictor(PrefillTimePredictor predictor) {
-        this.predictor = predictor;
     }
 
     ConcurrentHashMap<Long, BatchInflight> getInflightBatches() {
@@ -188,8 +221,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return totalPredictTimeMs;
     }
 
-    private void refreshSnapshot() {
-        snapshot.set(Math.max(0, totalPredictTimeMs.get()));
+    private void refreshEstimatedWaitingTime() {
+        estimatedWaitingTimeMs.set(Math.max(0, totalPredictTimeMs.get()));
     }
 
     private synchronized void recomputeTotalAndRefresh() {
@@ -198,14 +231,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
             sum += batch.predictTimeMs();
         }
         totalPredictTimeMs.set(sum);
-        refreshSnapshot();
+        refreshEstimatedWaitingTime();
     }
 
     private static boolean isCancelError(TaskInfo task) {
         return task.getErrorMessage() != null && task.getErrorMessage().toLowerCase().contains("cancel");
     }
 
-    private static void safeDecrement(AtomicLong value, long delta) {
-        value.accumulateAndGet(delta, (current, d) -> Math.max(0, current - d));
-    }
 }

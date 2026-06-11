@@ -12,8 +12,8 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.master.CacheStatus;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
@@ -49,45 +49,53 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_DECODE, this);
     }
 
-    private record WeightedWorker(WorkerStatus worker, long normalizedCacheUsed, double weight) {
+    private record WeightedWorker(DecodeEndpoint endpoint, long normalizedCacheUsed, double weight) {
     }
 
     @Override
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
         Request request = balanceContext.getRequest();
         long seqLen = request.getSeqLen();
-        Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
-        if (MapUtils.isEmpty(workerStatusMap)) {
-            Logger.warn("select ROLE: {} failed, workerStatusMap is empty", roleType.getCode());
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
-        }
         FlexlbConfig config = balanceContext.getConfig();
-        ResourceMeasureIndicatorEnum indicator = config.getResourceMeasureIndicator(roleType);
-        ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);
-        if (resourceMeasure == null) {
-            Logger.warn("No ResourceMeasure registered for indicator: {}, roleType: {}", indicator, roleType);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
-        }
-        List<WorkerStatus> workerStatusList = new ArrayList<>(workerStatusMap.values()).stream()
-                .filter(WorkerStatus::isAlive)
-                .filter(resourceMeasure::isResourceAvailable)
-                .toList();
-        if (CollectionUtils.isEmpty(workerStatusList)) {
-            Logger.warn("select ROLE: {} failed, workerStatusList is empty", roleType.getCode());
+
+        List<DecodeEndpoint> eligible = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType));
+        if (CollectionUtils.isEmpty(eligible)) {
+            Logger.warn("select ROLE: {} failed, no available endpoints", roleType.getCode());
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        List<WorkerStatus> survivors = applyHardFilters(workerStatusList, seqLen, config);
+        List<DecodeEndpoint> survivors = applyHardFilters(eligible, seqLen, config);
 
-        WorkerStatus selectedWorker = weightedRandomSelection(survivors);
+        DecodeEndpoint selectedEndpoint = weightedRandomSelection(survivors);
 
-        if (selectedWorker != null) {
-            long prefixLength = calcPrefixMatchLength(selectedWorker.getCacheStatus(), balanceContext.getRequest().getBlockCacheKeys());
-            return buildServerStatus(selectedWorker, seqLen, prefixLength, roleType, balanceContext.getRequestId());
+        if (selectedEndpoint != null) {
+            long prefixLength = calcPrefixMatchLength(selectedEndpoint.getCacheStatus(), balanceContext.getRequest().getBlockCacheKeys());
+            return buildServerStatus(selectedEndpoint, seqLen, prefixLength, roleType, balanceContext.getRequestId());
         }
 
         Logger.warn("Failed to select worker, no suitable worker available");
         return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+    }
+
+    private List<DecodeEndpoint> getAvailableEndpoints(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
+        Map<String, WorkerEndpoint> workerEndpointMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
+        if (MapUtils.isEmpty(workerEndpointMap)) {
+            return new ArrayList<>();
+        }
+        ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);
+        if (resourceMeasure == null) {
+            return new ArrayList<>();
+        }
+        List<DecodeEndpoint> result = new ArrayList<>();
+        for (WorkerEndpoint ep : workerEndpointMap.values()) {
+            if (!ep.isAlive() || !resourceMeasure.isResourceAvailable(ep)) {
+                continue;
+            }
+            if (ep instanceof DecodeEndpoint de && de.isAvailable()) {
+                result.add(de);
+            }
+        }
+        return result;
     }
 
     @Override
@@ -100,43 +108,41 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
         }
     }
 
-    private List<WorkerStatus> applyHardFilters(List<WorkerStatus> eligible, long seqLen, FlexlbConfig config) {
+    private List<DecodeEndpoint> applyHardFilters(List<DecodeEndpoint> eligible, long seqLen, FlexlbConfig config) {
         double hotspotMultiplier = config.getDecodeHotspotMultiplier();
         double imbalanceMultiplier = config.getDecodeImbalanceMultiplier();
 
         long sumLoad = 0;
         long sumCacheUsed = 0;
-        for (WorkerStatus w : eligible) {
-            DecodeEndpoint ep = endpointRegistry.getDecode(w.getIpPort());
-            sumLoad += ep != null ? ep.getTotalLoad() : 0;
-            sumCacheUsed += w.getUsedKvCacheTokens().get();
+        for (DecodeEndpoint ep : eligible) {
+            sumLoad += ep.getTotalLoad();
+            sumCacheUsed += ep.getUsedKvCacheTokens().get();
         }
         long avgLoad = sumLoad / eligible.size();
         long avgCacheUsed = sumCacheUsed / eligible.size();
 
-        List<WorkerStatus> survivors = new ArrayList<>(eligible.size());
-        for (WorkerStatus w : eligible) {
-            DecodeEndpoint ep = endpointRegistry.getDecode(w.getIpPort());
-            long availableKv = ep != null ? ep.getAvailableKvTokens() : w.getAvailableKvCacheTokens().get();
-            long totalKv = w.getUsedKvCacheTokens().get() + w.getAvailableKvCacheTokens().get();
+        List<DecodeEndpoint> survivors = new ArrayList<>(eligible.size());
+        for (DecodeEndpoint ep : eligible) {
+            long availableKv = ep.getAvailableKvTokens();
+            long totalKv = ep.getUsedKvCacheTokens().get() + ep.getAvailableKvCacheTokens().get();
             if (totalKv > 0 && availableKv < seqLen) {
                 continue;
             }
-            long load = ep != null ? ep.getTotalLoad() : 0;
+            long load = ep.getTotalLoad();
             if (hotspotMultiplier > 0 && avgLoad > 0
                     && load > avgLoad * hotspotMultiplier) {
                 continue;
             }
             if (imbalanceMultiplier > 0 && avgCacheUsed > 0
-                    && w.getUsedKvCacheTokens().get() > avgCacheUsed * imbalanceMultiplier) {
+                    && ep.getUsedKvCacheTokens().get() > avgCacheUsed * imbalanceMultiplier) {
                 continue;
             }
-            survivors.add(w);
+            survivors.add(ep);
         }
 
         if (survivors.isEmpty()) {
-            WorkerStatus leastUsed = eligible.stream()
-                    .min(Comparator.comparingLong(w -> w.getUsedKvCacheTokens().get()))
+            DecodeEndpoint leastUsed = eligible.stream()
+                    .min(Comparator.comparingLong(ep -> ep.getUsedKvCacheTokens().get()))
                     .orElse(null);
             if (leastUsed != null) {
                 survivors.add(leastUsed);
@@ -167,25 +173,25 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
         return blockSize * promptCacheKeys.size();
     }
 
-    private WorkerStatus weightedRandomSelection(List<WorkerStatus> candidateWorkers) {
-        int workerCount = candidateWorkers.size();
+    private DecodeEndpoint weightedRandomSelection(List<DecodeEndpoint> candidateEndpoints) {
+        int workerCount = candidateEndpoints.size();
         if (workerCount == 0) {
             return null;
         }
 
         long totalCacheUsed = 0;
-        for (WorkerStatus worker : candidateWorkers) {
-            totalCacheUsed += worker.getUsedKvCacheTokens().get();
+        for (DecodeEndpoint ep : candidateEndpoints) {
+            totalCacheUsed += ep.getUsedKvCacheTokens().get();
         }
         double avgCacheUsed = (double) totalCacheUsed / workerCount;
 
-        List<WeightedWorker> weightedWorkers = new ArrayList<>();
+        List<WeightedWorker> weightedEndpoints = new ArrayList<>();
         boolean allSameUsage = true;
         double totalWeight = 0;
         Long firstCacheUsed = null;
 
-        for (WorkerStatus worker : candidateWorkers) {
-            long cacheUsed = worker.getUsedKvCacheTokens().get();
+        for (DecodeEndpoint ep : candidateEndpoints) {
+            long cacheUsed = ep.getUsedKvCacheTokens().get();
             double normalizedValue = cacheUsed - avgCacheUsed;
 
             if (firstCacheUsed == null) {
@@ -196,52 +202,49 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
 
             double weight = Math.exp(-decayFactor * normalizedValue);
 
-            weightedWorkers.add(new WeightedWorker(worker, (long) normalizedValue, weight));
+            weightedEndpoints.add(new WeightedWorker(ep, (long) normalizedValue, weight));
             totalWeight += weight;
         }
 
         if (totalWeight <= 0) {
             Logger.warn("Total weight is zero or negative: {}, using uniform random selection", totalWeight);
             int randomIndex = ThreadLocalRandom.current().nextInt(workerCount);
-            return candidateWorkers.get(randomIndex);
+            return candidateEndpoints.get(randomIndex);
         }
 
         if (allSameUsage) {
             int randomIndex = ThreadLocalRandom.current().nextInt(workerCount);
-            return candidateWorkers.get(randomIndex);
+            return candidateEndpoints.get(randomIndex);
         }
 
         double randomValue = ThreadLocalRandom.current().nextDouble() * totalWeight;
         double cumulativeWeight = 0;
 
-        for (WeightedWorker weightedWorker : weightedWorkers) {
-            cumulativeWeight += weightedWorker.weight;
+        for (WeightedWorker weightedEndpoint : weightedEndpoints) {
+            cumulativeWeight += weightedEndpoint.weight;
             if (Double.compare(randomValue, cumulativeWeight) <= 0) {
-                return weightedWorker.worker;
+                return weightedEndpoint.endpoint;
             }
         }
 
-        return weightedWorkers.stream()
-                .min(Comparator.comparingLong(w -> w.worker.getUsedKvCacheTokens().get()))
-                .map(w -> w.worker)
+        return weightedEndpoints.stream()
+                .min(Comparator.comparingLong(w -> w.endpoint.getUsedKvCacheTokens().get()))
+                .map(w -> w.endpoint)
                 .orElse(null);
     }
 
-    private ServerStatus buildServerStatus(WorkerStatus optimalWorker, long seqLen, long prefixLength, RoleType roleType, long requestId) {
+    private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen, long prefixLength, RoleType roleType, long requestId) {
         ServerStatus result = new ServerStatus();
         try {
-            DecodeEndpoint ep = endpointRegistry.getDecode(optimalWorker.getIpPort());
-            if (ep != null) {
-                ep.reserve(requestId, seqLen);
-            }
+            optimalEndpoint.reserve(requestId, seqLen);
 
             result.setSuccess(true);
             result.setRole(roleType);
-            result.setServerIp(optimalWorker.getIp());
-            result.setHttpPort(optimalWorker.getPort());
-            result.setGrpcPort(CommonUtils.toGrpcPort(optimalWorker.getPort()));
-            result.setDpRank(optimalWorker.getDpRank());
-            result.setGroup(optimalWorker.getGroup());
+            result.setServerIp(optimalEndpoint.getIp());
+            result.setHttpPort(optimalEndpoint.getHttpPort());
+            result.setGrpcPort(CommonUtils.toGrpcPort(optimalEndpoint.getHttpPort()));
+            result.setDpRank(optimalEndpoint.getDpRank());
+            result.setGroup(optimalEndpoint.getGroup());
             result.setRequestId(requestId);
         } catch (Exception e) {
             Logger.error("buildServerStatus error", e);

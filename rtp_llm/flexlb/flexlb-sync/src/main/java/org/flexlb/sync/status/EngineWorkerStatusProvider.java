@@ -1,7 +1,7 @@
 package org.flexlb.sync.status;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,9 +21,9 @@ public class EngineWorkerStatusProvider implements WorkerStatusProvider {
     @Override
     public List<String> getWorkerIpPorts(RoleType roleType, String group) {
 
-        Map<String/*ip:port*/, WorkerStatus> workerStatusMap
+        Map<String, WorkerEndpoint> workerEndpointMap
                 = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
 
-        return new ArrayList<>(workerStatusMap.keySet());
+        return new ArrayList<>(workerEndpointMap.keySet());
     }
 }

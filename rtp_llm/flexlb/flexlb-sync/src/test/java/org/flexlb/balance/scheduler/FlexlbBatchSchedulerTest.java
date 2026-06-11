@@ -1,6 +1,8 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -80,8 +82,18 @@ class FlexlbBatchSchedulerTest {
         when(grpcClient.cancel(anyString(), anyInt(), anyLong(), anyLong()))
                 .thenReturn(EngineRpcService.EmptyPB.getDefaultInstance());
 
-        EndpointRegistry endpointRegistry = new EndpointRegistry(engineWorkerStatus);
+        EndpointRegistry endpointRegistry = new EndpointRegistry(engineWorkerStatus, configService, null);
         scheduler = new FlexlbBatchScheduler(configService, router, grpcClient, engineWorkerStatus, endpointRegistry);
+
+        // Create endpoint and batcher for the worker that successRoute() returns
+        String ipPort = "10.0.0.1:8080";
+        PrefillEndpoint endpoint = new PrefillEndpoint("10.0.0.1", 8080, 9080, new WorkerStatus(), config, scheduler);
+        ServerStatus prefill = new ServerStatus();
+        prefill.setServerIp("10.0.0.1");
+        prefill.setHttpPort(8080);
+        prefill.setGrpcPort(9080);
+        prefill.setRole(RoleType.PREFILL);
+        endpointRegistry.getOrCreatePrefill(ipPort, k -> endpoint);
     }
 
     @AfterEach
@@ -115,9 +127,9 @@ class FlexlbBatchSchedulerTest {
         assertEquals(batch.getBatchId(), inputs.get(1).getGroupId().getValue());
         assertEquals(77, inputs.get(0).getGenerateConfig().getGroupTimeout().getValue());
         assertEquals(2, inputs.get(0).getGenerateConfig().getRoleAddrsCount());
-        assertEquals(EngineRpcService.RoleAddrPB.RoleType.PREFILL,
+        assertEquals(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
                 inputs.get(0).getGenerateConfig().getRoleAddrs(0).getRole());
-        assertEquals(EngineRpcService.RoleAddrPB.RoleType.DECODE,
+        assertEquals(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
                 inputs.get(0).getGenerateConfig().getRoleAddrs(1).getRole());
     }
 
@@ -208,8 +220,9 @@ class FlexlbBatchSchedulerTest {
         dp0.setPort(8090);
         dp0.setDpRank(0);
         dp0.getStatusVersion().set(1);
+        PrefillEndpoint dp0Endpoint = new PrefillEndpoint("10.0.0.9", 8090, 9090, dp0, config, scheduler);
         when(engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, "g1"))
-                .thenReturn(Map.of("10.0.0.9:8090", dp0));
+                .thenReturn(Map.of("10.0.0.9:8090", dp0Endpoint));
 
         Response response = scheduler.submit(context(91)).get(2, TimeUnit.SECONDS);
 
@@ -227,8 +240,9 @@ class FlexlbBatchSchedulerTest {
         unsyncedDp0.setIp("10.0.0.9");
         unsyncedDp0.setPort(8090);
         unsyncedDp0.setDpRank(0);
+        PrefillEndpoint unsyncedEp = new PrefillEndpoint("10.0.0.9", 8090, 9090, unsyncedDp0, config, scheduler);
         when(engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, "g1"))
-                .thenReturn(Map.of("10.0.0.9:8090", unsyncedDp0));
+                .thenReturn(Map.of("10.0.0.9:8090", unsyncedEp));
 
         Response response = scheduler.submit(context(92)).get(2, TimeUnit.SECONDS);
 
@@ -632,6 +646,82 @@ class FlexlbBatchSchedulerTest {
 
         assertThrows(Exception.class, () -> future.get(2, TimeUnit.SECONDS));
         verify(grpcClient, never()).batchEnqueue(anyString(), anyInt(), any(), anyLong());
+    }
+
+    // ==================== cancel / onRequestsFinished → Decode endpoint release ====================
+
+    @Test
+    void cancel_releases_decode_endpoint_resource() {
+        // Register a DecodeEndpoint at the address the router returns for DECODE
+        WorkerStatus decodeStatus = new WorkerStatus();
+        DecodeEndpoint decodeEp = scheduler.endpointRegistry.ensureDecodeEndpoint(
+                "10.0.0.2:8081", "10.0.0.2", 8081, 9081, decodeStatus);
+
+        // Simulate strategy having reserved resources on the decode endpoint
+        decodeEp.calibrate(null, null, 10000);
+        decodeEp.reserve(17L, 500);
+        assertEquals(1, decodeEp.getInflightCount());
+
+        // Submit a request — router returns decode at 10.0.0.2:8081
+        CompletableFuture<Response> future = scheduler.submit(context(17));
+
+        // Cancel before batch is dispatched
+        scheduler.cancel(17L);
+
+        // Decode endpoint resource should be released
+        assertEquals(0, decodeEp.getInflightCount(),
+                "Cancel should propagate to DecodeEndpoint.release()");
+        assertTrue(future.isCompletedExceptionally());
+    }
+
+    @Test
+    void onRequestsFinished_releases_decode_endpoint_resource() {
+        WorkerStatus decodeStatus = new WorkerStatus();
+        DecodeEndpoint decodeEp = scheduler.endpointRegistry.ensureDecodeEndpoint(
+                "10.0.0.2:8081", "10.0.0.2", 8081, 9081, decodeStatus);
+
+        decodeEp.calibrate(null, null, 10000);
+        decodeEp.reserve(18L, 500);
+        assertEquals(1, decodeEp.getInflightCount());
+
+        // Submit so the request lands in inflight
+        scheduler.submit(context(18));
+
+        // Simulate engine-side request completion
+        scheduler.onRequestsFinished(List.of(18L));
+
+        // Decode endpoint resource should be released
+        assertEquals(0, decodeEp.getInflightCount(),
+                "onRequestsFinished should propagate to DecodeEndpoint.release()");
+    }
+
+    @Test
+    void onRequestsFinished_ignores_unknown_request_ids() {
+        WorkerStatus decodeStatus = new WorkerStatus();
+        DecodeEndpoint decodeEp = scheduler.endpointRegistry.ensureDecodeEndpoint(
+                "10.0.0.2:8081", "10.0.0.2", 8081, 9081, decodeStatus);
+
+        decodeEp.calibrate(null, null, 10000);
+        decodeEp.reserve(19L, 300);
+        assertEquals(1, decodeEp.getInflightCount());
+
+        // onRequestsFinished with a requestId not in inflight
+        scheduler.onRequestsFinished(List.of(99999L));
+
+        // Decode endpoint should NOT be affected
+        assertEquals(1, decodeEp.getInflightCount(),
+                "Unknown request IDs should not trigger release");
+    }
+
+    @Test
+    void cancel_with_decode_endpoint_not_registered_is_noop() {
+        // No DecodeEndpoint registered at 10.0.0.2:8081 — cancel should not throw
+        CompletableFuture<Response> future = scheduler.submit(context(20));
+
+        scheduler.cancel(20L);
+
+        assertTrue(future.isCompletedExceptionally());
+        // No exception thrown — passes
     }
 
     private static EngineRpcService.EnqueueBatchResponsePB ackFor(EngineRpcService.EnqueueBatchRequestPB request) {

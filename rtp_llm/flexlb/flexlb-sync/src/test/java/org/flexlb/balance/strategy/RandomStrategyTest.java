@@ -1,6 +1,8 @@
 package org.flexlb.balance.strategy;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
@@ -43,14 +45,16 @@ class RandomStrategyTest {
     void setUp() {
         ConfigService configService = Mockito.mock(ConfigService.class);
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        EndpointRegistry endpointRegistry = Mockito.mock(EndpointRegistry.class);
         resourceMeasure = Mockito.mock(ResourceMeasure.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
-        Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
+        Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any(WorkerEndpoint.class))).thenReturn(true);
         randomStrategy = new RandomStrategy(
-                new EngineWorkerStatus(new ModelMetaConfig()),
+                new EngineWorkerStatus(new ModelMetaConfig(), endpointRegistry),
                 configService,
-                resourceMeasureFactory);
+                resourceMeasureFactory,
+                endpointRegistry);
     }
 
     @AfterEach

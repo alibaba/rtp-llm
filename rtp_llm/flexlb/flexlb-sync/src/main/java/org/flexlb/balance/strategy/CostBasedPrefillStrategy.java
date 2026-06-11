@@ -6,13 +6,12 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
@@ -34,20 +33,17 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
     private final CacheAwareService cacheAwareService;
     private final ResourceMeasureFactory resourceMeasureFactory;
     private final EngineHealthReporter engineHealthReporter;
-    private final FlexlbBatchScheduler batchScheduler;
     private final EndpointRegistry endpointRegistry;
 
     public CostBasedPrefillStrategy(EngineWorkerStatus engineWorkerStatus,
                                     CacheAwareService cacheAwareService,
                                     ResourceMeasureFactory resourceMeasureFactory,
                                     EngineHealthReporter engineHealthReporter,
-                                    FlexlbBatchScheduler batchScheduler,
                                     EndpointRegistry endpointRegistry) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.cacheAwareService = cacheAwareService;
         this.resourceMeasureFactory = resourceMeasureFactory;
         this.engineHealthReporter = engineHealthReporter;
-        this.batchScheduler = batchScheduler;
         this.endpointRegistry = endpointRegistry;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, this);
     }
@@ -69,30 +65,29 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
     private ServerStatus doSelect(BalanceContext balanceContext, RoleType roleType, String group) {
         long requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
-        String model = balanceContext.getRequest().getModel();
         FlexlbConfig config = balanceContext.getConfig();
 
-        List<WorkerStatus> eligible = getAvailableWorkers(roleType, group, config.getResourceMeasureIndicator(roleType));
+        List<PrefillEndpoint> eligible = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType));
         if (CollectionUtils.isEmpty(eligible)) {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
         Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
-        PrefillTimePredictor predictor = createPredictor(config);
+        PrefillTimePredictor predictor = getPredictor(eligible, config);
 
-        List<WorkerStatus> survivors = applyHardFilters(eligible, model, seqLen, config, predictor);
+        List<PrefillEndpoint> survivors = applyHardFilters(eligible, seqLen, config, predictor);
 
-        WorkerStatus best = null;
+        PrefillEndpoint best = null;
         long bestScore = Long.MAX_VALUE;
         long bestCacheHit = 0;
 
-        for (WorkerStatus w : survivors) {
-            long cacheHit = calculateCacheHit(w, cacheMatchResults);
-            long score = computeScore(w, model, seqLen, cacheHit, config, predictor);
+        for (PrefillEndpoint ep : survivors) {
+            long cacheHit = calculateCacheHit(ep, cacheMatchResults);
+            long score = computeScore(ep, seqLen, cacheHit, config, predictor);
 
             if (score < bestScore) {
                 bestScore = score;
-                best = w;
+                best = ep;
                 bestCacheHit = cacheHit;
             }
         }
@@ -106,7 +101,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         return buildServerStatus(best, roleType, requestId, bestScore);
     }
 
-    private List<WorkerStatus> applyHardFilters(List<WorkerStatus> eligible, String model, long seqLen,
+    private List<PrefillEndpoint> applyHardFilters(List<PrefillEndpoint> eligible, long seqLen,
                                                 FlexlbConfig config, PrefillTimePredictor predictor) {
         long sloMs = config.resolveSloMs(seqLen);
         long sloRiskMarginMs = config.getCostSloRiskMarginMs();
@@ -115,24 +110,20 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
 
         long sumWaitMs = 0;
         long sumPendingCount = 0;
-        for (WorkerStatus w : eligible) {
-            PrefillEndpoint ep = endpointRegistry.getPrefill(w.getIpPort());
-            sumWaitMs += ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
-            sumPendingCount += batchScheduler.snapshotForWorker(model, w.getIp(), w.getPort()).queueSize()
-                    + (ep != null ? ep.getInflightRequestCount() : 0);
+        for (PrefillEndpoint ep : eligible) {
+            sumWaitMs += ep.getEstimatedWaitingTimeMs();
+            sumPendingCount += ep.getBatcherQueueSize() + ep.getInflightRequestCount();
         }
         long avgWaitMs = sumWaitMs / eligible.size();
         long avgPendingCount = sumPendingCount / eligible.size();
 
         long singlePrefillMs = predictor.predictBatchMs(
-                List.of(new RequestProfile(seqLen, 0)));
+                List.of(new BatchRequest(0, seqLen, 0)));
 
-        List<WorkerStatus> survivors = new ArrayList<>(eligible.size());
-        for (WorkerStatus w : eligible) {
-            PrefillEndpoint ep = endpointRegistry.getPrefill(w.getIpPort());
-            long endpointWaitMs = ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
-            long pendingCount = batchScheduler.snapshotForWorker(model, w.getIp(), w.getPort()).queueSize()
-                    + (ep != null ? ep.getInflightRequestCount() : 0);
+        List<PrefillEndpoint> survivors = new ArrayList<>(eligible.size());
+        for (PrefillEndpoint ep : eligible) {
+            long endpointWaitMs = ep.getEstimatedWaitingTimeMs();
+            long pendingCount = ep.getBatcherQueueSize() + ep.getInflightRequestCount();
 
             if (endpointWaitMs + singlePrefillMs > sloMs - sloRiskMarginMs) {
                 continue;
@@ -144,15 +135,12 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
                 continue;
             }
 
-            survivors.add(w);
+            survivors.add(ep);
         }
 
         if (survivors.isEmpty()) {
-            WorkerStatus leastLoaded = eligible.stream()
-                    .min(Comparator.comparingLong(w -> {
-                        PrefillEndpoint ep = endpointRegistry.getPrefill(w.getIpPort());
-                        return ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
-                    }))
+            PrefillEndpoint leastLoaded = eligible.stream()
+                    .min(Comparator.comparingLong(PrefillEndpoint::getEstimatedWaitingTimeMs))
                     .orElse(null);
             if (leastLoaded != null) {
                 survivors.add(leastLoaded);
@@ -162,9 +150,9 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         return survivors;
     }
 
-    private long computeScore(WorkerStatus w, String model, long seqLen, long cacheHit,
+    private long computeScore(PrefillEndpoint ep, long seqLen, long cacheHit,
                               FlexlbConfig config, PrefillTimePredictor predictor) {
-        BatcherSnapshot snap = batchScheduler.snapshotForWorker(model, w.getIp(), w.getPort());
+        BatcherSnapshot snap = ep.getBatcherSnapshot();
 
         long batcherWaitMs;
         if (snap.queueSize() == 0) {
@@ -177,31 +165,42 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
             batcherWaitMs = 0;
         }
 
-        PrefillEndpoint ep = endpointRegistry.getPrefill(w.getIpPort());
-        long endpointWaitMs = ep != null ? ep.getEstimatedWaitingTimeMs() : 0;
+        long endpointWaitMs = ep.getEstimatedWaitingTimeMs();
 
         return batcherWaitMs + endpointWaitMs;
     }
 
-    private PrefillTimePredictor createPredictor(FlexlbConfig config) {
+    private PrefillTimePredictor getPredictor(List<PrefillEndpoint> eligible, FlexlbConfig config) {
+        for (PrefillEndpoint ep : eligible) {
+            PrefillTimePredictor p = ep.getPredictor();
+            if (p != null) {
+                return p;
+            }
+        }
         return new PrefillTimePredictor(
                 config.getCostAlpha0(), config.getCostAlpha1(), config.getCostAlpha2(),
                 config.getCostAlpha3(), config.getCostAlpha4(), config.getCostAlpha5());
     }
 
-    private List<WorkerStatus> getAvailableWorkers(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
-        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
-        if (MapUtils.isEmpty(workerStatusMap)) {
+    private List<PrefillEndpoint> getAvailableEndpoints(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
+        Map<String, WorkerEndpoint> workerEndpointMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
+        if (MapUtils.isEmpty(workerEndpointMap)) {
             return new ArrayList<>();
         }
         ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);
         if (resourceMeasure == null) {
             return new ArrayList<>();
         }
-        return workerStatusMap.values().stream()
-                .filter(WorkerStatus::isAlive)
-                .filter(resourceMeasure::isResourceAvailable)
-                .toList();
+        List<PrefillEndpoint> result = new ArrayList<>();
+        for (WorkerEndpoint ep : workerEndpointMap.values()) {
+            if (!ep.isAlive() || !resourceMeasure.isResourceAvailable(ep)) {
+                continue;
+            }
+            if (ep instanceof PrefillEndpoint pe && pe.isAvailable()) {
+                result.add(pe);
+            }
+        }
+        return result;
     }
 
     private Map<String, Integer> getCacheMatchResults(BalanceContext balanceContext, RoleType roleType, String group) {
@@ -209,15 +208,15 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         return cacheAwareService.findMatchingEngines(blockCacheKeys, roleType, group);
     }
 
-    private long calculateCacheHit(WorkerStatus workerStatus, Map<String, Integer> cacheMatchResults) {
-        if (workerStatus.getCacheStatus() == null || cacheMatchResults == null) {
+    private long calculateCacheHit(PrefillEndpoint ep, Map<String, Integer> cacheMatchResults) {
+        if (ep.getCacheStatus() == null || cacheMatchResults == null) {
             return 0L;
         }
-        Integer prefixMatchLength = cacheMatchResults.get(workerStatus.getIpPort());
+        Integer prefixMatchLength = cacheMatchResults.get(ep.ipPort());
         if (prefixMatchLength == null) {
             return 0L;
         }
-        return workerStatus.getCacheStatus().getBlockSize() * prefixMatchLength;
+        return ep.getCacheStatus().getBlockSize() * prefixMatchLength;
     }
 
     private void reportCacheHitMetrics(RoleType roleType, String ip, long hitCacheTokens, long seqLen) {
@@ -225,17 +224,17 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         engineHealthReporter.reportCacheHitMetrics(roleType, ip, hitCacheTokens, hitRate);
     }
 
-    private ServerStatus buildServerStatus(WorkerStatus worker, RoleType roleType, long requestId, long score) {
+    private ServerStatus buildServerStatus(PrefillEndpoint ep, RoleType roleType, long requestId, long score) {
         ServerStatus result = new ServerStatus();
         result.setSuccess(true);
         result.setRole(roleType);
         result.setRequestId(requestId);
         result.setPrefillTime(score);
-        result.setGroup(worker.getGroup());
-        result.setServerIp(worker.getIp());
-        result.setHttpPort(worker.getPort());
-        result.setGrpcPort(CommonUtils.toGrpcPort(worker.getPort()));
-        result.setDpRank(worker.getDpRank());
+        result.setGroup(ep.getGroup());
+        result.setServerIp(ep.getIp());
+        result.setHttpPort(ep.getHttpPort());
+        result.setGrpcPort(CommonUtils.toGrpcPort(ep.getHttpPort()));
+        result.setDpRank(ep.getDpRank());
         return result;
     }
 }

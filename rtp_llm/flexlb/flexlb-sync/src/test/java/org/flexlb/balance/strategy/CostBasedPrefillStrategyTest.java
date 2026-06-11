@@ -2,10 +2,12 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
@@ -40,22 +42,34 @@ class CostBasedPrefillStrategyTest {
 
     @BeforeEach
     void setUp() {
-        engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
+        ConfigService configService = Mockito.mock(ConfigService.class);
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         cacheAwareService = Mockito.mock(CacheAwareService.class);
         resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
         batchScheduler = Mockito.mock(FlexlbBatchScheduler.class);
-        endpointRegistry = new EndpointRegistry(engineWorkerStatus);
+
+        // Create registry first to break circular dependency (null engineWorkerStatus is fine for tests)
+        endpointRegistry = new EndpointRegistry(null, configService, batchScheduler);
+        engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), endpointRegistry);
 
         ResourceMeasure resourceMeasure = Mockito.mock(ResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(any())).thenReturn(resourceMeasure);
-        Mockito.when(resourceMeasure.isResourceAvailable(any())).thenReturn(true);
+        Mockito.when(resourceMeasure.isResourceAvailable(any(WorkerEndpoint.class))).thenReturn(true);
         Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any())).thenReturn(new HashMap<>());
-        Mockito.when(batchScheduler.snapshotForWorker(any(), any(), anyInt())).thenReturn(BatcherSnapshot.EMPTY);
 
         strategy = new CostBasedPrefillStrategy(
                 engineWorkerStatus, cacheAwareService, resourceMeasureFactory,
-                engineHealthReporter, batchScheduler, endpointRegistry);
+                engineHealthReporter, endpointRegistry);
+    }
+
+    /** Helper: register PrefillEndpoints for all entries in the given worker map. */
+    private void registerPrefillEndpoints(Map<String, WorkerStatus> workerMap) {
+        for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
+            WorkerStatus ws = entry.getValue();
+            endpointRegistry.ensurePrefillEndpoint(entry.getKey(), ws.getIp(), ws.getPort(), 9090, ws);
+        }
     }
 
     @Test
@@ -78,12 +92,10 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.1:8080", w1);
         prefillMap.put("10.0.0.2:8080", w2);
 
-        List<RequestProfile> w1Requests = List.of(
-                new RequestProfile(1000, 0), new RequestProfile(1000, 0), new RequestProfile(1000, 0));
+        List<BatchRequest> w1Requests = List.of(
+                new BatchRequest(0, 1000, 0), new BatchRequest(1, 1000, 0), new BatchRequest(2, 1000, 0));
         long headDeadline = System.currentTimeMillis() + 300;
         BatcherSnapshot w1Snap = new BatcherSnapshot(3, w1Requests, System.currentTimeMillis(), headDeadline);
-        Mockito.when(batchScheduler.snapshotForWorker(any(), eq("10.0.0.1"), eq(8080))).thenReturn(w1Snap);
-        Mockito.when(batchScheduler.snapshotForWorker(any(), eq("10.0.0.2"), eq(8080))).thenReturn(BatcherSnapshot.EMPTY);
         ServerStatus result = strategy.select(buildContext(500, 2L), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
@@ -136,18 +148,6 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
         prefillMap.put("10.0.0.3:8080", createWorker("10.0.0.3", 0));
 
-        List<RequestProfile> hotRequests = new ArrayList<>();
-        for (int i = 0; i < 31; i++) {
-            hotRequests.add(new RequestProfile(1000, 0));
-        }
-        long deadline = System.currentTimeMillis() + 300;
-        BatcherSnapshot hotSpot = new BatcherSnapshot(31, hotRequests, System.currentTimeMillis(), deadline);
-        BatcherSnapshot normal = new BatcherSnapshot(1,
-                List.of(new RequestProfile(1000, 0)), System.currentTimeMillis(), deadline);
-        Mockito.when(batchScheduler.snapshotForWorker(any(), eq("10.0.0.1"), eq(8080))).thenReturn(hotSpot);
-        Mockito.when(batchScheduler.snapshotForWorker(any(), eq("10.0.0.2"), eq(8080))).thenReturn(normal);
-        Mockito.when(batchScheduler.snapshotForWorker(any(), eq("10.0.0.3"), eq(8080))).thenReturn(normal);
-
         ServerStatus result = strategy.select(buildContext(500, 6L), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
@@ -196,18 +196,20 @@ class CostBasedPrefillStrategyTest {
 
     @Test
     void endpointWaitMsFavorsEndpointWithLowerEstimate() {
-        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         WorkerStatus w1 = createWorker("10.0.0.1", 0);
         WorkerStatus w2 = createWorker("10.0.0.2", 0);
-        prefillMap.put("10.0.0.1:8080", w1);
-        prefillMap.put("10.0.0.2:8080", w2);
 
-        PrefillTimePredictor predictor = new PrefillTimePredictor(0, 1, 0, 0, 0, 0);
-        PrefillEndpoint ep1 = new PrefillEndpoint("10.0.0.1", 8080, 8081, w1, predictor);
-        ep1.commitBatch(1L, 4000, List.of(1L), List.of(new RequestProfile(1000, 0)));
+        FlexlbConfig config = new FlexlbConfig();
+        config.setCostAlpha0(0);
+        config.setCostAlpha1(1);
+        PrefillEndpoint ep1 = new PrefillEndpoint("10.0.0.1", 8080, 8081, w1, config, batchScheduler);
+        ep1.commitBatch(1L, 4000, List.of(new BatchRequest(1L, 1000, 0)));
+        // Replace the default endpoints created by createWorker with custom ones
+        endpointRegistry.removePrefill("10.0.0.1:8080");
+        endpointRegistry.removePrefill("10.0.0.2:8080");
         endpointRegistry.getOrCreatePrefill("10.0.0.1:8080", k -> ep1);
         endpointRegistry.getOrCreatePrefill("10.0.0.2:8080", k ->
-                new PrefillEndpoint("10.0.0.2", 8080, 8081, w2, predictor));
+                new PrefillEndpoint("10.0.0.2", 8080, 8081, w2, config, batchScheduler));
 
         ServerStatus result = strategy.select(buildContext(500, 10L), RoleType.PREFILL, null);
 
@@ -222,7 +224,7 @@ class CostBasedPrefillStrategyTest {
         // Single request: n=1000, p=200 → c=800, bs=1
         // = 10 + 0.5*800 + (0.001*640000 + 0.0005*160000) + 0.2*200 + 5*1
         // = 10 + 400 + (640 + 80) + 40 + 5 = 1175
-        long single = predictor.predictBatchMs(List.of(new RequestProfile(1000, 200)));
+        long single = predictor.predictBatchMs(List.of(new BatchRequest(0, 1000, 200)));
         assertEquals(1175, single);
 
         // Batch of 2: req1=(1000,200) req2=(500,100)
@@ -230,8 +232,8 @@ class CostBasedPrefillStrategyTest {
         // Σc=1200, Σ(640+80, 160+20)=900, Σp=300, bs=2
         // = 10 + 0.5*1200 + 900 + 0.2*300 + 5*2 = 1580
         long batch = predictor.predictBatchMs(List.of(
-                new RequestProfile(1000, 200),
-                new RequestProfile(500, 100)));
+                new BatchRequest(0, 1000, 200),
+                new BatchRequest(1, 500, 100)));
         assertEquals(1580, batch);
 
         assertEquals(0, predictor.predictBatchMs(List.of()));
@@ -248,6 +250,13 @@ class CostBasedPrefillStrategyTest {
         cacheStatus.setBlockSize(256);
         w.setCacheStatus(cacheStatus);
         w.setRunningTaskList(new HashMap<>());
+
+        String ipPort = ip + ":8080";
+        PrefillEndpoint ep = endpointRegistry.ensurePrefillEndpoint(ipPort, ip, 8080, 8081, w);
+        if (estimatedWaitMs > 0) {
+            ep.commitBatch(900000L + ip.hashCode(), estimatedWaitMs,
+                    List.of(new BatchRequest(900000L + ip.hashCode(), estimatedWaitMs, 0)));
+        }
         return w;
     }
 

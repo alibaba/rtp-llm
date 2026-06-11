@@ -1,8 +1,9 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
-import org.flexlb.sync.status.EngineWorkerStatus;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
@@ -14,10 +15,21 @@ public class EndpointRegistry {
 
     private final ConcurrentHashMap<String, PrefillEndpoint> prefillEndpoints = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, DecodeEndpoint> decodeEndpoints = new ConcurrentHashMap<>();
-    private final EngineWorkerStatus engineWorkerStatus;
+    private final ConfigService configService;
+    private final FlexlbBatchScheduler batchScheduler;
 
-    public EndpointRegistry(EngineWorkerStatus engineWorkerStatus) {
-        this.engineWorkerStatus = engineWorkerStatus;
+    public EndpointRegistry(ConfigService configService,
+                            @Lazy FlexlbBatchScheduler batchScheduler) {
+        this.configService = configService;
+        this.batchScheduler = batchScheduler;
+    }
+
+    public WorkerEndpoint get(String ipPort) {
+        WorkerEndpoint ep = prefillEndpoints.get(ipPort);
+        if (ep != null) {
+            return ep;
+        }
+        return decodeEndpoints.get(ipPort);
     }
 
     public PrefillEndpoint getPrefill(String ipPort) {
@@ -32,16 +44,22 @@ public class EndpointRegistry {
         return prefillEndpoints.computeIfAbsent(ipPort, factory);
     }
 
-    public DecodeEndpoint getOrCreateDecode(String ipPort, java.util.function.Function<String, DecodeEndpoint> factory) {
-        return decodeEndpoints.computeIfAbsent(ipPort, factory);
+    public PrefillEndpoint ensurePrefillEndpoint(String ipPort, String ip, int httpPort, int grpcPort, WorkerStatus status) {
+        return prefillEndpoints.computeIfAbsent(ipPort,
+                k -> new PrefillEndpoint(ip, httpPort, grpcPort, status, configService.loadBalanceConfig(), batchScheduler));
+    }
+
+    public DecodeEndpoint ensureDecodeEndpoint(String ipPort, String ip, int httpPort, int grpcPort, WorkerStatus status) {
+        return decodeEndpoints.computeIfAbsent(ipPort,
+                k -> new DecodeEndpoint(ip, httpPort, grpcPort, status));
     }
 
     public Map<String, PrefillEndpoint> getPrefillEndpoints(String group) {
-        return getEndpointsByRole(prefillEndpoints, RoleType.PREFILL, group);
+        return getEndpointsByGroup(prefillEndpoints, group);
     }
 
     public Map<String, DecodeEndpoint> getDecodeEndpoints(String group) {
-        return getEndpointsByRole(decodeEndpoints, RoleType.DECODE, group);
+        return getEndpointsByGroup(decodeEndpoints, group);
     }
 
     public void removePrefill(String ipPort) {
@@ -52,33 +70,17 @@ public class EndpointRegistry {
         decodeEndpoints.remove(ipPort);
     }
 
-    /**
-     * Backward-compatible get that returns any endpoint type.
-     */
-    public WorkerEndpoint get(String ipPort) {
-        PrefillEndpoint pep = prefillEndpoints.get(ipPort);
-        if (pep != null) {
-            return pep;
-        }
-        return decodeEndpoints.get(ipPort);
+    public void close() {
+        prefillEndpoints.values().forEach(WorkerEndpoint::close);
+        decodeEndpoints.values().forEach(WorkerEndpoint::close);
     }
 
-    public void remove(String ipPort) {
-        prefillEndpoints.remove(ipPort);
-        decodeEndpoints.remove(ipPort);
-    }
-
-    private <T> Map<String, T> getEndpointsByRole(ConcurrentHashMap<String, T> endpoints,
-                                                    RoleType roleType, String group) {
-        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
-        if (workerStatusMap == null || workerStatusMap.isEmpty()) {
-            return Map.of();
-        }
+    private <T extends WorkerEndpoint> Map<String, T> getEndpointsByGroup(ConcurrentHashMap<String, T> endpoints, String group) {
         Map<String, T> result = new LinkedHashMap<>();
-        for (String ipPort : workerStatusMap.keySet()) {
-            T ep = endpoints.get(ipPort);
-            if (ep != null) {
-                result.put(ipPort, ep);
+        for (Map.Entry<String, T> entry : endpoints.entrySet()) {
+            T ep = entry.getValue();
+            if (group == null || group.equals(ep.getGroup())) {
+                result.put(entry.getKey(), ep);
             }
         }
         return result;

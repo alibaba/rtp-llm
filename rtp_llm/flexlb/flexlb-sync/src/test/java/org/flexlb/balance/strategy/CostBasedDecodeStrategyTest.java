@@ -1,7 +1,9 @@
 package org.flexlb.balance.strategy;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
@@ -47,13 +49,24 @@ class CostBasedDecodeStrategyTest {
         return workerStatus;
     }
 
+    /** Create an EndpointRegistry with DecodeEndpoints registered for each WorkerStatus entry. */
+    private EndpointRegistry createDecodeRegistry(Map<String, WorkerStatus> workerMap) {
+        EndpointRegistry registry = new EndpointRegistry(null, configService, null);
+        for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
+            WorkerStatus ws = entry.getValue();
+            registry.ensureDecodeEndpoint(entry.getKey(), ws.getIp(), ws.getPort(), 9090, ws);
+        }
+        return registry;
+    }
+
     @Test
     void should_handle_empty_worker_map_when_no_workers_available() {
-        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        EndpointRegistry emptyRegistry = new EndpointRegistry(null, configService, null);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), emptyRegistry);
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, emptyRegistry);
 
         Request req = new Request();
         req.setSeqLen(1000);
@@ -70,7 +83,6 @@ class CostBasedDecodeStrategyTest {
 
     @Test
     void should_use_uniform_distribution_when_all_cache_usages_are_equal() {
-        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
@@ -84,6 +96,9 @@ class CostBasedDecodeStrategyTest {
         decodeMap.put("127.0.0.2:8080", worker2);
         decodeMap.put("127.0.0.3:8080", worker3);
 
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
+
         Request req = new Request();
         req.setSeqLen(1000);
         req.setRequestId(1000L);
@@ -91,8 +106,8 @@ class CostBasedDecodeStrategyTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any(WorkerEndpoint.class))).thenReturn(true);
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, registry);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -106,7 +121,6 @@ class CostBasedDecodeStrategyTest {
 
     @Test
     void should_prioritize_workers_with_lower_cache_usage_when_normalized_values_negative() {
-        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
@@ -122,6 +136,9 @@ class CostBasedDecodeStrategyTest {
         decodeMap.put("127.0.0.2:8080", worker2);
         decodeMap.put("127.0.0.3:8080", worker3);
 
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
+
         Request req = new Request();
         req.setSeqLen(1000);
         req.setRequestId(1000L);
@@ -129,8 +146,8 @@ class CostBasedDecodeStrategyTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any(WorkerEndpoint.class))).thenReturn(true);
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, registry);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -144,7 +161,6 @@ class CostBasedDecodeStrategyTest {
 
     @Test
     void should_handle_group_selection_when_group_parameter_provided() {
-        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         ModelWorkerStatus modelStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
@@ -153,6 +169,9 @@ class CostBasedDecodeStrategyTest {
 
         modelStatus.getDecodeStatusMap().put("127.0.0.1:8080", worker1);
 
+        EndpointRegistry registry = createDecodeRegistry(modelStatus.getDecodeStatusMap());
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
+
         Request req = new Request();
         req.setSeqLen(1000);
         req.setRequestId(1000L);
@@ -160,8 +179,8 @@ class CostBasedDecodeStrategyTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any(WorkerEndpoint.class))).thenReturn(true);
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, registry);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -175,7 +194,6 @@ class CostBasedDecodeStrategyTest {
 
     @Test
     void should_use_exponential_decay_for_balanced_weight_distribution_when_cache_usage_differs() {
-        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
@@ -189,14 +207,17 @@ class CostBasedDecodeStrategyTest {
         decodeMap.put("127.0.0.1:8080", worker1);
         decodeMap.put("127.0.0.2:8080", worker2);
 
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
+
         Request req = new Request();
         req.setSeqLen(1000);
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any(WorkerEndpoint.class))).thenReturn(true);
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, registry);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -231,7 +252,6 @@ class CostBasedDecodeStrategyTest {
 
     @Test
     void should_skip_worker_with_insufficient_kv_cache_capacity() {
-        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
@@ -245,6 +265,9 @@ class CostBasedDecodeStrategyTest {
         decodeMap.put("127.0.0.1:8080", worker1);
         decodeMap.put("127.0.0.2:8080", worker2);
 
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
+
         Request req = new Request();
         req.setSeqLen(500);
         req.setRequestId(2000L);
@@ -252,8 +275,8 @@ class CostBasedDecodeStrategyTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any(WorkerEndpoint.class))).thenReturn(true);
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, registry);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -267,7 +290,6 @@ class CostBasedDecodeStrategyTest {
 
     @Test
     void should_fallback_to_least_used_when_all_workers_filtered() {
-        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
@@ -281,6 +303,9 @@ class CostBasedDecodeStrategyTest {
         decodeMap.put("127.0.0.1:8080", worker1);
         decodeMap.put("127.0.0.2:8080", worker2);
 
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
+
         Request req = new Request();
         req.setSeqLen(200);
         req.setRequestId(3000L);
@@ -288,8 +313,8 @@ class CostBasedDecodeStrategyTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, new EndpointRegistry(engineWorkerStatus));
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any(WorkerEndpoint.class))).thenReturn(true);
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory, registry);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);

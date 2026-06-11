@@ -17,7 +17,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     private final ConcurrentHashMap<Long, RequestInflight> inflightRequests = new ConcurrentHashMap<>();
     private final AtomicLong totalKvTokens = new AtomicLong();
-    private final AtomicReference<Long> snapshot = new AtomicReference<>(0L);
+    private final AtomicReference<Long> estimatedAvailableKvTokens = new AtomicReference<>(0L);
     private volatile long reportedKvAvailable;
     private volatile int confirmedRunningCount;
 
@@ -28,14 +28,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public void reserve(long requestId, long kvTokens) {
         inflightRequests.put(requestId, new RequestInflight(requestId, kvTokens));
         totalKvTokens.addAndGet(kvTokens);
-        refreshSnapshot();
+        refreshEstimatedAvailableKvTokens();
     }
 
     public void release(long requestId) {
         RequestInflight removed = inflightRequests.remove(requestId);
         if (removed != null) {
-            safeDecrement(totalKvTokens, removed.kvTokens());
-            refreshSnapshot();
+            totalKvTokens.addAndGet(-removed.kvTokens());
+            refreshEstimatedAvailableKvTokens();
         }
     }
 
@@ -48,11 +48,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
         // Phase 1: process running requests — KV_ALLOCATED or RUNNING means the engine
         // has taken ownership, so we can release our inflight reservation.
+        int kvAllocatedRequests = 0;
         if (runningTaskInfo != null) {
             for (TaskInfo task : runningTaskInfo.values()) {
                 TaskPhase phase = task.getPhase();
                 if (phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING) {
                     inflightRequests.remove(task.getRequestId());
+                    kvAllocatedRequests++;
                 }
             }
         }
@@ -81,14 +83,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
         }
 
-        this.confirmedRunningCount = runningTaskInfo != null ? runningTaskInfo.size() : 0;
+        this.confirmedRunningCount = kvAllocatedRequests;
 
         // Phase 4: recompute cumulative and refresh snapshot
         recomputeTotalAndRefresh();
     }
 
     public long getAvailableKvTokens() {
-        return snapshot.get();
+        return estimatedAvailableKvTokens.get();
     }
 
     public int getInflightCount() {
@@ -107,8 +109,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return totalKvTokens;
     }
 
-    private void refreshSnapshot() {
-        snapshot.set(Math.max(0, reportedKvAvailable - totalKvTokens.get()));
+    private void refreshEstimatedAvailableKvTokens() {
+        estimatedAvailableKvTokens.set(Math.max(0, reportedKvAvailable - totalKvTokens.get()));
     }
 
     private synchronized void recomputeTotalAndRefresh() {
@@ -117,14 +119,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
             sum += ri.kvTokens();
         }
         totalKvTokens.set(sum);
-        refreshSnapshot();
+        refreshEstimatedAvailableKvTokens();
     }
 
     private static boolean isCancelError(TaskInfo task) {
         return task.getErrorMessage() != null && task.getErrorMessage().toLowerCase().contains("cancel");
     }
 
-    private static void safeDecrement(AtomicLong value, long delta) {
-        value.accumulateAndGet(delta, (current, d) -> Math.max(0, current - d));
-    }
 }

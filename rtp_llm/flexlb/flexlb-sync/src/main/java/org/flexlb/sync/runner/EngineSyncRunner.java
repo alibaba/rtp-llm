@@ -3,8 +3,10 @@ package org.flexlb.sync.runner;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -118,9 +120,12 @@ public class EngineSyncRunner implements Runnable {
                     if (System.nanoTime() / 1000 - lastTime > removalThresholdUs) {
                         cachedWorkerStatuses.remove(ipPort);
                         if (endpointRegistry != null) {
-                            endpointRegistry.remove(ipPort);
+                            WorkerEndpoint ep = endpointRegistry.get(ipPort);
+                            if (ep != null) {
+                                ep.setAvailable(false);
+                            }
                         }
-                        logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
+                        logger.info("[unavailable] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
                     }
                 }
             }
@@ -203,24 +208,42 @@ public class EngineSyncRunner implements Runnable {
             workerStatuses.put(workerIpPort, workerStatus);
             logger.info("Created new WorkerStatus for worker: {}", workerIpPort);
         }
-        ensureEndpointExists(workerIpPort, workerStatus);
+        if (endpointRegistry != null) {
+            ensureEndpoint(workerIpPort, workerStatus);
+        }
         return workerStatus;
     }
 
-    private void ensureEndpointExists(String ipPort, WorkerStatus workerStatus) {
-        if (endpointRegistry == null) {
-            return;
-        }
+    private void ensureEndpoint(String ipPort, WorkerStatus workerStatus) {
         String ip = workerStatus.getIp();
         int httpPort = workerStatus.getPort();
         int grpcPort = CommonUtils.toGrpcPort(httpPort);
 
+        WorkerEndpoint ep;
         if (roleType == RoleType.PREFILL) {
-            endpointRegistry.getOrCreatePrefill(ipPort,
-                    k -> new PrefillEndpoint(ip, httpPort, grpcPort, workerStatus, null));
+            long dpSize = workerStatus.getDpSize();
+            if (dpSize > 1) {
+                String message = String.format(
+                        "Prefill DP group endpoint not yet supported: model=%s, ipPort=%s, dp_size=%d",
+                        modelName, ipPort, dpSize);
+                logger.error(message);
+                throw new UnsupportedOperationException(message);
+            }
+            ep = endpointRegistry.ensurePrefillEndpoint(ipPort, ip, httpPort, grpcPort, workerStatus);
         } else if (roleType == RoleType.DECODE) {
-            endpointRegistry.getOrCreateDecode(ipPort,
-                    k -> new DecodeEndpoint(ip, httpPort, grpcPort, workerStatus));
+            ep = endpointRegistry.ensureDecodeEndpoint(ipPort, ip, httpPort, grpcPort, workerStatus);
+        } else {
+            throw new IllegalArgumentException("Unsupported role type: " + roleType);
+        }
+        if (ep != null) {
+            reactivateIfNecessary(ep, ipPort);
+        }
+    }
+
+    private void reactivateIfNecessary(WorkerEndpoint ep, String ipPort) {
+        if (!ep.isAvailable()) {
+            ep.setAvailable(true);
+            logger.info("[reactivate] worker back in service discovery, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
         }
     }
 }

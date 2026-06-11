@@ -21,10 +21,10 @@ public class PrefillTimePredictor {
     }
 
     public long estimateMs(long totalTokens, long hitTokens) {
-        return predictBatchMs(List.of(new RequestProfile(totalTokens, hitTokens)));
+        return predictBatchMs(List.of(new BatchRequest(0, totalTokens, hitTokens)));
     }
 
-    public long predictBatchMs(List<RequestProfile> requests) {
+    public long predictBatchMs(List<BatchRequest> requests) {
         if (requests.isEmpty()) {
             return 0;
         }
@@ -33,9 +33,9 @@ public class PrefillTimePredictor {
         double sumQuadratic = 0;
         long sumP = 0;
 
-        for (RequestProfile r : requests) {
+        for (BatchRequest r : requests) {
             long c = r.computeTokens();
-            long p = r.hitCacheTokens();
+            long p = r.hitCache();
             sumC += c;
             sumQuadratic += a2 * c * c + a3 * c * p;
             sumP += p;

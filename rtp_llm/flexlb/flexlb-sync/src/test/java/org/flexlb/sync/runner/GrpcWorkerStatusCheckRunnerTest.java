@@ -33,7 +33,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         workerStatus.setPort(8080);
 
         EngineRpcService.WorkerStatusPB workerStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
-                .setRole("test-role")
+                .setRole(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
                 .setAvailableConcurrency(10)
                 .setRunningQueryLen(5)
                 .setWaitingQueryLen(3)

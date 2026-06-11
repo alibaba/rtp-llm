@@ -8,10 +8,10 @@ import java.util.Map;
 
 @Getter
 public enum RoleType {
-    PDFUSION("RoleType.PDFUSION", "Prefill-Decode Fusion"),
-    PREFILL("RoleType.PREFILL", "Prefill"),
-    DECODE("RoleType.DECODE", "Decode"),
-    VIT("RoleType.VIT", "Vision Transformer");
+    PDFUSION("PDFUSION", "Prefill-Decode Fusion"),
+    PREFILL("PREFILL", "Prefill"),
+    DECODE("DECODE", "Decode"),
+    VIT("VIT", "Vision Transformer");
 
     private final String code;
     private final String description;

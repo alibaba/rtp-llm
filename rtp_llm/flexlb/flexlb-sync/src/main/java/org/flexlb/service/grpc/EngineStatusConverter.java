@@ -22,8 +22,8 @@ public class EngineStatusConverter {
     public static WorkerStatusResponse convertToWorkerStatusResponse(EngineRpcService.WorkerStatusPB workerStatusPB) {
         WorkerStatusResponse response = new WorkerStatusResponse();
 
-        // Set role directly as string
-        response.setRole(workerStatusPB.getRole());
+        // Convert proto enum to role name string (e.g., "DECODE")
+        response.setRole(workerStatusPB.getRole().name());
         response.setAvailableConcurrency(workerStatusPB.getAvailableConcurrency());
         response.setRunningQueryLen(workerStatusPB.getRunningQueryLen());
         response.setWaitingQueryLen(workerStatusPB.getWaitingQueryLen());

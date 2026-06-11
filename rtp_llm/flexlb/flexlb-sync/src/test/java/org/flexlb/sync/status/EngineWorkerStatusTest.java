@@ -1,10 +1,16 @@
 package org.flexlb.sync.status;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -15,12 +21,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class EngineWorkerStatusTest {
 
     private EngineWorkerStatus engineWorkerStatus;
+    private EndpointRegistry registry;
+    private ConfigService configService;
     private WorkerStatus workerStatus1;
     private WorkerStatus workerStatus2;
 
     @BeforeEach
     void setUp() {
-        engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        configService = Mockito.mock(ConfigService.class);
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        registry = new EndpointRegistry(null, configService, null);
+        engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig(), registry);
         workerStatus1 = new WorkerStatus();
         workerStatus1.setGroup("group1");
         workerStatus2 = new WorkerStatus();
@@ -33,7 +44,7 @@ class EngineWorkerStatusTest {
         ModelMetaConfig config = new ModelMetaConfig();
 
         // When
-        EngineWorkerStatus status = new EngineWorkerStatus(config);
+        EngineWorkerStatus status = new EngineWorkerStatus(config, registry);
 
         // Then
         assertNotNull(status);
@@ -50,6 +61,14 @@ class EngineWorkerStatusTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort1, workerStatus1); // group1
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort2, workerStatus2); // group2
 
+        // Register corresponding DecodeEndpoints
+        workerStatus1.setIp("127.0.0.1");
+        workerStatus1.setPort(8080);
+        workerStatus2.setIp("127.0.0.1");
+        workerStatus2.setPort(8081);
+        registry.ensureDecodeEndpoint(ipPort1, "127.0.0.1", 8080, 9090, workerStatus1);
+        registry.ensureDecodeEndpoint(ipPort2, "127.0.0.1", 8081, 9091, workerStatus2);
+
         // When
         var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, "group1");
 
@@ -60,6 +79,8 @@ class EngineWorkerStatusTest {
         assertFalse(result.containsKey(ipPort2));
 
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+        registry.removeDecode(ipPort1);
+        registry.removeDecode(ipPort2);
     }
 
     @Test
@@ -72,6 +93,14 @@ class EngineWorkerStatusTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put(ipPort1, workerStatus1);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put(ipPort2, workerStatus2);
 
+        // Register corresponding PrefillEndpoints
+        workerStatus1.setIp("127.0.0.1");
+        workerStatus1.setPort(8080);
+        workerStatus2.setIp("127.0.0.1");
+        workerStatus2.setPort(8081);
+        registry.ensurePrefillEndpoint(ipPort1, "127.0.0.1", 8080, 9090, workerStatus1);
+        registry.ensurePrefillEndpoint(ipPort2, "127.0.0.1", 8081, 9091, workerStatus2);
+
         // When
         var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
 
@@ -82,6 +111,8 @@ class EngineWorkerStatusTest {
         assertTrue(result.containsKey(ipPort2));
 
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
+        registry.removePrefill(ipPort1);
+        registry.removePrefill(ipPort2);
     }
 
     @Test

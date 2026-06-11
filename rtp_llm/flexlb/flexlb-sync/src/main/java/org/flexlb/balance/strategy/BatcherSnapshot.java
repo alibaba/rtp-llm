@@ -4,7 +4,7 @@ import java.util.List;
 
 public record BatcherSnapshot(
         int queueSize,
-        List<RequestProfile> requests,
+        List<BatchRequest> requests,
         long earliestEnqueueTimeMs,
         long headDeadlineMs) {
 
@@ -12,16 +12,16 @@ public record BatcherSnapshot(
 
     public long totalInputTokens() {
         long total = 0;
-        for (RequestProfile r : requests) {
-            total += r.inputLen();
+        for (BatchRequest r : requests) {
+            total += r.seqLen();
         }
         return total;
     }
 
     public long totalHitCacheTokens() {
         long total = 0;
-        for (RequestProfile r : requests) {
-            total += r.hitCacheTokens();
+        for (BatchRequest r : requests) {
+            total += r.hitCache();
         }
         return total;
     }

@@ -3,6 +3,7 @@ package org.flexlb.sync.runner;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -113,28 +114,19 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 return;
             }
 
-            workerStatus.setSite(site);
-            workerStatus.setGroup(group);
-            workerStatus.setRole(newWorkerStatus.getRole());
+            WorkerEndpoint ep = endpointRegistry != null ? endpointRegistry.get(ipPort) : null;
+            if (ep != null) {
+                ep.updateFromGrpcResponse(newWorkerStatus);
+                // Restore site/group that were set during construction (updateFromGrpcResponse
+                // preserves existing values, but ensure they match constructor params)
+                ep.setSite(site);
+                ep.setGroup(group);
+            }
 
             long currentVersion = workerStatus.getStatusVersion().get();
             if (currentVersion >= responseVersion) {
                 logger.info("query engine worker status via gRPC, version is not updated, currentVersion: {}, responseVersion: {}",
                         currentVersion, responseVersion);
-                // Update basic worker status even when version is not updated
-                workerStatus.setAlive(newWorkerStatus.isAlive());
-                workerStatus.setDpSize(newWorkerStatus.getDpSize());
-                workerStatus.setTpSize(newWorkerStatus.getTpSize());
-                workerStatus.setDpRank(newWorkerStatus.getDpRank());
-                workerStatus.getAvailableKvCacheTokens().set(newWorkerStatus.getAvailableKvCacheTokens());
-
-                // Update status timestamp and record actual sync interval
-                long nowUs = System.nanoTime() / 1000;
-                long prevUpdateTime = workerStatus.getStatusLastUpdateTime().get();
-                if (prevUpdateTime > 0) {
-                    workerStatus.getStatusUpdateIntervalUs().set(nowUs - prevUpdateTime);
-                }
-                workerStatus.getStatusLastUpdateTime().set(nowUs);
 
                 Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
                 Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
@@ -156,21 +148,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 return;
             }
 
-            // Update worker status from gRPC response
-            workerStatus.setAvailableConcurrency(newWorkerStatus.getAvailableConcurrency());
-            workerStatus.setStepLatencyMs(newWorkerStatus.getStepLatencyMs());
-            workerStatus.setIterateCount(newWorkerStatus.getIterateCount());
-            workerStatus.setDpSize(newWorkerStatus.getDpSize());
-            workerStatus.setTpSize(newWorkerStatus.getTpSize());
-            workerStatus.setDpRank(newWorkerStatus.getDpRank());
-            workerStatus.setAlive(newWorkerStatus.isAlive());
-            workerStatus.getAvailableKvCacheTokens().set(newWorkerStatus.getAvailableKvCacheTokens());
-            workerStatus.getStatusVersion().set(responseVersion != null ? responseVersion : -1L);
-            workerStatus.getLatestFinishedTaskVersion().set(newWorkerStatus.getLatestFinishedVersion() != null ? newWorkerStatus.getLatestFinishedVersion() : -1L);
-
             Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
             Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
-            workerStatus.setRunningTaskList(runningTaskInfo);
 
             List<Long> finished = extractFinishedRequestIds(finishedTaskInfo);
             if (batchScheduler != null && !finished.isEmpty()) {
@@ -185,13 +164,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     Optional.ofNullable(runningTaskInfo).map(Map::size).orElse(0),
                     Optional.ofNullable(finishedTaskInfo).map(Map::size).orElse(0));
 
-            // Update status timestamp and record actual sync interval
-            long nowUs = System.nanoTime() / 1000;
-            long prevUpdateTime = workerStatus.getStatusLastUpdateTime().get();
-            if (prevUpdateTime > 0) {
-                workerStatus.getStatusUpdateIntervalUs().set(nowUs - prevUpdateTime);
-            }
-            workerStatus.getStatusLastUpdateTime().set(nowUs);
             logWorkerStatusUpdate(startTime, workerStatus);
 
         } catch (Throwable e) {
@@ -257,7 +229,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             DecodeEndpoint ep = endpointRegistry.getDecode(ipPort);
             if (ep != null) {
                 ep.calibrate(runningTaskInfo, finishedTaskInfo,
-                        workerStatus.getAvailableKvCacheTokens().get());
+                        ep.getAvailableKvCacheTokens().get());
             }
         }
     }

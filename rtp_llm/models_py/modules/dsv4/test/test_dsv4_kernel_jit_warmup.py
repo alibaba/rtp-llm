@@ -139,7 +139,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             resolve_dense_gemm_warmup_max_m(
                 max_seq_len=1048576,
                 max_batch_size=1024,
-                role_type_name="RoleType.DECODE",
+                role_type_name="DECODE",
                 is_speculative=True,
                 gen_num_per_cycle=4,
             ),

@@ -140,13 +140,13 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         if (response.getRealMasterHost() != null) {
             builder.setRealMasterHost(response.getRealMasterHost());
         }
-        builder.setQueueLength(response.getQueueLength());
+        builder.setQueueLength(response.getQueueLength() != null ? response.getQueueLength() : 0);
         builder.setEnqueuedByMaster(response.isEnqueuedByMaster());
 
         if (response.getServerStatus() != null) {
             for (ServerStatus ss : response.getServerStatus()) {
                 builder.addServerStatus(EngineRpcService.FlexlbServerStatusPB.newBuilder()
-                        .setRole(ss.getRole() != null ? ss.getRole().getCode() : "")
+                        .setRole(EngineRpcService.RoleTypePB.valueOf(ss.getRole().getCode()))
                         .setServerIp(ss.getServerIp() != null ? ss.getServerIp() : "")
                         .setHttpPort(ss.getHttpPort())
                         .setGrpcPort(ss.getGrpcPort())

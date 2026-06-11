@@ -25,15 +25,16 @@ message IntMatrix {
     repeated IntVector rows = 1;
 }
 
+enum RoleTypePB {
+    ROLE_TYPE_PDFUSION = 0;
+    ROLE_TYPE_PREFILL = 1;
+    ROLE_TYPE_DECODE = 2;
+    ROLE_TYPE_VIT = 3;
+    ROLE_TYPE_FRONTEND = 4;
+}
+
 message RoleAddrPB {
-    enum RoleType {
-        PDFUSION = 0;
-        PREFILL = 1;
-        DECODE = 2;
-        VIT = 3;
-        FRONTEND = 4;
-    }
-    RoleType role = 1;
+    RoleTypePB role = 1;
     string ip = 2;
     int32 http_port = 3;
     int32 grpc_port = 4;
@@ -426,7 +427,7 @@ message UpdateWeightsRequestPB {
 }
 
 message WorkerStatusPB {
-    string role = 1;
+    RoleTypePB role = 1;
     int32 available_concurrency = 2;
     repeated TaskInfoPB running_task_info = 3;
     repeated TaskInfoPB finished_task_list = 4;
@@ -758,7 +759,7 @@ message FlexlbScheduleRequestPB {
 }
 
 message FlexlbServerStatusPB {
-    string role = 1;
+    RoleTypePB role = 1;
     string server_ip = 2;
     int32 http_port = 3;
     int32 grpc_port = 4;

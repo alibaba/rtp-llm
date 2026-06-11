@@ -245,7 +245,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     RTP_LLM_LOG_DEBUG("getWorkerStatusInfo took %ld us", request_after_ws_time_us - request_begin_time_us);
 
     const auto& engine_schedule_info = status_info.engine_schedule_info;
-    response->set_role(status_info.role);
+    response->set_role(static_cast<RoleTypePB>(status_info.role));
 
     for (const auto& task : engine_schedule_info.running_task_info_list) {
         TaskInfoPB* task_info = response->add_running_task_info();
@@ -296,25 +296,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
 WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_version) {
     WorkerStatusInfo status_info;
     status_info.engine_schedule_info = getEngineScheduleInfo(latest_finished_version);
-    switch (maga_init_params_.pd_sep_config.role_type) {
-        case RoleType::PDFUSION:
-            status_info.role = "RoleType.PDFUSION";
-            break;
-        case RoleType::PREFILL:
-            status_info.role = "RoleType.PREFILL";
-            break;
-        case RoleType::DECODE:
-            status_info.role = "RoleType.DECODE";
-            break;
-        case RoleType::VIT:
-            status_info.role = "RoleType.VIT";
-            break;
-        case RoleType::FRONTEND:
-            status_info.role = "RoleType.FRONTEND";
-            break;
-        default:
-            status_info.role = "RoleType.UNKNOWN";
-    }
+    status_info.role                 = maga_init_params_.pd_sep_config.role_type;
     status_info.dp_size                 = maga_init_params_.parallelism_config.dp_size;
     status_info.tp_size                 = maga_init_params_.parallelism_config.tp_size;
     status_info.dp_rank                 = maga_init_params_.parallelism_config.dp_rank;

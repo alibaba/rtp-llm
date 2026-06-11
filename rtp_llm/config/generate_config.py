@@ -52,14 +52,14 @@ class RoleAddr(BaseModel):
     @field_validator("role", mode="before")
     @classmethod
     def validate_role(cls, v):
-        """Convert string to RoleType enum for deserialization."""
-        if isinstance(v, str):
-            return getattr(RoleType, v)
+        """Convert proto enum (int) to RoleType enum for deserialization."""
+        if isinstance(v, int):
+            return RoleType(v)
         elif isinstance(v, RoleType):
             return v
         else:
             raise ValueError(
-                f"RoleType must be a string or RoleType enum, got {type(v)}"
+                f"RoleType must be an int or RoleType enum, got {type(v)}"
             )
 
     @field_serializer("role")

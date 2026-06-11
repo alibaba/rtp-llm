@@ -17,6 +17,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateOutputsPB,
     MultimodalInputPB,
     RoleAddrPB,
+    RoleTypePB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 from rtp_llm.utils.base_model_datatypes import (
@@ -44,17 +45,8 @@ def _is_finished_response(outputs_pb: GenerateOutputsPB) -> bool:
     return bool(finished) and all(finished)
 
 
-def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
-    if role_type == RoleType.PDFUSION:
-        return RoleAddrPB.RoleType.PDFUSION
-    elif role_type == RoleType.PREFILL:
-        return RoleAddrPB.RoleType.PREFILL
-    elif role_type == RoleType.DECODE:
-        return RoleAddrPB.RoleType.DECODE
-    elif role_type == RoleType.VIT:
-        return RoleAddrPB.RoleType.VIT
-    elif role_type == RoleType.FRONTEND:
-        return RoleAddrPB.RoleType.FRONTEND
+def trans_role_type(role_type: RoleType) -> RoleTypePB:
+    return RoleTypePB(role_type.value)
 
 
 def _trans_jsonable_option(config_pb, config, field_name):

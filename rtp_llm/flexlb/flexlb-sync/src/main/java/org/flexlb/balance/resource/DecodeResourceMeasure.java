@@ -1,6 +1,7 @@
 package org.flexlb.balance.resource;
 
 import org.apache.commons.collections4.MapUtils;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -54,6 +55,25 @@ public class DecodeResourceMeasure implements ResourceMeasure {
 
         long usagePercentage = (long) ((used * 100.0) / total);
         return workerStatus.updateResourceAvailabilityWithHysteresis(usagePercentage, availableThreshold, hysteresisBiasPercent);
+    }
+
+    @Override
+    public boolean isResourceAvailable(WorkerEndpoint endpoint) {
+        if (endpoint == null || !endpoint.isAlive()) {
+            return false;
+        }
+        if (isConcurrencyLimitReached(endpoint)) {
+            return false;
+        }
+        long used = endpoint.getUsedKvCacheTokens().get();
+        long available = endpoint.getAvailableKvCacheTokens().get();
+        long total = used + available;
+        if (total == 0) {
+            endpoint.getResourceAvailable().set(true);
+            return true;
+        }
+        long usagePercentage = (long) ((used * 100.0) / total);
+        return endpoint.updateResourceAvailabilityWithHysteresis(usagePercentage, availableThreshold, hysteresisBiasPercent);
     }
 
     @Override
@@ -124,9 +144,20 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         return concurrencyLimit > 0 && calculateDecodeConcurrency(workerStatus) >= concurrencyLimit;
     }
 
+    private boolean isConcurrencyLimitReached(WorkerEndpoint endpoint) {
+        return concurrencyLimit > 0 && calculateDecodeConcurrency(endpoint) >= concurrencyLimit;
+    }
+
     private long calculateDecodeConcurrency(WorkerStatus workerStatus) {
         if (MapUtils.isNotEmpty(workerStatus.getRunningTaskList())) {
             return workerStatus.getRunningTaskList().size();
+        }
+        return 0;
+    }
+
+    private long calculateDecodeConcurrency(WorkerEndpoint endpoint) {
+        if (MapUtils.isNotEmpty(endpoint.getRunningTaskList())) {
+            return endpoint.getRunningTaskList().size();
         }
         return 0;
     }
