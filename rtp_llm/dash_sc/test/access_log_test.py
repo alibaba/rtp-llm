@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import grpc
 
 from rtp_llm.dash_sc import access_log as access_log_module
+from rtp_llm.dash_sc import repetition_monitor as repetition_monitor_module
 from rtp_llm.dash_sc.access_log import (
     DASH_SC_GRPC_ACCESS_LOGGER_NAME,
     DASH_SC_GRPC_QUERY_LOGGER_NAME,
@@ -25,8 +26,75 @@ from rtp_llm.dash_sc.access_log import (
     init_dash_sc_grpc_query_logger,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
-from rtp_llm.dash_sc.proxy.access_record import ForwardAccessRecord
 from rtp_llm.metrics import AccMetrics, GaugeMetrics
+
+
+class _FakeToolCallSpan:
+    marker_index = 0
+    token_ids = (1, 2, 10, 3, 4)
+    overflow = False
+
+
+class _FakeToolCallSpanRecorder:
+    available = True
+
+    def __init__(self, markers, config):
+        self._buffer: list[int] = []
+
+    def update_tokens(self, token_ids):
+        self._buffer.extend(int(token_id) for token_id in token_ids)
+        if self._buffer[-5:] == [1, 2, 10, 3, 4]:
+            return [_FakeToolCallSpan()]
+        return []
+
+
+class _FakeToolCallLoopGuard:
+    available = True
+
+    def __init__(self, markers, config):
+        self.calls = 0
+
+    def check_completed_span(
+        self, input_ids, current_span_ids, marker_index, span_overflow=False
+    ):
+        self.calls += 1
+        return access_log_module.ToolCallLoopResult(
+            hit=True,
+            repeat_count=5,
+            threshold=5,
+            current_span_tokens=len(current_span_ids),
+            marker_index=marker_index,
+            history_suffix_count=4,
+            current_suffix_count=1,
+            span_overflow=span_overflow,
+        )
+
+
+def _tool_call_loop_patches():
+    config = repetition_monitor_module.DEFAULT_TOOL_CALL_LOOP_CONFIG.__class__(
+        enabled=True,
+        repeat_threshold=5,
+        max_span_tokens=16384,
+    )
+    marker = repetition_monitor_module.DEFAULT_TOOL_CALL_MARKERS[0].__class__(
+        begin_ids=[1, 2],
+        end_ids=[3, 4],
+        name="test_invoke",
+    )
+    return (
+        patch.object(repetition_monitor_module, "DEFAULT_TOOL_CALL_LOOP_CONFIG", config),
+        patch.object(repetition_monitor_module, "DEFAULT_TOOL_CALL_MARKERS", (marker,)),
+        patch.object(
+            repetition_monitor_module,
+            "NativeToolCallSpanRecorder",
+            _FakeToolCallSpanRecorder,
+        ),
+        patch.object(
+            repetition_monitor_module,
+            "NativeToolCallLoopGuard",
+            _FakeToolCallLoopGuard,
+        ),
+    )
 
 
 def _make_infer_request(
@@ -64,8 +132,6 @@ def _make_stream_response(
     *,
     generated_ids: list[int] | None = None,
     finish_reason: int | None = None,
-    finished: bool | None = None,
-    prompt_token_num: int | None = None,
     prompt_cached_token_num: int | None = None,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     resp = predict_v2_pb2.ModelStreamInferResponse()
@@ -87,18 +153,6 @@ def _make_stream_response(
         out.datatype = "INT64"
         out.shape.append(1)
         infer.raw_output_contents.append(struct.pack("<q", finish_reason))
-    if finished is not None:
-        out = infer.outputs.add()
-        out.name = "finished"
-        out.datatype = "BOOL"
-        out.shape.append(1)
-        infer.raw_output_contents.append(b"\x01" if finished else b"\x00")
-    if prompt_token_num is not None:
-        out = infer.outputs.add()
-        out.name = "prompt_token_num"
-        out.datatype = "INT32"
-        out.shape.append(1)
-        infer.raw_output_contents.append(struct.pack("<i", prompt_token_num))
     if prompt_cached_token_num is not None:
         out = infer.outputs.add()
         out.name = "prompt_cached_token_num"
@@ -291,18 +345,14 @@ class UnaryUnaryTest(InterceptorTestBase):
         self.assertIsNone(rec["status_detail"])
         self.assertEqual(rec["request_id"], "trace-123")
         self.assertEqual(rec["model_name"], "qwen3-8b")
-        self.assertEqual(rec["input_token_len"], 3)
-        self.assertEqual(rec["input_token_len"], 3)
+        self.assertEqual(rec["input_ids"], [10, 20, 30])
+        self.assertEqual(rec["input_len"], 3)
         self.assertEqual(rec["generate_config"]["max_new_tokens"], 32)
         self.assertAlmostEqual(rec["generate_config"]["top_p"], 0.8, places=5)
-        self.assertEqual(rec["output_token_len"], 3)
-        self.assertEqual(rec["output_token_len"], 3)
+        self.assertEqual(rec["generated_ids"], [1, 2, 3])
+        self.assertEqual(rec["output_len"], 3)
         self.assertEqual(rec["finish_reason"], 0)
         self.assertEqual(rec["prompt_cached_token_num"], 4)
-        self.assertEqual(rec["token_frame_count"], 1)
-        self.assertEqual(rec["max_tokens_per_frame"], 3)
-        self.assertNotIn("input_ids", rec)
-        self.assertNotIn("generated_ids", rec)
         self.assertEqual(rec["server_id"], 1)
         self.assertEqual(rec["rank_id"], 0)
         self.assertLessEqual(rec["latency_ttfb_ms"], rec["latency_total_ms"])
@@ -353,13 +403,11 @@ class UnaryUnaryTest(InterceptorTestBase):
 
         behavior(request, ctx)
         rec = self.records[0]
-        self.assertIsNone(rec["input_token_len"])
-        self.assertIsNone(rec["input_token_len"])
-        self.assertEqual(rec["output_token_len"], 0)
-        self.assertEqual(rec["output_token_len"], 0)
+        self.assertIsNone(rec["input_ids"])
+        self.assertIsNone(rec["input_len"])
+        self.assertEqual(rec["output_len"], 0)
+        self.assertIsNone(rec["generated_ids"])
         self.assertIsNone(rec["finish_reason"])
-        self.assertNotIn("input_ids", rec)
-        self.assertNotIn("generated_ids", rec)
 
     def test_unary_error_propagates_and_logs(self) -> None:
         def inner(request, context):
@@ -381,7 +429,7 @@ class UnaryUnaryTest(InterceptorTestBase):
 
 
 class BidiStreamTest(InterceptorTestBase):
-    def test_bidi_happy_path_accumulates_output_token_stats(self) -> None:
+    def test_bidi_happy_path_accumulates_generated_ids(self) -> None:
         def inner(request_iterator, context):
             list(request_iterator)  # consume
             yield _make_stream_response(generated_ids=[10], prompt_cached_token_num=8)
@@ -402,15 +450,147 @@ class BidiStreamTest(InterceptorTestBase):
         self.assertEqual(rec["stream_type"], "bidi_stream")
         self.assertEqual(rec["req_count"], 1)
         self.assertEqual(rec["resp_count"], 3)
-        self.assertEqual(rec["output_token_len"], 4)
-        self.assertEqual(rec["output_token_len"], 4)
-        self.assertEqual(rec["token_frame_count"], 3)
-        self.assertEqual(rec["multi_token_frame_count"], 1)
-        self.assertEqual(rec["max_tokens_per_frame"], 2)
+        self.assertEqual(rec["generated_ids"], [10, 20, 30, 40])
+        self.assertEqual(rec["output_len"], 4)
         self.assertEqual(rec["finish_reason"], 0)
         self.assertEqual(rec["prompt_cached_token_num"], 8)
+        self.assertFalse(rec["repetition_detected"])
+        self.assertFalse(rec["repetition_alert"])
+        self.assertIsNone(rec["repetition_reason"])
+        self.assertIsNone(rec["repetition_token_len"])
+        self.assertFalse(rec["function_tool_repeated"])
         self.assertIsNotNone(rec["latency_ttfb_ms"])
         self.assertLessEqual(rec["latency_ttfb_ms"], rec["latency_total_ms"])
+
+    def test_bidi_logs_tail_repetition_signal(self) -> None:
+        repeated = [10, 20, 30, 99] * 10 + [10, 20]
+
+        def inner(request_iterator, context):
+            list(request_iterator)
+            yield _make_stream_response(generated_ids=repeated[:17])
+            yield _make_stream_response(generated_ids=repeated[17:], finish_reason=0)
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+
+        list(behavior(iter([_make_infer_request(input_ids=[1])]), FakeContext()))
+
+        rec = self.records[0]
+        self.assertTrue(rec["output_repetition"])
+        self.assertLess(rec["output_repetition_check_ms"], 20.0)
+        self.assertEqual(rec["output_repetition_unit_size"], 4)
+        self.assertEqual(rec["output_repetition_repeat_count"], 10)
+        self.assertEqual(rec["output_repetition_partial_tail_tokens"], 2)
+        self.assertEqual(rec["output_repetition_duplicate_token_count"], 38)
+        self.assertEqual(rec["output_repetition_start_index"], 0)
+        self.assertEqual(rec["output_repetition_end_index"], len(repeated))
+        self.assertFalse(rec["output_repetition_window_capped"])
+        self.assertEqual(rec["output_repetition_level"], "structural_repeat")
+        self.assertEqual(
+            rec["output_repetition_classification_source"], "token_only"
+        )
+        self.assertTrue(rec["repetition_detected"])
+        self.assertFalse(rec["repetition_alert"])
+        self.assertEqual(
+            rec["repetition_reason"],
+            "output_repetition:structural_repeat:token_only_low_priority",
+        )
+        self.assertEqual(rec["repetition_token_len"], 38)
+        self.assertEqual(rec["output_repetition_token_len"], 38)
+        self.assertIsNone(rec["tool_call_loop_token_len"])
+        self.assertFalse(rec["function_tool_repeated"])
+
+    def test_bidi_token_only_extreme_repeat_warns(self) -> None:
+        repeated = [95553] * 2048
+
+        def inner(request_iterator, context):
+            list(request_iterator)
+            yield _make_stream_response(generated_ids=repeated, finish_reason=0)
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+
+        with self.assertLogs(access_log_module.__name__, level="WARNING") as logs:
+            list(behavior(iter([_make_infer_request(input_ids=[1])]), FakeContext()))
+
+        rec = self.records[0]
+        self.assertTrue(rec["output_repetition"])
+        self.assertEqual(rec["output_repetition_level"], "strong_loop")
+        self.assertEqual(rec["output_repetition_reason"], "token_only_long_repeat")
+        self.assertEqual(
+            rec["output_repetition_classification_source"], "token_only"
+        )
+        self.assertTrue(rec["repetition_detected"])
+        self.assertTrue(rec["repetition_alert"])
+        self.assertEqual(
+            rec["repetition_reason"],
+            "output_repetition:strong_loop:token_only_long_repeat",
+        )
+        self.assertEqual(rec["repetition_token_len"], 2047)
+        self.assertFalse(rec["function_tool_repeated"])
+        warning_text = "\n".join(logs.output)
+        self.assertIn("repetition detected", warning_text)
+        self.assertIn("output_repetition_token_len=2047", warning_text)
+        self.assertIn("tool_call_loop_token_len=None", warning_text)
+        self.assertIn("primary_source=output_repetition", warning_text)
+        self.assertIn("function_tool_repeated=False", warning_text)
+        self.assertIn("repetition_monitor_impl=", warning_text)
+        self.assertIn("repetition_monitor_available=", warning_text)
+
+    def test_bidi_logs_tool_call_loop_signal(self) -> None:
+        def inner(request_iterator, context):
+            list(request_iterator)
+            yield _make_stream_response(generated_ids=[1, 2])
+            yield _make_stream_response(generated_ids=[10, 3, 4], finish_reason=0)
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        patches = _tool_call_loop_patches()
+        with self.assertLogs(access_log_module.__name__, level="WARNING") as logs:
+            with patches[0], patches[1], patches[2], patches[3]:
+                list(
+                    behavior(
+                        iter([_make_infer_request(input_ids=[1, 2, 10, 3, 4] * 4)]),
+                        FakeContext(),
+                    )
+                )
+
+        rec = self.records[0]
+        self.assertTrue(rec["tool_call_loop_hit"])
+        self.assertTrue(rec["repetition_detected"])
+        self.assertTrue(rec["repetition_alert"])
+        self.assertEqual(rec["repetition_token_len"], 5)
+        self.assertIsNone(rec["output_repetition_token_len"])
+        self.assertEqual(rec["tool_call_loop_token_len"], 5)
+        self.assertTrue(rec["function_tool_repeated"])
+        self.assertIn(
+            "tool_call_loop:marker=test_invoke:repeat_count=5:threshold=5",
+            rec["repetition_reason"],
+        )
+        warning_text = "\n".join(logs.output)
+        self.assertIn("repetition detected", warning_text)
+        self.assertIn("output_repetition_token_len=None", warning_text)
+        self.assertIn("tool_call_loop_token_len=5", warning_text)
+        self.assertIn("primary_source=tool_call_loop", warning_text)
+        self.assertIn("function_tool_repeated=True", warning_text)
+        self.assertIn("repetition_monitor_available=True", warning_text)
+        self.assertIsNotNone(rec["tool_call_loop_check_ms"])
+        self.assertEqual(rec["tool_call_loop_output_span_count"], 1)
+        self.assertEqual(rec["tool_call_loop_repeat_count"], 5)
+        self.assertEqual(rec["tool_call_loop_threshold"], 5)
+        self.assertEqual(rec["tool_call_loop_current_span_tokens"], 5)
+        self.assertEqual(rec["tool_call_loop_marker_index"], 0)
+        self.assertEqual(rec["tool_call_loop_marker_name"], "test_invoke")
+        self.assertEqual(rec["tool_call_loop_impl"], "online_cpp_pybind")
+        self.assertEqual(rec["tool_call_loop_history_suffix_count"], 4)
+        self.assertEqual(rec["tool_call_loop_current_suffix_count"], 1)
+        self.assertFalse(rec["tool_call_loop_span_overflow"])
 
     def test_bidi_cancelled(self) -> None:
         def inner(request_iterator, context):
@@ -430,7 +610,7 @@ class BidiStreamTest(InterceptorTestBase):
         rec = self.records[0]
         self.assertEqual(rec["status"], "CANCELLED")
         self.assertEqual(rec["status_detail"], "client cancelled")
-        self.assertEqual(rec["output_token_len"], 1)
+        self.assertEqual(rec["generated_ids"], [10])
 
     def test_bidi_empty_generated_ids_chunk_not_polluting(self) -> None:
         """Empty generated_ids chunk (shape=[1,0] with 4-byte filler) must not pollute the accumulator.
@@ -470,8 +650,8 @@ class BidiStreamTest(InterceptorTestBase):
 
         list(behavior(iter([request]), ctx))
         rec = self.records[0]
-        self.assertEqual(rec["output_token_len"], 3)
-        self.assertEqual(rec["empty_frame_count"], 1)
+        self.assertEqual(rec["generated_ids"], [42, 43, 44])  # no spurious 0
+        self.assertEqual(rec["output_len"], 3)
         self.assertEqual(rec["resp_count"], 3)
         self.assertEqual(rec["finish_reason"], 0)
 
@@ -497,7 +677,7 @@ class BidiStreamTest(InterceptorTestBase):
         self.assertEqual(rec["status"], "UNKNOWN_RuntimeError")
         self.assertIn("downstream died", rec["status_detail"])
         self.assertEqual(rec["exc_type"], "RuntimeError")
-        self.assertEqual(rec["output_token_len"], 1)
+        self.assertEqual(rec["generated_ids"], [10])
 
     def test_bidi_grpc_rpc_error_populates_diagnostics(self) -> None:
         """Empty-iterator ``grpc.RpcError`` path — reproduces the production log
@@ -556,7 +736,7 @@ class ServerStreamTest(InterceptorTestBase):
         self.assertEqual(rec["stream_type"], "server_stream")
         self.assertEqual(rec["req_count"], 1)
         self.assertEqual(rec["resp_count"], 2)
-        self.assertEqual(rec["output_token_len"], 2)
+        self.assertEqual(rec["generated_ids"], [7, 8])
 
 
 class JsonShapeTest(InterceptorTestBase):
@@ -677,6 +857,77 @@ class KMonitorReportTest(InterceptorTestBase):
         # Iterate count = chunks seen.
         _, iter_count, _ = self._calls_for(GaugeMetrics.RESPONSE_ITERATE_COUNT)[0]
         self.assertEqual(iter_count, 3)
+
+    def test_repetition_metrics_reported_once_for_looping_output(self) -> None:
+        repeated = [10, 20, 30, 99] * 10 + [10, 20]
+
+        def inner(request, context):
+            yield _make_stream_response(generated_ids=repeated[:8])
+            yield _make_stream_response(generated_ids=repeated[8:], finish_reason=0)
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+
+        list(behavior(_make_infer_request(input_ids=[1]), FakeContext()))
+
+        self.assertEqual(len(self._calls_for(AccMetrics.OUTPUT_REPETITION_QPS_METRIC)), 1)
+        self.assertEqual(
+            len(self._calls_for(GaugeMetrics.OUTPUT_REPETITION_CHECK_RT_METRIC)), 1
+        )
+        _, unit_size, tags = self._calls_for(
+            GaugeMetrics.OUTPUT_REPETITION_UNIT_SIZE_METRIC
+        )[0]
+        self.assertEqual(unit_size, 4)
+        self.assertEqual(tags["repeat_kind"], "online_adjacent_max")
+        self.assertEqual(tags["implementation"], "online_cpp_pybind_max")
+        self.assertEqual(tags["severity"], "structural_repeat")
+        self.assertEqual(tags["classification_source"], "token_only")
+        self.assertEqual(tags["window_capped"], "false")
+        _, repeat_count, _ = self._calls_for(
+            GaugeMetrics.OUTPUT_REPETITION_REPEAT_COUNT_METRIC
+        )[0]
+        self.assertEqual(repeat_count, 10)
+        _, dup_tokens, _ = self._calls_for(
+            GaugeMetrics.OUTPUT_REPETITION_DUP_TOKEN_METRIC
+        )[0]
+        self.assertEqual(dup_tokens, 38)
+
+    def test_tool_call_loop_metrics_reported_once_for_repeated_call(self) -> None:
+        def inner(request, context):
+            yield _make_stream_response(generated_ids=[1, 2, 10, 3, 4])
+            yield _make_stream_response(generated_ids=[99], finish_reason=0)
+
+        handler = _make_handler(
+            request_streaming=False, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        patches = _tool_call_loop_patches()
+        with patches[0], patches[1], patches[2], patches[3]:
+            list(
+                behavior(
+                    _make_infer_request(input_ids=[1, 2, 10, 3, 4] * 4),
+                    FakeContext(),
+                )
+            )
+
+        self.assertEqual(len(self._calls_for(AccMetrics.TOOL_CALL_LOOP_QPS_METRIC)), 1)
+        self.assertEqual(
+            len(self._calls_for(GaugeMetrics.TOOL_CALL_LOOP_CHECK_RT_METRIC)), 1
+        )
+        _, repeat_count, tags = self._calls_for(
+            GaugeMetrics.TOOL_CALL_LOOP_REPEAT_COUNT_METRIC
+        )[0]
+        self.assertEqual(repeat_count, 5)
+        self.assertEqual(tags["repeat_threshold"], "5")
+        self.assertEqual(tags["marker_name"], "test_invoke")
+        self.assertEqual(tags["action"], "metric")
+        self.assertEqual(tags["span_overflow"], "false")
+        _, span_tokens, _ = self._calls_for(
+            GaugeMetrics.TOOL_CALL_LOOP_CURRENT_SPAN_TOKENS_METRIC
+        )[0]
+        self.assertEqual(span_tokens, 5)
 
     def test_cancelled_rpc_fires_cancel_qps_not_error(self) -> None:
         def inner(request_iterator, context):
@@ -816,19 +1067,19 @@ class DownstreamDiagnosticsTest(InterceptorTestBase):
     """Forward-path diagnostics (``backend_addr`` / ``backend_resp_count`` /
     ``buffered_stage``) must round-trip onto the access-log line.
 
-    These fields are populated by :class:`DashScProxyServicer` via the forward
-    access-record hook the interceptor installs; here we simulate that
-    write-back and assert the record ends up with the right shape regardless of
-    capture mode.
+    These fields are populated by :class:`DashScProxyServicer` via the
+    ``context._dash_sc_access_agg`` hook the interceptor installs; here we
+    simulate that write-back and assert the record ends up with the right
+    shape regardless of capture mode.
     """
 
-    def test_context_gets_forward_access_record_attached(self) -> None:
-        """Interceptor must attach the access record to the context for servicer readback."""
+    def test_context_gets_aggregate_attached(self) -> None:
+        """Interceptor must attach the aggregate to the context for servicer readback."""
 
         captured: dict[str, Any] = {}
 
         def inner(request, context):
-            captured["access_record"] = ForwardAccessRecord.from_context(context)
+            captured["agg"] = getattr(context, "_dash_sc_access_agg", None)
             return _make_stream_response(generated_ids=[1])
 
         handler = _make_handler(
@@ -836,11 +1087,11 @@ class DownstreamDiagnosticsTest(InterceptorTestBase):
         )
         behavior = _wrapped_behavior(self.interceptor, handler)
         behavior(_make_infer_request(input_ids=[1]), FakeContext())
-        self.assertIsNotNone(captured["access_record"])
-        # The access record exposes the writable diagnostics attributes.
-        self.assertTrue(hasattr(captured["access_record"], "backend_addr"))
-        self.assertTrue(hasattr(captured["access_record"], "backend_resp_count"))
-        self.assertTrue(hasattr(captured["access_record"], "buffered_stage"))
+        self.assertIsNotNone(captured["agg"])
+        # The aggregate exposes the writable diagnostics attributes.
+        self.assertTrue(hasattr(captured["agg"], "backend_addr"))
+        self.assertTrue(hasattr(captured["agg"], "backend_resp_count"))
+        self.assertTrue(hasattr(captured["agg"], "buffered_stage"))
 
     def test_defaults_emitted_when_no_forwarder_writes(self) -> None:
         """Struct-mode path doesn't touch diagnostics — record still has the fields."""
@@ -862,11 +1113,10 @@ class DownstreamDiagnosticsTest(InterceptorTestBase):
         """Simulate the forwarder writing diag fields — record mirrors them verbatim."""
 
         def inner(request, context):
-            access_record = ForwardAccessRecord.from_context(context)
-            assert access_record is not None
-            access_record.backend_addr = "10.0.0.7:9000"
-            access_record.backend_resp_count = 42
-            access_record.buffered_stage = "dropped_buffered_on_exception"
+            agg = context._dash_sc_access_agg
+            agg.backend_addr = "10.0.0.7:9000"
+            agg.backend_resp_count = 42
+            agg.buffered_stage = "dropped_buffered_on_exception"
             return _make_stream_response(generated_ids=[1])
 
         handler = _make_handler(
@@ -883,8 +1133,9 @@ class DownstreamDiagnosticsTest(InterceptorTestBase):
 class RawModeInterceptorTestBase(InterceptorTestBase):
     """Mirror of InterceptorTestBase with ``raw_mode=True``.
 
-    ``raw_mode`` is the legacy interceptor flag used by the forward servicer; it
-    now produces forward-summary records instead of payload dumps.
+    Shares the kmonitor patching, logger capture, and record list, but flips the
+    servicer into raw-mode: every request message and every response message is
+    dumped into the record as a decoded proto dict instead of struct fields.
     """
 
     def setUp(self) -> None:
@@ -906,19 +1157,14 @@ class RawModeInterceptorTestBase(InterceptorTestBase):
 
 
 class RawModeBidiTest(RawModeInterceptorTestBase):
-    """Forward-servicer path: log compact statistics instead of payload dumps."""
+    """Forward-servicer path: dump every request/response proto verbatim."""
 
-    def test_bidi_forward_summary_captures_request_and_response_stats(self) -> None:
+    def test_bidi_raw_mode_captures_every_request_and_response(self) -> None:
         def inner(request_iterator, context):
             for _ in request_iterator:
                 pass
             yield _make_stream_response(generated_ids=[10])
-            yield _make_stream_response(
-                generated_ids=[20, 30],
-                finish_reason=0,
-                prompt_token_num=3,
-                prompt_cached_token_num=2,
-            )
+            yield _make_stream_response(generated_ids=[20, 30], finish_reason=0)
 
         handler = _make_handler(
             request_streaming=True, response_streaming=True, inner=inner
@@ -932,44 +1178,95 @@ class RawModeBidiTest(RawModeInterceptorTestBase):
         self.assertEqual(len(self.records), 1)
         rec = self.records[0]
 
-        # Record shape flags forward summary capture.
-        self.assertEqual(rec["capture_mode"], "forward_summary")
-        self.assertEqual(rec["component_role"], "forwarder")
-        self.assertEqual(rec["forward_log_version"], 1)
+        # Record shape flags raw capture.
+        self.assertEqual(rec["capture_mode"], "raw")
         self.assertEqual(rec["req_count"], 2)
         self.assertEqual(rec["resp_count"], 2)
-        self.assertEqual(rec["request_id"], "r1")
-        self.assertEqual(rec["input_token_len"], 3)
-        self.assertEqual(rec["backend_input_token_len"], 3)
-        self.assertEqual(rec["output_token_len"], 3)
-        self.assertEqual(rec["finish_reason"], 0)
-        self.assertEqual(rec["prompt_cached_token_num"], 2)
-        self.assertEqual(rec["token_frame_count"], 2)
-        self.assertEqual(rec["multi_token_frame_count"], 1)
-        # Heavy proto/token payloads are absent from forward summary mode.
-        self.assertNotIn("raw_requests", rec)
-        self.assertNotIn("raw_responses", rec)
+        # Every request captured into raw_requests.
+        self.assertEqual(len(rec["raw_requests"]), 2)
+        self.assertEqual(rec["raw_requests"][0]["id"], "r1")
+        self.assertEqual(rec["raw_requests"][1]["id"], "r2")
+        # Tensor base64 decoded to integer list.
+        self.assertEqual(rec["raw_requests"][0]["inputs"][0]["decoded"], [1, 2, 3])
+        # Every response captured.
+        self.assertEqual(len(rec["raw_responses"]), 2)
+        gen_ids_0 = rec["raw_responses"][0]["infer_response"]["outputs"][0]
+        self.assertEqual(gen_ids_0["decoded"], [10])
+        # Truncation flags default False.
+        self.assertFalse(rec["raw_requests_truncated"])
+        self.assertFalse(rec["raw_responses_truncated"])
+        # Raw mode does not parse token tensors for detection, but keeps the
+        # unified repetition schema present with false/null values.
+        self.assertFalse(rec["repetition_detected"])
+        self.assertFalse(rec["repetition_alert"])
+        self.assertIsNone(rec["repetition_reason"])
+        self.assertIsNone(rec["repetition_token_len"])
+        self.assertFalse(rec["function_tool_repeated"])
+        self.assertEqual(rec["repetition_monitor_impl"], "disabled_raw_mode")
+        self.assertFalse(rec["repetition_monitor_available"])
+        self.assertEqual(rec["repetition_monitor_unavailable_reason"], "raw_mode")
+        # Struct fields are absent in raw mode.
         self.assertNotIn("input_ids", rec)
         self.assertNotIn("generated_ids", rec)
-        self.assertIn("generate_config", rec)
+        self.assertNotIn("generate_config", rec)
 
-    def test_forward_summary_counts_all_iterations_without_payload_growth(self) -> None:
-        def inner(request_iterator, context):
-            for _ in request_iterator:
-                pass
-            for _ in range(5):
-                yield _make_stream_response(generated_ids=[1])
+    def test_raw_mode_caps_chunks_and_sets_truncated_flag(self) -> None:
+        """Exceeding ``_RAW_MAX_CHUNKS`` drops extras and flips the truncated flag."""
+        original_cap = access_log_module._RAW_MAX_CHUNKS
+        access_log_module._RAW_MAX_CHUNKS = 3
+        try:
 
-        handler = _make_handler(
-            request_streaming=True, response_streaming=True, inner=inner
-        )
-        behavior = _wrapped_behavior(self.interceptor, handler)
-        list(behavior(iter([_make_infer_request(input_ids=[1])]), FakeContext()))
-        rec = self.records[0]
-        self.assertEqual(rec["resp_count"], 5)
-        self.assertEqual(rec["output_token_len"], 5)
-        self.assertEqual(rec["token_frame_count"], 5)
-        self.assertNotIn("raw_responses", rec)
+            def inner(request_iterator, context):
+                for _ in request_iterator:
+                    pass
+                for i in range(5):
+                    yield _make_stream_response(generated_ids=[i])
+
+            handler = _make_handler(
+                request_streaming=True, response_streaming=True, inner=inner
+            )
+            behavior = _wrapped_behavior(self.interceptor, handler)
+            ctx = FakeContext()
+            list(behavior(iter([_make_infer_request(input_ids=[1])]), ctx))
+            rec = self.records[0]
+            self.assertEqual(len(rec["raw_responses"]), 3)
+            self.assertTrue(rec["raw_responses_truncated"])
+            # req_count still counts every message; only capture is capped.
+            self.assertEqual(rec["resp_count"], 5)
+        finally:
+            access_log_module._RAW_MAX_CHUNKS = original_cap
+
+    def test_raw_mode_caps_per_tensor_decoded_elements(self) -> None:
+        """Large tensors keep only the head and flag ``decoded_truncated``."""
+        original_cap = access_log_module._RAW_MAX_DECODED_ELEMENTS
+        access_log_module._RAW_MAX_DECODED_ELEMENTS = 4
+        try:
+
+            def inner(request_iterator, context):
+                for _ in request_iterator:
+                    pass
+                yield _make_stream_response(generated_ids=[1, 2, 3, 4, 5, 6, 7, 8])
+
+            handler = _make_handler(
+                request_streaming=True, response_streaming=True, inner=inner
+            )
+            behavior = _wrapped_behavior(self.interceptor, handler)
+            ctx = FakeContext()
+            big = list(range(10))
+            list(behavior(iter([_make_infer_request(input_ids=big)]), ctx))
+            rec = self.records[0]
+            # Input tensor truncated.
+            t_in = rec["raw_requests"][0]["inputs"][0]
+            self.assertEqual(t_in["decoded"], [0, 1, 2, 3])
+            self.assertTrue(t_in["decoded_truncated"])
+            self.assertEqual(t_in["decoded_total"], 10)
+            # Output tensor truncated.
+            t_out = rec["raw_responses"][0]["infer_response"]["outputs"][0]
+            self.assertEqual(t_out["decoded"], [1, 2, 3, 4])
+            self.assertTrue(t_out["decoded_truncated"])
+            self.assertEqual(t_out["decoded_total"], 8)
+        finally:
+            access_log_module._RAW_MAX_DECODED_ELEMENTS = original_cap
 
 
 class CorrelationHeaderTest(InterceptorTestBase):
@@ -1458,12 +1755,12 @@ class CompletedInferenceTeardownTest(InterceptorTestBase):
 
 
 class RawModeErrorMessageTest(RawModeInterceptorTestBase):
-    """Forward-summary mode must honor the same protocol error channel
+    """Raw mode (forward servicer) must honor the same protocol error channel
     so forwarder-logged RPCs classify consistently with real-servicer RPCs.
     Before the capture-side refactor this only worked in struct mode.
     """
 
-    def test_forward_summary_error_message_frame_routes_to_error_qps(self) -> None:
+    def test_raw_mode_error_message_frame_routes_to_error_qps(self) -> None:
         def inner(request_iterator, context):
             list(request_iterator)
             yield predict_v2_pb2.ModelStreamInferResponse(
@@ -1477,7 +1774,7 @@ class RawModeErrorMessageTest(RawModeInterceptorTestBase):
         list(behavior(iter([_make_infer_request(input_ids=[1])]), FakeContext()))
 
         rec = self.records[0]
-        self.assertEqual(rec["capture_mode"], "forward_summary")
+        self.assertEqual(rec["capture_mode"], "raw")
         self.assertEqual(rec["status"], "BACKEND_INTERNAL")
         self.assertEqual(rec["error_message"], "downstream backend returned error")
         error_calls = [

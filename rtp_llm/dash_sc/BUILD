@@ -27,22 +27,24 @@ py_library(
         "proxy/__init__.py",
         "proxy/__main__.py",
         "proxy/access_record.py",
-        "proxy/service_route_config.py",
         "proxy/service_route.py",
+        "proxy/service_route_config.py",
         "proxy/servicer.py",
+        "repetition_monitor.py",
         "server.py",
         "think.py",
     ],
-    data = [":grpc_client_scripts"],
+    data = [
+        ":grpc_client_scripts",
+        "//rtp_llm/cpp/repetition:online_repetition_tracker",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/server:server",
         ":grpcio",
         "//rtp_llm/access_logger:access_logger",
-        "//rtp_llm:config",
         "//rtp_llm/dash_sc/proto:predict_v2_py_proto",
         "//rtp_llm/metrics:metrics",
-        "//rtp_llm:utils",
     ],
 )
 
@@ -101,6 +103,16 @@ py_test(
 py_test(
     name = "access_log_test",
     srcs = ["test/access_log_test.py"],
+    data = ["//rtp_llm/cpp/repetition:online_repetition_tracker"],
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "A10"},
+)
+
+py_test(
+    name = "repetition_monitor_test",
+    srcs = ["test/repetition_monitor_test.py"],
+    data = ["//rtp_llm/cpp/repetition:online_repetition_tracker"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},

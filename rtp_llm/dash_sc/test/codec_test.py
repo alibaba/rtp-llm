@@ -645,7 +645,9 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             for i in range(len(infer.outputs))
         }
         self.assertEqual(list(infer.outputs[0].shape), [1, 0])
-        self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [])
+        # Empty INT32 tensors carry one filler element to keep raw_output_contents
+        # aligned; consumers must trust the declared shape.
+        self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [0])
         self.assertEqual(
             _unpack_int64_le(by_name["finish_reason"]),
             [FINISH_REASON_USE_PARAMETER_STATUS],

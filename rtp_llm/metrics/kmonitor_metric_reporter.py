@@ -40,6 +40,11 @@ class AccMetrics(Enum):
     # rate matches "requests with a think-abort", not "abort tokens seen".
     DASH_SC_DSV4_PHASE2_QPS_METRIC = "py_rtp_dash_sc_dsv4_phase2_qps"
 
+    # Output fell into a repeated suffix. Reported once per request by the
+    # frontend gRPC access-log interceptor; tags intentionally avoid request_id.
+    OUTPUT_REPETITION_QPS_METRIC = "py_rtp_output_repetition_qps"
+    TOOL_CALL_LOOP_QPS_METRIC = "py_rtp_tool_call_loop_qps"
+
 
 class GaugeMetrics(Enum):
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
@@ -74,6 +79,16 @@ class GaugeMetrics(Enum):
 
     # vit preprocess
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
+
+    OUTPUT_REPETITION_UNIT_SIZE_METRIC = "py_rtp_output_repetition_unit_size"
+    OUTPUT_REPETITION_REPEAT_COUNT_METRIC = "py_rtp_output_repetition_repeat_count"
+    OUTPUT_REPETITION_DUP_TOKEN_METRIC = "py_rtp_output_repetition_dup_token"
+    OUTPUT_REPETITION_CHECK_RT_METRIC = "py_rtp_output_repetition_check_rt"
+    TOOL_CALL_LOOP_REPEAT_COUNT_METRIC = "py_rtp_tool_call_loop_repeat_count"
+    TOOL_CALL_LOOP_CURRENT_SPAN_TOKENS_METRIC = (
+        "py_rtp_tool_call_loop_current_span_tokens"
+    )
+    TOOL_CALL_LOOP_CHECK_RT_METRIC = "py_rtp_tool_call_loop_check_rt"
 
 
 class MetricReporter(object):
