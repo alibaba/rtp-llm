@@ -70,12 +70,22 @@ def http_deps():
 
     http_archive(
         name = "aiter",
-        sha256 = "6f0f49ab55490acbce7bb40d147fdeb14418b447d9dfc4b9212dc23ca82b4a88",
+        sha256 = "23c2fd22ea8130aa70750dee3fb3dfe08a0bcb60592188a26d64d84b0b6caa25",
         urls = [
-            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.13.dev14%2Bgfa35072d0.d20260402-cp310-cp310-linux_x86_64.whl",
+            "https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.17.dev79%2Bg2570b35f9.d20260623-cp310-cp310-linux_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.aiter"),
+    )
+
+    http_archive(
+        name = "flydsl",
+        sha256 = "1e4e4dd153356e2445402f82f5096a98b443f55593208421a08af23a4b9313cf",
+        urls = [
+            "https://mirrors.aliyun.com/pypi/packages/ff/e9/d5efa2f84b4cdb8b3466326d46dd02ecbbfde00ca1e065a51af18f429a5e/flydsl-0.2.0-cp310-cp310-manylinux_2_27_x86_64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("//:BUILD.flydsl"),
     )
 
     http_archive(

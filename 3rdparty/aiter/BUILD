@@ -87,7 +87,7 @@ genrule(
         "**/*",
     ]) + [":config_h"],
     outs = [
-        "aiter/jit/libmodule_aiter_enum.so",
+        "aiter/jit/libmodule_aiter_core.so",
         "aiter/jit/libmodule_custom_all_reduce.so",
         "aiter/jit/libmodule_quick_all_reduce.so",
         "aiter/jit/libmodule_norm.so",
@@ -107,6 +107,9 @@ genrule(
         "aiter/jit/libmodule_gemm_a8w8.so",
         "aiter/jit/libmodule_moe_ck2stages.so",
         "aiter/jit/libmodule_deepgemm.so",
+        "aiter/jit/libmodule_gated_rmsnorm_quant.so",
+        "aiter/jit/libmodule_gemm_a8w8_blockscale_bpreshuffle.so",
+        "aiter/jit/libmodule_moe_fmoe_asm.so",
     ],
     cmd = """
         cd external/aiter_src;
@@ -118,7 +121,7 @@ genrule(
         LD_LIBRARY_PATH=/opt/amdgpu/lib64:/opt/rocm/lib/llvm/lib/:$$LD_LIBRARY_PATH AITER_SYMBOL_VISIBLE=1 GPU_ARCHS=gfx942 ROCM_HOME=/opt/rocm PATH=/opt/rocm/bin:/opt/conda310/bin:$$PATH /opt/conda310/bin/python build_aiter_module.py;
         
         cd ../..;
-        cp external/aiter_src/aiter/jit/module_aiter_enum.so $(location aiter/jit/libmodule_aiter_enum.so);
+        cp external/aiter_src/aiter/jit/module_aiter_core.so $(location aiter/jit/libmodule_aiter_core.so);
         cp external/aiter_src/aiter/jit/module_custom_all_reduce.so $(location aiter/jit/libmodule_custom_all_reduce.so);
         cp external/aiter_src/aiter/jit/module_quick_all_reduce.so $(location aiter/jit/libmodule_quick_all_reduce.so);
         cp external/aiter_src/aiter/jit/module_quant.so $(location aiter/jit/libmodule_quant.so);
@@ -138,6 +141,9 @@ genrule(
         cp external/aiter_src/aiter/jit/module_fmha_v3_varlen_fwd.so $(location aiter/jit/libmodule_fmha_v3_varlen_fwd.so);
         cp external/aiter_src/aiter/jit/module_gemm_a8w8.so $(location aiter/jit/libmodule_gemm_a8w8.so);
         cp external/aiter_src/aiter/jit/module_moe_ck2stages.so $(location aiter/jit/libmodule_moe_ck2stages.so);
+        cp external/aiter_src/aiter/jit/module_gated_rmsnorm_quant.so $(location aiter/jit/libmodule_gated_rmsnorm_quant.so);
+        cp external/aiter_src/aiter/jit/module_gemm_a8w8_blockscale_bpreshuffle.so $(location aiter/jit/libmodule_gemm_a8w8_blockscale_bpreshuffle.so);
+        cp external/aiter_src/aiter/jit/module_moe_fmoe_asm.so $(location aiter/jit/libmodule_moe_fmoe_asm.so);
     """,
     visibility = ["//visibility:public"],
     tags = ["rocm","local"],
@@ -204,8 +210,8 @@ cc_library(
 )
 
 cc_library(
-    name = "module_aiter_enum",
-    srcs = ["aiter/jit/libmodule_aiter_enum.so"],
+    name = "module_aiter_core",
+    srcs = ["aiter/jit/libmodule_aiter_core.so"],
     hdrs = ["csrc/include/aiter_enum.h"],
     deps = [":cpp_libraries"],
     copts = [],
