@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
@@ -76,6 +77,14 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                          (int)parallelism_config_.tp_size,
                          config_.seq_size_per_block,
                          cp_slot_mapper_->virtualBlockSize());
+    }
+
+    if (pd_sep_config_.role_type == RoleType::PREFILL) {
+        if (PrefillCacheHitMetricsReporter::enabled()) {
+            prefill_cache_hit_metrics_reporter_ = std::make_unique<PrefillCacheHitMetricsReporter>(metrics_reporter_);
+        } else {
+            RTP_LLM_LOG_INFO("prefill recent-cache-key metrics disabled by PREFILL_CACHE_HIT_METRIC_ENABLE");
+        }
     }
 
     RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_num=%d, block_size=%dB, seq_size_per_block=%zu",
@@ -178,12 +187,14 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
 
     // Cache-key computation is identical for CP and non-CP — we always have
     // the full sequence's token ids; rolling hash is at block_size granularity.
-    const int seq_size_per_block = config_.seq_size_per_block;
-    if (!effective->batch_kv_cache_resource->curBlocksNum()) {
+    const int  seq_size_per_block = config_.seq_size_per_block;
+    const bool is_first_malloc    = !effective->batch_kv_cache_resource->curBlocksNum();
+    if (is_first_malloc) {
         initCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, seq_size_per_block);
     } else {
         updateCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, seq_size_per_block);
     }
+    reportPrefillCacheHitMetrics(*effective, is_first_malloc);
 
     auto result = allocator_->malloc(*effective);
 
@@ -209,6 +220,18 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     }
 
     return result;
+}
+
+void KVCacheManager::reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc) {
+    if (!is_first_malloc || !prefill_cache_hit_metrics_reporter_ || !malloc_info.batch_kv_cache_resource
+        || !malloc_info.complete_token_ids) {
+        return;
+    }
+    prefill_cache_hit_metrics_reporter_->record(*malloc_info.batch_kv_cache_resource,
+                                                malloc_info.cp_slot_mapper,
+                                                malloc_info.request_id,
+                                                malloc_info.complete_token_ids->seqLength(),
+                                                config_.seq_size_per_block);
 }
 
 void KVCacheManager::free(const FreeInfo& free_info) {
@@ -618,9 +641,9 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
     const size_t block_size_tokens = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
                                          cp_slot_mapper_->virtualBlockSize() :
                                          config_.seq_size_per_block;
-    info.block_size = block_size_tokens;
-    info.total_kv_cache     = allocator_->totalTokensNum();
-    info.available_kv_cache = allocator_->availableTokensNum();
+    info.block_size                = block_size_tokens;
+    info.total_kv_cache            = allocator_->totalTokensNum();
+    info.available_kv_cache        = allocator_->availableTokensNum();
     // cached_keys left empty for now; can be populated when distributed cache is wired up.
 
     return info;
