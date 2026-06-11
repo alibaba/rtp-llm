@@ -113,6 +113,9 @@ genrule(
         "libmodule_rmsnorm.so",
         "libmodule_gemm_a8w8.so",
         "libmodule_moe_ck2stages.so",
+        "libmodule_gated_rmsnorm_quant.so",
+        "libmodule_gemm_a8w8_blockscale_bpreshuffle.so",
+        "libmodule_moe_fmoe_asm.so",
     ],
     cmd = """
        cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_aiter_enum.so $(location libmodule_aiter_enum.so);
@@ -135,6 +138,9 @@ cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_rmsnorm.so $(lo
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_a8w8.so $(location libmodule_gemm_a8w8.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe_ck2stages.so $(location libmodule_moe_ck2stages.so);
 cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_deepgemm.so $(location libmodule_deepgemm.so);
+cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gated_rmsnorm_quant.so $(location libmodule_gated_rmsnorm_quant.so);
+cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_gemm_a8w8_blockscale_bpreshuffle.so $(location libmodule_gemm_a8w8_blockscale_bpreshuffle.so);
+cp ./bazel-out/k8-opt/bin/external/aiter_src/aiter/jit/libmodule_moe_fmoe_asm.so $(location libmodule_moe_fmoe_asm.so);
 """,
     tags = [
         "local",
@@ -146,7 +152,7 @@ genrule(
     name = "aiter_copy",
     srcs = ["@aiter//:aiter_so"],
     outs = [
-        "module_aiter_enum.so",
+        "module_aiter_core.so",
         "module_custom_all_reduce.so",
         "module_quick_all_reduce.so",
         "module_moe_sorting.so",
@@ -165,9 +171,12 @@ genrule(
         "module_rmsnorm.so",
         "module_gemm_a8w8.so",
         "module_deepgemm.so",
+        "module_gated_rmsnorm_quant.so",
+        "module_gemm_a8w8_blockscale_bpreshuffle.so",
+        "module_moe_fmoe_asm.so",
     ],
     cmd = """
-        cp external/aiter/aiter/jit/module_aiter_enum.so $(location module_aiter_enum.so);
+        cp external/aiter/aiter/jit/module_aiter_core.so $(location module_aiter_core.so);
         cp external/aiter/aiter/jit/module_custom_all_reduce.so $(location module_custom_all_reduce.so);
         cp external/aiter/aiter/jit/module_quick_all_reduce.so $(location module_quick_all_reduce.so);
         cp external/aiter/aiter/jit/module_moe_sorting.so $(location module_moe_sorting.so);
@@ -186,6 +195,9 @@ genrule(
         cp external/aiter/aiter/jit/module_rmsnorm.so $(location module_rmsnorm.so);
         cp external/aiter/aiter/jit/module_gemm_a8w8.so $(location module_gemm_a8w8.so);
         cp external/aiter/aiter/jit/module_deepgemm.so $(location module_deepgemm.so);
+        cp external/aiter/aiter/jit/module_gated_rmsnorm_quant.so $(location module_gated_rmsnorm_quant.so);
+        cp external/aiter/aiter/jit/module_gemm_a8w8_blockscale_bpreshuffle.so $(location module_gemm_a8w8_blockscale_bpreshuffle.so);
+        cp external/aiter/aiter/jit/module_moe_fmoe_asm.so $(location module_moe_fmoe_asm.so);
 """,
     tags = [
         "local",
