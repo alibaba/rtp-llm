@@ -91,9 +91,12 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 generate_output.hidden_states = update_info.hidden_states.narrow(0, i, 1).cpu();
             }
         }
-        if (generate_input_->generate_config->return_all_hidden_states && update_info.all_hidden_states.defined()
-            && iter_count_ == 1) {
-            generate_output.all_hidden_states = update_info.all_hidden_states.cpu();
+        if (generate_input_->generate_config->return_all_hidden_states) {
+            if (update_info.all_hidden_states.defined() && iter_count_ == 1) {
+                generate_output.all_hidden_states = update_info.all_hidden_states.cpu();
+            } else if (!isStreaming() && generate_output.finished && all_hidden_states_.defined()) {
+                generate_output.all_hidden_states = all_hidden_states_.cpu();
+            }
         }
         if (loss_.defined()) {
             RTP_LLM_CHECK_WITH_INFO(loss_index_ == inputLength() - 1,
@@ -185,6 +188,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     // TODO(wangyin.yx): check behaviour of update_info.hidden_states under mtp/eagle model
     if (needReturnHiddenStates() && update_info.all_hidden_states.defined()) {
         last_hidden_states_ = update_info.all_hidden_states;
+    }
+    if (generate_input_->generate_config->return_all_hidden_states && update_info.all_hidden_states.defined()
+        && !all_hidden_states_.defined()) {
+        all_hidden_states_ = update_info.all_hidden_states;
     }
 
     if (generate_input_->generate_config->return_softmax_probs && update_info.softmax_probs.defined()) {
