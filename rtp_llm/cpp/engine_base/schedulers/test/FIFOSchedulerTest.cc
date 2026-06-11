@@ -811,34 +811,42 @@ TEST_F(FIFOSchedulerTest, testPrefillRunsBeforeDecodeBatchWhenKVEnough) {
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
     PDSepConfig pd_sep_config;
-    pd_sep_config.role_type = RoleType::DECODE;
+    pd_sep_config.role_type = RoleType::PDFUSION;
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
     std::shared_ptr<GenerateInput> decode_query = make_shared<GenerateInput>();
-    decode_query->input_ids                     = torch::tensor({1}, torch::kInt32);
-    decode_query->generate_config               = make_shared<GenerateConfig>();
+    decode_query->request_id                      = 1;
+    decode_query->input_ids                       = torch::tensor({1}, torch::kInt32);
+    decode_query->generate_config                 = make_shared<GenerateConfig>();
+    decode_query->generate_config->max_new_tokens = 4;
     auto decode_running =
         make_shared<NormalGenerateStream>(decode_query, model_config, runtime_config, resource_context, nullptr);
+    decode_running->setIsContextStream(false);
     ASSERT_TRUE(scheduler.enqueue(decode_running).ok());
     auto first_round = scheduler.schedule();
     ASSERT_TRUE(first_round.ok());
     ASSERT_EQ(first_round.value().size(), 1);
-    decode_running->setIsContextStream(false);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
 
     std::shared_ptr<GenerateInput> decode_wait_query = make_shared<GenerateInput>();
-    decode_wait_query->input_ids                     = torch::tensor({2}, torch::kInt32);
-    decode_wait_query->generate_config               = make_shared<GenerateConfig>();
+    decode_wait_query->request_id                      = 2;
+    decode_wait_query->input_ids                       = torch::tensor({2}, torch::kInt32);
+    decode_wait_query->generate_config                 = make_shared<GenerateConfig>();
+    decode_wait_query->generate_config->max_new_tokens = 4;
     auto decode_waiting =
         make_shared<NormalGenerateStream>(decode_wait_query, model_config, runtime_config, resource_context, nullptr);
     decode_waiting->setIsContextStream(false);
     ASSERT_TRUE(scheduler.enqueue(decode_waiting).ok());
 
     std::shared_ptr<GenerateInput> prefill_query = make_shared<GenerateInput>();
-    prefill_query->input_ids                     = torch::tensor({1, 2, 3, 4}, torch::kInt32);
-    prefill_query->generate_config               = make_shared<GenerateConfig>();
+    prefill_query->request_id                       = 3;
+    prefill_query->input_ids                         = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    prefill_query->generate_config                   = make_shared<GenerateConfig>();
+    prefill_query->generate_config->max_new_tokens   = 4;
     auto prefill_waiting =
         make_shared<NormalGenerateStream>(prefill_query, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(prefill_waiting).ok());
@@ -853,14 +861,15 @@ TEST_F(FIFOSchedulerTest, testPrefillRunsBeforeDecodeBatchWhenKVEnough) {
     prefill_waiting->reportEventWithoutLock(StreamEvents::GenerateDone);
     auto third_round = scheduler.schedule();
     ASSERT_TRUE(third_round.ok());
-    ASSERT_EQ(third_round.value().size(), 2);
+    ASSERT_EQ(third_round.value().size(), 1);
     std::vector<int64_t> running_ids;
     for (const auto& stream : third_round.value()) {
         running_ids.push_back(stream->streamId());
     }
-    EXPECT_THAT(running_ids, ::testing::UnorderedElementsAre(decode_running->streamId(), decode_waiting->streamId()));
-    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
-    ASSERT_EQ(scheduler.runningStreamsSize(), 2);
+    ASSERT_EQ(running_ids.size(), 1);
+    ASSERT_EQ(running_ids.front(), decode_running->streamId());
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
 }
 
 TEST_F(FIFOSchedulerTest, testPrefillWaitsWhenKVInsufficient) {
@@ -876,24 +885,26 @@ TEST_F(FIFOSchedulerTest, testPrefillWaitsWhenKVInsufficient) {
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
     PDSepConfig pd_sep_config;
-    pd_sep_config.role_type = RoleType::DECODE;
+    pd_sep_config.role_type = RoleType::PDFUSION;
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
     std::shared_ptr<GenerateInput> decode_query = make_shared<GenerateInput>();
-    decode_query->input_ids                     = torch::tensor({1, 2, 3, 4}, torch::kInt32);
-    decode_query->generate_config               = make_shared<GenerateConfig>();
+    decode_query->request_id                            = 1;
+    decode_query->input_ids                             = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    decode_query->generate_config                       = make_shared<GenerateConfig>();
     auto decode_running =
         make_shared<NormalGenerateStream>(decode_query, model_config, runtime_config, resource_context, nullptr);
+    decode_running->setIsContextStream(false);
     ASSERT_TRUE(scheduler.enqueue(decode_running).ok());
     auto first_round = scheduler.schedule();
     ASSERT_TRUE(first_round.ok());
     ASSERT_EQ(first_round.value().size(), 1);
-    decode_running->setIsContextStream(false);
 
     std::shared_ptr<GenerateInput> prefill_query = make_shared<GenerateInput>();
+    prefill_query->request_id                    = 2;
     prefill_query->input_ids                     = torch::tensor({5, 6, 7}, torch::kInt32);
     prefill_query->generate_config               = make_shared<GenerateConfig>();
     auto prefill_waiting =
@@ -921,33 +932,39 @@ TEST_F(FIFOSchedulerTest, testPrefillOverridesDecodeOneByOne) {
     runtime_config.max_generate_batch_size                     = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
     PDSepConfig pd_sep_config;
-    pd_sep_config.role_type = RoleType::DECODE;
+    pd_sep_config.role_type = RoleType::PDFUSION;
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
     std::shared_ptr<GenerateInput> decode_query = make_shared<GenerateInput>();
-    decode_query->input_ids                     = torch::tensor({1}, torch::kInt32);
-    decode_query->generate_config               = make_shared<GenerateConfig>();
+    decode_query->request_id                        = 1;
+    decode_query->input_ids                         = torch::tensor({1}, torch::kInt32);
+    decode_query->generate_config                   = make_shared<GenerateConfig>();
+    decode_query->generate_config->max_new_tokens   = 4;
     auto decode_running =
         make_shared<NormalGenerateStream>(decode_query, model_config, runtime_config, resource_context, nullptr);
+    decode_running->setIsContextStream(false);
     ASSERT_TRUE(scheduler.enqueue(decode_running).ok());
     auto first_round = scheduler.schedule();
     ASSERT_TRUE(first_round.ok());
     ASSERT_EQ(first_round.value().size(), 1);
-    decode_running->setIsContextStream(false);
 
     std::shared_ptr<GenerateInput> prefill_query_a = make_shared<GenerateInput>();
-    prefill_query_a->input_ids                     = torch::tensor({1, 2, 3, 4}, torch::kInt32);
-    prefill_query_a->generate_config               = make_shared<GenerateConfig>();
+    prefill_query_a->request_id                      = 2;
+    prefill_query_a->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    prefill_query_a->generate_config                 = make_shared<GenerateConfig>();
+    prefill_query_a->generate_config->max_new_tokens = 4;
     auto prefill_waiting_a =
         make_shared<NormalGenerateStream>(prefill_query_a, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(prefill_waiting_a).ok());
 
     std::shared_ptr<GenerateInput> prefill_query_b = make_shared<GenerateInput>();
-    prefill_query_b->input_ids                     = torch::tensor({5, 6, 7, 8}, torch::kInt32);
-    prefill_query_b->generate_config               = make_shared<GenerateConfig>();
+    prefill_query_b->request_id                      = 3;
+    prefill_query_b->input_ids                       = torch::tensor({5, 6, 7, 8}, torch::kInt32);
+    prefill_query_b->generate_config                 = make_shared<GenerateConfig>();
+    prefill_query_b->generate_config->max_new_tokens = 4;
     auto prefill_waiting_b =
         make_shared<NormalGenerateStream>(prefill_query_b, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(prefill_waiting_b).ok());

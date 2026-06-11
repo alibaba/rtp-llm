@@ -120,34 +120,25 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
 bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
                                           const GenerateStreamPtr&       new_stream) const {
     RTP_LLM_PROFILE_FUNCTION();
-    const bool new_is_prefill      = new_stream->isContextStream();
-    bool       running_has_prefill = false;
-    bool       running_has_decode  = false;
-    for (const auto& running_stream : running_streams_) {
-        if (running_stream->isContextStream()) {
-            running_has_prefill = true;
-        } else {
-            running_has_decode = true;
-        }
-    }
-
-    if (!new_is_prefill && pd_sep_config_.role_type == RoleType::DECODE && !running_has_prefill) {
+    const bool new_is_prefill = new_stream->isContextStream();
+    if (pd_sep_config_.role_type == RoleType::DECODE && !new_is_prefill && !hasRunningPrefill()) {
         if (running_streams_.size() + streams.size() + 1 < max_generate_batch_size_) {
             return true;
         }
     }
 
     size_t running_batch_size = running_streams_.size();
-    if (running_has_prefill) {
+    if (hasRunningPrefill()) {
         return false;
     }
-    if (running_has_decode) {
+    if (hasRunningDecode()) {
         if (!new_is_prefill) {
             return false;
         }
         if (!hasAvailableKVForPrefill(streams, new_stream)) {
             return false;
         }
+        // Schedule prefer prefill request in this round
         running_batch_size = 0;
     }
     if (running_batch_size + streams.size() + 1 > max_generate_batch_size_) {
@@ -204,7 +195,9 @@ bool FIFOScheduler::hasAvailableKVForPrefill(const list<GenerateStreamPtr>& stre
     }
     size_t needed_tokens     = 0;
     auto   accumulate_tokens = [&needed_tokens](const GenerateStreamPtr& stream) {
-        const auto need_blocks = std::max(stream->nextNeedBlockNums(0), 0);
+        const int reserve_step = std::max(0, stream->generateConfig()->max_new_tokens
+                                        - static_cast<int>(stream->outputTokenLen()));
+        const auto need_blocks = std::max(stream->nextNeedBlockNums(reserve_step), 0);
         needed_tokens += size_t(need_blocks) * size_t(stream->seqSizePerBlock());
     };
     for (const auto& stream : streams) {
