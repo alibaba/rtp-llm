@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, NamedTuple, Optional
 
 import torch
 from torch import nn
@@ -35,14 +35,48 @@ try:
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
         CudaFp8GEMMLinear,
     )
+except ImportError:
+    CudaFp8GEMMLinear = None
+
+try:
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
+        CudaMxfp8Linear,
+    )
+except ImportError:
+    CudaMxfp8Linear = None
+
+try:
     from rtp_llm.models_py.triton_kernels.common.fused_add_rmsnorm_fp8_quant import (
         fused_add_rmsnorm_fp8_quant,
         fused_add_rmsnorm_fp8_quant_with_bf16_output,
     )
 except ImportError:
-    CudaFp8GEMMLinear = None
     fused_add_rmsnorm_fp8_quant = None
     fused_add_rmsnorm_fp8_quant_with_bf16_output = None
+
+
+class _FusedFp8QuantParams(NamedTuple):
+    group_size: int
+    scale_ue8m0: bool
+    round_to_pow2: bool
+
+
+def _get_fused_fp8_quant_params(linear: Any) -> Optional[_FusedFp8QuantParams]:
+    if CudaFp8GEMMLinear is not None and isinstance(linear, CudaFp8GEMMLinear):
+        return _FusedFp8QuantParams(
+            group_size=getattr(linear, "input_quant_group_size", 128),
+            scale_ue8m0=getattr(
+                linear, "input_quant_scale_ue8m0", linear.scale_ue8m0
+            ),
+            round_to_pow2=getattr(linear, "input_quant_round_to_pow2", False),
+        )
+    if CudaMxfp8Linear is not None and isinstance(linear, CudaMxfp8Linear):
+        return _FusedFp8QuantParams(
+            group_size=getattr(linear, "input_quant_group_size", 32),
+            scale_ue8m0=getattr(linear, "input_quant_scale_ue8m0", False),
+            round_to_pow2=getattr(linear, "input_quant_round_to_pow2", True),
+        )
+    return None
 
 
 def _resolve_swiglu_oai_params(config: ModelConfig):
@@ -409,47 +443,62 @@ class GenericMoeDecoderLayer(nn.Module):
 
         _fuse_on = fuse_kernels_enabled(hw_kernel_config)
         self._fuse_input_norm_quant = False
-        self._fuse_input_scale_ue8m0 = False
+        self._fuse_input_norm_quant_params = None
         if _fuse_on and (
             fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
-            and CudaFp8GEMMLinear is not None
         ):
             if isinstance(self.self_attn, CausalAttention):
                 _qkv = getattr(self.self_attn, "qkv_proj", None)
-                if isinstance(_qkv, CudaFp8GEMMLinear):
+                _params = _get_fused_fp8_quant_params(_qkv)
+                if _params is not None:
                     self._fuse_input_norm_quant = True
-                    self._fuse_input_scale_ue8m0 = _qkv.scale_ue8m0
+                    self._fuse_input_norm_quant_params = _params
             elif isinstance(self.self_attn, MlaAttention):
                 _proj = getattr(self.self_attn, "fused_qkv_a_proj", None) or getattr(
                     self.self_attn, "fused_qkv_proj", None
                 )
-                if isinstance(_proj, CudaFp8GEMMLinear):
+                _params = _get_fused_fp8_quant_params(_proj)
+                if _params is not None:
                     self._fuse_input_norm_quant = True
-                    self._fuse_input_scale_ue8m0 = _proj.scale_ue8m0
+                    self._fuse_input_norm_quant_params = _params
             elif self._is_msa_attn:
                 # MSA's qkv_proj is built by LinearFactory and is FP8 under M3
                 # quant config; the idx_q/idx_k branches stay bf16 and consume
                 # the bf16_normed output from the fused kernel.
                 _qkv = getattr(self.self_attn, "qkv_proj", None)
-                if isinstance(_qkv, CudaFp8GEMMLinear):
+                _params = _get_fused_fp8_quant_params(_qkv)
+                if _params is not None:
                     self._fuse_input_norm_quant = True
-                    self._fuse_input_scale_ue8m0 = _qkv.scale_ue8m0
+                    self._fuse_input_norm_quant_params = _params
 
         # Fuse post_attention_layernorm + fp8_quant for DenseMLP
+        self._fuse_post_norm_quant_params = (
+            _get_fused_fp8_quant_params(getattr(self.mlp, "up_proj", None))
+            if isinstance(self.mlp, DenseMLP)
+            else None
+        )
         self._fuse_post_norm_quant = (
             _fuse_on
             and fused_add_rmsnorm_fp8_quant is not None
             and isinstance(self.mlp, DenseMLP)
-            and self.mlp.accepts_fp8_input
+            and self._fuse_post_norm_quant_params is not None
         )
 
         # Fuse post_attention_layernorm + dual output (bf16+fp8) for MoE
+        self._fuse_post_norm_quant_moe_params = None
+        if (
+            isinstance(self.mlp, GenericMoeLayer)
+            and self.mlp.shared_expert is not None
+        ):
+            self._fuse_post_norm_quant_moe_params = _get_fused_fp8_quant_params(
+                getattr(self.mlp.shared_expert, "up_proj", None)
+            )
         self._fuse_post_norm_quant_moe = (
             _fuse_on
             and fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
             and isinstance(self.mlp, GenericMoeLayer)
             and self.mlp.shared_expert is not None
-            and self.mlp.shared_expert.accepts_fp8_input
+            and self._fuse_post_norm_quant_moe_params is not None
         )
 
     def clone_for_cuda_graph(self) -> "GenericMoeDecoderLayer":
@@ -464,9 +513,13 @@ class GenericMoeDecoderLayer(nn.Module):
         clone.input_layernorm = self.input_layernorm
         clone.post_attention_layernorm = self.post_attention_layernorm
         clone._fuse_input_norm_quant = self._fuse_input_norm_quant
-        clone._fuse_input_scale_ue8m0 = self._fuse_input_scale_ue8m0
+        clone._fuse_input_norm_quant_params = self._fuse_input_norm_quant_params
         clone._fuse_post_norm_quant = self._fuse_post_norm_quant
+        clone._fuse_post_norm_quant_params = self._fuse_post_norm_quant_params
         clone._fuse_post_norm_quant_moe = self._fuse_post_norm_quant_moe
+        clone._fuse_post_norm_quant_moe_params = (
+            self._fuse_post_norm_quant_moe_params
+        )
         return clone
 
     def forward(
@@ -486,14 +539,17 @@ class GenericMoeDecoderLayer(nn.Module):
             # while the fp8 output feeds the main qkv_proj — same trick as
             # the MoE shared-expert path uses for its dual-output fusion.
             if self._fuse_input_norm_quant and hidden_states.dim() == 2:
+                _params = self._fuse_input_norm_quant_params
+                assert _params is not None
                 bf16_hs, fp8_hs, scale = (
                     fused_add_rmsnorm_fp8_quant_with_bf16_output(
                         hidden_states,
                         residual,
                         self.input_layernorm.weight.data,
                         self.input_layernorm.variance_epsilon,
-                        group_size=128,
-                        scale_ue8m0=self._fuse_input_scale_ue8m0,
+                        group_size=_params.group_size,
+                        scale_ue8m0=_params.scale_ue8m0,
+                        round_to_pow2=_params.round_to_pow2,
                     )
                 )
                 hidden_states = self.self_attn(
@@ -513,13 +569,16 @@ class GenericMoeDecoderLayer(nn.Module):
                     kv_cache=kv_cache,
                 )
         elif self._fuse_input_norm_quant and hidden_states.dim() == 2:
+            _params = self._fuse_input_norm_quant_params
+            assert _params is not None
             bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
                 hidden_states,
                 residual,
                 self.input_layernorm.weight.data,
                 self.input_layernorm.variance_epsilon,
-                group_size=128,
-                scale_ue8m0=self._fuse_input_scale_ue8m0,
+                group_size=_params.group_size,
+                scale_ue8m0=_params.scale_ue8m0,
+                round_to_pow2=_params.round_to_pow2,
             )
             hidden_states = self.self_attn(
                 hidden_states=bf16_hs,
@@ -535,23 +594,29 @@ class GenericMoeDecoderLayer(nn.Module):
             )
 
         if self._fuse_post_norm_quant and hidden_states.dim() == 2:
+            _params = self._fuse_post_norm_quant_params
+            assert _params is not None
             fp8_hs, scale = fused_add_rmsnorm_fp8_quant(
                 hidden_states,
                 residual,
                 self.post_attention_layernorm.weight.data,
                 self.post_attention_layernorm.variance_epsilon,
-                group_size=128,
-                scale_ue8m0=self.mlp.up_proj.scale_ue8m0,
+                group_size=_params.group_size,
+                scale_ue8m0=_params.scale_ue8m0,
+                round_to_pow2=_params.round_to_pow2,
             )
             hidden_states = self.mlp(hidden_states, x_fp8=fp8_hs, x_scale=scale)
         elif self._fuse_post_norm_quant_moe and hidden_states.dim() == 2:
+            _params = self._fuse_post_norm_quant_moe_params
+            assert _params is not None
             bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
                 hidden_states,
                 residual,
                 self.post_attention_layernorm.weight.data,
                 self.post_attention_layernorm.variance_epsilon,
-                group_size=128,
-                scale_ue8m0=self.mlp.shared_expert.up_proj.scale_ue8m0,
+                group_size=_params.group_size,
+                scale_ue8m0=_params.scale_ue8m0,
+                round_to_pow2=_params.round_to_pow2,
             )
             hidden_states = self.mlp(bf16_hs, x_fp8=fp8_hs, x_scale=scale)
         else:
