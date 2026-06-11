@@ -25,7 +25,8 @@ public:
                                                        kv_cache_manager::QueryType             query_type,
                                                        const std::vector<int64_t>&             keys,
                                                        const kv_cache_manager::BlockMask&      block_mask,
-                                                       const kv_cache_manager::ForwardContext& forward_context);
+                                                       const kv_cache_manager::ForwardContext& forward_context,
+                                                       std::vector<kv_cache_manager::ClientReplicationHint>& out_hints);
 
     std::pair<bool, kv_cache_manager::WriteLocation>
     getWriteLocation(const std::string&              unique_id,
@@ -33,7 +34,8 @@ public:
                      const std::vector<int64_t>&     keys,
                      const std::vector<int64_t>&     tokens,
                      const std::vector<std::string>& location_spec_group_names,
-                     int64_t                         write_timeout_seconds);
+                     int64_t                         write_timeout_seconds,
+                     bool                            is_replication);
 
     bool finishWrite(const std::string&                 unique_id,
                      const std::string&                 trace_id,

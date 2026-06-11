@@ -3,6 +3,7 @@
 #include <atomic>
 #include <algorithm>
 #include <sstream>
+#include <unordered_set>
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -186,10 +187,9 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
     //   - any non-FULL entry (LINEAR or SWA) → FullLinearLayerGroupPolicy with F* / L* split.
     //   - otherwise (empty or all-FULL) → single-group FullLayerGroupPolicy.
     // This handles DSV4 (FULL paged KV + SWA state pools) and generic hybrid models uniformly.
-    const bool has_non_full_groups = std::any_of(
-        cache_config.group_types.begin(), cache_config.group_types.end(), [](CacheGroupType t) {
-            return t != CacheGroupType::FULL;
-        });
+    const bool has_non_full_groups = std::any_of(cache_config.group_types.begin(),
+                                                 cache_config.group_types.end(),
+                                                 [](CacheGroupType t) { return t != CacheGroupType::FULL; });
     if (has_non_full_groups) {
         for (int32_t group_id = 0; static_cast<size_t>(group_id) < cache_config.group_types.size(); ++group_id) {
             if (cache_config.group_types[group_id] == CacheGroupType::FULL) {
@@ -198,8 +198,8 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                 linear_group_ids.push_back(group_id);
             }
         }
-        group_policy_ = std::make_unique<remote_connector::FullLinearLayerGroupPolicy>(
-            allocator, full_group_ids, linear_group_ids);
+        group_policy_ =
+            std::make_unique<remote_connector::FullLinearLayerGroupPolicy>(allocator, full_group_ids, linear_group_ids);
     } else {
         full_group_ids.push_back(0);
         group_policy_ =
@@ -225,15 +225,15 @@ RemoteConnector::genLocationSpecInfoMapAndGroups(int64_t tp_size) {
     auto location_spec_info_map_ptr = std::make_shared<RemoteConnectorConfig::LocationSpecInfoMap>();
     // Hybrid-pool configs (e.g. DSV4) populate group_block_size_bytes per group; fall back to
     // the global block_size_bytes when no per-group sizes are configured.
-    const auto&         cache_cfg            = init_params_->cache_config;
-    const bool          use_per_group_bytes  = !cache_cfg.group_block_size_bytes.empty();
+    const auto&         cache_cfg           = init_params_->cache_config;
+    const bool          use_per_group_bytes = !cache_cfg.group_block_size_bytes.empty();
     std::vector<size_t> group_byte_sizes;
     group_byte_sizes.reserve(group_size);
     for (const auto& entry : group_policy_->groups()) {
-        int32_t group_id = entry.first;
-        size_t  byte_size_per_block =
-            use_per_group_bytes ? cache_cfg.group_block_size_bytes.at(static_cast<size_t>(group_id)) :
-                                  cache_cfg.block_size_bytes;
+        int32_t group_id            = entry.first;
+        size_t  byte_size_per_block = use_per_group_bytes ?
+                                          cache_cfg.group_block_size_bytes.at(static_cast<size_t>(group_id)) :
+                                          cache_cfg.block_size_bytes;
         group_byte_sizes.push_back(byte_size_per_block);
     }
     std::vector<std::string> all_group_names;
@@ -495,10 +495,10 @@ std::shared_ptr<AsyncContext> RemoteConnector::asyncRead(const std::shared_ptr<K
         remote_match_context != nullptr) {
         auto async_context = std::make_shared<RemoteConnectorAsyncContext>();
         auto ec            = thread_pool_->pushTask(
-            [this, resource, start_read_block_index, read_block_num, async_context, remote_match_context]() {
+            [this, resource, meta, start_read_block_index, read_block_num, async_context, remote_match_context]() {
                 async_context->setState(RemoteConnectorState::State::RCS_START);
                 this->asyncReadTask(
-                    resource, start_read_block_index, read_block_num, async_context, remote_match_context);
+                    resource, meta, start_read_block_index, read_block_num, async_context, remote_match_context);
             },
             false);
         CHECK_THREAD_POOL_EC("asyncRead", async_context, ec);
@@ -627,10 +627,15 @@ void RemoteConnector::asyncMatchTask(const std::shared_ptr<KVCacheResource>&    
     const std::string&          unique_id  = meta->unique_id();
     kv_cache_manager::QueryType query_type = kv_cache_manager::QueryType::QT_PREFIX_MATCH;
     async_context->setState(RemoteConnectorState::State::RCS_READ_MATCH);
-    auto match_result = client_wrapper_->match(unique_id, match_trace_id, query_type, keys, block_mask, {});
+    std::vector<kv_cache_manager::ClientReplicationHint> replication_hints;
+    auto                                                 match_result =
+        client_wrapper_->match(unique_id, match_trace_id, query_type, keys, block_mask, {}, replication_hints);
     CHECK_AND_LOG(match_result.first, RCS_READ_MATCH_ERROR, "asyncGet match failed, [%s]", match_trace_id.c_str());
     async_context->set_trace_id(match_trace_id);
     async_context->set_locations(std::move(match_result.second));
+    if (!replication_hints.empty()) {
+        async_context->set_replication_hints(std::move(replication_hints));
+    }
     auto matched_size = async_context->locations_ptr()->size();
     async_context->set_matched_block_count(matched_size + async_context->prev_reuse_blocks_num());
     async_context->setState(RemoteConnectorState::State::RCS_SUCCESS);
@@ -643,6 +648,7 @@ void RemoteConnector::asyncMatchTask(const std::shared_ptr<KVCacheResource>&    
 }
 
 void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&             resource,
+                                    const std::shared_ptr<Meta>&                        meta,
                                     int                                                 start_block_index,
                                     int                                                 reuse_size,
                                     const std::shared_ptr<RemoteConnectorAsyncContext>& async_context,
@@ -692,6 +698,15 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
     helper.collector.remote_read_token_num = new_reuse_block_num * init_params_->cache_config.seq_size_per_block;
     async_context->setState(RemoteConnectorState::State::RCS_SUCCESS);
     resource->setRemoteReuseBlockNum(new_reuse_block_num);
+
+    // fire-and-forget: if match returned replication hints, asynchronously write a replica
+    const auto& hints = match_context->replication_hints();
+    if (!hints.empty()) {
+        RTP_LLM_LOG_DEBUG("asyncReadTask: %zu replication hints received, submitting async replication write",
+                          hints.size());
+        thread_pool_->pushTask(
+            [this, resource, meta, hints]() { this->asyncReplicationWriteTask(resource, meta, hints); }, false);
+    }
 }
 
 void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResource>&             resource,
@@ -720,7 +735,7 @@ void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResource>&    
     // 1. for meta_client : get cache location from remote service
     async_context->setState(RemoteConnectorState::State::RCS_WRITE_START);
     auto [start_result, write_location] = client_wrapper_->getWriteLocation(
-        unique_id, start_write_trace_id, keys, tokens, location_spec_group_names, 600);
+        unique_id, start_write_trace_id, keys, tokens, location_spec_group_names, 600, /*is_rep*/ false);
     helper.collector.remote_get_write_location_time_us = currentTimeUs() - helper.begin_us;
     CHECK_AND_LOG(start_result, RCS_ERROR, "asyncPut getWriteLocation failed, [%s]", start_write_trace_id.c_str());
     RETURN_IF(write_location.locations.empty(), write);
@@ -796,6 +811,122 @@ void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResource>&    
 #undef RETURN_IF
 #undef CHECK_AND_LOG
 #undef CHECK_AND_LOG_WITH_DEFER
+
+void RemoteConnector::asyncReplicationWriteTask(const std::shared_ptr<KVCacheResource>&              resource,
+                                                const std::shared_ptr<Meta>&                         meta,
+                                                std::vector<kv_cache_manager::ClientReplicationHint> hints) {
+    const std::string& unique_id = meta->unique_id();
+    std::string        trace_id  = "replication_write_" + meta->trace_id();
+
+    // filter keys to only those specified in hints
+    std::unordered_set<int64_t> hint_block_keys;
+    hint_block_keys.reserve(hints.size());
+    for (const auto& hint : hints) {
+        hint_block_keys.insert(hint.block_key);
+    }
+
+    auto all_keys = resource->cacheKeys();
+    if (!all_keys.empty() && !resource->lastBlockAligned()) {
+        all_keys.pop_back();
+    }
+
+    std::vector<int64_t> keys;
+    keys.reserve(all_keys.size());
+    for (const auto& key : all_keys) {
+        if (hint_block_keys.count(key) > 0) {
+            keys.push_back(key);
+        }
+    }
+    if (keys.empty()) {
+        RTP_LLM_LOG_DEBUG("asyncReplicationWriteTask: no matching keys for hints, skip");
+        return;
+    }
+
+    std::vector<std::string> location_spec_group_names;
+    if (!group_policy_->getNeedWriteGroups(resource, location_spec_group_names)) {
+        RTP_LLM_LOG_WARNING("asyncReplicationWriteTask: getNeedWriteGroups failed, trace_id [%s]", trace_id.c_str());
+        return;
+    }
+
+    // 1. get write location with is_replication=true
+    const std::vector<int64_t>& tokens  = meta->tokens();
+    auto [start_result, write_location] = client_wrapper_->getWriteLocation(
+        unique_id, trace_id, keys, tokens, location_spec_group_names, 600, /*is_rep*/ true);
+    if (!start_result) {
+        RTP_LLM_LOG_WARNING("asyncReplicationWriteTask: getWriteLocation failed, trace_id [%s]", trace_id.c_str());
+        return;
+    }
+    if (write_location.locations.empty()) {
+        RTP_LLM_LOG_DEBUG("asyncReplicationWriteTask: empty write locations, skip");
+        return;
+    }
+
+    const std::string&                 write_session_id = write_location.write_session_id;
+    static kv_cache_manager::Locations empty_locations;
+    kv_cache_manager::Locations*       actual_locations  = &empty_locations;
+    size_t                             succeed_block_num = 0;
+
+    auto finish_write = [&, this](bool success) {
+        std::string finish_trace_id = "replication_finish_" + meta->trace_id();
+        bool        finish_result   = this->client_wrapper_->finishWrite(
+            unique_id, finish_trace_id, write_session_id, succeed_block_num, *actual_locations);
+        if (!finish_result) {
+            RTP_LLM_LOG_WARNING("asyncReplicationWriteTask: finishWrite failed, trace_id [%s]",
+                                finish_trace_id.c_str());
+        }
+        if (success) {
+            RTP_LLM_LOG_DEBUG("asyncReplicationWriteTask: success, trace_id [%s]", trace_id.c_str());
+        }
+    };
+
+    // 2. broadcast write to all TP workers
+    std::vector<FunctionRequestPB> requests;
+    ActualUriGather                actual_uri_gather;
+    if (!genWriteRequest(broadcaster_->workerNum(),
+                         write_location.locations,
+                         write_location.block_mask,
+                         trace_id,
+                         resource,
+                         requests,
+                         actual_uri_gather)) {
+        RTP_LLM_LOG_WARNING("asyncReplicationWriteTask: genWriteRequest failed, trace_id [%s]", trace_id.c_str());
+        finish_write(false);
+        return;
+    }
+
+    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& context,
+                       const FunctionRequestPB&                    request,
+                       grpc::CompletionQueue*                      completion_queue) {
+        return stub->AsyncExecuteFunction(context.get(), request, completion_queue);
+    };
+    auto broadcast_result =
+        broadcaster_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, put_broadcast_timeout_, rpc_call);
+    broadcast_result->waitDone();
+    if (!broadcast_result->success()) {
+        RTP_LLM_LOG_WARNING("asyncReplicationWriteTask: broadcast failed, trace_id [%s]", trace_id.c_str());
+        finish_write(false);
+        return;
+    }
+
+    // 3. finish write
+    auto responses            = broadcast_result->responses();
+    succeed_block_num         = write_location.locations.size();
+    bool actual_uri_not_empty = false;
+    for (int i = 0; i < broadcaster_->workerNum(); i++) {
+        const auto& proto_actual_uris = responses[i].remote_response().actual_uris();
+        for (int j = 0; j < proto_actual_uris.size(); j++) {
+            if (!proto_actual_uris[j].empty()) {
+                actual_uri_not_empty         = true;
+                actual_uri_gather[i][j]->uri = proto_actual_uris[j];
+            }
+        }
+    }
+    if (actual_uri_not_empty) {
+        actual_locations = &write_location.locations;
+    }
+    finish_write(true);
+}
 
 bool RemoteConnector::genReadRequest(size_t                                   tp_size,
                                      const kv_cache_manager::Locations&       locations,

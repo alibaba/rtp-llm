@@ -137,7 +137,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
                               _,                                      // tokens
                               Eq(BlockMask(static_cast<size_t>(0))),  // block_mask
                               _,                                      // sw_size
-                              _                                       // location_spec_names
+                              _,                                      // location_spec_names
+                              _                                       // out_hints
                               ))
         .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, expected_locations})));
     auto match_context = remote_connectors_[tp_rank]->asyncMatch(kv_cache_resouce, meta);
@@ -228,7 +229,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
                               _,                                      // tokens
                               Eq(BlockMask(static_cast<size_t>(1))),  // block_mask
                               _,                                      // sw_size
-                              _                                       // location_spec_names
+                              _,                                      // location_spec_names
+                              _                                       // out_hints
                               ))
         .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, expected_locations})));
     auto match_context = remote_connectors_[tp_rank]->asyncMatch(kv_cache_resouce, meta);
@@ -317,7 +319,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_act
                            std::vector<int64_t>({1, 2, 3}),  // keys
                            _,                                // tokens
                            Eq(std::vector<std::string>()),   // location_spec_group_names
-                           _                                 // write_timeout_seconds
+                           _,                                // write_timeout_seconds
+                           _                                 // is_replication
                            ))
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
@@ -363,7 +366,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
                            std::vector<int64_t>({1, 2, 3}),  // keys
                            _,                                // tokens
                            Eq(std::vector<std::string>()),   // location_spec_group_names
-                           _                                 // write_timeout_seconds
+                           _,                                // write_timeout_seconds
+                           _                                 // is_replication
                            ))
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
@@ -410,7 +414,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
                            std::vector<int64_t>({1, 2, 3, 4}),  // keys
                            _,                                   // tokens
                            Eq(std::vector<std::string>()),      // location_spec_group_names
-                           _                                    // write_timeout_seconds
+                           _,                                   // write_timeout_seconds
+                           _                                    // is_replication
                            ))
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
@@ -456,7 +461,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
                            std::vector<int64_t>({1, 2, 3}),  // keys
                            _,                                // tokens
                            Eq(std::vector<std::string>()),   // location_spec_group_names
-                           _                                 // write_timeout_seconds
+                           _,                                // write_timeout_seconds
+                           _                                 // is_replication
                            ))
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
@@ -483,7 +489,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_act
                            std::vector<int64_t>({1, 2, 3}),  // keys
                            _,                                // tokens
                            Eq(std::vector<std::string>()),   // location_spec_group_names
-                           _                                 // write_timeout_seconds
+                           _,                                // write_timeout_seconds
+                           _                                 // is_replication
                            ))
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 

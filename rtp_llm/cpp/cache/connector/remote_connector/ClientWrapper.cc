@@ -226,14 +226,16 @@ bool ClientWrapper::tryReinit(const std::string& unique_id) {
     return {false, {}};
 
 std::pair<bool, kv_cache_manager::Locations>
-ClientWrapper::match(const std::string&                      unique_id,
-                     const std::string&                      trace_id,
-                     kv_cache_manager::QueryType             query_type,
-                     const std::vector<int64_t>&             keys,
-                     const kv_cache_manager::BlockMask&      block_mask,
-                     const kv_cache_manager::ForwardContext& forward_context) {
+ClientWrapper::match(const std::string&                                    unique_id,
+                     const std::string&                                    trace_id,
+                     kv_cache_manager::QueryType                           query_type,
+                     const std::vector<int64_t>&                           keys,
+                     const kv_cache_manager::BlockMask&                    block_mask,
+                     const kv_cache_manager::ForwardContext&               forward_context,
+                     std::vector<kv_cache_manager::ClientReplicationHint>& out_hints) {
     CHECK_INIT2(unique_id);
-    CALL_CLIENT2(unique_id, MatchLocation, trace_id, query_type, keys, {}, block_mask, forward_context.sw_size, {});
+    CALL_CLIENT2(
+        unique_id, MatchLocation, trace_id, query_type, keys, {}, block_mask, forward_context.sw_size, {}, out_hints);
 }
 
 std::pair<bool, kv_cache_manager::WriteLocation>
@@ -242,9 +244,17 @@ ClientWrapper::getWriteLocation(const std::string&              unique_id,
                                 const std::vector<int64_t>&     keys,
                                 const std::vector<int64_t>&     tokens,
                                 const std::vector<std::string>& location_spec_group_names,
-                                int64_t                         write_timeout_seconds) {
+                                int64_t                         write_timeout_seconds,
+                                bool                            is_replication) {
     CHECK_INIT2(unique_id);
-    CALL_CLIENT2(unique_id, StartWrite, trace_id, keys, tokens, location_spec_group_names, write_timeout_seconds);
+    CALL_CLIENT2(unique_id,
+                 StartWrite,
+                 trace_id,
+                 keys,
+                 tokens,
+                 location_spec_group_names,
+                 write_timeout_seconds,
+                 is_replication);
 }
 
 bool ClientWrapper::finishWrite(const std::string&                 unique_id,

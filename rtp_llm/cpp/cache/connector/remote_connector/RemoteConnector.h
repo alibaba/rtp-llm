@@ -64,6 +64,7 @@ private:
                         const std::shared_ptr<Meta>&                    meta,
                         const std::shared_ptr<RemoteAsyncMatchContext>& async_context);
     void asyncReadTask(const std::shared_ptr<KVCacheResource>&             resource,
+                       const std::shared_ptr<Meta>&                        meta,
                        int                                                 start_read_block_index,
                        int                                                 read_block_num,
                        const std::shared_ptr<RemoteConnectorAsyncContext>& async_context,
@@ -71,6 +72,9 @@ private:
     void asyncWriteTask(const std::shared_ptr<KVCacheResource>&             resource,
                         const std::shared_ptr<Meta>&                        meta,
                         const std::shared_ptr<RemoteConnectorAsyncContext>& async_context);
+    void asyncReplicationWriteTask(const std::shared_ptr<KVCacheResource>&              resource,
+                                   const std::shared_ptr<Meta>&                         meta,
+                                   std::vector<kv_cache_manager::ClientReplicationHint> hints);
     bool genReadRequest(size_t                                   tp_size,
                         const kv_cache_manager::Locations&       locations,
                         size_t                                   block_idx,
@@ -208,6 +212,12 @@ private:
     inline void set_matched_block_count(size_t matched_block_count) {
         matched_block_count_ = matched_block_count;
     }
+    inline void set_replication_hints(std::vector<kv_cache_manager::ClientReplicationHint>&& hints) {
+        replication_hints_ = std::move(hints);
+    }
+    inline const std::vector<kv_cache_manager::ClientReplicationHint>& replication_hints() const {
+        return replication_hints_;
+    }
     inline void setState(RemoteConnectorState::State state) {
         state_.setState(state);
     }
@@ -216,7 +226,8 @@ private:
     size_t                                       matched_block_count_   = 0;
     std::shared_ptr<kv_cache_manager::Locations> locations_ptr_ = std::make_shared<kv_cache_manager::Locations>();
     std::string                                  trace_id_;
-    RemoteConnectorState                         state_;
+    std::vector<kv_cache_manager::ClientReplicationHint> replication_hints_;
+    RemoteConnectorState                                 state_;
 };
 
 class RemoteConnectorAsyncContext: public AsyncContext {

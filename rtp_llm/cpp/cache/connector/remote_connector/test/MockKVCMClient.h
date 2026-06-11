@@ -12,13 +12,14 @@ public:
     ~MockMetaClient() override = default;
     MOCK_METHOD((std::pair<ClientErrorCode, Locations>),
                 MatchLocation,
-                (const std::string&              trace_id,
-                 QueryType                       query_type,
-                 const std::vector<int64_t>&     keys,
-                 const std::vector<int64_t>&     tokens,
-                 const BlockMask&                block_mask,
-                 int32_t                         sw_size,
-                 const std::vector<std::string>& location_spec_names),
+                (const std::string&                  trace_id,
+                 QueryType                           query_type,
+                 const std::vector<int64_t>&         keys,
+                 const std::vector<int64_t>&         tokens,
+                 const BlockMask&                    block_mask,
+                 int32_t                             sw_size,
+                 const std::vector<std::string>&     location_spec_names,
+                 std::vector<ClientReplicationHint>& out_hints),
                 (override));
 
     MOCK_METHOD((std::pair<ClientErrorCode, WriteLocation>),
@@ -27,7 +28,8 @@ public:
                  const std::vector<int64_t>&     keys,
                  const std::vector<int64_t>&     tokens,
                  const std::vector<std::string>& location_spec_group_names,
-                 int64_t                         write_timeout_seconds),
+                 int64_t                         write_timeout_seconds,
+                 bool                            is_replication),
                 (override));
 
     MOCK_METHOD(ClientErrorCode,
@@ -39,6 +41,8 @@ public:
                 (override));
 
     MOCK_METHOD(const std::string&, GetStorageConfig, (), (override, const));
+
+    MOCK_METHOD(std::string, GetCallerNode, (), (override, const));
 
 private:
     // TODO : not test now
