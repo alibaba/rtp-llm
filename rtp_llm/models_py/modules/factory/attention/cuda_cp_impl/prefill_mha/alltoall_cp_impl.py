@@ -12,6 +12,8 @@ from flashinfer.page import append_paged_kv_cache
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, recv, send
 from rtp_llm.models_py.distributed.user_buffers import get_user_buffers_communicator
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
+    cast_kv_for_cache_append,
+    fill_fp8_kv_cache_scale,
     generate_half_kv_indices,
     generate_half_q_indices,
     plan_prefix_paged_attention,
@@ -67,7 +69,9 @@ class PCPAll2AllAttnOp:
         self.prefill_cp_rank = parallelism_config.tp_rank
         self.prefill_cp_size = parallelism_config.tp_size
 
-        self.seq_size_per_block = attn_configs.tokens_per_block
+        self.seq_size_per_block = (
+            attn_configs.kernel_tokens_per_block or attn_configs.tokens_per_block
+        )
 
         self.communication_stream = torch.cuda.Stream(device=self.device)
         self.comm_events = [torch.cuda.Event() for _ in range(self.prefill_cp_size)]
@@ -143,12 +147,17 @@ class PCPAll2AllAttnOp:
         self.half_q_idx = torch.tensor(half_q_indices, device=self.device)
         self.half_kv_idx = torch.tensor(half_kv_indices, device=self.device)
 
+        kv_block_id_host = self.attn_inputs.kv_cache_kernel_block_id_host
+        if kv_block_id_host is None:
+            kv_block_id_host = self.attn_inputs.kv_cache_block_id_host
+        tokens_per_block = self.attn_configs.kernel_tokens_per_block or self.attn_configs.tokens_per_block
+
         params = fill_mla_params(
             self.attn_inputs.prefix_lengths,
             self.attn_inputs.sequence_lengths,
             self.cp_info.prefill_actual_input_lengths_cpu,
-            self.attn_inputs.kv_cache_kernel_block_id_host,
-            self.attn_configs.kernel_tokens_per_block,
+            kv_block_id_host,
+            tokens_per_block,
         )
 
         chunk_lens = prefill_cp_chunk_lengths.tolist()
@@ -246,10 +255,13 @@ class PCPAll2AllAttnOp:
 
                 k = k.reshape(-1, self.num_kv_heads, self.head_dim)
                 v = v.reshape(-1, self.num_kv_heads, self.head_dim)
+                append_k, append_v = cast_kv_for_cache_append(
+                    k, v, kv_cache, self.attn_configs.kv_cache_dtype
+                )
 
                 append_paged_kv_cache(
-                    append_key=k,
-                    append_value=v,
+                    append_key=append_k,
+                    append_value=append_v,
                     batch_indices=self.append_batch_indice,
                     positions=self.all_shuffle_indices[self.prefill_cp_rank],
                     paged_kv_cache=kv_cache_tensor,
@@ -257,6 +269,15 @@ class PCPAll2AllAttnOp:
                     kv_indptr=params.decode_page_indptr_d,
                     kv_last_page_len=params.paged_kv_last_page_len_d,
                     kv_layout="HND",
+                )
+                fill_fp8_kv_cache_scale(
+                    kv_cache,
+                    params,
+                    self.append_batch_indice,
+                    self.all_shuffle_indices[self.prefill_cp_rank],
+                    num_kv_heads=self.num_kv_heads,
+                    page_size=self.seq_size_per_block,
+                    kv_cache_dtype=self.attn_configs.kv_cache_dtype,
                 )
 
                 q_reshaped = q.reshape(-1, self.num_qo_heads, self.head_dim)
@@ -292,11 +313,14 @@ class PCPAll2AllAttnOp:
                 remote_v = remote_v.contiguous().reshape(
                     -1, self.num_kv_heads, self.head_dim
                 )
+                append_remote_k, append_remote_v = cast_kv_for_cache_append(
+                    remote_k, remote_v, kv_cache, self.attn_configs.kv_cache_dtype
+                )
                 # TODO: make write local kvcache async
                 src_rank = (self.prefill_cp_rank - round_id) % self.prefill_cp_size
                 append_paged_kv_cache(
-                    append_key=remote_k,
-                    append_value=remote_v,
+                    append_key=append_remote_k,
+                    append_value=append_remote_v,
                     batch_indices=self.append_batch_indice,
                     positions=self.all_shuffle_indices[src_rank],
                     paged_kv_cache=kv_cache_tensor,
@@ -304,6 +328,15 @@ class PCPAll2AllAttnOp:
                     kv_indptr=params.decode_page_indptr_d,
                     kv_last_page_len=params.paged_kv_last_page_len_d,
                     kv_layout="HND",
+                )
+                fill_fp8_kv_cache_scale(
+                    kv_cache,
+                    params,
+                    self.append_batch_indice,
+                    self.all_shuffle_indices[src_rank],
+                    num_kv_heads=self.num_kv_heads,
+                    page_size=self.seq_size_per_block,
+                    kv_cache_dtype=self.attn_configs.kv_cache_dtype,
                 )
                 if round_id > self.prefill_cp_rank:
                     q_split = (

@@ -22,6 +22,8 @@ from flashinfer.cascade import merge_state
 from flashinfer.page import append_paged_kv_cache
 
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
+    cast_kv_for_cache_append,
+    fill_fp8_kv_cache_scale,
     generate_full_causal_kv_indices,
     generate_q_indices,
     plan_prefix_paged_attention,
@@ -69,7 +71,9 @@ class PCPAllGatherAttnOp:
         self.prefill_cp_rank = parallelism_config.tp_rank
         self.prefill_cp_size = parallelism_config.tp_size
 
-        self.seq_size_per_block = attn_configs.tokens_per_block
+        self.seq_size_per_block = (
+            attn_configs.kernel_tokens_per_block or attn_configs.tokens_per_block
+        )
 
         self.q0_idx = self.q1_idx = None
         self.kv0_idx = self.kv1_idx = None
@@ -118,12 +122,17 @@ class PCPAllGatherAttnOp:
         self.q0_idx = torch.tensor(q0_idx, device=self.device)
         self.q1_idx = torch.tensor(q1_idx, device=self.device)
 
+        kv_block_id_host = self.attn_inputs.kv_cache_kernel_block_id_host
+        if kv_block_id_host is None:
+            kv_block_id_host = self.attn_inputs.kv_cache_block_id_host
+        tokens_per_block = self.attn_configs.kernel_tokens_per_block or self.attn_configs.tokens_per_block
+
         params = fill_mla_params(
             self.attn_inputs.prefix_lengths,
             self.attn_inputs.sequence_lengths,
             self.cp_info.prefill_actual_input_lengths_cpu,
-            self.attn_inputs.kv_cache_kernel_block_id_host,
-            self.attn_configs.kernel_tokens_per_block,
+            kv_block_id_host,
+            tokens_per_block,
         )
 
         self._plan_ragged(qo_indptr)
@@ -194,19 +203,34 @@ class PCPAllGatherAttnOp:
         # TODO: make write local kvcache async
         restore_k = all_keys[self.kv_restore_unpad_indices]
         restore_v = all_values[self.kv_restore_unpad_indices]
+        nnz = restore_k.size(0)
+        batch_indices = params.batch_indice_d.narrow(0, 0, nnz)
+        positions = params.positions_d.narrow(0, 0, nnz)
         kv_cache_tensor = kv_cache.kv_cache_base.view(
             -1, 2, self.num_kv_heads, self.seq_size_per_block, self.head_dim
         )
+        append_k, append_v = cast_kv_for_cache_append(
+            restore_k, restore_v, kv_cache, self.attn_configs.kv_cache_dtype
+        )
         append_paged_kv_cache(
-            append_key=restore_k,
-            append_value=restore_v,
-            batch_indices=params.batch_indice_d,
-            positions=params.positions_d,
+            append_key=append_k,
+            append_value=append_v,
+            batch_indices=batch_indices,
+            positions=positions,
             paged_kv_cache=kv_cache_tensor,
             kv_indices=params.page_indice_d,
             kv_indptr=params.decode_page_indptr_d,
             kv_last_page_len=params.paged_kv_last_page_len_d,
             kv_layout="HND",
+        )
+        fill_fp8_kv_cache_scale(
+            kv_cache,
+            params,
+            batch_indices,
+            positions,
+            num_kv_heads=self.num_kv_heads,
+            page_size=self.seq_size_per_block,
+            kv_cache_dtype=self.attn_configs.kv_cache_dtype,
         )
 
         q0 = torch.index_select(q_reshaped, 0, self.q0_idx).contiguous()

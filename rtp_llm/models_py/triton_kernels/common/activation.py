@@ -807,12 +807,16 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
     BLOCK_N: tl.constexpr,  # group_size (typically 128)
     NUM_STAGE: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
+    ROUND_POW2: tl.constexpr = False,
+    GEMM1_ALPHA: tl.constexpr = 0.0,
+    GEMM1_CLAMP_LIMIT: tl.constexpr = 0.0,
 ):
     """Fused: SiLU-and-mul + per-token-group FP8 quant.
 
     When SCALE_UE8M0 is True, processes 4 groups at a time and writes a packed
     int32 (one byte per group exponent). When False, processes 1 group at a
-    time and writes float32 scale.
+    time and writes float32 scale. When ROUND_POW2 is True (and SCALE_UE8M0 is
+    False), the float32 scale is rounded to the nearest power of two (MXFP8).
     """
     block_id = tl.program_id(axis=0)
     token_id = tl.program_id(axis=1)
@@ -835,15 +839,17 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
             group_idx = base_group_idx + g
             offs_in_d = group_idx * BLOCK_N + tl.arange(0, BLOCK_N)
             mask = offs_in_d < size_n
-            # Match baseline ``FusedSiluAndMul`` + sgl quant: silu(gate_fp32) is
-            # multiplied by up_fp32 fully in fp32, rounded to bf16 (the
-            # FusedSiluAndMul output dtype), and ONLY then quantized to fp8.
             gate = tl.load(in_base + offs_in_d, mask=mask, other=0.0).to(tl.float32)
             up = tl.load(in_base + offs_in_d + size_n, mask=mask, other=0.0).to(
                 tl.float32
             )
-            silu_gate = gate / (1 + tl.exp(-gate))
-            gate_up_bf16 = (silu_gate * up).to(tl.bfloat16)
+            if GEMM1_ALPHA > 0:
+                gate = tl.minimum(gate, GEMM1_CLAMP_LIMIT)
+                up = tl.clamp(up, -GEMM1_CLAMP_LIMIT, GEMM1_CLAMP_LIMIT)
+                gate_up_bf16 = (gate * tl.sigmoid(gate * GEMM1_ALPHA) * (up + 1)).to(tl.bfloat16)
+            else:
+                silu_gate = gate / (1 + tl.exp(-gate))
+                gate_up_bf16 = (silu_gate * up).to(tl.bfloat16)
             gate_up = gate_up_bf16.to(tl.float32)
             # Match sgl_per_token_group_quant_fp8 byte-exact: 1e-10 floor on
             # absmax, IEEE-RNE fp32 div for scale and per-element val/s
@@ -867,14 +873,20 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
         group_idx = block_id
         offs_in_d = group_idx * BLOCK_N + tl.arange(0, BLOCK_N)
         mask = offs_in_d < size_n
-        # See SCALE_UE8M0 branch above for rationale.
         gate = tl.load(in_base + offs_in_d, mask=mask, other=0.0).to(tl.float32)
         up = tl.load(in_base + offs_in_d + size_n, mask=mask, other=0.0).to(tl.float32)
-        silu_gate = gate / (1 + tl.exp(-gate))
-        gate_up_bf16 = (silu_gate * up).to(tl.bfloat16)
+        if GEMM1_ALPHA > 0:
+            gate = tl.minimum(gate, GEMM1_CLAMP_LIMIT)
+            up = tl.clamp(up, -GEMM1_CLAMP_LIMIT, GEMM1_CLAMP_LIMIT)
+            gate_up_bf16 = (gate * tl.sigmoid(gate * GEMM1_ALPHA) * (up + 1)).to(tl.bfloat16)
+        else:
+            silu_gate = gate / (1 + tl.exp(-gate))
+            gate_up_bf16 = (silu_gate * up).to(tl.bfloat16)
         gate_up = gate_up_bf16.to(tl.float32)
         _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-4)
         output_s = _ieee_rn_div_f32(_absmax, fp8_max)
+        if ROUND_POW2:
+            output_s = tl.exp2(tl.ceil(tl.log2(tl.abs(output_s))))
         output_q = tl.clamp(
             _ieee_rn_div_f32(gate_up, tl.full(gate_up.shape, output_s, tl.float32)),
             fp8_min,
@@ -896,17 +908,30 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
     input: torch.Tensor,
     quant_group_size: int = 128,
     scale_ue8m0: bool = True,
+    round_to_pow2: bool = False,
+    gemm1_alpha: float = 0.0,
+    gemm1_clamp_limit: float = 0.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Dense 2-D fused SiLU-and-mul + per-token-group FP8 quant.
+    """Dense 2-D fused activation + per-token-group FP8 quant.
 
-    Falls back to unfused path (C++ silu_and_mul + sgl quant) for large T
-    where the fused Triton kernel is slower than baseline.
+    Supports both standard SiLU-and-mul (``gemm1_alpha == 0``) and SwiGLU-OAI
+    (``gemm1_alpha > 0``): ``gate * sigmoid(gate*alpha) * (up+1)`` with
+    one-sided gate clamp and two-sided up clamp at ``gemm1_clamp_limit``.
+
+    Falls back to unfused path for large T where the fused Triton kernel is
+    slower than baseline.
 
     Args:
         input:        [T, 2*H_out]  bf16/fp16, contiguous, layout `[gate | up]`.
         quant_group_size: must divide H_out, defaults to 128.
         scale_ue8m0:  True for Blackwell-style packed int32 UE8M0 scales,
                       False for H20-style fp32 scales.
+        round_to_pow2: When True and scale_ue8m0 is False, round scales to the
+                      nearest power of two (MXFP8 1×32 format). The returned
+                      scale is a row-major fp32 ``[T, H_out // quant_group_size]``
+                      tensor matching :func:`mxfp8_quant_act`'s contract.
+        gemm1_alpha:  SwiGLU-OAI alpha (>0 enables OAI math, 0 for standard SiLU).
+        gemm1_clamp_limit: SwiGLU-OAI clamp limit (used when gemm1_alpha > 0).
 
     Returns:
         (fp8_output, output_scale) tuple.
@@ -922,15 +947,23 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
     assert size_n % quant_group_size == 0
     num_groups = size_n // quant_group_size
 
+    mxfp8_mode = round_to_pow2 and not scale_ue8m0
+
     T = input.shape[0]
 
     if T >= _SILU_MUL_FP8_QUANT_M_THRESHOLD:
+        if gemm1_alpha > 0:
+            from rtp_llm.models_py.triton_kernels.common.swiglu_oai import swiglu_oai_torch
+            activated = swiglu_oai_torch(input, gemm1_alpha, gemm1_clamp_limit, gate_first=True)
+        else:
+            from rtp_llm.models_py.modules.base import FusedSiluAndMul
+            activated = FusedSiluAndMul()(input)
+        if mxfp8_mode:
+            from rtp_llm.models_py.kernels.cuda.mxfp8_ops import mxfp8_quant_act
+            return mxfp8_quant_act(activated)
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
             sgl_per_token_group_quant_fp8,
         )
-        from rtp_llm.models_py.modules.base import FusedSiluAndMul
-
-        activated = FusedSiluAndMul()(input)
         return sgl_per_token_group_quant_fp8(
             activated,
             group_size=quant_group_size,
@@ -940,14 +973,19 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
         )
 
     output = torch.empty((T, size_n), dtype=torch.float8_e4m3fn, device=input.device)
-    output_scale = create_per_token_group_quant_fp8_output_scale(
-        x_shape=(T, size_n),
-        device=input.device,
-        group_size=quant_group_size,
-        column_major_scales=True,
-        scale_tma_aligned=True,
-        scale_ue8m0=scale_ue8m0,
-    )
+    if mxfp8_mode:
+        output_scale = torch.empty(
+            (T, num_groups), dtype=torch.float32, device=input.device,
+        )
+    else:
+        output_scale = create_per_token_group_quant_fp8_output_scale(
+            x_shape=(T, size_n),
+            device=input.device,
+            group_size=quant_group_size,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=scale_ue8m0,
+        )
 
     if T == 0:
         return output, output_scale
@@ -982,6 +1020,9 @@ def silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(
         BLOCK_N=BLOCK_N,
         NUM_STAGE=NUM_STAGE,
         SCALE_UE8M0=scale_ue8m0,
+        ROUND_POW2=mxfp8_mode,
+        GEMM1_ALPHA=gemm1_alpha,
+        GEMM1_CLAMP_LIMIT=gemm1_clamp_limit,
         num_warps=1,
     )
     return output, output_scale

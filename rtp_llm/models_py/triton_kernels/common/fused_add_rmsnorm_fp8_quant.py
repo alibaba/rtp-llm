@@ -3,11 +3,12 @@
 Combines three operations into one kernel launch:
 1. residual += hidden_states  (in-place update)
 2. normed = rmsnorm(residual, weight, eps)
-3. (fp8_out, scale) = per_token_group_fp8_quant(normed, group_size=128)
+3. (fp8_out, scale) = per_token_group_fp8_quant(normed, group_size)
 
-Two scale layouts:
+Three scale layouts:
   - SCALE_UE8M0=True  : int32 packed (4 UE8M0 exponents per int32), Blackwell
-  - SCALE_UE8M0=False : float32 unpacked, H20
+  - SCALE_UE8M0=False, ROUND_POW2=False : float32 unpacked, H20
+  - SCALE_UE8M0=False, ROUND_POW2=True  : float32 power-of-two (MXFP8 1×32)
 
 Single-pass design: ``BLOCK_N = next_power_of_2(H)`` so the entire row fits in
 one Triton tile. Non-power-of-2 H is handled by masking loads/stores. For
@@ -83,6 +84,7 @@ def _fused_add_rmsnorm_fp8_quant_singlepass_kernel(
     BLOCK_N: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
+    ROUND_POW2: tl.constexpr = False,
 ):
     """Single-pass: load whole row → r_new in registers → reuse for normalize+quant.
 
@@ -166,6 +168,8 @@ def _fused_add_rmsnorm_fp8_quant_singlepass_kernel(
         )
     else:
         s = absmax / fp8_max
+        if ROUND_POW2:
+            s, _ = _ue8m0_pow2_round(s)
         s_bcast = tl.reshape(s, (num_groups, 1))
         s_full = tl.broadcast_to(s_bcast, (num_groups, GROUP_SIZE))
         inv_s = 1.0 / s_full
@@ -206,6 +210,7 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
     BLOCK_N: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
+    ROUND_POW2: tl.constexpr = False,
 ):
     """Single-pass dual-output: also stores bf16 normed alongside fp8.
 
@@ -297,6 +302,8 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
         )
     else:
         s = absmax / fp8_max
+        if ROUND_POW2:
+            s, _ = _ue8m0_pow2_round(s)
         s_bcast = tl.reshape(s, (num_groups, 1))
         s_full = tl.broadcast_to(s_bcast, (num_groups, GROUP_SIZE))
         inv_s = 1.0 / s_full
@@ -331,14 +338,19 @@ def _baseline_add_rmsnorm_fp8_quant(
     eps: float,
     group_size: int,
     scale_ue8m0: bool,
+    round_to_pow2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fallback: baseline CUDA kernels for H > MAX_INREG_H."""
     import flashinfer.norm
 
-    from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
-
     residual.add_(hidden_states)
     normed = flashinfer.norm.rmsnorm(residual, weight, eps=eps)
+    if round_to_pow2 and not scale_ue8m0:
+        from rtp_llm.models_py.kernels.cuda.mxfp8_ops import mxfp8_quant_act
+
+        return mxfp8_quant_act(normed)
+    from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+
     return sgl_per_token_group_quant_fp8(
         normed,
         group_size=group_size,
@@ -356,14 +368,20 @@ def _baseline_add_rmsnorm_fp8_quant_with_bf16_output(
     eps: float,
     group_size: int,
     scale_ue8m0: bool,
+    round_to_pow2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fallback: baseline CUDA kernels for H > MAX_INREG_H (dual output)."""
     import flashinfer.norm
 
-    from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
-
     residual.add_(hidden_states)
     bf16_out = flashinfer.norm.rmsnorm(residual, weight, eps=eps)
+    if round_to_pow2 and not scale_ue8m0:
+        from rtp_llm.models_py.kernels.cuda.mxfp8_ops import mxfp8_quant_act
+
+        fp8_out, scale = mxfp8_quant_act(bf16_out)
+        return bf16_out, fp8_out, scale
+    from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+
     fp8_out, scale = sgl_per_token_group_quant_fp8(
         bf16_out,
         group_size=group_size,
@@ -382,8 +400,15 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
     eps: float = 1e-6,
     group_size: int = 128,
     scale_ue8m0: bool = False,
+    round_to_pow2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Same as ``fused_add_rmsnorm_fp8_quant`` but also returns bf16 normed."""
+    """Same as ``fused_add_rmsnorm_fp8_quant`` but also returns bf16 normed.
+
+    When ``round_to_pow2=True`` and ``scale_ue8m0=False``, the scale is
+    rounded to the nearest power of two (MXFP8 1×32 format). The returned
+    scale is a row-major fp32 ``[T, H // group_size]`` tensor matching
+    :func:`mxfp8_quant_act`'s contract.
+    """
     assert hidden_states.dim() == 2, "hidden_states must be 2-D"
     assert residual.shape == hidden_states.shape
     assert weight.dim() == 1 and weight.shape[0] == hidden_states.shape[1]
@@ -395,21 +420,30 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
     block_n = triton.next_power_of_2(H)
     if block_n > MAX_INREG_H:
         return _baseline_add_rmsnorm_fp8_quant_with_bf16_output(
-            hidden_states, residual, weight, eps, group_size, scale_ue8m0
+            hidden_states, residual, weight, eps, group_size, scale_ue8m0,
+            round_to_pow2=round_to_pow2,
         )
+
+    mxfp8_mode = round_to_pow2 and not scale_ue8m0
 
     bf16_out = torch.empty((T, H), dtype=torch.bfloat16, device=hidden_states.device)
     fp8_out = torch.empty(
         (T, H), dtype=torch.float8_e4m3fn, device=hidden_states.device
     )
-    scale_out = create_per_token_group_quant_fp8_output_scale(
-        x_shape=(T, H),
-        device=hidden_states.device,
-        group_size=group_size,
-        column_major_scales=True,
-        scale_tma_aligned=True,
-        scale_ue8m0=scale_ue8m0,
-    )
+    if mxfp8_mode:
+        num_groups = H // group_size
+        scale_out = torch.empty(
+            (T, num_groups), dtype=torch.float32, device=hidden_states.device,
+        )
+    else:
+        scale_out = create_per_token_group_quant_fp8_output_scale(
+            x_shape=(T, H),
+            device=hidden_states.device,
+            group_size=group_size,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=scale_ue8m0,
+        )
     if T == 0:
         return bf16_out, fp8_out, scale_out
 
@@ -438,6 +472,7 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
         BLOCK_N=block_n,
         GROUP_SIZE=group_size,
         SCALE_UE8M0=scale_ue8m0,
+        ROUND_POW2=round_to_pow2 and not scale_ue8m0,
         num_warps=_select_num_warps(H),
     )
     return bf16_out, fp8_out, scale_out
@@ -450,11 +485,17 @@ def fused_add_rmsnorm_fp8_quant(
     eps: float = 1e-6,
     group_size: int = 128,
     scale_ue8m0: bool = False,
+    round_to_pow2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused add-residual + RMSNorm + per-token-group FP8 quant.
 
     Modifies ``residual`` in-place (``residual += hidden_states``).
     Returns ``(fp8_output, scale)`` matching DeepGEMM's expected layout.
+
+    When ``round_to_pow2=True`` and ``scale_ue8m0=False``, the scale is
+    rounded to the nearest power of two (MXFP8 1×32 format). The returned
+    scale is a row-major fp32 ``[T, H // group_size]`` tensor matching
+    :func:`mxfp8_quant_act`'s contract.
     """
     assert hidden_states.dim() == 2, "hidden_states must be 2-D"
     assert residual.shape == hidden_states.shape
@@ -467,20 +508,29 @@ def fused_add_rmsnorm_fp8_quant(
     block_n = triton.next_power_of_2(H)
     if block_n > MAX_INREG_H:
         return _baseline_add_rmsnorm_fp8_quant(
-            hidden_states, residual, weight, eps, group_size, scale_ue8m0
+            hidden_states, residual, weight, eps, group_size, scale_ue8m0,
+            round_to_pow2=round_to_pow2,
         )
+
+    mxfp8_mode = round_to_pow2 and not scale_ue8m0
 
     fp8_out = torch.empty(
         (T, H), dtype=torch.float8_e4m3fn, device=hidden_states.device
     )
-    scale_out = create_per_token_group_quant_fp8_output_scale(
-        x_shape=(T, H),
-        device=hidden_states.device,
-        group_size=group_size,
-        column_major_scales=True,
-        scale_tma_aligned=True,
-        scale_ue8m0=scale_ue8m0,
-    )
+    if mxfp8_mode:
+        num_groups = H // group_size
+        scale_out = torch.empty(
+            (T, num_groups), dtype=torch.float32, device=hidden_states.device,
+        )
+    else:
+        scale_out = create_per_token_group_quant_fp8_output_scale(
+            x_shape=(T, H),
+            device=hidden_states.device,
+            group_size=group_size,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=scale_ue8m0,
+        )
     if T == 0:
         return fp8_out, scale_out
 
@@ -507,6 +557,7 @@ def fused_add_rmsnorm_fp8_quant(
         BLOCK_N=block_n,
         GROUP_SIZE=group_size,
         SCALE_UE8M0=scale_ue8m0,
+        ROUND_POW2=round_to_pow2 and not scale_ue8m0,
         num_warps=_select_num_warps(H),
     )
     return fp8_out, scale_out

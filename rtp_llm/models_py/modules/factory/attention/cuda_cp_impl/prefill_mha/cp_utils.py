@@ -1,6 +1,58 @@
 import torch
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper
 
+from rtp_llm.ops import KvCacheDataType
+
+
+def cast_kv_for_cache_append(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_cache,
+    kv_cache_dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Cast K/V to the paged cache dtype before FlashInfer append (FP8 only)."""
+    if kv_cache_dtype != KvCacheDataType.FP8:
+        return key, value
+    cache_dtype = kv_cache.kv_cache_base.dtype
+    return key.to(dtype=cache_dtype), value.to(dtype=cache_dtype)
+
+
+def fill_fp8_kv_cache_scale(
+    kv_cache,
+    params,
+    batch_indices: torch.Tensor,
+    positions: torch.Tensor,
+    *,
+    num_kv_heads: int,
+    page_size: int,
+    kv_cache_dtype,
+) -> None:
+    """Set FP8 KV-cache scale=1.0 for slots written by FlashInfer append.
+
+    The fused RoPE+KV writer normally handles this; CP path writes through
+    FlashInfer instead and would leave scales uninitialized.
+    """
+    if kv_cache_dtype != KvCacheDataType.FP8:
+        return
+
+    scale_base = getattr(kv_cache, "kv_scale_base", None)
+    if scale_base is None or scale_base.numel() == 0 or positions.numel() == 0:
+        return
+
+    batch_indices_l = batch_indices.to(dtype=torch.long)
+    positions_l = positions.to(dtype=torch.long)
+    page_offsets = (
+        params.decode_page_indptr_d[batch_indices_l]
+        + torch.div(positions_l, page_size, rounding_mode="floor")
+    )
+    block_ids = params.page_indice_d[page_offsets.to(dtype=torch.long)].to(
+        dtype=torch.long
+    )
+    local_pos = torch.remainder(positions_l, page_size)
+
+    scale_view = scale_base.view(-1, 2, num_kv_heads, page_size)
+    scale_view[block_ids, :, :, local_pos] = 1.0
+
 
 def plan_prefix_paged_attention(
     wrapper: BatchPrefillWithPagedKVCacheWrapper,
