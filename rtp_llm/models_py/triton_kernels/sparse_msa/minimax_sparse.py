@@ -8,8 +8,18 @@ from .common.index import topk_index_reduce
 from .decode.flash_with_topk_idx import flash_decode_with_topk_idx
 from .decode.topk_sparse import flash_decode_with_gqa_share_sparse
 from .prefill.flash_with_topk_idx import flash_prefill_with_topk_index
-from .prefill.topk_bt_fused import flash_prefill_with_fused_topk_index
+from .prefill.topk_bt_fused import (
+    flash_prefill_with_fused_topk_index,
+    flash_prefill_with_trtllm_gen,
+)
 from .prefill.topk_sparse import flash_prefill_with_gqa_share_sparse
+
+
+# trtllm-gen sparse-decode kernel crashes with CUDA_ERROR_INVALID_VALUE in
+# fmhaKernels.cuh:328 when q_len > this threshold (observed: 8192 OK, 16384
+# FAIL on L20D). CP4 splits the prompt 4-way so q_len/rank <= 8192 is the
+# normal case; longer per-rank chunks fall back to the triton path.
+_TRTLLM_GEN_MAX_QLEN = 8192
 
 
 def minimax_sparse_prefill(
@@ -37,16 +47,50 @@ def minimax_sparse_prefill(
     idx_sm_scale: Optional[float] = None,
     score_type: str = "max",
     disable_index_value: bool = False,
+    workspace: Optional[torch.Tensor] = None,
 ):
     # All seqlen is less than topk, use full attention
     # Step 1: Flash attention with topk index (using index head)
     num_idx_heads = idx_q.shape[1]
     num_kv_heads = k_cache.shape[1]
     idx_group_size = num_idx_heads // num_kv_heads
-    # Use the fused topk_bt_fused.py path under the M3 production assumptions
-    # (idx_group_size == 1, disable_index_value, no idx_sink). Other shapes
-    # fall back to the legacy 3-stage path which still owns idx_group_size > 1
-    # via topk_index_reduce and the idx_value compute.
+
+    # Fastest path: mega topk-to-block-tables + trtllm-gen sparse decode.
+    # Only when caller supplied a workspace AND shape is in trtllm-gen's safe
+    # range. Both the fused-topk_idx path and the legacy 3-stage path stay as
+    # fallbacks: idx_group_size > 1 still routes there via topk_index_reduce,
+    # and so do CP-prefill segments longer than 8192 tokens / rank.
+    use_trtllm = (
+        workspace is not None
+        and idx_group_size == 1
+        and disable_index_value
+        and idx_sink is None
+        and sink is None
+        and max_seqlen_q <= _TRTLLM_GEN_MAX_QLEN
+        # topk_bt_fused emits page id = pid_h * num_pages + block_idx without a
+        # per-segment offset, so all segments must share one contiguous KV
+        # cache slice. Single-request CP prefill (the production case)
+        # satisfies this; multi-request batching does not.
+        and (cu_seqlens.numel() - 1) <= 2
+    )
+    if use_trtllm:
+        sm_scale_v = sm_scale if sm_scale is not None else q.shape[-1] ** -0.5
+        o = flash_prefill_with_trtllm_gen(
+            q=q, k_cache=k_cache, v_cache=v_cache,
+            idx_q=idx_q, idx_k_cache=idx_k_cache,
+            req_to_token=req_to_token, slot_ids=slot_ids,
+            cu_seqlens=cu_seqlens, seq_lens=seq_lens, prefix_lens=prefix_lens,
+            max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
+            block_size_k=block_size_k, topk=topk,
+            init_blocks=init_blocks, local_blocks=local_blocks,
+            sm_scale=sm_scale_v, workspace=workspace,
+            score_type=score_type,
+        )
+        return None, o
+
+    # Slower path: fused topk_bt_fused step 1+2 emitting topk_idx + legacy
+    # triton step 3 sparse attention. Avoids the second kernel launch in the
+    # original 3-stage flow but keeps the triton sparse_fwd kernel.
     use_fused = (
         idx_group_size == 1
         and disable_index_value

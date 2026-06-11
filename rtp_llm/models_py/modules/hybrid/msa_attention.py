@@ -78,6 +78,19 @@ def _gemma_rmsnorm_per_head(
 class MSAAttention(nn.Module):
     """MiniMax-M3 sparse attention for a single sparse layer."""
 
+    # Class-level workspace shared across all sparse layers (trtllm-gen needs
+    # a 256 MB scratch buffer; one per device is enough). Lazily allocated on
+    # the first prefill that takes the trtllm-gen fast path.
+    _trtllm_workspace: Dict[torch.device, torch.Tensor] = {}
+
+    @classmethod
+    def _get_trtllm_workspace(cls, device: torch.device) -> torch.Tensor:
+        ws = cls._trtllm_workspace.get(device)
+        if ws is None:
+            ws = torch.zeros(256 * 1024 * 1024, dtype=torch.uint8, device=device)
+            cls._trtllm_workspace[device] = ws
+        return ws
+
     def __init__(
         self,
         attn_config: AttentionConfigs,
@@ -590,8 +603,9 @@ class MSAAttention(nn.Module):
         max_seqlen_q = max(int(x) for x in segment_lengths)
         max_seqlen_k = int(kv_lens_cpu.max().item())
 
-        # Q is already in rank-local zigzag order. The Triton kernel stores O
-        # by cu_seqlens offsets, so no output restore/all-gather is needed here.
+        # Q is already in rank-local zigzag order. The Triton/trtllm-gen
+        # kernel stores O by cu_seqlens offsets, so no output restore /
+        # all-gather is needed here.
         _idx_o, o = minimax_sparse_prefill(
             q=q, k_cache=self.k_cache, v_cache=self.v_cache, sink=None,
             idx_q=idx_q, idx_k_cache=self.idx_k_cache, idx_v_cache=None,
@@ -603,6 +617,7 @@ class MSAAttention(nn.Module):
             topk=self.topk_blocks, init_blocks=self.init_blocks,
             local_blocks=self.local_blocks, score_type=self.score_type,
             disable_index_value=self.disable_index_value,
+            workspace=MSAAttention._get_trtllm_workspace(device),
         )
 
         output = self.o_proj(o.reshape(local_tokens, -1).contiguous())
@@ -743,6 +758,7 @@ class MSAAttention(nn.Module):
                 local_blocks=self.local_blocks,
                 score_type=self.score_type,
                 disable_index_value=self.disable_index_value,
+                workspace=MSAAttention._get_trtllm_workspace(device),
             )
         else:
             seq_lens = kv_lens.to(torch.int32)

@@ -253,6 +253,110 @@ def flash_prefill_topk_to_block_tables(
 
 
 @torch.no_grad()
+def flash_prefill_with_trtllm_gen(
+    q: torch.Tensor,                # [total_q, num_q_heads, head_dim] bf16
+    k_cache: torch.Tensor,          # [max_slots, num_kv_heads, head_dim] FLAT
+    v_cache: torch.Tensor,          # [max_slots, num_kv_heads, head_dim] FLAT
+    idx_q: torch.Tensor,            # [total_q, num_idx_heads, idx_head_dim]
+    idx_k_cache: torch.Tensor,      # [max_slots, 1, idx_head_dim]
+    req_to_token: torch.Tensor,
+    slot_ids: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    block_size_k: int,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+    sm_scale: float,
+    workspace: torch.Tensor,
+    score_type: str = "max",
+) -> torch.Tensor:
+    """Fast sparse prefill: mega topk + trtllm-gen sparse-decode attention.
+
+    Replaces the legacy 3-stage all-triton pipeline (flash_prefill_with_topk_index
+    + flash_prefill_with_gqa_share_sparse). Verified ~1.76x faster than the
+    triton ``_gqa_share_sparse_fwd_kernel`` at q_len=8192 on L20D (see
+    m3_test/test_mega_pipeline.py).
+
+    Constraints (caller must check, otherwise fall back to legacy):
+      * idx_group_size == 1  (num_idx_heads == num_kv_heads)
+      * max_seqlen_q <= 8192 (trtllm-gen kernel crashes with INVALID_VALUE on
+        L20D for q_len in [16384, 32768])
+      * The fused topk-to-block-table kernel assumes a single contiguous KV
+        cache slice (page id = pid_h * num_pages + block_idx with no per-batch
+        offset). CP prefill on a single request satisfies this; multi-request
+        batching would need a kernel extension.
+    """
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache
+
+    total_q, num_q_heads, head_dim = q.shape
+    max_slots, num_kv_heads, _ = k_cache.shape
+    gqa = num_q_heads // num_kv_heads
+    num_pages = (max_seqlen_k + block_size_k - 1) // block_size_k
+
+    # Step 1+2: fused QK score + bitonic topk + trtllm-style block_table emit.
+    bt, sl = flash_prefill_topk_to_block_tables(
+        idx_q=idx_q, idx_k_cache=idx_k_cache,
+        req_to_token=req_to_token, slot_ids=slot_ids,
+        cu_seqlens=cu_seqlens, seq_lens=seq_lens, prefix_lens=prefix_lens,
+        max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
+        block_size_k=block_size_k, topk=topk, num_pages=num_pages,
+        init_blocks=init_blocks, local_blocks=local_blocks,
+        score_type=score_type,
+    )
+
+    # Permute flat MSA side cache to trtllm's paged layout:
+    #   flat  [num_pages * block_size_k, num_kv_heads, head_dim]
+    # -> paged [num_kv_heads * num_pages, 1, block_size_k, head_dim]
+    # The trailing unsqueeze(1) is trtllm's blocks-per-token dim (= 1 here).
+    # `.contiguous()` after permute is one DtoD memcpy ~16us per cache per
+    # layer at 8k tokens — far less than the legacy step3's 1.4ms savings.
+    paged_slots = num_pages * block_size_k
+
+    def _to_paged(cache: torch.Tensor) -> torch.Tensor:
+        return (
+            cache[:paged_slots]
+            .view(num_pages, block_size_k, num_kv_heads, head_dim)
+            .permute(2, 0, 1, 3)
+            .contiguous()
+            .view(num_kv_heads * num_pages, block_size_k, head_dim)
+            .unsqueeze(1)
+        )
+
+    k_paged = _to_paged(k_cache)
+    v_paged = _to_paged(v_cache)
+
+    # Pack Q for trtllm-gen's GQA layout:
+    #   [total_q, num_q_heads, head_dim] -> [total_q * num_kv_heads, gqa, head_dim]
+    q_packed = (
+        q.view(total_q, num_kv_heads, gqa, head_dim)
+        .reshape(total_q * num_kv_heads, gqa, head_dim)
+        .contiguous()
+    )
+
+    out = trtllm_batch_decode_with_kv_cache(
+        query=q_packed,
+        kv_cache=(k_paged, v_paged),
+        workspace_buffer=workspace,
+        block_tables=bt,
+        seq_lens=sl,
+        max_seq_len=max_seqlen_q,
+        bmm1_scale=sm_scale,
+        bmm2_scale=1.0,
+        backend="trtllm-gen",
+        out_dtype=torch.bfloat16,
+    )
+
+    return (
+        out.view(total_q, num_kv_heads, gqa, head_dim)
+        .reshape(total_q, num_q_heads, head_dim)
+    )
+
+
+@torch.no_grad()
 def flash_prefill_with_fused_topk_index(
     idx_q: torch.Tensor,  # [total_q, num_idx_heads, idx_head_dim]
     idx_k_cache: torch.Tensor,  # [max_slots, 1, idx_head_dim]
