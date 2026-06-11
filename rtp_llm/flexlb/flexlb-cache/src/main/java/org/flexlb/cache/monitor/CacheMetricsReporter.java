@@ -180,7 +180,7 @@ public class CacheMetricsReporter {
     }
 
     /**
-     * Report cumulative and rolling-window theory cache-hit counters.
+     * Report cumulative theory cache-hit token counters.
      */
     public void reportTheoryCacheHitMetrics(CacheHitTheoryStats.Snapshot snapshot) {
         if (snapshot == null) {
@@ -190,21 +190,6 @@ public class CacheMetricsReporter {
                 snapshot.getAllHitCount(),
                 snapshot.getAllTotalCount(),
                 snapshot.getAllHitRatio());
-        reportTheoryWindow(snapshot.getWindow1m());
-        reportTheoryWindow(snapshot.getWindow5m());
-        reportTheoryWindow(snapshot.getWindow10m());
-        reportTheoryWindow(snapshot.getWindow15m());
-    }
-
-    private void reportTheoryWindow(CacheHitTheoryStats.WindowSnapshot window) {
-        if (window == null) {
-            return;
-        }
-        reportTheoryWindow(window.getLabel(),
-                window.getWindowMs(),
-                window.getHitCount(),
-                window.getTotalCount(),
-                window.getHitRatio());
     }
 
     private void reportTheoryWindow(String window, long windowMs, long hitCount, long totalCount, double hitRatio) {
