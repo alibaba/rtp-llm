@@ -426,6 +426,14 @@ class GenericMoeDecoderLayer(nn.Module):
                 if isinstance(_proj, CudaFp8GEMMLinear):
                     self._fuse_input_norm_quant = True
                     self._fuse_input_scale_ue8m0 = _proj.scale_ue8m0
+            elif self._is_msa_attn:
+                # MSA's qkv_proj is built by LinearFactory and is FP8 under M3
+                # quant config; the idx_q/idx_k branches stay bf16 and consume
+                # the bf16_normed output from the fused kernel.
+                _qkv = getattr(self.self_attn, "qkv_proj", None)
+                if isinstance(_qkv, CudaFp8GEMMLinear):
+                    self._fuse_input_norm_quant = True
+                    self._fuse_input_scale_ue8m0 = _qkv.scale_ue8m0
 
         # Fuse post_attention_layernorm + fp8_quant for DenseMLP
         self._fuse_post_norm_quant = (
@@ -470,15 +478,40 @@ class GenericMoeDecoderLayer(nn.Module):
         attn_inputs: Optional[Any] = None,
     ) -> DecodeLayerOutput:
         if self._is_msa_attn:
-            # Sparse MSA path: bypass the shared FMHA impl and the
-            # norm+quant fusion; the MSA module consumes PyAttentionInputs
-            # directly and runs its own index branch + Triton sparse kernels.
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
-            hidden_states = self.self_attn(
-                hidden_states=hidden_states,
-                attn_inputs=attn_inputs,
-                kv_cache=kv_cache,
-            )
+            # Sparse MSA path: bypass the shared FMHA impl; the MSA module
+            # consumes PyAttentionInputs directly and runs its own index
+            # branch + Triton sparse kernels. When ``_fuse_input_norm_quant``
+            # is on we still get the fused residual-add+rmsnorm+fp8-quant,
+            # but the bf16 normed output feeds the index F.linear branches
+            # while the fp8 output feeds the main qkv_proj — same trick as
+            # the MoE shared-expert path uses for its dual-output fusion.
+            if self._fuse_input_norm_quant and hidden_states.dim() == 2:
+                bf16_hs, fp8_hs, scale = (
+                    fused_add_rmsnorm_fp8_quant_with_bf16_output(
+                        hidden_states,
+                        residual,
+                        self.input_layernorm.weight.data,
+                        self.input_layernorm.variance_epsilon,
+                        group_size=128,
+                        scale_ue8m0=self._fuse_input_scale_ue8m0,
+                    )
+                )
+                hidden_states = self.self_attn(
+                    hidden_states=bf16_hs,
+                    attn_inputs=attn_inputs,
+                    kv_cache=kv_cache,
+                    x_fp8=fp8_hs,
+                    x_scale=scale,
+                )
+            else:
+                hidden_states, residual = self.input_layernorm(
+                    hidden_states, residual
+                )
+                hidden_states = self.self_attn(
+                    hidden_states=hidden_states,
+                    attn_inputs=attn_inputs,
+                    kv_cache=kv_cache,
+                )
         elif self._fuse_input_norm_quant and hidden_states.dim() == 2:
             bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
                 hidden_states,
