@@ -103,6 +103,16 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
         self.assertTrue(visitor._page_rr_route_cache_keys)
         self.assertEqual(visitor._page_rr_cp_size, 4)
 
+    def test_cache_key_block_size_tracks_routed_key_granularity(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.seq_size_per_block = 256
+        visitor._page_rr_route_cache_keys = False
+        visitor._page_rr_cp_size = 4
+        self.assertEqual(visitor._cache_key_block_size(), 256)
+
+        visitor._page_rr_route_cache_keys = True
+        self.assertEqual(visitor._cache_key_block_size(), 1024)
+
 
 class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
     async def test_page_rr_canonical_keys_are_sent_to_flexlb_client(self):
@@ -116,9 +126,11 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 
         class _MasterClient:
             async def get_backend_role_addrs(
-                self, *, block_cache_keys, input, request_id
+                self, *, block_cache_keys, cache_key_block_size, input, request_id
             ):
-                calls.append((block_cache_keys, input, request_id))
+                calls.append(
+                    (block_cache_keys, cache_key_block_size, input, request_id)
+                )
                 return FlexlbResponse.ok(["prefill-route"])
 
         visitor.master_client = _MasterClient()
@@ -131,7 +143,8 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
             result = await visitor.get_master_route_addrs(generate_input)
 
         self.assertIsNone(result)
-        self.assertEqual(calls, [([13, 17, 21], generate_input, 123)])
+        # cache_key_block_size follows the routed-key granularity: 128 * cp_size 4.
+        self.assertEqual(calls, [([13, 17, 21], 512, generate_input, 123)])
         self.assertEqual(generate_input.generate_config.role_addrs, ["prefill-route"])
 
     async def test_route_ips_preserves_master_route_error_code_on_route_error(self):
