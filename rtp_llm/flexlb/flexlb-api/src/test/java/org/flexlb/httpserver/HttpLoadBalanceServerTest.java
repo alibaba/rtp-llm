@@ -13,6 +13,8 @@ import org.flexlb.service.RouteService;
 import org.flexlb.service.address.FlexlbInstanceAddressService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.service.optimizer.OnlineOptimizerClient;
+import org.flexlb.service.optimizer.OnlineOptimizerHooker;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -64,6 +66,10 @@ class HttpLoadBalanceServerTest {
     private CacheAwareService cacheAwareService;
     @Mock
     private FlexlbInstanceAddressService instanceAddressService;
+    @Mock
+    private OnlineOptimizerHooker onlineOptimizerHooker;
+    @Mock
+    private OnlineOptimizerClient onlineOptimizerClient;
 
     private WebTestClient webTestClient;
 
@@ -78,7 +84,8 @@ class HttpLoadBalanceServerTest {
                 new ActiveRequestCounter(),
                 requestBlockHashService,
                 cacheAwareService,
-                instanceAddressService);
+                instanceAddressService,
+                onlineOptimizerHooker);
         webTestClient = WebTestClient.bindToRouterFunction(
                 server.loadBalancePrefill()).build();
     }
@@ -147,6 +154,34 @@ class HttpLoadBalanceServerTest {
         assertTrue(routeContextCaptor.getValue()
                 .getRequestBodyReadAndDeserializeTimeUs() >= 0);
         verify(engineHealthReporter).reportRequestPayload(routeContextCaptor.getValue());
+    }
+
+    @Test
+    void reportsStringRequestIdAndPreparedBlockKeysToOnlineOptimizer() {
+        List<Long> blockCacheKeys = List.of(10L, 20L, 30L);
+        when(requestBlockHashService.prepareBlockCacheKeys(any()))
+                .thenAnswer(invocation -> {
+                    BalanceContext ctx = invocation.getArgument(0);
+                    ctx.getRequest().setBlockCacheKeys(blockCacheKeys);
+                    return Mono.empty();
+                });
+        Response response = new Response();
+        response.setSuccess(true);
+        when(routeService.route(any())).thenReturn(Mono.just(response));
+        when(onlineOptimizerHooker.getClient()).thenReturn(onlineOptimizerClient);
+
+        String requestId = "request-optimizer-1";
+        webTestClient.post()
+                .uri("/rtp_llm/schedule")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of(
+                        "request_id", requestId,
+                        "seq_len", 4,
+                        "input_ids", new int[]{1, 2, 3, 4}))
+                .exchange()
+                .expectStatus().isOk();
+
+        verify(onlineOptimizerClient).traceQuery(requestId, blockCacheKeys, 4L);
     }
 
     @Test

@@ -31,10 +31,11 @@ class ExpirationCleanerTest {
 
         workerStatus.getLocalTaskMap().get("request-1")
                 .setLastActiveTimeUs(System.nanoTime() / 1000 - TimeUnit.SECONDS.toMicros(299));
+        long runningQueueTimeBeforeClean = workerStatus.getRunningQueueTime().get();
         cleaner.doClean(workerStatusMap(workerStatus), RoleType.PREFILL);
 
         assertTrue(workerStatus.getLocalTaskMap().containsKey("request-1"));
-        assertEquals(860, workerStatus.getRunningQueueTime().get());
+        assertEquals(runningQueueTimeBeforeClean, workerStatus.getRunningQueueTime().get());
     }
 
     @Test

@@ -32,6 +32,7 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
         log.info("Registered service discovery providers: {}", providers.keySet());
     }
 
+    @Override
     public void validate(Endpoint endpoint) {
         validatedProviderFor(endpoint).validate(endpoint);
     }
