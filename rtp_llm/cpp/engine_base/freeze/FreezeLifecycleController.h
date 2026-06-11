@@ -124,8 +124,9 @@ public:
     FreezeResult freeze(const FreezeOptions& opt);
 
     // Trigger resume: FROZEN -> RESUMING -> RUNNING. Idempotent when already
-    // RUNNING. On failure reverts to FROZEN (never half-available). Also allowed
-    // from ERROR as a recovery attempt.
+    // RUNNING. On failure returns ERROR with admission closed; recovery is an
+    // explicit retry or operator action. Also allowed from ERROR as a recovery
+    // attempt.
     FreezeResult resume();
 
     // Snapshot for GetFreezeStatus.

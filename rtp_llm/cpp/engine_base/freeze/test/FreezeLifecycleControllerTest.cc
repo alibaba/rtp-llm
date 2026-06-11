@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -198,7 +199,7 @@ TEST(FreezeLifecycleControllerTest, FreezeHookFailureGoesToError) {
     EXPECT_FALSE(controller.status().last_error.empty());
 }
 
-TEST(FreezeLifecycleControllerTest, ResumeFailureRevertsToFrozen) {
+TEST(FreezeLifecycleControllerTest, ResumeFailureGoesToError) {
     FreezeLifecycleController controller;
     FreezeHooks               hooks;
     hooks.warmupAndHealthCheck = []() { return false; };
@@ -207,8 +208,41 @@ TEST(FreezeLifecycleControllerTest, ResumeFailureRevertsToFrozen) {
     ASSERT_TRUE(controller.freeze(gracefulOptions()).ok);
     const auto result = controller.resume();
     EXPECT_FALSE(result.ok);
-    // Per design: resume failure keeps FROZEN, never half-available.
-    EXPECT_EQ(controller.state(), FreezeState::FROZEN);
+    EXPECT_EQ(controller.state(), FreezeState::ERROR);
+    EXPECT_FALSE(controller.admit());
+}
+
+TEST(FreezeLifecycleControllerTest, ResumeFailureDoesNotRunImplicitRollback) {
+    FreezeLifecycleController controller;
+    ASSERT_TRUE(controller.freeze(gracefulOptions()).ok);
+
+    std::atomic<int> pause_kv_called{0};
+    FreezeHooks      hooks;
+    hooks.resumeKvMemory = []() { return true; };
+    hooks.resumeWeights  = []() { return false; };
+    hooks.pauseKvMemory  = [&pause_kv_called](const FreezeOptions&) {
+        pause_kv_called++;
+        return true;
+    };
+    controller.setHooks(hooks);
+
+    const auto result = controller.resume();
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(controller.state(), FreezeState::ERROR);
+    EXPECT_EQ(pause_kv_called.load(), 0);
+}
+
+TEST(FreezeLifecycleControllerTest, ResumeHookExceptionGoesToError) {
+    FreezeLifecycleController controller;
+    ASSERT_TRUE(controller.freeze(gracefulOptions()).ok);
+
+    FreezeHooks hooks;
+    hooks.resumeKvMemory = []() -> bool { throw std::runtime_error("boom"); };
+    controller.setHooks(hooks);
+
+    const auto result = controller.resume();
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(controller.state(), FreezeState::ERROR);
     EXPECT_FALSE(controller.admit());
 }
 

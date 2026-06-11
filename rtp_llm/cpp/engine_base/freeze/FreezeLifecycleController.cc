@@ -2,7 +2,26 @@
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
+#include <exception>
+#include <utility>
+
 namespace rtp_llm {
+
+namespace {
+
+template<typename Hook, typename... Args>
+bool invokeHookNoThrow(const char* name, Hook& hook, Args&&... args) {
+    try {
+        return hook(std::forward<Args>(args)...);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("freeze lifecycle hook %s threw exception: %s", name, e.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("freeze lifecycle hook %s threw unknown exception", name);
+    }
+    return false;
+}
+
+}  // namespace
 
 std::string freezeStateToString(FreezeState state) {
     switch (state) {
@@ -55,8 +74,9 @@ bool FreezeLifecycleController::isLegalTransition(FreezeState from, FreezeState 
         case FreezeState::FROZEN:
             return to == FreezeState::RESUMING;
         case FreezeState::RESUMING:
-            // rebuild ok -> RUNNING; rebuild failed -> FROZEN (never half-available).
-            return to == FreezeState::RUNNING || to == FreezeState::FROZEN;
+            // rebuild ok -> RUNNING; rebuild failed -> ERROR for explicit
+            // recovery. Do not run implicit resource rollback here.
+            return to == FreezeState::RUNNING || to == FreezeState::ERROR;
         case FreezeState::ERROR:
             // explicit recovery attempt only.
             return to == FreezeState::RESUMING;
@@ -142,14 +162,14 @@ FreezeResult FreezeLifecycleController::freeze(const FreezeOptions& opt) {
     // KV physical memory; weights pause last (cpu-backup).
     bool ok = true;
     if (ok && hooks_.deregMrAndQuiesceEngine) {
-        ok = hooks_.deregMrAndQuiesceEngine(opt);
+        ok = invokeHookNoThrow("deregMrAndQuiesceEngine", hooks_.deregMrAndQuiesceEngine, opt);
         if (!ok) {
             setLastError("deregMrAndQuiesceEngine failed");
         }
     }
     if (ok && hooks_.pauseKvMemory) {
         kv_memory_state_.store(KvMemoryState::PAUSING, std::memory_order_release);
-        ok = hooks_.pauseKvMemory(opt);
+        ok = invokeHookNoThrow("pauseKvMemory", hooks_.pauseKvMemory, opt);
         if (!ok) {
             setLastError("pauseKvMemory failed");
         }
@@ -159,7 +179,7 @@ FreezeResult FreezeLifecycleController::freeze(const FreezeOptions& opt) {
         device_kv_cache_valid_.store(false, std::memory_order_release);
     }
     if (ok && hooks_.pauseWeights) {
-        ok = hooks_.pauseWeights(opt);
+        ok = invokeHookNoThrow("pauseWeights", hooks_.pauseWeights, opt);
         if (!ok) {
             setLastError("pauseWeights failed");
         }
@@ -206,7 +226,7 @@ FreezeResult FreezeLifecycleController::resume() {
     bool ok = true;
     if (ok && hooks_.resumeKvMemory) {
         kv_memory_state_.store(KvMemoryState::RESUMING, std::memory_order_release);
-        ok = hooks_.resumeKvMemory();
+        ok = invokeHookNoThrow("resumeKvMemory", hooks_.resumeKvMemory);
         if (!ok) {
             setLastError("resumeKvMemory failed");
         }
@@ -215,33 +235,34 @@ FreezeResult FreezeLifecycleController::resume() {
         kv_memory_state_.store(KvMemoryState::ACTIVE, std::memory_order_release);
     }
     if (ok && hooks_.resetKvMetadata) {
-        ok = hooks_.resetKvMetadata();
+        ok = invokeHookNoThrow("resetKvMetadata", hooks_.resetKvMetadata);
         if (!ok) {
             setLastError("resetKvMetadata failed");
         }
     }
     if (ok && hooks_.resumeWeights) {
-        ok = hooks_.resumeWeights();
+        ok = invokeHookNoThrow("resumeWeights", hooks_.resumeWeights);
         if (!ok) {
             setLastError("resumeWeights failed");
         }
     }
     if (ok && hooks_.regMrAndResumeEngine) {
-        ok = hooks_.regMrAndResumeEngine();
+        ok = invokeHookNoThrow("regMrAndResumeEngine", hooks_.regMrAndResumeEngine);
         if (!ok) {
             setLastError("regMrAndResumeEngine failed");
         }
     }
     if (ok && hooks_.warmupAndHealthCheck) {
-        ok = hooks_.warmupAndHealthCheck();
+        ok = invokeHookNoThrow("warmupAndHealthCheck", hooks_.warmupAndHealthCheck);
         if (!ok) {
             setLastError("warmupAndHealthCheck failed");
         }
     }
 
     if (!ok) {
-        // Per design: resume failure keeps the instance FROZEN, never half-available.
-        transitionLocked(FreezeState::RESUMING, FreezeState::FROZEN);
+        // Admission remains closed in ERROR. Control plane only observes
+        // resume failure; recovery is an explicit retry or operator action.
+        transitionLocked(FreezeState::RESUMING, FreezeState::ERROR);
         return FreezeResult::error(status().last_error);
     }
 
