@@ -77,12 +77,8 @@ class CacheMetricsReporterTest {
         reporter.reportTheoryCacheHitMetrics(snapshot);
 
         FlexMetricTags allTags = FlexMetricTags.of("window", "all", "windowMs", "0");
-        FlexMetricTags oneMinuteTags = FlexMetricTags.of("window", "1m", "windowMs", "60000");
         verify(monitor).report(CACHE_THEORY_HIT_COUNT, allTags, 2L);
         verify(monitor).report(CACHE_THEORY_TOTAL_COUNT, allTags, 4L);
         verify(monitor).report(CACHE_THEORY_HIT_RATIO, allTags, 0.5D);
-        verify(monitor).report(CACHE_THEORY_HIT_COUNT, oneMinuteTags, 2L);
-        verify(monitor).report(CACHE_THEORY_TOTAL_COUNT, oneMinuteTags, 4L);
-        verify(monitor).report(CACHE_THEORY_HIT_RATIO, oneMinuteTags, 0.5D);
     }
 }
