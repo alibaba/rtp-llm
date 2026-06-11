@@ -271,6 +271,17 @@ struct CommPtrs {
     void* data_ptrs[MAX_RANKS];
 };
 
+// Cached IPC slot entry: pairs the device-side CommPtrs pointer with the
+// allocation range that was current when the slot was registered.  On cache
+// hit we re-query the HIP runtime and compare — if the caching allocator
+// freed and reused the same data_ptr inside a different allocation block,
+// range_start / range_size will differ and we invalidate the stale entry.
+struct CachedSlot {
+    CommPtrs* comm_ptrs;
+    void*     range_start;
+    size_t    range_size;
+};
+
 template<int NRanks>
 struct SyncComm {
     __device__ __forceinline__ SyncComm(CommDeviceMeta<NRanks>& meta) {
@@ -1076,10 +1087,31 @@ public:
         meta.nranks     = world_size_;
 
         CommPtrs* cptrs;
+        bool      cache_hit = false;
         auto      it = ptr_to_comm_ptrs_.find(ptr);
         if (it != ptr_to_comm_ptrs_.end()) {
-            cptrs = it->second;
-        } else {
+            // Validate that the allocation backing this data_ptr hasn't
+            // changed (freed + reused by the caching allocator).  If the
+            // range no longer matches, the cached IPC slot is stale.
+            auto& slot = it->second;
+            void*  cur_start = nullptr;
+            size_t cur_size  = 0;
+            hipPointerGetAttribute(
+                &cur_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR,
+                reinterpret_cast<hipDeviceptr_t>(ptr));
+            hipPointerGetAttribute(
+                &cur_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE,
+                reinterpret_cast<hipDeviceptr_t>(ptr));
+            if (cur_start == slot.range_start && cur_size == slot.range_size) {
+                cptrs = slot.comm_ptrs;
+                cache_hit = true;
+            } else {
+                // Stale entry — allocation was recycled.  Erase so we fall
+                // through to the capture / copy-fallback path below.
+                ptr_to_comm_ptrs_.erase(it);
+            }
+        }
+        if (!cache_hit) {
             // Restore fast-path: during graph capture, assign each allreduce
             // invocation its own comm_ptrs slot and record the input tensor's
             // data_ptr for later IPC handle exchange (consume_capture).
@@ -1207,7 +1239,21 @@ public:
             cptrs.data_ptrs[i] = ipc_data[r];
         }
         gpuMemcpy(comm_ptrs_ + used_comm_ptrs_, &cptrs, sizeof(CommPtrs), gpuMemcpyHostToDevice);
-        ptr_to_comm_ptrs_[ptr] = comm_ptrs_ + used_comm_ptrs_;
+
+        // Record allocation range at registration time so that cache hits
+        // can detect freed-and-reused data_ptrs (same address, different
+        // allocation block).
+        void*  reg_start = nullptr;
+        size_t reg_size  = 0;
+        hipPointerGetAttribute(
+            &reg_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR,
+            reinterpret_cast<hipDeviceptr_t>(ptr));
+        hipPointerGetAttribute(
+            &reg_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE,
+            reinterpret_cast<hipDeviceptr_t>(ptr));
+        ptr_to_comm_ptrs_[ptr] = CachedSlot{
+            comm_ptrs_ + used_comm_ptrs_, reg_start, reg_size};
+
         // Track every ptr registered in this session (vector, NOT set) so
         // that duplicate data_ptrs are counted correctly for rollback.
         pending_capture_ptrs_.push_back(ptr);
@@ -1280,7 +1326,7 @@ private:
     std::vector<std::vector<void*>>      captured_ipc_handles_;
     CommPtrs*                            comm_ptrs_;
     int                                  used_comm_ptrs_;
-    std::unordered_map<void*, CommPtrs*> ptr_to_comm_ptrs_;
+    std::unordered_map<void*, CachedSlot> ptr_to_comm_ptrs_;
     std::vector<void*>                   pending_capture_ptrs_;      // ptrs registered in current session (allows duplicates)
     int                                  capture_snapshot_used_ = 0;       // used_comm_ptrs_ at session start
     int                                  capture_snapshot_ipc_count_ = 0;  // captured_ipc_handles_.size() at session start
