@@ -411,7 +411,11 @@ def trans_output(
             output_py.hidden_states = all_hidden_states[i]
 
         if all_all_hidden_states is not None:
-            output_py.all_hidden_states = all_all_hidden_states[i]
+            output_py.all_hidden_states = (
+                all_all_hidden_states
+                if len(all_all_hidden_states.shape) == 2
+                else all_all_hidden_states[i]
+            )
 
         if all_loss is not None:
             loss_slice = all_loss[i]
