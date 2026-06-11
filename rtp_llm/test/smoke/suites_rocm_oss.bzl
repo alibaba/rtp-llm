@@ -89,6 +89,20 @@ def rocm_oss_suites():
     )
 
 
+    # ROCm VL / Multimodal (Qwen3-VL-MoE)
+    native.test_suite(
+        name = "smoke_rocm_vl",
+        tests = [
+            smoke_test(
+                name="rocm_vl_qwen3_vl_moe",
+                task_info="data/model/qwen_vl/q_r_3_moe_rocm.json",
+                smoke_args="--act_type BF16 --use_asm_pa 0 --use_aiter_pa 1 --disable_flash_infer 1 --seq_size_per_block 1024 --kernel_seq_size_per_block 16 --warm_up 0 --tp_size 1 --world_size 1 --reserver_runtime_mem_mb 40960",
+                gpu_type=["MI308X-ROCM7"],
+            ),
+        ],
+    )
+
+
     # ROCm Eagle (Qwen2-14B + draft)
     native.test_suite(
         name = "smoke_rocm_eagle",
