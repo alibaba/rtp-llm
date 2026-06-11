@@ -47,6 +47,16 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
     def test_route_cache_keys_short_prompt_has_no_complete_virtual_block(self):
         self.assertEqual(route_cache_keys_for_page_rr([10, 11, 12], True, 4), [])
 
+    def test_cache_key_block_size_tracks_routed_key_granularity(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.seq_size_per_block = 256
+        visitor._page_rr_route_cache_keys = False
+        visitor._page_rr_cp_size = 4
+        self.assertEqual(visitor._cache_key_block_size(), 256)
+
+        visitor._page_rr_route_cache_keys = True
+        self.assertEqual(visitor._cache_key_block_size(), 1024)
+
 
 class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
     async def test_route_ips_preserves_master_route_error_code_on_route_error(self):

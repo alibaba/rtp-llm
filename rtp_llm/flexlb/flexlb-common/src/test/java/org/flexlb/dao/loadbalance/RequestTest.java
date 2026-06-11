@@ -16,6 +16,7 @@ class RequestTest {
                 {
                   "model": "engine_service",
                   "block_cache_keys": [1, 2, 3],
+                  "cache_key_block_size": 1024,
                   "seq_len": 8192,
                   "debug": false,
                   "request_priority": 100,
@@ -27,6 +28,7 @@ class RequestTest {
 
         assertEquals(12345L, request.getRequestId());
         assertEquals(8192L, request.getSeqLen());
+        assertEquals(1024L, request.getCacheKeyBlockSize());
         assertEquals(3, request.getBlockCacheKeys().size());
         assertEquals(5000L, request.getGenerateTimeout());
     }

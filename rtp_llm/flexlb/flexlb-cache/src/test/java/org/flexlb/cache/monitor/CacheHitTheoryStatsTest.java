@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class CacheHitTheoryStatsTest {
 
     @Test
-    void should_keep_all_time_and_rolling_window_sums() {
+    void should_keep_all_time_token_sums() {
         CacheHitTheoryStats stats = new CacheHitTheoryStats(() -> 0L);
 
         stats.record(1L, 4L, 0L);
@@ -16,9 +16,7 @@ class CacheHitTheoryStatsTest {
 
         assertEquals(6L, snapshot.getAllHitCount());
         assertEquals(20L, snapshot.getAllTotalCount());
-        assertEquals(5L, snapshot.getWindow1m().getHitCount());
-        assertEquals(16L, snapshot.getWindow1m().getTotalCount());
-        assertEquals(6L, snapshot.getWindow5m().getHitCount());
-        assertEquals(20L, snapshot.getWindow5m().getTotalCount());
+        assertEquals(3L, snapshot.getRequestHitCount());
+        assertEquals(10L, snapshot.getRequestTotalCount());
     }
 }

@@ -21,6 +21,9 @@ public class Request {
     @JsonProperty("seq_len")
     private long seqLen;
 
+    @JsonProperty("cache_key_block_size")
+    private long cacheKeyBlockSize;
+
     @JsonProperty("request_id")
     private long requestId;
 

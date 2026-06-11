@@ -220,6 +220,7 @@ class BackendRPCServerVisitor:
         try:
             route_result = await self.master_client.get_backend_role_addrs(
                 block_cache_keys=block_cache_keys,
+                cache_key_block_size=self._cache_key_block_size(),
                 input=input,
                 request_id=input.request_id,
             )
@@ -282,6 +283,11 @@ class BackendRPCServerVisitor:
         return route_cache_keys_for_page_rr(
             block_cache_keys, self._page_rr_route_cache_keys, self._page_rr_cp_size
         )
+
+    def _cache_key_block_size(self) -> int:
+        if self._page_rr_route_cache_keys and self._page_rr_cp_size > 1:
+            return self.seq_size_per_block * self._page_rr_cp_size
+        return self.seq_size_per_block
 
     async def get_domain_route_addrs(self, input: GenerateInput):
         specified_roles = {addr.role for addr in input.generate_config.role_addrs}
