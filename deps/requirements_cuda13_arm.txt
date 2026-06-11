@@ -1,0 +1,31 @@
+# CUDA 13 / aarch64 (GB200 / GB300) dep set.
+# Matches the x86 cuda13 pattern: only self-built wheels against torch 2.11+cu130.
+# Packages that link libcudart.so.12 (flash_attn, flashinfer_*, deep_ep,
+# fast_hadamard, nvidia_cutlass_dsl) are deferred.
+-r requirements_base.txt
+https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl
+https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl
+mysql-connector-python
+
+# Self-built wheels (built from GitHub deepseek-ai/{DeepGEMM,FlashMLA} main
+# against torch 2.11+cu130; SHAs encoded in filename).
+https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_aarch64.whl
+https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_aarch64.whl
+
+# rtp_kernel built from gitlab cuda_extension main against torch 2.11+cu130
+https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/rtp_kernel-0.1.0%2Bcu13.125c29e5-cp310-cp310-linux_aarch64.whl
+
+# fastsafetensors / fast_safetensors rebuilt against torch 2.11+cu130
+https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl
+http://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl
+
+# DSV4 mHC uses TileLang by default.
+https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/tilelang-0.1.9%2Bcuda.git441c3b06-cp38-abi3-linux_aarch64.whl
+https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/z3_solver-4.13.0.0%2Blocal.ali-py2.py3-none-manylinux2014_aarch64.whl
+https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/arm_pkg/tile_kernels-0.1.dev0%2Bali.git36d9e45-py3-none-any.whl
+
+safetensors==0.7.0
+tabulate==0.9.0
+
+# flash_attn / flash_attn_3 / flashinfer_* / fast_hadamard /
+# nvidia_cutlass_dsl / deep_ep: deferred — cu129 wheels link libcudart.so.12.

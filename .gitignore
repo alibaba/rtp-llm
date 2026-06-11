@@ -75,3 +75,4 @@ docs/index/dist/
 
 # Local analysis reports
 *_analysis_report.md
+user.bazelrc

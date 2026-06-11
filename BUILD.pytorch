@@ -25,6 +25,9 @@ cc_library(
         ] + glob([
             "torch/lib/libcudart*.so*",
             "torch/lib/libnvToolsExt*.so*",
+            # torch 2.11+cu130 links libtorch_cuda.so against libtorch_nvshmem.so;
+            # glob is empty for older wheels that don't ship it.
+            "torch/lib/libtorch_nvshmem.so*",
         ]),
         "@//:using_rocm": [
             # "torch/lib/librocfft.so",

@@ -60,6 +60,26 @@ def git_deps():
         build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
     )
 
+    # cutlass_cu13: CUTLASS v3.8 "v2" (b84e9802) — natively gates
+    # cuTensorMapEncodeTiled/Im2col on CUDA version so CUDA 13 can use the
+    # by-version driver-entry-point API (PFN_*_v12000).  Used by flashmla +
+    # trt_fused_multihead_attention when building with --config=cuda13[_arm].
+    new_git_repository(
+        name = "cutlass_cu13",
+        remote = "https://github.com/NVIDIA/cutlass.git",
+        commit = "b84e9802d84b16bcb4e92338fcf0a04785df9236",
+        build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
+    )
+
+    # cutlass3.6_cu13: same CUDA-13-ready commit, selected in place of
+    # cutlass3.6 by the cuda13 configs (flashinfer_cu13.BUILD).
+    new_git_repository(
+        name = "cutlass3.6_cu13",
+        remote = "https://github.com/NVIDIA/cutlass.git",
+        commit = "b84e9802d84b16bcb4e92338fcf0a04785df9236",
+        build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
+    )
+
     new_git_repository(
         name = "flashinfer_cpp",
         remote = "https://github.com/flashinfer-ai/flashinfer.git",
@@ -75,6 +95,33 @@ def git_deps():
             "@rtp_llm//3rdparty/flashinfer:0008-enable-pdl.patch",
             "@rtp_llm//3rdparty/flashinfer:0009-sp-sample.patch",
             "@rtp_llm//3rdparty/flashinfer:0010-silu-mul-vec-size.patch",
+        ],
+    )
+
+    # flashinfer_cpp_cu13: same 1c88d650 commit as flashinfer_cpp, with narrow
+    # CUDA-13 patches (0011-0015): CUB compat shim, PyModuleDef trailing
+    # fields, kernel visibility (scheduler/decode), occupancy-query skip.
+    # Selected only by --config=cuda13[_arm]; CUDA 12 builds stay unchanged.
+    new_git_repository(
+        name = "flashinfer_cpp_cu13",
+        remote = "https://github.com/flashinfer-ai/flashinfer.git",
+        commit = "1c88d650eeec97be3a4dcebe4a9912d7785bc250",
+        build_file = str(Label("@rtp_llm//3rdparty/flashinfer:flashinfer_cu13.BUILD")),
+        patches = [
+            "@rtp_llm//3rdparty/flashinfer:0001-fix-compile.patch",
+            "@rtp_llm//3rdparty/flashinfer:0002-dispatch-group-size.patch",
+            "@rtp_llm//3rdparty/flashinfer:0003-tanh-compatibility.patch",
+            "@rtp_llm//3rdparty/flashinfer:0005-update-add-mla-attn-test-impl-mla-write-kvcache.patch",
+            "@rtp_llm//3rdparty/flashinfer:0006-add-mla-dispatch-inc.patch",
+            "@rtp_llm//3rdparty/flashinfer:0007-fix-nan.patch",
+            "@rtp_llm//3rdparty/flashinfer:0008-enable-pdl.patch",
+            "@rtp_llm//3rdparty/flashinfer:0009-sp-sample.patch",
+            "@rtp_llm//3rdparty/flashinfer:0010-silu-mul-vec-size.patch",
+            "@rtp_llm//3rdparty/flashinfer:0011-cuda13-cub-compat.patch",
+            "@rtp_llm//3rdparty/flashinfer:0012-pymoduledef-missing-fields.patch",
+            "@rtp_llm//3rdparty/flashinfer:0013-cuda13-kernel-visibility-scheduler.patch",
+            "@rtp_llm//3rdparty/flashinfer:0014-cuda13-kernel-visibility-decode.patch",
+            "@rtp_llm//3rdparty/flashinfer:0015-cuda13-occupancy-skip.patch",
         ],
     )
 

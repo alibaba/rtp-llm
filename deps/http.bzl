@@ -58,6 +58,29 @@ def http_deps():
         build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
     )
 
+    # CUDA 13.x build of torch 2.11 from upstream pytorch.org/whl/cu130,
+    # mirrored on OSS for environments without pytorch.org access.
+    http_archive(
+        name = "torch_2.11_py310_cuda",
+        sha256 = "4c5be01584b7fee22d3c0d04062fd28026044acd07ffd0ee64cbd54b60e62d39",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+            "https://download.pytorch.org/whl/cu130/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
+    http_archive(
+        name = "torch_2.11_py310_cuda-aarch64",
+        sha256 = "4af01fad0822353e766770ff2c7d6bdc2cbcc2ac7fcd6da93a9e3c6f3f932b21",
+        urls = [
+            "https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
     http_archive(
         name = "torch_rocm",
         sha256 = "521d1febc9bfebe44fb321727ad550dcaf05900dd917b20bed52fb307f43bf3a",

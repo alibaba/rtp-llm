@@ -63,6 +63,24 @@ compile_pip_requirements(
 )
 
 compile_pip_requirements(
+    name = "requirements_torch_gpu_cuda13",
+    src = "requirements_torch_gpu_cuda13.txt",
+    extra_args = PIP_EXTRA_ARGS,
+    extra_data = ["//:requirements_base.txt"],
+    requirements_txt = "requirements_lock_torch_gpu_cuda13.txt",
+    tags = ["manual"],
+)
+
+compile_pip_requirements(
+    name = "requirements_cuda13_arm",
+    src = "requirements_cuda13_arm.txt",
+    extra_args = PIP_EXTRA_ARGS,
+    extra_data = ["//:requirements_base.txt"],
+    requirements_txt = "requirements_lock_cuda13_arm.txt",
+    tags = ["manual"],
+)
+
+compile_pip_requirements(
     name = "requirements_cuda12_arm",
     src = "requirements_cuda12_arm.txt",
     extra_args = PIP_EXTRA_ARGS,

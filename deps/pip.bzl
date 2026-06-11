@@ -50,6 +50,24 @@ def pip_deps():
     )
 
     pip_parse(
+        name = "pip_gpu_cuda13_torch",
+        requirements_lock = "@rtp_deps//:requirements_lock_torch_gpu_cuda13.txt",
+        python_interpreter = "/opt/conda310/bin/python3",
+        extra_pip_args = PIP_EXTRA_ARGS + ["--quiet"],
+        timeout = 3600,
+        quiet = False,
+    )
+
+    pip_parse(
+        name = "pip_cuda13_arm_torch",
+        requirements_lock = "@rtp_deps//:requirements_lock_cuda13_arm.txt",
+        python_interpreter = "/opt/conda310/bin/python3",
+        extra_pip_args = PIP_EXTRA_ARGS,
+        timeout = 3600,
+        quiet = False,
+    )
+
+    pip_parse(
         name = "pip_cuda12_arm_torch",
         requirements_lock = "@rtp_deps//:requirements_lock_cuda12_arm.txt",
         python_interpreter = "/opt/conda310/bin/python3",
