@@ -20,6 +20,8 @@ import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.service.optimizer.OnlineOptimizerClient;
+import org.flexlb.service.optimizer.OnlineOptimizerHooker;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
@@ -53,6 +55,7 @@ public class HttpLoadBalanceServer {
     private final EngineHealthReporter engineHealthReporter;
     private final QueueManager queueManager;
     private final ActiveRequestCounter activeRequestCounter;
+    private final OnlineOptimizerHooker onlineOptimizerHooker;
     private final ConfigService configService;
 
     public HttpLoadBalanceServer(GeneralHttpNettyService generalHttpNettyService,
@@ -61,6 +64,7 @@ public class HttpLoadBalanceServer {
                                  EngineHealthReporter engineHealthReporter,
                                  QueueManager queueManager,
                                  ActiveRequestCounter activeRequestCounter,
+                                 OnlineOptimizerHooker onlineOptimizerHooker,
                                  ConfigService configService) {
         this.generalHttpNettyService = generalHttpNettyService;
         this.routeService = routeService;
@@ -68,6 +72,7 @@ public class HttpLoadBalanceServer {
         this.engineHealthReporter = engineHealthReporter;
         this.queueManager = queueManager;
         this.activeRequestCounter = activeRequestCounter;
+        this.onlineOptimizerHooker = onlineOptimizerHooker;
         this.configService = configService;
     }
 
@@ -312,12 +317,29 @@ public class HttpLoadBalanceServer {
         response.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
 
         if (response.isSuccess()) {
+            fireTraceQuery(ctx);
             return buildSuccessResponse(response);
         } else {
             Logger.error("Routing failed with error code: {}", response.getErrorMessage());
             ctx.setSuccess(false);
             ctx.setErrorMessage("error_code:" + response.getErrorMessage());
             return buildErrorResponse(response);
+        }
+    }
+
+    private void fireTraceQuery(BalanceContext ctx) {
+        // Best-effort fire-and-forget. Any failure here MUST NOT propagate to the request path.
+        try {
+            OnlineOptimizerClient client = onlineOptimizerHooker.getClient();
+            if (client == null) {
+                return;
+            }
+            Request req = ctx.getRequest();
+            if (req != null && req.getBlockCacheKeys() != null && !req.getBlockCacheKeys().isEmpty()) {
+                client.traceQuery(req.getRequestId(), req.getBlockCacheKeys());
+            }
+        } catch (Throwable t) {
+            Logger.warn("fireTraceQuery skipped due to error: {}", t.getMessage());
         }
     }
 
