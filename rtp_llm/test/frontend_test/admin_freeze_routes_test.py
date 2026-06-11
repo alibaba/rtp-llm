@@ -287,6 +287,35 @@ class GrpcClientWrapperFreezeTest(unittest.IsolatedAsyncioTestCase):
         for address in addresses:
             wrapper._dp_stubs[address].ResumeServing.assert_awaited_once()
 
+    async def test_freeze_serving_commit_failure_returns_error_without_abort(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        wrapper, pb2 = self._build_wrapper(control_addresses=addresses)
+        wrapper._dp_stubs[addresses[0]].FreezeServing = AsyncMock(
+            return_value=pb2.EmptyPB()
+        )
+        wrapper._dp_stubs[addresses[1]].FreezeServing = AsyncMock(
+            side_effect=[
+                pb2.EmptyPB(),
+                self._aio_error(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    "pauseWeights failed",
+                ),
+            ]
+        )
+        for address in addresses:
+            wrapper._dp_stubs[address].ResumeServing = AsyncMock(
+                return_value=pb2.EmptyPB()
+            )
+
+        result = await wrapper.freeze_serving({})
+
+        self.assertIn("error", result)
+        self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertEqual(result["details"][0]["address"], addresses[1])
+        for address in addresses:
+            self.assertEqual(wrapper._dp_stubs[address].FreezeServing.await_count, 2)
+            wrapper._dp_stubs[address].ResumeServing.assert_not_awaited()
+
     async def test_freeze_serving_rejects_non_converged_final_state(self):
         addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
         wrapper, pb2 = self._build_wrapper(control_addresses=addresses)

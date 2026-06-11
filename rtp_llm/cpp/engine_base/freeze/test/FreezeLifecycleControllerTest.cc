@@ -199,6 +199,26 @@ TEST(FreezeLifecycleControllerTest, FreezeHookFailureGoesToError) {
     EXPECT_FALSE(controller.status().last_error.empty());
 }
 
+TEST(FreezeLifecycleControllerTest, FreezeHalfReleasedFailureGoesToError) {
+    FreezeLifecycleController controller;
+    std::atomic<int>          pause_kv_called{0};
+    FreezeHooks               hooks;
+    hooks.pauseKvMemory = [&pause_kv_called](const FreezeOptions&) {
+        pause_kv_called++;
+        return true;
+    };
+    hooks.pauseWeights = [](const FreezeOptions&) { return false; };
+    controller.setHooks(hooks);
+
+    const auto result = controller.freeze(gracefulOptions());
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(controller.state(), FreezeState::ERROR);
+    EXPECT_FALSE(controller.admit());
+    EXPECT_EQ(pause_kv_called.load(), 1);
+    EXPECT_EQ(controller.status().kv_memory_state, "PAUSED");
+    EXPECT_FALSE(controller.status().device_kv_cache_valid);
+}
+
 TEST(FreezeLifecycleControllerTest, ResumeFailureGoesToError) {
     FreezeLifecycleController controller;
     FreezeHooks               hooks;
