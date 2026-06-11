@@ -729,9 +729,6 @@ class IndexerOp(nn.Module):
             "target verify must use paged DSA topk; ragged fp8_mqa_logits is "
             "not CUDA-graph safe"
         )
-        from rtp_llm.models_py.kernels.cuda.fast_topk import (
-            fast_topk_transform_ragged_fused,
-        )
 
         # Gather quantized key from cache for prefill.
         # total_kv_tokens = sum(input_lengths + prefix_lengths) across all
@@ -793,22 +790,24 @@ class IndexerOp(nn.Module):
             clean_logits=False,
         )
 
-        assert (
-            fmha_params.expanded_seq_lens.device == logits.device
-        ), "expanded_seq_lens must be on the same device as logits"
-        assert (
-            fmha_params.topk_indices_offset.device == logits.device
-        ), "topk_indices_offset must be on the same device as logits"
-        assert (
-            fmha_params.ks.device == logits.device
-        ), "ks must be on the same device as logits"
-
-        topk_result = fast_topk_transform_ragged_fused(
-            score=logits,
-            lengths=fmha_params.expanded_seq_lens,
-            topk_indices_offset=fmha_params.topk_indices_offset,
-            topk=self.index_topk,
-            row_starts=fmha_params.ks,
+        num_rows = logits.shape[0]
+        topk_result = logits.new_empty(
+            (num_rows, self.index_topk), dtype=torch.int32
+        )
+        rtp_llm_ops.dsv4_top_k_per_row_prefill(
+            logits,
+            fmha_params.ks,
+            fmha_params.ke,
+            topk_result,
+            num_rows,
+            logits.stride(0),
+            logits.stride(1),
+            self.index_topk,
+        )
+        topk_result = torch.where(
+            topk_result >= 0,
+            topk_result + fmha_params.topk_indices_offset.unsqueeze(1),
+            topk_result,
         )
 
         return topk_result
@@ -854,10 +853,6 @@ class IndexerOp(nn.Module):
         Returns:
             TopK indices for the CP chunks, shape [len(total_local_ids), index_topk].
         """
-        from rtp_llm.models_py.kernels.cuda.fast_topk import (
-            fast_topk_transform_ragged_fused,
-        )
-
         total_kv_tokens = num_kv_tokens
         assert total_kv_tokens > 0, "num_kv_tokens must be positive"
 
@@ -919,7 +914,6 @@ class IndexerOp(nn.Module):
             weights_part: torch.Tensor,
             ks: torch.Tensor,
             ke: torch.Tensor,
-            lengths: torch.Tensor,
             topk_off: torch.Tensor,
         ) -> torch.Tensor:
             logits_p = deep_gemm.fp8_mqa_logits(
@@ -930,12 +924,24 @@ class IndexerOp(nn.Module):
                 ke,
                 clean_logits=False,
             )
-            return fast_topk_transform_ragged_fused(
-                score=logits_p,
-                lengths=lengths,
-                topk_indices_offset=topk_off,
-                topk=self.index_topk,
-                row_starts=ks,
+            nr = logits_p.shape[0]
+            topk_out = logits_p.new_empty(
+                (nr, self.index_topk), dtype=torch.int32
+            )
+            rtp_llm_ops.dsv4_top_k_per_row_prefill(
+                logits_p,
+                ks,
+                ke,
+                topk_out,
+                nr,
+                logits_p.stride(0),
+                logits_p.stride(1),
+                self.index_topk,
+            )
+            return torch.where(
+                topk_out >= 0,
+                topk_out + topk_off.unsqueeze(1),
+                topk_out,
             )
 
         if total_local_ids.size(0) > 0:
@@ -944,7 +950,6 @@ class IndexerOp(nn.Module):
                 weights_sq0,
                 precomputed_ks,
                 precomputed_ke,
-                precomputed_lengths,
                 precomputed_topk_off,
             )
         else:
