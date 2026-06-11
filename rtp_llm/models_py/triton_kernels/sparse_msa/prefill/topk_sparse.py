@@ -212,14 +212,29 @@ def _gqa_share_sparse_fwd_kernel(
                 mask=kd_mask[:, None] & pos_mask[None, :],
                 other=0.0,
             )
-            # compute qk
-            qk = tl.zeros((BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_K), dtype=tl.float32)
-            # causal mask
-            qk += tl.where(off_q_k[:, None, :] >= c, 0, float("-inf"))
-            qk = tl.reshape(qk, BLOCK_SIZE_QH, BLOCK_SIZE_K)
+            # Issue V load right after K so they share in-flight bandwidth and
+            # the scheduler can hide V's latency behind the QK dot + softmax
+            # work below. Both addresses depend only on `slots`, computed once.
+            v = tl.load(
+                v_cache_ptr
+                + slots[:, None] * stride_vs
+                + pid_kh * stride_vh
+                + off_vd[None, :] * stride_vd,
+                mask=pos_mask[:, None] & vd_mask[None, :],
+                other=0.0,
+            )
             # [BLOCK_SIZE_QH, qk_head_dim] @ [qk_head_dim, BLOCK_SIZE_K]
             #   -> [BLOCK_SIZE_QH, BLOCK_SIZE_K]
-            qk += tl.dot(q, k) * sm_scale_log2e
+            qk = tl.dot(q, k) * sm_scale_log2e
+            # causal mask: broadcast a [Q,1,K] mask out to [Q,H,K] then reshape
+            qk += tl.reshape(
+                tl.broadcast_to(
+                    tl.where(off_q_k[:, None, :] >= c, 0.0, float("-inf")),
+                    (BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_K),
+                ),
+                BLOCK_SIZE_QH,
+                BLOCK_SIZE_K,
+            )
             # K boundary mask: positions beyond seq_len contribute -inf
             qk += tl.where(pos_mask[None, :], 0, float("-inf"))
             # compute m_ij and l_ij
@@ -230,15 +245,6 @@ def _gqa_share_sparse_fwd_kernel(
             acc_o_scale = tl.exp2(m_i - m_ij)
             acc_o = acc_o * acc_o_scale[:, None]
             sum_i = sum_i * acc_o_scale + l_ij
-            # paged load V
-            v = tl.load(
-                v_cache_ptr
-                + slots[:, None] * stride_vs
-                + pid_kh * stride_vh
-                + off_vd[None, :] * stride_vd,
-                mask=pos_mask[:, None] & vd_mask[None, :],
-                other=0.0,
-            )
             p = p.to(v.dtype)
             acc_o += tl.dot(p, v)
             # update statistics

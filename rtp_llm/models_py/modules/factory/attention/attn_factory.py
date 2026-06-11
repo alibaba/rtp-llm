@@ -209,12 +209,17 @@ def get_fmha_impl(
         if _is_fmha_impl_disabled(impl_class_name, fmha_config):
             continue
 
-        # Check support before creating instance
-        if not impl.support(attn_configs, attn_inputs):
+        # Check parallelism config first to avoid calling support() on impls
+        # that don't support CP — some impls (e.g. TRT) abort in support().
+        # CP only splits the prefill sequence; decode runs standard attention,
+        # so the prefill-CP gate must not reject decode impls when CP is enabled.
+        if attn_inputs.is_prefill and not impl.support_parallelism_config(
+            parallelism_config
+        ):
             continue
 
-        # Check if implementation supports parallelism config
-        if not impl.support_parallelism_config(parallelism_config):
+        # Check support before creating instance
+        if not impl.support(attn_configs, attn_inputs):
             continue
         try:
             instance = impl(attn_configs, attn_inputs, parallelism_config)

@@ -7,7 +7,7 @@ per-(row, 32-col) UE8M0 scale. The GEMMs go through DeepGEMM's
 ``recipe=(1, 32)`` (these handle FP8xFP8 with this recipe). SM100 only.
 """
 
-/home/qb429732/RTP-LLM/github-opensource/rtp_llm/models_py/kernels/cuda/mxfp8_ops.pyimport os
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -15,6 +15,9 @@ import torch
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     fp8_fp4_gemm_nt,
     m_grouped_fp8_fp4_gemm_nt_contiguous,
+)
+from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
+    sgl_per_token_group_quant_fp8,
 )
 
 MX_BLOCK = 32
@@ -94,8 +97,14 @@ def mxfp8_linear(
     """y = x @ weight_e4m3.T   (weight is [N, K] e4m3, scale prepacked int32)."""
     M, K = x.shape
     N = weight_e4m3.shape[0]
-    a_q, a_s = mxfp8_quant_act(x)
-    a_s_packed = pack_mxfp8_scale(a_s, mn=M, k=K)
+    # One-shot: e4m3 quant (group=32, UE8M0) + DeepGEMM-packed int32 scale in TMA layout.
+    a_q, a_s_packed = sgl_per_token_group_quant_fp8(
+        x.contiguous(),
+        MX_BLOCK,
+        column_major_scales=True,
+        scale_tma_aligned=True,
+        scale_ue8m0=True,
+    )
     out = torch.empty(M, N, device=x.device, dtype=out_dtype)
     with torch.cuda.device(x.device):
         fp8_fp4_gemm_nt(
@@ -127,8 +136,13 @@ def mxfp8_grouped_gemm(
     """
     T, K = x.shape
     N = weight_e4m3.shape[1]
-    a_q, a_s = mxfp8_quant_act(x)
-    a_s_packed = pack_mxfp8_scale(a_s, mn=T, k=K)
+    a_q, a_s_packed = sgl_per_token_group_quant_fp8(
+        x.contiguous(),
+        MX_BLOCK,
+        column_major_scales=True,
+        scale_tma_aligned=True,
+        scale_ue8m0=True,
+    )
     out = torch.empty(T, N, device=x.device, dtype=out_dtype)
     with torch.cuda.device(x.device):
         m_grouped_fp8_fp4_gemm_nt_contiguous(

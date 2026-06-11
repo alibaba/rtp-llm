@@ -8,6 +8,7 @@ from .common.index import topk_index_reduce
 from .decode.flash_with_topk_idx import flash_decode_with_topk_idx
 from .decode.topk_sparse import flash_decode_with_gqa_share_sparse
 from .prefill.flash_with_topk_idx import flash_prefill_with_topk_index
+from .prefill.topk_bt_fused import flash_prefill_with_fused_topk_index
 from .prefill.topk_sparse import flash_prefill_with_gqa_share_sparse
 
 
@@ -39,35 +40,62 @@ def minimax_sparse_prefill(
 ):
     # All seqlen is less than topk, use full attention
     # Step 1: Flash attention with topk index (using index head)
-    idx_o, topk_idx = flash_prefill_with_topk_index(
-        q=idx_q,
-        k_cache=idx_k_cache,
-        v_cache=idx_v_cache,
-        sink=idx_sink,
-        req_to_token=req_to_token,
-        slot_ids=slot_ids,
-        cu_seqlens=cu_seqlens,
-        seq_lens=seq_lens,
-        prefix_lens=prefix_lens,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
-        block_size_q=block_size_q,
-        block_size_k=block_size_k,
-        topk=topk,
-        init_blocks=init_blocks,
-        local_blocks=local_blocks,
-        sm_scale=idx_sm_scale,
-        score_type=score_type,
-        disable_index_value=disable_index_value,
-    )
-    # Step 2: Reduce topk idx if num_idx_heads > num_kv_heads
     num_idx_heads = idx_q.shape[1]
     num_kv_heads = k_cache.shape[1]
     idx_group_size = num_idx_heads // num_kv_heads
-    if idx_group_size > 1:
-        topk_idx = topk_index_reduce(
-            topk_idx.view(num_kv_heads, idx_group_size, -1, topk), dim=1
+    # Use the fused topk_bt_fused.py path under the M3 production assumptions
+    # (idx_group_size == 1, disable_index_value, no idx_sink). Other shapes
+    # fall back to the legacy 3-stage path which still owns idx_group_size > 1
+    # via topk_index_reduce and the idx_value compute.
+    use_fused = (
+        idx_group_size == 1
+        and disable_index_value
+        and idx_sink is None
+    )
+    if use_fused:
+        idx_o, topk_idx = flash_prefill_with_fused_topk_index(
+            idx_q=idx_q,
+            idx_k_cache=idx_k_cache,
+            req_to_token=req_to_token,
+            slot_ids=slot_ids,
+            cu_seqlens=cu_seqlens,
+            seq_lens=seq_lens,
+            prefix_lens=prefix_lens,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            block_size_k=block_size_k,
+            topk=topk,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+            sm_scale=idx_sm_scale,
+            score_type=score_type,
         )
+    else:
+        idx_o, topk_idx = flash_prefill_with_topk_index(
+            q=idx_q,
+            k_cache=idx_k_cache,
+            v_cache=idx_v_cache,
+            sink=idx_sink,
+            req_to_token=req_to_token,
+            slot_ids=slot_ids,
+            cu_seqlens=cu_seqlens,
+            seq_lens=seq_lens,
+            prefix_lens=prefix_lens,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            block_size_q=block_size_q,
+            block_size_k=block_size_k,
+            topk=topk,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+            sm_scale=idx_sm_scale,
+            score_type=score_type,
+            disable_index_value=disable_index_value,
+        )
+        if idx_group_size > 1:
+            topk_idx = topk_index_reduce(
+                topk_idx.view(num_kv_heads, idx_group_size, -1, topk), dim=1
+            )
     # Step 3: Sparse attention using topk index (main head)
     o = flash_prefill_with_gqa_share_sparse(
         q=q,

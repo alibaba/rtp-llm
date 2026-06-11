@@ -16,6 +16,10 @@ from rtp_llm.ops import HWKernelConfig
 
 
 class CudaMxfp8Linear(LinearBase):
+    # Read by fused norm+quant gates in generic_moe / mla_attention; MXFP8
+    # always emits UE8M0-packed scales.
+    scale_ue8m0: bool = True
+
     @classmethod
     def can_handle(
         cls,
@@ -46,12 +50,10 @@ class CudaMxfp8Linear(LinearBase):
         super().__init__(
             weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
         )
-        # weight: [N, K] e4m3 (row-major); weight_scales: fp32 (1,32) power-of-two
-        # scale produced by the loader. The int32 DeepGEMM packed layout is
-        # built lazily on first forward (see _packed_weight_scale) and cached.
         self.weight = weight
         self.weight_scale = weight_scales
         self.bias = bias
+        self.N = weight.shape[0]
         self._weight_scale_packed = None
 
     def _packed_weight_scale(self) -> torch.Tensor:
@@ -61,11 +63,32 @@ class CudaMxfp8Linear(LinearBase):
             self._weight_scale_packed = pack_mxfp8_scale(self.weight_scale, mn=n, k=k)
         return self._weight_scale_packed
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input: torch.Tensor,
+        input_scales: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         orig_shape = input.shape
         x = input.reshape(-1, orig_shape[-1])
-        out = mxfp8_linear(
-            x, self.weight, self._packed_weight_scale(), self.bias,
-            out_dtype=torch.bfloat16,
-        )
+        if input_scales is not None:
+            from rtp_llm.models_py.kernels.cuda.mxfp8_ops import MX_BLOCK
+            from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_fp4_gemm_nt
+            M = x.shape[0]
+            out = torch.empty(M, self.N, device=x.device, dtype=torch.bfloat16)
+            with torch.cuda.device(x.device):
+                fp8_fp4_gemm_nt(
+                    (x, input_scales),
+                    (self.weight, self._packed_weight_scale()),
+                    out,
+                    recipe_a=(1, MX_BLOCK),
+                    recipe_b=(1, MX_BLOCK),
+                    disable_ue8m0_cast=True,
+                )
+            if self.bias is not None:
+                out = out + self.bias.to(out.dtype)
+        else:
+            out = mxfp8_linear(
+                x, self.weight, self._packed_weight_scale(), self.bias,
+                out_dtype=torch.bfloat16,
+            )
         return out.reshape(*orig_shape[:-1], out.shape[-1])
