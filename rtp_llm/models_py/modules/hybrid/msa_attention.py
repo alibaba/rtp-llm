@@ -61,14 +61,18 @@ def _gemma_rmsnorm_per_head(
     """Per-head RMSNorm over the last dim using the loaded gamma.
 
     MiniMax-M3 weight loading already bakes Gemma's ``+1`` offset into norm
-    weights, matching the dense Q/K norm path. Do not add it again here.
+    weights, matching the dense Q/K norm path — so this is plain RMSNorm and
+    we route it through flashinfer's fused kernel instead of a Python op
+    chain (cast/pow/mean/rsqrt/mul/cast). Last-dim reduction means the (T,H,D)
+    input can be reshaped to (T*H, D) where each row is normalized
+    independently against the shared D-dim weight.
     """
-    orig_dtype = x.dtype
-    xf = x.float()
-    variance = xf.pow(2).mean(dim=-1, keepdim=True)
-    xf = xf * torch.rsqrt(variance + eps)
-    xf = xf * weight.float()
-    return xf.to(orig_dtype)
+    import flashinfer.norm
+
+    orig_shape = x.shape
+    return flashinfer.norm.rmsnorm(
+        x.reshape(-1, orig_shape[-1]).contiguous(), weight, eps=eps
+    ).view(orig_shape)
 
 
 class MSAAttention(nn.Module):
