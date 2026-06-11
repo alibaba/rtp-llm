@@ -1,7 +1,13 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
 
 #include <c10/util/Exception.h>
+#if USING_ROCM
+#include <hip/hip_runtime.h>
+#elif USING_CUDA
 #include <cuda_runtime.h>
+#else
+#error "attention_input_metadata requires CUDA or ROCm"
+#endif
 #include <cstdint>
 
 namespace rtp_llm {
@@ -52,23 +58,52 @@ __global__ void buildAttentionInputMetadataKernel(const int32_t* __restrict__ in
 
 }  // namespace
 
-void invokeBuildAttentionInputMetadata(const at::Tensor& input_lengths,
-                                       const at::Tensor& prefix_lengths,
-                                       at::Tensor&       cu_seqlens,
-                                       at::Tensor&       cu_kv_seqlens,
-                                       at::Tensor&       padding_offset,
-                                       cudaStream_t      stream) {
+#if USING_ROCM
+inline hipError_t getLastMetadataKernelError() {
+    return hipGetLastError();
+}
+
+inline const char* getMetadataKernelErrorString(hipError_t result) {
+    return hipGetErrorString(result);
+}
+
+inline bool isMetadataKernelSuccess(hipError_t result) {
+    return result == hipSuccess;
+}
+#elif USING_CUDA
+inline cudaError_t getLastMetadataKernelError() {
+    return cudaGetLastError();
+}
+
+inline const char* getMetadataKernelErrorString(cudaError_t result) {
+    return cudaGetErrorString(result);
+}
+
+inline bool isMetadataKernelSuccess(cudaError_t result) {
+    return result == cudaSuccess;
+}
+#else
+#error "attention_input_metadata requires CUDA or ROCm"
+#endif
+
+void invokeBuildAttentionInputMetadata(const at::Tensor&            input_lengths,
+                                       const at::Tensor&            prefix_lengths,
+                                       at::Tensor&                  cu_seqlens,
+                                       at::Tensor&                  cu_kv_seqlens,
+                                       at::Tensor&                  padding_offset,
+                                       AttentionInputMetadataStream stream) {
     TORCH_CHECK(input_lengths.defined(), "input_lengths must be defined");
-    TORCH_CHECK(input_lengths.is_cuda(), "input_lengths must be a CUDA tensor");
+    TORCH_CHECK(input_lengths.is_cuda(), "input_lengths must be a device tensor");
     TORCH_CHECK(input_lengths.scalar_type() == at::kInt, "input_lengths must be int32");
     TORCH_CHECK(input_lengths.is_contiguous(), "input_lengths must be contiguous");
     TORCH_CHECK(!prefix_lengths.defined() || prefix_lengths.numel() == 0 || prefix_lengths.is_cuda(),
-                "prefix_lengths must be CUDA or empty");
+                "prefix_lengths must be device or empty");
     TORCH_CHECK(!prefix_lengths.defined() || prefix_lengths.numel() == 0 || prefix_lengths.scalar_type() == at::kInt,
                 "prefix_lengths must be int32");
-    TORCH_CHECK(cu_seqlens.is_cuda() && cu_seqlens.scalar_type() == at::kInt, "cu_seqlens must be CUDA int32");
-    TORCH_CHECK(cu_kv_seqlens.is_cuda() && cu_kv_seqlens.scalar_type() == at::kInt, "cu_kv_seqlens must be CUDA int32");
-    TORCH_CHECK(!padding_offset.defined() || padding_offset.is_cuda(), "padding_offset must be CUDA");
+    TORCH_CHECK(cu_seqlens.is_cuda() && cu_seqlens.scalar_type() == at::kInt, "cu_seqlens must be device int32");
+    TORCH_CHECK(cu_kv_seqlens.is_cuda() && cu_kv_seqlens.scalar_type() == at::kInt,
+                "cu_kv_seqlens must be device int32");
+    TORCH_CHECK(!padding_offset.defined() || padding_offset.is_cuda(), "padding_offset must be device");
 
     const auto batch_size   = static_cast<int32_t>(input_lengths.size(0));
     const auto total_tokens = padding_offset.defined() ? static_cast<int32_t>(padding_offset.numel()) : 0;
@@ -100,8 +135,10 @@ void invokeBuildAttentionInputMetadata(const at::Tensor& input_lengths,
         padding_offset.defined() && padding_offset.numel() > 0 ? padding_offset.data_ptr<int32_t>() : nullptr,
         batch_size,
         total_tokens);
-    const auto result = cudaGetLastError();
-    TORCH_CHECK(result == cudaSuccess, "build attention input metadata kernel failed: ", cudaGetErrorString(result));
+    const auto result = getLastMetadataKernelError();
+    TORCH_CHECK(isMetadataKernelSuccess(result),
+                "build attention input metadata kernel failed: ",
+                getMetadataKernelErrorString(result));
 }
 
 }  // namespace rtp_llm

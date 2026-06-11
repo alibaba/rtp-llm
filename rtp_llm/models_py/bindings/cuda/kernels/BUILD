@@ -128,11 +128,18 @@ cc_library(
     name = "attention_input_metadata",
     srcs = ["attention_input_metadata.cu"],
     hdrs = ["attention_input_metadata.h"],
-    deps = [
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ] + torch_deps(),
-    copts = cuda_copts(),
+    deps = select({
+        "@//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "@//:using_rocm": [
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:hip",
+        ],
+        "//conditions:default": [],
+    }) + torch_deps(),
+    copts = any_cuda_copts(),
     visibility = ["//visibility:public"],
 )
 
@@ -148,16 +155,9 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-cc_library(
+alias(
     name = "mtp_target_verify_prepare",
-    srcs = ["mtp_target_verify_prepare.cu"],
-    hdrs = ["mtp_target_verify_prepare.h"],
-    deps = [
-        "//rtp_llm/cpp/utils:core_utils",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ] + torch_deps(),
-    copts = cuda_copts(),
+    actual = "//rtp_llm/models_py/bindings/common/kernels:mtp_target_verify_prepare",
     visibility = ["//visibility:public"],
 )
 

@@ -162,6 +162,9 @@ protected:
     void publishSyncMtpDeviceState(const StreamGroups&                          stream_groups,
                                    const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                    const MergedOutput&                          draft_prefill_output);
+    void publishPrefillMtpDeviceState(const StreamGroups& stream_groups,
+                                      const MergedOutput& prefill_output,
+                                      const MergedOutput& draft_prefill_output);
 
     void releaseAllModelBuffers();
 

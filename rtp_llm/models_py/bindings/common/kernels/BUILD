@@ -148,6 +148,17 @@ cc_library(
 )
 
 cc_library(
+    name = "mtp_target_verify_prepare",
+    srcs = ["mtp_target_verify_prepare.cu"],
+    hdrs = ["mtp_target_verify_prepare.h"],
+    deps = any_cuda_deps + [
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = any_cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "kernels_kv_cache",
     srcs = ["kv_cache_kernels.cu"],
     hdrs = ["kv_cache_kernels.h"],

@@ -17,14 +17,30 @@
 #include <numeric>
 #include "rtp_llm/cpp/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#if USING_CUDA
+#if USING_ROCM
+#include <ATen/hip/HIPContext.h>
+#elif USING_CUDA
 #include <c10/cuda/CUDAStream.h>
+#endif
+#if USING_CUDA || USING_ROCM
 #include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
 #endif
 
 using namespace std;
 
 namespace rtp_llm {
+
+#if USING_CUDA || USING_ROCM
+namespace {
+AttentionInputMetadataStream getCurrentAttentionInputMetadataStream() {
+#if USING_ROCM
+    return at::hip::getCurrentHIPStream().stream();
+#else
+    return c10::cuda::getCurrentCUDAStream().stream();
+#endif
+}
+}  // namespace
+#endif
 
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
     if (tensor.device().is_cuda()) {
@@ -201,15 +217,15 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.cu_seqlens              = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.cu_kv_seqlens           = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.padding_offset          = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
         invokeBuildAttentionInputMetadata(py_attn_inputs.input_lengths,
                                           py_attn_inputs.prefix_lengths,
                                           py_attn_inputs.cu_seqlens,
                                           py_attn_inputs.cu_kv_seqlens,
                                           py_attn_inputs.padding_offset,
-                                          c10::cuda::getCurrentCUDAStream().stream());
+                                          getCurrentAttentionInputMetadataStream());
 #else
-        RTP_LLM_FAIL("device attention input metadata requires CUDA");
+        RTP_LLM_FAIL("device attention input metadata requires CUDA or ROCm");
 #endif
     } else {
         py_attn_inputs.total_tokens        = 0;
@@ -250,15 +266,15 @@ static void calculatePaddingOffsetDeviceAware(torch_ext::PyAttentionInputs& py_a
         return;
     }
 
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
     invokeBuildAttentionInputMetadata(py_attn_inputs.input_lengths,
                                       py_attn_inputs.prefix_lengths,
                                       py_attn_inputs.cu_seqlens,
                                       py_attn_inputs.cu_kv_seqlens,
                                       py_attn_inputs.padding_offset,
-                                      c10::cuda::getCurrentCUDAStream().stream());
+                                      getCurrentAttentionInputMetadataStream());
 #else
-    RTP_LLM_FAIL("device padding_offset requires CUDA");
+    RTP_LLM_FAIL("device padding_offset requires CUDA or ROCm");
 #endif
 }
 

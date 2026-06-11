@@ -213,7 +213,7 @@ void processLogits(const GreedyParams&  params,
                    no_repeat_ngram_size.data_ptr<int32_t>() + decoder_batch_size,
                    [](auto s) { return s != 0; })) {
             auto no_repeat_ngram_size_gpu = no_repeat_ngram_size.to(torch::kCUDA, true);
-            // Build array of pointers to each batch's token ids
+            // Build array of pointers to each batch's token ids#
             auto output_ids_ptrs =
                 torch::empty({(int64_t)decoder_batch_size}, torch::TensorOptions().dtype(torch::kInt64)).pin_memory();
             for (int64_t i = 0; i < (int64_t)decoder_batch_size; i++) {
@@ -504,7 +504,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // [batch_size, step + 1] — clone to GPU
     // On ROCm, hipMemcpyAsync from pageable memory is truly async (unlike CUDA where it
     // falls back to sync). Use blocking transfer to avoid memory access faults.
-    auto device_tokens = params.token_ids.to(torch::kCUDA);
+    auto device_tokens = params.token_ids.to(torch::kCUDA, true);
     // [step + 1, batch_size]
     auto transposed_tokens = device_tokens.transpose(0, 1).contiguous();
 
@@ -512,7 +512,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     if (std::any_of(params.temperature.data_ptr<float>(),
                     params.temperature.data_ptr<float>() + batch_size,
                     [&](auto t) { return t != 1.0f; })) {
-        auto temperature_gpu = params.temperature.to(torch::kCUDA);
+        auto temperature_gpu = params.temperature.to(torch::kCUDA, true);
         invokeBatchApplyTemperaturePenalty(params.logits.data_ptr<float>(),
                                            (float*)nullptr,  // embedding_bias
                                            temperature_gpu.data_ptr<float>(),
@@ -537,16 +537,16 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
             || std::any_of(frequency_penalty.data_ptr<float>(),
                            frequency_penalty.data_ptr<float>() + batch_size,
                            [&](auto t) { return t != 0.0f; })) {
-            auto sequence_lengths_gpu = params.input_lengths.to(torch::kCUDA);
+            auto sequence_lengths_gpu = params.input_lengths.to(torch::kCUDA, true);
             if (decoder_batch_size > 0) {
                 auto dst_slice = sequence_lengths_gpu.slice(0, 0, decoder_batch_size);
-                dst_slice.copy_(params.sequence_lengths.to(torch::kCUDA));
+                dst_slice.copy_(params.sequence_lengths.to(torch::kCUDA, true));
             }
             auto penalty_ws             = torch::zeros({(int64_t)batch_size, (int64_t)vocab_size_padded},
                                            torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-            auto repetition_penalty_gpu = repetition_penalty.to(torch::kCUDA);
-            auto presence_penalty_gpu   = presence_penalty.to(torch::kCUDA);
-            auto frequency_penalty_gpu  = frequency_penalty.to(torch::kCUDA);
+            auto repetition_penalty_gpu = repetition_penalty.to(torch::kCUDA, true);
+            auto presence_penalty_gpu   = presence_penalty.to(torch::kCUDA, true);
+            auto frequency_penalty_gpu  = frequency_penalty.to(torch::kCUDA, true);
             invokeBatchApplyRepetitionPenalty(params.logits.data_ptr<float>(),
                                               penalty_ws.data_ptr<int32_t>(),
                                               repetition_penalty_gpu.data_ptr<float>(),
@@ -574,7 +574,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         samples_t.copy_(selected_tokens);
 
         auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
-        params.token_ids.copy_(output_tokens);
+        params.token_ids.copy_(output_tokens, true);
 
         return GreedyOutput{};
     }

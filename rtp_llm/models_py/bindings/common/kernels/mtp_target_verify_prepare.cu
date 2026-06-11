@@ -1,8 +1,14 @@
-#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
+#include "rtp_llm/models_py/bindings/common/kernels/mtp_target_verify_prepare.h"
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 #include <algorithm>
+#if USING_CUDA
+#include <cuda_runtime.h>
+#endif
+#if USING_ROCM
+#include <hip/hip_runtime.h>
+#endif
 
 namespace rtp_llm {
 
@@ -112,7 +118,7 @@ void invokeMtpTargetVerifyPrepare(const torch::Tensor& sequence_lengths,
                                   torch::Tensor&       sequence_lengths_plus_1,
                                   torch::Tensor&       lm_output_indexes,
                                   int32_t              tokens_per_batch,
-                                  cudaStream_t         stream) {
+                                  MtpPrepareStream     stream) {
     const int64_t batch_size = input_lengths.numel();
     if (batch_size <= 0) {
         return;
@@ -134,10 +140,10 @@ void invokeMtpTargetVerifyPrepare(const torch::Tensor& sequence_lengths,
                                                                        static_cast<int32_t>(batch_size));
 }
 
-void invokeMtpSpecDecodeMetadataPrepare(torch::Tensor& input_lengths,
-                                        torch::Tensor& lm_output_indexes,
-                                        int32_t        tokens_per_batch,
-                                        cudaStream_t   stream) {
+void invokeMtpSpecDecodeMetadataPrepare(torch::Tensor&   input_lengths,
+                                        torch::Tensor&   lm_output_indexes,
+                                        int32_t          tokens_per_batch,
+                                        MtpPrepareStream stream) {
     const int64_t batch_size = input_lengths.numel();
     if (batch_size <= 0) {
         return;
@@ -160,7 +166,7 @@ void invokeMtpSpecDecodeTokensMetadataPrepare(const std::vector<torch::Tensor>& 
                                               torch::Tensor&                    input_lengths,
                                               torch::Tensor&                    lm_output_indexes,
                                               int32_t                           tokens_per_batch,
-                                              cudaStream_t                      stream) {
+                                              MtpPrepareStream                  stream) {
     RTP_LLM_CHECK_WITH_INFO(tokens_per_batch > 0, "tokens_per_batch must be positive");
     RTP_LLM_CHECK_WITH_INFO(tokens_per_batch <= 8, "tokens_per_batch %d exceeds fused kernel max 8", tokens_per_batch);
     RTP_LLM_CHECK_WITH_INFO(static_cast<int32_t>(token_columns.size()) == tokens_per_batch,
@@ -224,7 +230,7 @@ void invokeMtpDispatchStatePrepare(const torch::Tensor& accept_len,
                                    torch::Tensor&       next_seq_len,
                                    torch::Tensor&       hidden_idx,
                                    int64_t              batch_size,
-                                   cudaStream_t         stream) {
+                                   MtpPrepareStream     stream) {
     if (batch_size <= 0) {
         return;
     }

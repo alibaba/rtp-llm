@@ -137,6 +137,7 @@ cc_library(
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
     ] + select({
         "//:using_cuda": ["//rtp_llm/models_py/bindings/cuda/kernels:attention_input_metadata"],
+        "//:using_rocm": ["//rtp_llm/models_py/bindings/cuda/kernels:attention_input_metadata"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

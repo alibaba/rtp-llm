@@ -711,6 +711,7 @@ class AiterPrefillAttnOpPaged:
         self.kv_indptr_buf: Optional[torch.Tensor] = None
         self.kv_page_indices_buf: Optional[torch.Tensor] = None
         self.descale_buf: Optional[torch.Tensor] = None
+        self.sanitized_bt_buf: Optional[torch.Tensor] = None
         self._block_positions: Optional[torch.Tensor] = None
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
@@ -775,9 +776,29 @@ class AiterPrefillAttnOpPaged:
         bt = fmha_params.kv_cache_block_id_device
         extra_pages = (128 + self.tokens_per_block - 1) // self.tokens_per_block
         max_cols = bt.shape[1] + extra_pages
-        self.sanitized_bt_buf = torch.zeros(
-            batch_size, max_cols, dtype=torch.int32, device=self.graph_device
+        need_new_buf = (
+            self.sanitized_bt_buf is None
+            or self.sanitized_bt_buf.device != self.graph_device
+            or self.sanitized_bt_buf.dtype != torch.int32
+            or self.sanitized_bt_buf.shape[0] < batch_size
+            or self.sanitized_bt_buf.shape[1] < max_cols
         )
+        if need_new_buf:
+            if self.cuda_graph_prepared:
+                current_shape = (
+                    None
+                    if self.sanitized_bt_buf is None
+                    else tuple(self.sanitized_bt_buf.shape)
+                )
+                raise RuntimeError(
+                    "AiterPrefillAttnOpPaged CUDA graph replay requires a stable "
+                    "sanitized block-table buffer address; replay metadata exceeded "
+                    f"capture capacity {current_shape} -> "
+                    f"({batch_size}, {max_cols})"
+                )
+            self.sanitized_bt_buf = torch.zeros(
+                batch_size, max_cols, dtype=torch.int32, device=self.graph_device
+            )
         self.cuda_graph_prepared = True
 
     def forward(self, qkv, kv_cache, fmha_params) -> torch.Tensor:
@@ -839,8 +860,8 @@ class AiterPrefillAttnOpPaged:
             # CUDA graph replay requires stable tensor addresses. Copy the
             # sanitized result into the pre-allocated fixed-address buffer.
             cols = sanitized_bt.shape[1]
-            self.sanitized_bt_buf[:, :cols] = sanitized_bt
-            block_table = self.sanitized_bt_buf[:, :cols]
+            self.sanitized_bt_buf[:batch_size, :cols].copy_(sanitized_bt)
+            block_table = self.sanitized_bt_buf[:batch_size, :cols]
         else:
             block_table = sanitized_bt
 

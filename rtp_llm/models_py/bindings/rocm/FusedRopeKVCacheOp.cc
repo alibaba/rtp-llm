@@ -67,9 +67,25 @@ void updateKvCacheOffset(CKAttn& params, const torch::Tensor& kv_cache_block_id_
 void prepareInPlace(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inputs) {
     const bool has_prefix = attn_inputs.prefix_lengths.defined() && attn_inputs.prefix_lengths.numel() > 0;
 
+    if (attn_inputs.cu_seqlens.defined() && params.cu_seqlens.defined()
+        && params.cu_seqlens.data_ptr() != attn_inputs.cu_seqlens.data_ptr()) {
+        copyTensorExactInPlace(params.cu_seqlens, attn_inputs.cu_seqlens, "cu_seqlens");
+    }
+    if (attn_inputs.cu_kv_seqlens.defined() && params.cu_kv_seqlens.defined()
+        && params.cu_kv_seqlens.data_ptr() != attn_inputs.cu_kv_seqlens.data_ptr()) {
+        copyTensorExactInPlace(params.cu_kv_seqlens, attn_inputs.cu_kv_seqlens, "cu_kv_seqlens");
+    }
+    if (attn_inputs.input_lengths.defined() && params.input_lengths.defined()
+        && params.input_lengths.data_ptr() != attn_inputs.input_lengths.data_ptr()) {
+        copyTensorExactInPlace(params.input_lengths, attn_inputs.input_lengths, "input_lengths");
+    }
     if (has_prefix && params.prefix_lengths.defined() && params.prefix_lengths.numel() > 0
         && params.prefix_lengths.data_ptr() != attn_inputs.prefix_lengths.data_ptr()) {
         copyTensorExactInPlace(params.prefix_lengths, attn_inputs.prefix_lengths, "prefix_lengths");
+    }
+    if (attn_inputs.padding_offset.defined() && params.padding_offset.defined()
+        && params.padding_offset.data_ptr() != attn_inputs.padding_offset.data_ptr()) {
+        copyTensorExactInPlace(params.padding_offset, attn_inputs.padding_offset, "padding_offset");
     }
 
     params.max_seq_len = attn_inputs.input_lengths.max().item<int32_t>();
@@ -179,6 +195,20 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     const int  q_output_token_num = (use_paged_fmha && pad_query) ? batch_size * seq_len : token_num;
     const bool paged_fp8          = use_paged_fmha && attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
     const auto q_opts             = torch::TensorOptions(qkv.dtype()).device(qkv.device());
+    const int* padding_offset_ptr = nullptr;
+    if (params->padding_offset.defined() && params->padding_offset.numel() > 0) {
+        TORCH_CHECK(params->padding_offset.is_cuda(),
+                    "FusedRopeKVCachePrefillOp: padding_offset must be a device tensor");
+        TORCH_CHECK(params->padding_offset.scalar_type() == at::kInt,
+                    "FusedRopeKVCachePrefillOp: padding_offset must be int32, got ",
+                    params->padding_offset.scalar_type());
+        TORCH_CHECK(params->padding_offset.numel() >= token_num,
+                    "FusedRopeKVCachePrefillOp: padding_offset numel ",
+                    params->padding_offset.numel(),
+                    " is smaller than token_num ",
+                    token_num);
+        padding_offset_ptr = params->padding_offset.data_ptr<int>();
+    }
 
     // pad_query=false: q_output is packed [token_num, heads, dim] and the kernel writes
     // every cell — skip the zero-fill. pad_query=true: padded slots between sequences
@@ -290,7 +320,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                         (use_fmha_fp8 && qkv_buf_fp8.defined() ? qkv_buf_fp8.data_ptr() : nullptr),
             position_ids,
             nullptr,  // qkv_bias
-            params->padding_offset.data_ptr<int>(),
+            padding_offset_ptr,
             params->cu_seqlens.data_ptr<int>(),
             batch_size,
             seq_len,
@@ -323,7 +353,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                         (use_fmha_fp8 && qkv_buf_fp8.defined() ? qkv_buf_fp8.data_ptr() : nullptr),
             position_ids,
             nullptr,
-            params->padding_offset.data_ptr<int>(),
+            padding_offset_ptr,
             params->cu_seqlens.data_ptr<int>(),
             batch_size,
             seq_len,
