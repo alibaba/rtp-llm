@@ -25,6 +25,11 @@ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B924
 # DSV4 mHC uses TileLang by default.  Keep the same version as cuda12_9.
 tilelang==0.1.9
 
+# Freeze/resume sleep-mode weight offload backend.  The wheel carries the
+# torch_memory_saver Python package plus CUDA 12/13 preload and pluggable
+# allocator native extensions.
+torch_memory_saver==0.0.9.post1
+
 # rtp_kernel built against torch 2.11+cu130 for cuda13.
 http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/serina.wzq/whl/06_11/rtp_kernel-0.1.0-cp310-cp310-linux_x86_64.whl
 
