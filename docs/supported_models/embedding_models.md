@@ -80,4 +80,4 @@ for endpoint in endpoints:
 |-------------------------------------------------|-----------------------------------------------|---------------|--------------------------------------------------------------------------------------------------------------------------------------|
 | **Qwen3 Embedding/Reranker**      | `Qwen/Qwen3-Embedding-8B`             | N/A           | Support all size of qwen3 embedding/reranker                   |
 |
-| **BGE (BgeEmbeddingModel)**                     | `BAAI/bge-large-en-v1.5`                        | N/A                 | only support BGE family with model_type=`Bert/Roberta/Qwen2`  including bge_m3, not suport `ModernBert` or `NewModel` . Specially, please set `model_type=qwen_2_embedding` for `Alibaba-NLP/gte-Qwen2-7B-instruct`  |
+| **BGE (BgeEmbeddingModel)**                     | `BAAI/bge-large-en-v1.5`                        | N/A                 | only support BGE family with model_type=`Bert/Roberta/Qwen2`  including bge_m3, not support `ModernBert` or `NewModel` . Specifically, please set `model_type=qwen_2_embedding` for `Alibaba-NLP/gte-Qwen2-7B-instruct`  |
