@@ -19,7 +19,6 @@ struct MLAKVCacheSpec: public KVCacheSpec {
 
     MLAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config) {
         type               = KVCacheSpecType::MultiHeadLatentAttention;
-        layer_num          = 1;  // Will be set by caller
         local_head_num_kv  = 1;  // mla set local_head_num_kv to 1
         seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
         kv_lora_rank       = static_cast<uint32_t>(attn_config.kv_lora_rank);
@@ -79,6 +78,10 @@ struct MLAKVCacheSpec: public KVCacheSpec {
 
         // For MLA implementation, return the full blocks without any head-based partitioning
         return {0, k_block_bytes, k_block_bytes, v_block_bytes};
+    }
+
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<MLAKVCacheSpec>(*this);
     }
 
     std::string debugString(size_t indent = 0) const override {

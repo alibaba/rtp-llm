@@ -14,8 +14,13 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <memory>
 
 namespace rtp_llm {
+
+struct KVCacheSpec;
+using KVCacheSpecPtr = std::shared_ptr<KVCacheSpec>;
+using LayerKVCacheSpecs = std::map<int64_t, std::vector<KVCacheSpecPtr>>;
 
 enum TaskType {
     DENSE_EMBEDDING    = 0,
@@ -132,6 +137,10 @@ public:
 
     // Multimodal model configuration
     MMModelConfig mm_model_config;
+
+    // Declarative per-model KV cache layout. C++ cache config consumes this
+    // and performs runtime finalization such as block/ring sizing.
+    LayerKVCacheSpecs kv_cache_specs;
 
     // Fields merged from PyModelConfig
     std::string extra_data_path       = "";

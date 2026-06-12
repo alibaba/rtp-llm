@@ -14,8 +14,29 @@ namespace rtp_llm {
 
 namespace {
 
+bool hasDsv4KvCacheSpecs(const ModelConfig& model_config) {
+    constexpr const char* kExpectedTags[] = {
+        "csa_kv", "hca_kv", "indexer_kv", "indexer_state", "csa_state", "hca_state", "swa_kv"};
+    for (const auto& layer_specs : model_config.kv_cache_specs) {
+        for (const auto& spec : layer_specs.second) {
+            if (spec == nullptr) {
+                continue;
+            }
+            for (const char* expected_tag : kExpectedTags) {
+                if (spec->tag == expected_tag) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 bool hasTypedHybridPoolLayout(const ModelConfig& model_config) {
-    return !model_config.attn_config.layer_compress_ratios.empty();
+    RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.layer_compress_ratios.empty() || hasDsv4KvCacheSpecs(model_config),
+                            "DSV4 cache config requires model_config.kv_cache_specs; "
+                            "layer_compress_ratios fallback is disabled");
+    return hasDsv4KvCacheSpecs(model_config);
 }
 
 bool shouldUseHybridPoolLayout(const ModelConfig& model_config) {
@@ -332,6 +353,9 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
             config.layer_region_to_group_id[l].assign(region_name_count, -1);
         }
     }
+    if (!config.layer_tag_to_group_id.empty()) {
+        config.layer_tag_to_group_id.resize(static_cast<size_t>(total_layer_num));
+    }
     if (!config.layer_to_group_ids.empty()) {
         config.layer_to_group_ids.resize(static_cast<size_t>(total_layer_num));
     }
@@ -389,6 +413,12 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                     if (region < config.layer_region_to_group_id[static_cast<size_t>(global_layer_id)].size()) {
                         config.layer_region_to_group_id[static_cast<size_t>(global_layer_id)][region] = target_gid;
                     }
+                }
+                if (!config.layer_tag_to_group_id.empty()
+                    && static_cast<size_t>(global_layer_id) < config.layer_tag_to_group_id.size()
+                    && g < propose_config.group_tags.size() && !propose_config.group_tags[g].empty()) {
+                    config.layer_tag_to_group_id[static_cast<size_t>(global_layer_id)][propose_config.group_tags[g]] =
+                        target_gid;
                 }
                 if (target_gid >= 0 && static_cast<size_t>(target_gid) < config.group_block_size_bytes.size()) {
                     size_t stride_bytes = 0;

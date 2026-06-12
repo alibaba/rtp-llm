@@ -10,6 +10,8 @@
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
+#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/model_utils/RopeCache.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
@@ -40,6 +42,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("STATS", EplbMode::STATS)
         .value("EPLB", EplbMode::EPLB)
         .value("ALL", EplbMode::ALL);
+
+    py::enum_<KVCacheSpecType>(m, "KVCacheSpecType")
+        .value("MultiHeadAttention", KVCacheSpecType::MultiHeadAttention)
+        .value("MultiHeadLatentAttention", KVCacheSpecType::MultiHeadLatentAttention)
+        .value("LinearAttention", KVCacheSpecType::LinearAttention);
 
     py::enum_<CPRotateMethod>(m, "CPRotateMethod")
         .value("DISABLED", CPRotateMethod::DISABLED)
@@ -1558,6 +1565,50 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
         .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style);
 
+    // Register KV cache specs used by declarative model-side cache layout.
+    py::class_<KVCacheSpec, KVCacheSpecPtr>(m, "KVCacheSpec")
+        .def_readwrite("tag", &KVCacheSpec::tag)
+        .def_readwrite("local_head_num_kv", &KVCacheSpec::local_head_num_kv)
+        .def_readwrite("seq_size_per_block", &KVCacheSpec::seq_size_per_block)
+        .def_readwrite("type", &KVCacheSpec::type)
+        .def_readwrite("dtype", &KVCacheSpec::dtype);
+
+    py::class_<MHAKVCacheSpec, KVCacheSpec, std::shared_ptr<MHAKVCacheSpec>>(m, "MHAKVCacheSpec")
+        .def(py::init<>())
+        .def_readwrite("size_per_head", &MHAKVCacheSpec::size_per_head);
+
+    py::class_<MLAKVCacheSpec, KVCacheSpec, std::shared_ptr<MLAKVCacheSpec>>(m, "MLAKVCacheSpec")
+        .def(py::init<>())
+        .def_readwrite("kv_lora_rank", &MLAKVCacheSpec::kv_lora_rank)
+        .def_readwrite("rope_head_dim", &MLAKVCacheSpec::rope_head_dim);
+
+    py::class_<LinearKVCacheSpec, KVCacheSpec, std::shared_ptr<LinearKVCacheSpec>>(m, "LinearKVCacheSpec")
+        .def(py::init<>())
+        .def_readwrite("local_num_k_heads", &LinearKVCacheSpec::local_num_k_heads)
+        .def_readwrite("local_num_v_heads", &LinearKVCacheSpec::local_num_v_heads)
+        .def_readwrite("head_k_dim", &LinearKVCacheSpec::head_k_dim)
+        .def_readwrite("head_v_dim", &LinearKVCacheSpec::head_v_dim)
+        .def_readwrite("conv_kernel_dim", &LinearKVCacheSpec::conv_kernel_dim)
+        .def_readwrite("ssm_state_dtype", &LinearKVCacheSpec::ssm_state_dtype)
+        .def_readwrite("conv_state_dtype", &LinearKVCacheSpec::conv_state_dtype);
+
+    py::class_<DSV4KVSpec, KVCacheSpec, std::shared_ptr<DSV4KVSpec>>(m, "DSV4KVSpec")
+        .def(py::init<>())
+        .def_readwrite("entry_elems", &DSV4KVSpec::entry_elems)
+        .def_readwrite("entries_per_block", &DSV4KVSpec::entries_per_block)
+        .def_readwrite("compression_ratio", &DSV4KVSpec::compression_ratio)
+        .def_readwrite("store_dtype", &DSV4KVSpec::store_dtype)
+        .def_readwrite("block_size_bytes_alignment", &DSV4KVSpec::block_size_bytes_alignment);
+
+    py::class_<DSV4StateSpec, KVCacheSpec, std::shared_ptr<DSV4StateSpec>>(m, "DSV4StateSpec")
+        .def(py::init<>())
+        .def_readwrite("state_dim", &DSV4StateSpec::state_dim)
+        .def_readwrite("entries_per_block", &DSV4StateSpec::entries_per_block)
+        .def_readwrite("store_dtype", &DSV4StateSpec::store_dtype)
+        .def_readwrite("block_size_bytes_override", &DSV4StateSpec::block_size_bytes_override)
+        .def_readwrite("block_size_bytes_alignment", &DSV4StateSpec::block_size_bytes_alignment)
+        .def_readwrite("block_size_alignment_min_entries", &DSV4StateSpec::block_size_alignment_min_entries);
+
     // Register ModelConfig
     py::class_<ModelConfig>(m, "ModelConfig")
         .def(py::init<>())
@@ -1572,6 +1623,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("special_tokens", &ModelConfig::special_tokens)
         .def_readwrite("quant_algo", &ModelConfig::quant_algo)
         .def_readwrite("eplb_config", &ModelConfig::eplb_config)
+        .def_readwrite("kv_cache_specs", &ModelConfig::kv_cache_specs)
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)
         .def_readwrite("tokenizer_path", &ModelConfig::tokenizer_path)
