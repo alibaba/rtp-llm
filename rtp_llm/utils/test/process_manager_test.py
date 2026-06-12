@@ -7,7 +7,15 @@ import unittest
 from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
-from rtp_llm.utils.process_manager import ProcessManager
+from rtp_llm.utils.process_manager import (
+    DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV,
+    DEFER_FIRST_SIGTERM_ENV,
+    DEFER_FIRST_SIGTERM_SECONDS_ENV,
+    DEFER_FIRST_SIGTERM_VALUE,
+    ProcessManager,
+    SHUTDOWN_TIMEOUT_ENV,
+    STOP_TIMEOUT_MS_ENV,
+)
 
 
 @contextmanager
@@ -935,6 +943,87 @@ class TestFailureShutdownPaths(unittest.TestCase):
         self.assertTrue(self.manager.shutdown_requested)
         self.assertFalse(self.manager.failure_detected)
 
+    def test_backend_process_manager_defers_first_sigterm(self):
+        """Backend process managers can survive cgroup-wide SIGTERM until the
+        parent sends the staged backend SIGTERM after frontend drain."""
+        with patch.dict(
+            os.environ,
+            {
+                DEFER_FIRST_SIGTERM_ENV: DEFER_FIRST_SIGTERM_VALUE,
+                DEFER_FIRST_SIGTERM_SECONDS_ENV: "30",
+            },
+        ):
+            manager = ProcessManager(
+                shutdown_timeout=30,
+                monitor_interval=0.01,
+                allow_defer_first_sigterm=True,
+            )
+
+        manager._signal_handler(signal.SIGTERM, None)
+        self.assertFalse(manager.shutdown_requested)
+        self.assertTrue(manager.is_deferred_sigterm_pending())
+
+        manager._signal_handler(signal.SIGTERM, None)
+        self.assertTrue(manager.shutdown_requested)
+        self.assertFalse(manager.is_deferred_sigterm_pending())
+        self.assertFalse(manager.failure_detected)
+
+    def test_parent_process_manager_does_not_defer_first_sigterm(self):
+        """Only backend child managers may defer cgroup-wide SIGTERM.
+
+        The top-level parent must enter staged shutdown immediately so it can
+        drain frontend before sending the second SIGTERM to backend.
+        """
+        with patch.dict(
+            os.environ,
+            {
+                DEFER_FIRST_SIGTERM_ENV: DEFER_FIRST_SIGTERM_VALUE,
+                DEFER_FIRST_SIGTERM_SECONDS_ENV: "30",
+            },
+        ):
+            manager = ProcessManager(shutdown_timeout=30, monitor_interval=0.01)
+
+        manager._signal_handler(signal.SIGTERM, None)
+        self.assertTrue(manager.shutdown_requested)
+        self.assertFalse(manager.failure_detected)
+
+    def test_sync_shutdown_timeout_env_from_parsed_config(self):
+        """CLI-only shutdown_timeout must still reach C++ through env."""
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(ProcessManager.sync_shutdown_timeout_env(123), 123)
+            self.assertEqual(os.environ[SHUTDOWN_TIMEOUT_ENV], "123")
+
+            self.assertEqual(ProcessManager.sync_shutdown_timeout_env(-1), 600)
+            self.assertEqual(os.environ[SHUTDOWN_TIMEOUT_ENV], "600")
+
+    def test_deferred_group_budget_includes_stop_timeout_headroom(self):
+        """Parent backend wait must outlive the C++ gRPC stop timeout."""
+        with patch.dict(
+            os.environ,
+            {
+                STOP_TIMEOUT_MS_ENV: "90000",
+                DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV: "7",
+            },
+        ):
+            self.assertEqual(
+                ProcessManager.deferred_group_shutdown_timeout_seconds(10),
+                97,
+            )
+
+    def test_deferred_group_failure_budget_stays_immediate(self):
+        """Failure shutdown must not be expanded by graceful headroom."""
+        with patch.dict(
+            os.environ,
+            {
+                STOP_TIMEOUT_MS_ENV: "90000",
+                DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV: "7",
+            },
+        ):
+            self.assertEqual(
+                ProcessManager.deferred_group_shutdown_timeout_seconds(0),
+                0,
+            )
+
     # --- drain-cap activation -----------------------------------------------
 
     def test_failure_with_dead_backend_force_kills_frontend(self):
@@ -1058,6 +1147,29 @@ class TestFailureShutdownPaths(unittest.TestCase):
         # Frontend still force-killed by monitor's REAP-window timer.
         self.assertIn((frontend.pid, signal.SIGKILL), kills)
 
+    def test_normal_shutdown_backend_sigterm_exit_mid_drain_no_failure(self):
+        """A backend process may exit with -SIGTERM during startup shutdown
+        before its Python signal handler is installed; requested shutdown
+        should not classify that as a crash."""
+        frontend = _FakeProc("frontend")  # ignores SIGTERM
+        backend = _FakeProc(
+            "backend", dies_after=time.time() + 0.1, exitcode=-signal.SIGTERM
+        )
+        self.manager.add_process(frontend, shutdown_group="frontend")
+        self.manager.add_process(backend, shutdown_group="backend")
+        self.manager.shutdown_requested = True
+
+        def fake_kill(pid, sig):
+            if pid == frontend.pid:
+                frontend._alive = False
+
+        with patch("os.kill", side_effect=fake_kill), _watchdog(
+            15, "clean SIGTERM backend exit regressed"
+        ):
+            self.manager._monitor_processes_health()
+
+        self.assertFalse(self.manager.failure_detected)
+
     # --- frontend-only scenarios (no backend group registered) -------------
 
     def test_frontend_only_sigterm_drains_naturally(self):
@@ -1147,6 +1259,65 @@ class TestFailureShutdownPaths(unittest.TestCase):
         )
         self.assertFalse(self.manager.failure_detected)
 
+    def test_backend_gets_full_shutdown_budget_after_frontend_drain(self):
+        """Frontend drain and backend cleanup need separate budgets.
+
+        Regression coverage for graceful restarts where frontend consumes most
+        of shutdown_timeout, then backend still needs time to stop C++ RPC
+        services without being hit by the monitor's SIGKILL pass.
+        """
+        t0 = time.time()
+        frontend = _FakeProc("frontend", dies_after=t0 + 0.18)
+        backend = _FakeProc("backend", dies_after=t0 + 0.32)
+        self.manager.shutdown_timeout = 0.2
+        self.manager.monitor_interval = 0.01
+        self.manager.POST_KILL_REAP_WINDOW = 0.02
+        self.manager.add_process(frontend, shutdown_group="frontend")
+        self.manager.add_process(backend, shutdown_group="backend")
+        self.manager.shutdown_requested = True
+
+        kills = []
+        with patch(
+            "os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))
+        ), _watchdog(3, "backend shutdown budget was squeezed by frontend drain"):
+            self.manager._monitor_processes_health()
+
+        self.assertEqual(
+            kills,
+            [],
+            "backend exited within its own shutdown budget and must not be killed",
+        )
+        self.assertGreaterEqual(
+            time.time() - t0,
+            0.30,
+            "monitor did not wait for backend cleanup after frontend drain",
+        )
+        self.assertFalse(self.manager.failure_detected)
+
+    def test_backend_only_deferred_group_gets_shutdown_headroom(self):
+        """Backend rank managers have no frontend group but still need
+        headroom beyond the C++ stop timeout for grpc/http cleanup."""
+        t0 = time.time()
+        backend = _FakeProc("rank-0", dies_after=t0 + 1.2)
+        self.manager.shutdown_timeout = 1
+        self.manager.monitor_interval = 0.01
+        self.manager.POST_KILL_REAP_WINDOW = 0.02
+        self.manager.add_process(backend, shutdown_group="backend")
+        self.manager.shutdown_requested = True
+
+        kills = []
+        with patch.dict(
+            os.environ,
+            {DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV: "1"},
+        ), patch(
+            "os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))
+        ), _watchdog(3, "backend-only deferred headroom regressed"):
+            self.manager._monitor_processes_health()
+
+        self.assertEqual(kills, [])
+        self.assertGreaterEqual(time.time() - t0, 1.1)
+        self.assertFalse(self.manager.failure_detected)
+
     def test_failure_path_skips_drain_even_with_long_timeout(self):
         """Failure path must use drain_timeout=0 regardless of shutdown_timeout.
         Set shutdown_timeout=60 (would hang for a minute on graceful path);
@@ -1175,6 +1346,63 @@ class TestFailureShutdownPaths(unittest.TestCase):
             1.0,
             f"failure shutdown took {elapsed:.2f}s — drain wait was not skipped",
         )
+
+    def test_failure_path_does_not_wait_backend_graceful_headroom(self):
+        """A stuck backend on failure path must be SIGKILL'd promptly."""
+        self.manager.shutdown_timeout = 60
+        self.manager.POST_KILL_REAP_WINDOW = 0.05
+        frontend = _FakeProc("frontend", dies_on_terminate=True)
+        backend = _FakeProc("backend")  # ignores SIGTERM, never drains
+        self.manager.add_process(frontend, shutdown_group="frontend")
+        self.manager.add_process(backend, shutdown_group="backend")
+        self.manager.request_failure_shutdown()
+
+        kills = []
+
+        def fake_kill(pid, sig):
+            kills.append((pid, sig))
+            if pid == backend.pid:
+                backend._alive = False
+
+        t0 = time.time()
+        with patch("os.kill", side_effect=fake_kill), _watchdog(
+            3, "failure path waited on backend graceful headroom"
+        ):
+            self.manager._monitor_processes_health()
+        elapsed = time.time() - t0
+
+        self.assertLess(
+            elapsed,
+            1.0,
+            f"failure shutdown took {elapsed:.2f}s — backend headroom was used",
+        )
+        self.assertIn((backend.pid, signal.SIGKILL), kills)
+
+    def test_graceful_shutdown_waits_for_default_backend_group(self):
+        """Backend-rank ProcessManager registers ranks in the default group, not
+        frontend/backend groups. A normal SIGTERM must still wait the graceful
+        budget for those ranks to exit before the monitor's SIGKILL pass."""
+        rank = _FakeProc("rank-0", dies_after=time.time() + 0.3)
+        self.manager.shutdown_timeout = 2
+        self.manager.POST_KILL_REAP_WINDOW = 0.05
+        self.manager.add_process(rank, shutdown_group="default")
+        self.manager.shutdown_requested = True
+
+        kills = []
+        t0 = time.time()
+        with patch(
+            "os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))
+        ), _watchdog(5, "default backend group graceful wait regressed"):
+            self.manager._monitor_processes_health()
+        elapsed = time.time() - t0
+
+        self.assertGreaterEqual(
+            elapsed,
+            0.25,
+            "default backend rank was not given the graceful shutdown budget",
+        )
+        self.assertEqual(kills, [], "rank exited within budget and must not be killed")
+        self.assertFalse(self.manager.failure_detected)
 
     # --- _join_all_processes always uses POST_KILL_REAP_WINDOW --------------
 
