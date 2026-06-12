@@ -65,9 +65,7 @@ def _get_fused_fp8_quant_params(linear: Any) -> Optional[_FusedFp8QuantParams]:
     if CudaFp8GEMMLinear is not None and isinstance(linear, CudaFp8GEMMLinear):
         return _FusedFp8QuantParams(
             group_size=getattr(linear, "input_quant_group_size", 128),
-            scale_ue8m0=getattr(
-                linear, "input_quant_scale_ue8m0", linear.scale_ue8m0
-            ),
+            scale_ue8m0=getattr(linear, "input_quant_scale_ue8m0", linear.scale_ue8m0),
             round_to_pow2=getattr(linear, "input_quant_round_to_pow2", False),
         )
     if CudaMxfp8Linear is not None and isinstance(linear, CudaMxfp8Linear):
@@ -181,6 +179,24 @@ class GenericMoeLayer(nn.Module):
             )
         else:
             self.shared_expert = None
+
+        # Overlap executor: runs shared expert on an auxiliary CUDA stream
+        # concurrently with the routed-expert dispatch/combine pipeline.
+        # Controlled by MOE_SHARED_EXPERT_OVERLAP env var (default: off).
+        if self.shared_expert is not None:
+            from rtp_llm.models_py.modules.shared_expert_overlap import (
+                SharedExpertOverlapExecutor,
+            )
+
+            self._shared_overlap = SharedExpertOverlapExecutor()
+            # Pre-create the auxiliary stream so it exists before any CUDA
+            # graph capture.  prepare() is a no-op when overlap is disabled.
+            device = next(self.shared_expert.parameters(), None)
+            if device is not None:
+                self._shared_overlap.prepare(device.device)
+        else:
+            self._shared_overlap = None
+
         if weights.get(W.shared_expert_gate, None) is not None:
             self.shared_expert_gate = LinearFactory.create_linear_from_weights(
                 weights, W.shared_expert_gate, None, None, config
@@ -217,6 +233,7 @@ class GenericMoeLayer(nn.Module):
         clone.ffn_tp_size = self.ffn_tp_size
         clone.ep_size = self.ep_size
         clone.shared_expert = self.shared_expert
+        clone._shared_overlap = self._shared_overlap
         clone.shared_expert_gate = self.shared_expert_gate
         clone.sigmoid_gate_scale_add = self.sigmoid_gate_scale_add
         clone.correction_bias = self.correction_bias
@@ -291,6 +308,20 @@ class GenericMoeLayer(nn.Module):
         if _oai is not None:
             _moe_act = "swiglu_oai"
             _moe_extra = {"swiglu_alpha": _oai[0], "swiglu_limit": _oai[1]}
+
+        # Launch shared expert on auxiliary stream before routed expert work.
+        # When overlap is disabled (env var / CUDA graph capture / non-CUDA),
+        # SharedExpertOverlapExecutor.start() runs synchronously and caches
+        # the result for finish().
+        if self.shared_expert is not None and self._shared_overlap is not None:
+            self._shared_overlap.start(
+                self.shared_expert,
+                hidden_states,
+                x_fp8=x_fp8,
+                x_scale=x_scale,
+                skip_allreduce=use_ep_shared_allreduce,
+            )
+
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
@@ -299,12 +330,16 @@ class GenericMoeLayer(nn.Module):
             extra_expert_args=_moe_extra,
         )
         if self.shared_expert is not None:
-            shared_expert_output = self.shared_expert(
-                hidden_states,
-                x_fp8=x_fp8,
-                x_scale=x_scale,
-                skip_allreduce=use_ep_shared_allreduce,
-            )
+            # Collect shared expert output — from overlap executor or direct call.
+            if self._shared_overlap is not None:
+                shared_expert_output = self._shared_overlap.finish()
+            else:
+                shared_expert_output = self.shared_expert(
+                    hidden_states,
+                    x_fp8=x_fp8,
+                    x_scale=x_scale,
+                    skip_allreduce=use_ep_shared_allreduce,
+                )
             if use_ep_shared_allreduce:
                 # EP mode: routed expert output is already complete
                 # (EP combine via all_to_all / all_gather aggregated across ranks).
@@ -383,9 +418,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 and W.msa_idx_q_w in weights
             )
             if is_msa_layer:
-                from rtp_llm.models_py.modules.hybrid.msa_attention import (
-                    MSAAttention,
-                )
+                from rtp_llm.models_py.modules.hybrid.msa_attention import MSAAttention
 
                 self.self_attn = MSAAttention(
                     attn_configs,
@@ -412,7 +445,10 @@ class GenericMoeDecoderLayer(nn.Module):
         # Determine if this is a Dense layer (before first MoE layer or dense only)
         if layer_idx not in config.moe_layer_index:
             self.mlp = DenseMLP(
-                config.activation_type, parallelism_config, weights, quant_config,
+                config.activation_type,
+                parallelism_config,
+                weights,
+                quant_config,
                 swiglu_oai_params=_resolve_swiglu_oai_params(config),
             )
         else:
@@ -444,9 +480,7 @@ class GenericMoeDecoderLayer(nn.Module):
         _fuse_on = fuse_kernels_enabled(hw_kernel_config)
         self._fuse_input_norm_quant = False
         self._fuse_input_norm_quant_params = None
-        if _fuse_on and (
-            fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
-        ):
+        if _fuse_on and (fused_add_rmsnorm_fp8_quant_with_bf16_output is not None):
             if isinstance(self.self_attn, CausalAttention):
                 _qkv = getattr(self.self_attn, "qkv_proj", None)
                 _params = _get_fused_fp8_quant_params(_qkv)
@@ -486,10 +520,7 @@ class GenericMoeDecoderLayer(nn.Module):
 
         # Fuse post_attention_layernorm + dual output (bf16+fp8) for MoE
         self._fuse_post_norm_quant_moe_params = None
-        if (
-            isinstance(self.mlp, GenericMoeLayer)
-            and self.mlp.shared_expert is not None
-        ):
+        if isinstance(self.mlp, GenericMoeLayer) and self.mlp.shared_expert is not None:
             self._fuse_post_norm_quant_moe_params = _get_fused_fp8_quant_params(
                 getattr(self.mlp.shared_expert, "up_proj", None)
             )
@@ -517,9 +548,7 @@ class GenericMoeDecoderLayer(nn.Module):
         clone._fuse_post_norm_quant = self._fuse_post_norm_quant
         clone._fuse_post_norm_quant_params = self._fuse_post_norm_quant_params
         clone._fuse_post_norm_quant_moe = self._fuse_post_norm_quant_moe
-        clone._fuse_post_norm_quant_moe_params = (
-            self._fuse_post_norm_quant_moe_params
-        )
+        clone._fuse_post_norm_quant_moe_params = self._fuse_post_norm_quant_moe_params
         return clone
 
     def forward(
@@ -541,16 +570,14 @@ class GenericMoeDecoderLayer(nn.Module):
             if self._fuse_input_norm_quant and hidden_states.dim() == 2:
                 _params = self._fuse_input_norm_quant_params
                 assert _params is not None
-                bf16_hs, fp8_hs, scale = (
-                    fused_add_rmsnorm_fp8_quant_with_bf16_output(
-                        hidden_states,
-                        residual,
-                        self.input_layernorm.weight.data,
-                        self.input_layernorm.variance_epsilon,
-                        group_size=_params.group_size,
-                        scale_ue8m0=_params.scale_ue8m0,
-                        round_to_pow2=_params.round_to_pow2,
-                    )
+                bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
+                    hidden_states,
+                    residual,
+                    self.input_layernorm.weight.data,
+                    self.input_layernorm.variance_epsilon,
+                    group_size=_params.group_size,
+                    scale_ue8m0=_params.scale_ue8m0,
+                    round_to_pow2=_params.round_to_pow2,
                 )
                 hidden_states = self.self_attn(
                     hidden_states=bf16_hs,
@@ -560,9 +587,7 @@ class GenericMoeDecoderLayer(nn.Module):
                     x_scale=scale,
                 )
             else:
-                hidden_states, residual = self.input_layernorm(
-                    hidden_states, residual
-                )
+                hidden_states, residual = self.input_layernorm(hidden_states, residual)
                 hidden_states = self.self_attn(
                     hidden_states=hidden_states,
                     attn_inputs=attn_inputs,
