@@ -38,11 +38,10 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
             MoeConfigResolver,
         )
 
+        checker.check(callable(flashinfer_cutedsl_moe_masked))
         resolver = MoeConfigResolver()
         checker.check(resolver.is_bf16(config))
-        # Check if quantization is enabled and uses FP4 (uint8 dtype)
-        # FP4 weights are packed as uint8, so we check for quant_config with uint8 dtype
-        checker.check(resolver.has_quantization(config) and resolver.get_quant_method(config) == "modelopt_fp4")        
+        checker.check(resolver.has_quantization(config) and resolver.get_quant_method(config) == "modelopt_fp4")
 
     def __init__(
         self,

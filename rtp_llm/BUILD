@@ -129,7 +129,12 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
-] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
+] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn + [
+    "nvidia-cutlass-dsl-libs-base",
+    "cuda-python",
+    "cuda-bindings",
+    "cuda-pathfinder",
+])
 
 
 py_library(
