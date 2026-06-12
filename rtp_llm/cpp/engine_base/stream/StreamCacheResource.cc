@@ -193,15 +193,17 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         memcpy(sp_output_buffer->tokens.data_ptr<int>(),
                payload->propose_tokens.data(),
                payload->propose_tokens.size() * sizeof(int));
+        // REBASE CONFLICT CONTEXT(build-fix): dsv4_on_dev copied the full
+        // propose-token tensor for xgrammar, while feature/glm5_cu13 split
+        // target/propose GPU tensors for MTP graft prefill cudagraph. Keep
+        // one CUDA int32 option and publish target plus draft-token slices.
         const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-        auto       flat     = sp_output_buffer->tokens.reshape({-1});
-        if (flat.numel() >= 2) {
-            sp_output_buffer->target_token_gpu   = flat.narrow(0, 0, 1).to(cuda_i32);
-            sp_output_buffer->propose_tokens_gpu = flat.narrow(0, 1, 1).to(cuda_i32);
+        auto       flat_gpu = sp_output_buffer->tokens.reshape({-1}).to(cuda_i32, /*non_blocking=*/true);
+        if (flat_gpu.numel() >= 2) {
+            sp_output_buffer->target_token_gpu   = flat_gpu.narrow(0, 0, 1);
+            sp_output_buffer->propose_tokens_gpu = flat_gpu.narrow(0, 1, flat_gpu.numel() - 1);
         }
 
-        const auto cuda_i32                  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-        sp_output_buffer->propose_tokens_gpu = sp_output_buffer->tokens.to(cuda_i32, /*non_blocking=*/true);
         if (tensorPbHasPayload(payload->propose_probs)) {
             sp_output_buffer->all_probs = TensorPbConvert::pbToTorch(payload->propose_probs).to(torch::kCUDA);
         }
