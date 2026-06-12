@@ -1,5 +1,5 @@
 import copy
-from typing import List
+from typing import Any, List
 
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -98,6 +98,9 @@ class Qwen2VLRenderer(QwenRenderer):
             vit_config,
         )
 
+    def _format_tool_call_arguments(self, arguments: Any) -> Any:
+        return arguments
+
     def _render_messages(
         self, request: ChatCompletionRequest, add_vision_id: bool
     ) -> PromptWithMMInput:
@@ -147,7 +150,9 @@ class Qwen2VLRenderer(QwenRenderer):
                         "id": tc.id,
                         "function": {
                             "name": tc.function.name,
-                            "arguments": tc.function.arguments,
+                            "arguments": self._format_tool_call_arguments(
+                                tc.function.arguments
+                            ),
                         },
                     }
                     for tc in message.tool_calls
@@ -169,12 +174,17 @@ class Qwen2VLRenderer(QwenRenderer):
                     }
                 )
 
+        chat_template_kwargs = {
+            "tokenize": False,
+            "add_generation_prompt": True,
+            "add_vision_id": add_vision_id,
+            "tools": final_tools,
+        }
+        request_chat_template_kwargs = request.get_chat_template_kwargs()
+        if request_chat_template_kwargs is not None:
+            chat_template_kwargs.update(request_chat_template_kwargs)
         prompt = self.tokenizer.apply_chat_template(
-            final_messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            add_vision_id=add_vision_id,
-            tools=final_tools,
+            final_messages, **chat_template_kwargs
         )
 
         return PromptWithMMInput(
