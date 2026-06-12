@@ -235,14 +235,31 @@ void GrammarLogitsProcessor::logGrammarLifecycle(const char* phase,
     const int64_t num_accepted = matcher_ ? matcher_->numAcceptedTokens() : -1;
     const int     terminated   = matcher_ && matcher_->isTerminated() ? 1 : 0;
     const int     finished     = matcher_ && matcher_->finished() ? 1 : 0;
-    RTP_LLM_LOG_INFO("[grammar_lifecycle] stream=%ld phase=%s source=%s num_accepted=%ld "
-                      "terminated=%d finished=%d",
-                      stream_id,
-                      phase,
-                      source,
-                      static_cast<long>(num_accepted),
-                      terminated,
-                      finished);
+    // Per-token-batch sources ("commit", "replay") fire on every accepted-token
+    // batch per stream; logging them at INFO floods the engine log under any
+    // grammar-heavy load. Keep INFO only for true lifecycle transitions
+    // (compile / init / ready / error / finished); everything else is DEBUG.
+    const bool is_lifecycle_event =
+        std::strcmp(phase, "commit") != 0 && std::strcmp(phase, "replay") != 0;
+    if (is_lifecycle_event) {
+        RTP_LLM_LOG_INFO("[grammar_lifecycle] stream=%ld phase=%s source=%s num_accepted=%ld "
+                          "terminated=%d finished=%d",
+                          stream_id,
+                          phase,
+                          source,
+                          static_cast<long>(num_accepted),
+                          terminated,
+                          finished);
+    } else {
+        RTP_LLM_LOG_DEBUG("[grammar_lifecycle] stream=%ld phase=%s source=%s num_accepted=%ld "
+                           "terminated=%d finished=%d",
+                           stream_id,
+                           phase,
+                           source,
+                           static_cast<long>(num_accepted),
+                           terminated,
+                           finished);
+    }
 }
 
 bool GrammarLogitsProcessor::inReasoningPassthrough() const noexcept {
@@ -371,22 +388,6 @@ PrepareState GrammarLogitsProcessor::prepare(GenerateStream& stream) {
     return state;
 }
 
-void GrammarLogitsProcessor::prepareNormalAsyncUpdate(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
-    if (num_new_tokens <= 0) {
-        return;
-    }
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    pending_async_token_len_ = std::max(pending_async_token_len_, accepted_token_len_ + num_new_tokens);
-    if (new_tokens.defined() && new_tokens.is_cuda()) {
-        last_mask_device_ = new_tokens.device();
-    }
-}
-
-int64_t GrammarLogitsProcessor::acceptedTokenLen() const {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    return accepted_token_len_;
-}
-
 void GrammarLogitsProcessor::syncAcceptedTokenLenLocked() {
     accepted_token_len_ = total_advanced_;
 }
@@ -396,44 +397,8 @@ void GrammarLogitsProcessor::rebuildDeviceMaskStateLocked() {
 }
 
 GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::getDeviceMaskState(const c10::Device& device) {
-    std::unique_lock<std::mutex> lock(state_mutex_);
+    std::lock_guard<std::mutex> lock(state_mutex_);
     last_mask_device_ = device;
-    if (pending_async_token_len_ > accepted_token_len_) {
-        RTP_LLM_LOG_DEBUG("[grammar] getDeviceMaskState waiting for token sync: pending=%ld accepted=%ld",
-                          pending_async_token_len_, accepted_token_len_);
-        // 通过 GrammarCompiler 透传 GrammarConfig::mask_wait_timeout_ms。
-        // 默认 5000ms，可由 --grammar_mask_wait_timeout_ms / 环境变量调整。
-        const auto kMaskWaitTimeout =
-            std::chrono::milliseconds(GrammarCompiler::instance().maskWaitTimeoutMs());
-        bool resolved = state_cv_.wait_for(lock, kMaskWaitTimeout, [this]() {
-            return pending_async_token_len_ <= accepted_token_len_ || reported_error_.load() || !matcher_
-                   || matcher_->finished();
-        });
-        if (!resolved) {
-            // Token sync failed within budget. Silently returning FINISHED would let
-            // the sampler emit unconstrained tokens with no error signal (user gets
-            // schema-illegal output and never knows why). Surface it as a stream
-            // error and route through FINISHED so subsequent process() short-circuits.
-            RTP_LLM_LOG_WARNING("[grammar] getDeviceMaskState timed out waiting for token sync "
-                                "(pending=%ld accepted=%ld); reporting stream error",
-                                pending_async_token_len_, accepted_token_len_);
-            reported_error_.store(true, std::memory_order_relaxed);
-            if (matcher_) {
-                matcher_->markFinished();
-            }
-            // process() runs without holding the stream's mutex_; reporters that
-            // need the lock must acquire it themselves.
-            reportErrorViaReporter(ErrorCode::GENERATE_TIMEOUT,
-                                   "grammar token sync timed out (pending=" + std::to_string(pending_async_token_len_)
-                                       + " accepted=" + std::to_string(accepted_token_len_) + ")",
-                                   /*stream_lock_held=*/false);
-            DeviceMaskState state;
-            state.mode      = DeviceMaskMode::FINISHED;
-            state.token_len = accepted_token_len_;
-            state.device    = device;
-            return state;
-        }
-    }
 
     if (device_mask_state_.mode != DeviceMaskMode::UNSET && device_mask_state_.token_len == accepted_token_len_
         && device_mask_state_.device == device) {
@@ -648,7 +613,16 @@ void GrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_i
         return;
     }
     if (batch_size != 1) {
-        RTP_LLM_LOG_WARNING("grammar logits processor only supports single sequence decoding");
+        // Fires once per decode step per offending stream — log once at WARN
+        // for diagnosability, then DEBUG for the rest of this stream's life so
+        // a misconfigured multi-seq request doesn't drown the engine log.
+        if (!warned_multi_seq_unsupported_) {
+            warned_multi_seq_unsupported_ = true;
+            RTP_LLM_LOG_WARNING("grammar logits processor only supports single sequence decoding "
+                                "(this warning will not repeat for this stream)");
+        } else {
+            RTP_LLM_LOG_DEBUG("grammar logits processor skipping batch_size=%zu", batch_size);
+        }
         return;
     }
     if (inputs.finished_mask.defined()) {
@@ -708,10 +682,13 @@ void GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32
         // Commit walk: terminated + EOS -> markFinished and stop;
         // any other token after terminated -> error. Pre-terminal accept failures
         // are handled by advanceMatcher's reportError path.
-        bool stop_after_eos = false;
-        bool report_after_terminal = false;
-        std::vector<int32_t> active_tokens;
-        active_tokens.reserve(tokens.size());
+        // Reuse `tokens` itself instead of allocating a separate active_tokens
+        // copy: trim it down to the pre-terminal prefix and pass it straight
+        // to advanceMatcher. Saves one heap allocation per commit batch on the
+        // hot path (num_new_tokens==1 is the dominant case).
+        bool   stop_after_eos        = false;
+        bool   report_after_terminal = false;
+        size_t active_count          = 0;
         for (int32_t tok : tokens) {
             if (matcher_ && matcher_->isTerminated()) {
                 if (tok == static_cast<int32_t>(eos_token_id_)) {
@@ -723,20 +700,17 @@ void GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32
                 }
                 break;
             }
-            active_tokens.push_back(tok);
+            ++active_count;
         }
         if (report_after_terminal) {
-            // Drop straight to error reporting. matcher_ is already markFinished so
-            // any waiter on state_cv_ takes the FINISHED early-return.
-            state_cv_.notify_all();
             reportErrorViaReporter(
                 ErrorCode::INVALID_PARAMS,
                 "grammar received non-EOS token after terminal state",
                 /*stream_lock_held=*/true);
             return;
         }
-        if (!stop_after_eos && !advanceMatcher(active_tokens, MatcherAdvance::Commit)) {
-            state_cv_.notify_all();
+        tokens.resize(active_count);
+        if (!stop_after_eos && !advanceMatcher(tokens, MatcherAdvance::Commit)) {
             return;
         }
         syncAcceptedTokenLenLocked();
@@ -744,13 +718,10 @@ void GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32
             // EOS that consumed the terminal state was not forwarded to the
             // xgrammar matcher (markFinished only), so numAcceptedTokens does
             // not include it. Keep accepted_token_len_ in sync with the
-            // stream's committed token count so any pending async waiter sees
-            // the EOS as accepted and unblocks immediately.
+            // stream's committed token count.
             ++accepted_token_len_;
         }
-        pending_async_token_len_ = accepted_token_len_;
         rebuildDeviceMaskStateLocked();
-        state_cv_.notify_all();
     }
 
     if (auto stream = stream_.lock()) {
@@ -879,8 +850,13 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
         return VerifyRowState::Active;
     };
 
-    int gate_steps = 0;  // total gate observations made; rolled back symmetrically.
+    int  gate_steps  = 0;  // total gate observations made; rolled back symmetrically.
+    bool rolled_back = false;
     auto rollback_provisional = [&]() {
+        if (rolled_back) {
+            return;  // idempotent: success-path rollback may be retried by the catch arm.
+        }
+        rolled_back = true;
         if (accepted_prefix > 0) {
             matcher_->rollback(accepted_prefix);
         }
@@ -930,9 +906,48 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
         }
 
         rollback_provisional();
+    } catch (const std::exception& e) {
+        // Two ways to land here:
+        //   1. main loop threw → rolled_back=false → try rollback; if that also
+        //      throws, fall back to markFinished.
+        //   2. success-path rollback_provisional threw → rolled_back=true,
+        //      meaning matcher is partially rolled back; the helper is
+        //      idempotent no-op now, but matcher must be markFinished to
+        //      prevent later steps from reusing the half-rolled state.
+        // Confine the failure to this stream rather than re-throwing into the
+        // spec executor (caller has no try/catch — an uncaught throw aborts
+        // the whole batch).
+        const bool partial_rolled_back = rolled_back;
+        try {
+            rollback_provisional();
+        } catch (...) {
+            // swallow; markFinished below.
+        }
+        matcher_->markFinished();
+        (void)partial_rolled_back;
+        reported_error_.store(true, std::memory_order_relaxed);
+        // Force EOS-only on the next row caller will read for this offset so
+        // proc_mask AND target_mask cannot leave the row allow-all.
+        if (request.bitmask_cpu_out != nullptr && request.bitmask_size_int32 > 0) {
+            forceTokenInBitmask(request.bitmask_cpu_out, W, eos_token_id_);
+        }
+        reportErrorViaReporter(ErrorCode::EXECUTION_EXCEPTION,
+                               std::string("grammar MTP verify exception: ") + e.what(),
+                               /*stream_lock_held=*/false);
+        return 0;
     } catch (...) {
-        try { rollback_provisional(); } catch (...) { matcher_->markFinished(); }
-        throw;
+        try {
+            rollback_provisional();
+        } catch (...) {}
+        matcher_->markFinished();
+        reported_error_.store(true, std::memory_order_relaxed);
+        if (request.bitmask_cpu_out != nullptr && request.bitmask_size_int32 > 0) {
+            forceTokenInBitmask(request.bitmask_cpu_out, W, eos_token_id_);
+        }
+        reportErrorViaReporter(ErrorCode::EXECUTION_EXCEPTION,
+                               "grammar MTP verify unknown exception",
+                               /*stream_lock_held=*/false);
+        return 0;
     }
     return cap;
 }

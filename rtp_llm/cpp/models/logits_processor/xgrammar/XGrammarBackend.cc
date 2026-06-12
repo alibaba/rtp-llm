@@ -24,9 +24,19 @@ namespace {
 using JsonMap   = autil::legacy::json::JsonMap;
 using JsonArray = autil::legacy::json::JsonArray;
 
+// Cap on structural-format nesting depth. The legitimate xgrammar trees we
+// see are at most ~5 deep (sequence/or wrapping triggered_tags wrapping
+// json_schema), so 64 is generous; the bound exists purely to keep an
+// adversarial / malformed payload from blowing the stack.
+constexpr int kStructuralFormatMaxDepth = 64;
+
 // Walk structural-format tree; inject empty `json_schema:{}` into any
 // json_schema/qwen_xml_parameter node missing one (xgrammar requires the field).
-void sanitizeStructuralFormat(autil::legacy::Any& any) {
+void sanitizeStructuralFormat(autil::legacy::Any& any, int depth = 0) {
+    if (depth > kStructuralFormatMaxDepth) {
+        throw std::invalid_argument("structural_tag: format tree exceeds max depth "
+                                    + std::to_string(kStructuralFormatMaxDepth));
+    }
     auto* map = autil::legacy::AnyCast<JsonMap>(&any);
     if (!map) {
         return;
@@ -47,13 +57,13 @@ void sanitizeStructuralFormat(autil::legacy::Any& any) {
 
     if (fmt_type == "tag") {
         if (auto it = map->find("content"); it != map->end()) {
-            sanitizeStructuralFormat(it->second);
+            sanitizeStructuralFormat(it->second, depth + 1);
         }
     } else if (fmt_type == "sequence" || fmt_type == "or") {
         if (auto it = map->find("elements"); it != map->end()) {
             if (auto* arr = autil::legacy::AnyCast<JsonArray>(&it->second)) {
                 for (auto& el : *arr) {
-                    sanitizeStructuralFormat(el);
+                    sanitizeStructuralFormat(el, depth + 1);
                 }
             }
         }
@@ -61,7 +71,7 @@ void sanitizeStructuralFormat(autil::legacy::Any& any) {
         if (auto it = map->find("tags"); it != map->end()) {
             if (auto* arr = autil::legacy::AnyCast<JsonArray>(&it->second)) {
                 for (auto& tag : *arr) {
-                    sanitizeStructuralFormat(tag);
+                    sanitizeStructuralFormat(tag, depth + 1);
                 }
             }
         }

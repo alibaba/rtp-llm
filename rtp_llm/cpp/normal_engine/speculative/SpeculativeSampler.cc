@@ -127,9 +127,17 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                 idx++;
             }
         }
+        // Pin the host buffer so the H2D copy is a real async DMA. Without
+        // pin_memory(), PyTorch internally pin+copies a pageable source on
+        // every .to(non_blocking=true) call, silently stripping non_blocking
+        // (defeats the perf intent) and risks reading freed memory if the
+        // pageable tensor goes out of scope before transfer_done_event fires
+        // — should PyTorch ever start honoring non_blocking on pageable.
         auto force_mask_host = torch::from_blob(force_mask_cpu.data(),
                                                 {batch_size},
-                                                torch::TensorOptions().dtype(torch::kBool)).clone();
+                                                torch::TensorOptions().dtype(torch::kBool))
+                                   .clone()
+                                   .pin_memory();
         auto force_mask = force_mask_host.to(target_device, /*non_blocking=*/true);
         auto target_bonus  = target_last_col.select(1, static_cast<int64_t>(propose_step_));
         auto forced_tokens = torch::cat({draft_token_ids_d_t, target_bonus.unsqueeze(1)}, 1);

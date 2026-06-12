@@ -240,9 +240,11 @@ def h20_oss_suites():
         ],
     )
 
-    # H20 Grammar (xgrammar) structured-output smoke. qwen2 1.5B exercises the
-    # cheap axes (streaming/EBNF, mixed batch, PD-sep, TP×DP); qwen35 35B-MoE
-    # covers the expensive MTP / reasoning combinations.
+    # H20 Grammar (xgrammar) — light qwen2 1.5B suite. Cheap axes:
+    # streaming/EBNF, mixed batch, PD-sep, TP×DP. Heavy qwen35 35B-MoE
+    # MTP/PD/reasoning cases live in smoke_h20_grammar_heavy as a sibling
+    # suite so a developer can `bazel test :smoke_h20_grammar` to run
+    # only the cheap subset; both are pulled into maga_model_smoke.
     native.test_suite(
         name = "smoke_h20_grammar",
         tests = [
@@ -290,6 +292,17 @@ def h20_oss_suites():
                 envs = ["PYTHONUNBUFFERED=TRUE"],
                 concurrency_test = True,
             ),
+        ],
+    )
+
+    # H20 Grammar — heavy 35B-MoE MTP/PD/reasoning cases. Sibling of
+    # smoke_h20_grammar; both feed maga_model_smoke. Kept as a separate
+    # suite so that an iteration loop on grammar bugs can target the
+    # cheap qwen2 cases via `bazel test :smoke_h20_grammar` without
+    # paying the 35B FP8 load cost.
+    native.test_suite(
+        name = "smoke_h20_grammar_heavy",
+        tests = [
             # MTP + grammar + reasoning + concurrent (thinking ON). Matcher
             # passthrough until </think>, then schema lock.
             smoke_test(

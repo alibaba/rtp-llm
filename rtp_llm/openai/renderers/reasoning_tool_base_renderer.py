@@ -109,22 +109,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         self, n: int, request: ChatCompletionRequest
     ) -> List[StreamStatus]:
         """创建状态列表"""
-        in_think = self.in_think_mode(request)
-        attach_reasoning = (request.tools or in_think) and not request.logprobs
-        # [REASONING_SPLIT_DIAG] NOTE: this line决定响应是否做 reasoning 分流。
-        # 当 attach_reasoning=False 时不挂 reasoning_parser，</think> 不会被切进
-        # reasoning_content，会原样留在 content（PD+MTP grammar 的已知症状）。
-        # 排查 PD 节点 reasoning 不分流时盯这条日志的 think_mode / in_think_mode。
-        logging.debug(
-            "[REASONING_SPLIT_DIAG] attach_reasoning=%s think_mode=%s "
-            "in_think_mode=%s has_tools=%s logprobs=%s",
-            attach_reasoning,
-            getattr(self, "think_mode", None),
-            in_think,
-            bool(request.tools),
-            bool(request.logprobs),
-        )
-        if attach_reasoning:
+        if (request.tools or self.in_think_mode(request)) and not request.logprobs:
             return [
                 ReasoningToolStreamStatus(
                     request,
@@ -133,9 +118,8 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                 )
                 for _ in range(n)
             ]
-        else:
-            # logprobs模式下使用普通StreamStatus
-            return [StreamStatus(request) for _ in range(n)]
+        # logprobs模式下使用普通StreamStatus
+        return [StreamStatus(request) for _ in range(n)]
 
     @override
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:

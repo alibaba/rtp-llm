@@ -154,11 +154,36 @@ std::string buildXGrammarTokenizerInfoJson(
         }
     }
 
-    std::string meta  = xgrammar::TokenizerInfo::DetectMetadataFromHF(backend_tokenizer_str);
+    std::string meta = xgrammar::TokenizerInfo::DetectMetadataFromHF(backend_tokenizer_str);
+
+    // Stop ids that fall inside the truncated tail padding [effective_vocab_size, vocab_size)
+    // would be injected against a smaller declared vocab_size: xgrammar then silently drops
+    // them from its internal stop_token_ids_, so grammar EOS-unmask paths (can_reach_end /
+    // IsTerminated stop fast path) never recognise them. Filter explicitly and warn so the
+    // operator notices the special_tokens / vocab mismatch instead of getting subtle
+    // grammar-termination drift.
+    std::vector<int32_t> filtered_stops;
+    filtered_stops.reserve(stop_token_ids.size());
+    int32_t dropped_count = 0;
+    for (int32_t sid : stop_token_ids) {
+        if (sid >= 0 && static_cast<int64_t>(sid) < effective_vocab_size) {
+            filtered_stops.push_back(sid);
+        } else {
+            ++dropped_count;
+        }
+    }
+    if (dropped_count > 0) {
+        RTP_LLM_LOG_WARNING(
+            "buildXGrammarTokenizerInfoJson: dropped %d stop_token_id(s) outside effective_vocab_size=%lld "
+            "(declared vocab_size=%lld). xgrammar EOS-unmask will not recognise these ids.",
+            dropped_count,
+            static_cast<long long>(effective_vocab_size),
+            static_cast<long long>(vocab_size));
+    }
     std::string stops = "[";
-    for (size_t i = 0; i < stop_token_ids.size(); ++i) {
+    for (size_t i = 0; i < filtered_stops.size(); ++i) {
         if (i) stops += ",";
-        stops += std::to_string(stop_token_ids[i]);
+        stops += std::to_string(filtered_stops[i]);
     }
     stops += "]";
 
@@ -205,9 +230,20 @@ void bootstrapGrammarConfigFromModel(py::object model, GrammarConfig& gc, Reason
     }
 
     if (!rc.reasoning_parser.empty()) {
-        py::object tokenizer = model.attr("tokenizer").attr("tokenizer");
-        rc.think_end_id      = resolveThinkTokenId(rc.reasoning_parser, tokenizer, "think_end_token");
-        rc.think_start_id    = resolveThinkTokenId(rc.reasoning_parser, tokenizer, "think_start_token");
+        // Guard the attr chain itself: an attr() exception (model with no
+        // tokenizer.tokenizer chain, import side effect on reasoning_parser)
+        // would otherwise escape as pybind11::error_already_set after we've
+        // already mutated gc.tokenizer_info_json. Leave think ids at -1 and
+        // let reasoning admission degrade gracefully.
+        try {
+            py::object tokenizer = model.attr("tokenizer").attr("tokenizer");
+            rc.think_end_id      = resolveThinkTokenId(rc.reasoning_parser, tokenizer, "think_end_token");
+            rc.think_start_id    = resolveThinkTokenId(rc.reasoning_parser, tokenizer, "think_start_token");
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("xgrammar reasoning bootstrap failed (%s); think ids left at -1", e.what());
+            rc.think_end_id   = -1;
+            rc.think_start_id = -1;
+        }
     }
 
     RTP_LLM_LOG_INFO(

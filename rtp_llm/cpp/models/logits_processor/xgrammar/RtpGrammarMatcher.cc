@@ -26,10 +26,14 @@ RtpGrammarMatcher::RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> 
 bool RtpGrammarMatcher::acceptToken(int32_t token_id) {
     const bool ok = matcher_->AcceptToken(token_id);
     if (!ok) {
-        RTP_LLM_LOG_WARNING("RtpGrammarMatcher::acceptToken REJECTED token=%d, num_accepted=%ld, terminated=%d",
-                            token_id,
-                            num_accepted_,
-                            static_cast<int>(matcher_->IsTerminated()));
+        // Reject is the normal signal in spec-verify DFS / draft-mask probes —
+        // the caller is expected to react on the boolean. WARN here would
+        // produce one log line per illegal probe per request and drown the
+        // engine log under MTP load.
+        RTP_LLM_LOG_DEBUG("RtpGrammarMatcher::acceptToken REJECTED token=%d, num_accepted=%ld, terminated=%d",
+                          token_id,
+                          num_accepted_,
+                          static_cast<int>(matcher_->IsTerminated()));
         return false;
     }
     ++num_accepted_;

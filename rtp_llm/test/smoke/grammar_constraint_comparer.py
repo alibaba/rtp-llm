@@ -4,6 +4,8 @@ import os
 import re
 from typing import Any, List, Union
 
+import requests
+
 from smoke.common_def import QueryStatus, SmokeException
 from smoke.openai_comparer import OpenaiComparer
 from smoke.utils import no_compare, save_response
@@ -35,14 +37,14 @@ class GrammarConstraintComparer(OpenaiComparer):
     # -- run override for the error-path ------------------------------------
 
     def run(self):  # type: ignore[override]
-        """For queries with `expect_grammar_error: true`, visit-level
-        HTTP failures (server returns 4xx/5xx), response-parse failures,
-        and `error`/`detail` top-level fields are all acceptable PASS
-        signals — the whole point is that the server rejected the
-        malformed request instead of producing unconstrained output or
-        crashing. Only escalate to FAIL when none of those signals fire
-        AND the response parses as a normal ChatCompletion with a
-        stop-finish and non-empty content."""
+        """For queries with `expect_grammar_error: true`, an *explicit* server
+        rejection (HTTP 4xx/5xx body, or 200 with `error`/`detail`/`message`
+        envelope) is the PASS signal. Connection-refused / read-timeout /
+        process-exited are NOT — those indicate the server died or never
+        came up, not a successful reject path. We only PASS the silent
+        path when the response actually parses to a ChatCompletion-shaped
+        envelope that we then explicitly validate.
+        """
         if not self.qr_info.get("expect_grammar_error"):
             return super().run()
 
@@ -52,22 +54,54 @@ class GrammarConstraintComparer(OpenaiComparer):
         # the xgrammar backend (e.g. unsupported features). See review issue #2.
         query_info = self.format_query(self.qr_info["query"])
         self.tracer.query = query_info
-        # Use the same visit path but DON'T raise on HTTP failure — that
-        # is the expected outcome here. Reduce retry count via env so the
-        # error-path smoke doesn't pay 4× retry latency for every bad
-        # query (smoke sets VISIT_RETRY_TIME=1 in envs).
-        visit_retry_time = int(os.environ.get("VISIT_RETRY_TIME", 4))
         request_info = query_info.model_dump(exclude_defaults=True)
         self.maybe_set_concurrency(query_info)
-        ret, res = self.server_manager.visit(
-            request_info, visit_retry_time, self.request_endpoint
-        )
-        if not ret:
-            logging.info(
-                "[grammar-error-path] server returned non-200 for malformed "
-                "grammar request — acceptable reject at HTTP layer"
+
+        # Bypass server_manager.visit (which collapses every non-200 outcome to
+        # `(False, None)` after retries) and post directly so we can tell apart
+        # an explicit reject (4xx/5xx with body) from a hard failure (timeout /
+        # connection-refused / process exit). Only the former is a valid PASS.
+        try:
+            url = (
+                f"http://0.0.0.0:{int(self.server_manager._port)}"
+                f"{self.request_endpoint}"
+            )
+            response = requests.post(url, json=request_info, timeout=30)
+        except requests.exceptions.Timeout as e:
+            self._raise(
+                f"[grammar-error-path] request timed out: {e} — server may be hung; not an explicit reject"
             )
             return
+        except requests.exceptions.ConnectionError as e:
+            self._raise(
+                f"[grammar-error-path] connection error: {e} — server may have died; not an explicit reject"
+            )
+            return
+
+        # Verify the server is still alive before treating any non-200 as a
+        # legitimate reject. A 5xx that came together with the process exiting
+        # is a crash, not an "acceptable reject".
+        proc = getattr(self.server_manager, "_server_process", None)
+        if proc is not None and proc.poll() is not None:
+            self._raise(
+                f"[grammar-error-path] server process exited (rc={proc.poll()}) "
+                "during error-path request — crash, not a reject"
+            )
+            return
+
+        if response.status_code != 200:
+            logging.info(
+                "[grammar-error-path] server returned %d with body %.200s — explicit reject",
+                response.status_code,
+                response.text,
+            )
+            return
+
+        res = (
+            [x.encode("utf-8") for x in response.text.splitlines() if x]
+            if response.headers.get("Transfer-Encoding") == "chunked"
+            else response.text
+        )
 
         # HTTP 200 — now inspect the body.
         try:
@@ -488,8 +522,13 @@ _PY_TYPE_MAP = {
 
 
 def _schema_check(value: Any, schema: dict, path: str) -> str | None:
-    # Lightweight smoke-time validator: type/properties/items/required/enum only.
-    # Does not recurse into oneOf/anyOf/allOf/not or validate additionalProperties.
+    # Lightweight smoke-time validator. Covers the keywords actually used in
+    # the grammar smoke datasets: type/properties/items/required/enum, plus
+    # length/range/count bounds (maxLength, minLength, minimum, maximum,
+    # exclusiveMinimum, exclusiveMaximum, maxItems, minItems). Does NOT
+    # implement oneOf/anyOf/allOf/not, pattern, format, or additionalProperties
+    # subschemas — if you add such a keyword to a smoke schema, extend this
+    # function or the constraint will silently pass.
     if not isinstance(schema, dict):
         return None
 
@@ -515,6 +554,28 @@ def _schema_check(value: Any, schema: dict, path: str) -> str | None:
     if isinstance(enum_vals, list) and value not in enum_vals:
         return f"{path}: value {value!r} not in enum {enum_vals}"
 
+    if t == "string" and isinstance(value, str):
+        max_len = schema.get("maxLength")
+        if isinstance(max_len, int) and len(value) > max_len:
+            return f"{path}: string length {len(value)} > maxLength {max_len}"
+        min_len = schema.get("minLength")
+        if isinstance(min_len, int) and len(value) < min_len:
+            return f"{path}: string length {len(value)} < minLength {min_len}"
+
+    if t in ("integer", "number") and isinstance(value, (int, float)) and not isinstance(value, bool):
+        minimum = schema.get("minimum")
+        if isinstance(minimum, (int, float)) and value < minimum:
+            return f"{path}: value {value} < minimum {minimum}"
+        maximum = schema.get("maximum")
+        if isinstance(maximum, (int, float)) and value > maximum:
+            return f"{path}: value {value} > maximum {maximum}"
+        excl_min = schema.get("exclusiveMinimum")
+        if isinstance(excl_min, (int, float)) and value <= excl_min:
+            return f"{path}: value {value} <= exclusiveMinimum {excl_min}"
+        excl_max = schema.get("exclusiveMaximum")
+        if isinstance(excl_max, (int, float)) and value >= excl_max:
+            return f"{path}: value {value} >= exclusiveMaximum {excl_max}"
+
     if t == "object":
         props = schema.get("properties") or {}
         required = schema.get("required") or []
@@ -536,6 +597,12 @@ def _schema_check(value: Any, schema: dict, path: str) -> str | None:
         items_schema = schema.get("items") or {}
         if not isinstance(value, list):
             return f"{path}: expected array"
+        max_items = schema.get("maxItems")
+        if isinstance(max_items, int) and len(value) > max_items:
+            return f"{path}: array length {len(value)} > maxItems {max_items}"
+        min_items = schema.get("minItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            return f"{path}: array length {len(value)} < minItems {min_items}"
         for i, item in enumerate(value):
             err = _schema_check(item, items_schema, path=f"{path}[{i}]")
             if err is not None:

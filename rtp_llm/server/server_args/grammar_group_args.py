@@ -43,19 +43,6 @@ def init_grammar_group_args(parser, grammar_config):
         ),
     )
     grammar_group.add_argument(
-        "--grammar_mask_wait_timeout_ms",
-        env_name="GRAMMAR_MASK_WAIT_TIMEOUT_MS",
-        bind_to=(grammar_config, "mask_wait_timeout_ms"),
-        type=_positive_int,
-        default=5000,
-        help=(
-            "Per-tick budget (ms) for the sampler to wait on walk_thread "
-            "advancing the grammar matcher before flagging the stream as "
-            "errored and routing through FINISHED. Lower to fail fast on "
-            "stuck workers; raise under heavy GIL contention."
-        ),
-    )
-    grammar_group.add_argument(
         "--grammar_num_workers",
         env_name="GRAMMAR_NUM_WORKERS",
         bind_to=(grammar_config, "num_workers"),

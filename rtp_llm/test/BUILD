@@ -71,6 +71,19 @@ py_test(
 )
 
 py_test(
+    name = "renderer_preopened_think_test",
+    srcs = [
+        "renderer_preopened_think_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    imports = [],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "stop_words_pipeline_test",
     srcs = [
         "stop_words_pipeline_test.py",

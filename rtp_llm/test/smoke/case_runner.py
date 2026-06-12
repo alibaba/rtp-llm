@@ -144,8 +144,30 @@ class CaseRunner(object):
         # emitted at LOG_LEVEL=DEBUG, then prints
         # one verdict line per grammar kind so accept_len degradation under
         # grammar surfaces in CI logs.
+        # Two cheap gates so non-grammar / non-MTP smokes don't pay the full
+        # log-parse cost on every run:
+        #   1. RTP_SP_ACCEPT_TRACE=0 disables the summary entirely.
+        #   2. A literal substring grep for "[sp_accept_trace]" — if it never
+        #      appears in the log we skip parse_lines (the regex walk is the
+        #      expensive part on multi-GB engine logs).
+        if os.environ.get("RTP_SP_ACCEPT_TRACE", "1") in ("0", "false", "False"):
+            return
         log_path = server_manager.log_file_path
         if not log_path or not os.path.exists(log_path):
+            return
+        try:
+            with open(log_path, "rb") as f:
+                # Cheap pre-flight: bail out if no sp_accept_trace lines
+                # exist. Only grammar / MTP smokes emit this marker.
+                has_marker = False
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    if b"[sp_accept_trace]" in chunk:
+                        has_marker = True
+                        break
+            if not has_marker:
+                return
+        except OSError as e:
+            logging.warning(f"[sp_accept_check] preflight read failed: {e}")
             return
         try:
             from smoke.spec_accept_analyzer import _verdict, parse_lines, summarize

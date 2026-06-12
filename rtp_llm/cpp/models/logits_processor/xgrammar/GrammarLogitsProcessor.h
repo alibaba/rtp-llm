@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <future>
 #include <memory>
@@ -45,9 +44,6 @@ public:
     void         setStream(const std::shared_ptr<GenerateStream>& stream) override { stream_ = stream; }
 
     bool isStateful() const override { return true; }
-    bool supportsNormalAsyncDeviceState() const override { return true; }
-    void prepareNormalAsyncUpdate(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
-    int64_t acceptedTokenLen() const override;
 
     bool isSpecVerifyEligible() const override;
     int  tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
@@ -115,7 +111,6 @@ private:
     std::weak_ptr<GenerateStream>      stream_;
 
     mutable std::mutex          state_mutex_;
-    std::condition_variable     state_cv_;
     std::atomic_bool            reported_error_{false};
     int64_t                     eos_token_id_              = 0;
     // Total tokens advanced by the processor (matcher accepts + gate-passthrough
@@ -123,7 +118,6 @@ private:
     // alone would miss tokens consumed while the reasoning gate was passthrough.
     int64_t                     total_advanced_              = 0;
     int64_t                     accepted_token_len_          = 0;
-    int64_t                     pending_async_token_len_     = 0;
     std::optional<c10::Device>  last_mask_device_;
     DeviceMaskState             device_mask_state_;
     torch::Tensor               reusable_bitmask_cpu_;
@@ -139,6 +133,10 @@ private:
     // converts the H2D copy_ into a real async DMA (otherwise PyTorch silently
     // does a sync pin+copy on a pageable source, defeating non_blocking=true).
     bool                        reusable_bitmask_cpu_pinned_ = false;
+    // Per-stream once-flag for the unsupported batch_size!=1 path. Without
+    // this the WARN at process() fires on every decode step for the lifetime
+    // of an offending stream and drowns the engine log.
+    bool                        warned_multi_seq_unsupported_ = false;
 };
 
 }  // namespace rtp_llm

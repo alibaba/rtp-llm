@@ -66,7 +66,6 @@ public:
 
     bool    enabled() const noexcept { return state_->backend != nullptr; }
     int64_t compileTimeoutMs() const noexcept { return grammar_compile_timeout_ms_; }
-    int64_t maskWaitTimeoutMs() const noexcept { return mask_wait_timeout_ms_; }
 
     // Submit a compile request. A cache hit / cached-invalid returns an
     // already-ready future; a miss dedups onto (or starts) the in-flight compile
@@ -121,7 +120,6 @@ private:
     std::vector<std::thread>     workers_;
 
     int64_t grammar_compile_timeout_ms_ = 60000;
-    int64_t mask_wait_timeout_ms_       = 5000;
 
     static std::mutex                       singleton_mutex_;
     static std::unique_ptr<GrammarCompiler> singleton_;

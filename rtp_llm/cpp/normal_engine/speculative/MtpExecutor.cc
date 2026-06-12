@@ -1299,7 +1299,23 @@ MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& str
     result.spec_vocab_mask_cpu_owner = merged;
     result.spec_cap_cpu_owner        = cap_cpu;
 #else
-    RTP_LLM_FAIL("MTP spec logits verify requires CUDA for packed bitmask upload");
+    // Non-CUDA build: packed bitmask H2D upload is CUDA-only. Surface the
+    // unsupported combination as a per-request error on every stream that
+    // carries a SpecLogitsProcessor, instead of RTP_LLM_FAIL-ing the whole
+    // engine for what is effectively a misconfigured request.
+    auto stream_it = streams.begin();
+    for (size_t i = 0; i < streams.size() && stream_it != streams.end(); ++i, ++stream_it) {
+        for (const auto& item : active) {
+            if (item.stream_idx == i) {
+                (*stream_it)
+                    ->reportError(ErrorCode::INVALID_PARAMS,
+                                  "MTP spec logits verify (grammar/structured output) "
+                                  "requires CUDA build; not supported on this platform");
+                break;
+            }
+        }
+    }
+    return {};
 #endif
     return result;
 }
