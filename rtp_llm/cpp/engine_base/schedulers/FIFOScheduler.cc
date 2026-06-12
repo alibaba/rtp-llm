@@ -85,6 +85,7 @@ bool FIFOScheduler::checkInputLength(const GenerateStreamPtr& stream) {
 absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!checkInputLength(stream)) {
+        stream->moveToNext();
         return absl::InvalidArgumentError("Check input length failed");
     }
     {
@@ -106,6 +107,8 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
     for (const auto& stream : streams) {
         if (checkInputLength(stream)) {
             stream_enqueued.emplace_back(stream);
+        } else {
+            stream->moveToNext();
         }
     }
     {

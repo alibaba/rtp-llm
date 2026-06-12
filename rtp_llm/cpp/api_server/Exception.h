@@ -5,6 +5,7 @@
 
 #include "autil/legacy/jsonizable.h"
 
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/api_server/http_server/http_server/HttpResponseWriter.h"
 #include "rtp_llm/cpp/api_server/http_server/http_server/HttpRequest.h"
@@ -105,6 +106,8 @@ private:
     Type        type_;
     std::string message_;
 };
+
+HttpApiServerException::Type transErrorCodeToHttpExceptionType(ErrorCode code);
 
 template<typename T>
 inline std::string formatException(const T& e) {
