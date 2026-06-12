@@ -132,6 +132,15 @@ public final class BatchChunkAssembler {
     }
 
     /**
+     * Whether a target can be stamped into {@code generate_config.role_addrs}: FE's gRPC
+     * pre-assignment needs both a gRPC port and a role. Embedding (ARPC-only) or role-less
+     * targets are not pre-assignable and fall back to FE's own scheduling.
+     */
+    public static boolean isPreAssignable(BatchScheduleTarget target) {
+        return target.getGrpcPort() != null && target.getRole() != null;
+    }
+
+    /**
      * Appends each chunk's pre-resolved BE target into {@code generate_config.role_addrs}.
      * Per-addr wire shape matches Python {@code rtp_llm.config.generate_config.RoleAddr}:
      * {@code {role, ip, http_port, grpc_port}}. Note {@code ip} (not {@code server_ip} from
@@ -149,7 +158,7 @@ public final class BatchChunkAssembler {
         int max = Math.min(chunkBodies.size(), targets.size());
         for (int i = 0; i < max; i++) {
             BatchScheduleTarget target = targets.get(i);
-            if (target.getGrpcPort() == null || target.getRole() == null) {
+            if (!isPreAssignable(target)) {
                 // role_addrs is FE's gRPC pre-assignment mechanism; targets without a gRPC
                 // slot (embedding engines) or without a role cannot be pre-assigned through
                 // it — skip rather than fail, pre-assignment never blocks traffic.

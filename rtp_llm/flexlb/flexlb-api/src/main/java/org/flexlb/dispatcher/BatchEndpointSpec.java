@@ -1,5 +1,6 @@
 package org.flexlb.dispatcher;
 
+import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import lombok.Value;
 
@@ -41,6 +42,31 @@ public class BatchEndpointSpec {
      * per-endpoint above for any endpoint where wire compat matters.
      */
     boolean fanoutWriteNulls;
+    /**
+     * When true, the array field only counts as a batch if every element is a string.
+     * {@code /v1/embeddings} needs this: FE's {@code input} union also admits a single
+     * multimodal/chat input expressed as {@code List[ContentPart]} / {@code List[ChatMessage]}
+     * — an array of JSON objects that is ONE input and must not be split per element.
+     * Endpoints whose batch items are legitimately objects (e.g. {@code requests} on
+     * {@code /v1/batch/chat/completions}) keep this false.
+     */
+    boolean splitRequiresStringItems;
+
+    /**
+     * Whether the array field is batch-shaped for this endpoint and may be split into
+     * chunks; non-splittable bodies are passthrough-forwarded whole.
+     */
+    public boolean canSplit(JSONArray arr) {
+        if (!splitRequiresStringItems) {
+            return true;
+        }
+        for (Object item : arr) {
+            if (!(item instanceof String)) {
+                return false;
+            }
+        }
+        return true;
+    }
 
     /**
      * Cross-chunk aggregation hook; runs after {@link ResponseMerger} has stitched
@@ -89,16 +115,16 @@ public class BatchEndpointSpec {
     public static final List<BatchEndpointSpec> SPECS = List.of(
             new BatchEndpointSpec("/",
                     "prompt_batch", "response_batch",
-                    FailedItemFactory.NULL, null, false),
+                    FailedItemFactory.NULL, null, false, false),
             new BatchEndpointSpec("/batch_infer",
                     "prompt_batch", "response_batch",
-                    FailedItemFactory.NULL, null, false),
+                    FailedItemFactory.NULL, null, false, false),
             new BatchEndpointSpec("/v1/batch/chat/completions",
                     "requests", "responses",
-                    FailedItemFactory.OPENAI_ERROR, null, true),
+                    FailedItemFactory.OPENAI_ERROR, null, true, false),
             new BatchEndpointSpec("/v1/embeddings",
                     "input", "data",
-                    FailedItemFactory.EMBEDDING_NULL, EmbeddingMerger.INSTANCE, true)
+                    FailedItemFactory.EMBEDDING_NULL, EmbeddingMerger.INSTANCE, true, true)
     );
 
     /**

@@ -43,6 +43,7 @@ class BatchHandlerPvTest {
 
     private ch.qos.logback.classic.Logger pvLogger;
     private ListAppender<ILoggingEvent> pvAppender;
+    private Level originalPvLevel;
 
     @BeforeEach
     void setUp() {
@@ -52,6 +53,7 @@ class BatchHandlerPvTest {
                 .thenReturn(Mono.just(List.of()));
 
         pvLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
+        originalPvLevel = pvLogger.getLevel();
         pvLogger.setLevel(Level.INFO);
         pvAppender = new ListAppender<>();
         pvAppender.start();
@@ -62,6 +64,7 @@ class BatchHandlerPvTest {
     void tearDown() {
         pvLogger.detachAppender(pvAppender);
         pvAppender.stop();
+        pvLogger.setLevel(originalPvLevel);
     }
 
     @Test

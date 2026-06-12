@@ -6,6 +6,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.enums.EngineType;
+import org.flexlb.exception.ServiceDiscoveryException;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -89,7 +90,9 @@ public class EngineSyncRunner implements Runnable {
             if (engineType == EngineType.EMBEDDING) {
                 // Discovery presence is the only liveness signal for embedding engines
                 // (no gRPC probe): a worker missing from the list stops being routable
-                // immediately, while physical removal below stays thresholded.
+                // immediately, while physical removal below stays thresholded. Trusting
+                // the list like this requires getEngineWorkerList to throw on discovery
+                // failure — an empty list here always means a genuinely empty fleet.
                 for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
                     if (!latestValidIpPorts.contains(entry.getKey()) && entry.getValue().isAlive()) {
                         entry.getValue().setAlive(false);
@@ -169,6 +172,11 @@ public class EngineSyncRunner implements Runnable {
             logger.info("Finished submitting status check tasks for model: {}, role: {}, worker count: {}", modelName,
                     roleType, latestEngineWorkerList.size());
 
+        } catch (ServiceDiscoveryException e) {
+            // Already reported by WorkerAddressService; skip the round and keep the
+            // previous worker state until discovery recovers.
+            logger.error("service discovery failed, keeping previous worker state, model={}, role={}, error:{}",
+                    modelName, roleType, e.getMessage());
         } catch (Exception e) {
             logger.error("sync engine workers status exception, modelName:{}, error:{}", modelName, e.getMessage(), e);
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, null, null);
@@ -218,7 +226,7 @@ public class EngineSyncRunner implements Runnable {
     private void markAliveFromDiscovery(WorkerStatus workerStatus, WorkerHost host) {
         workerStatus.setSite(host.getSite());
         workerStatus.setGroup(host.getGroup());
-        workerStatus.setRole(roleType.toString());
+        workerStatus.setRole(roleType.getCode());
         workerStatus.setAlive(true);
         long nowUs = System.nanoTime() / 1000;
         long prevUpdateTime = workerStatus.getStatusLastUpdateTime().get();

@@ -24,8 +24,10 @@ import java.util.Map;
  * Dispatcher infrastructure beans (config, connection provider, shared WebClient, route table).
  * Domain beans (FePool, FeHealthChecker, FeClient, …) are individually annotated
  * {@code @Component @ConditionalOnProperty} so the entire dispatcher subsystem is gated on
- * {@code dispatch.fe-pool-service-id} being a non-blank value (via Spring's relaxed binding
- * the {@code DISPATCH_FE_POOL_SERVICE_ID} env maps to this property automatically). No
+ * {@code dispatch.fe-pool-service-id} being a non-blank value. Two configuration styles set it:
+ * the {@code DISPATCH_FE_POOL_SERVICE_ID} env (Spring relaxed-binds it to this property), or a
+ * {@code fePoolServiceId} inside the {@code DISPATCH_CONFIG} JSON, which
+ * {@link DispatchConfigEnvironmentPostProcessor} expands into the same property at startup. No
  * second "enabled" flag — presence-of-FE-pool-name IS the enable signal: a deployment that
  * names a FE pool obviously means to run the dispatcher, and one that doesn't has nothing
  * for the dispatcher to call anyway.

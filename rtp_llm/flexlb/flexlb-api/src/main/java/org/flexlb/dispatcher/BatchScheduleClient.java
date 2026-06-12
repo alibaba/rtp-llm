@@ -2,7 +2,7 @@ package org.flexlb.dispatcher;
 
 import lombok.RequiredArgsConstructor;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
-import org.flexlb.dao.loadbalance.BatchScheduleResponse;
+import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.service.BatchScheduleCoordinator;
 import org.flexlb.util.Logger;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -10,7 +10,6 @@ import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
-import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 
 /**
  * Resolves N pre-assigned BE targets in a single shot for the dispatcher by calling the master's

@@ -89,8 +89,12 @@ class HttpLoadBalanceServerTest {
         when(serverRequest.bodyToMono(BatchScheduleRequest.class))
                 .thenReturn(Mono.error(new IllegalArgumentException("malformed json")));
 
-        server.batchScheduleRequest(serverRequest).block();
+        org.springframework.web.reactive.function.server.ServerResponse out =
+                server.batchScheduleRequest(serverRequest).block();
 
+        assertNotNull(out);
+        assertEquals(500, out.statusCode().value(),
+                "client must see a 500 on a malformed body, not a silent success");
         BatchScheduleContext bctx = capturedBatchContext();
         assertFalse(bctx.isSuccess());
         assertNotNull(bctx.getBatchResponse(),
@@ -102,8 +106,12 @@ class HttpLoadBalanceServerTest {
     void batch_schedule_empty_body_is_reported_as_invalid_request() {
         when(serverRequest.bodyToMono(BatchScheduleRequest.class)).thenReturn(Mono.empty());
 
-        server.batchScheduleRequest(serverRequest).block();
+        org.springframework.web.reactive.function.server.ServerResponse out =
+                server.batchScheduleRequest(serverRequest).block();
 
+        assertNotNull(out);
+        assertEquals(500, out.statusCode().value(),
+                "client must see a 500 on an empty body, not a silent success");
         BatchScheduleContext bctx = capturedBatchContext();
         assertFalse(bctx.isSuccess());
         assertNotNull(bctx.getBatchResponse(),

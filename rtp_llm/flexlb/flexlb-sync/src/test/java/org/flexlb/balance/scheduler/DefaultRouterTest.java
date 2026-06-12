@@ -73,6 +73,9 @@ class DefaultRouterTest {
 
     @BeforeEach
     void setUp() {
+        // Start from an empty strategy registry so registrations here neither inherit from nor
+        // leak into other test classes sharing the process-wide LoadBalanceStrategyFactory.
+        LoadBalanceStrategyFactory.resetForTesting();
         // Clear all status maps
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();

@@ -1,8 +1,5 @@
 package org.flexlb.service;
 
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.CompletableFuture;
-
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.config.ConfigService;
@@ -13,6 +10,10 @@ import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.Response;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
+
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
 
 @Component
 public class RouteService {
@@ -42,7 +43,10 @@ public class RouteService {
         if (flexlbConfig.isEnableQueueing()) {
             resultMono = queueManager.tryRouteAsync(balanceContext);  // Use async queuing mechanism
         } else {
-            resultMono = Mono.fromCallable(() -> router.route(balanceContext));  // Direct routing without queuing
+            // Direct routing: keep the worker-map scan off the caller's Netty event loop, the same
+            // way batchSchedule does. The queue path above already hands off to a worker thread.
+            resultMono = Mono.fromCallable(() -> router.route(balanceContext))
+                    .subscribeOn(Schedulers.parallel());
         }
 
         return resultMono.doOnSuccess(result -> {
@@ -73,6 +77,10 @@ public class RouteService {
      * available on this path. Multi-role deployments must use {@link #route} per request.
      */
     public Mono<BatchScheduleResponse> batchSchedule(BatchScheduleRequest batchScheduleRequest) {
-        return Mono.fromCallable(() -> router.batchSchedule(batchScheduleRequest));
+        // router.batchSchedule scans the worker map and allocates the target list; run it on a
+        // worker thread so it never executes on the caller's Netty event loop (the dispatcher's
+        // in-JVM call and the master's HTTP handler both subscribe from event-loop threads).
+        return Mono.fromCallable(() -> router.batchSchedule(batchScheduleRequest))
+                .subscribeOn(Schedulers.parallel());
     }
 }

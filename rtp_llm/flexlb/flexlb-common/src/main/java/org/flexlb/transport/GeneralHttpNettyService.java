@@ -176,6 +176,11 @@ public class GeneralHttpNettyService {
         // If status code is not 200, indicates abnormal situation, parse chunk and return error
         if (httpStatusCode != StatusEnum.SUCCESS.getCode()) {
             NettyUtils.cacheBuffer(nettyCtx, obj);
+            // Wait for the whole error body before failing; a chunked non-200 response would
+            // otherwise be truncated to its first chunk, corrupting upstream business-error JSON.
+            if (!(obj instanceof LastHttpContent)) {
+                return;
+            }
             String body = NettyUtils.readBody(nettyCtx);
             NettyUtils.finishNettyWithException(nettyCtx,
                     new HttpErrorResponseException(httpStatusCode, body));

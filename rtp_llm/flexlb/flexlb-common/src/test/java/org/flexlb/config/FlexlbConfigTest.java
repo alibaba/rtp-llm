@@ -1,8 +1,8 @@
 package org.flexlb.config;
 
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.EngineType;
+import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

@@ -30,6 +30,12 @@ public class FanoutService {
     private static final JSONWriter.Feature[] WRITE_NULLS = { JSONWriter.Feature.WriteNulls };
     private static final JSONWriter.Feature[] NO_FEATURES = {};
     /**
+     * Caps how many sub-calls are in flight (and how many serialized payloads / parsed
+     * responses are resident) at once, so a pathologically large fanout cannot balloon
+     * heap. The common {@code count:5} split never reaches it; it only bites huge batches.
+     */
+    private static final int FANOUT_MAX_CONCURRENCY = 64;
+    /**
      * Failure WARNs are capped at one per interval with a suppressed-count rider: during an
      * FE outage the fanout path fails per chunk, and at production QPS an uncapped WARN
      * stream is tens of thousands of log lines per second — enough to cost real throughput.
@@ -46,34 +52,53 @@ public class FanoutService {
     public Mono<List<SubBatchResult>> dispatchChunks(String fePath,
                                                      List<JSONObject> chunkBodies,
                                                      BatchEndpointSpec spec) {
-        List<Mono<SubBatchResult>> calls = new ArrayList<>(chunkBodies.size());
-        int start = 0;
         JSONWriter.Feature[] features = spec.isFanoutWriteNulls() ? WRITE_NULLS : NO_FEATURES;
+        String arrayField = spec.getRequestArrayField();
+        List<ChunkPlan> plans = new ArrayList<>(chunkBodies.size());
+        int start = 0;
         for (JSONObject body : chunkBodies) {
-            int chunkSize = body.getJSONArray(spec.getRequestArrayField()).size();
-            int startIndex = start;
-            byte[] payload = JSON.toJSONBytes(body, features);
-            calls.add(Mono.fromCallable(fePool::next)
-                    .flatMap(feUrl -> feClient.postBytes(feUrl, fePath, payload)
-                            .map(bytes -> SubBatchResult.ok(
-                                    JSON.parseObject(bytes), chunkSize, startIndex))
-                            .onErrorResume(e -> {
-                                String reason = DispatcherResponses.briefReason(e);
-                                warnRateLimited("FE chunk failed: url={}, path={}, size={}, err={}, suppressed={}",
-                                        feUrl, fePath, chunkSize, reason);
-                                return Mono.just(SubBatchResult.failed(chunkSize, startIndex, reason));
-                            }))
-                    .onErrorResume(e -> {
-                        String reason = DispatcherResponses.briefReason(e);
-                        warnRateLimited("FE pick failed for chunk size={}, err={}, suppressed={}",
-                                chunkSize, reason);
-                        return Mono.just(SubBatchResult.failed(chunkSize, startIndex, reason));
-                    }));
+            int chunkSize = body.getJSONArray(arrayField).size();
+            plans.add(new ChunkPlan(body, start, chunkSize));
             start += chunkSize;
         }
-        return Flux.mergeSequential(Flux.fromIterable(calls))
+        return Flux.fromIterable(plans)
+                .flatMapSequential(plan -> dispatchOne(fePath, plan, features), FANOUT_MAX_CONCURRENCY)
                 .collectList()
                 .publishOn(Schedulers.parallel());
+    }
+
+    /**
+     * Serializes the chunk lazily at subscription (so payloads are not all held at once) and
+     * picks the FE in declaration order, keeping round-robin assignment deterministic. The FE
+     * response is parsed on a {@link Schedulers#parallel()} worker rather than the Netty event
+     * loop, so a large embedding response cannot stall the I/O thread serving other connections.
+     */
+    private Mono<SubBatchResult> dispatchOne(String fePath, ChunkPlan plan, JSONWriter.Feature[] features) {
+        return Mono.fromCallable(() -> new Pick(fePool.next(), JSON.toJSONBytes(plan.body(), features)))
+                .flatMap(pick -> feClient.postBytes(pick.feUrl(), fePath, pick.payload())
+                        .publishOn(Schedulers.parallel())
+                        .map(bytes -> SubBatchResult.ok(
+                                JSON.parseObject(bytes), plan.chunkSize(), plan.startIndex()))
+                        .onErrorResume(e -> {
+                            String reason = DispatcherResponses.briefReason(e);
+                            warnRateLimited("FE chunk failed: url={}, path={}, size={}, err={}, suppressed={}",
+                                    pick.feUrl(), fePath, plan.chunkSize(), reason);
+                            return Mono.just(SubBatchResult.failed(plan.chunkSize(), plan.startIndex(), reason));
+                        }))
+                .onErrorResume(e -> {
+                    String reason = DispatcherResponses.briefReason(e);
+                    warnRateLimited("FE pick failed for chunk size={}, err={}, suppressed={}",
+                            plan.chunkSize(), reason);
+                    return Mono.just(SubBatchResult.failed(plan.chunkSize(), plan.startIndex(), reason));
+                });
+    }
+
+    /** A chunk's request body plus its absolute offset and item count in the batch. */
+    private record ChunkPlan(JSONObject body, int startIndex, int chunkSize) {
+    }
+
+    /** A picked FE URL with the chunk already serialized for it. */
+    private record Pick(String feUrl, byte[] payload) {
     }
 
     /**
