@@ -18,6 +18,7 @@ from rtp_llm.utils.model_weight import W
 
 
 class GptModelBase(nn.Module):
+
     def __init__(
         self,
         config: ModelConfig,
@@ -103,6 +104,33 @@ class GptModelBase(nn.Module):
             is_cuda_graph,
         )
         return fmha_impl
+
+    def get_inputs_embeds(self, input_ids: Tensor, inputs: PyModelInputs) -> Tensor:
+        inputs_embeds = self.embed_tokens(input_ids)
+        if inputs.input_embeddings is not None and len(inputs.input_embeddings) > 0:
+            locs = inputs.input_embeddings_locs
+            token_num = inputs_embeds.size(0)
+            for i, emb in enumerate(inputs.input_embeddings):
+                loc = locs[i].item()
+                assert loc >= 0, f"input_embeddings_locs[{i}]={loc} must be >= 0"
+                assert loc + emb.size(0) <= token_num, (
+                    f"input_embeddings[{i}] at loc {loc} with length {emb.size(0)} "
+                    f"exceeds token count {token_num}"
+                )
+                inputs_embeds[loc : loc + emb.size(0)] = emb.to(
+                    device=inputs_embeds.device, dtype=inputs_embeds.dtype
+                )
+        return inputs_embeds
+
+    @staticmethod
+    def _has_input_embeddings(inputs: PyModelInputs) -> bool:
+        return inputs.input_embeddings is not None and len(inputs.input_embeddings) > 0
+
+    def _reject_input_embeddings(self, inputs: PyModelInputs) -> None:
+        if self._has_input_embeddings(inputs):
+            raise RuntimeError(
+                f"{type(self).__name__} does not support input_embeddings."
+            )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         raise NotImplementedError("forward method must be implemented in subclass")

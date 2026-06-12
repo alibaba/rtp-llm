@@ -1,6 +1,9 @@
 #pragma once
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 
 namespace rtp_llm {
 
@@ -18,13 +21,20 @@ public:
                          kmonitor::MetricsReporterPtr          metrics_reporter,
                          size_t                                extra_reserve_token_num = 0,
                          bool                                  perf_test               = false):
-        GenerateStream(query, model_config, runtime_config, resource_context, metrics_reporter, extra_reserve_token_num, perf_test),
+        GenerateStream(query,
+                       model_config,
+                       runtime_config,
+                       resource_context,
+                       metrics_reporter,
+                       extra_reserve_token_num,
+                       perf_test),
         request_id_(query->request_id) {
         generate_outputs_queue_.setCapacity(1000);
     }
 
     ~NormalGenerateStream() {
-        generate_outputs_queue_.wakeup();
+        finished_.store(true, std::memory_order_release);
+        notifyOutputReady();
     }
 
     bool                         hasOutput() override;
@@ -34,9 +44,12 @@ public:
 private:
     GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);
     void            enqueueGenerateOutput(GenerateOutputs&& generate_results);
+    void            notifyOutputReady();
 
     int64_t                                   request_id_{0};
-    bool                                      finished_{false};
+    std::atomic<bool>                         finished_{false};
     autil::SynchronizedQueue<GenerateOutputs> generate_outputs_queue_;
+    std::mutex                                output_notify_mutex_;
+    std::condition_variable                   output_notify_cv_;
 };
 }  // namespace rtp_llm

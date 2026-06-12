@@ -728,6 +728,7 @@ class KimiLinearDecoderLayer(nn.Module):
 
 
 class KimiLinearModel(GptModelBase):
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -776,7 +777,7 @@ class KimiLinearModel(GptModelBase):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
+        inputs_embeds = self.get_inputs_embeds(input_ids, inputs)
         hidden_states = inputs_embeds
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs

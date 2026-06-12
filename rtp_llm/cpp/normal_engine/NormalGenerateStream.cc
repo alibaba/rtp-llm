@@ -3,22 +3,38 @@
 namespace rtp_llm {
 
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
-    // TODO(xinfei.sxf) 某些case下会出现1s的等待
-    while ((!hasError()) && getStatus() != StreamState::FINISHED && generate_outputs_queue_.isEmpty()) {
+    // Use a dedicated CV (output_notify_cv_) so the "is-queue-empty?" check and
+    // the wait happen under the same lock.  The old pattern used SynchronizedQueue's
+    // isEmpty() + waitNotEmpty() which are two independent lock acquisitions; a
+    // push()+signal() landing between them caused a missed signal and a full
+    // DEF_WAIT_TIME (1 s) stall.
+    GenerateOutputs output;
+    while (!hasError() && !finished_.load(std::memory_order_acquire)) {
+        if (generate_outputs_queue_.tryGetAndPopFront(output)) {
+            return output;
+        }
         checkTimeout();
-        generate_outputs_queue_.waitNotEmpty();
+        std::unique_lock<std::mutex> lk(output_notify_mutex_);
+        if (!generate_outputs_queue_.isEmpty()) {
+            continue;
+        }
+        output_notify_cv_.wait_for(lk, std::chrono::seconds(1));
     }
     if (hasError()) {
         return statusInfo();
     }
-    if (generate_outputs_queue_.isEmpty()) {
-        if (isFinished()) {
-            return ErrorInfo(ErrorCode::FINISHED, "finished");
-        } else {
-            return ErrorInfo(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty");
-        }
+    if (generate_outputs_queue_.tryGetAndPopFront(output)) {
+        return output;
     }
-    return generate_outputs_queue_.getAndPopFront();
+    if (finished_.load(std::memory_order_acquire) || isFinished()) {
+        return ErrorInfo(ErrorCode::FINISHED, "finished");
+    }
+    return ErrorInfo(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty");
+}
+
+void NormalGenerateStream::notifyOutputReady() {
+    std::lock_guard<std::mutex> lk(output_notify_mutex_);
+    output_notify_cv_.notify_one();
 }
 
 bool NormalGenerateStream::hasOutput() {
@@ -75,9 +91,12 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 generate_output.hidden_states = update_info.hidden_states.narrow(0, i, 1).cpu();
             }
         }
-        if (generate_input_->generate_config->return_all_hidden_states && update_info.all_hidden_states.defined()
-            && iter_count_ == 1) {
-            generate_output.all_hidden_states = update_info.all_hidden_states.cpu();
+        if (generate_input_->generate_config->return_all_hidden_states) {
+            if (update_info.all_hidden_states.defined() && iter_count_ == 1) {
+                generate_output.all_hidden_states = update_info.all_hidden_states.cpu();
+            } else if (!isStreaming() && generate_output.finished && all_hidden_states_.defined()) {
+                generate_output.all_hidden_states = all_hidden_states_.cpu();
+            }
         }
         if (loss_.defined()) {
             RTP_LLM_CHECK_WITH_INFO(loss_index_ == inputLength() - 1,
@@ -155,6 +174,7 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_resu
     } else {
         generate_outputs_queue_.push(std::move(generate_results));
     }
+    notifyOutputReady();
 }
 
 void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
@@ -169,6 +189,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     if (needReturnHiddenStates() && update_info.all_hidden_states.defined()) {
         last_hidden_states_ = update_info.all_hidden_states;
     }
+    if (generate_input_->generate_config->return_all_hidden_states && update_info.all_hidden_states.defined()
+        && !all_hidden_states_.defined()) {
+        all_hidden_states_ = update_info.all_hidden_states;
+    }
 
     if (generate_input_->generate_config->return_softmax_probs && update_info.softmax_probs.defined()) {
         RTP_LLM_CHECK(update_info.softmax_probs.dim() == 2);
@@ -176,8 +200,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         setSoftmaxProbs(update_info.softmax_probs, seqLength() - update_info.num_new_tokens);
     }
 
-    finished_ = needFinish();
-    if (finished_) {
+    bool is_finished = needFinish();
+    // Delay finished_.store(true) until after final output is enqueued, so the consumer
+    // in nextOutput() cannot see finished_==true while the queue is still empty.
+    if (is_finished) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
         fillSubGenerateStatus(StreamState::FINISHED);
     }
@@ -191,29 +217,41 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     // TODO: move it to better position
     RTP_LLM_LOG_DEBUG("stream [%ld] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",
                       streamId(),
-                      finished_,
+                      is_finished,
                       queryPdSep(),
                       isStreaming(),
                       update_info.update_remote_generate);
 
-    if (!finished_ && queryPdSep() && update_info.update_remote_generate) {
+    if (!is_finished && queryPdSep() && update_info.update_remote_generate) {
         holdKVCacheForPDSep();
         reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
         reportEventWithoutLock(StreamEvents::GenerateDone);
+        is_finished = true;
     }
 
     bool pd_sep_first_token = queryPdSep();
-    bool need_update        = pd_sep_first_token || isStreaming() || finished_;
+    bool need_update        = pd_sep_first_token || isStreaming() || is_finished;
     if (!need_update) {
         return;
     }
 
     if (seqLength() - last_output_pos_ == 0) {
+        // Finished but no new tokens to enqueue — publish finished_ and wake consumer.
+        if (is_finished) {
+            finished_.store(true, std::memory_order_release);
+            notifyOutputReady();
+        }
         return;
     }
 
     RTP_LLM_LOG_DEBUG("stream [%ld] enqueue generate output", streamId());
     enqueueGenerateOutput(prepareGenerateOutput(update_info));
+
+    // Publish finished_ AFTER enqueue so consumer always sees output before FINISHED.
+    if (is_finished) {
+        finished_.store(true, std::memory_order_release);
+        notifyOutputReady();
+    }
 
     if (hasError()) {
         return;
