@@ -1,0 +1,13 @@
+diff --git aios/autil/autil/SynchronizedQueue.h aios/autil/autil/SynchronizedQueue.h
+index 8f758696..94b88f8c 100644
+--- aios/autil/autil/SynchronizedQueue.h
++++ aios/autil/autil/SynchronizedQueue.h
+@@ -134,7 +134,7 @@ bool SynchronizedQueue<T>::tryGetAndPopFront(T &element) {
+ template <class T>
+ void SynchronizedQueue<T>::waitNotEmpty() {
+     ScopedLock lk(_cond);
+-    _cond.wait(DEF_WAIT_TIME);
++    if (_elements.empty()) _cond.wait(DEF_WAIT_TIME);
+ }
+
+ template <class T>
