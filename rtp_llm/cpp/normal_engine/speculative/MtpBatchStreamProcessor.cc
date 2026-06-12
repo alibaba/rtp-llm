@@ -297,7 +297,13 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     // past accept_tokens row bounds. Per-row check is the only load-bearing
     // guard — shape/dtype come from SpeculativeSampler's internal contract.
     {
-        const int32_t* len_ptr = accept_lens.contiguous().data_ptr<int32_t>();
+        // Hold the contiguous() result in a named local: a temporary's
+        // .data_ptr() would dangle once the temporary is destroyed at the
+        // end of the full-expression. accept_lens is currently already
+        // contiguous so contiguous() returns self, but a future caller
+        // that hands in a strided tensor would otherwise read freed memory.
+        auto           accept_lens_c = accept_lens.contiguous();
+        const int32_t* len_ptr       = accept_lens_c.data_ptr<int32_t>();
         for (size_t i = 0; i < batch_size; ++i) {
             RTP_LLM_CHECK_WITH_INFO(len_ptr[i] > 0 && len_ptr[i] <= static_cast<int32_t>(propose_step_ + 1),
                                     "invalid accept_len[%zu]=%d (propose_step=%zu)",

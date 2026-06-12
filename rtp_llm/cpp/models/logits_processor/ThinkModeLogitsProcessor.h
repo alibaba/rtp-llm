@@ -69,55 +69,47 @@ struct StreamThinkInfo {
     }
 };
 
-struct ThinkModeSpecSnapshot {
-    bool            eligible = false;
-    StreamThinkInfo info;
-    uint64_t        version = 0;
-};
+class ThinkModeLogitsProcessorTestPeer;
 
 class ThinkModeLogitsProcessor: public BaseLogitsProcessor, public SpecLogitsProcessor {
 public:
     ThinkModeLogitsProcessor() = default;
-    ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> think_infos);
-    virtual ~ThinkModeLogitsProcessor() {}
+    explicit ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> think_infos);
+    ~ThinkModeLogitsProcessor() override = default;
 
-public:
     static std::shared_ptr<ThinkModeLogitsProcessor> fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,
-                                                                       int32_t                        num);
+                                                                      int32_t                        num);
 
-public:
-    void         process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
-    void         updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
-    void         updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
-    bool         isSpecVerifyEligible() const override;
-    int          tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
-    bool         isStateful() const override;
-    int64_t      acceptedTokenLen() const override;
+    void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
+    void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
+    void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
+
+    bool isSpecVerifyEligible() const override;
+    int  tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
+    bool isStateful() const override;
 
 private:
-    bool forceThinkEndToken(const torch::Tensor& new_tokens_logits, StreamThinkInfo& info, size_t vocab_size);
+    friend class ThinkModeLogitsProcessorTestPeer;
+
     void publishSpecSnapshotLocked();
 
-public:
-    std::vector<size_t> thinkEndTokensStatus();
-    size_t              size() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return think_infos_.size();
-    }
-    void insert(std::shared_ptr<ThinkModeLogitsProcessor> others, size_t num) {
-        if (others != nullptr) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            think_infos_.insert(think_infos_.end(), others->think_infos_.begin(), others->think_infos_.end());
-            publishSpecSnapshotLocked();
-        }
-    }
-
-private:
     std::vector<StreamThinkInfo>                 think_infos_;
     mutable std::mutex                           mutex_;
-    std::shared_ptr<const ThinkModeSpecSnapshot> spec_snapshot_;
+    // `spec_eligible_` is fixed at construction time: only updateMultiSeqStatus
+    // could resize think_infos_, and that path is only taken for beam search,
+    // which is itself ineligible for spec. So the flag never needs to flip.
+    bool                                         spec_eligible_         = false;
+    std::shared_ptr<const StreamThinkInfo>       spec_snapshot_;
     uint64_t                                     spec_snapshot_version_ = 0;
 };
-typedef std::shared_ptr<ThinkModeLogitsProcessor> ThinkModeLogitsProcessorPtr;
+
+using ThinkModeLogitsProcessorPtr = std::shared_ptr<ThinkModeLogitsProcessor>;
+
+// Test-only peer that exposes internal DFA state. Definition lives in the .cc;
+// linkage from tests is fine because the .o ends up in the same archive.
+class ThinkModeLogitsProcessorTestPeer {
+public:
+    static std::vector<size_t> thinkEndTokensStatus(ThinkModeLogitsProcessor& proc);
+};
 
 }  // namespace rtp_llm

@@ -89,6 +89,9 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             }
         }
         RTP_LLM_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
+        if (result.value().generate_outputs.empty()) {
+            continue;
+        }
         GenerateOutputsPB outputs_pb;
 
         QueryConverter::transResponse(&outputs_pb,

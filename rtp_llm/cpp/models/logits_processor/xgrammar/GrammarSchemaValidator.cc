@@ -120,6 +120,48 @@ void walkSchema(const autil::legacy::Any& node,
 }
 
 static constexpr size_t kMaxRegexEbnfSize = 64 * 1024;  // 64 KiB
+// structural_tag is deserialized via autil::legacy::json::ParseJson and then
+// recursively walked by sanitizeStructuralFormat; both are recursive and have
+// no built-in depth limit. A user-controlled payload of pure-`[` nesting
+// within the 64 KiB byte cap can still reach ~32k levels and overflow the
+// worker thread's 8 MiB stack, sending SIGSEGV — uncatchable by the worker's
+// catch(...). Reject obviously-deep payloads at admission so the worker
+// thread never sees them. 256 levels is well above any realistic structural
+// schema (sequence/or/tag/triggered_tags trees rarely exceed ~10 levels).
+static constexpr int kMaxStructuralTagDepth = 256;
+
+GrammarValidateResult scanStructuralTagDepth(const std::string& s) {
+    int depth     = 0;
+    int max_depth = 0;
+    bool in_str  = false;
+    bool escape  = false;
+    for (char c : s) {
+        if (in_str) {
+            if (escape) {
+                escape = false;
+            } else if (c == '\\') {
+                escape = true;
+            } else if (c == '"') {
+                in_str = false;
+            }
+            continue;
+        }
+        if (c == '"') {
+            in_str = true;
+        } else if (c == '{' || c == '[') {
+            ++depth;
+            if (depth > max_depth) max_depth = depth;
+            if (depth > kMaxStructuralTagDepth) {
+                return {GrammarValidateStatus::TooLarge,
+                        "structural_tag nesting exceeds maximum depth ("
+                            + std::to_string(kMaxStructuralTagDepth) + ")"};
+            }
+        } else if (c == '}' || c == ']') {
+            if (depth > 0) --depth;
+        }
+    }
+    return {GrammarValidateStatus::Ok, ""};
+}
 
 GrammarValidateResult validateRegexEbnfKeyLightweight(const GrammarKeyCpp& key) {
     if (key.key_string.size() > kMaxRegexEbnfSize) {
@@ -128,6 +170,12 @@ GrammarValidateResult validateRegexEbnfKeyLightweight(const GrammarKeyCpp& key) 
     }
     if (key.key_string.empty()) {
         return {GrammarValidateStatus::InvalidSyntax, "empty grammar string"};
+    }
+    if (key.key_type == "structural_tag") {
+        auto depth_result = scanStructuralTagDepth(key.key_string);
+        if (depth_result.status != GrammarValidateStatus::Ok) {
+            return depth_result;
+        }
     }
     return {GrammarValidateStatus::Ok, ""};
 }

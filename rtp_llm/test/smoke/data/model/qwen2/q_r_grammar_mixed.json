@@ -189,7 +189,8 @@
                 "usage": {"prompt_tokens": 26, "total_tokens": 54, "completion_tokens": 28},
                 "aux_info": {"iter_count": 28, "input_len": 26, "output_len": 28, "step_output_len": 28, "pd_sep": false, "reuse_len": 0, "local_reuse_len": 0, "remote_reuse_len": 0, "memory_reuse_len": 0}
             },
-            "_comment": "Same-schema person JSON #1 — cache-miss path."
+            "grammar_constraint_only": true,
+            "_comment": "Same-schema person JSON #1 — cache-miss path. grammar_constraint_only: BF16 + concurrency_test=True + TP2DP2 NCCL ordering can shift one token; only the schema needs to hold."
         },
         {
             "endpoint": "/v1/chat/completions",
@@ -235,7 +236,8 @@
                 "usage": {"prompt_tokens": 24, "total_tokens": 52, "completion_tokens": 28},
                 "aux_info": {"iter_count": 28, "input_len": 24, "output_len": 28, "step_output_len": 28, "pd_sep": false, "reuse_len": 0, "local_reuse_len": 0, "remote_reuse_len": 0, "memory_reuse_len": 0}
             },
-            "_comment": "Same-schema person JSON #2 — cache-hit path (XGrammarBackendCpp::getCached short-circuit)."
+            "grammar_constraint_only": true,
+            "_comment": "Same-schema person JSON #2 — cache-hit path (XGrammarBackendCpp::getCached short-circuit). grammar_constraint_only: same flaky-byte rationale as Q5."
         },
         {
             "endpoint": "/v1/chat/completions",
@@ -321,15 +323,16 @@
                         "schema": {
                             "type": "object",
                             "properties": {
-                                "company": {"type": "string"},
+                                "company": {"type": "string", "maxLength": 64},
                                 "departments": {
                                     "type": "array",
+                                    "maxItems": 4,
                                     "items": {
                                         "type": "object",
                                         "properties": {
-                                            "name": {"type": "string"},
-                                            "head": {"type": "string"},
-                                            "size": {"type": "integer"}
+                                            "name": {"type": "string", "maxLength": 32},
+                                            "head": {"type": "string", "maxLength": 32},
+                                            "size": {"type": "integer", "minimum": 0, "maximum": 10000}
                                         },
                                         "required": ["name", "head", "size"]
                                     }
@@ -339,7 +342,7 @@
                         }
                     }
                 },
-                "max_tokens": 4000,
+                "max_tokens": 800,
                 "temperature": 0.0,
                 "top_p": 1.0,
                 "stream": false

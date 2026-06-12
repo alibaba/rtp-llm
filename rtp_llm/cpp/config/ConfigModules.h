@@ -356,11 +356,6 @@ struct StructuredOutputConfig {
     // Backend selector: "xgrammar" / "none" / "" (disabled).
     std::string          grammar_backend                         = "xgrammar";
     int64_t              compile_timeout_ms                      = 60000;
-    // 每次 sampler tick 等待 walk_thread 推进 matcher 的最大时长（ms）。
-    // 超时则 LogitsProcessor 标 reported_error_、把 stream 转 FINISHED，
-    // 阻止采到 schema-非法 token。设过小会把瞬时 GIL 抢占放大成请求失败，
-    // 默认 5000ms 对应原 hardcoded 值。
-    int64_t              mask_wait_timeout_ms                    = 5000;
     // Empty ⇒ no override (backend uses tokenizer-derived stops).
     std::vector<int32_t> override_stop_tokens;
 

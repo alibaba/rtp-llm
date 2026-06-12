@@ -36,7 +36,6 @@ size_t grammarConfigFingerprint(const GrammarConfig& cfg) {
     h        = mixFingerprint(h, static_cast<size_t>(cfg.constrained_json_disable_any_whitespace));
     h        = mixFingerprint(h, static_cast<size_t>(cfg.num_workers));
     h        = mixFingerprint(h, static_cast<size_t>(cfg.compile_timeout_ms));
-    h        = mixFingerprint(h, static_cast<size_t>(cfg.mask_wait_timeout_ms));
     for (int32_t token : cfg.override_stop_tokens) {
         h = mixFingerprint(h, static_cast<size_t>(token));
     }
@@ -163,9 +162,6 @@ GrammarCompiler::GrammarCompiler(std::shared_ptr<XGrammarBackend> backend, const
     if (cfg.compile_timeout_ms > 0) {
         grammar_compile_timeout_ms_ = cfg.compile_timeout_ms;
     }
-    if (cfg.mask_wait_timeout_ms > 0) {
-        mask_wait_timeout_ms_ = cfg.mask_wait_timeout_ms;
-    }
     if (!enabled()) {
         RTP_LLM_LOG_INFO("GrammarCompiler init: backend=disabled, compile_timeout_ms=%lld",
                          static_cast<long long>(grammar_compile_timeout_ms_));
@@ -215,7 +211,11 @@ GrammarCompiler::~GrammarCompiler() {
         for (auto& task : state_->compile_tasks) {
             try {
                 task.promise.set_value({nullptr, false, false, "grammar compiler shutting down", 0});
-            } catch (const std::future_error&) {}
+            } catch (const std::future_error& fe) {
+                RTP_LLM_LOG_WARNING("grammar worker set_value future_error on shutdown: key=%s, what=%s",
+                                    task.key.brief().c_str(),
+                                    fe.what());
+            }
         }
         state_->compile_tasks.clear();
     }
@@ -231,23 +231,24 @@ GrammarCompiler::~GrammarCompiler() {
 
     int stuck = state_->alive_workers.load();
     if (stuck > 0) {
-        // Detach instead of abort: graceful shutdown getting escalated to a
-        // hard crash because a single xgrammar compile took longer than the
-        // timeout is a worse experience than letting the worker leak. Detach
-        // is safe here because the worker captured a shared_ptr<WorkerState>
-        // — the state survives this destructor and gets reaped when the last
-        // detached worker exits (or the OS reaps it at process _exit, which
-        // is the steady-state path: GrammarCompiler is a singleton destroyed
-        // only at process teardown).
-        RTP_LLM_LOG_ERROR("GrammarCompiler shutdown: %d worker(s) stuck in compileNow after %lld ms; "
-                          "detaching (state kept alive via shared_ptr until workers exit)",
-                          stuck, static_cast<long long>(grammar_compile_timeout_ms_));
-        for (auto& t : workers_) {
-            if (t.joinable()) {
-                t.detach();
-            }
-        }
-        return;
+        // We cannot safely detach: shared_ptr<WorkerState> only keeps the
+        // queue/backend alive, NOT the Logger / alog globals / xgrammar
+        // translation-unit statics that the worker keeps using once
+        // compileNow returns. By the time this destructor runs we are
+        // already inside process-shutdown static teardown, so any of those
+        // globals can be half-destructed; touching them from a detached
+        // thread is an immediate UAF.
+        //
+        // Joining indefinitely would hang shutdown. Aborting via _Exit is
+        // the honest answer: it is loud, it is consistent, and it skips the
+        // rest of static destruction (which is already racing with the
+        // worker) so we don't crash the test harness with an obscure
+        // post-main UAF stack instead.
+        RTP_LLM_LOG_ERROR(
+            "GrammarCompiler shutdown: %d worker(s) stuck in compileNow after %lld ms; "
+            "calling _Exit to avoid UAF on Logger/xgrammar statics during teardown",
+            stuck, static_cast<long long>(grammar_compile_timeout_ms_));
+        std::_Exit(EXIT_FAILURE);
     }
     for (auto& t : workers_) {
         if (t.joinable()) {
@@ -323,14 +324,22 @@ std::shared_future<GrammarReadyPayload> GrammarCompiler::submit(const GrammarKey
         if (it != state_->in_flight.end() && it->second.valid()) {
             future = it->second;
         } else {
+            // Build the task and reserve the queue slot BEFORE publishing the
+            // future to in_flight. If compile_tasks.emplace_back throws (e.g.
+            // bad_alloc), the local CompileTask unwinds and its still-unset
+            // promise destroys the shared state with broken_promise. If we
+            // had already installed the future at in_flight[kid], every
+            // subsequent submit for the same key would singleflight-subscribe
+            // onto that broken future and fail forever — workerLoop never gets
+            // a task for this kid, so erase_in_flight() never runs to clean it.
             std::promise<GrammarReadyPayload> promise;
-            future                  = promise.get_future().share();
-            state_->in_flight[kid]  = future;
+            future = promise.get_future().share();
             CompileTask task;
             task.key     = key;
             task.promise = std::move(promise);
             state_->compile_tasks.emplace_back(std::move(task));
-            submitted_new_task = true;
+            state_->in_flight[kid] = future;
+            submitted_new_task     = true;
         }
     }
     if (submitted_new_task) {
@@ -373,28 +382,26 @@ void GrammarCompiler::workerLoop(std::shared_ptr<WorkerState> state) {
         if (state->stop.load(std::memory_order_relaxed)) {
             try {
                 popped->promise.set_value({nullptr, false, false, "shutdown", 0});
-            } catch (const std::future_error&) {}
+            } catch (const std::future_error& fe) {
+                RTP_LLM_LOG_WARNING("grammar worker set_value future_error on shutdown: key=%s, what=%s",
+                                    popped->key.brief().c_str(),
+                                    fe.what());
+            }
             erase_in_flight();
             continue;
         }
 
-        // Catch-all around the whole task body: compileNow has its own
-        // exception->payload handling, but setCache / logging / set_value can
-        // still throw (e.g. bad_alloc). An exception escaping this thread would
-        // std::terminate the process and leave every subscriber's future
-        // permanently unfulfilled. Convert any escape into a system-error
-        // payload so subscribers unblock and the worker keeps serving.
+        GrammarReadyPayload payload;
+        const std::string   key_brief = popped->key.brief();
         try {
-            RTP_LLM_LOG_INFO("grammar worker picked up task: key=%s", popped->key.brief().c_str());
+            RTP_LLM_LOG_INFO("grammar worker picked up task: key=%s", key_brief.c_str());
 
             const auto t_start = std::chrono::steady_clock::now();
-
-            GrammarReadyPayload payload;
             try {
                 CompileResult result = state->backend->compileNow(popped->key);
-                payload.compiled     = std::move(result.compiled);
-                payload.is_invalid   = result.is_invalid;
-                payload.error_msg    = std::move(result.error_message);
+                payload.compiled   = std::move(result.compiled);
+                payload.is_invalid = result.is_invalid;
+                payload.error_msg  = std::move(result.error_message);
             } catch (const std::exception& e) {
                 payload.compiled   = nullptr;
                 payload.is_invalid = false;
@@ -402,57 +409,46 @@ void GrammarCompiler::workerLoop(std::shared_ptr<WorkerState> state) {
             }
 
             const auto t_end      = std::chrono::steady_clock::now();
-            const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
-            payload.compile_time_us = elapsed_us;
+            payload.compile_time_us =
+                std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count();
             RTP_LLM_LOG_INFO("grammar worker compileNow done: key=%s, ok=%d, invalid=%d, elapsed_ms=%lld, err=%s",
-                             popped->key.brief().c_str(),
+                             key_brief.c_str(),
                              static_cast<int>(payload.compiled != nullptr),
                              static_cast<int>(payload.is_invalid),
-                             static_cast<long long>(elapsed_us / 1000),
+                             static_cast<long long>(payload.compile_time_us / 1000),
                              payload.error_msg.empty() ? "" : payload.error_msg.c_str());
 
-            // Cache eagerly so the result survives even when all subscribers
-            // have timed out. Without this, a schema that compiles in 61s (just
-            // past the 60s default timeout) would never be cached and every
-            // future request would re-compile and re-timeout.
             if (payload.compiled) {
                 state->backend->setCache(popped->key, payload.compiled);
             } else if (payload.is_invalid) {
                 state->backend->setCacheInvalid(popped->key, payload.error_msg);
             }
+        } catch (const std::bad_alloc& e) {
+            RTP_LLM_LOG_ERROR("grammar worker task body bad_alloc (transient); not caching, key=%s", key_brief.c_str());
+            payload = {nullptr, false, false, std::string("grammar worker bad_alloc: ") + e.what(), 0};
+        } catch (const std::exception& e) {
+            const std::string err = std::string("grammar worker exception: ") + e.what();
+            RTP_LLM_LOG_ERROR("grammar worker task body threw (%s); marking key invalid to suppress retry storm: key=%s",
+                              e.what(),
+                              key_brief.c_str());
+            payload = {nullptr, true, false, err, 0};
+            if (state->backend) {
+                try {
+                    state->backend->setCacheInvalid(popped->key, err);
+                } catch (const std::exception& cache_err) {
+                    RTP_LLM_LOG_WARNING("grammar worker setCacheInvalid failed: key=%s, what=%s",
+                                        key_brief.c_str(),
+                                        cache_err.what());
+                }
+            }
+        }
 
+        try {
             popped->promise.set_value(std::move(payload));
         } catch (const std::future_error& fe) {
             RTP_LLM_LOG_WARNING("grammar worker set_value future_error: key=%s, what=%s",
-                                popped->key.brief().c_str(), fe.what());
-        } catch (const std::bad_alloc& e) {
-            // 资源型瞬时失败：不缓存，下一次相同 key 重新走 compile，避免把
-            // 内存压力固化成永久 invalid 状态。
-            RTP_LLM_LOG_ERROR("grammar worker task body bad_alloc (transient); not caching, key=%s",
-                              popped->key.brief().c_str());
-            try {
-                popped->promise.set_value({nullptr, false, false, std::string("grammar worker bad_alloc: ") + e.what(), 0});
-            } catch (const std::future_error&) {}
-        } catch (const std::exception& e) {
-            // 任务体内 setCache / 序列化等抛出的非资源型异常：把 key 标 invalid
-            // 缓存，避免后续相同 schema 反复重试触发 retry storm（subscribers
-            // 仍能从 promise 立即拿到错误）。
-            const std::string err = std::string("grammar worker exception: ") + e.what();
-            RTP_LLM_LOG_ERROR("grammar worker task body threw (%s); marking key invalid to suppress retry storm: key=%s",
-                              e.what(), popped->key.brief().c_str());
-            try {
-                if (state->backend) {
-                    state->backend->setCacheInvalid(popped->key, err);
-                }
-            } catch (...) {}
-            try {
-                popped->promise.set_value({nullptr, true, false, err, 0});
-            } catch (const std::future_error&) {}
-        } catch (...) {
-            RTP_LLM_LOG_ERROR("grammar worker task body threw unknown exception; key=%s", popped->key.brief().c_str());
-            try {
-                popped->promise.set_value({nullptr, false, false, "grammar worker unknown exception", 0});
-            } catch (const std::future_error&) {}
+                                key_brief.c_str(),
+                                fe.what());
         }
 
         // Remove the singleflight slot AFTER the result has been cached + the

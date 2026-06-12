@@ -113,10 +113,10 @@ NormalizedGrammar normalizeResponseFormat(const std::string& response_format_str
         RTP_LLM_LOG_WARNING("normalizeResponseFormat: response_format is not a valid JSON object: %s", e.what());
         throw std::invalid_argument(std::string("response_format is not a valid JSON object: ") + e.what());
     }
-    if (response_map.empty()) {
-        return out;
-    }
 
+    // Empty object {} is NOT silently unconstrained: an explicit
+    // response_format must declare a valid 'type'. Falls through to the
+    // backstop below which throws INVALID_PARAMS with a diagnostic message.
     const std::string format_type = mapField(response_map, "type").value_or("");
 
     if (format_type == "text") {
@@ -136,6 +136,12 @@ NormalizedGrammar normalizeResponseFormat(const std::string& response_format_str
                 if (auto unwrapped = unwrapJsonSchemaEnvelope(*raw)) {
                     raw = std::move(unwrapped);
                 }
+            }
+            // Reject explicitly-empty payloads ("{}", "[]") — they would
+            // otherwise compile as "match anything" and silently relax
+            // constraints. Mirrors the Pydantic-side rejection of empty schema.
+            if (raw && (*raw == "{}" || *raw == "[]")) {
+                raw.reset();
             }
             out.*(rule.target) = std::move(raw);
             break;

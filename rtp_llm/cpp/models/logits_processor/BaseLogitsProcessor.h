@@ -95,12 +95,6 @@ public:
     virtual PrepareState prepare(GenerateStream& /*stream*/) { return PrepareState::Ready; }
 
     virtual bool isStateful() const { return false; }
-    virtual bool supportsNormalAsyncDeviceState() const { return false; }
-    virtual void prepareNormalAsyncUpdate(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
-        (void)new_tokens;
-        (void)num_new_tokens;
-    }
-    virtual int64_t acceptedTokenLen() const { return 0; }
 
     // Set the owning stream's back-reference. Called by GenerateStream after
     // make_shared so shared_from_this is valid. Default no-op for processors

@@ -300,25 +300,18 @@ TEST_F(QueryConverterTest, ResponseFormat_TextTypeIsNoOp) {
     EXPECT_FALSE(cfg->structural_tag.has_value());
 }
 
-TEST_F(QueryConverterTest, ResponseFormat_EmptyStringAndObjectAreNoOp) {
-    {
-        GenerateInputPB input;
-        input.add_token_ids(0);
-        input.mutable_generate_config()->mutable_response_format()->set_value("");
-        auto cfg = QueryConverter::transQuery(&input)->generate_config;
-        EXPECT_FALSE(cfg->json_schema.has_value());
-        EXPECT_FALSE(cfg->regex.has_value());
-        EXPECT_FALSE(cfg->ebnf.has_value());
-        EXPECT_FALSE(cfg->structural_tag.has_value());
-    }
-    {
-        auto input = makeInputWithResponseFormat("{}");
-        auto cfg   = QueryConverter::transQuery(&input)->generate_config;
-        EXPECT_FALSE(cfg->json_schema.has_value());
-        EXPECT_FALSE(cfg->regex.has_value());
-        EXPECT_FALSE(cfg->ebnf.has_value());
-        EXPECT_FALSE(cfg->structural_tag.has_value());
-    }
+TEST_F(QueryConverterTest, ResponseFormat_EmptyStringIsNoOp) {
+    // Empty string is the "absent response_format" sentinel — no envelope was
+    // sent. Distinct from {} which is an explicit empty envelope and must be
+    // rejected (covered by ResponseFormat_InvalidEnvelopesAreRejected).
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    input.mutable_generate_config()->mutable_response_format()->set_value("");
+    auto cfg = QueryConverter::transQuery(&input)->generate_config;
+    EXPECT_FALSE(cfg->json_schema.has_value());
+    EXPECT_FALSE(cfg->regex.has_value());
+    EXPECT_FALSE(cfg->ebnf.has_value());
+    EXPECT_FALSE(cfg->structural_tag.has_value());
 }
 
 TEST_F(QueryConverterTest, ResponseFormat_InvalidEnvelopesAreRejected) {
@@ -327,6 +320,8 @@ TEST_F(QueryConverterTest, ResponseFormat_InvalidEnvelopesAreRejected) {
     // at the gRPC layer instead of a silent unconstrained generation.
     const std::vector<std::pair<const char*, std::string>> bad = {
         {"malformed_json",          "this is not json {{{"},
+        {"empty_object",            "{}"},
+        {"json_schema_empty_body",  R"({"type":"json_schema","json_schema":{}})"},
         {"unknown_type",            R"({"type":"not_a_real_type"})"},
         {"missing_type",            R"({"json_schema":{"schema":{"type":"object"}}})"},
         {"json_schema_no_payload",  R"({"type":"json_schema"})"},
