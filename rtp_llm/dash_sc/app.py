@@ -13,6 +13,7 @@ import logging
 import os
 import signal
 import threading
+import time
 import traceback
 from typing import Any, List, Optional
 
@@ -36,6 +37,19 @@ _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
 
 _PROXY_SERVICER_STARTUP_TIMEOUT_S = 30.0
 _SERVICER_CLOSE_TIMEOUT_S = 10.0
+_PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
+_DEFAULT_PRE_STOP_DRAIN_SECONDS = 30.0
+
+
+def _pre_stop_drain_seconds() -> float:
+    raw = os.environ.get(_PRE_STOP_DRAIN_SECONDS_ENV, "")
+    if not raw:
+        return _DEFAULT_PRE_STOP_DRAIN_SECONDS
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return _DEFAULT_PRE_STOP_DRAIN_SECONDS
+    return max(0.0, seconds)
 
 
 def _is_proxy_mode_enabled() -> bool:
@@ -195,6 +209,7 @@ class DashScApp:
         self._enqueue_loop: Optional[asyncio.AbstractEventLoop] = None
         self._enqueue_loop_thread: Optional[threading.Thread] = None
         self._shutdown_event = threading.Event()
+        self._shutdown_started_at: Optional[float] = None
         self._grpc_server = DashScGrpcServer(
             dash_sc_grpc_config=self.dash_sc_grpc_config
         )
@@ -237,6 +252,8 @@ class DashScApp:
     def _install_signal_handlers(self) -> None:
         def _handler(signum, frame):
             logging.info("[DashScApp] received signal %s, shutting down", signum)
+            if self._shutdown_started_at is None:
+                self._shutdown_started_at = time.monotonic()
             self._shutdown_event.set()
 
         try:
@@ -411,6 +428,7 @@ class DashScApp:
             self.stop()
 
     def stop(self) -> None:
+        self._sleep_before_stop_for_drain()
         to = self.server_config.shutdown_timeout
         grace = None if to < 0 else float(to)
         try:
@@ -418,3 +436,33 @@ class DashScApp:
         except Exception as e:
             logging.warning("[DashScApp] grpc_server.stop failed: %s", e)
         self._stop_enqueue_loop()
+
+    def _sleep_before_stop_for_drain(self) -> None:
+        if self._shutdown_started_at is None:
+            return
+        drain_seconds = self._effective_pre_stop_drain_seconds()
+        if drain_seconds <= 0:
+            return
+        elapsed = time.monotonic() - self._shutdown_started_at
+        remaining = drain_seconds - elapsed
+        if remaining <= 0:
+            return
+        logging.info(
+            "[DashScApp] pre-stop drain before grpc stop: remaining=%.3fs",
+            remaining,
+        )
+        time.sleep(remaining)
+
+    def _effective_pre_stop_drain_seconds(self) -> float:
+        drain_seconds = _pre_stop_drain_seconds()
+        shutdown_timeout = getattr(self.server_config, "shutdown_timeout", None)
+        if shutdown_timeout is None or shutdown_timeout <= 0:
+            return drain_seconds
+        if drain_seconds <= shutdown_timeout:
+            return drain_seconds
+        logging.warning(
+            "[DashScApp] clamp pre-stop drain %.3fs to shutdown_timeout=%ss",
+            drain_seconds,
+            shutdown_timeout,
+        )
+        return float(shutdown_timeout)
