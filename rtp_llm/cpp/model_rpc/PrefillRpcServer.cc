@@ -69,7 +69,7 @@ namespace rtp_llm {
             }                                                                                                          \
         }                                                                                                              \
         if (prefill_context.getStream()) {                                                                             \
-            prefill_context.getStream()->reportEvent(StreamEvents::Error, new_error_code, new_error_msg);              \
+            prefill_context.getStream()->reportError(new_error_code, new_error_msg);                                   \
         }                                                                                                              \
         prefill_context.error_info   = ErrorInfo(new_error_code, new_error_msg);                                       \
         prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);     \
@@ -77,11 +77,11 @@ namespace rtp_llm {
     }
 
 grpc::Status PrefillRpcServer::init(const EngineInitParams&                                maga_init_params,
-                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                                    py::object                                             mm_process_engine) {
+                                    py::object                                             mm_process_engine,
+                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
     RTP_LLM_CHECK_WITH_INFO(maga_init_params.pd_sep_config.role_type == RoleType::PREFILL,
                             "prefill's role_type must be PREFILL");
-    auto ret = RemoteRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
+    auto ret = RemoteRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
     if (!ret.ok()) {
         return ret;
     }
@@ -97,7 +97,7 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
         auto cost_time_us    = current_time_us - begin_time_us;
         if (cost_time_us > max_wait_timeout_us) {
             string new_error_msg = "wait to run timeout, timeout is " + std::to_string(max_wait_timeout_us) + " us";
-            stream->reportEvent(StreamEvents::Error, ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
+            stream->reportError(ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
             return ErrorInfo(ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
         }
     }
@@ -222,6 +222,11 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", prefill_context.request_id);
     auto stream = engine_->enqueue(prefill_context.generate_input);
     prefill_context.setStream(stream);
+    if (stream->hasError()) {
+        prefill_context.error_info   = stream->statusInfo();
+        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        return;
+    }
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", prefill_context.request_id);
 }
 

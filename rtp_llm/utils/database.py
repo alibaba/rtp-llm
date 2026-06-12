@@ -13,6 +13,41 @@ from rtp_llm.lora.lora_file import LoraCkpt
 from rtp_llm.utils.ckpt_file_info import CkptFileInfo, FinetuneType
 
 
+def _should_use_fastsafetensors_shm(required_mb: int) -> bool:
+    try:
+        stat = os.statvfs("/dev/shm")
+    except OSError as e:
+        logging.warning(
+            "failed to inspect /dev/shm, disable fastsafetensors shm: %s", e
+        )
+        return False
+
+    available_bytes = stat.f_frsize * stat.f_bavail
+    required_bytes = required_mb * 1024 * 1024
+    if available_bytes < required_bytes:
+        logging.info(
+            "disable fastsafetensors shm, /dev/shm available=%d required=%d",
+            available_bytes,
+            required_bytes,
+        )
+        return False
+    return True
+
+
+def _create_fastsafetensors_loader(loader_factory, loader_kwargs: Dict[str, Any]):
+    try:
+        return loader_factory(**loader_kwargs)
+    except RuntimeError as e:
+        if not loader_kwargs.get("use_shm"):
+            raise
+        logging.warning(
+            "fastsafetensors shm init failed, fallback to non-shm loader: %s", e
+        )
+        fallback_kwargs = dict(loader_kwargs)
+        fallback_kwargs["use_shm"] = False
+        return loader_factory(**fallback_kwargs)
+
+
 class BaseDatabase:
 
     def get_pretrain_tensor_names(self) -> List[str]:
@@ -235,15 +270,31 @@ class CkptDatabase(BaseDatabase):
     def load_tensors_by_prefix(
         self, prefix_list: List[str], device: str, direct_io: bool
     ) -> dict[str, List[torch.Tensor]]:
+        shm_loader = None
         try:
             from fast_safetensors import LoadWithShm
 
-            loader = LoadWithShm(2 * 1024 * 1024 * 1024, device, direct_io)
-            load_tensors = lambda ckptfile: loader.load_safetensors_to_device(
-                ckptfile.file_name
-            )
+            if _should_use_fastsafetensors_shm(2 * 1024):
+                shm_loader = LoadWithShm(2 * 1024 * 1024 * 1024, device, direct_io)
         except (ModuleNotFoundError, ImportError):
-            load_tensors = lambda ckptfile: ckptfile.load_tensors(device, direct_io)
+            pass
+        except RuntimeError as e:
+            logging.warning(
+                "fastsafetensors shm init failed for prefix load, fallback to direct checkpoint load: %s",
+                e,
+            )
+
+        def load_tensors(ckptfile: CkptFileInfo) -> Dict[str, torch.Tensor]:
+            if shm_loader is not None:
+                try:
+                    return shm_loader.load_safetensors_to_device(ckptfile.file_name)
+                except RuntimeError as e:
+                    logging.warning(
+                        "fastsafetensors shm load failed for %s, fallback to direct checkpoint load: %s",
+                        ckptfile.file_name,
+                        e,
+                    )
+            return ckptfile.load_tensors(device, direct_io)
 
         res = {}
         for ckptfile in self.pretrain_file_list:
@@ -291,12 +342,20 @@ class CkptDatabase(BaseDatabase):
                 use_tqdm_on_load=use_tqdm_on_load,
                 device=device,
                 bbuf_size_kb=1024 * 1024 * 2,
-                use_shm=True,
+                use_shm=_should_use_fastsafetensors_shm(2 * 1024),
             )
             if stacked_key_config:
-                loader = PerExpertParallelLoader(stacked_key_config, **loader_kwargs)
+                loader = _create_fastsafetensors_loader(
+                    lambda **kwargs: PerExpertParallelLoader(
+                        stacked_key_config, **kwargs
+                    ),
+                    loader_kwargs,
+                )
             else:
-                loader = ParallelLoader(**loader_kwargs)
+                loader = _create_fastsafetensors_loader(
+                    ParallelLoader,
+                    loader_kwargs,
+                )
             try:
                 yield from loader.iterate_weights()
             finally:

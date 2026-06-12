@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include <thread>
 #include <torch/extension.h>
 
@@ -63,6 +64,11 @@ public:
     // P2P read extension field
     GenerateStream* generateStream() const override {
         return generate_stream_;
+    }
+    void reportError(ErrorCode error_code, const std::string& error_msg) override {
+        if (generate_stream_) {
+            generate_stream_->reportError(error_code, error_msg);
+        }
     }
 
     // P2P routing context: cached at construction time, read-only access thereafter
@@ -126,37 +132,33 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         return false;
     }
 
-    // Apply side-channel data to GenerateStream
+    // Apply side-channel data to GenerateStream; current callers reach here via waitLoadCacheDone() with
+    // stream_->mutex_ held.
     // 1. First token: append to stream
-    if (payload->first_token_id > 0) {
+    if (payload->has_first_token) {
         stream->setIsContextStream(false);
         stream->step();
         auto new_tokens                   = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
         new_tokens.data_ptr<int32_t>()[0] = static_cast<int32_t>(payload->first_token_id);
-        stream->incLastOutputPos();
-        stream->update({.new_tokens        = new_tokens,
-                        .num_new_tokens    = 1,
-                        .hidden_states     = {},
-                        .logits            = {},
-                        .softmax_probs     = {},
-                        .cum_log_probs     = {},
-                        .all_probs         = {},
-                        .loss              = {},
-                        .src_batch_indices = {},
-                        .all_hidden_states = {}});
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: appended first_token_id=%ld, stream_id=%ld",
-                          payload->first_token_id,
-                          stream->streamId());
+        stream->updateWithoutLock({.new_tokens             = new_tokens,
+                                   .num_new_tokens         = 1,
+                                   .hidden_states          = {},
+                                   .logits                 = {},
+                                   .softmax_probs          = {},
+                                   .cum_log_probs          = {},
+                                   .all_probs              = {},
+                                   .loss                   = {},
+                                   .src_batch_indices      = {},
+                                   .all_hidden_states      = {},
+                                   .update_remote_generate = false,
+                                   .force_update_info      = false,
+                                   .skip_finish_check      = true});
     }
 
     // 2. Reuse lengths
     if (payload->total_reuse_len > 0) {
-        stream->setInitialReuseLength(payload->total_reuse_len);
-        stream->setReuseLength(payload->total_reuse_len);
-        stream->setLocalReuseLength(payload->local_reuse_len + payload->memory_reuse_len);
-        stream->setMtpTokenIndex(payload->total_reuse_len);
-        stream->setMemoryReuseLength(payload->memory_reuse_len);
-        stream->setRemoteReuseLength(payload->remote_reuse_len);
+        stream->setPrefillReuseLength(
+            payload->total_reuse_len, payload->local_reuse_len, payload->remote_reuse_len, payload->memory_reuse_len);
         RTP_LLM_LOG_DEBUG("applyP2PSideChannel: reuse total=%d, local=%d, remote=%d, memory=%d",
                           payload->total_reuse_len,
                           payload->local_reuse_len,
@@ -165,21 +167,68 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
     }
 
     // 3. Speculative proposal info
-    if (!payload->propose_tokens.empty()) {
-        stream->setReuseLength(stream->seqLength() - 1);
-        stream->setSpEditRun(false);
-        stream->setMtpTokenIndex(stream->seqLength() - 1);
-        stream->setContainProposeToken(true);
-        stream->setProposeToken(payload->propose_tokens);
+    const bool has_propose_probs =
+        payload->propose_probs.shape_size() > 0 || !payload->propose_probs.fp16_data().empty()
+        || !payload->propose_probs.bf16_data().empty() || !payload->propose_probs.fp32_data().empty();
+    const bool has_propose_hidden =
+        payload->propose_hidden.shape_size() > 0 || !payload->propose_hidden.fp16_data().empty()
+        || !payload->propose_hidden.bf16_data().empty() || !payload->propose_hidden.fp32_data().empty();
+    const bool mtp_requires_propose_tokens = !stream->disableSpRun();
+    if (mtp_requires_propose_tokens && payload->propose_tokens.size() < 2) {
+        stream->setContainProposeToken(false);
+        stream->setProposeToken({});
+        stream->setSPOutputBuffer(nullptr);
+        const std::string error_message =
+            "decode_entrance mtp handoff missing valid propose_tokens for unique_key=" + stream->uniqueKey();
+        RTP_LLM_LOG_WARNING("%s, propose_tokens=%zu, has_probs=%d, has_hidden=%d",
+                            error_message.c_str(),
+                            payload->propose_tokens.size(),
+                            has_propose_probs,
+                            has_propose_hidden);
+        stream->reportErrorWithoutLock(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED, error_message);
+        return true;
+    }
 
-        auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
-        sp_output_buffer->tokens = torch::zeros({1, (int64_t)payload->propose_tokens.size()}, torch::kInt32);
-        memcpy(sp_output_buffer->tokens.data_ptr<int>(),
-               payload->propose_tokens.data(),
-               payload->propose_tokens.size() * sizeof(int));
+    const bool has_sp_side_channel = !payload->propose_tokens.empty() || has_propose_probs || has_propose_hidden;
+    if (has_sp_side_channel) {
+        if (payload->propose_tokens.size() < 2) {
+            RTP_LLM_LOG_WARNING("decode_entrance applyP2PSideChannelToStream skipping malformed speculative "
+                                "side-channel, unique_key=%s, propose_tokens=%zu, has_probs=%d, has_hidden=%d",
+                                stream->uniqueKey().c_str(),
+                                payload->propose_tokens.size(),
+                                has_propose_probs,
+                                has_propose_hidden);
+            stream->setContainProposeToken(false);
+            stream->setProposeToken({});
+            stream->setSPOutputBuffer(nullptr);
+        } else {
+            auto propose_probs_t  = has_propose_probs ? TensorPbConvert::pbToTorch(payload->propose_probs) :
+                                                        torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32));
+            auto propose_hidden_t = has_propose_hidden ?
+                                        TensorPbConvert::pbToTorch(payload->propose_hidden) :
+                                        torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
 
-        stream->setSPOutputBuffer(sp_output_buffer);
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: propose_tokens count=%zu", payload->propose_tokens.size());
+            std::vector<int> side_channel_tokens = payload->propose_tokens;
+            stream->setReuseLength(stream->seqLength() - 1);
+            stream->setSpEditRun(false);
+            stream->setMtpTokenIndex(stream->seqLength() - 1);
+            stream->setContainProposeToken(true);
+            stream->setProposeToken(side_channel_tokens);
+
+            auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+            sp_output_buffer->tokens = torch::zeros({1, (int64_t)side_channel_tokens.size()}, torch::kInt32);
+            memcpy(sp_output_buffer->tokens.data_ptr<int>(),
+                   side_channel_tokens.data(),
+                   side_channel_tokens.size() * sizeof(int));
+
+            sp_output_buffer->all_probs     = propose_probs_t;
+            sp_output_buffer->hidden_states = propose_hidden_t;
+            sp_output_buffer->tensors_holder.emplace_back(std::move(propose_probs_t));
+            sp_output_buffer->tensors_holder.emplace_back(std::move(propose_hidden_t));
+
+            stream->setSPOutputBuffer(sp_output_buffer);
+            RTP_LLM_LOG_DEBUG("applyP2PSideChannel: propose_tokens count=%zu", payload->propose_tokens.size());
+        }
     }
 
     // 4. Position IDs
@@ -256,7 +305,6 @@ void StreamCacheResource::releaseResource() {
     tryReleaseKVBlock(curBlocksNum());
     batch_kv_cache_resource_->clearBlocks();
     resource_released_ = true;
-    load_cache_once_.store(false, std::memory_order_release);
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
@@ -407,11 +455,8 @@ bool StreamCacheResource::asyncLoadCache() {
     if (load_cache_context_) {
         return true;  // 已有进行中的 load 任务（幂等）
     }
-    // Second+ initKVBlock (same stream): skip — reuse lengths already set on first load.
-    if (load_cache_once_.exchange(true)) {
-        return true;
-    }
-    auto meta = std::make_shared<MetaImpl>(
+    async_load_cache_start_us_ = currentTimeUs();
+    auto meta                  = std::make_shared<MetaImpl>(
         reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
     meta->generate_stream_ = stream_;
     meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
@@ -428,6 +473,12 @@ bool StreamCacheResource::loadCacheDone() {
         return false;  // coordinator 后台线程尚未处理完
     }
     // 加载完成（无论成功失败），更新 reuse lengths
+    auto load_cache_cost_us = currentTimeUs() - async_load_cache_start_us_;
+    RTP_LLM_LOG_DEBUG("loadCacheDone, stream=%ld, success=%d, cost_us=%ld, retry_count=%d",
+                      stream_->streamId(),
+                      load_cache_context_->success(),
+                      load_cache_cost_us,
+                      load_cache_retry_count_);
     waitLoadCacheDone(load_cache_context_);
     if (!load_cache_context_->success()) {
         // 区分匹配失败和传输失败
@@ -468,8 +519,7 @@ bool StreamCacheResource::loadCacheDone() {
                 RTP_LLM_LOG_WARNING("load cache failed after %d retries (transfer error), stream: [%ld]",
                                     load_cache_retry_count_,
                                     stream_->streamId());
-                stream_->reportEventWithoutLock(StreamEvents::Error,
-                                                ErrorCode::LOAD_CACHE_TIMEOUT,
+                stream_->reportErrorWithoutLock(ErrorCode::LOAD_CACHE_TIMEOUT,
                                                 "load cache failed after " + std::to_string(max_retry)
                                                     + " retries (transfer error)");
                 releaseResource();
@@ -567,36 +617,6 @@ bool StreamCacheResource::enableTieredMemoryCache() const {
     return resource_context_.enable_tiered_memory_cache && enableMemoryCache() && enableDeviceCache();
 }
 
-void StreamCacheResource::loadCacheSync() {
-    RTP_LLM_PROFILE_FUNCTION();
-    if (!resource_context_.cache_manager || !resource_context_.cache_manager->hasActiveConnectors()) {
-        return;
-    }
-    // Memory/remote connectors require reuseCache(); P2P connector does not.
-    // Skip when only memory/remote connectors are active and reuseCache is disabled.
-    const bool has_reuse_path = reuseCache() && (enableMemoryCache() || enableRemoteCache());
-    const bool has_p2p_path   = resource_context_.cache_manager->hasP2PConnector();
-    if (!has_reuse_path && !has_p2p_path) {
-        return;
-    }
-    // Second+ initKVBlock (same stream): skip — reuse lengths already set on first load.
-    if (load_cache_once_.exchange(true)) {
-        return;
-    }
-    auto meta = std::make_shared<MetaImpl>(
-        reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
-    meta->generate_stream_ = stream_;
-    meta->fillRoutingContext(stream_);  // Fill routing context once from GenerateStream
-    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
-    std::shared_ptr<AsyncContext> load_cache_context;
-    {
-        RTP_LLM_PROFILE_SCOPE("asyncLoadCache");
-        load_cache_context = resource_context_.cache_manager->asyncLoadCache(connector_context);
-    }
-    waitLoadCacheDone(load_cache_context);
-    // TODO: scheduler will call incrkvblock after load cache, or may lack block on p2p connector
-}
-
 void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!load_context) {
@@ -607,9 +627,6 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
         auto error = load_context->errorInfo();
         RTP_LLM_LOG_WARNING(
             "load cache done but not success, stream: [%ld], error: %s", stream_->streamId(), error.ToString().c_str());
-        if (error.hasError()) {
-            stream_->reportError(error.code(), error.ToString());
-        }
         return;
     }
     auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_context);
@@ -644,6 +661,8 @@ std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(
     const std::shared_ptr<BatchKVCacheResource>& batch_resource, bool enable_memory_cache, bool enable_remote_cache) {
     RTP_LLM_PROFILE_FUNCTION();
     auto meta              = std::make_shared<MetaImpl>(enable_memory_cache, enable_remote_cache, stream_->traceId());
+    meta->generate_stream_ = stream_;
+    meta->fillRoutingContext(stream_);
     auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_resource, meta);
     auto store_context     = resource_context_.cache_manager->asyncStoreCache(connector_context);
     if (resource_context_.write_cache_sync) {

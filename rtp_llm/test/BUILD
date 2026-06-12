@@ -308,3 +308,25 @@ py_test(
     imports=[],
     exec_properties={"gpu": "H20"},
 )
+
+py_test(
+    name="database_test",
+    srcs=[
+        "database_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "H20"},
+)
+
+py_test(
+    name="engine_config_test",
+    srcs=[
+        "engine_config_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "H20"},
+)

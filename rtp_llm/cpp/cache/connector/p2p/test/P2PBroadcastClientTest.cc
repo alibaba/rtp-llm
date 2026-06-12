@@ -125,8 +125,9 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_Timeout) {
 
     ASSERT_NE(result, nullptr);
 
-    // broadcast gRPC 超时时 BroadcastManager::waitDone 抛 RTPException
-    EXPECT_THROW(waitDone(result, 500), RTPException);
+    waitDone(result, 500);
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
 }
 
 TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_PartialResponseFailed) {

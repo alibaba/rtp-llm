@@ -25,6 +25,7 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
     ] + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",

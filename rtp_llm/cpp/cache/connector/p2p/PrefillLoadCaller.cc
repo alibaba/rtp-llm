@@ -4,11 +4,212 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "autil/StringUtil.h"
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/unknown_field_set.h>
 #include <grpc++/grpc++.h>
 #include <chrono>
+#include <condition_variable>
 #include <limits>
+#include <list>
+#include <mutex>
+#include <thread>
 
 namespace rtp_llm {
+
+namespace {
+
+using google::protobuf::UnknownField;
+using google::protobuf::UnknownFieldSet;
+
+bool parsePackedInt32s(const std::string& bytes, std::vector<int32_t>& out) {
+    google::protobuf::io::CodedInputStream input(reinterpret_cast<const uint8_t*>(bytes.data()),
+                                                 static_cast<int>(bytes.size()));
+    uint32_t                               value = 0;
+    while (input.ReadVarint32(&value)) {
+        out.push_back(static_cast<int32_t>(value));
+    }
+    return input.ConsumedEntireMessage();
+}
+
+bool extractLegacyStartLoadPayload(const P2PConnectorStartLoadResponsePB& response,
+                                   P2PSideChannelPayload&                 side_channel_payload) {
+    const UnknownFieldSet& unknown_fields     = response.GetReflection()->GetUnknownFields(response);
+    bool                   found_legacy_field = false;
+    bool                   has_first_token    = false;
+
+    for (int i = 0; i < unknown_fields.field_count(); ++i) {
+        const UnknownField& field = unknown_fields.field(i);
+        switch (field.number()) {
+            case 1:
+                if (field.type() == UnknownField::TYPE_VARINT) {
+                    side_channel_payload.first_token_id = static_cast<int64_t>(field.varint());
+                    has_first_token                     = true;
+                    found_legacy_field                  = true;
+                }
+                break;
+            case 2:
+                if (field.type() == UnknownField::TYPE_VARINT) {
+                    side_channel_payload.total_reuse_len = static_cast<int32_t>(field.varint());
+                    found_legacy_field                   = true;
+                }
+                break;
+            case 3:
+                if (field.type() == UnknownField::TYPE_VARINT) {
+                    side_channel_payload.local_reuse_len = static_cast<int32_t>(field.varint());
+                    found_legacy_field                   = true;
+                }
+                break;
+            case 4:
+                if (field.type() == UnknownField::TYPE_VARINT) {
+                    side_channel_payload.remote_reuse_len = static_cast<int32_t>(field.varint());
+                    found_legacy_field                    = true;
+                }
+                break;
+            case 5:
+                if (field.type() == UnknownField::TYPE_LENGTH_DELIMITED) {
+                    found_legacy_field = true;
+                    parsePackedInt32s(field.length_delimited(), side_channel_payload.propose_tokens);
+                } else if (field.type() == UnknownField::TYPE_VARINT) {
+                    found_legacy_field = true;
+                    side_channel_payload.propose_tokens.push_back(static_cast<int32_t>(field.varint()));
+                }
+                break;
+            case 6:
+                if (field.type() == UnknownField::TYPE_LENGTH_DELIMITED) {
+                    found_legacy_field = true;
+                    side_channel_payload.propose_probs.ParseFromString(field.length_delimited());
+                }
+                break;
+            case 7:
+                if (field.type() == UnknownField::TYPE_LENGTH_DELIMITED) {
+                    found_legacy_field = true;
+                    side_channel_payload.propose_hidden.ParseFromString(field.length_delimited());
+                }
+                break;
+            case 8:
+                if (field.type() == UnknownField::TYPE_LENGTH_DELIMITED) {
+                    found_legacy_field = true;
+                    parsePackedInt32s(field.length_delimited(), side_channel_payload.position_ids);
+                } else if (field.type() == UnknownField::TYPE_VARINT) {
+                    found_legacy_field = true;
+                    side_channel_payload.position_ids.push_back(static_cast<int32_t>(field.varint()));
+                }
+                break;
+            case 11:
+                if (field.type() == UnknownField::TYPE_VARINT) {
+                    side_channel_payload.memory_reuse_len = static_cast<int32_t>(field.varint());
+                    found_legacy_field                    = true;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    side_channel_payload.has_first_token = has_first_token;
+    side_channel_payload.has_data        = found_legacy_field;
+    return found_legacy_field;
+}
+
+/// Process-wide lazy-started background drainer for abandoned CompletionQueues.
+///
+/// Triggered by PrefillLoadCaller::Result::shutdownAndDrainCompletionQueue when the
+/// 100ms in-line drain budget elapses without SHUTDOWN. Holds the shared_ptr<Result>
+/// to keep CompletionQueue + ClientContext + reader alive (gRPC requires fully draining
+/// the CQ before destruction, otherwise UB).
+///
+/// Background loop: every 100ms, attempt AsyncNext with 1s budget on each pending entry;
+/// on SHUTDOWN, drop the entry (Result destructor then runs as a no-op since
+/// completion_queue_shutdown_drained_ is already set).
+class DeferredCompletionQueueDrainer {
+public:
+    static DeferredCompletionQueueDrainer& instance() {
+        static DeferredCompletionQueueDrainer drainer;
+        return drainer;
+    }
+
+    void enqueue(std::shared_ptr<PrefillLoadCaller::Result> result) {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (stop_ || !result) {
+            return;
+        }
+        pending_.push_back(std::move(result));
+        if (!started_) {
+            started_ = true;
+            thread_  = std::thread([this] { run(); });
+        }
+        cv_.notify_one();
+    }
+
+    size_t pendingCountForTest() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return pending_.size();
+    }
+
+    ~DeferredCompletionQueueDrainer() {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+        // pending_ entries destructed here. If any still hold undrained CQs, the
+        // ~Result path will attempt one more bounded drain; if it fails again,
+        // shared_from_this in the dtor context throws and we accept the gRPC leak
+        // (only happens at process shutdown).
+    }
+
+private:
+    DeferredCompletionQueueDrainer() = default;
+
+    void run() {
+        while (true) {
+            std::list<std::shared_ptr<PrefillLoadCaller::Result>> local;
+            {
+                std::unique_lock<std::mutex> lock(mu_);
+                cv_.wait_for(lock, std::chrono::milliseconds(100), [this] { return stop_ || !pending_.empty(); });
+                if (stop_ && pending_.empty()) {
+                    return;
+                }
+                local.splice(local.end(), pending_);
+            }
+
+            std::list<std::shared_ptr<PrefillLoadCaller::Result>> remaining;
+            for (auto& result : local) {
+                if (!result || !result->completion_queue) {
+                    continue;
+                }
+                void*      tag      = nullptr;
+                bool       ok       = false;
+                const auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(1);
+                auto       status   = result->completion_queue->AsyncNext(&tag, &ok, deadline);
+                if (status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+                    // Fully drained. Mark and drop ref; ~Result runs as no-op via the drained flag.
+                    result->completion_queue_shutdown_drained_ = true;
+                    continue;
+                }
+                // TIMEOUT or GOT_EVENT — keep trying next round.
+                remaining.push_back(std::move(result));
+            }
+
+            if (!remaining.empty()) {
+                std::lock_guard<std::mutex> lock(mu_);
+                pending_.splice(pending_.end(), remaining);
+            }
+        }
+    }
+
+    mutable std::mutex                                    mu_;
+    std::condition_variable                               cv_;
+    std::list<std::shared_ptr<PrefillLoadCaller::Result>> pending_;
+    bool                                                  stop_    = false;
+    bool                                                  started_ = false;
+    std::thread                                           thread_;
+};
+
+}  // namespace
 
 PrefillLoadCaller::PrefillLoadCaller(const std::vector<std::string>& worker_addrs): worker_addrs_(worker_addrs) {
     rpc_pool_ = std::make_shared<RPCPool>();
@@ -28,12 +229,12 @@ PrefillLoadCaller::PrefillLoadCaller(const std::vector<std::string>& worker_addr
     }
 }
 
-std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t                   request_id,
-                                                                   const std::string&        prefill_ip,
-                                                                   uint32_t                  prefill_port,
-                                                                   const std::string&        unique_key,
-                                                                   int64_t                   deadline_ms,
-                                                                   GenerateStream*           generate_stream) {
+std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t            request_id,
+                                                                   const std::string& prefill_ip,
+                                                                   uint32_t           prefill_port,
+                                                                   const std::string& unique_key,
+                                                                   int64_t            deadline_ms,
+                                                                   GenerateStream*    generate_stream) {
     if (!rpc_pool_) {
         RTP_LLM_LOG_WARNING("PrefillLoadCaller load failed: rpc_pool is null");
         return nullptr;
@@ -42,7 +243,20 @@ std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t      
     auto result         = std::make_shared<Result>();
     result->server_addr = prefill_ip + ":" + std::to_string(prefill_port);
 
-    auto conn_status = rpc_pool_->getConnection(result->server_addr);
+    // [PD-DIAG] Measure getConnection separately. RpcPool::getConnection holds a
+    // pool-wide mutex and may synchronously trigger gRPC channel reconnection
+    // (channel->GetState(true)) when the cached connection is in TRANSIENT_FAILURE,
+    // which can serialize all callers behind the slow reconnect of one peer.
+    const int64_t get_conn_start_us = currentTimeUs();
+    auto          conn_status       = rpc_pool_->getConnection(result->server_addr);
+    const int64_t get_conn_cost_us  = currentTimeUs() - get_conn_start_us;
+    if (get_conn_cost_us >= 100000) {
+        RTP_LLM_LOG_WARNING(
+            "[PD-DIAG] PrefillLoadCaller::load slow getConnection, addr: %s, cost_us=%ld, unique_key: %s",
+            result->server_addr.c_str(),
+            get_conn_cost_us,
+            unique_key.c_str());
+    }
     if (!conn_status.ok()) {
         RTP_LLM_LOG_WARNING("PrefillLoadCaller load failed: getConnection failed, addr: %s",
                             result->server_addr.c_str());
@@ -58,8 +272,17 @@ std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t      
     result->request_id      = request_id;
     result->generate_stream = generate_stream;
 
+    const int64_t build_rpc_start_us = currentTimeUs();
     if (!buildAndStartAsyncRpc(result, unique_key, deadline_ms, request_id)) {
         return nullptr;
+    }
+    const int64_t build_rpc_cost_us = currentTimeUs() - build_rpc_start_us;
+    if (build_rpc_cost_us >= 100000) {
+        RTP_LLM_LOG_WARNING(
+            "[PD-DIAG] PrefillLoadCaller::load slow buildAndStartAsyncRpc, addr: %s, cost_us=%ld, unique_key: %s",
+            result->server_addr.c_str(),
+            build_rpc_cost_us,
+            unique_key.c_str());
     }
 
     RTP_LLM_LOG_DEBUG("PrefillLoadCaller load started, unique_key: %s, addr: %s, deadline_ms: %lld, timeout ms: %d",
@@ -117,12 +340,47 @@ void PrefillLoadCaller::Result::shutdownAndDrainCompletionQueue() {
         return;
     }
     completion_queue->Shutdown();
+
+    // Bounded drain. If we exceed kDrainBudgetMs without SHUTDOWN, hand the CQ + reader
+    // + context off to DeferredCompletionQueueDrainer (a background thread that keeps
+    // shared_ptr<Result> alive until SHUTDOWN). This unblocks the caller (typically the
+    // checker thread holding async_contexts_mutex_) — see DingTalk doc §7 for the
+    // production 8-min stall we are fixing.
+    constexpr int64_t kDrainBudgetMs = 100;
+    const auto        deadline       = std::chrono::system_clock::now() + std::chrono::milliseconds(kDrainBudgetMs);
+
     void* tag = nullptr;
     bool  ok  = false;
-    while (completion_queue->Next(&tag, &ok)) {
-        // Drain Finish / cancellation notifications; tag is the request_id we passed to Finish().
+    while (true) {
+        auto next_status = completion_queue->AsyncNext(&tag, &ok, deadline);
+        if (next_status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+            completion_queue_shutdown_drained_ = true;
+            return;
+        }
+        if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
+            RTP_LLM_LOG_WARNING(
+                "[PD-DIAG] PrefillLoadCaller drain abandoned to deferred drainer; "
+                "server_addr=%s, unique_key=%s, budget_ms=%ld",
+                server_addr.c_str(),
+                unique_key.c_str(),
+                kDrainBudgetMs);
+            // Mark drained BEFORE handing off so ~Result is a no-op when the drainer drops its ref.
+            completion_queue_shutdown_drained_ = true;
+            try {
+                DeferredCompletionQueueDrainer::instance().enqueue(shared_from_this());
+            } catch (const std::bad_weak_ptr&) {
+                // Called outside a shared_ptr (e.g. from ~Result when count is already 0).
+                // Falling through leaks the CQ resources; this only happens in shutdown corner
+                // cases and is preferable to the prior unbounded Next() that caused the stall.
+                RTP_LLM_LOG_WARNING(
+                    "[PD-DIAG] PrefillLoadCaller drain abandoned but cannot hand off "
+                    "(shared_from_this failed); leaking CQ for server_addr=%s",
+                    server_addr.c_str());
+            }
+            return;
+        }
+        // GOT_EVENT: drained one tag, loop again until SHUTDOWN or TIMEOUT.
     }
-    completion_queue_shutdown_drained_ = true;
 }
 
 void PrefillLoadCaller::Result::cancel() {
@@ -187,47 +445,54 @@ bool PrefillLoadCaller::Result::pollCompletionQueue() {
 }
 
 void PrefillLoadCaller::Result::updateStreamFromResponse() {
-    const auto& payload = response.payload();
-    side_channel_payload.first_token_id   = payload.first_generate_token_id();
-    side_channel_payload.total_reuse_len  = payload.total_reuse_len();
-    side_channel_payload.local_reuse_len  = payload.local_reuse_len();
-    side_channel_payload.remote_reuse_len = payload.remote_reuse_len();
-    side_channel_payload.memory_reuse_len = payload.memory_reuse_len();
-    side_channel_payload.has_data         = true;
+    if (response.has_payload()) {
+        const auto& payload = response.payload();
+        side_channel_payload.has_first_token =
+            payload.has_first_generate_token() || payload.first_generate_token_id() != 0;
+        side_channel_payload.first_token_id   = payload.first_generate_token_id();
+        side_channel_payload.total_reuse_len  = payload.total_reuse_len();
+        side_channel_payload.local_reuse_len  = payload.local_reuse_len();
+        side_channel_payload.remote_reuse_len = payload.remote_reuse_len();
+        side_channel_payload.memory_reuse_len = payload.memory_reuse_len();
+        side_channel_payload.has_data         = true;
 
-    // Extract tensors from the payload map
-    auto it_propose = payload.tensors().find("propose_tokens");
-    if (it_propose != payload.tensors().end() && it_propose->second.has_tensor()) {
-        const auto& tensor_pb = it_propose->second.tensor();
-        if (tensor_pb.data_type() == TensorPB::INT32 && !tensor_pb.int32_data().empty()) {
-            const auto* data = reinterpret_cast<const int*>(tensor_pb.int32_data().data());
-            size_t count = tensor_pb.int32_data().size() / sizeof(int);
-            side_channel_payload.propose_tokens.assign(data, data + count);
+        // Extract tensors from the payload map
+        auto it_propose = payload.tensors().find("propose_tokens");
+        if (it_propose != payload.tensors().end() && it_propose->second.has_tensor()) {
+            const auto& tensor_pb = it_propose->second.tensor();
+            if (tensor_pb.data_type() == TensorPB::INT32 && !tensor_pb.int32_data().empty()) {
+                const auto* data  = reinterpret_cast<const int*>(tensor_pb.int32_data().data());
+                size_t      count = tensor_pb.int32_data().size() / sizeof(int);
+                side_channel_payload.propose_tokens.assign(data, data + count);
+            }
         }
-    }
 
-    auto it_probs = payload.tensors().find("propose_probs");
-    if (it_probs != payload.tensors().end() && it_probs->second.has_tensor()) {
-        side_channel_payload.propose_probs.CopyFrom(it_probs->second.tensor());
-    }
-
-    auto it_hidden = payload.tensors().find("propose_hidden");
-    if (it_hidden != payload.tensors().end() && it_hidden->second.has_tensor()) {
-        side_channel_payload.propose_hidden.CopyFrom(it_hidden->second.tensor());
-    }
-
-    auto it_pos = payload.tensors().find("position_ids");
-    if (it_pos != payload.tensors().end() && it_pos->second.has_tensor()) {
-        const auto& tensor_pb = it_pos->second.tensor();
-        if (tensor_pb.data_type() == TensorPB::INT32 && !tensor_pb.int32_data().empty()) {
-            const auto* data = reinterpret_cast<const int32_t*>(tensor_pb.int32_data().data());
-            size_t count = tensor_pb.int32_data().size() / sizeof(int32_t);
-            side_channel_payload.position_ids.assign(data, data + count);
+        auto it_probs = payload.tensors().find("propose_probs");
+        if (it_probs != payload.tensors().end() && it_probs->second.has_tensor()) {
+            side_channel_payload.propose_probs.CopyFrom(it_probs->second.tensor());
         }
+
+        auto it_hidden = payload.tensors().find("propose_hidden");
+        if (it_hidden != payload.tensors().end() && it_hidden->second.has_tensor()) {
+            side_channel_payload.propose_hidden.CopyFrom(it_hidden->second.tensor());
+        }
+
+        auto it_pos = payload.tensors().find("position_ids");
+        if (it_pos != payload.tensors().end() && it_pos->second.has_tensor()) {
+            const auto& tensor_pb = it_pos->second.tensor();
+            if (tensor_pb.data_type() == TensorPB::INT32 && !tensor_pb.int32_data().empty()) {
+                const auto* data  = reinterpret_cast<const int32_t*>(tensor_pb.int32_data().data());
+                size_t      count = tensor_pb.int32_data().size() / sizeof(int32_t);
+                side_channel_payload.position_ids.assign(data, data + count);
+            }
+        }
+    } else {
+        extractLegacyStartLoadPayload(response, side_channel_payload);
     }
 
     RTP_LLM_LOG_DEBUG("PrefillLoadCaller::Result: parsed side-channel payload, first_token: %ld, total_reuse: %d",
-                      side_channel_payload.first_token_id, side_channel_payload.total_reuse_len);
+                      side_channel_payload.first_token_id,
+                      side_channel_payload.total_reuse_len);
 }
 
 void PrefillLoadCaller::Result::checkDone() {
@@ -236,14 +501,12 @@ void PrefillLoadCaller::Result::checkDone() {
     }
     bool poll_ok = pollCompletionQueue();
     if (!poll_ok) {
-        // error already set in pollCompletionQueue
         return;
     }
     if (!done_) {
         return;  // TIMEOUT — not finished yet
     }
 
-    RTP_LLM_LOG_DEBUG("PrefillLoadCaller::Result::checkDone: response success");
     updateStreamFromResponse();
     success_           = true;
     done_              = true;

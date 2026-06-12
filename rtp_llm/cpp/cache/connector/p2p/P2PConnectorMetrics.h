@@ -99,6 +99,13 @@ public:
     int64_t stream_wait_time_us = 0;
 };
 
+/// Tracks per-layer cache write failures at the Op level (convertToGlobalLayerId / cache_key conversion).
+class CacheWriteOpFailureMetricsCollector final {
+public:
+    CacheWriteOpFailureMetricsCollector()  = default;
+    ~CacheWriteOpFailureMetricsCollector() = default;
+};
+
 /// @brief P2P connector 指标上报，聚合 Decode/Prefill 两侧的调度和传输指标
 class P2PConnectorMetrics: public kmonitor::MetricsGroup {
 public:
@@ -116,6 +123,7 @@ public:
     void report(const kmonitor::MetricsTags* tags, PrefillWorkerSendMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, PrefillWorkerStatusMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, PrefillWorkerStoreMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, CacheWriteOpFailureMetricsCollector* collector);
 
 private:
     // decode schedule metrics
@@ -163,6 +171,9 @@ private:
     kmonitor::MutableMetric* prefill_worker_wait_store_event_count_metric = nullptr;
     kmonitor::MutableMetric* prefill_worker_task_count_metric             = nullptr;
     kmonitor::MutableMetric* prefill_worker_computed_request_count_metric = nullptr;
+
+    // cache write op-level failure metrics
+    kmonitor::MutableMetric* cache_write_op_failure_qps_metric = nullptr;
 };
 
 }  // namespace rtp_llm

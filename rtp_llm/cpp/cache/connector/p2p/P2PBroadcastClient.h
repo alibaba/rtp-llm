@@ -66,6 +66,35 @@ public:
     /// @brief 向所有 TP worker 广播 cancel 请求
     std::shared_ptr<Result> cancel(const std::string& unique_key, P2PConnectorBroadcastType type);
 
+    struct LeaseStatusResult {
+        bool success{false};
+        // Per-rank lease status. Empty on broadcast failure.
+        struct RankStatus {
+            bool valid{false};
+            bool sealed{true};
+            int  started_ops{0};
+            int  finished_ops{0};
+            bool stopped{false};
+        };
+        std::vector<RankStatus> ranks;
+
+        bool allStopped() const {
+            if (ranks.empty()) {
+                return false;
+            }
+            for (const auto& r : ranks) {
+                if (!r.valid || !r.stopped) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    };
+
+    /// @brief 向所有 TP worker 查询指定 unique_key 的 lease 状态（仅读，不修改状态）
+    /// @param poll_timeout_ms 单次 broadcast 的 gRPC 超时（毫秒）
+    LeaseStatusResult queryLeaseStatus(const std::string& unique_key, int64_t poll_timeout_ms);
+
 private:
     void genBroadcastRequest(FunctionRequestPB&                                    request,
                              int64_t                                               request_id,

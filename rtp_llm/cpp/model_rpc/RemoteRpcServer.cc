@@ -6,16 +6,19 @@ using namespace std;
 namespace rtp_llm {
 
 grpc::Status RemoteRpcServer::init(const EngineInitParams&                                maga_init_params,
+                                   py::object                                             mm_process_engine,
                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
-                                   py::object                                             mm_process_engine) {
+                                   bool                                                   init_cache_store) {
     rtp_llm::ProposeModelEngineInitParams* propose_params_ptr = propose_params ? propose_params.get() : nullptr;
-    auto ret = LocalRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
+    auto ret = LocalRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
     if (!ret.ok()) {
         return ret;
     }
     initLocalHostInfo();
     initLocalPeerInfo();
-    initCacheStore(maga_init_params, propose_params_ptr);
+    if (init_cache_store) {
+        initCacheStore(maga_init_params, propose_params_ptr);
+    }
     return grpc::Status::OK;
 }
 

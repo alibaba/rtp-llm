@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/connector/IKVCacheConnectorCoordinator.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
@@ -274,24 +276,28 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             inputs.kv_cache_layer_to_group.defined() ? inputs.kv_cache_layer_to_group : torch::Tensor();
         torch::Tensor kv_cache_group_types =
             inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types : torch::Tensor();
-        PyCacheStoreInputs cache_store_inputs{context_batch_size,
-                                              decoder_batch_size,
-                                              inputs.request_id,
-                                              inputs.request_pd_separation,
-                                              kv_cache_layer_to_group,
-                                              kv_cache_group_types,
-                                              transVectorToString(cache_keys_vec),
-                                              inputs.seq_size_per_block,
-                                              inputs.kv_block_stride_bytes,
-                                              inputs.kv_scale_stride_bytes,
-                                              inputs.pd_separation,
-                                              model_id_,
-                                              inputs.decode_entrance,
-                                              inputs.warmup,
-                                              description_.attention_conf.use_mla
-                                                  && mla_ops_type_ != rtp_llm::MlaOpsType::MHA,
-                                              cache_manager_ ? cache_manager_->getCacheStore() : nullptr,
-                                              cache_store_async_writer_.get()};
+        PyCacheStoreInputs cache_store_inputs{
+            context_batch_size,
+            decoder_batch_size,
+            inputs.request_id,
+            inputs.request_pd_separation,
+            inputs.request_deadline_ms,
+            kv_cache_layer_to_group,
+            kv_cache_group_types,
+            transVectorToString(cache_keys_vec),
+            inputs.seq_size_per_block,
+            inputs.kv_block_stride_bytes,
+            inputs.kv_scale_stride_bytes,
+            inputs.pd_separation,
+            model_id_,
+            inputs.decode_entrance,
+            inputs.warmup,
+            description_.attention_conf.use_mla && mla_ops_type_ != rtp_llm::MlaOpsType::MHA,
+            cache_manager_ ? cache_manager_->getCacheStore() : nullptr,
+            cache_store_async_writer_.get(),
+            cache_manager_ ?
+                std::static_pointer_cast<IKVCacheConnectorCoordinator>(cache_manager_->connectorCoordinator()) :
+                nullptr};
         params = cache_store_inputs;
     }
     return params;
@@ -336,7 +342,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         auto multimodal_inputs     = buildPyMultimodalInputs(micro_inputs);
         auto bert_embedding_inputs = buildBertEmbeddingInputs(micro_inputs);
         if (!inputs.warmup && inputs.pd_separation) {
-            py_attn_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
+            py_attn_inputs.cache_store_inputs = prepareWriteCacheParams(micro_inputs);
         }
         torch::Tensor combo_position_ids = micro_inputs.combo_position_ids.defined() ?
                                                tensorHoldHostAndToCuda(micro_inputs.combo_position_ids) :
@@ -849,6 +855,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
                                                     inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                     torch::Tensor();
+                micro_model_inputs.request_deadline_ms =
+                    inputs.request_deadline_ms.defined() ?
+                        inputs.request_deadline_ms.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, (size_t)slice_token_num});
 
@@ -885,6 +895,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_batch_idx, d_micro_batch_size);
+                micro_model_inputs.request_id             = torch::Tensor();
+                micro_model_inputs.request_pd_separation  = torch::Tensor();
+                micro_model_inputs.cache_keys             = torch::Tensor();
+                micro_model_inputs.request_deadline_ms    = torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, d_micro_batch_size});
 
@@ -937,6 +951,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
                                                     inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                     torch::Tensor();
+                micro_model_inputs.request_deadline_ms =
+                    inputs.request_deadline_ms.defined() ?
+                        inputs.request_deadline_ms.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, (size_t)slice_token_num});
 

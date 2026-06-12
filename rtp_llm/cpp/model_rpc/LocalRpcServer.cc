@@ -1,5 +1,6 @@
 #include <memory>
 #include <chrono>
+#include <thread>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -16,8 +17,8 @@ using namespace std;
 namespace rtp_llm {
 
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
-                                  std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                                  py::object                                    mm_process_engine) {
+                                  py::object                                    mm_process_engine,
+                                  std::unique_ptr<ProposeModelEngineInitParams> propose_params) {
     meta_.reset(new RpcServerRuntimeMeta());
     maga_init_params_ = maga_init_params;
     weight_manager_   = maga_init_params.weight_manager;
@@ -77,6 +78,12 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                               WriterInterface*                 writer,
                                               std::shared_ptr<GenerateStream>& stream) {
     RTP_LLM_PROFILE_FUNCTION();
+    // Guard: stream may already be in error state from a failed enqueue (before
+    // entering the output polling loop). Also covers callers other than
+    // GenerateStreamCall that invoke pollStreamOutput directly.
+    if (stream->hasError()) {
+        return serializeErrorMsg(request_key, stream->statusInfo());
+    }
     // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
     // 如果流有错误，应该停止消费输出
     while (stream->isActive() || stream->hasOutput()) {
@@ -101,18 +108,33 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
         }
+        updateAuxInfo(outputs_pb, stream);
         if (!writer->Write(outputs_pb)) {
             stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
             return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
         }
         if (stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
+            if (stream->queryPdSep() && stream->resourceContext().role_type == RoleType::PREFILL
+                && stream->resourceContext().decode_entrance) {
+                while (!context->IsCancelled() && !stream->hasError() && stream->getStatus() != StreamState::FINISHED) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+                if (context->IsCancelled()) {
+                    stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
+                    RTP_LLM_LOG_WARNING("request [%s] cancelled by user during decode_entrance wait", request_key.c_str());
+                    return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
+                }
+            }
             break;
         }
-        if (stream->queryPdSep()) {
+        if (stream->queryPdSep() && stream->resourceContext().role_type == RoleType::PREFILL) {
             stream->waitForRemoteGenerate();
             break;
         }
+    }
+    if (stream->hasError()) {
+        return serializeErrorMsg(request_key, stream->statusInfo());
     }
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
 
@@ -135,6 +157,9 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
                                               std::shared_ptr<GenerateStream>&      stream,
                                               const std::shared_ptr<GenerateInput>& input,
                                               GenerateOutputs&                      last_outputs) {
+    if (stream->hasError()) {
+        return stream->statusInfo();
+    }
     while (!stream->isFinished() || stream->hasOutput()) {
         if (context->IsCancelled()) {
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by client");
@@ -176,6 +201,11 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
         RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
         generate_context.setStream(engine_->enqueue(input));
     }
+    if (generate_context.getStream()->hasError()) {
+        generate_context.error_status =
+            serializeErrorMsg(generate_context.request_key, generate_context.getStream()->statusInfo());
+    }
+    CHECK_ERROR_STATUS(generate_context);
 
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
 
@@ -577,8 +607,19 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
     if (!cache_manager->executeFunction(*request, *response)) {
-        RTP_LLM_LOG_WARNING("execute function failed, request: [%s]", request->DebugString().c_str());
-        const std::string error_msg = "execute function failed, request: [" + request->DebugString() + "]";
+        std::string request_case;
+        if (request->has_mem_request()) {
+            request_case = "mem_request";
+        } else if (request->has_remote_request()) {
+            request_case = "remote_request(trace_id=" + request->remote_request().trace_id() + ")";
+        } else if (request->has_p2p_request()) {
+            request_case = "p2p_request";
+        } else {
+            request_case = "unknown";
+        }
+        RTP_LLM_LOG_WARNING(
+            "execute function failed, peer: %s, request_case: %s", context->peer().c_str(), request_case.c_str());
+        const std::string error_msg = "execute function failed, request_case: " + request_case;
         return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
     }
     return grpc::Status::OK;

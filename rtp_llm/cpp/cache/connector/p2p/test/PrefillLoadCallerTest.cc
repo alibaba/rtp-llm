@@ -159,6 +159,38 @@ TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_NullGenerateStream) {
     EXPECT_TRUE(success);
 }
 
+TEST_F(PrefillLoadCallerTest, Load_ParsesLegacyStartLoadResponse) {
+    server_->service()->setUseLegacyStartLoadResponse(true);
+    server_->service()->setFirstGenerateTokenId(23456);
+
+    std::string unique_key   = "test_load_legacy";
+    int64_t     request_id   = 1007;
+    int64_t     deadline_ms  = currentTimeMs() + 5000;
+    std::string prefill_ip   = "127.0.0.1";
+    uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
+
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, nullptr);
+    ASSERT_NE(result, nullptr);
+
+    bool success = waitDone(result);
+    EXPECT_TRUE(success);
+    EXPECT_TRUE(result->side_channel_payload.has_data);
+    EXPECT_TRUE(result->side_channel_payload.has_first_token);
+    EXPECT_EQ(result->side_channel_payload.first_token_id, 23456);
+    EXPECT_EQ(result->side_channel_payload.total_reuse_len, 10);
+    EXPECT_EQ(result->side_channel_payload.local_reuse_len, 4);
+    EXPECT_EQ(result->side_channel_payload.remote_reuse_len, 6);
+    EXPECT_EQ(result->side_channel_payload.memory_reuse_len, 2);
+    ASSERT_EQ(result->side_channel_payload.propose_tokens.size(), 2u);
+    EXPECT_EQ(result->side_channel_payload.propose_tokens[0], 7);
+    EXPECT_EQ(result->side_channel_payload.propose_tokens[1], 8);
+    ASSERT_EQ(result->side_channel_payload.position_ids.size(), 2u);
+    EXPECT_EQ(result->side_channel_payload.position_ids[0], 11);
+    EXPECT_EQ(result->side_channel_payload.position_ids[1], 12);
+    EXPECT_EQ(result->side_channel_payload.propose_probs.shape_size(), 2);
+    EXPECT_EQ(result->side_channel_payload.propose_hidden.shape_size(), 2);
+}
+
 TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_RpcStatusFailed) {
     // 设置服务器返回 RPC 错误状态
     server_->service()->setRpcResponseStatus(::grpc::Status(grpc::StatusCode::INTERNAL, "Internal error"));
@@ -229,6 +261,66 @@ TEST_F(PrefillLoadCallerTest, CheckDone_TotalCostTimeUs) {
     // 验证总耗时被记录
     int64_t cost_time_us = result->totalCostTimeUs();
     EXPECT_GT(cost_time_us, 0);
+}
+
+// ---------------------------- cancel (bounded drain — P0-1 fix) ----------------------------
+
+// Regression for the 8-min decode-side stall (DingTalk doc §7). Before the fix,
+// shutdownAndDrainCompletionQueue used an unbounded Next() that could block for the
+// remaining gRPC deadline when the peer channel was unhealthy. With the bounded-drain
+// fix, cancel() must return within ~100ms (drain budget) + slack regardless of how
+// long the server takes to respond.
+TEST_F(PrefillLoadCallerTest, Cancel_BoundedByDrainDeadline_WhenServerSlow) {
+    // Make the server sleep long enough that the drain budget would be exhausted if
+    // we waited synchronously for the call to complete.
+    server_->service()->setSleepMillis(5000);
+
+    std::string unique_key   = "test_cancel_bounded";
+    int64_t     request_id   = 3001;
+    int64_t     deadline_ms  = currentTimeMs() + 30000;  // long deadline so timeout isn't the bound
+    std::string prefill_ip   = "127.0.0.1";
+    uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
+
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, nullptr);
+    ASSERT_NE(result, nullptr);
+
+    // Give the request a moment to reach the (sleeping) server.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_FALSE(result->done());
+
+    // Measure cancel wall time — must be bounded by the drain budget (100ms) + slack,
+    // never by the server's 5000ms sleep.
+    const int64_t cancel_start_ms = currentTimeMs();
+    result->cancel();
+    const int64_t cancel_cost_ms  = currentTimeMs() - cancel_start_ms;
+
+    EXPECT_LT(cancel_cost_ms, 1000) << "cancel should return within ~drain_budget+slack, got " << cancel_cost_ms
+                                     << "ms (regression of the 8-min stall fix)";
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+}
+
+TEST_F(PrefillLoadCallerTest, Cancel_Idempotent) {
+    server_->service()->setSleepMillis(200);
+
+    std::string unique_key   = "test_cancel_idempotent";
+    int64_t     request_id   = 3002;
+    int64_t     deadline_ms  = currentTimeMs() + 5000;
+    std::string prefill_ip   = "127.0.0.1";
+    uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
+
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, nullptr);
+    ASSERT_NE(result, nullptr);
+
+    result->cancel();
+    EXPECT_TRUE(result->done());
+    EXPECT_TRUE(result->completion_queue_shutdown_drained_);
+
+    // Second cancel is a no-op — should not crash or hang.
+    const int64_t second_cancel_start_ms = currentTimeMs();
+    result->cancel();
+    const int64_t second_cancel_cost_ms  = currentTimeMs() - second_cancel_start_ms;
+    EXPECT_LT(second_cancel_cost_ms, 50);
 }
 
 }  // namespace rtp_llm

@@ -12,7 +12,7 @@ public:
     CompleteTokenIds(const CompleteTokenIds& other, bool share = false, int shift_token_num = 0);
 
 public:
-    void init(const std::shared_ptr<GenerateInput>& generate_input, size_t extra_reserve_token_num = 0);
+    bool init(const std::shared_ptr<GenerateInput>& generate_input, size_t extra_reserve_token_num = 0);
 
     std::vector<int> completeTokenIdsVec(int batch_id);
     std::vector<int> commonCompleteTokenIdsVec(int batch_id);

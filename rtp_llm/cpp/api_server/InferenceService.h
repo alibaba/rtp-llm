@@ -63,7 +63,8 @@ private:
     iterateStreams(std::vector<std::shared_ptr<GenerateStreamWrapper>>&    streams,
                    const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                    const InferenceParsedRequest&                           req,
-                   autil::StageTime&                                       iterate_stage_timer);
+                   autil::StageTime&                                       iterate_stage_timer,
+                   bool*                                                   response_started = nullptr);
 
     std::shared_ptr<GenerateInput> fillGenerateInput(int64_t                                request_id,
                                                      const std::string&                     text,
