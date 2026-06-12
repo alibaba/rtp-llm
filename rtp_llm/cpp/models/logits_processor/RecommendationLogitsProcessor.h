@@ -17,12 +17,12 @@ namespace rtp_llm {
 // 对 qwen3 等会默认输出 <think>\n\n</think>\n\n 占位的模型,若 end_think_token_ids
 // 非空,则先按该序列跳过 think prelude,跳过完成前的 token 不进入 combo 前缀。
 struct StreamRecommendationInfo {
-    int32_t combo_token_size          = 0;
-    int32_t input_length              = 0;
-    int32_t current_output_length     = 0;
+    int32_t combo_token_size      = 0;
+    int32_t input_length          = 0;
+    int32_t current_output_length = 0;
     // 兼容旧构造/insert一致性检查的遗留字段；实际 token layout 由 updateStatus 按 new_tokens shape 动态判定。
-    bool    needs_token_offset        = false;
-    bool    enable_cross_sequence_ban = false;
+    bool    needs_token_offset            = false;
+    bool    enable_cross_sequence_ban     = false;
     int32_t cross_seq_diverge_start_combo = 0;
 
     // 当前正在生成 combo 内的位置,取值 [0, combo_token_size-1]
@@ -47,8 +47,8 @@ struct StreamRecommendationInfo {
                              int32_t                           current_output_length,
                              bool                              needs_token_offset,
                              const std::set<std::vector<int>>& banned_combos,
-                             const std::vector<int>&           end_think_token_ids = {},
-                             bool                              enable_cross_sequence_ban = false,
+                             const std::vector<int>&           end_think_token_ids           = {},
+                             bool                              enable_cross_sequence_ban     = false,
                              int32_t                           cross_seq_diverge_start_combo = 0):
         combo_token_size(combo_token_size),
         input_length(input_length),
@@ -63,7 +63,7 @@ struct StreamRecommendationInfo {
     // 默认拷贝构造/赋值即为深拷贝（std::set、std::vector 均值语义），无需手动 copy()。
     StreamRecommendationInfo(const StreamRecommendationInfo&) = default;
     StreamRecommendationInfo& operator=(const StreamRecommendationInfo&) = default;
-    StreamRecommendationInfo(StreamRecommendationInfo&&) = default;
+    StreamRecommendationInfo(StreamRecommendationInfo&&)                 = default;
     StreamRecommendationInfo& operator=(StreamRecommendationInfo&&) = default;
 };
 
@@ -79,9 +79,9 @@ public:
     fromGenerateInput(std::shared_ptr<GenerateInput> generate_input, int32_t num);
 
 public:
-    void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
-    void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
-    void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
+    std::optional<ErrorInfo> process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
+    void                     updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
+    std::optional<ErrorInfo> updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
 
 public:
     size_t size() const {
@@ -96,21 +96,17 @@ public:
             if (!infos_.empty()) {
                 const auto& existing = infos_[0];
                 const auto& incoming = others->infos_[0];
-                RTP_LLM_CHECK_WITH_INFO(
-                    existing.enable_cross_sequence_ban == incoming.enable_cross_sequence_ban,
-                    "insert: enable_cross_sequence_ban flag mismatch");
-                RTP_LLM_CHECK_WITH_INFO(
-                    existing.combo_token_size == incoming.combo_token_size,
-                    "insert: combo_token_size mismatch");
-                RTP_LLM_CHECK_WITH_INFO(
-                    existing.cross_seq_diverge_start_combo == incoming.cross_seq_diverge_start_combo,
-                    "insert: cross_seq_diverge_start_combo mismatch");
-                RTP_LLM_CHECK_WITH_INFO(
-                    existing.needs_token_offset == incoming.needs_token_offset,
-                    "insert: legacy needs_token_offset flag mismatch");
-                RTP_LLM_CHECK_WITH_INFO(
-                    existing.end_think_token_ids == incoming.end_think_token_ids,
-                    "insert: end_think_token_ids mismatch");
+                RTP_LLM_CHECK_WITH_INFO(existing.enable_cross_sequence_ban == incoming.enable_cross_sequence_ban,
+                                        "insert: enable_cross_sequence_ban flag mismatch");
+                RTP_LLM_CHECK_WITH_INFO(existing.combo_token_size == incoming.combo_token_size,
+                                        "insert: combo_token_size mismatch");
+                RTP_LLM_CHECK_WITH_INFO(existing.cross_seq_diverge_start_combo
+                                            == incoming.cross_seq_diverge_start_combo,
+                                        "insert: cross_seq_diverge_start_combo mismatch");
+                RTP_LLM_CHECK_WITH_INFO(existing.needs_token_offset == incoming.needs_token_offset,
+                                        "insert: legacy needs_token_offset flag mismatch");
+                RTP_LLM_CHECK_WITH_INFO(existing.end_think_token_ids == incoming.end_think_token_ids,
+                                        "insert: end_think_token_ids mismatch");
             }
             infos_.insert(infos_.end(), others->infos_.begin(), others->infos_.end());
         }
@@ -119,8 +115,8 @@ public:
 private:
     // 将单个 token 推进到状态机;若形成完整 combo 则加入 banned_combos 并返回 true。
     // 若 new_combos 非空，新完成的 combo 会同时被 push 到该向量（用于增量广播）。
-    bool advanceOneToken(StreamRecommendationInfo& info, int token_id,
-                         std::vector<std::vector<int>>* new_combos = nullptr);
+    bool
+    advanceOneToken(StreamRecommendationInfo& info, int token_id, std::vector<std::vector<int>>* new_combos = nullptr);
 
 private:
     std::vector<StreamRecommendationInfo> infos_;

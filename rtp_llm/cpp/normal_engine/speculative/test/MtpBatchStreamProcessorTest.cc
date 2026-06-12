@@ -12,7 +12,6 @@
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
-#include "rtp_llm/cpp/config/ConfigModules.h"
 
 using namespace std;
 
@@ -160,10 +159,9 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     auto stream_groups = StreamGroups({stream1, stream2});
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
-    spec_decode_output.accept_len = {5, 1};
-
-    spec_decode_output.accept_tokens = {torch::tensor({{2, 3, 1, 3, 2}}, torch::kInt32),
-                                        torch::tensor({{2}}, torch::kInt32)};
+    spec_decode_output.accept_len    = {5, 1};
+    spec_decode_output.accept_tokens = {torch::tensor({2, 3, 1, 3, 2}, torch::kInt32).reshape({1, 5}),
+                                        torch::tensor({2}, torch::kInt32).reshape({1, 1})};
 
     MergedOutput draft_prefill_output;
     draft_prefill_output.model_output.all_hidden_states =
@@ -230,6 +228,51 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
     auto          last_hidden_states_h      = last_hidden_states.cpu().clone();
     vector<float> expect_last_hidden_states = {0.1, 0.2, 1.1, 1.2};
     EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states_h));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputAppliesGrammarMask) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 2;
+
+    ResourceContext   resource_context;
+    GenerateStreamPtr stream        = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1);
+    auto              stream_groups = StreamGroups({stream});
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelInputs  model_input;
+    GptModelOutputs model_output;
+    model_output.logits =
+        torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 1.1f, 1.2f, 1.3f, 1.4f, 2.1f, 2.2f, 2.3f, 2.4f}, torch::kFloat32)
+            .reshape({3, 4})
+            .to(torch::kCUDA);
+
+    SpecLogitsVerifyRunner::LaunchResult spec_logits_result;
+    spec_logits_result.has_active_processor = true;
+    spec_logits_result.packed_allow_mask_gpu =
+        torch::tensor({0b1011, 0b1110, 0b0111}, torch::kInt32).reshape({3, 1}).to(torch::kCUDA);
+    spec_logits_result.logits_row_indices_gpu = torch::tensor({0, 1, 2}, torch::kInt32).to(torch::kCUDA);
+
+    auto sampler_inputs =
+        processor.gatherSpecSamplerInput(stream_groups, model_input, model_output, spec_logits_result);
+    ASSERT_TRUE(sampler_inputs.ok());
+
+    auto logits = sampler_inputs.value().logits.cpu().contiguous();
+    EXPECT_FLOAT_EQ(logits.data_ptr<float>()[0], 0.1f);
+    EXPECT_LT(logits.data_ptr<float>()[2], -1e20f);
+    EXPECT_LT(logits.data_ptr<float>()[4], -1e20f);
+    EXPECT_FLOAT_EQ(logits.data_ptr<float>()[5], 1.2f);
+    EXPECT_LT(logits.data_ptr<float>()[11], -1e20f);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
@@ -550,7 +593,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
     spec_decode_output.accept_len    = {3, 1};
-    spec_decode_output.accept_tokens = {torch::tensor({{2, 3, 1}}, torch::kInt32), torch::tensor({{2}}, torch::kInt32)};
+    spec_decode_output.accept_tokens = {torch::tensor({2, 3, 1}, torch::kInt32).reshape({1, 3}),
+                                        torch::tensor({2}, torch::kInt32).reshape({1, 1})};
 
     torch::Tensor hidden_states_d_t;
     size_t        total_accept_len;

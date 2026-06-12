@@ -28,6 +28,7 @@ from rtp_llm.openai.api_datatype import (
     FunctionCall,
     ModelCard,
     ModelList,
+    ResponseFormat,
     RoleEnum,
     ToolCall,
     UsageInfo,
@@ -194,19 +195,11 @@ class OpenaiEndpoint(object):
         # TODO(wangyin): implement this
         config = request.extra_configs or GenerateConfig()
         if request.response_format is not None:
-            # TODO: enable response_format when grammar-constrained decoding is
-            # wired through the backend for this branch.
-            raise FtRuntimeException(
-                ExceptionType.UNSUPPORTED_OPERATION,
-                "response_format is not supported yet",
-            )
-        if request.json_format:
-            # TODO: enable json_format with the response_format / grammar path
-            # when grammar-constrained decoding is wired through this branch.
-            raise FtRuntimeException(
-                ExceptionType.UNSUPPORTED_OPERATION,
-                "json_format is not supported yet",
-            )
+            # OpenAI response_format takes precedence over grammar fields from
+            # extra_configs. ResponseFormatBuilder projects it before RPC.
+            config.response_format = request.response_format
+        if request.json_format is not None:
+            config.json_format = request.json_format
         if request.trace_id != None:
             config.trace_id = request.trace_id
         if request.stream == True:
@@ -274,7 +267,11 @@ class OpenaiEndpoint(object):
         ):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
         # add_thinking_params now accepts generate_env_config parameter
-        config.add_thinking_params(self.tokenizer, self.generate_env_config)
+        config.add_thinking_params(
+            self.tokenizer,
+            self.generate_env_config,
+            normalize_response_format=False,
+        )
         if request.thinking_budget is not None:
             budget = int(request.thinking_budget)
             config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
@@ -293,6 +290,9 @@ class OpenaiEndpoint(object):
             config.max_new_tokens = backend_max_new_tokens
         elif request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
+        reasoning_format = self.chat_renderer.get_reasoning_format()
+        config.validate()
+        config.apply_response_format(reasoning_format=reasoning_format)
         if request.debug_info:
             config.return_output_ids = True
         return config

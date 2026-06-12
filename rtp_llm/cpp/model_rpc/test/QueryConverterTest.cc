@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include <array>
 #include <memory>
 #include <optional>
 
@@ -8,6 +9,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 using namespace std;
@@ -32,6 +34,10 @@ TEST_F(QueryConverterTest, testTransInput) {
     generate_config_pb->mutable_top_p_decay()->set_value(0.7);
     generate_config_pb->mutable_top_p_min()->set_value(0.3);
     generate_config_pb->mutable_top_p_reset_ids()->set_value(7);
+    generate_config_pb->mutable_json_schema()->set_value("{\"type\":\"object\"}");
+    generate_config_pb->mutable_regex()->set_value("[a-z]+");
+    generate_config_pb->mutable_ebnf()->set_value("root ::= \"a\"");
+    generate_config_pb->mutable_structural_tag()->set_value("{\"format\":{\"type\":\"json_schema\"}}");
     generate_config_pb->mutable_task_id()->set_value("8");
     generate_config_pb->set_calculate_loss(1);
     generate_config_pb->set_return_hidden_states(true);
@@ -57,6 +63,10 @@ TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_FLOAT_EQ(generate_config->top_p_decay.value(), 0.7);
     ASSERT_FLOAT_EQ(generate_config->top_p_min.value(), 0.3);
     ASSERT_EQ(generate_config->top_p_reset_ids.value(), 7);
+    ASSERT_EQ(generate_config->json_schema.value(), "{\"type\":\"object\"}");
+    ASSERT_EQ(generate_config->regex.value(), "[a-z]+");
+    ASSERT_EQ(generate_config->ebnf.value(), "root ::= \"a\"");
+    ASSERT_EQ(generate_config->structural_tag.value(), "{\"format\":{\"type\":\"json_schema\"}}");
     ASSERT_EQ(generate_config->task_id.value(), "8");
     ASSERT_EQ(generate_config->calculate_loss, 1);
     ASSERT_TRUE(generate_config->return_hidden_states);
@@ -191,6 +201,84 @@ TEST_F(QueryConverterTest, TransTensorPB_UnsupportedType) {
     torch::Tensor tensor = torch::ones({1}, torch::kInt64);
     TensorPB      tensor_pb;
     EXPECT_THROW(QueryConverter::transTensorPB(&tensor_pb, tensor), std::runtime_error);
+}
+
+// Typed grammar fields wire as google.protobuf.StringValue → Optional<string>.
+TEST_F(QueryConverterTest, GrammarTypedFieldsAreAccepted) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    input.mutable_generate_config()->mutable_json_schema()->set_value(R"({"type":"object"})");
+    auto cfg = QueryConverter::transQuery(&input)->generate_config;
+    ASSERT_TRUE(cfg->json_schema.has_value());
+    EXPECT_EQ(cfg->json_schema.value(), R"({"type":"object"})");
+}
+
+TEST_F(QueryConverterTest, MultipleGrammarConstraintsAreRejectedByFactory) {
+    using SetGrammarField = void (*)(GenerateConfigPB*);
+    struct GrammarFieldCase {
+        const char*     name;
+        SetGrammarField set;
+    };
+    const std::array<GrammarFieldCase, 4> fields{{
+        {"json_schema", [](GenerateConfigPB* config) {
+             config->mutable_json_schema()->set_value(R"({"type":"object"})");
+         }},
+        {"regex", [](GenerateConfigPB* config) { config->mutable_regex()->set_value("[a-z]+"); }},
+        {"ebnf", [](GenerateConfigPB* config) { config->mutable_ebnf()->set_value("root ::= \"a\""); }},
+        {"structural_tag", [](GenerateConfigPB* config) {
+             config->mutable_structural_tag()->set_value(R"({"type":"structural_tag"})");
+         }},
+    }};
+
+    for (size_t first = 0; first < fields.size(); ++first) {
+        for (size_t second = first + 1; second < fields.size(); ++second) {
+            SCOPED_TRACE(std::string(fields[first].name) + "+" + fields[second].name);
+            GenerateInputPB input;
+            input.add_token_ids(0);
+            auto* config = input.mutable_generate_config();
+            fields[first].set(config);
+            fields[second].set(config);
+
+            auto generate_input = QueryConverter::transQuery(&input);
+            auto result = LogitsProcessorFactory::createLogitsProcessors(
+                std::move(generate_input), /*init_batch_size=*/1, /*max_batch_size=*/1, /*eos_token_id=*/0);
+
+            ASSERT_FALSE(result.ok());
+            EXPECT_EQ(result.status().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_NE(result.status().ToString().find(fields[first].name), std::string::npos);
+            EXPECT_NE(result.status().ToString().find(fields[second].name), std::string::npos);
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, GrammarWithMultipleSequencesIsRejectedByFactory) {
+    struct MultiSequenceCase {
+        const char* name;
+        void (*configure)(GenerateConfigPB*);
+    };
+    const std::array<MultiSequenceCase, 3> cases{{
+        {"num_beams", [](GenerateConfigPB* config) { config->set_num_beams(2); }},
+        {"variable_num_beams", [](GenerateConfigPB* config) { config->add_variable_num_beams(2); }},
+        {"num_return_sequences", [](GenerateConfigPB* config) { config->set_num_return_sequences(2); }},
+    }};
+
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        GenerateInputPB input;
+        input.add_token_ids(0);
+        auto* config = input.mutable_generate_config();
+        config->mutable_regex()->set_value("[a-z]+");
+        test_case.configure(config);
+
+        auto generate_input = QueryConverter::transQuery(&input);
+        auto result = LogitsProcessorFactory::createLogitsProcessors(
+            std::move(generate_input), /*init_batch_size=*/1, /*max_batch_size=*/2, /*eos_token_id=*/0);
+
+        ASSERT_FALSE(result.ok());
+        EXPECT_EQ(result.status().code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_NE(result.status().ToString().find("does not support beam search or num_return_sequences > 1"),
+                  std::string::npos);
+    }
 }
 
 }  // namespace rtp_llm

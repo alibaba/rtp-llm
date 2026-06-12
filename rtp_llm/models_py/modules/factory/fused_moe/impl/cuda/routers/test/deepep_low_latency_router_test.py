@@ -119,6 +119,7 @@ def _init_router(
         dash_sc_grpc_config=py_env.dash_sc_grpc_config,
         grammar_config=py_env.grammar_config,
         load_config=py_env.load_config,
+        grammar_config=py_env.grammar_config,
     )
     init_deepep_wrapper(engine_config, model_config)
 

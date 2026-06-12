@@ -30,10 +30,11 @@ public:
             /*layer_num=*/3, /*block_num=*/9, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
     }
 
-    GenerateStreamPtr createContextStream(std::vector<int> input_ids) {
+    GenerateStreamPtr createContextStream(std::vector<int> input_ids, int max_new_tokens = 8192) {
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         ResourceContext                 resource_context;
+        generate_config->max_new_tokens = max_new_tokens;
         generate_input->generate_config = generate_config;
         generate_input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
         generate_input->input_ids =
@@ -106,6 +107,24 @@ void waitForConsumer(std::future<T>& future, const std::shared_ptr<NormalGenerat
     EXPECT_EQ(status, std::future_status::ready);
     future.wait();
 }
+
+class RecordingLogitsProcessor final: public BaseLogitsProcessor {
+public:
+    std::optional<ErrorInfo> process(const SamplerInputs&, size_t, size_t) override {
+        return std::nullopt;
+    }
+
+    void updateMultiSeqStatus(const std::vector<int>&) override {}
+
+    std::optional<ErrorInfo> updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override {
+        ++commit_calls;
+        committed_tokens.assign(new_tokens.data_ptr<int32_t>(), new_tokens.data_ptr<int32_t>() + num_new_tokens);
+        return std::nullopt;
+    }
+
+    int                  commit_calls = 0;
+    std::vector<int32_t> committed_tokens;
+};
 
 TEST_F(GenerateStreamTest, testConstruct) {
     auto builder = GenerateStreamBuilder();
@@ -505,6 +524,35 @@ TEST_F(GenerateStreamTest, publicReadinessReaderIsSafeDuringPublication) {
     EXPECT_TRUE(stream->hasOutput());
     EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+}
+
+TEST_F(GenerateStreamTest, CommitsFinalTokenBeforePublishingFinishedOutput) {
+    auto builder   = GenerateStreamBuilder();
+    auto stream    = builder.createContextStream({1, 2, 3}, /*max_new_tokens=*/1);
+    auto processor = std::make_shared<RecordingLogitsProcessor>();
+    stream->installLogitsProcessor(processor);
+    stream->setIsContextStream(false);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    auto             new_tokens = torch::tensor({{42}}, torch::kInt32);
+    StreamUpdateInfo update_info{new_tokens,
+                                 1,
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor()};
+
+    stream->update(update_info);
+
+    EXPECT_TRUE(stream->generate_status_->checkFinished());
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_EQ(stream->outputTokenLen(), 1);
+    EXPECT_EQ(processor->commit_calls, 1);
+    EXPECT_EQ(processor->committed_tokens, std::vector<int32_t>({42}));
 }
 
 }  // namespace rtp_llm

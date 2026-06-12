@@ -13,4 +13,3 @@ py_test(
     ],
     exec_properties = {'gpu':'H20'},
 )
-

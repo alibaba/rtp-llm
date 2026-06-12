@@ -107,6 +107,7 @@ def trans_input(input_py: GenerateInput):
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
     # check generate config is valid before enter into engine
     input_py.generate_config.validate()
+    input_py.generate_config.apply_response_format()
 
     generate_config_pb = input_pb.generate_config
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens
@@ -146,6 +147,9 @@ def trans_input(input_py: GenerateInput):
     trans_option(generate_config_pb, input_py.generate_config, "top_p_min")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_reset_ids")
     _trans_jsonable_options(generate_config_pb, input_py.generate_config)
+    generate_config_pb.grammar_terminate_without_stop_token = (
+        input_py.generate_config.grammar_terminate_without_stop_token()
+    )
     trans_option(generate_config_pb, input_py.generate_config, "adapter_name")
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "task_id", functools.partial(str)

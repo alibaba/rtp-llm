@@ -389,6 +389,7 @@ std::string GrammarConfig::to_string() const {
     oss << "grammar_backend: " << grammar_backend << "\n"
         << "constrained_json_disable_any_whitespace: " << constrained_json_disable_any_whitespace << "\n"
         << "num_workers: " << num_workers << "\n"
+        << "compiler_cache_bytes: " << compiler_cache_bytes << "\n"
         << "tokenizer_info_json_size: " << tokenizer_info_json.size() << "\n"
         << "override_stop_tokens_size: " << override_stop_tokens.size();
     return oss.str();

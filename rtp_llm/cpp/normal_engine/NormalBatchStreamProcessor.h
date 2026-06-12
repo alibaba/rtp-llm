@@ -48,10 +48,6 @@ protected:
                                  bool                          score_batch  = false,
                                  size_t                        propose_step = 0) const;
 
-    void setLogitsProcessorInputs(SamplerInputs&                sampler_inputs,
-                                  std::list<GenerateStreamPtr>& all_streams,
-                                  bool                          score_batch = false) const;
-
 protected:
     NormalModelInputGathererConfig              model_input_gatherer_config_;
     std::unique_ptr<NormalModelInputGatherer>   model_input_gatherer_;

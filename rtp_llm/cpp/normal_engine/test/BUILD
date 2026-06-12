@@ -33,6 +33,18 @@ cc_library(
 )
 
 cc_test(
+    name = "normal_output_dispatcher_test",
+    srcs = ["NormalOutputDispatcherTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    exec_properties = {"gpu": "H20"},
+)
+
+cc_test(
     name = "batch_stream_processor_test",
     srcs = glob([
         "NormalBatchStreamProcessorTest.cc",

@@ -137,6 +137,7 @@ message GenerateConfigPB {
     google.protobuf.StringValue ebnf = 71;
     google.protobuf.StringValue structural_tag = 72;
     google.protobuf.StringValue response_format = 73;
+    bool grammar_terminate_without_stop_token = 74;
 }
 
 message MMPreprocessConfigPB {

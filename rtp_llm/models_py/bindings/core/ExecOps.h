@@ -68,6 +68,13 @@ void          setTraceMemory(bool trace_memory);
 void runtimeCopy(const CopyParams& params);
 void runtimeBatchCopy(const BatchCopyParams& params);
 void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask);
+void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
+                                  const torch::Tensor& packed_allow_mask,
+                                  const torch::Tensor& row_indices,
+                                  size_t               vocab_size);
+void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
+                                  const torch::Tensor& packed_allow_mask,
+                                  size_t               vocab_size);
 
 void execNoBlockCopy(const CopyParams& params);
 void execBatchCopy(const BatchCopyParams& params);

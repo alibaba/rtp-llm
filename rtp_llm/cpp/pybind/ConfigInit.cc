@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
+#include "rtp_llm/cpp/engine_base/grammar/XGrammarTokenizerInfo.h"
 #include "rtp_llm/cpp/model_utils/RopeCache.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
@@ -94,6 +95,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register get_block_cache_keys function
     registerCommon(m);
     registerMultimodal(m);
+    m.def("serialize_grammar_tokenizer_info",
+          &rtp_llm::xgrammar_impl::serializeTokenizerInfo,
+          py::arg("encoded_vocab"),
+          py::arg("tokenizer_metadata_json"));
 
     // Register enums
     py::enum_<RoleType>(m, "RoleType")
@@ -1325,26 +1330,53 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &GrammarConfig::constrained_json_disable_any_whitespace)
         .def_readwrite("num_workers", &GrammarConfig::num_workers)
         .def_readwrite("tokenizer_info_json", &GrammarConfig::tokenizer_info_json)
+        .def_readwrite("compiler_cache_bytes", &GrammarConfig::compiler_cache_bytes)
         .def_readwrite("override_stop_tokens", &GrammarConfig::override_stop_tokens)
         .def("to_string", &GrammarConfig::to_string)
+        .def("__repr__",
+             [](const GrammarConfig& c) {
+                 std::ostringstream oss;
+                 oss << "GrammarConfig(grammar_backend=" << c.grammar_backend
+                     << ", constrained_json_disable_any_whitespace="
+                     << c.constrained_json_disable_any_whitespace << ", num_workers=" << c.num_workers
+                     << ", compiler_cache_bytes=" << c.compiler_cache_bytes << ", override_stop_tokens=[";
+                 for (size_t i = 0; i < c.override_stop_tokens.size(); ++i) {
+                     if (i)
+                         oss << ",";
+                     oss << c.override_stop_tokens[i];
+                 }
+                 oss << "])";
+                 return oss.str();
+             })
         .def(py::pickle(
             [](const GrammarConfig& self) {
                 return py::make_tuple(self.grammar_backend,
                                       self.constrained_json_disable_any_whitespace,
                                       self.num_workers,
                                       self.tokenizer_info_json,
-                                      self.override_stop_tokens);
+                                      self.override_stop_tokens,
+                                      self.compiler_cache_bytes);
             },
             [](py::tuple t) {
-                if (t.size() != 5)
+                if (t.size() != 4 && t.size() != 5 && t.size() != 6)
                     throw std::runtime_error("Invalid state!");
                 GrammarConfig c;
                 try {
-                    c.grammar_backend                         = t[0].cast<std::string>();
-                    c.constrained_json_disable_any_whitespace = t[1].cast<bool>();
-                    c.num_workers                             = t[2].cast<int>();
-                    c.tokenizer_info_json                     = t[3].cast<std::string>();
-                    c.override_stop_tokens                    = t[4].cast<std::vector<int32_t>>();
+                    if (t.size() == 4) {
+                        c.constrained_json_disable_any_whitespace = t[0].cast<bool>();
+                        c.num_workers                             = t[1].cast<int>();
+                        c.override_stop_tokens                    = t[2].cast<std::vector<int32_t>>();
+                        c.compiler_cache_bytes                    = t[3].cast<int64_t>();
+                    } else {
+                        c.grammar_backend                         = t[0].cast<std::string>();
+                        c.constrained_json_disable_any_whitespace = t[1].cast<bool>();
+                        c.num_workers                             = t[2].cast<int>();
+                        c.tokenizer_info_json                     = t[3].cast<std::string>();
+                        c.override_stop_tokens                    = t[4].cast<std::vector<int32_t>>();
+                        if (t.size() == 6) {
+                            c.compiler_cache_bytes = t[5].cast<int64_t>();
+                        }
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("GrammarConfig unpickle error: ") + e.what());
                 }
@@ -1824,6 +1856,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)
         .def_readwrite("tokenizer_path", &ModelConfig::tokenizer_path)
+        .def_readwrite("tokenizer_info_json", &ModelConfig::tokenizer_info_json)
         .def_readwrite("position_ids_style", &ModelConfig::position_ids_style)
         .def_readwrite("pre_seq_len", &ModelConfig::pre_seq_len)
         .def_readwrite("use_kvcache", &ModelConfig::use_kvcache)
