@@ -104,6 +104,38 @@ def _compute_state_ring_entries(
     return ring_capacity_entries
 
 
+def _state_ring_entries_warmup_values(
+    *,
+    compress_ratio: int,
+    overlap: bool,
+    gen_num_per_cycle: int,
+    cp_size: int,
+    prefill_sliced: bool,
+) -> tuple[int, ...]:
+    local_entries = _compute_state_ring_entries(
+        compress_ratio=compress_ratio,
+        overlap=overlap,
+        gen_num_per_cycle=gen_num_per_cycle,
+        cp_size=cp_size,
+        prefill_sliced=prefill_sliced,
+    )
+    values = [local_entries]
+    if int(cp_size) > 1 and bool(prefill_sliced):
+        # CP-sharded prefix hits gather local state slices back into a full
+        # CP ring before the fused compressor read path. STATE_RING_ENTRIES is a
+        # Triton constexpr, so prewarm both the write-local and read-full keys.
+        values.append(
+            _compute_state_ring_entries(
+                compress_ratio=compress_ratio,
+                overlap=overlap,
+                gen_num_per_cycle=gen_num_per_cycle,
+                cp_size=cp_size,
+                prefill_sliced=False,
+            )
+        )
+    return tuple(sorted(set(int(v) for v in values if int(v) > 0)))
+
+
 def resolve_dense_gemm_warmup_max_m(
     *,
     max_seq_len: int,
@@ -679,19 +711,12 @@ def _warmup_fused_kv_compress_norm_rope_insert(
     assert (
         gen_num_per_cycle >= 0
     ), f"gen_num_per_cycle must be >= 0, got {gen_num_per_cycle}"
-    state_ring_entries = _compute_state_ring_entries(
+    state_ring_entries_values = _state_ring_entries_warmup_values(
         compress_ratio=compress_ratio,
         overlap=overlap,
         gen_num_per_cycle=gen_num_per_cycle,
         cp_size=fixed_region_cp_size,
         prefill_sliced=fixed_region_prefill_sliced,
-    )
-    state_blocks = max(max_position // state_block_size + 1, 1)
-    block_table = torch.zeros((1, state_blocks), dtype=torch.int32, device=device)
-    state_cache = torch.zeros(
-        (state_blocks, state_ring_entries, 2 * raw_width),
-        dtype=torch.float32,
-        device=device,
     )
     # Match the production fused output split:
     # ``kv_flat=fused[:, :raw_width]`` and ``score_flat=fused[:, raw_width:]``
@@ -711,38 +736,46 @@ def _warmup_fused_kv_compress_norm_rope_insert(
         (1, kv_block_size, entry_bytes), dtype=torch.uint8, device=device
     )
 
-    for batched in (False, True):
-        kwargs = {}
-        if batched:
-            kwargs["seq_start_per_req"] = torch.zeros(
-                (1,), dtype=torch.int32, device=device
-            )
-            kwargs["cu_seq_per_req"] = torch.tensor(
-                [0, n_raw], dtype=torch.int32, device=device
-            )
-        run_fused_compress_kv_write(
-            state_cache=state_cache,
-            token_to_req_indices=token_to_req,
-            positions=positions,
-            slot_mapping=slot_mapping,
-            block_table=block_table,
-            rms_norm_weight=rms_norm_weight,
-            rms_norm_eps=1.0e-6,
-            cos_sin_cache=cos_sin_cache,
-            kv_cache=kv_cache,
-            kv_slot_mapping=kv_slot_mapping,
-            kv_raw=kv_raw,
-            score_raw=score_raw,
-            ape=ape,
-            seq_start=0,
-            disable_raw_path=False,
-            head_dim=head_dim,
-            rope_head_dim=rope_head_dim,
-            compress_ratio=compress_ratio,
-            overlap=bool(overlap),
-            state_tokens_per_block=state_block_size,
-            **kwargs,
+    for state_ring_entries in state_ring_entries_values:
+        state_blocks = max(max_position // state_block_size + 1, 1)
+        block_table = torch.zeros((1, state_blocks), dtype=torch.int32, device=device)
+        state_cache = torch.zeros(
+            (state_blocks, state_ring_entries, 2 * raw_width),
+            dtype=torch.float32,
+            device=device,
         )
+        for batched in (False, True):
+            kwargs = {}
+            if batched:
+                kwargs["seq_start_per_req"] = torch.zeros(
+                    (1,), dtype=torch.int32, device=device
+                )
+                kwargs["cu_seq_per_req"] = torch.tensor(
+                    [0, n_raw], dtype=torch.int32, device=device
+                )
+            run_fused_compress_kv_write(
+                state_cache=state_cache,
+                token_to_req_indices=token_to_req,
+                positions=positions,
+                slot_mapping=slot_mapping,
+                block_table=block_table,
+                rms_norm_weight=rms_norm_weight,
+                rms_norm_eps=1.0e-6,
+                cos_sin_cache=cos_sin_cache,
+                kv_cache=kv_cache,
+                kv_slot_mapping=kv_slot_mapping,
+                kv_raw=kv_raw,
+                score_raw=score_raw,
+                ape=ape,
+                seq_start=0,
+                disable_raw_path=False,
+                head_dim=head_dim,
+                rope_head_dim=rope_head_dim,
+                compress_ratio=compress_ratio,
+                overlap=bool(overlap),
+                state_tokens_per_block=state_block_size,
+                **kwargs,
+            )
 
 
 def _shape_key(kind: str, n_value: int, k_value: int) -> tuple[str, int, int]:

@@ -51,6 +51,8 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _run_tilelang_warmup_launch_with_retry,
     _run_triton_warmup_launch_with_retry,
     _sm100_dense_layout_signature,
+    _state_ring_entries_warmup_values,
+    _warmup_fused_kv_compress_norm_rope_insert,
     resolve_dense_gemm_warmup_max_m,
 )
 import rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup as warmup_module
@@ -198,6 +200,69 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 (512, 64, 4, True),
                 (512, 64, 128, False),
             ),
+        )
+
+    def test_cp_sliced_compressor_warmup_includes_full_read_ring(self):
+        self.assertEqual(
+            _state_ring_entries_warmup_values(
+                compress_ratio=4,
+                overlap=True,
+                gen_num_per_cycle=4,
+                cp_size=8,
+                prefill_sliced=True,
+            ),
+            (2, 16),
+        )
+        self.assertEqual(
+            _state_ring_entries_warmup_values(
+                compress_ratio=4,
+                overlap=True,
+                gen_num_per_cycle=4,
+                cp_size=8,
+                prefill_sliced=False,
+            ),
+            (16,),
+        )
+
+    def test_compressor_warmup_launches_local_and_full_cp_ring_keys(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import _compressor_vllm_triton
+
+        calls = []
+
+        def fake_run_fused(**kwargs):
+            calls.append(
+                (
+                    int(kwargs["state_cache"].shape[1]),
+                    bool(kwargs.get("seq_start_per_req") is not None),
+                    int(kwargs["head_dim"]),
+                    int(kwargs["compress_ratio"]),
+                )
+            )
+
+        old_run_fused = _compressor_vllm_triton.run_fused_compress_kv_write
+        try:
+            _compressor_vllm_triton.run_fused_compress_kv_write = fake_run_fused
+            _warmup_fused_kv_compress_norm_rope_insert(
+                head_dim=512,
+                rope_head_dim=64,
+                compress_ratio=4,
+                overlap=True,
+                device=torch.device("cpu"),
+                gen_num_per_cycle=4,
+                fixed_region_cp_size=8,
+                fixed_region_prefill_sliced=True,
+            )
+        finally:
+            _compressor_vllm_triton.run_fused_compress_kv_write = old_run_fused
+
+        self.assertEqual(
+            calls,
+            [
+                (2, False, 512, 4),
+                (2, True, 512, 4),
+                (16, False, 512, 4),
+                (16, True, 512, 4),
+            ],
         )
 
     def test_collect_dense_shapes_dedupes_representatives(self):
