@@ -1,5 +1,8 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
+
 #include "absl/status/status.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
@@ -41,12 +44,18 @@ public:
 
     void initRuntime(const EngineInitParams& params);
 
-    void pause() {
-        pause_ = true;
+    virtual void pause() {
+        pause_.store(true, std::memory_order_release);
     }
 
-    void restart() {
-        pause_ = false;
+    virtual void restart() {
+        pause_.store(false, std::memory_order_release);
+    }
+
+    virtual absl::Status pauseAndWaitQuiesced(int64_t timeout_ms) {
+        (void)timeout_ms;
+        pause();
+        return absl::OkStatus();
     }
 
     virtual std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) = 0;
@@ -105,7 +114,7 @@ protected:
     int32_t                        kv_cache_group_num_ = 1;
     std::vector<int32_t>           kv_cache_layer_to_group_;
     std::unique_ptr<SchedulerBase> scheduler_ = nullptr;
-    bool                           pause_     = false;
+    std::atomic<bool>              pause_{false};
 };
 
 }  // namespace rtp_llm

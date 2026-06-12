@@ -4,11 +4,49 @@
 #include <cstring>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 using namespace torch_ext;
 namespace rtp_llm {
+
+namespace {
+
+constexpr const char* kCudaGraphTmsTag = "cuda_graph";
+
+class CudaGraphTmsRegionGuard {
+public:
+    CudaGraphTmsRegionGuard() {
+        if (!tms_.isAvailable()) {
+            return;
+        }
+        cuda_graph::graphEmptyCache();
+        // CUDA graph capture owns persistent staging tensors and attention
+        // plan/workspace buffers. VMM pause may recycle the old physical pages,
+        // so preserve their content unless every referenced buffer is proven to
+        // be deterministically refilled before replay.
+        active_ = tms_.beginAllocationRegion(kCudaGraphTmsTag, true);
+        if (active_) {
+            RTP_LLM_LOG_INFO("CUDA graph allocations are tagged under tms tag '%s'", kCudaGraphTmsTag);
+        }
+    }
+
+    ~CudaGraphTmsRegionGuard() {
+        if (active_) {
+            tms_.endAllocationRegion();
+        }
+    }
+
+    CudaGraphTmsRegionGuard(const CudaGraphTmsRegionGuard&)            = delete;
+    CudaGraphTmsRegionGuard& operator=(const CudaGraphTmsRegionGuard&) = delete;
+
+private:
+    TmsBackend tms_;
+    bool       active_{false};
+};
+
+}  // namespace
 
 // clang-format off
 // CUDA Graph Mode Configuration Table:
@@ -603,6 +641,7 @@ void CudaGraphRunner::initCapture() {
     c10::InferenceMode inference_guard(true);
 
     if (enable_cuda_graph_) {
+        CudaGraphTmsRegionGuard tms_region_guard;
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
         shared_graph_pool_ = cuda_graph::graphPoolHandle();
         if (is_prefill_cuda_graph_mode_) {

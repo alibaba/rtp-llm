@@ -96,8 +96,8 @@ public:
     //   MRs are deregistered (M7) before calling.
     // resumeKVCacheMemory: re-maps physical pages at the same VA (content discarded), then
     //   resets all KV metadata: BlockPool::resetMetadata + BlockCache::clear (generation++).
-    //   device_kv_cache_valid bookkeeping is owned by M1; system prompt rebuild and
-    //   MemoryBlockCache cleanup are handled at integration time (normal_engine side).
+    //   device_kv_cache_valid bookkeeping is owned by M1. MemoryBlockCache is
+    //   host-backed and survives the device KV reset; drained writes remain reusable.
     bool pauseKVCacheMemory();
     bool resumeKVCacheMemory();
 

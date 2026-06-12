@@ -46,6 +46,8 @@ struct FreezeStatus {
     FreezeState state        = FreezeState::RUNNING;
     int64_t     freeze_epoch = 0;
     std::string kv_memory_state;
+    // True means device KV memory is backed and usable. It does not promise
+    // that pre-freeze KV contents survived; those are discarded on freeze.
     bool        device_kv_cache_valid       = true;
     int64_t     active_request_count        = 0;
     int64_t     active_cache_transfer_count = 0;

@@ -26,6 +26,7 @@ TmsBackend::TmsBackend() {
     resume_fn_                 = probeSymbol<TmsTagFn>("tms_resume");
     set_current_tag_fn_        = probeSymbol<TmsTagFn>("tms_set_current_tag");
     set_interesting_region_fn_ = probeSymbol<TmsSetBoolFn>("tms_set_interesting_region");
+    set_enable_cpu_backup_fn_  = probeSymbol<TmsSetBoolFn>("tms_set_enable_cpu_backup");
 
     if (isAvailable()) {
         RTP_LLM_LOG_INFO("TmsBackend: torch_memory_saver preload shim detected "
@@ -62,13 +63,21 @@ bool TmsBackend::resume(const std::string& tag) {
     return true;
 }
 
-bool TmsBackend::beginAllocationRegion(const std::string& tag) {
+bool TmsBackend::beginAllocationRegion(const std::string& tag, bool enable_cpu_backup) {
     if (!set_current_tag_fn_ || !set_interesting_region_fn_) {
         RTP_LLM_LOG_ERROR("TmsBackend::beginAllocationRegion(tag=%s) failed: region symbols not available",
                           tag.c_str());
         return false;
     }
+    if (enable_cpu_backup && !set_enable_cpu_backup_fn_) {
+        RTP_LLM_LOG_ERROR("TmsBackend::beginAllocationRegion(tag=%s) failed: cpu backup symbol not available",
+                          tag.c_str());
+        return false;
+    }
     set_current_tag_fn_(tag.c_str());
+    if (set_enable_cpu_backup_fn_) {
+        set_enable_cpu_backup_fn_(enable_cpu_backup);
+    }
     set_interesting_region_fn_(true);
     return true;
 }
@@ -78,6 +87,12 @@ bool TmsBackend::endAllocationRegion() {
         return false;
     }
     set_interesting_region_fn_(false);
+    if (set_current_tag_fn_) {
+        set_current_tag_fn_("default");
+    }
+    if (set_enable_cpu_backup_fn_) {
+        set_enable_cpu_backup_fn_(false);
+    }
     return true;
 }
 

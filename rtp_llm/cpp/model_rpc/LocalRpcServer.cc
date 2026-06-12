@@ -151,12 +151,15 @@ void LocalRpcServer::installFreezeHooks() {
 
     const auto local_rank         = maga_init_params_.parallelism_config.local_rank;
     auto       tms                = tms_backend_;
-    hooks.deregMrAndQuiesceEngine = [engine, local_rank](const FreezeOptions&) {
+    hooks.deregMrAndQuiesceEngine = [engine, local_rank](const FreezeOptions& opt) {
         OptionalFreezeDeviceGuard device_guard(local_rank);
-        // Stall the scheduling loop (no destruction) so nothing touches KV memory
-        // while its physical pages are dropped. The engine is already drained.
-        engine->pause();
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        // Stall the engine at a TP-safe point so no rank is left in
+        // tpSyncModelInputs while KV physical pages are dropped.
+        auto pause_status = engine->pauseAndWaitQuiesced(opt.drain_timeout_ms);
+        if (!pause_status.ok()) {
+            RTP_LLM_LOG_ERROR("pauseAndWaitQuiesced failed before freeze: %s", pause_status.ToString().c_str());
+            return false;
+        }
         if (!synchronizeFreezeDevice("before_dereg_mr")) {
             return false;
         }
@@ -182,14 +185,18 @@ void LocalRpcServer::installFreezeHooks() {
         return cache_manager->pauseKVCacheMemory();
     };
     // M6: weights are tagged by rtp_llm/model_loader/weight_memory_saver.py under
-    // "weights" with cpu backup; pausing an unknown/empty tag is a harmless no-op.
+    // "weights" with cpu backup. CUDA graph runtime buffers are tagged under
+    // "cuda_graph" during graph capture with cpu backup too: after VMM pause
+    // the physical pages can be recycled by other processes, so graph-owned
+    // persistent buffers cannot rely on stale physical contents. Pausing an
+    // unknown tag is a harmless no-op.
     hooks.pauseWeights = [tms, local_rank](const FreezeOptions&) {
         OptionalFreezeDeviceGuard device_guard(local_rank);
         if (!tms->isAvailable()) {
             RTP_LLM_LOG_WARNING("pauseWeights skipped: tms preload shim not present");
             return true;
         }
-        return tms->pause("weights");
+        return tms->pause("cuda_graph") && tms->pause("weights");
     };
     hooks.resumeKvMemory = [engine, local_rank]() {
         OptionalFreezeDeviceGuard device_guard(local_rank);
@@ -209,7 +216,7 @@ void LocalRpcServer::installFreezeHooks() {
         if (!tms->isAvailable()) {
             return true;
         }
-        return tms->resume("weights");
+        return tms->resume("weights") && tms->resume("cuda_graph");
     };
     hooks.regMrAndResumeEngine = [this, engine, local_rank]() {
         OptionalFreezeDeviceGuard device_guard(local_rank);
@@ -775,7 +782,11 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
 
 grpc::Status LocalRpcServer::SetPause(grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
-    engine_->pause();
+    OptionalFreezeDeviceGuard device_guard(maga_init_params_.parallelism_config.local_rank);
+    auto                      status = engine_->pauseAndWaitQuiesced(60000);
+    if (!status.ok()) {
+        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, status.ToString());
+    }
     return grpc::Status::OK;
 }
 

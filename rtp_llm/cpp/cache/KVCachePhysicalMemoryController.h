@@ -40,6 +40,7 @@ public:
 //   void tms_set_current_tag(const char* tag);
 //   void tms_set_interesting_region(bool);
 //   bool tms_get_interesting_region();
+//   void tms_set_enable_cpu_backup(bool);           // required when enable_cpu_backup=true
 // pause/resume are mandatory for availability; the region/tag symbols enable tagging
 // future allocations (see beginAllocationRegion/endAllocationRegion).
 class TmsBackend: public PhysicalMemoryBackend {
@@ -55,7 +56,7 @@ public:
     // Allocation-region scoping: cudaMalloc calls issued between begin/end are tracked by
     // torch_memory_saver under `tag` and become pause/resume-able. Integration code wraps the
     // BlockPool big-buffer allocation (torch::empty(kCUDA)) with these so the KV buffer is hooked.
-    bool beginAllocationRegion(const std::string& tag);
+    bool beginAllocationRegion(const std::string& tag, bool enable_cpu_backup = false);
     bool endAllocationRegion();
 
 private:
@@ -66,6 +67,7 @@ private:
     TmsTagFn     resume_fn_                 = nullptr;
     TmsTagFn     set_current_tag_fn_        = nullptr;
     TmsSetBoolFn set_interesting_region_fn_ = nullptr;
+    TmsSetBoolFn set_enable_cpu_backup_fn_  = nullptr;
 };
 
 // Controls the physical memory backing the KV cache big buffer (freeze/resume M5).

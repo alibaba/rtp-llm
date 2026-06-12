@@ -2,8 +2,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -34,6 +36,9 @@ public:
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
+    void                              pause() override;
+    void                              restart() override;
+    absl::Status                      pauseAndWaitQuiesced(int64_t timeout_ms) override;
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
@@ -60,6 +65,10 @@ private:
     absl::Status                    initSystemPrompt();
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
     void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+    absl::Status                    runExecutorProcess(const std::list<GenerateStreamPtr>& streams);
+    absl::Status                    releasePendingTpCollectiveForPause(uint64_t pause_epoch);
+    void                            enterPausedState();
+    void                            markPauseQuiesced();
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 
@@ -69,6 +78,12 @@ private:
 private:
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
+    std::mutex                                    process_mutex_;
+    std::mutex                                    pause_mutex_;
+    std::condition_variable                       pause_cv_;
+    bool                                          pause_quiesced_{false};
+    std::atomic<uint64_t>                         pause_epoch_{0};
+    std::atomic<uint64_t>                         processed_pause_epoch_{0};
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     ParallelismConfig                             parallelism_config;

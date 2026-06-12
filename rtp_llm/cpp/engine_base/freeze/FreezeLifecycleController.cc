@@ -269,6 +269,10 @@ FreezeResult FreezeLifecycleController::resume() {
     if (!transitionLocked(FreezeState::RESUMING, FreezeState::RUNNING)) {
         return FreezeResult::error(status().last_error);
     }
+    // The old device KV contents were intentionally discarded during freeze,
+    // but after resume succeeds the device KV memory is backed again and its
+    // metadata has been reset to an empty, usable cache.
+    device_kv_cache_valid_.store(true, std::memory_order_release);
     return FreezeResult::success();
 }
 

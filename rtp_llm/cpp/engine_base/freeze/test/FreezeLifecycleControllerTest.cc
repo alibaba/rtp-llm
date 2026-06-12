@@ -56,6 +56,8 @@ TEST(FreezeLifecycleControllerTest, ResumeFromFrozenReachesRunning) {
     EXPECT_TRUE(controller.admit());
     // epoch is bumped by freeze, not by resume.
     EXPECT_EQ(controller.freezeEpoch(), 1);
+    EXPECT_EQ(controller.status().kv_memory_state, "ACTIVE");
+    EXPECT_TRUE(controller.status().device_kv_cache_valid);
 }
 
 TEST(FreezeLifecycleControllerTest, FreezeIsIdempotent) {

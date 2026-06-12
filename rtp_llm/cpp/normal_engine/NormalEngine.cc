@@ -377,8 +377,114 @@ absl::Status NormalEngine::startLoop() {
 absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
+    restart();
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    return absl::OkStatus();
+}
+
+void NormalEngine::pause() {
+    bool expected = false;
+    if (pause_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        auto epoch = pause_epoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        {
+            std::lock_guard<std::mutex> lock(pause_mutex_);
+            pause_quiesced_ = false;
+        }
+        RTP_LLM_LOG_INFO("normal engine pause requested, epoch=%lu", epoch);
+    }
+}
+
+void NormalEngine::restart() {
+    pause_.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(pause_mutex_);
+        pause_quiesced_ = false;
+    }
+    pause_cv_.notify_all();
+}
+
+void NormalEngine::markPauseQuiesced() {
+    {
+        std::lock_guard<std::mutex> lock(pause_mutex_);
+        pause_quiesced_ = true;
+    }
+    pause_cv_.notify_all();
+}
+
+void NormalEngine::enterPausedState() {
+    markPauseQuiesced();
+    std::unique_lock<std::mutex> lock(pause_mutex_);
+    pause_cv_.wait(lock, [this] { return !pause_.load(std::memory_order_acquire) || !running_.load(); });
+    pause_quiesced_ = false;
+}
+
+absl::Status NormalEngine::runExecutorProcess(const std::list<GenerateStreamPtr>& streams) {
+    std::lock_guard<std::mutex> lock(process_mutex_);
+    auto                        status = executor_->process(streams);
+    if (status.ok() && executor_->consumeLastPauseSignal()) {
+        pause();
+    }
+    if (pause_.load(std::memory_order_acquire)) {
+        processed_pause_epoch_.store(pause_epoch_.load(std::memory_order_acquire), std::memory_order_release);
+    }
+    return status;
+}
+
+absl::Status NormalEngine::releasePendingTpCollectiveForPause(uint64_t pause_epoch) {
+    if (parallelism_config.tp_size <= 1 || parallelism_config.tp_rank != 0) {
+        return absl::OkStatus();
+    }
+    if (processed_pause_epoch_.load(std::memory_order_acquire) >= pause_epoch) {
+        return absl::OkStatus();
+    }
+
+    std::lock_guard<std::mutex> lock(process_mutex_);
+    if (processed_pause_epoch_.load(std::memory_order_acquire) >= pause_epoch) {
+        return absl::OkStatus();
+    }
+
+    RTP_LLM_LOG_INFO("normal engine pause: run one empty TP sync step, epoch=%lu", pause_epoch);
+    auto status = executor_->processForPause();
+    (void)executor_->consumeLastPauseSignal();
+    if (!status.ok()) {
+        return status;
+    }
+    processed_pause_epoch_.store(pause_epoch, std::memory_order_release);
+    // Rank0 may be blocked in scheduler_->schedule() while worker ranks are
+    // waiting in tpSyncModelInputs. The RPC thread's empty sync step releases
+    // those workers, and rank0 itself is not touching GPU while scheduler-blocked.
+    markPauseQuiesced();
+    return absl::OkStatus();
+}
+
+absl::Status NormalEngine::pauseAndWaitQuiesced(int64_t timeout_ms) {
+    constexpr int64_t kDefaultPauseQuiesceTimeoutMs = 60000;
+    const int64_t     effective_timeout_ms          = timeout_ms > 0 ? timeout_ms : kDefaultPauseQuiesceTimeoutMs;
+
+    pause();
+    const auto pause_epoch = pause_epoch_.load(std::memory_order_acquire);
+    if (!running_.load(std::memory_order_acquire)) {
+        return absl::OkStatus();
+    }
+
+    auto status = releasePendingTpCollectiveForPause(pause_epoch);
+    if (!status.ok()) {
+        return status;
+    }
+
+    std::unique_lock<std::mutex> lock(pause_mutex_);
+    if (pause_quiesced_ || !pause_.load(std::memory_order_acquire)) {
+        return absl::OkStatus();
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(effective_timeout_ms);
+    if (!pause_cv_.wait_until(lock, deadline, [this] {
+            return pause_quiesced_ || !pause_.load(std::memory_order_acquire) || !running_.load();
+        })) {
+        return absl::Status(absl::StatusCode::kDeadlineExceeded,
+                            "normal engine pause quiesce timeout after " + std::to_string(effective_timeout_ms)
+                                + " ms");
+    }
     return absl::OkStatus();
 }
 
@@ -434,9 +540,9 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
 
 absl::Status NormalEngine::step() {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
-    while (pause_) {
-        // wait 50ms if system paused.
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (pause_.load(std::memory_order_acquire)
+        && (parallelism_config.tp_size <= 1 || parallelism_config.tp_rank == 0)) {
+        enterPausedState();
     }
 
     list<GenerateStreamPtr> streams;
@@ -455,6 +561,11 @@ absl::Status NormalEngine::step() {
         if (streams.empty() && parallelism_config.tp_size <= 1) {
             return absl::OkStatus();
         }
+    }
+
+    if (pause_.load(std::memory_order_acquire) && parallelism_config.tp_rank == 0) {
+        enterPausedState();
+        return absl::OkStatus();
     }
 
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -479,7 +590,11 @@ absl::Status NormalEngine::step() {
 
     {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
-        status = executor_->process(streams);
+        status = runExecutorProcess(streams);
+    }
+
+    if (status.ok() && pause_.load(std::memory_order_acquire)) {
+        enterPausedState();
     }
 
     // tick profiler after process() to count this step (and stop when num_steps reached).

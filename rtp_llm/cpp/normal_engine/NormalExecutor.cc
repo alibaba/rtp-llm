@@ -117,6 +117,19 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 }
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
+    return processImpl(streams, false);
+}
+
+absl::Status NormalExecutor::processForPause() {
+    std::list<GenerateStreamPtr> empty_streams;
+    return processImpl(empty_streams, true);
+}
+
+bool NormalExecutor::consumeLastPauseSignal() {
+    return last_pause_signal_.exchange(false, std::memory_order_acq_rel);
+}
+
+absl::Status NormalExecutor::processImpl(const std::list<GenerateStreamPtr>& streams, bool pause_signal) {
     StreamGroups                   stream_groups(streams);
     RtpLLMExecutorMetricsCollector executor_collector;
     RtpLLMTokenPSMetricsCollector  tps_collector;
@@ -124,6 +137,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     GptModelOutputs                model_output;
     SamplerOutput                  sampler_output;
     RTP_LLM_PROFILE_FUNCTION();
+    last_pause_signal_.store(false, std::memory_order_release);
     {
         RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -136,8 +150,15 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.tp_sync_input");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        if (pause_signal && model_input.skip_run) {
+            // Reuse the skip-run shape broadcast to carry a TP pause marker.
+            // Worker ranks may receive this before their local freeze RPC has
+            // set pause_, so NormalEngine must pause itself after process().
+            model_input.is_fake_stream = true;
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
         if (model_input.skip_run) {
+            last_pause_signal_.store(model_input.is_fake_stream, std::memory_order_release);
             return absl::OkStatus();
         }
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
