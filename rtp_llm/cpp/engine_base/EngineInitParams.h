@@ -114,7 +114,13 @@ struct EngineInitParams {
     py::object                   py_eplb;
     py::object                   py_sp_model;
     py::object                   weight_manager;
-    kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
+    // Grammar/structured-output config (empty tokenizer_info_json = disabled);
+    // tokenizer_info_json is populated in RtpLLMOp::initModel.
+    GrammarConfig                grammar_config;
+    // Reasoning / think-block detector config; think_start_id / think_end_id
+    // are also populated in RtpLLMOp::initModel.
+    ReasoningConfig              reasoning_config;
+    kmonitor::MetricsReporterPtr metrics_reporter    = nullptr;
 
 public:
     void showDebugInfo() const {

@@ -89,10 +89,13 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/api_server:http_api_server",
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
+        "//rtp_llm/cpp/models/logits_processor/xgrammar:grammar_cpp_lib",
+        "//rtp_llm/cpp/models/logits_processor/xgrammar:xgrammar_bootstrap",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/utils:signal_utils",
         "//:rtp_compute_ops",
+        "@xgrammar//:xgrammar",
     ] + torch_deps() + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",

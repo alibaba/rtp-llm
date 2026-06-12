@@ -70,7 +70,21 @@ class Qwen3CoderRenderer(ReasoningToolBaseRenderer):
 
         try:
             rendered_result = self.render_chat(request)
-            if rendered_result.rendered_prompt.endswith(self.think_start_tag):
+            # When the chat template pre-opens the thinking block in the PROMPT
+            # (Qwen3.5 with enable_thinking), the generated text contains only the
+            # closing </think> tag, never <think>. A non-forced Qwen3Detector then
+            # never enters reasoning mode (it keys on <think> appearing in the
+            # output), so </think> leaks into `content` instead of being split into
+            # reasoning_content. Detect the pre-opened case and force reasoning.
+            #
+            # Use a whitespace-robust suffix match: think_start_tag is "<think>\n",
+            # but the rendered prompt may end with "<think>", "<think>\n\n", or
+            # trailing spaces depending on the template. An exact endswith() is too
+            # brittle and silently falls back to the non-forced parser.
+            think_open = self.think_start_tag.strip()
+            if think_open and rendered_result.rendered_prompt.rstrip().endswith(
+                think_open
+            ):
                 return ReasoningParser(model_type="qwen3-thinking")
         except Exception as e:
             logging.error(f"Failed to render chat in _create_reasoning_parser: {e}")

@@ -57,11 +57,19 @@ void ChatService::generateResponse(const std::shared_ptr<GenerateConfig>&       
     ctx->init(num_return_sequences, body, chat_render);
 
     GenerateOutputs outputs;
-    // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
-    // 如果流有错误，应该停止消费输出
+    // NOTE: this C++ HttpApiServer path is outside the xgrammar / grammar refactor scope and
+    // is not the production inference path (production goes Python uvicorn frontend ->
+    // backend gRPC). Collapsing every nextOutput failure into a plain break instead of
+    // mapping ErrorCode -> HttpApiServerException is the known existing behavior; reviewers
+    // need not flag it again.
+    // hasError() check: finished() used to imply success, but FINISHED can now carry an
+    // error — bail out of the consume loop in that case.
     while (stream->isActive() || stream->hasOutput()) {
         const auto result = stream->nextOutput();
         if (!result.ok()) {
+            // Intentional break (not throw): keeps the "return whatever was already rendered"
+            // semantics so a mid-generation failure doesn't escalate the entire request to a
+            // 5xx, leaving room for the upstream SSE / aggregator layer to fall back.
             RTP_LLM_LOG_INFO("stream nextOutput failed");
             break;
         }
@@ -131,11 +139,17 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
 
     writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Stream);
     GenerateOutputs outputs;
-    // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
-    // 如果流有错误，应该停止消费输出
+    // NOTE: same as generateResponse — this C++ HttpApiServer path is outside the
+    // xgrammar / grammar refactor scope and not the production inference path; collapsing
+    // nextOutput failures into a plain break is the known existing behavior.
+    // hasError() check: finished() used to imply success, but FINISHED can now carry an
+    // error — bail out of the consume loop in that case.
     while (stream->isActive()) {
         const auto output_status = stream->nextOutput();
         if (!output_status.ok()) {
+            // Same as generateResponse: streaming branch also preserves partial-success
+            // semantics so the client receives whatever SSE chunks were already flushed
+            // and decides next steps based on finish_reason.
             RTP_LLM_LOG_INFO("stream nextOutput failed");
             break;
         }

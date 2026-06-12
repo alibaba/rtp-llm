@@ -1003,6 +1003,13 @@ class CustomChatRenderer:
             for _ in range(nums_output)
         ]
         async for outputs in output_generator:
+            # C++ QueryConverter::transResponse returns an empty FlattenOutputPB
+            # when source_outputs is empty for a given streaming chunk
+            # (intermediate yield with no per-beam payload). trans_output then
+            # produces GenerateOutputs() with an empty generate_outputs list.
+            # Treat as a no-op rather than a hard fault.
+            if len(outputs.generate_outputs) == 0:
+                continue
             if index == 0:
                 yield await self._generate_first(nums_output)
             index += 1

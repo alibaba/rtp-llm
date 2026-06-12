@@ -4,6 +4,9 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
@@ -15,12 +18,78 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#include "autil/TimeUtility.h"
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDACachingAllocator.h>
+#endif
+#include <algorithm>
 #include <memory>
-#include <thread>
 #include <random>
 
 namespace rtp_llm {
+
+namespace {
+
+#if USING_CUDA
+void recordSpecTensorUseOnCurrentStream(const torch::Tensor& tensor) {
+    if (tensor.defined() && tensor.is_cuda()) {
+        c10::cuda::CUDACachingAllocator::recordStream(tensor.storage().data_ptr(),
+                                                      at::cuda::getCurrentCUDAStream(tensor.device().index()));
+    }
+}
+#else
+void recordSpecTensorUseOnCurrentStream(const torch::Tensor& tensor) {
+    (void)tensor;
+}
+#endif
+
+void applySpecLogitsAcceptLenCap(const SamplerInputs&                   sampler_input,
+                                 const SamplerOutput&                   target_sampler_output,
+                                 speculative::SpeculativeSamplerOutput& output,
+                                 int64_t                                batch_size,
+                                 int64_t                                propose_step) {
+    if (!sampler_input.spec_cap_gpu.defined()) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(output.accept_len.defined() && output.accept_len.is_cuda(),
+                            "spec logits cap requires CUDA accept_len");
+
+    recordSpecTensorUseOnCurrentStream(sampler_input.spec_cap_gpu);
+    auto cap_gpu      = sampler_input.spec_cap_gpu.to(output.accept_len.options());
+    auto cap_plus_one = cap_gpu + 1;
+    output.accept_len = torch::minimum(output.accept_len, cap_plus_one);
+
+    RTP_LLM_CHECK_WITH_INFO(output.accept_tokens.defined() && output.accept_tokens.is_cuda(),
+                            "spec logits cap requires CUDA accept_tokens");
+    RTP_LLM_CHECK_WITH_INFO(target_sampler_output.token_ids.defined(),
+                            "spec logits cap requires target sampler token_ids");
+    auto target_token_ids = target_sampler_output.token_ids;
+    if (!target_token_ids.is_cuda()) {
+        target_token_ids = target_token_ids.to(output.accept_tokens.device(), /*non_blocking=*/true);
+    }
+    const int64_t token_stride  = target_token_ids.size(1);
+    auto          target_tokens = target_token_ids.reshape({batch_size, propose_step + 1, token_stride})
+                             .select(2, token_stride - 1)
+                             .to(output.accept_tokens.options());
+    auto cap_index =
+        sampler_input.spec_cap_gpu.to(torch::TensorOptions().device(output.accept_tokens.device()).dtype(torch::kLong));
+    auto replacement = target_tokens.gather(1, cap_index.unsqueeze(1));
+
+    auto cols = torch::arange(propose_step + 1,
+                              torch::TensorOptions().device(output.accept_tokens.device()).dtype(torch::kLong))
+                    .unsqueeze(0)
+                    .expand({batch_size, propose_step + 1});
+    auto replace_mask = (cap_gpu < propose_step).unsqueeze(1) & (output.accept_len > cap_gpu).unsqueeze(1)
+                        & (cols == cap_index.unsqueeze(1));
+    output.accept_tokens =
+        torch::where(replace_mask, replacement.expand({batch_size, propose_step + 1}), output.accept_tokens);
+
+    output.accept_tokens_cpu = output.accept_tokens.to(torch::kCPU, /*non_blocking=*/true);
+    output.accept_len_cpu    = output.accept_len.to(torch::kCPU, /*non_blocking=*/true);
+    output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+}
+
+}  // namespace
 
 bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
@@ -508,6 +577,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     RtpLLMSpeculativeEngineMetricsCollector& sp_engine_collector = metrics_collector.sp_engine_collector;
 
     StreamGroups    stream_groups(streams);
+
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
@@ -528,6 +598,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     speculative::FastTopKSamplerOutput fast_topk_sampler_output;
 
     size_t total_accept_len = 0;
+
+    MtpSpecLogitsVerifyResult spec_logits_result;
 
     // clone tensors from grpc
     {
@@ -628,6 +700,22 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
     }
 
+    if (isTpRank0() && !warm_up_ && !model_input.is_fake_stream) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify)");
+        torch::Tensor draft_tokens;
+        if (propose_step_ == 1) {
+            if (draft_sampler_output.token_ids.defined() && draft_sampler_output.token_ids.numel() > 0) {
+                draft_tokens = draft_sampler_output.token_ids;
+            } else {
+                draft_tokens = model_input.combo_tokens.reshape(
+                    {static_cast<int64_t>(streams.size()), static_cast<int64_t>(propose_step_ + 1)});
+            }
+        } else {
+            draft_tokens = draft_token_ids_t;
+        }
+        spec_logits_result = buildSpecLogitsVerifyInline(streams, draft_tokens);
+    }
+
     // eplb
     if (expert_balancer_) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(eplb_step_forward)");
@@ -640,22 +728,40 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(rejection_sampling)");
 
         if (model_input.is_fake_stream) {
-            auto accept_tokens                       = torch::zeros({1, 1}, torch::kInt32);
-            speculative_sampler_output.accept_len    = {1};
-            speculative_sampler_output.accept_tokens = {std::move(accept_tokens)};
+            const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            speculative_sampler_output.accept_tokens =
+                torch::zeros({1, 1}, cuda_i32);
+            speculative_sampler_output.accept_len = torch::ones({1}, cuda_i32);
+            speculative_sampler_output.accept_tokens_cpu =
+                speculative_sampler_output.accept_tokens.to(torch::kCPU, /*non_blocking=*/true);
+            speculative_sampler_output.accept_len_cpu =
+                speculative_sampler_output.accept_len.to(torch::kCPU, /*non_blocking=*/true);
+            speculative_sampler_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
             cudaSyncAndCheck();
         } else {
             // target model sample
             CHECK_AND_RETURN_REF(
                 sampler_input,
-                batch_stream_processor_->gatherSpecSamplerInput(stream_groups, model_input, model_output));
+                batch_stream_processor_->gatherSpecSamplerInput(stream_groups, model_input, model_output,
+                                                                spec_logits_result));
+
             sampler_output           = std::move(sampler_->forward(sampler_input));
             sampler_output.all_probs = sampler_output.all_probs.reshape(
                 {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
 
-            // rejection sampling
-            speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
+            speculative_sampler_output =
+                speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
+            applySpecLogitsAcceptLenCap(sampler_input,
+                                        sampler_output,
+                                        speculative_sampler_output,
+                                        static_cast<int64_t>(batch_size),
+                                        static_cast<int64_t>(propose_step_));
         }
+        // Commit accepted tokens to each stream via GenerateStream::specUpdate
+        // -> updateStatus (the Token Commit Invariant), which advances each
+        // attached token-constraint processor exactly once per committed token
+        // and emits the opt-in RTP_SP_ACCEPT_TRACE=1 trace. Skipped for fake
+        // streams (their accept_len is synthetic).
         // NOTE: here will have cuda device sync before update model input
         batch_stream_processor_->updateDecodePostDraftModelInput(
             model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, total_accept_len);
@@ -726,6 +832,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             stream_groups,
             speculative_sampler_output,
             {std::move(draft_prefill_model_output), std::move(draft_prefill_sampler_output)});
+
+        // Per-stream constraint commits + observability happen via
+        // GenerateStream::specUpdate → notifyCommit → BaseLogitsProcessor::
+        // updateStatus, which fires uniformly for prefill (T0) and decode
+        // (verified suffix). MtpExecutor must not dispatch a per-constraint
+        // commit hook here — doing so used to double-commit on decode and
+        // miss prefill T0 entirely.
+
         // clean holder tensors from grpc
         for (auto& stream : streams) {
             stream->getSPOutputBuffer()->tensors_holder.clear();
@@ -831,29 +945,40 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     model_input.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
 
     GptModelOutputs            draft_decode_model_output;
-    std::vector<torch::Tensor> draft_token_ids_list;
     torch::Tensor              spec_prefix_lengths;
 
     // update TP > 0 batch_size
-    size_t batch_size   = model_input.combo_tokens.size(0);
+    size_t batch_size             = model_input.combo_tokens.size(0);
+    const auto draft_token_cols   = static_cast<int64_t>(propose_step_ + 1);
+    draft_token_ids_t =
+        torch::empty({static_cast<int64_t>(batch_size), draft_token_cols},
+                     torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     spec_prefix_lengths = model_input.sequence_lengths.cpu().clone().pin_memory();
 
-    auto pre_propose_token_t_raw = model_input.combo_tokens.to(torch::kCUDA).clone();
+    auto int32_cuda_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto pre_propose_token_t_raw =
+        model_input.combo_tokens.to(int32_cuda_options).contiguous().clone();
 
     auto pre_target_token = torch::empty({(int64_t)batch_size}, torch::kInt32);
     int  batch_idx        = 0;
     for (const auto& stream : stream_groups.allStreams()) {
-        int* propose_tokens                         = stream->getSPOutputBuffer()->tokens.data_ptr<int>();
-        pre_target_token.data_ptr<int>()[batch_idx] = propose_tokens[0];
+        auto sp_buf = stream->getSPOutputBuffer();
+        RTP_LLM_CHECK(sp_buf != nullptr);
+        RTP_LLM_CHECK(sp_buf->tokens.defined() && sp_buf->tokens.is_contiguous()
+                      && sp_buf->tokens.device().is_cpu()
+                      && sp_buf->tokens.scalar_type() == torch::kInt32
+                      && sp_buf->tokens.numel() >= 1);
+        const auto* propose_tokens                           = sp_buf->tokens.data_ptr<int32_t>();
+        pre_target_token.data_ptr<int32_t>()[batch_idx]      = propose_tokens[0];
         batch_idx++;
     }
 
-    auto pre_target_token_t         = pre_target_token.to(torch::kCUDA);
-    auto pre_target_token_t_reshape = pre_target_token_t.reshape({(int)batch_size, 1});
-    draft_token_ids_list.push_back(pre_target_token_t_reshape);
+    auto pre_target_token_t = pre_target_token.to(int32_cuda_options).contiguous();
+    auto pre_target_token_t_reshape = pre_target_token_t.reshape({static_cast<int64_t>(batch_size), 1});
+    draft_token_ids_t.narrow(1, 0, 1).copy_(pre_target_token_t_reshape);
 
-    auto pre_propose_token_t_reshape = pre_propose_token_t_raw.reshape({(int)batch_size, 1});
-    draft_token_ids_list.push_back(pre_propose_token_t_reshape);
+    auto pre_propose_token_t_reshape = pre_propose_token_t_raw.reshape({static_cast<int64_t>(batch_size), 1});
+    draft_token_ids_t.narrow(1, 1, 1).copy_(pre_propose_token_t_reshape);
 
     // n-1 steps draft model decode
     for (int i = 0; i < propose_step_ - 1; i++) {
@@ -873,8 +998,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             draft_decode_model_output.all_hidden_states.zero_();
         }
 
-        draft_token_ids = draft_token_ids.to(torch::kInt32).to(torch::kCUDA);
-        draft_token_ids_list.push_back(draft_token_ids);
+        draft_token_ids = draft_token_ids.to(int32_cuda_options).contiguous();
+        draft_token_ids_t.narrow(1, i + 2, 1)
+            .copy_(draft_token_ids.reshape({static_cast<int64_t>(batch_size), 1}));
         draft_probs_list.push_back(draft_probs_reshape);
 
         // update model input
@@ -887,8 +1013,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.draft_model_decode(build_spec_decode_input)");
         // prepare spec decode input
-        draft_token_ids_t =
-            torch::cat(draft_token_ids_list, 1).reshape({(int)batch_size, (int)(propose_step_ + 1)}).contiguous();
+        draft_token_ids_t = draft_token_ids_t.contiguous();
 
         auto lm_output_indexes =
             torch::empty({(int64_t)(batch_size * (propose_step_ + 1))},
@@ -897,10 +1022,10 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                           torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
 
         for (int i = 0; i < batch_size; i++) {
-            input_lengths.data_ptr<int>()[i] = propose_step_ + 1;
+            input_lengths.data_ptr<int32_t>()[i] = propose_step_ + 1;
         }
         for (int i = 0; i < batch_size * (propose_step_ + 1); i++) {
-            lm_output_indexes.data_ptr<int>()[i] = i;
+            lm_output_indexes.data_ptr<int32_t>()[i] = i;
         }
 
         model_input.input_lengths     = std::move(input_lengths);
@@ -921,6 +1046,262 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         model_input.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
         model_input.kv_scale_stride_bytes = cache_cfg.kv_scale_stride_bytes;
     }
+}
+
+namespace {
+
+void fillAllAllowBitmask(const torch::Tensor& tensor) {
+    if (tensor.defined() && tensor.numel() > 0) {
+        std::fill_n(tensor.data_ptr<int32_t>(), tensor.numel(), SpecLogitsProcessor::kBitmaskAllowAll);
+    }
+}
+
+void bitwiseAndBitmaskInplace(int32_t* dst, const int32_t* src, size_t words) {
+    for (size_t i = 0; i < words; ++i) {
+        dst[i] &= src[i];
+    }
+}
+
+}  // namespace
+
+void MtpExecutor::ensureSpecLogitsBuffersFit(size_t total_streams,
+                                           int    propose_step,
+                                           size_t vocab_size,
+                                           size_t bitmask_words) {
+    const int64_t B    = static_cast<int64_t>(total_streams);
+    const int64_t P    = static_cast<int64_t>(propose_step);
+    const int64_t rows = B * (P + 1);
+    const int64_t W    = static_cast<int64_t>(bitmask_words);
+    (void)vocab_size;
+
+    auto cpu_i32    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+    auto pinned_i32 = cpu_i32.pinned_memory(true);
+
+    if (!draft_tokens_cpu_.defined() || draft_tokens_cpu_.numel() < B * P) {
+        draft_tokens_cpu_ = torch::empty({B, P}, pinned_i32);
+    }
+    // Pinned: merged_bitmask_cpu_ is the source of mask_gpu.copy_(non_blocking=true)
+    // every spec step. Pageable source forces PyTorch to internally pin+copy
+    // synchronously, which silently strips the non_blocking property.
+    // processor_bitmask_cpu_ is local-scratch (only AND'd into merged_bitmask_cpu_,
+    // never directly H2D'd) so pinning it isn't strictly required, but we pin
+    // it too for symmetry — the buffer is small and only allocated once.
+    if (!processor_bitmask_cpu_.defined() || processor_bitmask_cpu_.numel() < (P + 1) * W) {
+        processor_bitmask_cpu_ = torch::empty({P + 1, W}, pinned_i32);
+    }
+    if (!merged_bitmask_cpu_.defined() || merged_bitmask_cpu_.numel() < rows * W) {
+        merged_bitmask_cpu_ = torch::empty({rows, W}, pinned_i32);
+        // Whole buffer starts allow-all so per-call code only has to reset
+        // last-call's active rows + fill this-call's active rows.
+        std::fill_n(merged_bitmask_cpu_.data_ptr<int32_t>(),
+                    merged_bitmask_cpu_.numel(),
+                    SpecLogitsProcessor::kBitmaskAllowAll);
+        last_active_stream_rows_.clear();
+    }
+    if (!spec_cap_cpu_.defined() || spec_cap_cpu_.numel() < B) {
+        spec_cap_cpu_ = torch::empty({B}, pinned_i32);
+    }
+#if USING_CUDA
+    auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    if (!merged_bitmask_gpu_.defined() || merged_bitmask_gpu_.numel() < rows * W) {
+        merged_bitmask_gpu_ = torch::empty({rows, W}, cuda_i32);
+        // Mirror CPU side: GPU buffer is allow-all, and we incrementally
+        // overwrite only active rows. The first H2D below seeds it from CPU
+        // pinned memory in one shot.
+        merged_bitmask_gpu_.copy_(merged_bitmask_cpu_.narrow(0, 0, rows).narrow(1, 0, W));
+        last_active_stream_rows_.clear();
+    }
+    if (!spec_cap_gpu_.defined() || spec_cap_gpu_.numel() < B) {
+        spec_cap_gpu_ = torch::empty({B}, cuda_i32);
+    }
+#else
+    (void)rows;
+#endif
+}
+
+void MtpExecutor::materializeDraftTokensToCpu(size_t               total_streams,
+                                              int                  propose_step,
+                                              const torch::Tensor& draft_tokens) {
+    const int64_t B = static_cast<int64_t>(total_streams);
+    const int64_t P = static_cast<int64_t>(propose_step);
+    if (B == 0 || P == 0) {
+        return;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(draft_tokens.defined(), "MTP spec logits verify requires draft tokens");
+    RTP_LLM_CHECK_WITH_INFO(draft_tokens.numel() >= B * P && draft_tokens.numel() % B == 0,
+                            "MTP spec logits verify draft token shape mismatch");
+    const int64_t draft_cols   = draft_tokens.numel() / B;
+    const int64_t draft_offset = draft_cols > P ? 1 : 0;
+    RTP_LLM_CHECK_WITH_INFO(draft_cols >= draft_offset + P, "MTP spec logits verify draft token columns mismatch");
+    auto draft     = draft_tokens.reshape({B, draft_cols}).narrow(1, draft_offset, P);
+    auto dst       = draft_tokens_cpu_.narrow(0, 0, B).narrow(1, 0, P);
+    auto draft_i32 = draft.scalar_type() == torch::kInt32 ? draft.contiguous() : draft.to(torch::kInt32).contiguous();
+    dst.copy_(draft_i32);
+}
+
+MtpSpecLogitsVerifyResult
+MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
+                                         const torch::Tensor&                draft_tokens) {
+    RTP_LLM_PROFILE_SCOPE("mtp_executor.spec_logits_verify_inline");
+    MtpSpecLogitsVerifyResult result;
+
+    struct ActiveProcessor {
+        SpecLogitsProcessorPtr processor;
+        size_t                 stream_idx      = 0;
+        size_t                 processor_idx   = 0;
+        uint64_t               stream_id       = 0;
+        int64_t                base_seq_len    = 0;
+        int64_t                base_output_len = 0;
+    };
+    std::vector<ActiveProcessor> active;
+    size_t                     stream_idx = 0;
+    for (const auto& stream : streams) {
+        size_t processor_idx = 0;
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(processor);
+            if (spec_processor) {
+                active.push_back({spec_processor,
+                                  stream_idx,
+                                  processor_idx,
+                                  static_cast<uint64_t>(stream->streamId()),
+                                  static_cast<int64_t>(stream->seqLength()),
+                                  static_cast<int64_t>(stream->outputTokenLen())});
+            }
+            ++processor_idx;
+        }
+        ++stream_idx;
+    }
+    if (active.empty()) {
+        return result;
+    }
+
+    const size_t B    = streams.size();
+    const int    P    = static_cast<int>(propose_step_);
+    const size_t V    = vocab_size_;
+    const size_t W    = SpecLogitsProcessor::bitmaskWordCount(V);
+    const size_t rows = B * static_cast<size_t>(P + 1);
+    RTP_LLM_CHECK_WITH_INFO(B > 0 && P > 0 && V > 0, "invalid MTP spec logits verify task");
+
+    ensureSpecLogitsBuffersFit(B, P, V, W);
+    // materializeDraftTokensToCpu does an O(B*P) device->host copy that's only
+    // useful if at least one processor is eligible. Defer it to the first
+    // eligible-hit; if every active processor is filtered out, we skip the
+    // copy entirely and short-circuit returning {} below.
+    bool draft_tokens_materialized = false;
+
+    // Sparse-row strategy:
+    //   * merged_bitmask_cpu_ / _gpu_ are kept allow-all on un-touched rows.
+    //   * On each call we reset rows that were narrowed by the *previous* call
+    //     back to allow-all (small CPU memset + targeted H2D), then fill this
+    //     call's active rows.
+    //   * Streams without a SpecLogitsProcessor never pay the fill / H2D cost,
+    //     so a mixed batch with a single grammar request no longer blows up
+    //     into B*(P+1)*W bits of CPU work and PCIe traffic.
+    auto merged = merged_bitmask_cpu_.narrow(0, 0, static_cast<int64_t>(rows)).narrow(1, 0, static_cast<int64_t>(W));
+    auto* merged_base = merged_bitmask_cpu_.data_ptr<int32_t>();
+    const size_t row_words   = (P + 1) * W;
+    const size_t buffer_rows = static_cast<size_t>(merged_bitmask_cpu_.size(0)) / static_cast<size_t>(P + 1);
+
+    // Clear any rows narrowed by a previous call so they go back to allow-all
+    // for the consumer. Skip rows that fall outside the current B in case the
+    // batch shrank — the leftover allow-all state is still correct for them.
+    std::vector<size_t> rows_to_reset;
+    rows_to_reset.reserve(last_active_stream_rows_.size());
+    for (size_t prev : last_active_stream_rows_) {
+        if (prev < buffer_rows) {
+            std::fill_n(merged_base + prev * row_words, row_words, SpecLogitsProcessor::kBitmaskAllowAll);
+            rows_to_reset.push_back(prev);
+        }
+    }
+    std::fill_n(spec_cap_cpu_.data_ptr<int32_t>(), B, P);
+
+    auto proc_mask = processor_bitmask_cpu_.narrow(0, 0, P + 1).narrow(1, 0, static_cast<int64_t>(W));
+    std::vector<size_t> this_active_rows;
+    this_active_rows.reserve(active.size());
+    bool applied_processor = false;
+    for (const auto& item : active) {
+        if (!item.processor || !item.processor->isSpecVerifyEligible()) {
+            continue;
+        }
+        applied_processor = true;
+        if (!draft_tokens_materialized) {
+            materializeDraftTokensToCpu(B, P, draft_tokens);
+            draft_tokens_materialized = true;
+        }
+
+        fillAllAllowBitmask(proc_mask);
+        SpecLogitsProcessorRequest request;
+        request.draft_tokens       = draft_tokens_cpu_.data_ptr<int32_t>() + item.stream_idx * P;
+        request.propose_step       = P;
+        request.bitmask_cpu_out    = proc_mask.data_ptr<int32_t>();
+        request.bitmask_size_int32 = W;
+        request.vocab_size         = V;
+        request.stream_id          = item.stream_id;
+        request.base_seq_len       = item.base_seq_len;
+        request.base_output_len    = item.base_output_len;
+
+        int cap = item.processor->tryAcceptAndFillBitmask(request);
+        cap     = std::max(0, std::min(cap, P));
+
+        auto* merged_row = merged_base + item.stream_idx * row_words;
+        bitwiseAndBitmaskInplace(merged_row, proc_mask.data_ptr<int32_t>(), row_words);
+        auto* cap_ptr            = spec_cap_cpu_.data_ptr<int32_t>();
+        cap_ptr[item.stream_idx] = std::min<int32_t>(cap_ptr[item.stream_idx], cap);
+        result.applied_processors.push_back({item.stream_id, item.processor_idx});
+        this_active_rows.push_back(item.stream_idx);
+    }
+
+    if (!applied_processor) {
+        // Nothing to upload, but make sure any rows narrowed last call get
+        // their allow-all state synced back to GPU before we early-return so
+        // the next caller sees a clean buffer.
+        last_active_stream_rows_.clear();
+#if USING_CUDA
+        if (!rows_to_reset.empty()) {
+            for (size_t row : rows_to_reset) {
+                auto cpu_slice = merged_bitmask_cpu_.narrow(0, row * (P + 1), P + 1).narrow(1, 0, W);
+                auto gpu_slice = merged_bitmask_gpu_.narrow(0, row * (P + 1), P + 1).narrow(1, 0, W);
+                gpu_slice.copy_(cpu_slice, /*non_blocking=*/true);
+            }
+        }
+#endif
+        return {};
+    }
+
+    auto cap_cpu = spec_cap_cpu_.narrow(0, 0, static_cast<int64_t>(B));
+#if USING_CUDA
+    auto mask_gpu = merged_bitmask_gpu_.narrow(0, 0, static_cast<int64_t>(rows)).narrow(1, 0, static_cast<int64_t>(W));
+    auto cap_gpu  = spec_cap_gpu_.narrow(0, 0, static_cast<int64_t>(B));
+
+    // Upload only the rows that changed — both rows we reset to allow-all and
+    // rows we just narrowed. This is a per-stream copy_(non_blocking) instead
+    // of one big mask_gpu.copy_(merged), keeping H2D traffic O(active streams)
+    // rather than O(B*(P+1)).
+    auto upload_row = [&](size_t row) {
+        auto cpu_slice = merged_bitmask_cpu_.narrow(0, row * (P + 1), P + 1).narrow(1, 0, W);
+        auto gpu_slice = merged_bitmask_gpu_.narrow(0, row * (P + 1), P + 1).narrow(1, 0, W);
+        gpu_slice.copy_(cpu_slice, /*non_blocking=*/true);
+    };
+    for (size_t row : rows_to_reset) {
+        upload_row(row);
+    }
+    for (size_t row : this_active_rows) {
+        upload_row(row);
+    }
+    cap_gpu.copy_(cap_cpu, /*non_blocking=*/true);
+
+    last_active_stream_rows_ = std::move(this_active_rows);
+
+    result.spec_vocab_mask_gpu       = mask_gpu;
+    result.spec_cap_gpu              = cap_gpu;
+    result.has_active_processor      = true;
+    result.spec_vocab_mask_cpu_owner = merged;
+    result.spec_cap_cpu_owner        = cap_cpu;
+#else
+    RTP_LLM_FAIL("MTP spec logits verify requires CUDA for packed bitmask upload");
+#endif
+    return result;
 }
 
 }  // namespace rtp_llm

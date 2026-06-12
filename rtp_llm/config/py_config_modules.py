@@ -15,6 +15,7 @@ from rtp_llm.ops import (
     EPLBConfig,
     FfnDisAggregateConfig,
     FMHAConfig,
+    GrammarConfig,
     GrpcConfig,
     HWKernelConfig,
     MiscellaneousConfig,
@@ -24,6 +25,7 @@ from rtp_llm.ops import (
     PDSepConfig,
     PrefillCPConfig,
     ProfilingDebugLoggingConfig,
+    ReasoningConfig,
     RoleType,
     RuntimeConfig,
     SpeculativeExecutionConfig,
@@ -439,6 +441,8 @@ class PyEnvConfigs:
         self.distribute_config: DistributeConfig = DistributeConfig()
         self.vit_config: VitConfig = VitConfig()
         self.generate_env_config: GenerateEnvConfig = GenerateEnvConfig()
+        self.grammar_config: GrammarConfig = GrammarConfig()
+        self.reasoning_config: ReasoningConfig = ReasoningConfig()
         self.quantization_config: QuantizationConfig = QuantizationConfig()
         self.eplb_config: EPLBConfig = EPLBConfig()
         self.kv_cache_config: KVCacheConfig = KVCacheConfig()
@@ -481,6 +485,8 @@ class PyEnvConfigs:
             "[distribute_config]\n" + self.distribute_config.to_string() + "\n\n"
             "[vit_config]\n" + self.vit_config.to_string() + "\n\n"
             "[generate_env_config]\n" + self.generate_env_config.to_string() + "\n\n"
+            "[grammar_config]\n" + str(self.grammar_config) + "\n\n"
+            "[reasoning_config]\n" + str(self.reasoning_config) + "\n\n"
             "[quantization_config]\n" + self.quantization_config.to_string() + "\n\n"
             "[eplb_config]\n" + self.eplb_config.to_string() + "\n\n"
             "[kv_cache_config]\n" + self.kv_cache_config.to_string() + "\n\n"

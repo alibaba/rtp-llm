@@ -1,9 +1,12 @@
 #pragma once
 
 #include "absl/status/statusor.h"
+#include "c10/core/Event.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/models/ModelTypes.h"
 
 namespace rtp_llm {
 
@@ -11,8 +14,15 @@ namespace speculative {
 
 struct SpeculativeSamplerOutput {
 public:
-    std::vector<torch::Tensor> accept_tokens;
-    std::vector<int>           accept_len;
+    torch::Tensor accept_tokens;
+    torch::Tensor accept_len;
+
+    torch::Tensor accept_tokens_cpu;
+    torch::Tensor accept_len_cpu;
+
+    std::shared_ptr<torch::Event> transfer_done_event;
+
+    SpeculativeSamplerOutput(): transfer_done_event(std::make_shared<torch::Event>(cuda_graph::makeGraphEvent())) {}
 };
 
 struct FastTopKSamplerOutput {
@@ -40,6 +50,7 @@ private:
                      const std::list<GenerateStreamPtr>& streams,
                      SamplerOutput&                      draft_sampler_output,
                      SamplerOutput&                      target_sampler_output) const;
+
     void streamSample(SpeculativeSamplerOutput&           sample_output,
                       const std::list<GenerateStreamPtr>& streams,
                       SamplerOutput&                      draft_sampler_output,

@@ -7,7 +7,6 @@
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
-#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include <thread>
 #include <torch/extension.h>
 
@@ -127,24 +126,34 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
     }
 
     // Apply side-channel data to GenerateStream
-    // 1. First token: append to stream
+    // 1. First token: commit through the universal update() path. updateStatus
+    // on attached processors only advances internal state; stream termination
+    // is delegated to the EOS sampler path.
+    //
+    // MUST use updateWithoutLock: this function is reached via
+    // GenerateStream::moveToNext (holds mutex_) → GenerateStateMachine::handleLoading
+    // → loadCacheDone → updateReuseLengthsFromContext → applyP2PSideChannelToStream.
+    // Calling update() would re-acquire mutex_ and self-deadlock on the
+    // non-recursive mutex.
     if (payload->first_token_id > 0) {
         stream->setIsContextStream(false);
         stream->step();
-        auto new_tokens                   = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
-        new_tokens.data_ptr<int32_t>()[0] = static_cast<int32_t>(payload->first_token_id);
         stream->incLastOutputPos();
-        stream->update({.new_tokens        = new_tokens,
-                        .num_new_tokens    = 1,
-                        .hidden_states     = {},
-                        .logits            = {},
-                        .softmax_probs     = {},
-                        .cum_log_probs     = {},
-                        .all_probs         = {},
-                        .loss              = {},
-                        .src_batch_indices = {},
-                        .all_hidden_states = {}});
-        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: appended first_token_id=%ld, stream_id=%ld",
+        auto bonus_tokens = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
+        bonus_tokens.data_ptr<int32_t>()[0] = static_cast<int32_t>(payload->first_token_id);
+        StreamUpdateInfo bonus_info{bonus_tokens,
+                                    /*num_new_tokens=*/1,
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    /*update_remote_generate=*/false};
+        stream->updateWithoutLock(bonus_info);
+        RTP_LLM_LOG_DEBUG("applyP2PSideChannel: committed first_token_id=%ld via updateWithoutLock(), stream_id=%ld",
                           payload->first_token_id,
                           stream->streamId());
     }

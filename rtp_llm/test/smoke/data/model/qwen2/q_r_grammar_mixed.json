@@ -1,0 +1,365 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2-1.5B-Instruct/",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Give me a hex color code."
+                    }
+                ],
+                "response_format": {
+                    "type": "regex",
+                    "pattern": "#[0-9A-Fa-f]{6}"
+                },
+                "max_tokens": 16,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+            },
+            "_comment": "Mixed-batch Q1 (grammar regex). re.fullmatch check — if a non-grammar neighbour's logits are NOT masked but the active-index path is buggy, this stream's mask row could be overwritten and it would produce non-hex output."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Reply with a short friendly greeting."
+                    }
+                ],
+                "max_tokens": 48,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+            },
+            "skip_content_check": true,
+            "_comment": "Mixed-batch Q2 (NO response_format). If the scheduler places this into the same batch as a grammar stream and the parallel-fill / active-subset indexing leaks a hex-only bitmask onto this row, this stream's output will be empty (all logits -inf) or garbled — _validate_well_formed flags either."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Generate a person profile as JSON."
+                    }
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "person",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "maxLength": 40},
+                                "age": {"type": "integer"},
+                                "city": {"type": "string", "maxLength": 40}
+                            },
+                            "required": ["name", "age", "city"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+            },
+            "grammar_constraint_only": true,
+            "_comment": "Mixed-batch Q3 (grammar json_schema). Differs in length from Q1+Q2, so across 5 concurrent threads the per-thread position spread causes heterogeneous batching at the server."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Name two colors."
+                    }
+                ],
+                "max_tokens": 32,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+            },
+            "skip_content_check": true,
+            "_comment": "Mixed-batch Q4 (NO response_format). Second non-grammar sidecar to reduce the chance that 'first non-grammar query always runs alone'."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Generate a person profile as JSON."
+                    }
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "person",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "age": {"type": "integer"},
+                                "city": {"type": "string"}
+                            },
+                            "required": ["name", "age", "city"]
+                        }
+                    }
+                },
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "{\n  \"name\": \"John Doe\",\n  \"age\": 35,\n  \"city\": \"New York City\"\n}", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 26, "total_tokens": 54, "completion_tokens": 28},
+                "aux_info": {"iter_count": 28, "input_len": 26, "output_len": 28, "step_output_len": 28, "pd_sep": false, "reuse_len": 0, "local_reuse_len": 0, "remote_reuse_len": 0, "memory_reuse_len": 0}
+            },
+            "_comment": "Same-schema person JSON #1 — cache-miss path."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Generate another person profile."
+                    }
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "person",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "age": {"type": "integer"},
+                                "city": {"type": "string"}
+                            },
+                            "required": ["name", "age", "city"]
+                        }
+                    }
+                },
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "{\n  \"name\": \"John Doe\",\n  \"age\": 35,\n  \"city\": \"New York City\"\n}", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 24, "total_tokens": 52, "completion_tokens": 28},
+                "aux_info": {"iter_count": 28, "input_len": 24, "output_len": 28, "step_output_len": 28, "pd_sep": false, "reuse_len": 0, "local_reuse_len": 0, "remote_reuse_len": 0, "memory_reuse_len": 0}
+            },
+            "_comment": "Same-schema person JSON #2 — cache-hit path (XGrammarBackendCpp::getCached short-circuit)."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Give me a hex color code."
+                    }
+                ],
+                "response_format": {
+                    "type": "regex",
+                    "pattern": "#[0-9A-Fa-f]{6}"
+                },
+                "max_tokens": 16,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+            },
+            "_comment": "Bounded regex hex — re.fullmatch."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Give me a US zip code."
+                    }
+                ],
+                "response_format": {
+                    "type": "regex",
+                    "pattern": "[0-9]{5}"
+                },
+                "max_tokens": 12,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+            },
+            "_comment": "Bounded regex zip code."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Give me a company org structure."
+                    }
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "company",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "company": {"type": "string"},
+                                "departments": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {"type": "string"},
+                                            "head": {"type": "string"},
+                                            "size": {"type": "integer"}
+                                        },
+                                        "required": ["name", "head", "size"]
+                                    }
+                                }
+                            },
+                            "required": ["company", "departments"]
+                        }
+                    }
+                },
+                "max_tokens": 4000,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+            },
+            "grammar_constraint_only": true,
+            "_comment": "Nested array json_schema — exercises deeper NFA states under concurrent batch."
+        }
+    ]
+}

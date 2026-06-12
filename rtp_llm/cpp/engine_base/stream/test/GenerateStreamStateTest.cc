@@ -12,6 +12,8 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
+#include <stdexcept>
+
 using namespace std;
 
 namespace rtp_llm {
@@ -337,6 +339,150 @@ TEST_F(GenerateStreamStateTest, testNormalPathTriggersAsyncLoadCache) {
     // Should transition to LOADING_CACHE if asyncLoadCache was initiated
     // or stay in WAITING if no connectors are available
     ASSERT_TRUE(new_state == StreamState::LOADING_CACHE || new_state == StreamState::WAITING);
+}
+
+// ============================================================================
+// 10. Logits-processor readiness gate (moveToNext while WAITING)
+// ============================================================================
+
+namespace {
+// Test double for an async logits processor. Returns a scripted state on each
+// prepare(); on Failed it reports the error WITHOUT lock (prepare runs under the
+// stream's mutex_ inside moveToNext), matching the real contract. needsPreparation
+// stays true until the first non-Pending prepare resolves it, mirroring the real
+// grammar processor.
+class FakeAsyncLogitsProcessor: public BaseLogitsProcessor {
+public:
+    PrepareState scripted         = PrepareState::Pending;
+    int          polls            = 0;
+    bool         throw_on_prepare = false;
+
+    bool needsPreparation() const override {
+        return !resolved_;
+    }
+
+    PrepareState prepare(GenerateStream& stream) override {
+        ++polls;
+        if (throw_on_prepare) {
+            throw std::runtime_error("fake processor prepare threw");
+        }
+        if (scripted == PrepareState::Failed) {
+            stream.reportErrorWithoutLock(ErrorCode::INVALID_PARAMS, "fake processor failed");
+        }
+        if (scripted != PrepareState::Pending) {
+            resolved_ = true;
+        }
+        return scripted;
+    }
+
+    void process(const SamplerInputs& /*inputs*/, size_t /*start*/, size_t /*finish*/) override {}
+    void updateMultiSeqStatus(const std::vector<int>& /*src_batch_indices*/) override {}
+    void updateStatus(const torch::Tensor& /*new_tokens*/, int32_t /*num_new_tokens*/) override {}
+
+private:
+    bool resolved_ = false;
+};
+
+std::shared_ptr<FakeAsyncLogitsProcessor> armFakePreparation(const GenerateStreamPtr& stream, PrepareState scripted) {
+    auto fake      = std::make_shared<FakeAsyncLogitsProcessor>();
+    fake->scripted = scripted;
+    stream->addLogitsProcessor(fake);
+    // Mirror what the constructor would do had the processor been present at
+    // creation time (this test injects it after construction).
+    stream->preparation_pending_ = true;
+    // LoadInitiated lets later moveToNext() ticks skip the async KV-load phase in
+    // tests that only exercise the readiness gate (see BaseLogitsProcessor.h).
+    stream->reportEvent(StreamEvents::LoadInitiated);
+    return fake;
+}
+}  // namespace
+
+TEST_F(GenerateStreamStateTest, testPreparationPendingHoldsInWaiting) {
+    auto stream = createStream();
+    auto fake   = armFakePreparation(stream, PrepareState::Pending);
+
+    // Even with CanRun set, a Pending preparation must keep the stream WAITING
+    // and must NOT clear the gate.
+    stream->reportEvent(StreamEvents::CanRun);
+    auto new_state = stream->moveToNext();
+    ASSERT_EQ(new_state, StreamState::WAITING);
+    ASSERT_EQ(stream->getStatus(), StreamState::WAITING);
+    ASSERT_TRUE(stream->preparation_pending_);
+    ASSERT_GE(fake->polls, 1);
+}
+
+TEST_F(GenerateStreamStateTest, testPreparationReadyAllowsProgress) {
+    auto stream = createStream();
+
+    // Mirror the decode-side fast path so WAITING->RUNNING needs no async load:
+    // pre-init the KV block and mark LoadInitiated, then grant CanRun.
+    auto& resource = stream->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream->reportEvent(StreamEvents::LoadInitiated);
+
+    auto fake = armFakePreparation(stream, PrepareState::Ready);
+    stream->reportEvent(StreamEvents::CanRun);
+
+    // Resolve tick: prepare() returns Ready, the gate clears but holds one extra
+    // WAITING tick (batch-isolation: the freshly-ready stream must re-pass the
+    // scheduler's memory check before joining a batch).
+    auto resolve_state = stream->moveToNext();
+    ASSERT_EQ(resolve_state, StreamState::WAITING);
+    ASSERT_FALSE(stream->preparation_pending_);
+    ASSERT_EQ(fake->polls, 1);
+
+    // Next tick: gate is no longer armed, so the state machine advances.
+    auto run_state = stream->moveToNext();
+    ASSERT_EQ(run_state, StreamState::RUNNING);
+    // The resolved processor is not polled again.
+    ASSERT_EQ(fake->polls, 1);
+}
+
+TEST_F(GenerateStreamStateTest, testPreparationFailedFinishesWithError) {
+    auto stream = createStream();
+    auto fake   = armFakePreparation(stream, PrepareState::Failed);
+
+    // Resolve tick reports the error and clears the gate (returns WAITING).
+    auto resolve_state = stream->moveToNext();
+    ASSERT_EQ(resolve_state, StreamState::WAITING);
+    ASSERT_TRUE(stream->hasError());
+    ASSERT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    ASSERT_FALSE(stream->preparation_pending_);
+    ASSERT_EQ(fake->polls, 1);
+
+    // Next tick: the state machine sees the Error event and finishes the stream.
+    auto finish_state = stream->moveToNext();
+    ASSERT_EQ(finish_state, StreamState::FINISHED);
+}
+
+TEST_F(GenerateStreamStateTest, testPreparationPendingDoesNotMaskExternalError) {
+    auto stream = createStream();
+    auto fake   = armFakePreparation(stream, PrepareState::Pending);
+    stream->reportEvent(StreamEvents::CanRun);
+
+    stream->reportEvent(StreamEvents::Error, ErrorCode::WAIT_TO_RUN_TIMEOUT, "decode allocate wait timeout");
+
+    auto state = stream->moveToNext();
+    ASSERT_EQ(state, StreamState::FINISHED);
+    ASSERT_TRUE(stream->hasError());
+    ASSERT_EQ(stream->statusInfo().code(), ErrorCode::WAIT_TO_RUN_TIMEOUT);
+    ASSERT_FALSE(stream->preparation_pending_);
+    ASSERT_EQ(fake->polls, 0);
+}
+
+TEST_F(GenerateStreamStateTest, testPreparationPrepareExceptionFinishesWithError) {
+    auto stream         = createStream();
+    auto fake           = armFakePreparation(stream, PrepareState::Pending);
+    fake->throw_on_prepare = true;
+
+    auto resolve_state = stream->moveToNext();
+    ASSERT_EQ(resolve_state, StreamState::WAITING);
+    ASSERT_TRUE(stream->hasError());
+    ASSERT_EQ(stream->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    ASSERT_FALSE(stream->preparation_pending_);
+
+    auto finish_state = stream->moveToNext();
+    ASSERT_EQ(finish_state, StreamState::FINISHED);
 }
 
 }  // namespace rtp_llm

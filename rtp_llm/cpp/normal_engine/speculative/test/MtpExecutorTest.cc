@@ -690,8 +690,9 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
         {draft_sampler_output_1, draft_sampler_output_2, draft_sampler_output_3, next_draft_sampler_output});
 
     // set fake speculative sampler outputs
-    auto accept_tokens              = torch::tensor({{3, 2, 0}}, torch::kInt32);
-    auto speculative_sampler_output = spec::SpeculativeSamplerOutput{{accept_tokens}, {3}};
+    spec::SpeculativeSamplerOutput speculative_sampler_output;
+    speculative_sampler_output.accept_tokens_cpu = torch::tensor({{3, 2, 0}}, torch::kInt32);
+    speculative_sampler_output.accept_len_cpu    = torch::tensor({3}, torch::kInt32);
     auto draft_spec_sample_input    = SamplerOutput{};
     auto target_spec_sample_input   = SamplerOutput{};
 
@@ -864,9 +865,10 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     components.fake_sampler->setOutputs({sampler_output});
 
     // set fake speculative sampler outputs
-    auto accept_tokens1             = torch::tensor({{3}}, torch::kInt32);
-    auto accept_tokens2             = torch::tensor({{3, 0, 2, 2, 1}}, torch::kInt32);
-    auto speculative_sampler_output = spec::SpeculativeSamplerOutput{{accept_tokens1, accept_tokens2}, {1, 5}};
+    spec::SpeculativeSamplerOutput speculative_sampler_output;
+    speculative_sampler_output.accept_tokens_cpu =
+        torch::tensor({{3, 0, 0, 0, 0}, {3, 0, 2, 2, 1}}, torch::kInt32);
+    speculative_sampler_output.accept_len_cpu = torch::tensor({1, 5}, torch::kInt32);
     auto draft_spec_sample_input    = SamplerOutput{};
     auto target_spec_sample_input   = SamplerOutput{};
 

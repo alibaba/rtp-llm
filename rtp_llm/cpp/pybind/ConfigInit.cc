@@ -1160,6 +1160,71 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return c;
             }));
 
+    // Register GrammarConfig
+    py::class_<GrammarConfig>(m, "GrammarConfig")
+        .def(py::init<>())
+        .def_readwrite("grammar_backend", &GrammarConfig::grammar_backend)
+        .def_readwrite("constrained_json_disable_any_whitespace",
+                       &GrammarConfig::constrained_json_disable_any_whitespace)
+        .def_readwrite("compile_timeout_ms", &GrammarConfig::compile_timeout_ms)
+        .def_readwrite("mask_wait_timeout_ms", &GrammarConfig::mask_wait_timeout_ms)
+        .def_readwrite("num_workers", &GrammarConfig::num_workers)
+        .def_readwrite("tokenizer_info_json", &GrammarConfig::tokenizer_info_json)
+        .def_readwrite("override_stop_tokens", &GrammarConfig::override_stop_tokens)
+        .def(py::pickle(
+            [](const GrammarConfig& self) {
+                return py::make_tuple(self.grammar_backend,
+                                      self.constrained_json_disable_any_whitespace,
+                                      self.compile_timeout_ms,
+                                      self.num_workers,
+                                      self.tokenizer_info_json,
+                                      self.override_stop_tokens,
+                                      self.mask_wait_timeout_ms);
+            },
+            [](py::tuple t) {
+                if (t.size() != 6 && t.size() != 7)
+                    throw std::runtime_error("Invalid state!");
+                GrammarConfig c;
+                try {
+                    c.grammar_backend                         = t[0].cast<std::string>();
+                    c.constrained_json_disable_any_whitespace = t[1].cast<bool>();
+                    c.compile_timeout_ms                      = t[2].cast<int64_t>();
+                    c.num_workers                             = t[3].cast<int>();
+                    c.tokenizer_info_json                     = t[4].cast<std::string>();
+                    c.override_stop_tokens                    = t[5].cast<std::vector<int32_t>>();
+                    if (t.size() >= 7) {
+                        c.mask_wait_timeout_ms = t[6].cast<int64_t>();
+                    }
+                } catch (const std::exception& e) {
+                    throw std::runtime_error(std::string("GrammarConfig unpickle error: ") + e.what());
+                }
+                return c;
+            }));
+
+    // Register ReasoningConfig
+    py::class_<ReasoningConfig>(m, "ReasoningConfig")
+        .def(py::init<>())
+        .def_readwrite("reasoning_parser", &ReasoningConfig::reasoning_parser)
+        .def_readwrite("think_start_id", &ReasoningConfig::think_start_id)
+        .def_readwrite("think_end_id", &ReasoningConfig::think_end_id)
+        .def(py::pickle(
+            [](const ReasoningConfig& self) {
+                return py::make_tuple(self.reasoning_parser, self.think_start_id, self.think_end_id);
+            },
+            [](py::tuple t) {
+                if (t.size() != 3)
+                    throw std::runtime_error("Invalid state!");
+                ReasoningConfig c;
+                try {
+                    c.reasoning_parser = t[0].cast<std::string>();
+                    c.think_start_id   = t[1].cast<int64_t>();
+                    c.think_end_id     = t[2].cast<int64_t>();
+                } catch (const std::exception& e) {
+                    throw std::runtime_error(std::string("ReasoningConfig unpickle error: ") + e.what());
+                }
+                return c;
+            }));
+
     // Register RuntimeConfig - only expose its own members, not sub-config members
     py::class_<RuntimeConfig> runtime_config(m, "RuntimeConfig");
     runtime_config.def(py::init<>())

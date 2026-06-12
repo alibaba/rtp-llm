@@ -1,13 +1,162 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 
 #include <numeric>
+#include <optional>
+#include <stdexcept>
 
 #include "RPCPool.h"
+#include "autil/legacy/json.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+namespace {
+
+using JsonMap = autil::legacy::json::JsonMap;
+
+// One primitive for the whole file: read an Any as a string. Bare strings
+// pass through; nested objects/arrays are re-serialized to JSON. Empty strings
+// and serialization failures collapse to nullopt so callers can `if (auto s =
+// ...)` uniformly. This is the SOLE place the try-string-then-serialize
+// pattern lives — every other helper goes through it.
+std::optional<std::string> anyToString(const autil::legacy::Any& value) {
+    try {
+        const auto s = autil::legacy::AnyCast<std::string>(value);
+        return s.empty() ? std::nullopt : std::optional<std::string>(s);
+    } catch (...) {}
+    try {
+        return autil::legacy::ToJsonString(value, true);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+// map[key] -> anyToString. Replaces the old extractJsonField.
+std::optional<std::string> mapField(const JsonMap& map, const char* key) {
+    const auto it = map.find(key);
+    return it == map.end() ? std::nullopt : anyToString(it->second);
+}
+
+// If `payload` parses as an OpenAI json_schema envelope ({"name":..., "schema": {...}}),
+// return the unwrapped schema; otherwise nullopt (caller treats payload as-is).
+// Bare JSON Schemas commonly have type/properties/$schema/$defs/$ref at top
+// level — if any is present, the payload is itself a schema, not an envelope.
+std::optional<std::string> unwrapJsonSchemaEnvelope(const std::string& payload) {
+    try {
+        const auto map = autil::legacy::AnyCast<JsonMap>(autil::legacy::json::ParseJson(payload));
+        if (map.find("schema") == map.end()) {
+            return std::nullopt;
+        }
+        for (const char* k : {"type", "properties", "$schema", "$defs", "$ref"}) {
+            if (map.find(k) != map.end()) {
+                return std::nullopt;
+            }
+        }
+        return mapField(map, "schema");
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+// Sole normalization point for response_format. When a request arrives with
+// response_format set but no concrete grammar field, we populate the matching
+// grammar field so the engine can compile the constraint. The Python layer
+// only passes response_format through verbatim (there is no Python-side
+// normalizer); doing it here means every client — Python gRPC, native C++
+// HTTP, non-Python gRPC — gets identical behavior.
+struct NormalizedGrammar {
+    std::optional<std::string> json_schema;
+    std::optional<std::string> regex;
+    std::optional<std::string> ebnf;
+    std::optional<std::string> structural_tag;
+
+    bool empty() const {
+        return !json_schema.has_value() && !regex.has_value() && !ebnf.has_value()
+               && !structural_tag.has_value();
+    }
+};
+
+// Per-type dispatch table: type-name -> (payload-field, NormalizedGrammar member).
+// Every entry uses the same {mapField, optional unwrap} extraction path; adding
+// a new grammar type is one row. text/json_object stay outside because they
+// have no payload field (sentinel and literal default, respectively).
+struct ResponseFormatRule {
+    const char*                                    type_name;
+    const char*                                    payload_key;
+    std::optional<std::string> NormalizedGrammar::*target;
+    bool                                           unwrap_envelope;
+};
+static constexpr ResponseFormatRule kResponseFormatRules[] = {
+    {"json_schema", "json_schema", &NormalizedGrammar::json_schema, true},
+    {"regex", "pattern", &NormalizedGrammar::regex, false},
+    {"ebnf", "grammar", &NormalizedGrammar::ebnf, false},
+    {"structural_tag", "structural_tag", &NormalizedGrammar::structural_tag, false},
+};
+
+// Parse the OpenAI-style response_format envelope. The single backstop at the
+// end rejects anything that didn't yield a usable grammar field AND wasn't the
+// explicit "text" sentinel, so unknown / malformed types produce INVALID_PARAMS
+// instead of silently falling through as unconstrained.
+NormalizedGrammar normalizeResponseFormat(const std::string& response_format_str) {
+    NormalizedGrammar out;
+
+    if (response_format_str.empty()) {
+        return out;
+    }
+
+    JsonMap response_map;
+    try {
+        response_map = autil::legacy::AnyCast<JsonMap>(autil::legacy::json::ParseJson(response_format_str));
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("normalizeResponseFormat: response_format is not a valid JSON object: %s", e.what());
+        throw std::invalid_argument(std::string("response_format is not a valid JSON object: ") + e.what());
+    }
+    if (response_map.empty()) {
+        return out;
+    }
+
+    const std::string format_type = mapField(response_map, "type").value_or("");
+
+    if (format_type == "text") {
+        return out;  // OpenAI explicit "no constraint" sentinel.
+    }
+    if (format_type == "json_object") {
+        // OpenAI "any valid JSON object" shorthand — mirrors the Python
+        // client: config.json_schema = json.dumps({"type": "object"}).
+        out.json_schema = R"({"type":"object"})";
+    } else {
+        for (const auto& rule : kResponseFormatRules) {
+            if (format_type != rule.type_name) {
+                continue;
+            }
+            auto raw = mapField(response_map, rule.payload_key);
+            if (raw && rule.unwrap_envelope) {
+                if (auto unwrapped = unwrapJsonSchemaEnvelope(*raw)) {
+                    raw = std::move(unwrapped);
+                }
+            }
+            out.*(rule.target) = std::move(raw);
+            break;
+        }
+    }
+
+    if (out.empty()) {
+        const std::string preview =
+            response_format_str.size() > 256 ? response_format_str.substr(0, 256) + "..." : response_format_str;
+        RTP_LLM_LOG_WARNING(
+            "normalizeResponseFormat: type='%s' did not yield a usable grammar field; response_format=%s",
+            format_type.c_str(),
+            preview.c_str());
+        throw std::invalid_argument("response_format type='" + format_type
+                                    + "' did not yield a usable grammar field "
+                                      "(check 'type' and the matching payload field)");
+    }
+    return out;
+}
+
+}  // namespace
 #define TRANS_OPTIONAL(name)                                                                                           \
     if (config_proto->has_##name()) {                                                                                  \
         generate_config->name = config_proto->name().value();                                                          \
@@ -85,10 +234,18 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(top_p_decay);
     TRANS_OPTIONAL(top_p_min);
     TRANS_OPTIONAL(top_p_reset_ids);
+    TRANS_OPTIONAL(json_schema);
+    TRANS_OPTIONAL(regex);
+    TRANS_OPTIONAL(ebnf);
+    TRANS_OPTIONAL(structural_tag);
+    TRANS_OPTIONAL(response_format);
     TRANS_OPTIONAL(task_id);
     TRANS_OPTIONAL(adapter_name);
     generate_config->in_think_mode       = config_proto->in_think_mode();
     generate_config->max_thinking_tokens = config_proto->max_thinking_tokens();
+    for (const auto& token_id : config_proto->begin_think_token_ids()) {
+        generate_config->begin_think_token_ids.push_back(token_id);
+    }
     for (const auto& token_id : config_proto->end_think_token_ids()) {
         generate_config->end_think_token_ids.push_back(token_id);
     }
@@ -116,6 +273,40 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
         }
         generate_config->banned_combo_token_ids.push_back(std::move(combo));
     }
+
+    if (generate_config->json_schema.has_value()) {
+        if (auto unwrapped = unwrapJsonSchemaEnvelope(*generate_config->json_schema)) {
+            generate_config->json_schema = std::move(*unwrapped);
+        }
+    }
+    // Mirror the Python normalizer: only fall back to response_format if NO
+    // concrete grammar field was supplied. If any one was set, respect the
+    // client's explicit choice.
+    const bool any_grammar_set = generate_config->json_schema.has_value()
+                                 || generate_config->regex.has_value()
+                                 || generate_config->ebnf.has_value()
+                                 || generate_config->structural_tag.has_value();
+    if (!any_grammar_set && config_proto->has_response_format()) {
+        auto norm = normalizeResponseFormat(config_proto->response_format().value());
+        if (norm.json_schema.has_value()) {
+            generate_config->json_schema = std::move(*norm.json_schema);
+        }
+        if (norm.regex.has_value()) {
+            generate_config->regex = std::move(*norm.regex);
+        }
+        if (norm.ebnf.has_value()) {
+            generate_config->ebnf = std::move(*norm.ebnf);
+        }
+        if (norm.structural_tag.has_value()) {
+            generate_config->structural_tag = std::move(*norm.structural_tag);
+        }
+    }
+    // QueryConverter is the sole normalization point: the grammar intent (if any)
+    // now lives in the concrete fields above. Drop the raw envelope so a non-grammar
+    // response_format (e.g. {"type":"text"}) does not leave hasStructuredOutputRequest()
+    // — which only sees the optional's presence — spuriously true and route a plain
+    // request through the grammar admission path.
+    generate_config->response_format.reset();
 
     return generate_config;
 }

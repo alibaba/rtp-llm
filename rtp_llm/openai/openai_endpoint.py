@@ -27,6 +27,7 @@ from rtp_llm.openai.api_datatype import (
     FunctionCall,
     ModelCard,
     ModelList,
+    ResponseFormat,
     RoleEnum,
     ToolCall,
     UsageInfo,
@@ -164,6 +165,45 @@ class OpenaiEndpoint(object):
     ) -> List[List[int]]:
         return [i for i, _ in itertools.groupby(sorted(stop_words_list))]
 
+    @staticmethod
+    def _apply_response_format(rf: "ResponseFormat", config: GenerateConfig) -> None:
+        """Project a validated ResponseFormat onto GenerateConfig grammar fields.
+
+        Shape and required-payload checks live in ResponseFormat._check_payload
+        (pydantic model_validator), which always runs before this projection on
+        every request reaching the OpenAI endpoint; unknown `type` is rejected
+        by the pydantic Literal at the same layer. We translate only here and
+        do not re-validate.
+
+        The top-level OpenAI ResponseFormat is the single source of truth for a
+        request's grammar. Clear every grammar-bearing field on the merged
+        config first (json_schema / regex / ebnf / structural_tag *and*
+        config.response_format) so a stale constraint left over in
+        extra_configs cannot survive — e.g. extra_configs.response_format =
+        json_schema while the top-level rf.type == "text" must end up
+        unconstrained, not still json-schema-locked.
+        """
+        config.json_schema = None
+        config.regex = None
+        config.ebnf = None
+        config.structural_tag = None
+        config.response_format = None
+        if rf.type == "json_schema":
+            config.json_schema = json.dumps(
+                rf.json_schema.schema, ensure_ascii=False, separators=(",", ":")
+            )
+        elif rf.type == "json_object":
+            config.json_schema = json.dumps({"type": "object"})
+        elif rf.type == "regex":
+            config.regex = rf.pattern
+        elif rf.type == "ebnf":
+            config.ebnf = rf.grammar
+        elif rf.type == "structural_tag":
+            config.structural_tag = json.dumps(
+                rf.structural_tag, ensure_ascii=False, separators=(",", ":")
+            )
+        # rf.type == "text" falls through with all four fields cleared above.
+
     def _extract_generation_config(
         self, request: ChatCompletionRequest
     ) -> GenerateConfig:
@@ -222,8 +262,12 @@ class OpenaiEndpoint(object):
             and isinstance(request.extra_configs.max_thinking_tokens, int)
         ):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
-        # add_thinking_params now accepts generate_env_config parameter
+        # Structured output: extract grammar constraints from response_format.
+        if request.response_format is not None:
+            self._apply_response_format(request.response_format, config)
         config.add_thinking_params(self.tokenizer, self.generate_env_config)
+        if request.disable_thinking():
+            config.in_think_mode = False
         if request.debug_info:
             config.return_output_ids = True
         return config

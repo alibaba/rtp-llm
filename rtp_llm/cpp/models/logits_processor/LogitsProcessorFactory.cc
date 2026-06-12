@@ -7,8 +7,21 @@
 
 namespace rtp_llm {
 
+namespace {
+// Set once during engine init (single thread, before any request is enqueued)
+// and only read afterwards, so no additional synchronization is required.
+LogitsProcessorFactory::ExtraProcessorFactory& extraFactoryRef() {
+    static LogitsProcessorFactory::ExtraProcessorFactory factory;
+    return factory;
+}
+}  // namespace
+
 void LogitsProcessorFactory::init(const std::string& ckpt_path, const std::string& tree_decode_config) {
     PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(ckpt_path, tree_decode_config);
+}
+
+void LogitsProcessorFactory::registerExtraFactory(ExtraProcessorFactory factory) {
+    extraFactoryRef() = std::move(factory);
 }
 
 std::vector<BaseLogitsProcessorPtr>
@@ -37,6 +50,15 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
     auto multi_seq_processor = MultiSeqLogitsProcessor::fromGenerateInput(generate_input, eos_token_id);
     if (multi_seq_processor != nullptr) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(multi_seq_processor));
+    }
+
+    // Module-injected processors (e.g. structured output / grammar). Created here
+    // so the stream stays free of any upward dependency; the processor may be
+    // not-yet-ready and resolve later through prepare().
+    if (auto& extra_factory = extraFactoryRef()) {
+        if (auto extra = extra_factory(generate_input)) {
+            result.push_back(std::move(extra));
+        }
     }
 
     return result;

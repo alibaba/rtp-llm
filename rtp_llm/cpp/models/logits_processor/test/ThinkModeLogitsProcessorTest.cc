@@ -30,10 +30,11 @@ public:
         for (size_t i = 0; i < batch_size; i++) {
             auto think_info = StreamThinkInfo(think_mode,
                                               max_thinking_tokens[i],
+                                              std::vector<int>{},
                                               end_think_token_ids,
                                               0,
                                               0,
-                                              0,
+                                              false,
                                               std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids));
             think_info.dfa_ptr->forceSetStatus(think_status[i]);
             think_infos.push_back(think_info);
