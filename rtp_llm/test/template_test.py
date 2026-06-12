@@ -335,6 +335,8 @@ class TemplateTest(TestCase):
         )
 
     def test_qwen35_moe_mtp_uses_qwen35_renderer(self):
+        assert _renderer_factory["qwen35_moe"] is Qwen35Renderer
+        assert _renderer_factory["qwen35_dense"] is Qwen35Renderer
         assert _renderer_factory["qwen35_moe_mtp"] is Qwen35Renderer
 
     def test_qwen35_passes_chat_template_kwargs_to_template(self):
