@@ -129,6 +129,7 @@ class CaseRunner(object):
                 return task_states
             assert server_manager is not None, "server manager should not be None"
             server_manager.stop_server()
+            self._print_sp_accept_summary(server_manager)
             if enable_remote_cache and self.remote_kvcm_server is not None:
                 self.remote_kvcm_server.stop_server()
                 self.remote_kvcm_server.copy_logs()
@@ -137,6 +138,44 @@ class CaseRunner(object):
             summarize_and_cleanup_coredumps(
                 os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "")
             )
+
+    def _print_sp_accept_summary(self, server_manager: MagaServerManager) -> None:
+        # Advisory only — never fails the smoke. Reads [sp_accept_trace] lines
+        # emitted at LOG_LEVEL=DEBUG, then prints
+        # one verdict line per grammar kind so accept_len degradation under
+        # grammar surfaces in CI logs.
+        log_path = server_manager.log_file_path
+        if not log_path or not os.path.exists(log_path):
+            return
+        try:
+            from smoke.spec_accept_analyzer import _verdict, parse_lines, summarize
+        except ImportError as e:
+            logging.warning(f"[sp_accept_check] analyzer import failed: {e}")
+            return
+        try:
+            by_grammar, _by_stream, _steps, total = parse_lines([log_path])
+        except Exception as e:
+            logging.warning(f"[sp_accept_check] parse failed: {e}")
+            return
+        if total == 0:
+            return
+        baseline_mean = summarize(by_grammar.get("none", [])).get("mean", 0)
+        for kind in sorted(by_grammar.keys()):
+            s = summarize(by_grammar[kind])
+            if kind == "none":
+                logging.info(f"[sp_accept_check] grammar={kind:<14} mean={s['mean']} (baseline)")
+                continue
+            if baseline_mean and baseline_mean > 0:
+                ratio = s["mean"] / baseline_mean
+                logging.info(
+                    f"[sp_accept_check] grammar={kind:<14} mean={s['mean']} "
+                    f"ratio={ratio:.3f} -> {_verdict(ratio)}"
+                )
+            else:
+                logging.info(
+                    f"[sp_accept_check] grammar={kind:<14} mean={s['mean']} "
+                    f"(no baseline=none stream in this run)"
+                )
 
     def _start_remote_kvcm_server(self) -> Optional[RemoteKVCMServer]:
         server_path = os.path.join(os.environ["TEST_SRCDIR"], os.environ["TEST_WORKSPACE"], "external/remote_kv_cache_manager_server")
@@ -169,7 +208,7 @@ class CaseRunner(object):
                     task_states = results[0]
                 else:
                     for result in results:
-                        if str(result) != str(str(results[0])):
+                        if str(result) != str(results[0]):
                             task_states = result
         else:
             task_states = self._curl_server_impl(server_manager, self.task_info)
@@ -207,6 +246,17 @@ class CaseRunner(object):
         if q_r.get("tau2_bench", False):
             return Tau2BenchComparer
         if "messages" in q_r["query"]:
+            if (
+                "response_format" in q_r["query"]
+                or q_r.get("skip_content_check")
+                or q_r.get("expect_grammar_error")
+            ):
+                # GrammarConstraintComparer dispatches by response_format.type
+                # and also honours two qr_info flags:
+                # - skip_content_check: mixed-batch non-grammar sidecar.
+                # - expect_grammar_error: malformed-schema error-path smoke.
+                from smoke.grammar_constraint_comparer import GrammarConstraintComparer
+                return GrammarConstraintComparer
             return OpenaiComparer
         elif request_endpoint in [
             "/v1/embeddings",

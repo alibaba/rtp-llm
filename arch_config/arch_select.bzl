@@ -11,8 +11,22 @@ def copy_all_so():
     copy_so("@rtp_llm//:th_transformer_config")
     copy_so("@rtp_llm//:rtp_compute_ops")
 
+_CUDA_ONLY_REQUIREMENTS = ["triton"]
+
 def requirement(names):
     for name in names:
+        if name in _CUDA_ONLY_REQUIREMENTS:
+            native.py_library(
+                name = name,
+                deps = select({
+                    "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
+                    "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
+                    "@rtp_llm//:using_cuda12_arm": [requirement_gpu_cuda12_9(name)],
+                    "//conditions:default": ["@rtp_llm//rtp_llm:empty_target"],
+                }),
+                visibility = ["//visibility:public"],
+            )
+            continue
         native.py_library(
             name = name,
             deps = select({
@@ -129,6 +143,9 @@ def cuda_register():
 
 def triton_deps(names):
     return select({
+        "@rtp_llm//:cuda_pre_12_9": ["//rtp_llm:%s" % n for n in names],
+        "@rtp_llm//:using_cuda12_9_x86": ["//rtp_llm:%s" % n for n in names],
+        "@rtp_llm//:using_cuda12_arm": ["//rtp_llm:%s" % n for n in names],
         "//conditions:default": [],
     })
 

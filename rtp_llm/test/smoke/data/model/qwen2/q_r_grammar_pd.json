@@ -1,0 +1,153 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2-1.5B-Instruct/",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Generate a person profile as JSON."
+                    }
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "person",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string"
+                                },
+                                "age": {
+                                    "type": "integer"
+                                },
+                                "city": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "name",
+                                "age",
+                                "city"
+                            ]
+                        }
+                    }
+                },
+                "max_tokens": 128,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "partial": false
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "_comment": "PD-sep json_schema case \u2014 GrammarConstraintComparer routes json_schema to byte-equal vs golden is skipped here (content is placeholder); content is validated by json.loads path below if enabled. For now: only regex cases are strictly validated.",
+            "grammar_constraint_only": true
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Give me a hex color code."
+                    }
+                ],
+                "response_format": {
+                    "type": "regex",
+                    "pattern": "#[0-9A-Fa-f]{6}"
+                },
+                "max_tokens": 16,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "partial": false
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            },
+            "_comment": "PD-sep regex hex color \u2014 key verification: xgrammar's grammar object must travel from prefill role to decode role and keep its advanced NFA state (prefill produced the first token; decode must resume from state after that token)."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Give me a US zip code."
+                    }
+                ],
+                "response_format": {
+                    "type": "regex",
+                    "pattern": "[0-9]{5}"
+                },
+                "max_tokens": 12,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "partial": false
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                }
+            }
+        }
+    ]
+}

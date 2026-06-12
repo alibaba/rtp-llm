@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorModules.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -51,6 +52,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
     runtime_config(params.runtime_config),
+    grammar_config_(params.grammar_config),
     eplb_config(params.eplb_config),
     pd_sep_config(params.pd_sep_config),
     profiling_debug_logging_config(params.profiling_debug_logging_config),
@@ -111,6 +113,17 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     // 此时checkpoint已加载完成，可以将glibc缓存的内存归还给操作系统
     releaseHostMemoryCache();
 
+    // Composition root: wire the structured-output logits-processor module once,
+    // through a single neutral entry. The engine stays backend-agnostic — it does
+    // not name GrammarCompiler / GrammarLogitsProcessor; the module installs its
+    // compile service and registers a pending-processor factory with
+    // LogitsProcessorFactory, so every structured-output stream gets a logits
+    // processor it resolves via prepare() while WAITING (mirrors KV-cache async
+    // load) rather than any scheduler gate. Every other downstream component
+    // (FIFOScheduler, GenerateStream, NormalExecutor, the MTP spec layer) reaches
+    // structured output only through the generic LogitsProcessorFactory /
+    // stream_logits_processor seams.
+    registerStructuredOutputLogitsProcessor(params.grammar_config);
     initScheduler();
     (void)startLoop();
 }
@@ -138,8 +151,10 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
 
 void NormalEngine::initScheduler() {
     if (runtime_config.use_batch_decode_scheduler) {
-        scheduler_.reset(new BatchDecodeScheduler(
-            runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
+        scheduler_.reset(new BatchDecodeScheduler(runtime_config,
+                                                  resource_context_.cache_manager,
+                                                  metrics_reporter_,
+                                                  parallelism_config.dp_rank));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");
     } else {
         scheduler_.reset(new FIFOScheduler(runtime_config,
@@ -148,7 +163,8 @@ void NormalEngine::initScheduler() {
                                            parallelism_config,
                                            model_specific_config,
                                            resource_context_.cache_manager,
-                                           metrics_reporter_));
+                                           metrics_reporter_,
+                                           1));
         RTP_LLM_LOG_INFO("create fifo scheduler done");
     }
 }
@@ -403,6 +419,7 @@ absl::Status NormalEngine::trySaveStepError() const {
 std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    stream->initProcessorStreamRefs();
     return stream;
 }
 
@@ -414,6 +431,7 @@ void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    stream->initProcessorStreamRefs();
     stream->setReserveStep(reserve_step_);
     (void)scheduler_->enqueue(stream);
     return stream;
@@ -426,6 +444,7 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
     for (auto& inp : inputs) {
         auto stream = std::make_shared<NormalGenerateStream>(
             inp, model_config_, runtime_config, resource_context_, metrics_reporter_);
+        stream->initProcessorStreamRefs();
         stream->setReserveStep(reserve_step_);
         streams.push_back(stream);
     }

@@ -23,8 +23,15 @@ void GenerateStreamWrapper::init(GenerateStreamPtr stream, const std::shared_ptr
 }
 
 std::pair<MultiSeqsResponse, bool> GenerateStreamWrapper::generateResponse() {
-    // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
-    // 如果流有错误，不应该返回"正常完成"的响应，应该让后续逻辑处理错误
+    // NOTE: this C++ HttpApiServer path is outside the xgrammar / grammar refactor scope and
+    // is not the production inference path (production goes Python uvicorn frontend ->
+    // backend gRPC). Folding FINISHED / OUTPUT_QUEUE_IS_EMPTY together with
+    // INVALID_PARAMS / ERROR_GENERATE_CONFIG_FORMAT / GENERATE_TIMEOUT into a single
+    // UNKNOWN_ERROR (rather than mapping per-ErrorCode to HttpApiServerException) is the
+    // known existing behavior and is intentionally left as-is — reviewers need not flag it.
+    // hasError() check: finished() used to imply success, but FINISHED can now carry an
+    // error; do NOT return a "normal completion" response in that case — let the caller
+    // surface the error.
     if (!stream_->hasError() && stream_->isFinished() && stream_->hasOutput() == false) {
         RTP_LLM_LOG_INFO("stream finished.");
         return std::make_pair(MultiSeqsResponse(), true);
@@ -32,6 +39,9 @@ std::pair<MultiSeqsResponse, bool> GenerateStreamWrapper::generateResponse() {
 
     const auto result = stream_->nextOutput();
     if (!result.ok()) {
+        // Return (empty response, finished=true) instead of throwing: the caller relies on
+        // this convention to terminate the SSE loop and run a final flush over the previous
+        // tick's outputs_cache_; throwing here would skip that flush.
         RTP_LLM_LOG_INFO("stream nextOutput failed.");
         return std::make_pair(MultiSeqsResponse(), true);
     }

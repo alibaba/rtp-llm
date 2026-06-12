@@ -5,10 +5,12 @@ cc_library(
     name = "sample_infos",
     hdrs = [
         "SampleInfos.h",
+        "SpecLogitsProcessorTypes.h",
     ],
     deps = [
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
+        "//rtp_llm/cpp/pybind:py_utils",
     ],
     visibility = ["//visibility:public"],
 )
@@ -48,12 +50,14 @@ cc_library(
     name = "logits_processor",
     hdrs = [
         "logits_processor/BaseLogitsProcessor.h",
+        "logits_processor/SpecLogitsProcessor.h",
         "logits_processor/MultiSeqLogitsProcessor.h",
         "logits_processor/LogitsProcessorStates.h",
         "logits_processor/ThinkModeLogitsProcessor.h",
         "logits_processor/TreeLogitsProcessor.h",
         "logits_processor/RecommendationLogitsProcessor.h",
         "logits_processor/LogitsProcessorFactory.h",
+        "logits_processor/LogitsProcessorModules.h",
     ],
     srcs = [
         "logits_processor/BaseLogitsProcessor.cc",
@@ -69,10 +73,18 @@ cc_library(
         ":dfa_utils",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/models/logits_processor/xgrammar:grammar_compiler",
         "//rtp_llm/cpp/pybind:py_utils",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
+        "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
     ] + select({
-        "//:using_cuda": ["//rtp_llm/models_py/bindings/cuda/ops:standalone_ops"],
+        "//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
+            "//rtp_llm/cpp/models/logits_processor/xgrammar:xgrammar_kernels",
+        ],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
@@ -124,6 +136,7 @@ cc_library(
         ":context_parallel",
         "//:rtp_compute_ops",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:cache",

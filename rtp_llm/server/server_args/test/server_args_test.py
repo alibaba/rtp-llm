@@ -257,5 +257,111 @@ class ServerArgsSetTest(TestCase):
         )
 
 
+class ServerArgsGrammarConfigTest(TestCase):
+    """Cover every CLI-wired field on GrammarConfig (--grammar_* /
+    --constrained_json_*) and ReasoningConfig (--reasoning_parser): default
+    value, CLI binding, env binding, and CLI-overrides-env. The remaining
+    fields (tokenizer_info_json, think_end_id, ...) are derived at engine
+    startup, not CLI parameters, so they are out of scope here. Matters
+    because GrammarCompiler reads these *only* from the config objects
+    produced here — no other code path sets them."""
+
+    def setUp(self):
+        environ_backup = os.environ.copy()
+        argv_backup = sys.argv.copy()
+
+        # Register restoration BEFORE mutating global state so it runs even if
+        # setUp itself (or _setup) raises — a bare tearDown would be skipped on a
+        # setUp failure and leave os.environ cleared for the rest of the suite.
+        def _restore():
+            os.environ.clear()
+            os.environ.update(environ_backup)
+            sys.argv = argv_backup
+
+        self.addCleanup(_restore)
+
+        os.environ.clear()
+        sys.argv = ["prog"]
+
+    def _setup(self):
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        return rtp_llm.server.server_args.server_args.setup_args()
+
+    def test_grammar_defaults(self):
+        """All five fields match defaults when no input is given.
+        Regression guard for the wiring in init_grammar_group_args /
+        init_reasoning_group_args."""
+        py_env_configs = self._setup()
+        g = py_env_configs.grammar_config
+        r = py_env_configs.reasoning_config
+
+        self.assertEqual(g.grammar_backend, "xgrammar")
+        self.assertEqual(g.constrained_json_disable_any_whitespace, False)
+        self.assertEqual(r.reasoning_parser, "")
+        self.assertEqual(g.compile_timeout_ms, 60000)
+        self.assertEqual(g.num_workers, 32)
+
+    def test_grammar_cmd_args(self):
+        """Every CLI flag binds to the right config field, with correct types."""
+        sys.argv = [
+            "prog",
+            "--grammar_backend",
+            "none",
+            "--constrained_json_disable_any_whitespace",
+            "1",
+            "--reasoning_parser",
+            "qwen3",
+            "--grammar_compile_timeout_ms",
+            "12345",
+            "--grammar_num_workers",
+            "7",
+        ]
+
+        cfgs = self._setup()
+        g = cfgs.grammar_config
+        r = cfgs.reasoning_config
+        self.assertEqual(g.grammar_backend, "none")
+        self.assertEqual(g.constrained_json_disable_any_whitespace, True)
+        self.assertEqual(r.reasoning_parser, "qwen3")
+        self.assertEqual(g.compile_timeout_ms, 12345)
+        self.assertEqual(g.num_workers, 7)
+
+    def test_grammar_env_vars(self):
+        """Every env_name binds to the right config field."""
+        os.environ["GRAMMAR_BACKEND"] = "none"
+        os.environ["CONSTRAINED_JSON_DISABLE_ANY_WHITESPACE"] = "1"
+        os.environ["REASONING_PARSER"] = "qwen3"
+        os.environ["GRAMMAR_COMPILE_TIMEOUT_MS"] = "42000"
+        os.environ["GRAMMAR_NUM_WORKERS"] = "5"
+
+        cfgs = self._setup()
+        g = cfgs.grammar_config
+        r = cfgs.reasoning_config
+        self.assertEqual(g.grammar_backend, "none")
+        self.assertEqual(g.constrained_json_disable_any_whitespace, True)
+        self.assertEqual(r.reasoning_parser, "qwen3")
+        self.assertEqual(g.compile_timeout_ms, 42000)
+        self.assertEqual(g.num_workers, 5)
+
+    def test_grammar_cmd_overrides_env(self):
+        """CLI wins over env on the fields where both are set."""
+        os.environ["GRAMMAR_COMPILE_TIMEOUT_MS"] = "1000"
+        os.environ["GRAMMAR_NUM_WORKERS"] = "1"
+
+        sys.argv = [
+            "prog",
+            "--grammar_compile_timeout_ms",
+            "99999",
+            "--grammar_num_workers",
+            "9",
+        ]
+
+        g = self._setup().grammar_config
+        self.assertEqual(g.compile_timeout_ms, 99999)
+        self.assertEqual(g.num_workers, 9)
+
+
 if __name__ == "__main__":
     main()

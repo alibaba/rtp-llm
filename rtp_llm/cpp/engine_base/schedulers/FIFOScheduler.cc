@@ -241,6 +241,14 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
             }
         }
 
+        // Skip streams that are still waiting for async preparation (e.g.
+        // grammar compile) AND haven't been externally marked CanRun (e.g.
+        // by DecodeRpcServer for PD decode streams). Externally-marked streams
+        // get their preparation polled through moveToNext in Phase 2.
+        if (stream->isPreparationPending() && !stream->hasEvent(StreamEvents::CanRun)) {
+            it++;
+            continue;
+        }
         // Check for errors and memory constraints
         if (!stream->hasError() && !stream->hasEvent(StreamEvents::CanRun)
             && evaluateRunningMemory(new_streams, stream)) {

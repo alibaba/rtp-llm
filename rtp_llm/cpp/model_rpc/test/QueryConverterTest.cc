@@ -32,6 +32,10 @@ TEST_F(QueryConverterTest, testTransInput) {
     generate_config_pb->mutable_top_p_decay()->set_value(0.7);
     generate_config_pb->mutable_top_p_min()->set_value(0.3);
     generate_config_pb->mutable_top_p_reset_ids()->set_value(7);
+    generate_config_pb->mutable_json_schema()->set_value("{\"type\":\"object\"}");
+    generate_config_pb->mutable_regex()->set_value("[a-z]+");
+    generate_config_pb->mutable_ebnf()->set_value("root ::= \"a\"");
+    generate_config_pb->mutable_structural_tag()->set_value("{\"format\":{\"type\":\"json_schema\"}}");
     generate_config_pb->mutable_task_id()->set_value("8");
     generate_config_pb->set_calculate_loss(1);
     generate_config_pb->set_return_hidden_states(true);
@@ -57,6 +61,10 @@ TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_FLOAT_EQ(generate_config->top_p_decay.value(), 0.7);
     ASSERT_FLOAT_EQ(generate_config->top_p_min.value(), 0.3);
     ASSERT_EQ(generate_config->top_p_reset_ids.value(), 7);
+    ASSERT_EQ(generate_config->json_schema.value(), "{\"type\":\"object\"}");
+    ASSERT_EQ(generate_config->regex.value(), "[a-z]+");
+    ASSERT_EQ(generate_config->ebnf.value(), "root ::= \"a\"");
+    ASSERT_EQ(generate_config->structural_tag.value(), "{\"format\":{\"type\":\"json_schema\"}}");
     ASSERT_EQ(generate_config->task_id.value(), "8");
     ASSERT_EQ(generate_config->calculate_loss, 1);
     ASSERT_TRUE(generate_config->return_hidden_states);
@@ -191,6 +199,146 @@ TEST_F(QueryConverterTest, TransTensorPB_UnsupportedType) {
     torch::Tensor tensor = torch::ones({1}, torch::kInt64);
     TensorPB      tensor_pb;
     EXPECT_THROW(QueryConverter::transTensorPB(&tensor_pb, tensor), std::runtime_error);
+}
+
+// -- response_format normalization -------------------------------------------
+// These tests cover the server-side fallback in QueryConverter::transGenerateConfig
+// that mirrors rtp_llm/cpp/model_rpc/model_rpc_client.py::_normalize_grammar_fields.
+// A non-Python client (or a Python path that skips the normalizer) should get
+// the same grammar-field population as the OpenAI endpoint does client-side.
+
+namespace {
+GenerateInputPB makeInputWithResponseFormat(const std::string& response_format_json) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    auto* config = input.mutable_generate_config();
+    config->mutable_response_format()->set_value(response_format_json);
+    return input;
+}
+}  // namespace
+
+TEST_F(QueryConverterTest, ResponseFormat_JsonSchemaNested) {
+    // OpenAI-style: {"type":"json_schema","json_schema":{"name":"x","schema":{...}}}
+    auto input = makeInputWithResponseFormat(
+        R"({"type":"json_schema","json_schema":{"name":"person","schema":{"type":"object","properties":{"age":{"type":"integer"}}}}})");
+    auto cfg = QueryConverter::transQuery(&input)->generate_config;
+    ASSERT_TRUE(cfg->json_schema.has_value());
+    // Inner schema is surfaced — NOT the wrapping {name, schema} envelope.
+    EXPECT_NE(cfg->json_schema->find("\"properties\""), std::string::npos);
+    EXPECT_EQ(cfg->json_schema->find("\"name\""), std::string::npos);
+    EXPECT_FALSE(cfg->regex.has_value());
+    EXPECT_FALSE(cfg->ebnf.has_value());
+    EXPECT_FALSE(cfg->structural_tag.has_value());
+}
+
+TEST_F(QueryConverterTest, ResponseFormat_JsonObjectShorthand) {
+    // OpenAI "any JSON object" — should populate json_schema with the
+    // literal "object" schema so xgrammar can compile it.
+    auto input = makeInputWithResponseFormat(R"({"type":"json_object"})");
+    auto cfg   = QueryConverter::transQuery(&input)->generate_config;
+    ASSERT_TRUE(cfg->json_schema.has_value());
+    EXPECT_EQ(cfg->json_schema.value(), R"({"type":"object"})");
+}
+
+TEST_F(QueryConverterTest, ResponseFormat_Regex) {
+    auto input = makeInputWithResponseFormat(
+        R"({"type":"regex","pattern":"#[0-9A-Fa-f]{6}"})");
+    auto cfg = QueryConverter::transQuery(&input)->generate_config;
+    ASSERT_TRUE(cfg->regex.has_value());
+    EXPECT_EQ(cfg->regex.value(), "#[0-9A-Fa-f]{6}");
+    EXPECT_FALSE(cfg->json_schema.has_value());
+    EXPECT_FALSE(cfg->ebnf.has_value());
+    EXPECT_FALSE(cfg->structural_tag.has_value());
+}
+
+TEST_F(QueryConverterTest, ResponseFormat_Ebnf) {
+    auto input = makeInputWithResponseFormat(
+        R"({"type":"ebnf","grammar":"root ::= \"hi\""})");
+    auto cfg = QueryConverter::transQuery(&input)->generate_config;
+    ASSERT_TRUE(cfg->ebnf.has_value());
+    EXPECT_EQ(cfg->ebnf.value(), "root ::= \"hi\"");
+    EXPECT_FALSE(cfg->json_schema.has_value());
+    EXPECT_FALSE(cfg->regex.has_value());
+    EXPECT_FALSE(cfg->structural_tag.has_value());
+}
+
+TEST_F(QueryConverterTest, ResponseFormat_StructuralTag) {
+    // structural_tag payload is typically a JSON object; we serialize it back
+    // to a string and stash it in generate_config.structural_tag.
+    auto input = makeInputWithResponseFormat(
+        R"({"type":"structural_tag","structural_tag":{"format":{"type":"sequence","elements":[]}}})");
+    auto cfg = QueryConverter::transQuery(&input)->generate_config;
+    ASSERT_TRUE(cfg->structural_tag.has_value());
+    EXPECT_NE(cfg->structural_tag->find("\"sequence\""), std::string::npos);
+    EXPECT_FALSE(cfg->json_schema.has_value());
+}
+
+TEST_F(QueryConverterTest, ResponseFormat_ExplicitFieldWinsOverResponseFormat) {
+    // If the PB carries BOTH a concrete grammar field and a response_format,
+    // the explicit field is authoritative — response_format is not re-parsed.
+    // This matches the Python normalizer's early-return guard.
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    auto* config = input.mutable_generate_config();
+    config->mutable_regex()->set_value("^[0-9]+$");
+    config->mutable_response_format()->set_value(R"({"type":"json_object"})");
+
+    auto cfg = QueryConverter::transQuery(&input)->generate_config;
+    ASSERT_TRUE(cfg->regex.has_value());
+    EXPECT_EQ(cfg->regex.value(), "^[0-9]+$");
+    // json_object fallback must NOT fire because regex was already set.
+    EXPECT_FALSE(cfg->json_schema.has_value());
+}
+
+TEST_F(QueryConverterTest, ResponseFormat_TextTypeIsNoOp) {
+    // OpenAI explicit "no constraint" — must succeed and leave grammar fields empty.
+    auto input = makeInputWithResponseFormat(R"({"type":"text"})");
+    auto cfg   = QueryConverter::transQuery(&input)->generate_config;
+    EXPECT_FALSE(cfg->json_schema.has_value());
+    EXPECT_FALSE(cfg->regex.has_value());
+    EXPECT_FALSE(cfg->ebnf.has_value());
+    EXPECT_FALSE(cfg->structural_tag.has_value());
+}
+
+TEST_F(QueryConverterTest, ResponseFormat_EmptyStringAndObjectAreNoOp) {
+    {
+        GenerateInputPB input;
+        input.add_token_ids(0);
+        input.mutable_generate_config()->mutable_response_format()->set_value("");
+        auto cfg = QueryConverter::transQuery(&input)->generate_config;
+        EXPECT_FALSE(cfg->json_schema.has_value());
+        EXPECT_FALSE(cfg->regex.has_value());
+        EXPECT_FALSE(cfg->ebnf.has_value());
+        EXPECT_FALSE(cfg->structural_tag.has_value());
+    }
+    {
+        auto input = makeInputWithResponseFormat("{}");
+        auto cfg   = QueryConverter::transQuery(&input)->generate_config;
+        EXPECT_FALSE(cfg->json_schema.has_value());
+        EXPECT_FALSE(cfg->regex.has_value());
+        EXPECT_FALSE(cfg->ebnf.has_value());
+        EXPECT_FALSE(cfg->structural_tag.has_value());
+    }
+}
+
+TEST_F(QueryConverterTest, ResponseFormat_InvalidEnvelopesAreRejected) {
+    // Every case below routes to either the JSON-parse throw or the empty-
+    // result backstop in normalizeResponseFormat, ending up as INVALID_PARAMS
+    // at the gRPC layer instead of a silent unconstrained generation.
+    const std::vector<std::pair<const char*, std::string>> bad = {
+        {"malformed_json",          "this is not json {{{"},
+        {"unknown_type",            R"({"type":"not_a_real_type"})"},
+        {"missing_type",            R"({"json_schema":{"schema":{"type":"object"}}})"},
+        {"json_schema_no_payload",  R"({"type":"json_schema"})"},
+        {"regex_no_pattern",        R"({"type":"regex"})"},
+        {"ebnf_no_grammar",         R"({"type":"ebnf"})"},
+        {"structural_tag_no_body",  R"({"type":"structural_tag"})"},
+    };
+    for (const auto& [label, env] : bad) {
+        auto input = makeInputWithResponseFormat(env);
+        EXPECT_THROW(QueryConverter::transQuery(&input), std::invalid_argument)
+            << "case: " << label;
+    }
 }
 
 }  // namespace rtp_llm

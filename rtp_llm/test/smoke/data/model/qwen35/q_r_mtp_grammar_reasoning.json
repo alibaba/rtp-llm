@@ -1,0 +1,154 @@
+{
+    "model_type": "qwen35_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "_comment": "MTP + grammar + reasoning (sequential, thinking ON). Pairs with q_r_mtp_grammar.json (thinking OFF) and q_r_mtp_grammar_reasoning_concurrent.json (thinking ON + concurrency). Each axis has had a real bug in living memory: (1) MTP rollback non-reasoning active_steps formula bug; (2) ReasonerGrammarObject per-stream tokens_after_think_end reset (GrammarManager.cc:473-474); (3) MTP prefill bonus token T0 must be accepted into matcher; (4) grammar fork/DFS in spec decoding. With reasoning enabled, the matcher is in 'free-accept' (mask off) until </think> is seen, then locks onto the schema. Under MTP this means: the spec engine drafts N tokens including possibly </think>, the matcher must transition state synchronously, AND rollback must use the reasoning-mode active_steps formula. If any of those four breaks, the output is either non-JSON or never closes <think>. grammar_constraint_only=true because reasoning_content is model-version-dependent.",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Generate a person profile as JSON."
+                    }
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "person",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "maxLength": 40},
+                                "age": {"type": "integer"},
+                                "city": {"type": "string", "maxLength": 40}
+                            },
+                            "required": ["name", "age", "city"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "max_tokens": 512,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "max_thinking_tokens": 64,
+                    "chat_template_kwargs": {
+                        "enable_thinking": true
+                    }
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+            },
+            "grammar_constraint_only": true,
+            "_comment": "json_schema #1 (cache MISS) — first request triggers async compile of ReasonerGrammarObject under MTP. Verifies the freshly-built reasoner state propagates through MtpExecutor::dispatchDecode without leaking the compile-time default. max_thinking_tokens=64 caps the reasoning span so the matcher transitions to grammar lock within max_tokens=512."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Generate another person profile."
+                    }
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "person",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "maxLength": 40},
+                                "age": {"type": "integer"},
+                                "city": {"type": "string", "maxLength": 40}
+                            },
+                            "required": ["name", "age", "city"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "max_tokens": 512,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "max_thinking_tokens": 64,
+                    "chat_template_kwargs": {
+                        "enable_thinking": true
+                    }
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+            },
+            "grammar_constraint_only": true,
+            "_comment": "json_schema #2 (memory cache HIT under MTP) — same schema, different prompt. The cache-hit branch must independently re-init the reasoner per request."
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Give me a hex color code for ocean blue."
+                    }
+                ],
+                "response_format": {
+                    "type": "regex",
+                    "pattern": "#[0-9A-Fa-f]{6}"
+                },
+                "max_tokens": 256,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "max_thinking_tokens": 32,
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "", "partial": false},
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+            },
+            "grammar_constraint_only": true,
+            "_comment": "regex (no-thinking, MTP) — strict 7-char constraint (#RRGGBB). thinking=false because model enters rep-loop for this trivial prompt under thinking mode, consuming max_tokens on reasoning. The json_schema queries above already validate reasoning+grammar path. This query validates grammar ACTIVELY constrains: without masking, the model would output explanatory text around the code. re.fullmatch catches any extra chars."
+        }
+    ]
+}
