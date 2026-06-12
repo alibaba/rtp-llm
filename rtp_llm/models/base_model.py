@@ -22,6 +22,10 @@ from rtp_llm.ops import (
     DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
+    KVCacheSpecType,
+    MHAKVCacheSpec,
+    MLAKVCacheSpec,
+    MlaOpsType,
     MoeConfig,
     ParallelismConfig,
     ProfilingDebugLoggingConfig,
@@ -209,6 +213,30 @@ class BaseModel(object):
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         raise NotImplementedError()
+
+    @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        if model_config.kv_cache_specs:
+            return
+
+        if (
+            model_config.attn_config.use_mla
+            and model_config.mla_ops_type != MlaOpsType.MHA
+        ):
+            spec = MLAKVCacheSpec()
+            spec.type = KVCacheSpecType.MultiHeadLatentAttention
+            spec.kv_lora_rank = int(model_config.attn_config.kv_lora_rank)
+            spec.rope_head_dim = int(model_config.attn_config.rope_head_dim)
+        else:
+            spec = MHAKVCacheSpec()
+            spec.type = KVCacheSpecType.MultiHeadAttention
+            spec.size_per_head = int(model_config.attn_config.size_per_head)
+
+        spec.tag = "default"
+        spec.seq_size_per_block = int(model_config.attn_config.tokens_per_block)
+        model_config.kv_cache_specs = {
+            layer_id: [spec] for layer_id in range(model_config.num_layers)
+        }
 
     @classmethod
     def from_config(
