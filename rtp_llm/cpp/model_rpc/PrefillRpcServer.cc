@@ -69,7 +69,7 @@ namespace rtp_llm {
             }                                                                                                          \
         }                                                                                                              \
         if (prefill_context.getStream()) {                                                                             \
-            prefill_context.getStream()->reportEvent(StreamEvents::Error, new_error_code, new_error_msg);              \
+            prefill_context.getStream()->reportError(new_error_code, new_error_msg);                                   \
         }                                                                                                              \
         prefill_context.error_info   = ErrorInfo(new_error_code, new_error_msg);                                       \
         prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);     \
@@ -97,7 +97,7 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
         auto cost_time_us    = current_time_us - begin_time_us;
         if (cost_time_us > max_wait_timeout_us) {
             string new_error_msg = "wait to run timeout, timeout is " + std::to_string(max_wait_timeout_us) + " us";
-            stream->reportEvent(StreamEvents::Error, ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
+            stream->reportError(ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
             return ErrorInfo(ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
         }
     }

@@ -60,3 +60,19 @@ cc_test(
     },
     exec_properties = {'gpu':'A10'},
 )
+
+# Regression coverage for the onErrorReported() wakeup hook -- catches future
+# bypasses that would re-introduce the 1s nextOutput() stall after Error.
+cc_test(
+    name = "generate_stream_error_wakeup_test",
+    srcs = [
+        "GenerateStreamErrorWakeupTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+)
