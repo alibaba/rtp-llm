@@ -215,3 +215,34 @@ def init_vit_group_args(parser, vit_config):
         default="round_robin",
         help="VIT代理服务器的负载均衡策略，可选值: 'round_robin' 或 'least_connections'",
     )
+    vit_group.add_argument(
+        "--use_gpu_batch",
+        env_name="USE_GPU_BATCH",
+        bind_to=(vit_config, "use_gpu_batch"),
+        type=str2bool,
+        default=False,
+        help="是否开启GPU embedding batch调度",
+    )
+    vit_group.add_argument(
+        "--gpu_batch_wait_ms",
+        env_name="GPU_BATCH_WAIT_MS",
+        bind_to=(vit_config, "gpu_batch_wait_ms"),
+        type=int,
+        default=10,
+        help="GPU batch调度等待时间(ms)",
+    )
+    vit_group.add_argument(
+        "--gpu_max_batch_size",
+        env_name="GPU_MAX_BATCH_SIZE",
+        bind_to=(vit_config, "gpu_max_batch_size"),
+        type=int,
+        default=8,
+        help="GPU batch调度最大batch大小(请求数)",
+    )
+    vit_group.add_argument(
+        "--gpu_max_batch_tokens",
+        bind_to=(vit_config, "gpu_max_batch_tokens"),
+        type=int,
+        default=1048576,
+        help="GPU batch调度最大token(patch)数。单请求token总数超过此值则直接拒绝,默认约20GB显存等效",
+    )
