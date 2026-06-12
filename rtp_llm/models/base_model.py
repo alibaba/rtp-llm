@@ -362,6 +362,7 @@ class BaseModel(object):
             parallelism_config=self.parallelism_config,
             fmha_config=getattr(self.hw_kernel_config, "fmha_config", None),
             device_resource_config=self.device_resource_config,
+            moe_config=self.moe_config,
         )
 
         loader = NewModelLoader(
@@ -375,7 +376,7 @@ class BaseModel(object):
         self.py_model = loader.load()
         self.weight = self._build_weights_from_module(self.py_model)
         self.weight_manager = None
-        self.model_weights_loader = None
+        self.model_weights_loader = loader
         self.py_eplb = None
         logging.info("NewModelLoader: model loaded successfully")
 

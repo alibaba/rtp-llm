@@ -133,9 +133,7 @@ def _get_all_weights(
             # otherwise allows arbitrary code execution on untrusted .pt/.bin
             # files. Modern HF ckpts and the {state_dict, model} containers
             # below are pure tensor dicts and load fine under this flag.
-            state_dict = torch.load(
-                ckpt_file, map_location=device, weights_only=True
-            )
+            state_dict = torch.load(ckpt_file, map_location=device, weights_only=True)
             if "state_dict" in state_dict:
                 state_dict = state_dict["state_dict"]
             elif "model" in state_dict:
@@ -249,6 +247,9 @@ class NewModelLoader:
         logger.info(f"Moving model to device: {self.device}")
         model.to(self.device)
         logger.info(f"model.to({self.device}) took {time.time() - t1:.2f}s")
+
+        self._run_post_load_hooks(model)
+        self._log_peak_gpu_memory()
         return model
 
     def _load_via_fastsafetensors(self) -> nn.Module:
@@ -274,7 +275,38 @@ class NewModelLoader:
         t1 = time.time()
         model.load_weights(weights_iter)
         logger.info(f"model.load_weights() took {time.time() - t1:.2f}s")
+
+        self._run_post_load_hooks(model)
+        self._log_peak_gpu_memory()
         return model
+
+    def _run_post_load_hooks(self, model: nn.Module):
+        import time
+
+        t0 = time.time()
+        count = 0
+        for module in model.modules():
+            if hasattr(module, "process_weights_after_loading"):
+                module.process_weights_after_loading()
+                count += 1
+        logger.info(
+            f"Post-load hooks ran on {count} modules in {time.time() - t0:.2f}s"
+        )
+
+    def _log_peak_gpu_memory(self):
+        if not torch.cuda.is_available():
+            return
+        try:
+            allocated = torch.cuda.max_memory_allocated()
+            reserved = torch.cuda.max_memory_reserved()
+            gib = 1024**3
+            logger.info(
+                f"Peak GPU memory after loading: "
+                f"allocated={allocated / gib:.2f} GiB, "
+                f"reserved={reserved / gib:.2f} GiB"
+            )
+        except Exception:
+            pass
 
     def _resolve_target_device(self) -> str:
         device = str(self.device)
@@ -404,3 +436,157 @@ class NewModelLoader:
         num_experts = getattr(self.model_config, "expert_num", 0)
         ep_filter = _create_ep_filter(ep_size, ep_rank, num_experts)
         return ep_filter.apply(weights_iter)
+
+    # ------------------------------------------------------------------ #
+    #  LoRA support
+    # ------------------------------------------------------------------ #
+
+    def load_lora_weights(self, adapter_name: str, lora_path: str, device: str = "cpu"):
+        """Load HF-format LoRA adapter weights independently of the legacy loader.
+
+        Reads adapter_config.json for rank/alpha, then loads adapter_model
+        checkpoint, maps HF module names to engine-internal W.* names, applies
+        TP slicing, and returns a LoRAWeights object ready for the C++ runtime.
+        """
+        from rtp_llm.lora.lora_weights import LoRAWeights
+        from rtp_llm.utils.model_weight import W
+
+        lora_config = self._read_lora_config(lora_path)
+        rank = lora_config["rank"]
+        lora_alpha = lora_config["lora_alpha"]
+
+        num_layers = getattr(self.model_config, "num_layers", 0)
+        if num_layers == 0:
+            num_layers = getattr(self.model_config, "num_hidden_layers", 0)
+        lora_weights = LoRAWeights(num_layers)
+        lora_weights.set_lora_rank(rank)
+
+        tp_size = getattr(self.load_config, "tp_size", 1)
+        tp_rank = getattr(self.load_config, "tp_rank", 0)
+        compute_dtype = getattr(self.load_config, "compute_dtype", torch.float16)
+
+        state_dict = self._load_lora_state_dict(lora_path, device)
+
+        for hf_name, tensor in state_dict.items():
+            parsed = _parse_hf_lora_name(hf_name)
+            if parsed is None:
+                continue
+            layer_id, hf_module, ab_suffix = parsed
+
+            if layer_id >= num_layers:
+                continue
+
+            engine_name = _HF_TO_ENGINE_LORA.get(hf_module)
+            if engine_name is None:
+                logger.warning(f"LoRA: unmapped module '{hf_module}', skipping")
+                continue
+
+            tensor = tensor.to(compute_dtype)
+
+            # TP slicing
+            if tp_size > 1:
+                split_rule = _LORA_TP_RULES.get((hf_module, ab_suffix))
+                if split_rule is not None:
+                    tensor = _tp_slice(tensor, tp_size, tp_rank, split_rule)
+
+            full_name = f"{engine_name}.{ab_suffix}"
+            lora_weights.set_layer_weight(False, layer_id, full_name, tensor)
+
+        lora_weights.apply_scale(lora_alpha / rank)
+        logger.info(
+            f"Loaded LoRA '{adapter_name}' from {lora_path}: "
+            f"rank={rank}, alpha={lora_alpha}, layers={num_layers}"
+        )
+        return lora_weights
+
+    @staticmethod
+    def _read_lora_config(lora_path: str) -> dict:
+        import json
+
+        config_path = os.path.join(lora_path, "adapter_config.json")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(
+                f"LoRA adapter_config.json not found: {config_path}"
+            )
+        with open(config_path) as f:
+            cfg = json.load(f)
+        return {
+            "rank": cfg["r"],
+            "lora_alpha": cfg["lora_alpha"],
+        }
+
+    @staticmethod
+    def _load_lora_state_dict(lora_path: str, device: str) -> dict:
+        for filename in (
+            "adapter_model.safetensors",
+            "adapter_model.bin",
+            "adapter_model.pt",
+        ):
+            filepath = os.path.join(lora_path, filename)
+            if os.path.exists(filepath):
+                if filepath.endswith(".safetensors"):
+                    from safetensors.torch import load_file
+
+                    return load_file(filepath, device=device)
+                else:
+                    return torch.load(filepath, map_location=device, weights_only=True)
+        raise FileNotFoundError(f"No adapter model file found in {lora_path}")
+
+
+# ------------------------------------------------------------------ #
+#  LoRA name mapping and TP slicing helpers
+# ------------------------------------------------------------------ #
+
+_HF_LORA_PATTERN = re.compile(
+    r"base_model\.model\.model\.layers\.(\d+)\.(.*)\.(lora_A|lora_B)\.weight"
+)
+
+
+def _parse_hf_lora_name(name: str):
+    """Parse HF LoRA tensor name -> (layer_id, hf_module, 'lora_A'|'lora_B')."""
+    m = _HF_LORA_PATTERN.match(name)
+    if m is None:
+        return None
+    return int(m.group(1)), m.group(2), m.group(3)
+
+
+# HF module path -> engine internal W.* name
+_HF_TO_ENGINE_LORA = {
+    "self_attn.q_proj": "self_attention_weights.query_weight.kernel",
+    "self_attn.k_proj": "self_attention_weights.query_weight.kernel",
+    "self_attn.v_proj": "self_attention_weights.query_weight.kernel",
+    "self_attn.o_proj": "self_attention_weights.attention_output_weight.kernel",
+    "mlp.gate_proj": "ffn_weights.intermediate_weight.kernel",
+    "mlp.up_proj": "ffn_weights.intermediate_weight3.kernel",
+    "mlp.down_proj": "ffn_weights.intermediate_weight2.kernel",
+}
+
+
+# TP slicing rules: (hf_module, ab_suffix) -> (dim, "split"|"identity")
+# Column-parallel projections (q/k/v/gate/up): lora_B sliced on dim=-1
+# Row-parallel projections (o/down): lora_A sliced on dim=0
+_LORA_TP_RULES: Dict[tuple, tuple] = {
+    # q/k/v: lora_B output-dim split
+    ("self_attn.q_proj", "lora_B"): (-1, "split"),
+    ("self_attn.k_proj", "lora_B"): (-1, "split"),
+    ("self_attn.v_proj", "lora_B"): (-1, "split"),
+    # o_proj: lora_A input-dim split
+    ("self_attn.o_proj", "lora_A"): (0, "split"),
+    # gate/up: lora_B output-dim split
+    ("mlp.gate_proj", "lora_B"): (-1, "split"),
+    ("mlp.up_proj", "lora_B"): (-1, "split"),
+    # down: lora_A input-dim split
+    ("mlp.down_proj", "lora_A"): (0, "split"),
+}
+
+
+def _tp_slice(
+    tensor: torch.Tensor, tp_size: int, tp_rank: int, rule: tuple
+) -> torch.Tensor:
+    dim, action = rule
+    if action != "split":
+        return tensor
+    size = tensor.shape[dim]
+    chunk_size = size // tp_size
+    start = tp_rank * chunk_size
+    return tensor.narrow(dim, start, chunk_size).contiguous()

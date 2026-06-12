@@ -15,6 +15,14 @@ logger = logging.getLogger(__name__)
 # path: doing the import inside apply() (even though sys.modules caches it)
 # still costs a sys.modules lookup + LOAD_ATTR on every call. Importing once at
 # module load amortizes that cost across the lifetime of the process.
+#
+# Each method that uses a kernel still falls back to a lazy `_resolve_*()` helper
+# below when the module-level symbol is None, since `fp8.py` is loaded eagerly
+# from `quant_methods/__init__.py` and may resolve before the kernel package
+# finishes initialization (the kernel package's __init__ calls load_all_configs()
+# which can take long enough for an interleaving import to observe a partially
+# initialized module — that is reported with a logger.warning here so the
+# fallback isn't silent).
 try:
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
         per_block_cast_to_fp8,
@@ -22,7 +30,12 @@ try:
         scaled_fp8_per_token_quant,
         sgl_per_token_group_quant_fp8,
     )
-except ImportError:  # pragma: no cover - kernel package may be absent on CPU-only setups
+except (
+    ImportError
+) as e:  # pragma: no cover - kernel package may be absent on CPU-only setups
+    logger.warning(
+        "fp8 kernel imports unavailable: %s (will fall back to lazy import)", e
+    )
     per_block_cast_to_fp8 = None
     scaled_fp8_per_tensor_quant = None
     scaled_fp8_per_token_quant = None
@@ -33,11 +46,72 @@ try:
         fp8_gemm_nt,
         has_deep_gemm,
     )
-except ImportError:  # pragma: no cover
+except ImportError as e:  # pragma: no cover
+    logger.warning(
+        "deepgemm_wrapper imports unavailable: %s (will fall back to lazy import)", e
+    )
     fp8_gemm_nt = None
 
     def has_deep_gemm() -> bool:  # type: ignore[no-redef]
         return False
+
+
+def _resolve_per_tensor_quant():
+    """Return scaled_fp8_per_tensor_quant, lazy-importing on a hoist miss."""
+    global scaled_fp8_per_tensor_quant
+    if scaled_fp8_per_tensor_quant is None:
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            scaled_fp8_per_tensor_quant as _fn,
+        )
+
+        scaled_fp8_per_tensor_quant = _fn
+    return scaled_fp8_per_tensor_quant
+
+
+def _resolve_per_token_quant():
+    """Return scaled_fp8_per_token_quant, lazy-importing on a hoist miss."""
+    global scaled_fp8_per_token_quant
+    if scaled_fp8_per_token_quant is None:
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            scaled_fp8_per_token_quant as _fn,
+        )
+
+        scaled_fp8_per_token_quant = _fn
+    return scaled_fp8_per_token_quant
+
+
+def _resolve_per_block_cast():
+    """Return per_block_cast_to_fp8, lazy-importing on a hoist miss."""
+    global per_block_cast_to_fp8
+    if per_block_cast_to_fp8 is None:
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            per_block_cast_to_fp8 as _fn,
+        )
+
+        per_block_cast_to_fp8 = _fn
+    return per_block_cast_to_fp8
+
+
+def _resolve_sgl_per_token_group_quant():
+    """Return sgl_per_token_group_quant_fp8, lazy-importing on a hoist miss."""
+    global sgl_per_token_group_quant_fp8
+    if sgl_per_token_group_quant_fp8 is None:
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            sgl_per_token_group_quant_fp8 as _fn,
+        )
+
+        sgl_per_token_group_quant_fp8 = _fn
+    return sgl_per_token_group_quant_fp8
+
+
+def _resolve_fp8_gemm_nt():
+    """Return fp8_gemm_nt, lazy-importing on a hoist miss."""
+    global fp8_gemm_nt
+    if fp8_gemm_nt is None:
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt as _fn
+
+        fp8_gemm_nt = _fn
+    return fp8_gemm_nt
 
 
 @register_quant_method("fp8")
@@ -88,16 +162,12 @@ class Fp8LinearMethod(QuantizeMethodBase):
     def apply(
         self, layer, x: torch.Tensor, bias: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-            scaled_fp8_per_tensor_quant,
-        )
-
         out_dtype = x.dtype
         input_2d = x.view(-1, x.shape[-1])
         out_features = layer.weight.shape[0]
         output_shape = list(x.shape[:-1]) + [out_features]
 
-        qinput, x_scale = scaled_fp8_per_tensor_quant(input_2d)
+        qinput, x_scale = _resolve_per_tensor_quant()(input_2d)
 
         if not Fp8LinearMethod._apply_logged:
             logger.info(
@@ -182,7 +252,7 @@ class Fp8OnlineLinearMethod(QuantizeMethodBase):
             weight = weight.to(f"cuda:{torch.cuda.current_device()}")
         assert weight.ndim == 2, f"expected 2D weight, got {weight.shape}"
 
-        fp8_weight, scale = scaled_fp8_per_tensor_quant(weight)
+        fp8_weight, scale = _resolve_per_tensor_quant()(weight)
 
         # nn.Parameter dtype is immutable; rebind both attributes so the
         # post-load model.to(device) sees a consistent (cuda, fp8/fp32) pair.
@@ -218,7 +288,7 @@ class Fp8OnlineLinearMethod(QuantizeMethodBase):
         out_features = layer.weight.shape[0]
         output_shape = list(x.shape[:-1]) + [out_features]
 
-        qinput, x_scale = scaled_fp8_per_tensor_quant(input_2d)
+        qinput, x_scale = _resolve_per_tensor_quant()(input_2d)
 
         if not Fp8OnlineLinearMethod._apply_logged:
             logger.info(
@@ -306,7 +376,7 @@ class Fp8PerChannelOnlineLinearMethod(QuantizeMethodBase):
 
         # Treat weight rows as "tokens" → per-output-channel quant.
         # fp8_weight: [N, K] float8_e4m3fn, scale: [N, 1] float32.
-        fp8_weight, scale = scaled_fp8_per_token_quant(weight)
+        fp8_weight, scale = _resolve_per_token_quant()(weight)
 
         del layer.weight
         layer.register_parameter(
@@ -347,7 +417,7 @@ class Fp8PerChannelOnlineLinearMethod(QuantizeMethodBase):
         output_shape = list(x.shape[:-1]) + [N]
 
         # Per-token activation quant: [M, K] bf16 -> [M, K] fp8 + [M, 1] fp32.
-        qinput, x_scale = scaled_fp8_per_token_quant(input_2d)
+        qinput, x_scale = _resolve_per_token_quant()(input_2d)
 
         # Weight scale was already shaped [1, N] contiguous in
         # process_weights_after_loading — use it directly.
@@ -448,7 +518,7 @@ class Fp8PerChannelLinearMethod(QuantizeMethodBase):
         N = layer.weight.shape[0]
         output_shape = list(x.shape[:-1]) + [N]
 
-        qinput, x_scale = scaled_fp8_per_token_quant(input_2d)
+        qinput, x_scale = _resolve_per_token_quant()(input_2d)
         # weight_scale was already shaped [1, N] contiguous in
         # process_weights_after_loading — use it directly.
         weight_scale_b = layer.weight_scale
@@ -532,7 +602,7 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
         # per_block_cast_to_fp8 returns:
         #   fp8_weight: [N, K] float8_e4m3fn (sliced back to original shape)
         #   scale:      [ceil(N/128), ceil(K/128)] float32
-        fp8_weight, scale = per_block_cast_to_fp8(weight, use_ue8m0=False)
+        fp8_weight, scale = _resolve_per_block_cast()(weight, use_ue8m0=False)
 
         del layer.weight
         layer.register_parameter(
@@ -580,7 +650,7 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
         output_shape = list(x.shape[:-1]) + [N]
 
         # Online per-token-group activation quant (group_size=128).
-        qinput, x_scales = sgl_per_token_group_quant_fp8(
+        qinput, x_scales = _resolve_sgl_per_token_group_quant()(
             input_2d,
             group_size=self.BLOCK,
             eps=1e-4,
@@ -590,7 +660,7 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
         )
 
         output = torch.empty(M, N, dtype=out_dtype, device=input_2d.device)
-        fp8_gemm_nt(
+        _resolve_fp8_gemm_nt()(
             (qinput, x_scales),
             (layer.weight, layer.weight_scale),
             output,

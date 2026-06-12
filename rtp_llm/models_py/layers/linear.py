@@ -44,6 +44,19 @@ class LinearBase(nn.Module):
         output = self.quant_method.apply(self, x, self.bias)
         return output
 
+    def process_weights_after_loading(self):
+        # Called once by NewModelLoader._run_post_load_hooks after model.to(device)
+        # and after every weight shard is in place. Doing the work here (rather
+        # than at the end of load_weights) is required for streaming dispatch:
+        # MergedColumnParallelLinear / QKVParallelLinear receive their shards on
+        # separate _default_load_weights ticks, so a per-tick call would quantize
+        # before all shards arrived (corrupt scale) and then re-quantize an
+        # already-fp8 weight on the next tick (kernel dispatch failure).
+        if getattr(self, "_post_load_done", False):
+            return
+        self.quant_method.process_weights_after_loading(self)
+        self._post_load_done = True
+
 
 class ColumnParallelLinear(LinearBase):
 
@@ -112,7 +125,8 @@ class ColumnParallelLinear(LinearBase):
                 )
             param.data.copy_(tensor)
 
-        self.quant_method.process_weights_after_loading(self)
+        # process_weights_after_loading is invoked by NewModelLoader's
+        # post-load hook after every shard has landed; see LinearBase.
 
     def _split_weight(self, tensor: torch.Tensor, dim: int = 0) -> torch.Tensor:
         if self.tp_size <= 1:
@@ -192,7 +206,8 @@ class RowParallelLinear(LinearBase):
                 )
             param.data.copy_(tensor)
 
-        self.quant_method.process_weights_after_loading(self)
+        # process_weights_after_loading is invoked by NewModelLoader's
+        # post-load hook after every shard has landed; see LinearBase.
 
     def _split_weight(self, tensor: torch.Tensor, dim: int = 1) -> torch.Tensor:
         if self.tp_size <= 1:
@@ -270,10 +285,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 # Per-channel/per-shard tensor: TP-slice + offset copy along dim 0.
                 # Convention: ckpt tensor's dim-0 covers one shard's full output
                 # (= shard_size * tp_size).
-                if (
-                    self.tp_size > 1
-                    and tensor.shape[0] == shard_size * self.tp_size
-                ):
+                if self.tp_size > 1 and tensor.shape[0] == shard_size * self.tp_size:
                     start = self.tp_rank * shard_size
                     tensor = tensor.narrow(0, start, shard_size).contiguous()
                 offset = shard_id * shard_size
@@ -313,14 +325,18 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 continue
             if len(set(round(v, 6) for v in vals)) > 1:
                 import logging
+
                 logging.warning(
                     "[MergedColumn %s] %s shards have differing scalars %s; "
                     "using max — small accuracy loss until phase-5 rescaling.",
-                    self.prefix, param_name, vals,
+                    self.prefix,
+                    param_name,
+                    vals,
                 )
             param.data.fill_(max(vals))
 
-        self.quant_method.process_weights_after_loading(self)
+        # process_weights_after_loading is invoked by NewModelLoader's
+        # post-load hook after every shard has landed; see LinearBase.
 
     def _get_shard_id(self, weight_name: str) -> int:
         for idx, shard_name in enumerate(self.shard_names):
@@ -383,15 +399,18 @@ class QKVParallelLinear(ColumnParallelLinear):
         )
 
     def load_weights(self, weights: Dict[str, torch.Tensor]):
-        q_weight = k_weight = v_weight = None
-        q_bias = k_bias = v_bias = None
-        # Collect per-q/k/v tensors for non-weight/bias params (e.g.
-        # weight_scale per channel). Keyed by param_name.
-        qkv_extra: Dict[str, Dict[str, torch.Tensor]] = {}
-        other_weights: Dict[str, torch.Tensor] = {}
-
+        # Streaming-dispatch contract: this method may be called many times
+        # with a single q/k/v shard at a time. Each call writes the shard
+        # into its own offset slice in self.weight (and self.bias, etc.) so
+        # that partial calls are safe — there's no "wait for all three" gate.
+        # NewModelLoader._run_post_load_hooks invokes
+        # process_weights_after_loading after every shard has landed; see
+        # LinearBase.
         for full_name, tensor in weights.items():
             param_name = self._get_param_name(full_name)
+            if param_name is None:
+                continue
+
             qkv_key = None
             if "q_proj" in full_name:
                 qkv_key = "q"
@@ -400,113 +419,117 @@ class QKVParallelLinear(ColumnParallelLinear):
             elif "v_proj" in full_name:
                 qkv_key = "v"
 
-            if qkv_key is not None:
+            if qkv_key is None:
+                # Non-q/k/v param (e.g. an already-merged ckpt or auxiliary
+                # tensor that maps directly onto a self.* param).
                 if param_name == "weight":
-                    if qkv_key == "q":
-                        q_weight = tensor
-                    elif qkv_key == "k":
-                        k_weight = tensor
-                    else:
-                        v_weight = tensor
-                elif param_name == "bias":
-                    if qkv_key == "q":
-                        q_bias = tensor
-                    elif qkv_key == "k":
-                        k_bias = tensor
-                    else:
-                        v_bias = tensor
+                    self.weight.data.copy_(self._split_weight(tensor, dim=0))
                 else:
-                    qkv_extra.setdefault(param_name, {})[qkv_key] = tensor
-            else:
-                other_weights[full_name] = tensor
-
-        if q_weight is not None and k_weight is not None and v_weight is not None:
-            q_split = self._split_qkv(q_weight, self.num_heads, self.head_dim)
-            k_split = self._split_qkv(k_weight, self.num_kv_heads, self.head_dim)
-            v_split = self._split_qkv(v_weight, self.num_kv_heads, self.head_dim)
-
-            combined = torch.cat([q_split, k_split, v_split], dim=0)
-            self.weight.data.copy_(combined)
-        elif other_weights:
-            for full_name, tensor in other_weights.items():
-                param_name = self._get_param_name(full_name)
-                if param_name == "weight":
-                    split_tensor = self._split_weight(tensor, dim=0)
-                    self.weight.data.copy_(split_tensor)
-                elif param_name in ("weight_scale", "input_scale"):
                     param = getattr(self, param_name, None)
-                    if param is not None:
+                    if isinstance(param, nn.Parameter) and tensor.shape == param.shape:
                         param.data.copy_(tensor)
-
-        # Merge q/k/v extra tensors (per-channel weight_scale, etc.) the same
-        # way as weights: TP-slice along the head/kv-head dim, then cat in qkv
-        # order.
-        for param_name, qkv_tensors in qkv_extra.items():
-            param = getattr(self, param_name, None)
-            if param is None or not isinstance(param, nn.Parameter):
-                continue
-            if not all(k in qkv_tensors for k in ("q", "k", "v")):
-                # Partial — fall back to first tensor's full copy (legacy).
                 continue
 
-            if param.numel() == 1:
-                # Per-tensor scalar across q/k/v: max-merge.
-                vals = [
-                    float(qkv_tensors[k].flatten()[0].item()) for k in ("q", "k", "v")
-                ]
-                if len(set(round(v, 6) for v in vals)) > 1:
-                    import logging
-                    logging.warning(
-                        "[QKV %s] %s q/k/v have differing scalars %s; "
-                        "using max — small accuracy loss until phase-5 rescaling.",
-                        self.prefix, param_name, vals,
-                    )
-                param.data.fill_(max(vals))
-            else:
-                # Per-channel: TP-slice each piece along output dim, then cat.
-                q_t = self._split_qkv(qkv_tensors["q"], self.num_heads, self.head_dim)
-                k_t = self._split_qkv(
-                    qkv_tensors["k"], self.num_kv_heads, self.head_dim
-                )
-                v_t = self._split_qkv(
-                    qkv_tensors["v"], self.num_kv_heads, self.head_dim
-                )
-                cat = torch.cat([q_t, k_t, v_t], dim=0)
-                if cat.shape != param.shape:
-                    raise ValueError(
-                        f"Shape mismatch for merged QKV {self.prefix}.{param_name}: "
-                        f"got {cat.shape}, expected {param.shape}"
-                    )
-                param.data.copy_(cat)
+            self._dispatch_qkv_shard(qkv_key, param_name, tensor)
 
-        if self.bias is not None:
-            present = {
-                "q": q_bias is not None,
-                "k": k_bias is not None,
-                "v": v_bias is not None,
-            }
-            if all(present.values()):
-                q_b_split = self._split_qkv(q_bias, self.num_heads, self.head_dim)
-                k_b_split = self._split_qkv(k_bias, self.num_kv_heads, self.head_dim)
-                v_b_split = self._split_qkv(v_bias, self.num_kv_heads, self.head_dim)
-                combined_bias = torch.cat([q_b_split, k_b_split, v_b_split], dim=0)
-                self.bias.data.copy_(combined_bias)
-            elif any(present.values()):
-                # Partial bias is almost always a ckpt/mapping issue: e.g.
-                # Qwen2 qkv_bias=True but only q_proj.bias was provided. Surface
-                # it loudly so it doesn't get diluted into a silent zero bias.
-                missing = [k for k, v in present.items() if not v]
-                import logging
+    def _dispatch_qkv_shard(self, qkv_key: str, param_name: str, tensor: torch.Tensor):
+        """Write a single q/k/v shard into the merged parameter at its offset."""
+        # Resolve per-shard size and offset in the merged QKV layout.
+        if qkv_key == "q":
+            num_heads, size, offset = self.num_heads, self.q_size, 0
+        elif qkv_key == "k":
+            num_heads, size, offset = self.num_kv_heads, self.kv_size, self.q_size
+        else:  # "v"
+            num_heads, size, offset = (
+                self.num_kv_heads,
+                self.kv_size,
+                self.q_size + self.kv_size,
+            )
 
-                logging.warning(
-                    "[QKV %s] partial bias loaded — missing %s; bias for those "
-                    "projections will stay zero-initialized. Check ckpt or "
-                    "WeightsMapper.",
-                    self.prefix,
-                    missing,
-                )
+        if param_name == "weight":
+            split = self._split_qkv(tensor, num_heads, self.head_dim)
+            self.weight.data[offset : offset + size].copy_(split)
+            return
 
+        if param_name == "bias":
+            if self.bias is None:
+                return
+            split = self._split_qkv(tensor, num_heads, self.head_dim)
+            self.bias.data[offset : offset + size].copy_(split)
+            return
+
+        # Auxiliary per-shard params (per-channel weight_scale, input_scale, ...).
+        param = getattr(self, param_name, None)
+        if param is None or not isinstance(param, nn.Parameter):
+            return
+
+        if param.numel() == 1:
+            # Per-tensor scalar: collect per-shard scales now and merge in
+            # process_weights_after_loading. Naive max-merge here is wrong for
+            # `weight_scale` because each q/k/v shard's fp8 weights are stored
+            # in the representation of its OWN ckpt scale; if the merged scale
+            # is the max across shards, the smaller-scale shards' fp8 values
+            # decode to magnitudes inflated by max/own — silently corrupt.
+            # The original loader's `merge_qkv_hf_fp8_with_scale` rescales each
+            # shard's weight to share max_scale; we mirror that in post-load.
+            val = float(tensor.flatten()[0].item())
+            if not hasattr(self, "_qkv_per_tensor_scales"):
+                self._qkv_per_tensor_scales = {}
+            self._qkv_per_tensor_scales.setdefault(param_name, {})[qkv_key] = val
+            return
+
+        # Per-channel along output dim: TP-slice and write into [offset:offset+size).
+        split = self._split_qkv(tensor, num_heads, self.head_dim)
+        if split.shape[0] != size:
+            raise ValueError(
+                f"Shape mismatch for QKV shard {self.prefix}.{param_name}/{qkv_key}: "
+                f"got dim-0={split.shape[0]}, expected {size}"
+            )
+        param.data[offset : offset + size].copy_(split)
+
+    def process_weights_after_loading(self):
+        # Merge per-tensor q/k/v scales and rescale fp8 weights so all three
+        # shards share the same final scale. Must run BEFORE the quant_method
+        # post-load hook (which may rebind weight/scale Parameters and freeze
+        # dtypes), so we override here instead of letting LinearBase handle it.
+        if getattr(self, "_post_load_done", False):
+            return
+        self._merge_qkv_per_tensor_scales()
         self.quant_method.process_weights_after_loading(self)
+        self._post_load_done = True
+
+    def _merge_qkv_per_tensor_scales(self):
+        scales_by_param = getattr(self, "_qkv_per_tensor_scales", None)
+        if not scales_by_param:
+            return
+
+        for param_name, scales in scales_by_param.items():
+            param = getattr(self, param_name, None)
+            if param is None or param.numel() != 1:
+                continue
+            max_scale = max(scales.values())
+            param.data.fill_(max_scale)
+            # input_scale doesn't index into self.weight; only weight_scale
+            # requires per-shard fp8 rescale.
+            if param_name != "weight_scale":
+                continue
+            for qkv_key, scale_val in scales.items():
+                if scale_val == max_scale:
+                    continue
+                offset, size = self._qkv_shard_offset_size(qkv_key)
+                weight_slice = self.weight.data[offset : offset + size]
+                ratio = scale_val / max_scale
+                rescaled = (weight_slice.float() * ratio).to(weight_slice.dtype)
+                self.weight.data[offset : offset + size].copy_(rescaled)
+
+        del self._qkv_per_tensor_scales
+
+    def _qkv_shard_offset_size(self, qkv_key: str):
+        if qkv_key == "q":
+            return 0, self.q_size
+        if qkv_key == "k":
+            return self.q_size, self.kv_size
+        return self.q_size + self.kv_size, self.kv_size
 
     def _split_qkv(
         self, tensor: torch.Tensor, num_heads: int, head_dim: int

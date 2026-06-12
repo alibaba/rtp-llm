@@ -26,18 +26,15 @@ def _default_is_fused_target(self, child: nn.Module) -> bool:
 
 
 def _default_load_weights(self, weights: Any):
-    """流式分发权重：边读边路由，不再先全量 groupby。"""
-    cls_name = self.__class__.__name__
-
+    """Per-tensor streaming dispatch: each tensor immediately walks the module
+    tree to its leaf and copies directly.  No intermediate dict buffering, so
+    peak memory stays at model-params + one ckpt tensor."""
     if isinstance(weights, dict):
         weights_iter = iter(weights.items())
     else:
         weights_iter = weights
 
     redirect = self._build_redirect()
-
-    child_buffers: Dict[str, Dict[str, torch.Tensor]] = defaultdict(dict)
-    fused_buffers: Dict[str, Dict[str, torch.Tensor]] = defaultdict(dict)
     dropped: List[str] = []
     count = 0
 
@@ -59,27 +56,22 @@ def _default_load_weights(self, weights: Any):
 
         if prefix in redirect:
             layer, shard_id, target_name = redirect[prefix]
-            fused_buffers[target_name][f"{prefix}.{rest}"] = tensor
+            layer.load_weights({f"{prefix}.{rest}": tensor})
         else:
             child = self._get_child_module(prefix)
             if child is None:
                 dropped.append(full_name)
                 continue
 
-            if self._is_fused_target(child):
-                fused_buffers[prefix][rest] = tensor
+            if isinstance(child, nn.ModuleList):
+                _dispatch_single_to_module_list(self, child, rest, tensor)
+            elif hasattr(child, "load_weights"):
+                child.load_weights({rest: tensor})
             else:
-                child_buffers[prefix][rest] = tensor
+                self._assign_weight(child, rest, tensor)
 
-    logger.info(
-        f"[{cls_name}] streamed {count} weights, "
-        f"children={list(child_buffers.keys())}, "
-        f"fused={list(fused_buffers.keys())}"
-    )
-
-    # Surface silently-dropped weights — usually a sign of a stale or wrong
-    # WeightsMapper. Cap the printed sample so the log stays scannable.
     if dropped:
+        cls_name = self.__class__.__name__
         sample = dropped[:10]
         more = (
             f" (+{len(dropped) - len(sample)} more)"
@@ -94,47 +86,24 @@ def _default_load_weights(self, weights: Any):
             more,
         )
 
-    for prefix, buf in child_buffers.items():
-        child = self._get_child_module(prefix)
-        if child is None:
-            continue
-        if hasattr(child, "load_weights"):
-            child.load_weights(buf)
-        elif isinstance(child, nn.ModuleList):
-            _dispatch_to_module_list(self, child, buf)
-        else:
-            for name, tensor in buf.items():
-                self._assign_weight(child, name, tensor)
 
-    for target_name, buf in fused_buffers.items():
-        child = self._get_child_module(target_name)
-        if child is not None and hasattr(child, "load_weights"):
-            child.load_weights(buf)
-
-
-def _dispatch_to_module_list(
-    self, module_list: nn.ModuleList, weights: Dict[str, torch.Tensor]
+def _dispatch_single_to_module_list(
+    self, module_list: nn.ModuleList, name: str, tensor: torch.Tensor
 ):
-    """将 '0.rest_name' 形式的权重按索引分发到 ModuleList 中的子模块。"""
-    sub_buffers: Dict[int, Dict[str, torch.Tensor]] = defaultdict(dict)
-    for name, tensor in weights.items():
-        if "." in name:
-            idx_str, rest = name.split(".", 1)
-            try:
-                idx = int(idx_str)
-                sub_buffers[idx][rest] = tensor
-            except ValueError:
-                pass
-        # names without '.' are ignored for ModuleList
-
-    for idx, buf in sub_buffers.items():
-        if idx < len(module_list):
-            child = module_list[idx]
-            if hasattr(child, "load_weights"):
-                child.load_weights(buf)
-            else:
-                for name, tensor in buf.items():
-                    self._assign_weight(child, name, tensor)
+    if "." not in name:
+        return
+    idx_str, rest = name.split(".", 1)
+    try:
+        idx = int(idx_str)
+    except ValueError:
+        return
+    if idx >= len(module_list):
+        return
+    child = module_list[idx]
+    if hasattr(child, "load_weights"):
+        child.load_weights({rest: tensor})
+    else:
+        self._assign_weight(child, rest, tensor)
 
 
 def _default_get_child_module(self, name: str) -> Optional[nn.Module]:

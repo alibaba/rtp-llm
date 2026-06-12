@@ -468,6 +468,15 @@ class Fp8PerTensorCompressedQuantConfig(CompressedTensorsQuantConfig):
     def is_dynamic(self) -> bool:
         return self._dynamic
 
+    def get_runtime_method_key(self) -> str:
+        # Pre-quantized compressed-tensors FP8 ckpts (is_quanted=True) — the
+        # ckpt ships fp8 weights + per-tensor weight_scale, so route to the
+        # already-quantized "fp8" method (Fp8LinearMethod for dense linear,
+        # "fp8_per_tensor" family for MoE). The online (BF16->FP8) variant
+        # is unreachable here because compressed-tensors only emits this
+        # config from `load_from_ckpt` when is_quanted=True.
+        return "fp8" if self.is_quanted() else "fp8_online"
+
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerTensorCompressedQuantConfig(**config)
