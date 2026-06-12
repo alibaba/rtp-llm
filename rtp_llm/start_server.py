@@ -19,7 +19,12 @@ from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.ops import RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
-from rtp_llm.utils.process_manager import ProcessManager
+from rtp_llm.utils.process_manager import (
+    DEFER_FIRST_SIGTERM_ENV,
+    DEFER_FIRST_SIGTERM_SECONDS_ENV,
+    DEFER_FIRST_SIGTERM_VALUE,
+    ProcessManager,
+)
 
 setup_logging()
 
@@ -48,6 +53,21 @@ def check_server_health(server_port):
         return False
 
 
+def _backend_deferred_sigterm_seconds(py_env_configs: PyEnvConfigs) -> str:
+    timeout = ProcessManager.normalize_shutdown_timeout_seconds(
+        py_env_configs.server_config.shutdown_timeout
+    )
+    return str(ProcessManager.deferred_group_shutdown_timeout_seconds(timeout))
+
+
+def _sync_server_shutdown_timeout(py_env_configs: PyEnvConfigs):
+    py_env_configs.server_config.shutdown_timeout = (
+        ProcessManager.sync_shutdown_timeout_env(
+            py_env_configs.server_config.shutdown_timeout
+        )
+    )
+
+
 @timer_wrapper(description="start backend server")
 def start_backend_server_impl(
     global_controller,
@@ -65,12 +85,29 @@ def start_backend_server_impl(
     pipe_reader, pipe_writer = multiprocessing.Pipe(duplex=False)
     logging.info(f"[PROCESS_SPAWN]Start backend server process outer")
 
-    backend_process = multiprocessing.Process(
-        target=start_backend_server,
-        args=(global_controller, py_env_configs, pipe_writer),
-        name="backend_manager",
+    old_defer = os.environ.get(DEFER_FIRST_SIGTERM_ENV)
+    old_defer_seconds = os.environ.get(DEFER_FIRST_SIGTERM_SECONDS_ENV)
+    _sync_server_shutdown_timeout(py_env_configs)
+    os.environ[DEFER_FIRST_SIGTERM_ENV] = DEFER_FIRST_SIGTERM_VALUE
+    os.environ[DEFER_FIRST_SIGTERM_SECONDS_ENV] = _backend_deferred_sigterm_seconds(
+        py_env_configs
     )
-    backend_process.start()
+    try:
+        backend_process = multiprocessing.Process(
+            target=start_backend_server,
+            args=(global_controller, py_env_configs, pipe_writer),
+            name="backend_manager",
+        )
+        backend_process.start()
+    finally:
+        if old_defer is None:
+            os.environ.pop(DEFER_FIRST_SIGTERM_ENV, None)
+        else:
+            os.environ[DEFER_FIRST_SIGTERM_ENV] = old_defer
+        if old_defer_seconds is None:
+            os.environ.pop(DEFER_FIRST_SIGTERM_SECONDS_ENV, None)
+        else:
+            os.environ[DEFER_FIRST_SIGTERM_SECONDS_ENV] = old_defer_seconds
     pipe_writer.close()  # Parent process closes write end
 
     # Create check_ready_fn for pipe-based health check
@@ -329,6 +366,7 @@ def start_server(py_env_configs: PyEnvConfigs):
         py_env_configs.concurrency_config,
         dp_size=py_env_configs.parallelism_config.dp_size,
     )
+    _sync_server_shutdown_timeout(py_env_configs)
 
     # Create process manager with config values
     process_manager = ProcessManager(
