@@ -1,0 +1,266 @@
+"""MXFP8 DeepEP normal executor for MiniMax-M3.
+
+Optimized executor for the DeepEP normal dispatch path with MXFP8 (1x32)
+quantization. Unlike :class:`Mxfp8ContiguousExecutor` (designed for pure-TP),
+this executor is tailored for the DeepEP normal dispatch output format:
+
+- DeepEP non-expand dispatch produces ``[N_recv, K]`` of **unique** received
+  tokens (no per-expert duplication) with ``[N_recv, top_k]`` routing metadata
+- The executor expands tokens into per-expert contiguous layout (duplicating
+  tokens with multiple local expert assignments), runs MXFP8 grouped GEMMs,
+  then gathers results back with router weight application via ``ep_gather``
+
+DeepEP normal dispatch output (non-expand mode)::
+
+    expert_x:        [N_recv, K] BF16, unique received tokens (no duplicates)
+    expert_topk_ids: [N_recv, top_k] local expert IDs in [0, E_local) + -1
+    expert_num_tokens: [E_local] padded to expert_alignment (128)
+
+Executor output (fed to normal combine)::
+
+    fused_expert_output: [N_recv, K] BF16
+        = Σ_{k assigned to local experts} expert_ffn(token, expert_k) * weight_k
+
+Normal combine then sums partial results across ranks (no weight application).
+"""
+
+from typing import Any, Dict, List, Optional
+
+import torch
+
+from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
+    mxfp8_grouped_gemm,
+    pack_mxfp8_scale,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    CombineForwardPayload,
+    ExpertForwardPayload,
+    FusedMoeExpertExecutor,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
+from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
+    MoeConfigResolver,
+)
+from rtp_llm.models_py.triton_kernels.common.activation import silu_and_mul
+from rtp_llm.models_py.triton_kernels.common.swiglu_oai import (
+    is_swiglu_oai,
+    swiglu_oai_alpha_limit,
+    swiglu_oai_torch,
+)
+from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+    ep_expand,
+    ep_fill_m_indices,
+    ep_gather,
+)
+from rtp_llm.models_py.utils.arch import get_sm
+from rtp_llm.utils.model_weight import W
+
+
+def _contiguous_alignment() -> int:
+    import deep_gemm
+
+    return deep_gemm.get_m_alignment_for_contiguous_layout()
+
+
+class Mxfp8DeepepExecutor(FusedMoeExpertExecutor):
+    """MXFP8 executor optimized for DeepEP normal dispatch.
+
+    DeepEP non-expand dispatch outputs ``[N_recv, K]`` unique tokens with
+    ``[N_recv, top_k]`` routing metadata. This executor:
+
+    1. **Expands** unique tokens into per-expert contiguous layout
+       (``[all_tokens, K]``, ``all_tokens = Σ padded_counts``), duplicating
+       tokens that have multiple local expert assignments.
+    2. Builds ``m_indices`` and ``output_index`` (mapping each (token, slot)
+       pair to its row in the expanded tensor).
+    3. Runs MXFP8 grouped GEMMs on the expanded tensor.
+    4. **Gathers** results back using ``ep_gather`` triton kernel, which
+       applies router weights and accumulates into ``[N_recv, K]`` output.
+
+    Compared to :class:`DeepGemmHybridExecutor`:
+    - No ``ep_scatter`` needed (MXFP8 dispatches BF16, no FP8 scale reformatting)
+    - No FP8 activation quant between SiLU and down GEMM (MXFP8 quantizes
+      inside ``mxfp8_grouped_gemm`` with recipe=(1,32))
+    - Expand uses ``ep_expand`` triton kernel (atomic_add scatter, 1 launch)
+      instead of sort-based PyTorch expand (~24 launches)
+    """
+
+    @classmethod
+    def executor_type(cls) -> ExecutorType:
+        return ExecutorType.DEEPGEMM_CONTINUOUS
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import has_deep_gemm
+
+        resolver = MoeConfigResolver()
+        checker.check(resolver.get_quant_method(config) == "MXFP8")
+        checker.check(has_deep_gemm())
+        checker.check(get_sm()[0] >= 10)
+
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+        weights: Dict[str, torch.Tensor],
+    ):
+        super().__init__(config, quant_config, weights)
+        # Weights: [E_local, ...] e4m3 with prepacked int32 UE8M0 [1, 32] scales
+        self.w1 = weights[W.moe_w1]  # [E, 2*inter, hidden] (up|gate)
+        self.w2 = weights[W.moe_w2]  # [E, hidden, inter] (down)
+        self.w1_scale = weights[W.moe_s1]  # fp32 (1, 32) power-of-two scale
+        self.w2_scale = weights[W.moe_s2]
+        self.E = self.w1.size(0)  # E_local
+        self.K = self.w1.size(2)  # hidden_size
+        self.N = self.w1.size(1)  # 2 * moe_inter (gate+up concatenated)
+        self._w1_sp = None
+        self._w2_sp = None
+        self._align = _contiguous_alignment()
+
+    @property
+    def topk_ids_dtype(self) -> torch.dtype:
+        return torch.int32
+
+    def _packed_scales(self):
+        """Pack (1, 32) fp32 weight scales into DeepGEMM int32 layout (cached)."""
+        if self._w1_sp is None:
+            e, ngu, k1 = self.w1.shape
+            self._w1_sp = pack_mxfp8_scale(self.w1_scale, mn=ngu, k=k1, num_groups=e)
+            e2, hid, k2 = self.w2.shape
+            self._w2_sp = pack_mxfp8_scale(self.w2_scale, mn=hid, k=k2, num_groups=e2)
+        return self._w1_sp, self._w2_sp
+
+    def execute(
+        self,
+        payload: ExpertForwardPayload,
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+        extra_expert_args: Optional[dict[str, Any]],
+    ) -> CombineForwardPayload:
+        hidden = payload.expert_x  # [N_recv, K] BF16 unique recv tokens
+        topk_ids = payload.expert_topk_ids  # [N_recv, top_k], local IDs + -1
+        topk_weights = payload.expert_topk_weights  # [N_recv, top_k]
+        assert topk_ids is not None and topk_weights is not None
+        assert (
+            payload.expert_tokens_meta is not None
+        ), "DeepEP dispatch must provide expert_tokens_meta"
+
+        # --- Per-expert padded counts from DeepEP dispatch ---
+        # DeepEP dispatch with expert_alignment=self._align guarantees each
+        # expert's slot count is padded to a multiple of self._align.
+        if payload.expert_tokens_meta.expert_num_tokens_cpu is not None:
+            padded_counts: List[int] = list(
+                payload.expert_tokens_meta.expert_num_tokens_cpu
+            )
+        elif payload.expert_tokens_meta.expert_num_tokens is not None:
+            padded_counts = payload.expert_tokens_meta.expert_num_tokens.tolist()
+        else:
+            raise ValueError(
+                "expert_tokens_meta must provide expert_num_tokens or "
+                "expert_num_tokens_cpu (from DeepEP dispatch)"
+            )
+
+        N_recv = hidden.size(0)
+        device = hidden.device
+        top_k = topk_ids.size(1)
+
+        # Early exit: no tokens received
+        if N_recv == 0:
+            return CombineForwardPayload(
+                fused_expert_output=torch.zeros(
+                    0, self.K, device=device, dtype=torch.bfloat16
+                )
+            )
+
+        # --- Compute all_tokens (expanded size) ---
+        # all_tokens = Σ padded_counts ≥ N_recv because tokens with multiple
+        # local expert assignments are duplicated, and each expert's count is
+        # padded to self._align.
+        all_tokens = sum(padded_counts)
+        if all_tokens <= 0:
+            return CombineForwardPayload(
+                fused_expert_output=torch.zeros(
+                    N_recv, self.K, device=device, dtype=torch.bfloat16
+                )
+            )
+
+        # --- Expand unique tokens into per-expert contiguous layout ---
+        # Two fused triton kernels replace ~24 PyTorch kernel launches:
+        #   ep_expand:        atomic_add based scatter (hidden + output_index)
+        #   ep_fill_m_indices: per-expert m_indices fill (including padding rows)
+        padded_counts_t = torch.tensor(padded_counts, dtype=torch.int32, device=device)
+        padded_offsets = torch.zeros(self.E, dtype=torch.long, device=device)
+        if self.E > 1:
+            padded_offsets[1:] = torch.cumsum(padded_counts_t[:-1].to(torch.long), 0)
+
+        expanded_hidden = torch.empty(
+            all_tokens, self.K, device=device, dtype=torch.bfloat16
+        )
+        output_index = torch.full((N_recv, top_k), -1, device=device, dtype=torch.int32)
+        m_indices = torch.empty(all_tokens, device=device, dtype=torch.int32)
+
+        # ep_expand mutates padded_offsets via atomic_add (advances each
+        # expert's counter past its actual assignments), so clone it first
+        # for ep_fill_m_indices which needs the original block start offsets.
+        padded_offsets_clone = padded_offsets.clone()
+        ep_expand(
+            hidden,
+            topk_ids,
+            padded_offsets_clone,
+            expanded_hidden,
+            output_index,
+            self.E,
+        )
+
+        # ep_fill_m_indices fills each expert's padded block [offset, offset+count)
+        # with the expert ID. Uses the original (un-mutated) padded_offsets.
+        ep_fill_m_indices(padded_counts_t, padded_offsets, m_indices)
+
+        # --- Activation function parameters ---
+        if is_swiglu_oai(activation):
+            alpha, limit = swiglu_oai_alpha_limit(extra_expert_args)
+        else:
+            alpha, limit = None, None
+
+        # --- Gate+Up grouped MXFP8 GEMM ---
+        # mxfp8_grouped_gemm quantizes activations internally via
+        # _mxfp8_quant_act_v2 (per-row, per-32-col UE8M0 scale)
+        w1_sp, w2_sp = self._packed_scales()
+        upgate = mxfp8_grouped_gemm(expanded_hidden, self.w1, w1_sp, m_indices)
+        del expanded_hidden
+        # upgate: [all_tokens, 2*inter] BF16
+
+        # --- SwiGLU activation ---
+        inter = self.N // 2
+        if alpha is not None and limit is not None:
+            act = swiglu_oai_torch(upgate, alpha, limit, gate_first=False)
+        else:
+            act = torch.empty(all_tokens, inter, device=device, dtype=torch.bfloat16)
+            silu_and_mul(act, upgate)
+        del upgate
+
+        # --- Down grouped MXFP8 GEMM ---
+        down = mxfp8_grouped_gemm(act.contiguous(), self.w2, w2_sp, m_indices)
+        del act
+        # down: [all_tokens, K] BF16
+
+        # --- Apply router weights + gather back to original token order ---
+        # Normal combine is weightless (pure sum), so the executor must
+        # produce the weighted partial result for each unique received token.
+        #
+        # ep_gather is a fused triton kernel that does:
+        #   gather_out[token_i] = Σ_k down[output_index[i,k]] * topk_weights[i,k]
+        # in a single kernel launch, replacing the multi-launch PyTorch path
+        # (flatten → filter → index_select → mul → index_add_).
+        gather_out = torch.empty(N_recv, self.K, device=device, dtype=torch.bfloat16)
+        ep_gather(down, topk_ids, topk_weights, output_index, gather_out)
+
+        return CombineForwardPayload(fused_expert_output=gather_out)

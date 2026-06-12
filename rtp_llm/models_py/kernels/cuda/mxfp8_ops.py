@@ -29,8 +29,49 @@ def ue8m0_uint8_to_fp32(scale_u8: torch.Tensor) -> torch.Tensor:
     return torch.exp2(scale_u8.to(torch.float32) - 127.0)
 
 
+def _mxfp8_quant_act_v2(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Fast MXFP8 activation quant using the v2 CUDA kernel with UE8M0 scales.
+
+    Uses ``sgl_per_token_group_quant_fp8`` with ``scale_ue8m0=True`` to produce
+    e4m3 activations and int32-packed UE8M0 scales in the exact layout that
+    DeepGEMM expects (column-major, TMA-aligned). The output can be passed
+    directly to ``fp8_fp4_gemm_nt`` / ``m_grouped_fp8_fp4_gemm_nt_contiguous``
+    with ``disable_ue8m0_cast=True`` — no additional packing or conversion needed.
+
+    This matches SGLang's approach: the v2 kernel's int32 output IS DeepGEMM's
+    native scale format.
+
+    Returns (e4m3 ``[M, K]``, int32 packed scale ``[M_padded, K // 128]``).
+    """
+    from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+
+    assert x.dim() == 2, f"expected 2D activation, got {x.shape}"
+    K = x.shape[1]
+    assert K % MX_BLOCK == 0, f"K={K} must be a multiple of {MX_BLOCK}"
+    assert x.is_contiguous(), "input must be contiguous"
+
+    q, s_packed = sgl_per_token_group_quant_fp8(
+        x,
+        group_size=MX_BLOCK,
+        scale_ue8m0=True,
+        column_major_scales=True,
+        scale_tma_aligned=True,
+    )
+    # s_packed is int32 packed UE8M0, column-major layout — directly consumable
+    # by DeepGEMM with disable_ue8m0_cast=True
+    return q, s_packed
+
+
 def mxfp8_quant_act_eager(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Eager reference: per-(row, 32-col) MXFP8 quant. Kept for fallback/tests."""
+    """Dynamic per-(row, 32-col) MXFP8 quant of a 2D activation.
+
+    Returns (e4m3 ``[M, K]``, fp32 power-of-two scale ``[M, K // 32]``).
+    The scale is a pure power of two so it is exactly representable as UE8M0.
+
+    .. deprecated::
+        Use ``_mxfp8_quant_act_v2`` for better performance (single fused
+        CUDA kernel vs ~6 PyTorch kernel launches).
+    """
     assert x.dim() == 2, f"expected 2D activation, got {x.shape}"
     M, K = x.shape
     assert K % MX_BLOCK == 0, f"K={K} must be a multiple of {MX_BLOCK}"
@@ -95,16 +136,8 @@ def mxfp8_linear(
     out_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
     """y = x @ weight_e4m3.T   (weight is [N, K] e4m3, scale prepacked int32)."""
-    M, K = x.shape
-    N = weight_e4m3.shape[0]
-    # One-shot: e4m3 quant (group=32, UE8M0) + DeepGEMM-packed int32 scale in TMA layout.
-    a_q, a_s_packed = sgl_per_token_group_quant_fp8(
-        x.contiguous(),
-        MX_BLOCK,
-        column_major_scales=True,
-        scale_tma_aligned=True,
-        scale_ue8m0=True,
-    )
+    M, N = x.shape[0], weight_e4m3.shape[0]
+    a_q, a_s_packed = _mxfp8_quant_act_v2(x)
     out = torch.empty(M, N, device=x.device, dtype=out_dtype)
     with torch.cuda.device(x.device):
         fp8_fp4_gemm_nt(
@@ -134,15 +167,8 @@ def mxfp8_grouped_gemm(
     ``deep_gemm.get_m_alignment_for_contiguous_layout()`` (128). ``m_indices``
     maps each row to its expert id.
     """
-    T, K = x.shape
-    N = weight_e4m3.shape[1]
-    a_q, a_s_packed = sgl_per_token_group_quant_fp8(
-        x.contiguous(),
-        MX_BLOCK,
-        column_major_scales=True,
-        scale_tma_aligned=True,
-        scale_ue8m0=True,
-    )
+    T, N = x.shape[0], weight_e4m3.shape[1]
+    a_q, a_s_packed = _mxfp8_quant_act_v2(x)
     out = torch.empty(T, N, device=x.device, dtype=out_dtype)
     with torch.cuda.device(x.device):
         m_grouped_fp8_fp4_gemm_nt_contiguous(
@@ -152,5 +178,6 @@ def mxfp8_grouped_gemm(
             m_indices,
             recipe_a=(1, MX_BLOCK),
             recipe_b=(1, MX_BLOCK),
+            disable_ue8m0_cast=True,
         )
     return out
