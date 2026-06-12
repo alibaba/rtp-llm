@@ -67,6 +67,17 @@ py_test (
     exec_properties = {'gpu':'MI355X-ROCM7'},
 )
 
+py_test (
+    name = "rocm_moe_flydsl_gate_test",
+    srcs = ["rocm_moe_flydsl_gate_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["rocm"],
+)
+
 # CPU-only regression test for torch_moe_ref (PR #882 review #4):
 # the apply_router_weight_on_input=True path used to raise UnboundLocalError.
 # Pure PyTorch CPU - intentionally no rocm tag / gpu exec_properties so it
