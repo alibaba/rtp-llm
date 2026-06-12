@@ -401,9 +401,7 @@ class DeepepNormalRouterW4a8Int4PerChannel(DeepepNormalRouterBase):
         super().check_conditions(checker, config)
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(
-            quant_method in ["W4A8_INT4_PER_CHANNEL"]
-        )
+        checker.check(quant_method in ["W4A8_INT4_PER_CHANNEL"])
 
 
 class DeepepNormalRouterFp4PerGroup(DeepepNormalRouterBase):
@@ -432,10 +430,14 @@ class DeepepNormalRouterMxfp8(DeepepNormalRouterBase):
 
     Dispatches BF16 activations (no pre-quant — the MXFP8 executor quantizes
     per-expert chunks at group-32 internally), and keeps DeepEP's *local*
-    expert indices (``LOCAL_TOPK_IDS=True``) so ``mxfp8_moe_forward``
+    expert indices (``LOCAL_TOPK_IDS=True``) so ``Mxfp8DeepepExecutor``
     (num_experts = E_local, drops -1 assignments) can consume them directly.
     ``finalize`` runs DeepEP combine + TP all_gather to reconstruct the full
     token output, replacing the full-hidden TP all_reduce of the pure-TP path.
+
+    ``expert_alignment=128`` matches DeepGEMM's
+    ``m_alignment_for_contiguous_layout`` so the executor can build
+    ``m_indices`` directly from dispatch metadata without re-padding.
     """
 
     LOCAL_TOPK_IDS = True
@@ -446,7 +448,7 @@ class DeepepNormalRouterMxfp8(DeepepNormalRouterBase):
         config: MoEConfigAdapter,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(config, quant_config, expert_alignment=1)
+        super().__init__(config, quant_config, expert_alignment=128)
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:

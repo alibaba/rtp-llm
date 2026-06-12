@@ -434,6 +434,191 @@ def ep_gather(
     return
 
 
+# ---------------------------------------------------------------------------
+# MXFP8 expand kernels: fuse token duplication + output_index + m_indices
+# for DeepEP non-expand dispatch output → per-expert contiguous layout.
+#
+# Unlike ep_scatter_2 which also reformats FP8 per-block-128 scales (and
+# requires a specific scale layout), ep_expand only copies BF16 hidden states
+# and writes output_index — no scale handling needed for MXFP8 (the executor
+# quantizes activations inside mxfp8_grouped_gemm with recipe=(1,32)).
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _fwd_kernel_ep_expand(
+    total_token_num,
+    expert_start_loc,
+    recv_x,
+    recv_x_stride0,
+    recv_topk,
+    recv_topk_stride0,
+    output_tensor,
+    output_tensor_stride0,
+    output_index,
+    output_index_stride0,
+    topk_num: tl.constexpr,
+    num_experts: tl.constexpr,
+    HIDDEN_SIZE: tl.constexpr,
+    HIDDEN_SIZE_PAD: tl.constexpr,
+):
+    """Expand unique tokens into per-expert contiguous layout via atomic_add.
+
+    Grid: ``(min(N_recv, 1024),)``.  Each program loops over a strided slice
+    of tokens; for each token's each top-k slot that maps to a valid local
+    expert, atomically claims a row in that expert's block and copies the
+    hidden state there.
+
+    No pre-sort needed: the order of rows within an expert's block is
+    determined by atomic_add scheduling, but correctness is preserved because
+    ``output_index[token_i, k]`` records the exact destination for
+    ``ep_gather`` to retrieve.
+    """
+    start_token_id = tl.program_id(0)
+    grid_num = tl.num_programs(0)
+    offset_in = tl.arange(0, HIDDEN_SIZE_PAD)
+    mask = offset_in < HIDDEN_SIZE
+    for token_id_int32 in range(start_token_id, total_token_num, grid_num):
+        token_id = token_id_int32.to(tl.int64)
+        to_copy = tl.load(recv_x + token_id * recv_x_stride0 + offset_in, mask=mask)
+        for topk_idx_int32 in tl.range(0, topk_num, 1, num_stages=4):
+            topk_index = topk_idx_int32.to(tl.int64)
+            expert_id = tl.load(recv_topk + token_id * recv_topk_stride0 + topk_index)
+            if expert_id >= 0 and expert_id < num_experts:
+                dest_token_index_int32 = tl.atomic_add(expert_start_loc + expert_id, 1)
+                dest_token_index = dest_token_index_int32.to(tl.int64)
+                tl.store(
+                    output_index + token_id * output_index_stride0 + topk_index,
+                    dest_token_index_int32,
+                )
+                tl.store(
+                    output_tensor
+                    + dest_token_index * output_tensor_stride0
+                    + offset_in,
+                    to_copy,
+                    mask=mask,
+                )
+
+
+@triton.jit
+def _fwd_kernel_ep_fill_m_indices(
+    padded_counts,
+    padded_offsets,
+    m_indices,
+    BLOCK_E: tl.constexpr,
+):
+    """Fill m_indices: each expert's padded block gets its expert_id.
+
+    Grid: ``(E,)``.  Program *e* writes expert_id ``e`` to
+    ``m_indices[padded_offsets[e] : padded_offsets[e] + padded_counts[e]]``,
+    covering both valid rows and alignment-padding rows.  Mirrors
+    ``_fwd_kernel_ep_scatter_1`` but takes pre-computed ``padded_offsets``
+    instead of recomputing cumsum, and handles variable-width blocks (since
+    ``padded_counts`` can differ per expert).
+    """
+    cur_expert = tl.program_id(0).to(tl.int64)
+    cur_start = tl.load(padded_offsets + cur_expert).to(tl.int64)
+    cur_count = tl.load(padded_counts + cur_expert)
+    off_e = tl.arange(0, BLOCK_E).to(tl.int64)
+    for start_m in tl.range(0, cur_count, BLOCK_E, num_stages=4):
+        start_m_i64 = start_m.to(tl.int64)
+        mask = off_e < (cur_count - start_m_i64)
+        tl.store(
+            m_indices + cur_start + start_m_i64 + off_e,
+            cur_expert.to(tl.int32),
+            mask=mask,
+        )
+
+
+@torch.no_grad()
+def ep_expand(
+    recv_x: torch.Tensor,
+    recv_topk: torch.Tensor,
+    padded_offsets: torch.Tensor,
+    output_tensor: torch.Tensor,
+    output_index: torch.Tensor,
+    num_experts: int,
+):
+    """Expand unique DeepEP-dispatched tokens into per-expert contiguous layout.
+
+    Replaces the PyTorch expand in :class:`Mxfp8DeepepExecutor` with a single
+    Triton kernel using ``atomic_add`` (same pattern as ``ep_scatter_2``, but
+    without the FP8 per-block-128 scale reformatting branch — MXFP8 quantizes
+    activations inside ``mxfp8_grouped_gemm`` with recipe=(1,32) instead).
+
+    Args:
+        recv_x: ``[N_recv, K]`` BF16, unique received tokens from DeepEP.
+        recv_topk: ``[N_recv, top_k]`` int32/int64, local expert IDs + -1.
+        padded_offsets: ``[E]`` int64, pre-computed padded block starts
+            (``cumsum(padded_counts[:-1])``).  **Modified in-place** by the
+            kernel's ``atomic_add`` counter; clone before passing if the
+            caller still needs the original values.
+        output_tensor: ``[all_tokens, K]`` BF16, pre-allocated destination.
+        output_index: ``[N_recv, top_k]`` int32, pre-filled with -1.
+        num_experts: number of local experts (``E_local``).
+
+    Returns:
+        The (now mutated) ``padded_offsets`` tensor — its values have been
+        advanced past each expert's actual assignment count and should not be
+        reused as offsets.
+    """
+    HIDDEN_SIZE = recv_x.shape[1]
+    HIDDEN_SIZE_PAD = triton.next_power_of_2(HIDDEN_SIZE)
+    num_warps = 8
+    grid = min(recv_topk.shape[0], 1024)
+    _fwd_kernel_ep_expand[(grid,)](
+        recv_topk.shape[0],
+        padded_offsets,
+        recv_x,
+        recv_x.stride(0),
+        recv_topk,
+        recv_topk.stride(0),
+        output_tensor,
+        output_tensor.stride(0),
+        output_index,
+        output_index.stride(0),
+        topk_num=recv_topk.shape[1],
+        num_experts=num_experts,
+        num_warps=num_warps,
+        HIDDEN_SIZE=HIDDEN_SIZE,
+        HIDDEN_SIZE_PAD=HIDDEN_SIZE_PAD,
+    )
+    return padded_offsets
+
+
+@torch.no_grad()
+def ep_fill_m_indices(
+    padded_counts: torch.Tensor,
+    padded_offsets: torch.Tensor,
+    m_indices: torch.Tensor,
+):
+    """Fill ``m_indices`` for DeepGEMM contiguous grouped GEMM.
+
+    Each expert's padded block ``[offset, offset + count)`` is filled with the
+    expert's ID.  Handles both valid rows and alignment-padding rows (padding
+    rows get the block's expert ID, satisfying DeepGEMM's range check even
+    though those rows' hidden values are garbage and are never consumed by
+    ``ep_gather``).
+
+    Args:
+        padded_counts: ``[E]`` int32, per-expert padded token counts.
+        padded_offsets: ``[E]`` int64, per-expert block start offsets
+            (must be the **original** values, not the post-atomic_add
+            counters from ``ep_expand``).
+        m_indices: ``[all_tokens]`` int32, pre-allocated output.
+    """
+    BLOCK_E = 128
+    num_warps = 8
+    num_experts = padded_counts.shape[0]
+    _fwd_kernel_ep_fill_m_indices[(num_experts,)](
+        padded_counts,
+        padded_offsets,
+        m_indices,
+        num_warps=num_warps,
+        BLOCK_E=BLOCK_E,
+    )
+
+
 def get_tma_aligned_size(x: int, element_size: int) -> int:
     """
     Global memory address of TMA must be 16-byte aligned.

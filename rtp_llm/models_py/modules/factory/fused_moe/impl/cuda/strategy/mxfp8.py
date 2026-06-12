@@ -26,9 +26,7 @@ class CudaMxfp8NoDPStrategy(MoeStrategy):
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
         checker.check(resolver.get_quant_method(config) == "MXFP8")
-        checker.check(
-            config.moe_strategy in ("mxfp8", "mxfp8_no_dp", "auto")
-        )
+        checker.check(config.moe_strategy in ("mxfp8", "mxfp8_no_dp", "auto"))
         # When DeepEP is requested, defer to CudaMxfp8EpNormalStrategy. Needed
         # because PURE_TP has a higher router priority than DEEPEP_NORMAL, so
         # without this gate the pure-TP path would always win the tie-break.
@@ -67,15 +65,13 @@ class CudaMxfp8EpNormalStrategy(MoeStrategy):
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
         checker.check(resolver.get_quant_method(config) == "MXFP8")
-        checker.check(
-            config.moe_strategy in ("mxfp8", "mxfp8_ep_normal", "auto")
-        )
+        checker.check(config.moe_strategy in ("mxfp8", "mxfp8_ep_normal", "auto"))
         checker.check(config.moe_config.use_deepep_moe)
         checker.check(not resolver.use_all_gather(config))
 
     def get_attributes(self) -> StrategyAttributes:
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mxfp8_contiguous_executor import (
-            Mxfp8ContiguousExecutor,
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mxfp8_deepep_executor import (
+            Mxfp8DeepepExecutor,
         )
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router import (
             DeepepNormalRouterMxfp8,
@@ -87,6 +83,6 @@ class CudaMxfp8EpNormalStrategy(MoeStrategy):
         )
         return StrategyAttributes(
             router_class=DeepepNormalRouterMxfp8,
-            executor_class=Mxfp8ContiguousExecutor,
+            executor_class=Mxfp8DeepepExecutor,
             quant_config=quant_config,
         )
