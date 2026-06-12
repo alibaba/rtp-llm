@@ -118,7 +118,7 @@ class ProxyModeEnvTest(TestCase):
 class PreStopDrainSecondsTest(TestCase):
     def test_default_pre_stop_drain(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(_pre_stop_drain_seconds(), 30.0)
+            self.assertEqual(_pre_stop_drain_seconds(), 120.0)
 
     def test_env_pre_stop_drain(self) -> None:
         with patch.dict(
@@ -130,7 +130,7 @@ class PreStopDrainSecondsTest(TestCase):
         with patch.dict(
             os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "bad"}, clear=True
         ):
-            self.assertEqual(_pre_stop_drain_seconds(), 30.0)
+            self.assertEqual(_pre_stop_drain_seconds(), 120.0)
 
     def test_effective_pre_stop_drain_clamps_to_shutdown_timeout(self) -> None:
         app = bg_app.DashScApp.__new__(bg_app.DashScApp)
