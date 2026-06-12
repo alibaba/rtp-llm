@@ -564,6 +564,79 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             [("fuse_launch", 8), ("fuse_launch", 1)],
         )
 
+    def test_mhc_tilelang_single_warmup_uses_runtime_wrapper(self):
+        calls = []
+        shapes = {
+            (24, 16384): {
+                "name": "attn_hc",
+                "fn": torch.empty((24, 16384), dtype=torch.float32),
+                "base": torch.empty((24,), dtype=torch.float32),
+                "scale": torch.empty((3,), dtype=torch.float32),
+                "dim": 4096,
+                "hc_mult": 4,
+                "norm_eps": 1.0e-6,
+                "hc_eps": 1.0e-6,
+                "hc_sinkhorn_iters": 20,
+            }
+        }
+
+        def with_patch(name, value):
+            old = getattr(warmup_module, name)
+            setattr(warmup_module, name, value)
+            return old
+
+        old_values = {}
+        try:
+            old_values["_is_cuda_device"] = with_patch(
+                "_is_cuda_device", lambda device: True
+            )
+            old_values["_assert_not_capturing"] = with_patch(
+                "_assert_not_capturing", lambda: None
+            )
+            old_values["_get_deep_gemm_num_sms"] = with_patch(
+                "_get_deep_gemm_num_sms", lambda device: 148
+            )
+            old_values["_mhc_prenorm_deepgemm_backend_name"] = with_patch(
+                "_mhc_prenorm_deepgemm_backend_name", lambda: "tilelang_single"
+            )
+            old_values["_mhc_prenorm_deepgemm_backend_enabled"] = with_patch(
+                "_mhc_prenorm_deepgemm_backend_enabled", lambda: False
+            )
+            old_values["_dist_rank"] = with_patch("_dist_rank", lambda: 0)
+            old_values["_sync_cuda"] = with_patch("_sync_cuda", lambda device: None)
+            old_values["_release_cuda_cache"] = with_patch(
+                "_release_cuda_cache", lambda device: None
+            )
+            old_values["_run_deepgemm_warmup_launches_serialized"] = with_patch(
+                "_run_deepgemm_warmup_launches_serialized",
+                lambda label, fn: fn(),
+            )
+            old_values["_launch_dummy_mhc_prenorm_gemm"] = with_patch(
+                "_launch_dummy_mhc_prenorm_gemm",
+                lambda **kwargs: calls.append(("deepgemm", kwargs)),
+            )
+            old_values["_launch_dummy_mhc_pre_big_fuse"] = with_patch(
+                "_launch_dummy_mhc_pre_big_fuse",
+                lambda **kwargs: calls.append(("raw_fuse", kwargs)),
+            )
+            old_values["_launch_dummy_mhc_pre_wrapper"] = with_patch(
+                "_launch_dummy_mhc_pre_wrapper",
+                lambda **kwargs: calls.append(("wrapper", kwargs["m_value"])),
+            )
+            warmup_module._MHC_PRENORM_GEMM_JIT_WARMED_KEYS.clear()
+
+            warmup_module.warmup_mhc_prenorm_gemm_jit(
+                shapes,
+                max_m=1024,
+                device=torch.device("cuda"),
+            )
+        finally:
+            for name, value in old_values.items():
+                setattr(warmup_module, name, value)
+            warmup_module._MHC_PRENORM_GEMM_JIT_WARMED_KEYS.clear()
+
+        self.assertEqual(calls, [("wrapper", 1)])
+
     def test_mhc_head_fused_warmup_uses_batched_two_token_shape(self):
         calls = []
         shapes = {
