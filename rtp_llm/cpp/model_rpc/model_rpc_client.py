@@ -500,6 +500,16 @@ class ModelRpcClient(object):
                     )
                 elif e.code() == StatusCode.CANCELLED:
                     raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
+                elif e.code() == StatusCode.UNAVAILABLE:
+                    details = e.details() or ""
+                    lower_details = details.lower()
+                    if "socket closed" in lower_details or "connection reset" in lower_details:
+                        exception_type = ExceptionType.CONNECTION_RESET_BY_PEER
+                    elif "timed out" in lower_details or "timeout" in lower_details:
+                        exception_type = ExceptionType.CONNECT_TIMEOUT
+                    else:
+                        exception_type = ExceptionType.CONNECT_FAILED
+                    raise FtRuntimeException(exception_type, details)
                 else:
                     raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
         except Exception as e:

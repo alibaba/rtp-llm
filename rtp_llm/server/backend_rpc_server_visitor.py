@@ -1,5 +1,7 @@
 import logging
+import os
 import time
+import asyncio
 from typing import TYPE_CHECKING, AsyncGenerator, List, Optional
 
 import torch
@@ -31,6 +33,9 @@ if TYPE_CHECKING:
     from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 route_logger = logging.getLogger("route_logger")
+
+PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
+DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
 
 
 class BackendRPCServerVisitor:
@@ -113,10 +118,43 @@ class BackendRPCServerVisitor:
             master_config=master_config,
         )
         self.recent_cache_key_window = RecentCacheKeyWindow()
+        self.pd_route_retry_on_unavailable = self._pd_route_retry_on_unavailable()
 
     async def close(self):
         await self.model_rpc_client.close()
         await self.master_client.close()
+
+    @staticmethod
+    def _pd_route_retry_on_unavailable() -> int:
+        raw = os.environ.get(PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV, "")
+        if not raw:
+            return DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            route_logger.warning(
+                "Invalid %s=%r, falling back to default retry count %s",
+                PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV,
+                raw,
+                DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE,
+            )
+            return DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE
+
+    @staticmethod
+    def _is_retryable_route_rpc_error(e: BaseException) -> bool:
+        exception_type = getattr(e, "exception_type", None)
+        if exception_type is not None:
+            try:
+                return int(exception_type) >= 8000
+            except (TypeError, ValueError):
+                pass
+        text = str(e)
+        return (
+            "StatusCode.UNAVAILABLE" in text
+            or "grpc_status:14" in text
+            or "recvmsg:Connection timed out" in text
+            or "Socket closed" in text
+        )
 
     @staticmethod
     def get_backend_role_list(
@@ -448,21 +486,45 @@ class BackendRPCServerVisitor:
                     f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
                 )
 
-            if self.host_service.service_available:
-                await self.route_ips(input)
-
-            stream = self.model_rpc_client.enqueue(input)
         except BaseException as e:
             set_aux_info(e)
             raise
 
+        async def route_and_enqueue(attempt: int):
+            if attempt > 0:
+                input.generate_config.role_addrs = []
+            if self.host_service.service_available:
+                await self.route_ips(input)
+            return self.model_rpc_client.enqueue(input)
+
         async def stream_with_aux_info():
-            try:
-                async for output in stream:
-                    yield output
-            except BaseException as e:
-                set_aux_info(e)
-                raise
+            attempt = 0
+            while True:
+                yielded_output = False
+                try:
+                    stream = await route_and_enqueue(attempt)
+                    async for output in stream:
+                        yielded_output = True
+                        yield output
+                    return
+                except BaseException as e:
+                    set_aux_info(e)
+                    if (
+                        yielded_output
+                        or attempt >= self.pd_route_retry_on_unavailable
+                        or not self._is_retryable_route_rpc_error(e)
+                    ):
+                        raise
+                    attempt += 1
+                    route_logger.warning(
+                        "retrying PD route after retryable RPC error, "
+                        "request_id=%s, attempt=%s/%s, error=%s",
+                        input.request_id,
+                        attempt,
+                        self.pd_route_retry_on_unavailable,
+                        e,
+                    )
+                    await asyncio.sleep(min(0.2, 0.05 * attempt))
 
         return stream_with_aux_info()
 
