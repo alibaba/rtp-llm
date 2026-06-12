@@ -134,6 +134,7 @@ cc_library(
         ":type_convert",
         ":types_hdr",
         ":common_defines",
+        ":cache_store_async_writer",
         "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         "//rtp_llm/cpp/utils:signal_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",

@@ -34,6 +34,19 @@ torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start
     return hidden_states.narrow(0, start, length).clone();
 }
 
+torch::Tensor clonePrefillLastHiddenSlice(const torch::Tensor& hidden_states,
+                                          int64_t              batch_idx_out,
+                                          int64_t              token_offset,
+                                          int64_t              token_size,
+                                          int64_t              total_batch_size_out) {
+    if (!hidden_states.defined() || hidden_states.numel() == 0) {
+        return torch::Tensor();
+    }
+    const bool compact_last_hidden = hidden_states.dim() == 2 && hidden_states.size(0) == total_batch_size_out;
+    const auto start               = compact_last_hidden ? batch_idx_out : token_offset + token_size - 1;
+    return cloneHiddenSlice(hidden_states, start, 1);
+}
+
 }  // namespace
 
 namespace {
@@ -860,8 +873,14 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
             if (draft_last_hidden_states.defined() && draft_last_hidden_states.numel() > 0) {
                 last_hidden_states = cloneHiddenSlice(draft_last_hidden_states, batch_idx_out, 1);
             } else {
-                last_hidden_states =
-                    cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + token_size - 1, 1);
+                // CP prefill may use PyWrappedModel's last-hidden-only exit for
+                // the draft model, yielding compact [batch, hidden] rows. The
+                // non-CP/full-hidden path still yields [tokens, hidden].
+                last_hidden_states = clonePrefillLastHiddenSlice(draft_model_output.all_hidden_states,
+                                                                 batch_idx_out,
+                                                                 token_offset,
+                                                                 token_size,
+                                                                 total_batch_size_out);
             }
         }
 

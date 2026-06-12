@@ -9,6 +9,7 @@ from torch import nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, barrier
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
 
 # Try to import CUDA dependencies, but don't fail if running on CPU
@@ -35,6 +36,29 @@ def _get_topk_workspace(device: torch.device) -> torch.Tensor:
         ws = torch.empty(1 << 20, dtype=torch.uint8, device=device)
         _persistent_topk_workspace[device] = ws
     return ws
+
+
+def _fp8_mqa_logits_chunk_rows() -> int:
+    """Rows per FP8 MQA logits chunk.
+
+    Long-context CP prefill can otherwise materialize a [local_q, full_k]
+    logits matrix. Keep this opt-in for the shared base indexer path; the GLM5
+    smoke target enables it explicitly with the same env used by DSV4.
+    """
+    return dsv4_chunk_tokens_from_env(
+        "DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS",
+        default=0,
+        min_value=0,
+    )
+
+
+def _halve_chunk_rows(chunk_rows: int) -> int:
+    next_rows = max(1, chunk_rows // 2)
+    if next_rows >= 1024:
+        return max(1024, (next_rows // 1024) * 1024)
+    if next_rows >= 128:
+        return max(128, (next_rows // 128) * 128)
+    return next_rows
 
 
 def _pd_debug_enabled() -> bool:
@@ -130,6 +154,19 @@ def _unpack_ue8m0_scale(sf_packed: torch.Tensor) -> torch.Tensor:
     return sf_fp32
 
 
+def _indexer_cache_blocks(
+    kv_cache_fp8: torch.Tensor, blocksize: int, head_dim_with_sf: int
+) -> torch.Tensor:
+    """Normalize indexer cache storage to physical pages.
+
+    LayerKVCache can expose the same contiguous cache either as physical pages
+    [num_blocks, blocksize, stride] or as kernel-block pages
+    [num_blocks * blocksize, 1, stride] when kernel_seq_size_per_block == 1.
+    Indexer kernels and DeepGEMM paged logits need physical pages.
+    """
+    return kv_cache_fp8.view(-1, blocksize, head_dim_with_sf)
+
+
 def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
     """
     Hadamard transform for activation rotation.
@@ -185,8 +222,13 @@ def _try_fused_prefill_rope_hadamard_qk(
     from rtp_llm.models_py.triton_kernels.sparse_mla.fused_prefill_rope_hadamard import (
         fused_prefill_rope_hadamard_qk,
     )
+
     return fused_prefill_rope_hadamard_qk(
-        q, k, positions, cos_sin_cache, rope_head_dim,
+        q,
+        k,
+        positions,
+        cos_sin_cache,
+        rope_head_dim,
         is_neox_style=is_neox_style,
     )
 
@@ -233,6 +275,14 @@ class IndexerOp(nn.Module):
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
 
+    def _head_dim_with_sf(self) -> int:
+        return self.index_head_dim + self.index_head_dim // self.block_size * 4
+
+    def _kv_cache_blocks(self, kv_cache: KVCache) -> torch.Tensor:
+        return _indexer_cache_blocks(
+            kv_cache.kv_scale_base, self.blocksize, self._head_dim_with_sf()
+        )
+
     def apply_rope_and_rotate_q_k(
         self,
         q: torch.Tensor,
@@ -253,8 +303,12 @@ class IndexerOp(nn.Module):
         # Fast path: fused Triton kernel + cuBLAS GEMM (2 launches instead of 4)
         # Empirical: 2.35x at T=4096, up to 4.2x at T=16384 on DSV3.2 (eager mode).
         fused = _try_fused_prefill_rope_hadamard_qk(
-            q, k, positions, self.cos_sin_cache,
-            self.rope_head_dim, self.is_neox_style,
+            q,
+            k,
+            positions,
+            self.cos_sin_cache,
+            self.rope_head_dim,
+            self.is_neox_style,
         )
         if fused is not None:
             return fused
@@ -308,8 +362,12 @@ class IndexerOp(nn.Module):
         # Fast path: fused Triton kernel + cuBLAS GEMM (2 launches instead of 4)
         # Skips when full_rope_pos_ids is None (CP edge case: n_q == 0).
         fused = _try_fused_prefill_rope_hadamard_qk(
-            q, k, full_rope_pos_ids, self.cos_sin_cache,
-            self.rope_head_dim, self.is_neox_style,
+            q,
+            k,
+            full_rope_pos_ids,
+            self.cos_sin_cache,
+            self.rope_head_dim,
+            self.is_neox_style,
         )
         if fused is not None:
             return fused
@@ -384,7 +442,7 @@ class IndexerOp(nn.Module):
         assert kv_cache is not None, "kv_cache is required"
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
-            kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
+            self._kv_cache_blocks(kv_cache),  # [num_blocks, block_size, cache_stride]
             slot_mapping,  # [num_tokens] physical slot indices
             self.block_size,  # quantization block size (128)
             self.scale_fmt,  # "ue8m0" for power-of-2 scaling
@@ -431,7 +489,7 @@ class IndexerOp(nn.Module):
         assert kv_cache is not None, "kv_cache is required"
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
-            kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
+            self._kv_cache_blocks(kv_cache),  # [num_blocks, block_size, cache_stride]
             slot_mapping,  # [num_tokens] physical slot indices
             self.block_size,  # quantization block size (128)
             self.scale_fmt,  # "ue8m0" for power-of-2 scaling
@@ -560,7 +618,7 @@ class IndexerOp(nn.Module):
 
         rtp_llm_ops.indexer_k_quant_and_cache(
             restored_key,
-            kv_cache.kv_scale_base,
+            self._kv_cache_blocks(kv_cache),
             slot_mapping,
             self.block_size,
             self.scale_fmt,
@@ -602,16 +660,15 @@ class IndexerOp(nn.Module):
             TopK indices tensor
         """
         weights = weights.view(-1, self.index_n_heads)
-        kv_cache_fp8 = kv_cache.kv_scale_base
         is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
 
         num_heads_kv = 1
-        head_dim_with_sf = (
-            self.index_head_dim + self.index_head_dim // self.block_size * 4
+        head_dim_with_sf = self._head_dim_with_sf()
+        kv_cache_fp8 = (
+            self._kv_cache_blocks(kv_cache)
+            .view(-1, self.blocksize, num_heads_kv, head_dim_with_sf)
+            .view(dtype=torch.uint8)
         )
-        kv_cache_fp8 = kv_cache_fp8.view(
-            kv_cache_fp8.shape[0], self.blocksize, num_heads_kv, head_dim_with_sf
-        ).view(dtype=torch.uint8)
 
         block_table = _physical_block_table(attention_inputs)
         cu_seqlens_q = attention_inputs.decode_cu_seqlens_d
@@ -775,7 +832,7 @@ class IndexerOp(nn.Module):
                 )
 
         rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-            kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
+            self._kv_cache_blocks(kv_cache),  # [num_blocks, block_size, cache_stride]
             k_fp8,  # output [num_tokens, index_head_dim]
             k_scale,  # output [num_tokens, scale_size]
             block_table,  # [batch_size, physical_blocks]
@@ -790,34 +847,62 @@ class IndexerOp(nn.Module):
             fmha_params.ks is not None and fmha_params.ke is not None
         ), "ks/ke must be prepared in prefill"
 
-        logits = deep_gemm.fp8_mqa_logits(
-            q_fp8,
-            kv_fp8,
-            weights,
-            fmha_params.ks,
-            fmha_params.ke,
-            clean_logits=False,
+        num_rows = q_fp8.shape[0]
+        topk_result = torch.empty(
+            (num_rows, self.index_topk), dtype=torch.int32, device=q_fp8.device
         )
-
-        num_rows = logits.shape[0]
-        topk_result = logits.new_empty(
-            (num_rows, self.index_topk), dtype=torch.int32
-        )
-        rtp_llm_ops.dsv4_top_k_per_row_prefill(
-            logits,
-            fmha_params.ks,
-            fmha_params.ke,
-            topk_result,
-            num_rows,
-            logits.stride(0),
-            logits.stride(1),
-            self.index_topk,
-        )
-        topk_result = torch.where(
-            topk_result >= 0,
-            topk_result + fmha_params.topk_indices_offset.unsqueeze(1),
-            topk_result,
-        )
+        if num_rows == 0:
+            return topk_result
+        chunk_rows_env = _fp8_mqa_logits_chunk_rows()
+        chunk_rows = num_rows if chunk_rows_env <= 0 else min(chunk_rows_env, num_rows)
+        row_start = 0
+        while row_start < num_rows:
+            row_end = min(row_start + chunk_rows, num_rows)
+            try:
+                logits = deep_gemm.fp8_mqa_logits(
+                    q_fp8[row_start:row_end],
+                    kv_fp8,
+                    weights[row_start:row_end],
+                    fmha_params.ks[row_start:row_end],
+                    fmha_params.ke[row_start:row_end],
+                    clean_logits=False,
+                )
+            except torch.OutOfMemoryError:
+                next_chunk_rows = _halve_chunk_rows(chunk_rows)
+                if next_chunk_rows == chunk_rows:
+                    raise
+                logging.warning(
+                    "[INDEXER_FP8_MQA_CHUNK] OOM with chunk_rows=%s, "
+                    "retrying with chunk_rows=%s for num_rows=%s total_kv_tokens=%s",
+                    chunk_rows,
+                    next_chunk_rows,
+                    num_rows,
+                    total_kv_tokens,
+                )
+                torch.cuda.empty_cache()
+                chunk_rows = next_chunk_rows
+                continue
+            topk_part = logits.new_empty(
+                (logits.shape[0], self.index_topk), dtype=torch.int32
+            )
+            rtp_llm_ops.dsv4_top_k_per_row_prefill(
+                logits,
+                fmha_params.ks[row_start:row_end],
+                fmha_params.ke[row_start:row_end],
+                topk_part,
+                logits.shape[0],
+                logits.stride(0),
+                logits.stride(1),
+                self.index_topk,
+            )
+            topk_result[row_start:row_end] = torch.where(
+                topk_part >= 0,
+                topk_part
+                + fmha_params.topk_indices_offset[row_start:row_end].unsqueeze(1),
+                topk_part,
+            )
+            del logits, topk_part
+            row_start = row_end
 
         return topk_result
 
@@ -910,7 +995,7 @@ class IndexerOp(nn.Module):
                 )
 
         rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-            kv_cache.kv_scale_base,
+            self._kv_cache_blocks(kv_cache),
             k_fp8,
             k_scale,
             block_table,
@@ -925,33 +1010,62 @@ class IndexerOp(nn.Module):
             ke: torch.Tensor,
             topk_off: torch.Tensor,
         ) -> torch.Tensor:
-            logits_p = deep_gemm.fp8_mqa_logits(
-                q_part,
-                kv_fp8_full,
-                weights_part,
-                ks,
-                ke,
-                clean_logits=False,
+            nr = q_part.shape[0]
+            topk_result = torch.empty(
+                (nr, self.index_topk), dtype=torch.int32, device=q_part.device
             )
-            nr = logits_p.shape[0]
-            topk_out = logits_p.new_empty(
-                (nr, self.index_topk), dtype=torch.int32
-            )
-            rtp_llm_ops.dsv4_top_k_per_row_prefill(
-                logits_p,
-                ks,
-                ke,
-                topk_out,
-                nr,
-                logits_p.stride(0),
-                logits_p.stride(1),
-                self.index_topk,
-            )
-            return torch.where(
-                topk_out >= 0,
-                topk_out + topk_off.unsqueeze(1),
-                topk_out,
-            )
+            if nr == 0:
+                return topk_result
+            chunk_rows_env = _fp8_mqa_logits_chunk_rows()
+            chunk_rows = nr if chunk_rows_env <= 0 else min(chunk_rows_env, nr)
+            row_start = 0
+            while row_start < nr:
+                row_end = min(row_start + chunk_rows, nr)
+                try:
+                    logits_p = deep_gemm.fp8_mqa_logits(
+                        q_part[row_start:row_end],
+                        kv_fp8_full,
+                        weights_part[row_start:row_end],
+                        ks[row_start:row_end],
+                        ke[row_start:row_end],
+                        clean_logits=False,
+                    )
+                except torch.OutOfMemoryError:
+                    next_chunk_rows = _halve_chunk_rows(chunk_rows)
+                    if next_chunk_rows == chunk_rows:
+                        raise
+                    logging.warning(
+                        "[INDEXER_FP8_MQA_CHUNK] OOM with chunk_rows=%s, "
+                        "retrying with chunk_rows=%s for nr=%s total_kv_tokens=%s",
+                        chunk_rows,
+                        next_chunk_rows,
+                        nr,
+                        total_kv_tokens,
+                    )
+                    torch.cuda.empty_cache()
+                    chunk_rows = next_chunk_rows
+                    continue
+                topk_part = logits_p.new_empty(
+                    (logits_p.shape[0], self.index_topk), dtype=torch.int32
+                )
+                rtp_llm_ops.dsv4_top_k_per_row_prefill(
+                    logits_p,
+                    ks[row_start:row_end],
+                    ke[row_start:row_end],
+                    topk_part,
+                    logits_p.shape[0],
+                    logits_p.stride(0),
+                    logits_p.stride(1),
+                    self.index_topk,
+                )
+                topk_result[row_start:row_end] = torch.where(
+                    topk_part >= 0,
+                    topk_part + topk_off[row_start:row_end].unsqueeze(1),
+                    topk_part,
+                )
+                del logits_p, topk_part
+                row_start = row_end
+            return topk_result
 
         if total_local_ids.size(0) > 0:
             topk = run_part_logits_topk(

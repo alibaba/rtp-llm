@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules.dsv4.moe.moe_layer import resolve_moe_max_tokens_
 from .mega_moe import GLM5MegaMoE
 
 logger = logging.getLogger(__name__)
+_CHUNKED_GLM5_MOE_LOGGED = False
 
 
 def _split_stacked_moe_w1_up_gate(
@@ -185,6 +186,48 @@ class MegaMoeWrapper(nn.Module):
 
         self.expert_num = n_routed_experts
 
+    def _forward_chunked(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        forward_fn,
+    ) -> torch.Tensor:
+        capacity = int(
+            getattr(
+                getattr(self.mega_moe, "_mega_buf", None), "num_max_tokens_per_rank", 0
+            )
+            or 0
+        )
+        tokens = int(hidden_states.size(0))
+        if capacity <= 0 or tokens <= capacity:
+            return forward_fn(hidden_states, topk_weights, topk_ids)
+
+        global _CHUNKED_GLM5_MOE_LOGGED
+        if not _CHUNKED_GLM5_MOE_LOGGED:
+            _CHUNKED_GLM5_MOE_LOGGED = True
+            logger.info(
+                "[GLM5 MegaMoE] chunked forward enabled: tokens=%d "
+                "chunk_tokens=%d chunks=%d hidden=%s device=%s",
+                tokens,
+                capacity,
+                (tokens + capacity - 1) // capacity,
+                tuple(hidden_states.shape),
+                hidden_states.device,
+            )
+
+        output = torch.empty_like(hidden_states)
+        for token_start in range(0, tokens, capacity):
+            token_end = min(token_start + capacity, tokens)
+            output[token_start:token_end].copy_(
+                forward_fn(
+                    hidden_states[token_start:token_end],
+                    topk_weights[token_start:token_end],
+                    topk_ids[token_start:token_end],
+                )
+            )
+        return output
+
     def clone_for_cuda_graph(self) -> "MegaMoeWrapper":
         clone = object.__new__(type(self))
         nn.Module.__init__(clone)
@@ -210,4 +253,9 @@ class MegaMoeWrapper(nn.Module):
         extra_expert_args: Optional[Dict[str, Any]] = None,
         extra_finalize_args: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
-        return self.mega_moe(hidden_states, topk_weights, topk_ids)
+        return self._forward_chunked(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            self.mega_moe,
+        )
