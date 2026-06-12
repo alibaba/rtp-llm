@@ -45,6 +45,27 @@ public:
         return status.load(std::memory_order_acquire);
     }
 
+    // 返回事件触发后的"最新状态"：在 status 之上应用尚未被 moveToNext() 消费的事件
+    // (Error / GenerateDone)。用于事件已上报但状态机尚未被调度器轮询的窗口期内，让调用方
+    // 读到与事件一致的状态。
+    // 非终态事件（CanRun/LoadInitiated 等）的转移依赖 initKVBlock/loadCacheDone 等副作用，
+    // 不可仅由事件得到，故仍按 committed status 返回。
+    // 线程安全约定与 hasEvent() 一致：调用方需保证 events_ 与 status 在同一同步域下访问
+    // （通常通过 GenerateStream::mutex_ 保护）。
+    StreamState getLatestStatus() const {
+        const auto committed = status.load(std::memory_order_acquire);
+        if (committed == StreamState::FINISHED) {
+            return committed;
+        }
+        if (events_.has(StreamEvents::Error)) {
+            return StreamState::FINISHED;
+        }
+        if (committed == StreamState::RUNNING && events_.has(StreamEvents::GenerateDone)) {
+            return StreamState::FINISHED;
+        }
+        return committed;
+    }
+
     void setReserveStep(size_t reserve_step) {
         reserve_step_ = reserve_step;
     }
