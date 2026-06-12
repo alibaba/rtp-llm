@@ -69,6 +69,7 @@ _MHC_HEAD_FUSED_JIT_WARMED_KEYS: set[tuple] = set()
 _FP8_MQA_LOGITS_JIT_WARMED_KEYS: set[tuple] = set()
 _SWA_SLOT_DEQUANT_JIT_WARMED_KEYS: set[tuple] = set()
 _DEEPGEMM_WARMUP_COMPILE_RETRIES = 2
+_TILELANG_WARMUP_COMPILE_RETRIES = 2
 
 
 def _cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
@@ -226,6 +227,28 @@ def _is_deepgemm_nvcc_compile_error(error: BaseException) -> bool:
     return "NVCC compilation failed" in str(error)
 
 
+def _is_tilelang_transient_nvcc_compile_error(error: BaseException) -> bool:
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop()
+        obj_id = id(current)
+        if obj_id in seen:
+            continue
+        seen.add(obj_id)
+        message = str(current)
+        if (
+            "cannot open source file" in message
+            and "/tmp/tmpxft_" in message
+            and ".ii" in message
+        ):
+            return True
+        for nested in (current.__cause__, current.__context__):
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+    return False
+
+
 def _run_deepgemm_warmup_launch_with_retry(
     label: str,
     detail: str,
@@ -249,6 +272,42 @@ def _run_deepgemm_warmup_launch_with_retry(
                 break
             logging.warning(
                 "[%s] %s hit NVCC compilation failure on attempt %d/%d; retrying",
+                label,
+                detail,
+                attempt,
+                attempts,
+            )
+            _sync_cuda(device)
+            _release_cuda_cache(device)
+            time.sleep(0.2 * attempt)
+
+    assert last_error is not None
+    raise last_error
+
+
+def _run_tilelang_warmup_launch_with_retry(
+    label: str,
+    detail: str,
+    launch_fn: Any,
+    *,
+    device: torch.device,
+) -> None:
+    """Retry transient TileLang NVCC temp-file failures during startup warmup."""
+
+    last_error: BaseException | None = None
+    attempts = _TILELANG_WARMUP_COMPILE_RETRIES + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            launch_fn()
+            return
+        except RuntimeError as error:
+            if not _is_tilelang_transient_nvcc_compile_error(error):
+                raise
+            last_error = error
+            if attempt >= attempts:
+                break
+            logging.warning(
+                "[%s] %s hit transient TileLang NVCC failure on attempt %d/%d; retrying",
                 label,
                 detail,
                 attempt,
@@ -1527,18 +1586,30 @@ def warmup_mhc_prenorm_gemm_jit(
                         ),
                         device=device,
                     )
-                    _launch_dummy_mhc_pre_big_fuse(
-                        key=key,
-                        info=info,
-                        m_value=m_value,
-                        num_splits=num_splits,
+                    _run_tilelang_warmup_launch_with_retry(
+                        "DSV4 mHC TileLangFuse",
+                        f"shape={key} num_splits={num_splits} m={m_value}",
+                        partial(
+                            _launch_dummy_mhc_pre_big_fuse,
+                            key=key,
+                            info=info,
+                            m_value=m_value,
+                            num_splits=num_splits,
+                            device=device,
+                        ),
                         device=device,
                     )
                 else:
-                    _launch_dummy_mhc_pre_wrapper(
-                        key=key,
-                        info=info,
-                        m_value=m_value,
+                    _run_tilelang_warmup_launch_with_retry(
+                        "DSV4 mHC TileLangPre",
+                        f"shape={key} m={m_value}",
+                        partial(
+                            _launch_dummy_mhc_pre_wrapper,
+                            key=key,
+                            info=info,
+                            m_value=m_value,
+                            device=device,
+                        ),
                         device=device,
                     )
             _sync_cuda(device)
@@ -1586,10 +1657,16 @@ def warmup_mhc_head_fused_jit(
 
     def _run_warmup_launches() -> None:
         for key in shape_keys:
-            _launch_dummy_mhc_head_fused(
-                key=key,
-                info=shapes[key],
-                token_values=(2,),
+            _run_tilelang_warmup_launch_with_retry(
+                "DSV4 mHCHeadFused",
+                f"shape={key} token_values=(2,)",
+                partial(
+                    _launch_dummy_mhc_head_fused,
+                    key=key,
+                    info=shapes[key],
+                    token_values=(2,),
+                    device=device,
+                ),
                 device=device,
             )
             _sync_cuda(device)

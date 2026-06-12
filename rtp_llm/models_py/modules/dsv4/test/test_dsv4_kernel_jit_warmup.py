@@ -45,6 +45,7 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _generate_dense_gemm_warmup_m_grid,
     _generate_mhc_prenorm_warmup_specs,
     _run_deepgemm_warmup_launch_with_retry,
+    _run_tilelang_warmup_launch_with_retry,
     _sm100_dense_layout_signature,
     resolve_dense_gemm_warmup_max_m,
 )
@@ -944,6 +945,59 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             _run_deepgemm_warmup_launch_with_retry(
                 "test",
                 "shape=(24, 16384)",
+                launch,
+                device=torch.device("cpu"),
+            )
+
+    def test_tilelang_warmup_retry_handles_tmpxft_source_race(self):
+        calls = []
+
+        def launch():
+            calls.append(None)
+            if len(calls) == 1:
+                raise RuntimeError(
+                    'Catastrophic error: cannot open source file '
+                    '"/tmp/tmpxft_000011ba_00000000-7_tvm_kernels.cpp1.ii"'
+                )
+
+        _run_tilelang_warmup_launch_with_retry(
+            "test",
+            "shape=(24, 28672) num_splits=18",
+            launch,
+            device=torch.device("cpu"),
+        )
+
+        self.assertEqual(len(calls), 2)
+
+    def test_tilelang_warmup_retry_handles_chained_tmpxft_source_race(self):
+        calls = []
+
+        def launch():
+            calls.append(None)
+            if len(calls) == 1:
+                cause = RuntimeError(
+                    'Catastrophic error: cannot open source file '
+                    '"/tmp/tmpxft_000011ba_00000000-7_tvm_kernels.cpp1.ii"'
+                )
+                raise RuntimeError("TileLang mhc_pre failed: shape=(1, 2)") from cause
+
+        _run_tilelang_warmup_launch_with_retry(
+            "test",
+            "shape=(24, 28672) num_splits=18",
+            launch,
+            device=torch.device("cpu"),
+        )
+
+        self.assertEqual(len(calls), 2)
+
+    def test_tilelang_warmup_retry_does_not_swallow_other_errors(self):
+        def launch():
+            raise RuntimeError("TileLang semantic compile error")
+
+        with self.assertRaisesRegex(RuntimeError, "semantic compile"):
+            _run_tilelang_warmup_launch_with_retry(
+                "test",
+                "shape=(24, 28672)",
                 launch,
                 device=torch.device("cpu"),
             )
