@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import signal
 import socket
 import threading
@@ -7,6 +8,7 @@ import time
 import unittest
 import urllib.request
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from fastapi.responses import StreamingResponse
 from uvicorn import Config
@@ -116,7 +118,8 @@ class FrontendGracefulShutdownBusinessTest(unittest.TestCase):
         stream_thread.start()
         self.assertTrue(frontend_server.first_chunk_sent.wait(timeout=5))
 
-        server.handle_exit(signal.SIGTERM, None)
+        with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "0"}):
+            server.handle_exit(signal.SIGTERM, None)
 
         stream_thread.join(timeout=10)
         server_thread.join(timeout=10)

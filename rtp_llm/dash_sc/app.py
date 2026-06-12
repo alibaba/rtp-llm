@@ -36,6 +36,19 @@ _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
 
 _PROXY_SERVICER_STARTUP_TIMEOUT_S = 30.0
 _SERVICER_CLOSE_TIMEOUT_S = 10.0
+_PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
+_DEFAULT_PRE_STOP_DRAIN_SECONDS = 120.0
+
+
+def _pre_stop_drain_seconds() -> float:
+    raw = os.environ.get(_PRE_STOP_DRAIN_SECONDS_ENV, "")
+    if not raw:
+        return _DEFAULT_PRE_STOP_DRAIN_SECONDS
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return _DEFAULT_PRE_STOP_DRAIN_SECONDS
+    return max(0.0, seconds)
 
 
 def _is_proxy_mode_enabled() -> bool:

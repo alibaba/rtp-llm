@@ -12,6 +12,7 @@ from rtp_llm.dash_sc.app import (
     _create_proxy_servicer_on_loop,
     _derive_echo_prefix_ids,
     _is_proxy_mode_enabled,
+    _pre_stop_drain_seconds,
 )
 
 
@@ -112,6 +113,36 @@ class ProxyModeEnvTest(TestCase):
             clear=True,
         ):
             self.assertTrue(_is_proxy_mode_enabled())
+
+
+class PreStopDrainSecondsTest(TestCase):
+    def test_default_pre_stop_drain(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_pre_stop_drain_seconds(), 120.0)
+
+    def test_env_pre_stop_drain(self) -> None:
+        with patch.dict(
+            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "2.5"}, clear=True
+        ):
+            self.assertEqual(_pre_stop_drain_seconds(), 2.5)
+
+    def test_bad_pre_stop_drain_uses_default(self) -> None:
+        with patch.dict(
+            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "bad"}, clear=True
+        ):
+            self.assertEqual(_pre_stop_drain_seconds(), 120.0)
+
+    def test_effective_pre_stop_drain_clamps_to_shutdown_timeout(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+
+        class _ServerConfig:
+            shutdown_timeout = 10
+
+        app.server_config = _ServerConfig()
+        with patch.dict(
+            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "30"}, clear=True
+        ):
+            self.assertEqual(app._effective_pre_stop_drain_seconds(), 10.0)
 
 
 class CloseServicerOnLoopTest(TestCase):
