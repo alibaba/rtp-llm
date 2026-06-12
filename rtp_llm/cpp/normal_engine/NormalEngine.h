@@ -35,9 +35,10 @@ public:
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
 
+    absl::Status start() override;
+
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
-    absl::Status startLoop();
     int64_t      getLastScheduleTime() override;
     void         reportMetrics(RtpLLMEngineMetricsCollector collector) {
         if (metrics_reporter_) {
@@ -46,6 +47,9 @@ public:
     }
     bool updateEplbConfig(const EPLBConfig& config) override;
     void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
+
+private:
+    absl::Status startLoop();
 
 private:
     void                            initScheduler();
@@ -84,6 +88,7 @@ private:
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
     StepWindowProfiler                            step_profiler_;
     int                                           reserve_step_ = 0;
+    bool                                          loop_started_ = false;
 };
 
 }  // namespace rtp_llm

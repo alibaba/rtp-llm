@@ -29,8 +29,12 @@ EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object hand
     executor_.reset(new EmbeddingExecutor(params, handler));
     scheduler_.reset(
         new EmbeddingScheduler(model_config_, concurrency_config, params.runtime_config, metrics_reporter_));
+}
 
-    (void)startLoop();
+absl::Status EmbeddingEngine::start() {
+    RTP_LLM_CHECK_WITH_INFO(!loop_started_, "EmbeddingEngine::start must be called at most once");
+    loop_started_ = true;
+    return startLoop();
 }
 
 EmbeddingEngine::~EmbeddingEngine() {

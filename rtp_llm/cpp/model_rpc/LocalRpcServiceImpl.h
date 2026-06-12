@@ -29,6 +29,13 @@ public:
         return local_server_->init(maga_init_params, std::move(propose_params), mm_process_engine);
     }
 
+    grpc::Status start() {
+        if (!local_server_) {
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "RPC server not initialized");
+        }
+        return local_server_->start();
+    }
+
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
