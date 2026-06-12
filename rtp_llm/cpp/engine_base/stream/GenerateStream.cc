@@ -537,10 +537,16 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
 StreamState GenerateStream::moveToNext() {
     checkTimeout();
     std::lock_guard<std::mutex> lock(*mutex_);
-    StreamState                 state = generate_status_->moveToNext();
+    const auto                  old_status = getStatus();
+    StreamState                 state      = generate_status_->moveToNext();
+    const auto                  new_status = getStatus();
+
+    if (old_status == StreamState::WAITING && new_status != StreamState::WAITING) {
+        wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+    }
 
     // notify one thread waiting for stream completion
-    if (getStatus() == StreamState::FINISHED) {
+    if (new_status == StreamState::FINISHED) {
         cv_->notify_one();
     }
     return state;
