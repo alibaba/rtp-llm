@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
 from rtp_llm.utils.process_manager import (
+    BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV,
     DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV,
     DEFER_FIRST_SIGTERM_ENV,
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
@@ -945,7 +946,7 @@ class TestFailureShutdownPaths(unittest.TestCase):
 
     def test_backend_process_manager_defers_first_sigterm(self):
         """Backend process managers can survive cgroup-wide SIGTERM until the
-        parent sends the staged backend SIGTERM after frontend drain."""
+        parent sends the staged backend SIGINT after frontend drain."""
         with patch.dict(
             os.environ,
             {
@@ -964,9 +965,79 @@ class TestFailureShutdownPaths(unittest.TestCase):
         self.assertTrue(manager.is_deferred_sigterm_pending())
 
         manager._signal_handler(signal.SIGTERM, None)
+        self.assertFalse(manager.shutdown_requested)
+        self.assertTrue(manager.is_deferred_sigterm_pending())
+
+        manager._signal_handler(signal.SIGINT, None)
         self.assertTrue(manager.shutdown_requested)
         self.assertFalse(manager.is_deferred_sigterm_pending())
         self.assertFalse(manager.failure_detected)
+
+    def test_deferred_backend_group_gets_staged_sigint(self):
+        """Parent-staged backend shutdown must not look like duplicate
+        cgroup SIGTERM noise to backend children."""
+
+        class FakeProcess:
+            name = "backend"
+            pid = 123456
+            _popen = object()
+
+            def is_alive(self):
+                return True
+
+        signals = []
+
+        with patch("os.kill", side_effect=lambda pid, sig: signals.append((pid, sig))):
+            self.manager.add_process(FakeProcess(), shutdown_group="backend")
+            self.manager._sigterm_deferred_groups()
+
+        self.assertEqual(signals, [(123456, signal.SIGINT)])
+
+    def test_backend_shutdown_lingers_after_frontend_drain(self):
+        events = []
+
+        class FakeProcess:
+            _popen = None
+
+            def __init__(self, name):
+                self.name = name
+                self.pid = len(events) + 100
+                self._alive = True
+
+            def is_alive(self):
+                return self._alive
+
+            def terminate(self):
+                events.append((self.name, time.time()))
+                self._alive = False
+
+        frontend_proc = FakeProcess("frontend")
+        backend_proc = FakeProcess("backend")
+        self.manager.add_process(frontend_proc, shutdown_group="frontend")
+        self.manager.add_process(backend_proc, shutdown_group="backend")
+
+        with patch.dict(os.environ, {BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV: "0.05"}):
+            self.manager._terminate_processes(drain_timeout=1)
+
+        self.assertEqual([name for name, _ in events], ["frontend", "backend"])
+        self.assertGreaterEqual(events[1][1] - events[0][1], 0.04)
+
+    def test_backend_linger_is_clamped_to_shutdown_deadline(self):
+        frontend = _FakeProc("frontend")
+        backend = _FakeProc("backend")
+        self.manager.add_process(frontend, shutdown_group="frontend")
+        self.manager.add_process(backend, shutdown_group="backend")
+
+        sleeps = []
+        with patch.dict(os.environ, {BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV: "10"}):
+            with patch("time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+                self.manager._linger_before_deferred_group_shutdown(
+                    time.time() + 0.05
+                )
+
+        self.assertEqual(len(sleeps), 1)
+        self.assertGreater(sleeps[0], 0)
+        self.assertLessEqual(sleeps[0], 0.05)
 
     def test_parent_process_manager_does_not_defer_first_sigterm(self):
         """Only backend child managers may defer cgroup-wide SIGTERM.
@@ -1244,9 +1315,9 @@ class TestFailureShutdownPaths(unittest.TestCase):
         self.manager.shutdown_requested = True  # mirror SIGTERM handler
 
         t0 = time.time()
-        with patch("os.kill", side_effect=lambda pid, sig: None), _watchdog(
-            5, "graceful drain timing regressed"
-        ):
+        with patch("os.kill", side_effect=lambda pid, sig: None), patch.dict(
+            os.environ, {BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV: "0"}
+        ), _watchdog(5, "graceful drain timing regressed"):
             self.manager._monitor_processes_health()
 
         self.assertEqual(len(backend_terminated_at), 1, "backend SIGTERM'd once")
