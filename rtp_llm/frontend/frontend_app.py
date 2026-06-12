@@ -42,6 +42,30 @@ from rtp_llm.utils.version_info import VersionInfo
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 
 STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
+FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV = "FRONTEND_PRE_STOP_DRAIN_SECONDS"
+DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
+DEFAULT_PRE_STOP_DRAIN_SECONDS = 120.0
+
+
+def _pre_stop_drain_seconds() -> float:
+    for env_key in (
+        FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
+        DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV,
+    ):
+        raw = os.environ.get(env_key, "")
+        if not raw:
+            continue
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            logging.warning(
+                "Invalid %s=%r, falling back to default pre-stop drain %.3fs",
+                env_key,
+                raw,
+                DEFAULT_PRE_STOP_DRAIN_SECONDS,
+            )
+            return DEFAULT_PRE_STOP_DRAIN_SECONDS
+    return DEFAULT_PRE_STOP_DRAIN_SECONDS
 
 
 class GracefulShutdownServer(Server):
@@ -54,6 +78,8 @@ class GracefulShutdownServer(Server):
         self.frontend_server = frontend_server
         self.shutdown_manager = shutdown_manager
         self.grpc_client = grpc_client
+        self._pre_stop_lock = threading.RLock()
+        self._pre_stop_timer: Optional[threading.Timer] = None
 
     @override
     def handle_exit(self, sig: int, frame) -> None:
@@ -61,8 +87,63 @@ class GracefulShutdownServer(Server):
             sig_name = signal.Signals(sig).name
         except ValueError:
             sig_name = str(sig)
+        if self._defer_sigterm_for_pre_stop_drain(sig, frame, sig_name):
+            return
+        self._begin_shutdown(sig, frame, sig_name)
+
+    def _defer_sigterm_for_pre_stop_drain(self, sig: int, frame, sig_name: str) -> bool:
+        if sig != signal.SIGTERM:
+            return False
+        if self.should_exit:
+            return False
+        drain_seconds = self._effective_pre_stop_drain_seconds()
+        if drain_seconds <= 0:
+            return False
+
+        with self._pre_stop_lock:
+            if self._pre_stop_timer is not None:
+                logging.info(
+                    "Frontend received second %s during pre-stop drain; "
+                    "skipping pre-stop drain and entering uvicorn shutdown",
+                    sig_name,
+                )
+                self._pre_stop_timer.cancel()
+                self._pre_stop_timer = None
+                return False
+
+            logging.info(
+                "Frontend pre-stop drain before uvicorn shutdown: remaining=%.3fs",
+                drain_seconds,
+            )
+            timer = threading.Timer(
+                drain_seconds,
+                self._begin_shutdown,
+                args=(sig, frame, sig_name),
+            )
+            timer.daemon = True
+            self._pre_stop_timer = timer
+            timer.start()
+            return True
+
+    def _begin_shutdown(self, sig: int, frame, sig_name: str) -> None:
+        with self._pre_stop_lock:
+            self._pre_stop_timer = None
         self.shutdown_manager.start_draining(f"signal {sig_name}")
-        super().handle_exit(sig, frame)
+        Server.handle_exit(self, sig, frame)
+
+    def _effective_pre_stop_drain_seconds(self) -> float:
+        drain_seconds = _pre_stop_drain_seconds()
+        shutdown_timeout = self.config.timeout_graceful_shutdown
+        if shutdown_timeout is None or shutdown_timeout <= 0:
+            return drain_seconds
+        if drain_seconds <= shutdown_timeout:
+            return drain_seconds
+        logging.warning(
+            "Clamp frontend pre-stop drain %.3fs to shutdown_timeout=%ss",
+            drain_seconds,
+            shutdown_timeout,
+        )
+        return float(shutdown_timeout)
 
     @override
     async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:
