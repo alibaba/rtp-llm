@@ -183,9 +183,23 @@ class AiterPrefillAttnOp:
         self.head_num_kv = attn_configs.kv_head_num
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
         self.is_causal = attn_configs.is_causal
+        self.kv_cache_torch_dtype = self._get_kv_cache_torch_dtype(
+            attn_configs.kv_cache_dtype, attn_configs.dtype
+        )
         self.v1_kv_layout = v1_kv_layout
+        self.use_compact = (
+            self.v1_kv_layout and attn_configs.kv_cache_dtype != KvCacheDataType.FP8
+        )
         self._block_positions: Optional[torch.Tensor] = None
         self._compact_arange: Optional[torch.Tensor] = None
+
+    @staticmethod
+    def _get_kv_cache_torch_dtype(kv_cache_dtype, base_dtype):
+        if kv_cache_dtype == KvCacheDataType.INT8:
+            return torch.int8
+        if kv_cache_dtype == KvCacheDataType.FP8:
+            return torch.float8_e4m3fn
+        return base_dtype
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
@@ -195,7 +209,68 @@ class AiterPrefillAttnOp:
             attn_inputs=attn_inputs,
             is_prefill=True,
         )
+        self._prepare_block_table_indices(self.fmha_params)
+
         return self.fmha_params
+
+    def _prepare_block_table_indices(self, fmha_params):
+        """Eagerly compute sanitized block table, block indices, compact
+        block table, and KV pad tensors so _forward_paged can skip them
+        on every layer."""
+        block_table = fmha_params.kv_cache_block_id_device
+        if block_table is None:
+            fmha_params.sanitized_block_table = None
+            fmha_params.block_indices = None
+            fmha_params.compact_block_table = None
+            fmha_params.k_compact_buf = None
+            fmha_params.v_compact_buf = None
+            return
+
+        seqlen_k = fmha_params.prefill_seqlen_k_int32
+        max_seqlen_k = fmha_params.max_seqlen_k
+
+        sanitized = self._sanitize_block_table(block_table, seqlen_k, max_seqlen_k)
+        fmha_params.sanitized_block_table = sanitized
+
+        block_indices = sanitized.reshape(-1).to(torch.int64)
+        fmha_params.block_indices = block_indices
+
+        num_gathered = block_indices.numel()
+        cached_arange = self._compact_arange
+        if (
+            cached_arange is None
+            or cached_arange.numel() < num_gathered
+            or cached_arange.device != sanitized.device
+        ):
+            cached_arange = torch.arange(
+                max(num_gathered, 1024), dtype=torch.int32, device=sanitized.device
+            )
+            self._compact_arange = cached_arange
+        fmha_params.compact_block_table = cached_arange[:num_gathered].view_as(
+            sanitized
+        )
+
+        if self.use_compact:
+            # Pre-allocate compact K/V buffers with trailing zero-block for CK
+            # speculative read safety. Reused every layer — forward() writes into
+            # buf[:num_gathered] and the last row stays zero, eliminating per-layer
+            # cat allocations and the V contiguous() intermediate.
+            hk = self.head_num_kv
+            ps = self.tokens_per_block
+            hd = self.head_dim
+            dtype = self.kv_cache_torch_dtype
+            device = sanitized.device
+            vs = 16 // torch.empty(0, dtype=dtype).element_size()
+            n = num_gathered + 1
+            fmha_params.k_compact_buf = torch.zeros(
+                (n, hk, hd // vs, ps, vs), dtype=dtype, device=device
+            )
+            fmha_params.v_compact_buf = torch.zeros(
+                (n, hk, ps // vs, hd, vs), dtype=dtype, device=device
+            )
+        else:
+            fmha_params.k_compact_buf = None
+            fmha_params.v_compact_buf = None
 
     def _reshape_kv_cache_vectorized(self, kv_cache_base):
         """Reshape kv_cache_base into 5D VECTORIZED_LAYOUT for mha_batch_prefill.
@@ -260,9 +335,7 @@ class AiterPrefillAttnOp:
 
         return k_cache, v_cache
 
-    def _sanitize_block_table(
-        self, block_table, block_num: int, seqlen_k=None, max_seqlen_k=None
-    ):
+    def _sanitize_block_table(self, block_table, seqlen_k=None, max_seqlen_k=None):
         """Sanitize + pad block_table via shared helper."""
         if max_seqlen_k is None:
             max_seqlen_k = 0
@@ -275,43 +348,41 @@ class AiterPrefillAttnOp:
         )
         return result
 
-    def _gather_and_reshape_kv_compact(self, kv_cache_base, block_table):
+    def _gather_and_reshape_kv_compact(
+        self,
+        kv_cache_base,
+        block_indices,
+        k_compact_buf,
+        v_compact_buf,
+    ):
         """Gather referenced blocks once, then reshape to VECTORIZED_LAYOUT.
 
         For v1_kv_layout=True (non-ASM, non-FP8) path, the V cache needs a
         permute+contiguous to convert from linear [hd, ps] to vectorized
         [ps//vs, hd, vs] layout. Doing this on the full KV cache pool is
         extremely expensive. This method gathers all referenced blocks
-        (including duplicates) from the current prefill batch and remaps
-        block_table so mha_batch_prefill_func indexes into the compact
-        buffer directly. Dedup via torch.unique was removed to eliminate
-        stream-0 memset stalls caused by its internal workspace allocation.
+        (including duplicates) from the current prefill batch and writes the
+        reshaped result into the caller-provided compact buffers.
 
         This also avoids the int32 offset overflow in aiter CK kernel when
         block_num * batch_stride_k > INT32_MAX (single-layer K cache > 2 GB).
 
         Args:
             kv_cache_base: Full pool — [block_num, 2, hk, ps, hd] (5D) or 2D flat.
-            block_table:   [batch_size, max_blocks_per_seq] int32 on GPU.
+            block_indices: int64 indices into kv_cache_base block dimension.
+            k_compact_buf: Pre-allocated K buffer [num_gathered+1, hk, hd//vs, ps, vs].
+                           Gathered data is written into buf[:num_gathered]; the trailing
+                           row stays zero for CK speculative read safety.
+            v_compact_buf: Pre-allocated V buffer [num_gathered+1, hk, ps//vs, hd, vs].
 
         Returns:
-            (k_compact, v_compact, compact_block_table)
+            (k_cache_5d, v_cache_5d) — the compact buffers with gathered data.
         """
         hk = self.head_num_kv
         ps = self.tokens_per_block
         hd = self.head_dim
         vs = 16 // kv_cache_base.element_size()
 
-        # Flatten block_table to get all referenced block indices.
-        # NOTE: we intentionally skip torch.unique dedup here — unique's
-        # internal workspace allocation triggers stream-0 memset stalls that
-        # block the compute stream on every prefill batch. The tradeoff is
-        # that prefix-sharing scenarios will gather duplicate blocks, inflating
-        # the compact buffer up to block_table.numel() entries (still bounded
-        # by the original KV pool size). If this becomes a memory bottleneck
-        # under heavy prefix caching, consider a sort-based dedup path
-        # (torch.sort + torch.diff) which avoids the memset issue.
-        block_indices = block_table.reshape(-1).to(torch.int64)
         num_gathered = block_indices.numel()
 
         if kv_cache_base.ndim >= 4:
@@ -320,12 +391,12 @@ class AiterPrefillAttnOp:
             v_4d = kv_cache_base.select(1, 1)  # [block_num, hk, ps, hd]
             k_used = k_4d.index_select(0, block_indices)  # [n, hk, ps, hd]
             v_used = v_4d.index_select(0, block_indices)  # [n, hk, ps, hd]
-            k_compact = k_used.view(num_gathered, hk, hd // vs, ps, vs)
-            v_compact = (
-                v_used.reshape(num_gathered, hk, hd, ps // vs, vs)
-                .permute(0, 1, 3, 2, 4)
-                .contiguous()
+            k_compact_buf[:num_gathered] = k_used.view(
+                num_gathered, hk, hd // vs, ps, vs
             )
+            v_compact_buf[:num_gathered] = v_used.reshape(
+                num_gathered, hk, hd, ps // vs, vs
+            ).permute(0, 1, 3, 2, 4)
         else:
             # 2D flat buffer path
             block_num = kv_cache_base.shape[0]
@@ -333,41 +404,14 @@ class AiterPrefillAttnOp:
             flat = kv_cache_base[:, :expected_elems].reshape(block_num, 2, hk, ps * hd)
             k_used = flat[:, 0, :, :].index_select(0, block_indices)
             v_used = flat[:, 1, :, :].index_select(0, block_indices)
-            k_compact = k_used.view(num_gathered, hk, hd // vs, ps, vs).contiguous()
-            v_compact = (
-                v_used.view(num_gathered, hk, hd, ps // vs, vs)
-                .permute(0, 1, 3, 2, 4)
-                .contiguous()
+            k_compact_buf[:num_gathered] = k_used.view(
+                num_gathered, hk, hd // vs, ps, vs
             )
+            v_compact_buf[:num_gathered] = v_used.view(
+                num_gathered, hk, hd, ps // vs, vs
+            ).permute(0, 1, 3, 2, 4)
 
-        # Build identity block_table: [0, 1, 2, ...] so aiter indexes into
-        # the compact buffer instead of the original full pool.
-        cached_arange = self._compact_arange
-        if (
-            cached_arange is None
-            or cached_arange.numel() < num_gathered
-            or cached_arange.device != block_table.device
-        ):
-            cached_arange = torch.arange(
-                max(num_gathered, 1024), dtype=torch.int32, device=block_table.device
-            )
-            self._compact_arange = cached_arange
-        compact_block_table = cached_arange[:num_gathered].view_as(block_table)
-
-        # Append one dummy zero-block to k/v compact buffers. CK kernel may
-        # speculatively read beyond the last valid block_table entry; having a
-        # trailing safe block prevents GPU page faults even if the read lands
-        # on a padding column that maps to index num_gathered (one past end).
-        k_pad = torch.zeros(
-            (1, *k_compact.shape[1:]), dtype=k_compact.dtype, device=k_compact.device
-        )
-        v_pad = torch.zeros(
-            (1, *v_compact.shape[1:]), dtype=v_compact.dtype, device=v_compact.device
-        )
-        k_compact = torch.cat([k_compact, k_pad], dim=0)
-        v_compact = torch.cat([v_compact, v_pad], dim=0)
-
-        return k_compact, v_compact, compact_block_table
+        return k_compact_buf, v_compact_buf
 
     def _split_qkv_fp8(self, qkv_fp8):
         return split_qkv_fp8(qkv_fp8, self.head_num, self.head_num_kv, self.head_dim)
@@ -440,10 +484,6 @@ class AiterPrefillAttnOp:
         if q_tensor.dim() == 2:
             q_tensor = q_tensor.view(q_tensor.size(0), self.head_num, self.head_dim)
 
-        is_fp8 = kv_cache.kv_cache_base.dtype in (
-            torch.float8_e4m3fnuz,
-            torch.float8_e4m3fn,
-        )
         # cu_seqlens are already created on GPU in FMHAParams.__init__
         cu_seqlens_q = fmha_params.cu_seqlens_q
         # Ensure cu_seqlens_q is on the same device as q_tensor
@@ -459,23 +499,19 @@ class AiterPrefillAttnOp:
         if seqlen_k.device != q_tensor.device:
             seqlen_k = seqlen_k.to(q_tensor.device, non_blocking=True)
 
-        # Sanitize padding columns + pad for CK speculative prefetch in one call.
         max_seqlen_q = fmha_params.max_seqlen_q
         max_seqlen_k = fmha_params.max_seqlen_k
-        block_table = self._sanitize_block_table(
-            fmha_params.kv_cache_block_id_device,
-            kv_cache.kv_cache_base.shape[0],
-            seqlen_k,
-            max_seqlen_k,
-        )
 
-        use_compact = self.v1_kv_layout and not is_fp8
-
-        if use_compact:
-            k_cache, v_cache, block_table = self._gather_and_reshape_kv_compact(
-                kv_cache.kv_cache_base, block_table
+        if self.use_compact:
+            block_table = fmha_params.compact_block_table
+            k_cache, v_cache = self._gather_and_reshape_kv_compact(
+                kv_cache.kv_cache_base,
+                fmha_params.block_indices,
+                fmha_params.k_compact_buf,
+                fmha_params.v_compact_buf,
             )
         else:
+            block_table = fmha_params.sanitized_block_table
             k_cache, v_cache = self._reshape_kv_cache_vectorized(kv_cache.kv_cache_base)
 
         softmax_scale = 1.0 / math.sqrt(self.head_dim)
