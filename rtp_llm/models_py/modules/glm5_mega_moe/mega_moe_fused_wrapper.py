@@ -91,6 +91,9 @@ class MegaMoeFusedWrapper(MegaMoeWrapper):
         extra_expert_args: Optional[Dict[str, Any]] = None,
         extra_finalize_args: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
-        return self.mega_moe.forward_with_shared_expert(
-            hidden_states, topk_weights, topk_ids
+        return self._forward_chunked(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            self.mega_moe.forward_with_shared_expert,
         )

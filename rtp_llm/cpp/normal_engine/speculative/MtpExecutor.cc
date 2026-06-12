@@ -1142,6 +1142,18 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         saved_combo_tokens  = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
         saved_input_lengths = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
     }
+    const bool saved_need_all_hidden_states = model_input.need_all_hidden_states;
+    if (cp_enabled) {
+        // CP+MTP prefill feeds the target model's per-token hidden states into
+        // the draft model after updatePrefillPostDraftModelInput(). The regular
+        // CP fast path may return only lm_output_indexes rows when neither
+        // logits nor hidden dumps need the full sequence; that leaves
+        // last_hidden_states as [batch, hidden] while combo_tokens remains full
+        // length and the next CP split rejects the shape. Force the target pass
+        // to materialize full hidden rows for this hand-off, then restore the
+        // caller's flag before sampler/dispatch logic observes it.
+        model_input.need_all_hidden_states = true;
+    }
 
     // target model prefill
     {
@@ -1152,6 +1164,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_output                        = std::move(model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+    model_input.need_all_hidden_states = saved_need_all_hidden_states;
 
     // eplb
     if (expert_balancer_) {
@@ -1519,6 +1532,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     if (propose_step_ > 1) {
         if (shouldSkipFakeStreamForStop(model_input, "draftModelDecode")) {
+            if (useAsyncPrepare()) {
+                target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+            }
             releaseAllModelBuffers();
             return absl::OkStatus();
         }
@@ -1526,6 +1542,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
+    }
+    if (useAsyncPrepare()) {
+        // prepareAttentionInputs mutates PyWrappedModel state consumed by forward().
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_target_verify_prepare)");
+        target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
     }
 
     auto draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
@@ -1541,6 +1562,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     {
         if (shouldSkipFakeStreamForStop(model_input, "target verify forward")) {
+            if (useAsyncPrepare()) {
+                draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+            }
             releaseAllModelBuffers();
             return absl::OkStatus();
         }
@@ -1693,6 +1717,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     broadcastPostRejectionInputs(model_input, stream_groups);
 
     {
+        if (useAsyncPrepare()) {
+            // prepareAttentionInputs mutates PyWrappedModel state consumed by forward().
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_draft_prefill_prepare)");
+            draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+        }
         if (shouldSkipFakeStreamForStop(model_input, "draft prefill forward")) {
             releaseAllModelBuffers();
             return absl::OkStatus();
@@ -1738,6 +1767,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
 void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size) {
     if (!useAsyncPrepare()) {
+        return;
+    }
+    if (isCpContextRequest(parallelism_config_, model_input)) {
+        // REBASE CONFLICT CONTEXT(async-prepare-cp): PyWrappedModel::forward
+        // rewrites CP context inputs via ContextParallelProcessor::handleInputs
+        // before inline prepare. Async prepare runs before forward and would
+        // fill CudaGraph attention buffers from pre-CP metadata.
+        RTP_LLM_LOG_DEBUG("[MTP decode] skip target-verify async prepare for CP context request");
         return;
     }
     const auto& cache_cfg = cache_manager_->cacheConfig();
@@ -1798,6 +1835,12 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     model_input_copy.sequence_lengths =
         torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     model_input_copy.is_target_verify = true;
+    if (isCpContextRequest(parallelism_config_, model_input_copy)) {
+        // The function entry receives draft-decode-shaped inputs; only after
+        // this rewrite is the eventual target-verify CP context visible.
+        RTP_LLM_LOG_DEBUG("[MTP decode] skip target-verify async prepare after CP target rewrite");
+        return;
+    }
     ensureModelInputsOnCuda(model_input_copy, "decode.target_prepare");
 
     // Device-first inputs are produced on the main stream; the async prepare
@@ -1821,6 +1864,13 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
 
 void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_input) {
     if (!useAsyncPrepare()) {
+        return;
+    }
+    if (isCpContextRequest(parallelism_config_, model_input)) {
+        // REBASE CONFLICT CONTEXT(async-prepare-cp): draft prefill uses the
+        // same CP input rewrite in PyWrappedModel::forward as target verify.
+        // Let forward build attention inputs after that rewrite.
+        RTP_LLM_LOG_DEBUG("[MTP decode] skip draft-prefill async prepare for CP context request");
         return;
     }
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);

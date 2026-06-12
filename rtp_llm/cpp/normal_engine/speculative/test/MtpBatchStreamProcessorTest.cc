@@ -72,6 +72,23 @@ double benchmarkUs(Func&& func, int iterations) {
 
 class MtpBatchStreamProcessorTest: public DeviceTestBase {
 public:
+    void setSpOutputTokens(const SpeculativeExecutorStreamOutputPtr& sp_output_buffer, const vector<int>& token_ids) {
+        std::vector<int32_t> token_ids_i32(token_ids.begin(), token_ids.end());
+        sp_output_buffer->tokens = torch::tensor(token_ids_i32, torch::TensorOptions().dtype(torch::kInt32))
+                                       .reshape({1, (int64_t)token_ids_i32.size()});
+
+        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        sp_output_buffer->target_token_gpu =
+            sp_output_buffer->tokens.narrow(1, 0, 1).to(cuda_i32, /*non_blocking=*/true);
+        if (token_ids_i32.size() > 1) {
+            sp_output_buffer->propose_tokens_gpu =
+                sp_output_buffer->tokens.narrow(1, 1, (int64_t)token_ids_i32.size() - 1)
+                    .to(cuda_i32, /*non_blocking=*/true);
+        } else {
+            sp_output_buffer->propose_tokens_gpu = torch::empty({1, 0}, cuda_i32);
+        }
+    }
+
     GenerateStreamPtr createContextStream(const ModelConfig&     model_config,
                                           const RuntimeConfig&   runtime_config,
                                           const ResourceContext& resource_context,
@@ -95,7 +112,7 @@ public:
 
         auto        sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
         vector<int> propose_tokens   = vector<int>(2, -1);
-        sp_output_buffer->tokens     = torch::tensor(propose_tokens, torch::kInt32).reshape({1, 2});
+        setSpOutputTokens(sp_output_buffer, propose_tokens);
         stream->setReturnAllProbs(true);
         stream->setSPOutputBuffer(sp_output_buffer);
         stream->generate_status_->status = StreamState::RUNNING;
@@ -348,6 +365,53 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchUsesDraftLastHiddenOverri
     checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {8.1, 8.2});
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchSupportsCompactDraftLastHidden) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 4;
+
+    ResourceContext resource_context;
+
+    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {2}, 1);
+    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream1);
+    streams.emplace_back(stream2);
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    StreamGroups stream_groups(streams);
+
+    MergedOutput target_output;
+    target_output.sampler_output.token_ids = torch::tensor({2, -1, 1, 1, 2, 3}, torch::kInt32).reshape({2, 3});
+
+    MergedOutput draft_output;
+    // CP last-hidden-only prefill returns one hidden row per output batch, not
+    // one row per token. Dispatch must treat this compact shape as valid.
+    draft_output.model_output.all_hidden_states =
+        torch::tensor({9.1f, 9.2f, 8.1f, 8.2f}, torch::kFloat32).reshape({2, 2});
+    draft_output.sampler_output.token_ids = torch::tensor({2L, 0L}, torch::kInt64).reshape({2, 1});
+    draft_output.sampler_output.all_probs =
+        torch::tensor({0.2f, 0.1f, 0.3f, 0.5f, 0.3f, 0.1f, 0.4f, 0.2f}, torch::kFloat32).reshape({2, 4});
+
+    auto status = processor.dispatchPrefill(stream_groups, target_output, draft_output);
+    EXPECT_TRUE(status.ok());
+
+    checkOutput(stream1, {2, 1}, {1, 2}, {0.2, 0.1, 0.3, 0.5}, {9.1, 9.2});
+    checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {8.1, 8.2});
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
@@ -517,8 +581,8 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
     vector<int> propose_tokens_1 = {2, 3};
     vector<int> propose_tokens_2 = {3, 1};
 
-    stream1->getSPOutputBuffer()->tokens = torch::tensor(propose_tokens_1, torch::kInt32).reshape({1, 2});
-    stream2->getSPOutputBuffer()->tokens = torch::tensor(propose_tokens_2, torch::kInt32).reshape({1, 2});
+    setSpOutputTokens(stream1->getSPOutputBuffer(), propose_tokens_1);
+    setSpOutputTokens(stream2->getSPOutputBuffer(), propose_tokens_2);
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
@@ -716,8 +780,8 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     vector<int> propose_tokens_1 = {2, 3};
     vector<int> propose_tokens_2 = {3, 1};
 
-    stream1->getSPOutputBuffer()->tokens        = torch::tensor(propose_tokens_1, torch::kInt32).reshape({1, 2});
-    stream2->getSPOutputBuffer()->tokens        = torch::tensor(propose_tokens_2, torch::kInt32).reshape({1, 2});
+    setSpOutputTokens(stream1->getSPOutputBuffer(), propose_tokens_1);
+    setSpOutputTokens(stream2->getSPOutputBuffer(), propose_tokens_2);
     stream1->getSPOutputBuffer()->hidden_states = torch::tensor({{0.1f, 0.2f}});
     stream2->getSPOutputBuffer()->hidden_states = torch::tensor({{1.1f, 1.2f}});
 
@@ -917,8 +981,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutput) {
 
     stream1->getSPOutputBuffer()->all_probs = torch::tensor({{0.1f, 0.2f, 0.3f, 0.4f}});
     stream2->getSPOutputBuffer()->all_probs = torch::tensor({{0.5f, 0.6f, 0.7f, 0.8f}});
-    stream1->getSPOutputBuffer()->tokens    = torch::tensor({1, 2}, torch::kInt32).reshape({1, 2});
-    stream2->getSPOutputBuffer()->tokens    = torch::tensor({2, 3}, torch::kInt32).reshape({1, 2});
+    setSpOutputTokens(stream1->getSPOutputBuffer(), {1, 2});
+    setSpOutputTokens(stream2->getSPOutputBuffer(), {2, 3});
 
     auto stream_groups = StreamGroups({stream1, stream2});
     auto processor     = MtpBatchStreamProcessor(
@@ -972,8 +1036,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutputFromDevic
 
     stream1->getSPOutputBuffer()->all_probs = torch::tensor({{0.1f, 0.2f, 0.3f, 0.4f}});
     stream2->getSPOutputBuffer()->all_probs = torch::tensor({{0.5f, 0.6f, 0.7f, 0.8f}});
-    stream1->getSPOutputBuffer()->tokens    = torch::tensor({1, 2}, torch::kInt32).reshape({1, 2});
-    stream2->getSPOutputBuffer()->tokens    = torch::tensor({2, 3}, torch::kInt32).reshape({1, 2});
+    setSpOutputTokens(stream1->getSPOutputBuffer(), {1, 2});
+    setSpOutputTokens(stream2->getSPOutputBuffer(), {2, 3});
 
     GenerateStream::MtpAsyncDeviceState state1;
     state1.propose_tokens_gpu  = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
@@ -1039,8 +1103,8 @@ TEST_F(MtpBatchStreamProcessorTest, updateMultiStepDraftSamplerOutput) {
 
     stream1->getSPOutputBuffer()->all_probs = torch::tensor({{0.1f, 0.2f, 0.3f, 0.4f}});
     stream2->getSPOutputBuffer()->all_probs = torch::tensor({{0.5f, 0.6f, 0.7f, 0.8f}});
-    stream1->getSPOutputBuffer()->tokens    = torch::tensor({1, 2}, torch::kInt32).reshape({1, 2});
-    stream2->getSPOutputBuffer()->tokens    = torch::tensor({2, 3}, torch::kInt32).reshape({1, 2});
+    setSpOutputTokens(stream1->getSPOutputBuffer(), {1, 2});
+    setSpOutputTokens(stream2->getSPOutputBuffer(), {2, 3});
 
     auto output_token_probs_1 =
         torch::tensor({1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f, 1.7f, 1.8f}, torch::kFloat32).reshape({2, 1, 4});
