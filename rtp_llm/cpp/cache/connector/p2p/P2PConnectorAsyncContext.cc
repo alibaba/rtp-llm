@@ -369,28 +369,28 @@ size_t P2PConnectorAsyncReadContextChecker::inflightContextCount() const {
 void P2PConnectorAsyncReadContextChecker::checkOnce() {
     int64_t start_time_us = currentTimeUs();
 
-    // Three-phase structure to keep async_contexts_mutex_ off the slow cancel path —
+    // Three-phase structure to keep async_contexts_mutex_ off the slow check/cancel path —
     // see DingTalk doc §7 for the 8-min production stall this fixes:
-    //   Phase 1 (under lock): drive checkDone + pollLease, collect contexts that need cancel.
-    //   Phase 2 (no lock):    run cancel() outside the mutex. cancel() can synchronously block
-    //                         inside gRPC drain when the peer channel is unhealthy; holding the
-    //                         mutex across it would back-pressure addContext on the scheduler
-    //                         thread, freezing the whole decode read path.
-    //   Phase 3 (under lock): emit WARN logs for failures and erase done contexts.
+    //   Phase 1 (under lock): snapshot the shared_ptr list only.
+    //   Phase 2 (no lock):    run checkDone / lease poll / cancel decisions on the snapshot.
+    //   Phase 3 (under lock): reclaim done contexts from the live vector.
     std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> to_poll;
     std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> to_cancel;
+    std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> snapshot;
     {
         std::lock_guard<std::mutex> lock(async_contexts_mutex_);
-        for (auto& async_context : async_contexts_) {
-            async_context->checkDone();
-            if (async_context->needLeasePoll()) {
-                to_poll.push_back(async_context);
-            }
-            if (async_context->needCancel()) {
-                RTP_LLM_LOG_DEBUG("P2PConnectorAsyncReadContextChecker checkOnce: needCancel, unique_key: %s",
-                                  async_context->uniqueKey().c_str());
-                to_cancel.push_back(async_context);
-            }
+        snapshot = async_contexts_;
+    }
+
+    for (const auto& async_context : snapshot) {
+        async_context->checkDone();
+        if (async_context->needLeasePoll()) {
+            to_poll.push_back(async_context);
+        }
+        if (async_context->needCancel()) {
+            RTP_LLM_LOG_DEBUG("P2PConnectorAsyncReadContextChecker checkOnce: needCancel, unique_key: %s",
+                              async_context->uniqueKey().c_str());
+            to_cancel.push_back(async_context);
         }
     }
 
@@ -406,26 +406,28 @@ void P2PConnectorAsyncReadContextChecker::checkOnce() {
     }
 
     size_t inflight_after = 0;
+    std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> failed_contexts;
     {
         std::lock_guard<std::mutex> lock(async_contexts_mutex_);
-        for (auto& async_context : async_contexts_) {
-            if (async_context->done() && !async_context->success()) {
-                auto error = async_context->errorInfo();
-                RTP_LLM_LOG_WARNING(
-                    "P2PConnectorAsyncReadContextChecker checkOnce: async read failed, unique_key: %s, error: %s",
-                    async_context->uniqueKey().c_str(),
-                    error.ToString().c_str());
+        auto it = async_contexts_.begin();
+        while (it != async_contexts_.end()) {
+            if ((*it)->done()) {
+                if (!(*it)->success()) {
+                    failed_contexts.push_back(*it);
+                }
+                it = async_contexts_.erase(it);
+                continue;
             }
+            ++it;
         }
-
-        async_contexts_.erase(
-            std::remove_if(async_contexts_.begin(),
-                           async_contexts_.end(),
-                           [](const std::shared_ptr<P2PConnectorAsyncReadContext>& async_context) -> bool {
-                               return async_context->done();
-                           }),
-            async_contexts_.end());
         inflight_after = async_contexts_.size();
+    }
+
+    for (const auto& async_context : failed_contexts) {
+        auto error = async_context->errorInfo();
+        RTP_LLM_LOG_WARNING("P2PConnectorAsyncReadContextChecker checkOnce: async read failed, unique_key: %s, error: %s",
+                            async_context->uniqueKey().c_str(),
+                            error.ToString().c_str());
     }
 
     if (metrics_reporter_) {

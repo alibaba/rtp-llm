@@ -49,6 +49,11 @@ std::string encodeFp32TensorBytes(std::initializer_list<float> values) {
 
     broadcast_tp_call_count_++;
 
+    if (request->has_p2p_request()) {
+        std::lock_guard<std::mutex> lock(last_broadcast_tp_request_mutex_);
+        last_broadcast_tp_request_.CopyFrom(request->p2p_request());
+    }
+
     if (sleep_millis_ > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(sleep_millis_));
     }
@@ -194,6 +199,11 @@ int TestRpcService::getBroadcastTpCancelCallCount() const {
     return broadcast_tp_cancel_call_count_.load();
 }
 
+P2PConnectorBroadcastTpRequestPB TestRpcService::getLastBroadcastTpRequest() const {
+    std::lock_guard<std::mutex> lock(last_broadcast_tp_request_mutex_);
+    return last_broadcast_tp_request_;
+}
+
 int TestRpcService::getStartLoadCallCount() const {
     return start_load_call_count_.load();
 }
@@ -205,6 +215,10 @@ int TestRpcService::getGenerateStreamCallCount() const {
 void TestRpcService::resetCallCounts() {
     broadcast_tp_call_count_        = 0;
     broadcast_tp_cancel_call_count_ = 0;
+    {
+        std::lock_guard<std::mutex> lock(last_broadcast_tp_request_mutex_);
+        last_broadcast_tp_request_.Clear();
+    }
     start_load_call_count_          = 0;
     generate_stream_call_count_     = 0;
     use_legacy_start_load_response_ = false;

@@ -13,6 +13,17 @@ namespace rtp_llm {
 
 class PrefillServerCaller;
 
+struct PrefillServerCallerAsyncState {
+    std::shared_ptr<grpc::ClientContext>                        client_context;
+    std::shared_ptr<grpc::CompletionQueue>                      completion_queue;
+    std::shared_ptr<RpcService::Stub>                           stub;
+    std::unique_ptr<grpc::ClientAsyncReader<GenerateOutputsPB>> reader;
+    GenerateInputPB                                             request;
+    GenerateOutputsPB                                           read_response;
+    grpc::Status                                                status;
+    bool                                                        completion_queue_shutdown_drained_{false};
+};
+
 class PrefillServerCallerContext {
 public:
     struct ReuseLensSnapshot {
@@ -44,14 +55,15 @@ public:
     bool success() {
         checkDone();
         std::shared_lock<std::shared_mutex> lock(state_mutex_);
-        return finished_ && status_.ok() && response_received_;
+        return finished_ && async_state_ && async_state_->status.ok() && response_received_;
     }
 
     bool failed() {
         checkDone();
         std::shared_lock<std::shared_mutex> lock(state_mutex_);
         return error_info_.hasError()
-               || (finished_ && !status_.ok() && status_.error_code() != grpc::StatusCode::CANCELLED);
+               || (finished_ && async_state_ && !async_state_->status.ok()
+                   && async_state_->status.error_code() != grpc::StatusCode::CANCELLED);
     }
 
     // Get response (only valid after done() returns true)
@@ -96,23 +108,19 @@ private:
     friend class PrefillServerCaller;
     bool updateReuseLensSnapshotLocked(const GenerateOutputsPB& response);
     void handleReadChunkLocked(const GenerateOutputsPB& response);
+    bool waitWithTimeoutMs(int64_t timeout_ms);
+    void shutdownAndDrainCompletionQueue();
 
     // Metadata
     std::string prefill_addr_;
     std::string unique_key_;
 
     // gRPC infrastructure
-    std::shared_ptr<grpc::ClientContext>                        client_context_;
-    std::shared_ptr<grpc::CompletionQueue>                      completion_queue_;
-    std::shared_ptr<RpcService::Stub>                           stub_;
-    std::unique_ptr<grpc::ClientAsyncReader<GenerateOutputsPB>> reader_;
+    std::shared_ptr<PrefillServerCallerAsyncState> async_state_;
 
     // Request/Response
-    GenerateInputPB   request_;
     GenerateOutputsPB first_response_;
     GenerateOutputsPB response_;
-    GenerateOutputsPB read_response_;
-    grpc::Status      status_;
     ErrorInfo         error_info_;
 
     // State
