@@ -3,6 +3,7 @@ package org.flexlb.sync;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
+import org.flexlb.exception.ServiceDiscoveryException;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Assertions;
@@ -10,7 +11,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
-import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.Collections;
@@ -18,12 +18,8 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
-import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyString;
-import static org.mockito.Mockito.eq;
-import static org.mockito.Mockito.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -46,19 +42,39 @@ class WorkerAddressServiceTest {
     private WorkerAddressService workerAddressService;
 
     @Test
-    @SuppressWarnings("unchecked")
-    void testGetHosts_Timeout() throws Exception {
-        // Arrange
+    void testGetHosts_EmptySuccess() throws Exception {
+        // Arrange - discovery succeeds but the service genuinely has no hosts
         String modelName = "TestModel";
         String address = "TestAddress";
-        Future<List<WorkerHost>> future = mock(Future.class);
         when(serviceDiscovery.getHosts(anyString())).thenReturn(Collections.emptyList());
 
         // Act
         List<WorkerHost> actualHosts = workerAddressService.getServiceHosts(modelName, address);
 
-        // Assertions - should return empty list on timeout
+        // Assertions - a successful empty result is returned as-is
         Assertions.assertTrue(actualHosts.isEmpty());
+    }
+
+    @Test
+    void testGetHosts_ErrorThrows() throws Exception {
+        // Arrange - the discovery client itself fails
+        when(serviceDiscovery.getHosts(anyString())).thenThrow(new RuntimeException("vipserver down"));
+
+        // Assertions - failure must be distinguishable from an empty fleet
+        Assertions.assertThrows(ServiceDiscoveryException.class,
+                () -> workerAddressService.getServiceHosts("TestModel", "TestAddress"));
+    }
+
+    @Test
+    void testGetHosts_TimeoutThrows() throws Exception {
+        // Arrange - discovery hangs past the 500ms budget
+        when(serviceDiscovery.getHosts(anyString())).thenAnswer(invocation -> {
+            TimeUnit.MILLISECONDS.sleep(800);
+            return Collections.emptyList();
+        });
+
+        Assertions.assertThrows(ServiceDiscoveryException.class,
+                () -> workerAddressService.getServiceHosts("TestModel", "TestAddress"));
     }
 
     @Test

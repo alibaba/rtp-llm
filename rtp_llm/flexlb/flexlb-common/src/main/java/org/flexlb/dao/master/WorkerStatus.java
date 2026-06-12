@@ -2,7 +2,6 @@ package org.flexlb.dao.master;
 
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.collections4.MapUtils;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.util.Logger;

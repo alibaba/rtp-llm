@@ -1,11 +1,17 @@
 package org.flexlb.balance.scheduler;
 
 import org.apache.commons.collections4.CollectionUtils;
+import org.flexlb.balance.strategy.BatchLoadBalancer;
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
+import org.flexlb.dao.loadbalance.BatchScheduleTarget;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.RoutingResult;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -26,19 +32,41 @@ import java.util.Map;
 import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 
 @Component
-@DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy"})
+@DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy", "roundRobinStrategy"})
 public class DefaultRouter implements Router {
 
     private final Map<RoleType, LoadBalancer> loadBalancerMap;
+    /**
+     * Balancer for {@code /batch_schedule}, separate from {@link #loadBalancerMap} which
+     * governs {@code /schedule}. Decoupling lets operators keep e.g. SHORTEST_TTFT for
+     * single-request routing while the batch endpoint defaults to ROUND_ROBIN — the only
+     * batch-capable strategy today and the source of batch_schedule's atomic-distribution
+     * guarantee. See {@link FlexlbConfig#getBatchLoadBalanceStrategy}.
+     */
+    private final LoadBalancer batchLoadBalancer;
+    private final int batchScheduleMaxCount;
+    private final ModelMetaConfig modelMetaConfig;
 
-    public DefaultRouter(ConfigService configService) {
+    public DefaultRouter(ConfigService configService, ModelMetaConfig modelMetaConfig) {
+        this.modelMetaConfig = modelMetaConfig;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.loadBalancerMap = new EnumMap<>(RoleType.class);
 
         for (RoleType roleType : RoleType.values()) {
             LoadBalanceStrategyEnum strategy = config.getStrategyForRoleType(roleType);
             loadBalancerMap.put(roleType, LoadBalanceStrategyFactory.getLoadBalancer(strategy));
+            Logger.warn("DefaultRouter role={}: schedule={}", roleType, strategy);
         }
+
+        LoadBalanceStrategyEnum batchStrategy = config.getBatchLoadBalanceStrategy();
+        this.batchLoadBalancer = LoadBalanceStrategyFactory.getLoadBalancer(batchStrategy);
+        this.batchScheduleMaxCount = config.getBatchScheduleMaxCount();
+        if (batchScheduleMaxCount < 1) {
+            throw new IllegalStateException("batchScheduleMaxCount must be >= 1, got "
+                    + batchScheduleMaxCount + "; check BATCH_SCHEDULE_MAX_COUNT");
+        }
+        Logger.warn("DefaultRouter batchSchedule={}, batchScheduleMaxCount={}",
+                batchStrategy, batchScheduleMaxCount);
     }
 
     /**
@@ -80,6 +108,78 @@ public class DefaultRouter implements Router {
         }
 
         return response;
+    }
+
+    /**
+     * Single-role batch dispatch. Scope: only callable when the cluster has exactly one
+     * registered role. Multi-stage deployments (disaggregated PD / VL) should fan out
+     * via {@link #route} per request.
+     */
+    public BatchScheduleResponse batchSchedule(BatchScheduleRequest batchRequest) {
+        // (1) batch_count validation
+        if (batchRequest == null) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST, "batch_schedule request is null");
+        }
+        int count = batchRequest.getBatchCount();
+        if (count < 1 || count > batchScheduleMaxCount) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                    "batch_count must be in [1, " + batchScheduleMaxCount + "]");
+        }
+
+        // (1a) sub_requests length consistency (when caller opts in to forward-compatible payload)
+        List<Request> subs = batchRequest.getSubRequests();
+        if (subs != null && subs.size() != count) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                    "sub_requests length " + subs.size() + " != batch_count " + count);
+        }
+
+        // (2) master readiness
+        ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
+        if (workerStatus == null) {
+            return BatchScheduleResponse.error(NO_AVAILABLE_WORKER,
+                    "master not ready or MODEL_SERVICE_CONFIG missing");
+        }
+
+        // (3) Single-role check against deployment configuration first: the runtime view
+        //     can transiently hide a role (workers down or not yet synced), which must not
+        //     make a multi-role deployment look single-role and get a partial pre-assignment.
+        List<RoleType> configuredRoles = modelMetaConfig.getConfiguredRoleTypes();
+        if (configuredRoles.size() > 1) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                    "batch_schedule only supports single-role deployments; "
+                    + "multi-stage deployments (disaggregated PD / VL) should use /schedule per request. "
+                    + "Configured roles: " + configuredRoles);
+        }
+
+        // Role inference: reuse the same data source /schedule uses
+        List<RoleType> roleTypes = workerStatus.getRoleTypeList();
+        if (CollectionUtils.isEmpty(roleTypes)) {
+            return BatchScheduleResponse.error(NO_AVAILABLE_WORKER,
+                    "master not ready or MODEL_SERVICE_CONFIG missing");
+        }
+        if (roleTypes.size() > 1) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                    "batch_schedule only supports single-role deployments; "
+                    + "multi-stage deployments (disaggregated PD / VL) should use /schedule per request. "
+                    + "Detected roles: " + roleTypes);
+        }
+        RoleType roleType = roleTypes.get(0);
+
+        // (4) Batch strategy (independent of /schedule's strategy) must support batch.
+        //     Default is ROUND_ROBIN; an operator-configured non-batch-capable batchStrategy
+        //     fails loudly here rather than silently falling back, so misconfiguration is loud.
+        if (!(this.batchLoadBalancer instanceof BatchLoadBalancer batchLoadBalancer)) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                    "batchStrategy for role " + roleType.getCode() + " does not support batch_schedule");
+        }
+
+        // (5) RR pick N targets
+        List<BatchScheduleTarget> targets = batchLoadBalancer.selectBatch(count, roleType, null);
+        if (targets == null || targets.isEmpty()) {
+            return BatchScheduleResponse.error(roleType.getErrorType());
+        }
+
+        return BatchScheduleResponse.success(targets);
     }
 
     /**

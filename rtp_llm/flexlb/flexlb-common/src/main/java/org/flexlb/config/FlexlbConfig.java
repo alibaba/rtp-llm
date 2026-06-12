@@ -3,10 +3,14 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.Setter;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.EngineType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 
+import java.util.Collection;
+
 import static org.flexlb.enums.LoadBalanceStrategyEnum.RANDOM;
+import static org.flexlb.enums.LoadBalanceStrategyEnum.ROUND_ROBIN;
 import static org.flexlb.enums.LoadBalanceStrategyEnum.SHORTEST_TTFT;
 import static org.flexlb.enums.LoadBalanceStrategyEnum.WEIGHTED_CACHE;
 import static org.flexlb.enums.ResourceMeasureIndicatorEnum.REMAINING_KV_CACHE;
@@ -22,9 +26,11 @@ import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
 public class FlexlbConfig {
 
     /**
-     * Load balancing strategy
+     * Load balancing strategy for PDFUSION/PREFILL. When not explicitly configured, the
+     * default follows {@link #engineType}: SHORTEST_TTFT for LLM, ROUND_ROBIN for EMBEDDING
+     * (embedding workers are never probed, so no load metrics exist for SHORTEST_TTFT).
      */
-    private LoadBalanceStrategyEnum loadBalanceStrategy = LoadBalanceStrategyEnum.SHORTEST_TTFT;
+    private LoadBalanceStrategyEnum loadBalanceStrategy;
 
     /**
      * Load balancing strategy for DECODE role
@@ -35,6 +41,37 @@ public class FlexlbConfig {
      * Load balancing strategy for VIT role
      */
     private LoadBalanceStrategyEnum vitLoadBalanceStrategy = LoadBalanceStrategyEnum.RANDOM;
+
+    /**
+     * Load balancing strategy used by the {@code /batch_schedule} endpoint, decoupled from
+     * {@link #loadBalanceStrategy} which governs {@code /schedule}. Default {@code ROUND_ROBIN}
+     * because batch dispatch's value lies in atomic per-cursor distribution — the only
+     * {@link org.flexlb.balance.strategy.BatchLoadBalancer} implementation today. Operators
+     * who keep e.g. {@code SHORTEST_TTFT} for {@code /schedule} no longer have to give it up
+     * to enable {@code /batch_schedule}; the two endpoints honor their own strategies.
+     *
+     * <p>Per-role overrides are not exposed yet because all four roles share the same default
+     * (RR is the only batch-capable strategy). Add per-role fields if a future batch-aware
+     * strategy ever justifies them.
+     */
+    private LoadBalanceStrategyEnum batchLoadBalanceStrategy = LoadBalanceStrategyEnum.ROUND_ROBIN;
+
+    /**
+     * Upper bound accepted for {@code batch_count} on {@code /batch_schedule}. Like every other
+     * field, overridable via the {@code BATCH_SCHEDULE_MAX_COUNT} env var.
+     */
+    private int batchScheduleMaxCount = 1000;
+
+    /**
+     * Engine type of the workers behind this instance. Default {@link EngineType#LLM}
+     * (existing behavior: gRPC liveness probing, targets carry grpc_port). Set
+     * {@link EngineType#EMBEDDING} for embedding/BERT services: liveness trusts the
+     * service-discovery host list (their engine has no {@code GetWorkerStatus}) and schedule
+     * targets carry arpc_port instead. EMBEDDING requires load-unaware strategies for all
+     * deployed roles — enforced by {@link #validateEngineTypeConfig}.
+     */
+    private EngineType engineType = EngineType.LLM;
+
     /**
      * Weight decay factor, controls weight difference degree
      * Smaller value means smaller weight difference, larger value means more obvious weight difference
@@ -129,6 +166,15 @@ public class FlexlbConfig {
     private int nettyWorkerThreadMultiplier = 2;
 
     /**
+     * The {@code /batch_schedule} load balancing strategy. Never null — falls back to
+     * {@link LoadBalanceStrategyEnum#ROUND_ROBIN} so the batch path works out of the box
+     * regardless of how {@link #getStrategyForRoleType} is configured.
+     */
+    public LoadBalanceStrategyEnum getBatchLoadBalanceStrategy() {
+        return batchLoadBalanceStrategy != null ? batchLoadBalanceStrategy : ROUND_ROBIN;
+    }
+
+    /**
      * Get load balancing strategy for a role type
      * This method handles the logic of selecting the appropriate strategy based on role type and configuration
      *
@@ -138,10 +184,10 @@ public class FlexlbConfig {
     public LoadBalanceStrategyEnum getStrategyForRoleType(RoleType roleType) {
         switch (roleType) {
             case PDFUSION -> {
-                return this.loadBalanceStrategy != null ? loadBalanceStrategy : SHORTEST_TTFT;
+                return this.loadBalanceStrategy != null ? loadBalanceStrategy : defaultPrimaryStrategy();
             }
             case PREFILL -> {
-                return this.loadBalanceStrategy != null ? loadBalanceStrategy : SHORTEST_TTFT;
+                return this.loadBalanceStrategy != null ? loadBalanceStrategy : defaultPrimaryStrategy();
             }
             case DECODE -> {
                 return this.decodeLoadBalanceStrategy != null ? decodeLoadBalanceStrategy : WEIGHTED_CACHE;
@@ -162,6 +208,35 @@ public class FlexlbConfig {
      * @param roleType Role type
      * @return Resource measure indicator
      */
+    private LoadBalanceStrategyEnum defaultPrimaryStrategy() {
+        return engineType == EngineType.EMBEDDING ? ROUND_ROBIN : SHORTEST_TTFT;
+    }
+
+    /**
+     * Fail fast when {@link EngineType#EMBEDDING} is combined with a load-aware strategy.
+     * EMBEDDING workers are never probed, so the worker status map holds no real load
+     * metrics and SHORTEST_TTFT/WEIGHTED_CACHE would silently schedule on all-zero data.
+     * Only roles actually deployed are checked, so e.g. an embedding service (PDFUSION only)
+     * does not have to reconfigure the DECODE default.
+     *
+     * @param deployedRoles roles present in the service route
+     * @throws IllegalStateException when a deployed role uses a load-aware strategy
+     */
+    public void validateEngineTypeConfig(Collection<RoleType> deployedRoles) {
+        if (engineType != EngineType.EMBEDDING) {
+            return;
+        }
+        for (RoleType roleType : deployedRoles) {
+            LoadBalanceStrategyEnum strategy = getStrategyForRoleType(roleType);
+            if (strategy != ROUND_ROBIN && strategy != RANDOM) {
+                throw new IllegalStateException(
+                        "engineType=EMBEDDING workers are not probed and provide no load metrics, but role "
+                                + roleType + " is configured with load-aware strategy " + strategy
+                                + "; use ROUND_ROBIN or RANDOM");
+            }
+        }
+    }
+
     public ResourceMeasureIndicatorEnum getResourceMeasureIndicator(RoleType roleType) {
         switch (roleType) {
             case PDFUSION -> {

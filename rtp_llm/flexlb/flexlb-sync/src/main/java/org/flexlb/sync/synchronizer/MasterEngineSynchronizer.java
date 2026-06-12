@@ -71,6 +71,9 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
         });
         ModelMetaConfig.putServiceRoute(serviceRoute.getServiceId(), serviceRoute);
         modelNames.add(IdUtils.getModelNameByServiceId(serviceRoute.getServiceId()));
+
+        flexlbConfig.validateEngineTypeConfig(serviceRoute.getAllRoleTypes());
+        Logger.warn("engine type: {}", flexlbConfig.getEngineType());
     }
 
     public void syncEngineStatus() {
@@ -98,7 +101,8 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                 modelName, modelWorkerStatus.getRoleStatusMap(roleType),
                                 workerAddressService, statusCheckExecutor, engineHealthReporter,
                                 engineGrpcService, roleType, localKvCacheAwareManager,
-                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval
+                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                                flexlbConfig.getEngineType()
                         ));
                     } else {
                         logger.error("roleEndpoints is null, by roleType : {}", roleType);

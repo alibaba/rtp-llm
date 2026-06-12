@@ -9,7 +9,9 @@ public enum LoadBalanceStrategyEnum {
 
     SHORTEST_TTFT("ShortestTTFT"),  // Shortest Time-To-First-Token
 
-    WEIGHTED_CACHE("WeightedCache")  // Lowest cache usage strategy
+    WEIGHTED_CACHE("WeightedCache"),  // Lowest cache usage strategy
+
+    ROUND_ROBIN("RoundRobin")  // Cursor-based round-robin (cheap, no load awareness)
 
     ;
     private final String name;
