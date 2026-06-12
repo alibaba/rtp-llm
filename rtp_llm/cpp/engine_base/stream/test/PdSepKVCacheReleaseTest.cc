@@ -32,6 +32,8 @@
 
 namespace rtp_llm {
 
+using test::setDsv4KvCacheSpecs;
+
 namespace {
 
 constexpr int kDsv4PoolNum        = 7;
@@ -268,6 +270,7 @@ protected:
         }
         ratios.push_back(0);  // MTP tail marker.
         mc.attn_config.layer_compress_ratios = ratios;
+        setDsv4KvCacheSpecs(mc);
 
         ParallelismConfig pc;
         KVCacheConfig     kv_config;

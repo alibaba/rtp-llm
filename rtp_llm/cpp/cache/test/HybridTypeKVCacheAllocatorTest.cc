@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -33,7 +34,6 @@ static CacheConfig makeTinyHybridConfig() {
     auto linear_spec                = std::make_shared<LinearKVCacheSpec>();
     linear_spec->type               = KVCacheSpecType::LinearAttention;
     linear_spec->dtype              = config.dtype;
-    linear_spec->layer_num          = 2;
     linear_spec->local_num_k_heads  = 1;
     linear_spec->local_num_v_heads  = 1;
     linear_spec->head_k_dim         = 1;
@@ -46,7 +46,6 @@ static CacheConfig makeTinyHybridConfig() {
     auto full_spec                = std::make_shared<MHAKVCacheSpec>();
     full_spec->type               = KVCacheSpecType::MultiHeadAttention;
     full_spec->dtype              = config.dtype;
-    full_spec->layer_num          = 2;
     full_spec->local_head_num_kv  = 1;
     full_spec->size_per_head      = 1;
     full_spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);
@@ -106,6 +105,8 @@ static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig() {
     score_model_cfg.linear_attention_config.linear_value_head_dim  = 8;
     score_model_cfg.linear_attention_config.linear_num_key_heads   = 2;
     score_model_cfg.linear_attention_config.linear_num_value_heads = 2;
+    setHybridAttentionKvCacheSpecs(score_model_cfg);
+    setDefaultKvCacheSpec(propose_model_cfg);
 
     ParallelismConfig parallelism_cfg;
     parallelism_cfg.tp_size = 1;

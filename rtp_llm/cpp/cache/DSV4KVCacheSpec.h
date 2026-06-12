@@ -27,8 +27,8 @@ inline size_t alignDsv4Fp8KvBlockBytes(size_t natural, size_t extra_multiple = 1
     return ((natural + align - 1) / align) * align;
 }
 
-// KVCacheSpec for DSV4 paged KV pools (Pool 0/1/2: CSA_KV, HCA_KV, INDEXER_KV).
-// These are variable-length paged pools storing KV entries as uint8 (byte-addressed).
+// KVCacheSpec for compressed paged KV pools. These are variable-length paged
+// pools storing KV entries as uint8 (byte-addressed).
 // BF16 mode: head_dim * 2 bytes per entry (1024 KV / 256 Indexer).
 // FP8 mode: 584B per KV entry, 132B per Indexer entry — see constants above.
 // Each entry contains the full KV for one compressed token (one KV head).
@@ -36,23 +36,27 @@ struct DSV4KVSpec: public KVCacheSpec {
     KVCacheRegionName cache_type = KVCacheRegionName::DEFAULT;
     uint32_t          entry_elems;        // bytes per entry (1024/584 KV, 256/132 Indexer)
     uint32_t          entries_per_block;  // entries per block (64 or 2)
-    DataType          store_dtype;        // TYPE_UINT8
+    uint32_t          compression_ratio           = 1;
+    DataType          store_dtype                 = DataType::TYPE_INVALID;
+    size_t            block_size_bytes_alignment = 0;
 
     DSV4KVSpec() = default;
 
     DSV4KVSpec(KVCacheRegionName cache_region,
-               uint32_t          layer_count,
                uint32_t          entry_elements,
                uint32_t          block_entries,
                DataType          storage_dtype,
-               uint32_t          seq_size_per_blk) {
+               uint32_t          seq_size_per_blk,
+               uint32_t          cache_compression_ratio = 1,
+               size_t            block_size_alignment    = 0) {
         cache_type        = cache_region;
         entry_elems       = entry_elements;
         entries_per_block = block_entries;
+        compression_ratio = cache_compression_ratio;
         store_dtype       = storage_dtype;
+        block_size_bytes_alignment = block_size_alignment;
 
         // KVCacheSpec base fields
-        layer_num          = layer_count;
         local_head_num_kv  = 1;  // DSV4 is MQA (1 KV head)
         seq_size_per_block = seq_size_per_blk;
         type               = KVCacheSpecType::MultiHeadAttention;
@@ -79,8 +83,9 @@ struct DSV4KVSpec: public KVCacheSpec {
     // padding for FlashMLA TMA; BF16 and indexer pools keep their natural size.
     size_t block_size_bytes() const override {
         const size_t natural = natural_block_size_bytes();
-        if (entry_elems == DSV4_FP8_KV_ENTRY_BYTES) {
-            return alignDsv4Fp8KvBlockBytes(natural);
+        if (block_size_bytes_alignment > 0) {
+            return ((natural + block_size_bytes_alignment - 1) / block_size_bytes_alignment)
+                   * block_size_bytes_alignment;
         }
         return natural;
     }
@@ -92,6 +97,10 @@ struct DSV4KVSpec: public KVCacheSpec {
         return block_size_bytes() / 2;
     }
 
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<DSV4KVSpec>(*this);
+    }
+
     std::string debugString(size_t indent = 0) const override {
         std::ostringstream os;
         os << std::string(indent, ' ') << "DSV4KVSpec{\n";
@@ -99,40 +108,46 @@ struct DSV4KVSpec: public KVCacheSpec {
         os << std::string(indent + 2, ' ') << "cache_type=" << static_cast<int>(cache_type) << "\n";
         os << std::string(indent + 2, ' ') << "entry_elems=" << entry_elems << "\n";
         os << std::string(indent + 2, ' ') << "entries_per_block=" << entries_per_block << "\n";
+        os << std::string(indent + 2, ' ') << "compression_ratio=" << compression_ratio << "\n";
+        os << std::string(indent + 2, ' ') << "block_size_bytes_alignment=" << block_size_bytes_alignment << "\n";
         os << std::string(indent, ' ') << "}\n";
         return os.str();
     }
 };
 
-// KVCacheSpec for DSV4 fixed-allocation pools (Pool 3/4/5/6: INDEXER_STATE,
-// CSA_STATE, HCA_STATE, SWA_KV).  State pools store compressor/indexer state as
-// float32; SWA_KV stores byte-addressed KV entries.  They use SWA tail
-// allocation, and non-null tail blocks can participate in prefix cache.  The
-// K/V split is a placeholder for state pools because state is an opaque blob.
+// KVCacheSpec for fixed-allocation state/SWA payload pools. State pools store
+// compressor/indexer state as float32; SWA_KV stores byte-addressed KV entries.
+// They use SWA tail allocation, and non-null tail blocks can participate in
+// prefix cache. The K/V split is a placeholder for state pools because state is
+// an opaque blob.
 struct DSV4StateSpec: public KVCacheSpec {
     KVCacheRegionName cache_type = KVCacheRegionName::DEFAULT;
     uint32_t          state_dim;          // state dimension (entry_elems in pool_spec)
     uint32_t          entries_per_block;  // 4 or 8
-    DataType          store_dtype;        // TYPE_FP32
-    size_t            block_size_bytes_override = 0;
+    DataType          store_dtype                      = DataType::TYPE_INVALID;
+    size_t            block_size_bytes_override         = 0;
+    size_t            block_size_bytes_alignment        = 0;
+    uint32_t          block_size_alignment_min_entries = 0;
 
     DSV4StateSpec() = default;
 
     DSV4StateSpec(KVCacheRegionName cache_region,
-                  uint32_t          layer_count,
                   uint32_t          state_elements,
                   uint32_t          block_entries,
                   DataType          storage_dtype,
                   uint32_t          seq_size_per_blk,
-                  size_t            block_size_bytes_override_value = 0) {
+                  size_t            block_size_bytes_override_value = 0,
+                  size_t            block_size_alignment            = 0,
+                  uint32_t          block_alignment_min_entries     = 0) {
         cache_type        = cache_region;
         state_dim         = state_elements;
         entries_per_block = block_entries;
-        store_dtype       = storage_dtype;
+        store_dtype               = storage_dtype;
         block_size_bytes_override = block_size_bytes_override_value;
+        block_size_bytes_alignment        = block_size_alignment;
+        block_size_alignment_min_entries = block_alignment_min_entries;
 
         // KVCacheSpec base fields
-        layer_num          = layer_count;
         local_head_num_kv  = 1;
         seq_size_per_block = seq_size_per_blk;
         type               = KVCacheSpecType::MultiHeadAttention;
@@ -163,8 +178,9 @@ struct DSV4StateSpec: public KVCacheSpec {
             return block_size_bytes_override;
         }
         const size_t natural = natural_block_size_bytes();
-        if (state_dim == DSV4_FP8_KV_ENTRY_BYTES && entries_per_block >= DSV4_SWA_WINDOW_ENTRIES) {
-            return alignDsv4Fp8KvBlockBytes(natural);
+        if (block_size_bytes_alignment > 0 && entries_per_block >= block_size_alignment_min_entries) {
+            return ((natural + block_size_bytes_alignment - 1) / block_size_bytes_alignment)
+                   * block_size_bytes_alignment;
         }
         return natural;
     }
@@ -176,6 +192,10 @@ struct DSV4StateSpec: public KVCacheSpec {
         return block_size_bytes() / 2;
     }
 
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<DSV4StateSpec>(*this);
+    }
+
     std::string debugString(size_t indent = 0) const override {
         std::ostringstream os;
         os << std::string(indent, ' ') << "DSV4StateSpec{\n";
@@ -184,6 +204,9 @@ struct DSV4StateSpec: public KVCacheSpec {
         os << std::string(indent + 2, ' ') << "state_dim=" << state_dim << "\n";
         os << std::string(indent + 2, ' ') << "entries_per_block=" << entries_per_block << "\n";
         os << std::string(indent + 2, ' ') << "block_size_bytes_override=" << block_size_bytes_override << "\n";
+        os << std::string(indent + 2, ' ') << "block_size_bytes_alignment=" << block_size_bytes_alignment << "\n";
+        os << std::string(indent + 2, ' ')
+           << "block_size_alignment_min_entries=" << block_size_alignment_min_entries << "\n";
         os << std::string(indent, ' ') << "}\n";
         return os.str();
     }

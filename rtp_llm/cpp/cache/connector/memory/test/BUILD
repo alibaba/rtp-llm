@@ -61,6 +61,7 @@ cc_test(
         "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:kv_cache_allocator_hdr",
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/utils:core_utils",

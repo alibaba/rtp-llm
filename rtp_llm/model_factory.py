@@ -291,6 +291,7 @@ class ModelFactory:
             embedding_config=embedding_config,
             quantization_config=quantization_config,
         )
+        model_cls._post_build_model_config(model_config)
 
         # Set model metadata fields
         # Set lora_infos from lora_config (direct assignment)
@@ -409,5 +410,6 @@ class ModelFactory:
             profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
             embedding_config=None,  # Propose model doesn't need embedding_config
         )
+        propose_model_cls._post_build_model_config(propose_model_config)
 
         return propose_model_config

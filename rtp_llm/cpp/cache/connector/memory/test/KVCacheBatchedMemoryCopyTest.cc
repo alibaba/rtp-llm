@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -149,6 +150,7 @@ ModelConfig makeDsv4ProModelConfig() {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
     mc.attn_config.layer_compress_ratios = ratios;
+    setDsv4KvCacheSpecs(mc);
     return mc;
 }
 
@@ -173,6 +175,7 @@ ModelConfig makeDsv4FlashModelConfig() {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
     mc.attn_config.layer_compress_ratios = ratios;
+    setDsv4KvCacheSpecs(mc);
     return mc;
 }
 
@@ -202,7 +205,6 @@ CacheConfig makeTinyTypedHybridPoolConfig() {
         auto spec                = std::make_shared<MHAKVCacheSpec>();
         spec->type               = KVCacheSpecType::MultiHeadAttention;
         spec->dtype              = config.dtype;
-        spec->layer_num          = config.layer_num;
         spec->local_head_num_kv  = 1;
         spec->size_per_head      = size_per_head;
         spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);
@@ -290,7 +292,6 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
         auto spec                = std::make_shared<MHAKVCacheSpec>();
         spec->type               = KVCacheSpecType::MultiHeadAttention;
         spec->dtype              = config.dtype;
-        spec->layer_num          = layer_num;
         spec->local_head_num_kv  = 1;
         spec->size_per_head      = 16;
         spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);

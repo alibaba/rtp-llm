@@ -4,6 +4,11 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
+#include <array>
+#include <map>
+#include <set>
+#include <utility>
+
 namespace rtp_llm {
 
 namespace {
@@ -16,16 +21,6 @@ constexpr uint32_t kDsv4KernelTokensPerBlock    = 256;
 constexpr uint32_t kDsv4MinKernelTokensPerBlock = 128;
 // SWA sliding-window length in tokens (SWA_KV ring base size; see swa_kv_eb).
 constexpr uint32_t kDsv4SwaWindowEntries = 128;
-// BF16 pool: head_dim=512 x 2B = 1024B per KV slot, 128 x 2B = 256B per
-// indexer slot. FP8 pool packs the same logical KV into a smaller slot
-// (canonical fp8_model1_mla layout: 448B fp8 NoPE + 64B bf16 RoPE + 8B
-// UE8M0 scales = 584B; indexer is 128B fp8 + 4B fp32 scale = 132B).
-// Selected at runtime from ``attn_config.kv_cache_dtype`` -- see
-// ``buildDSV4PoolDescs``.
-constexpr uint32_t kDsv4KvEntryBytesBf16      = 1024;
-constexpr uint32_t kDsv4IndexerEntryBytesBf16 = 256;
-constexpr uint32_t kDsv4KvEntryBytesFp8       = 584;
-constexpr uint32_t kDsv4IndexerEntryBytesFp8  = 132;
 constexpr size_t   kDsv4PoolNum               = 7;
 
 struct DSV4LayerSets {
@@ -36,15 +31,37 @@ struct DSV4LayerSets {
 };
 
 struct DSV4PoolDesc {
+    std::string             tag;
     KVCacheRegionName       region_name;
     const std::vector<int>* layer_ids;
     uint32_t                entry_elems;
     uint32_t                entries_per_block;
     uint32_t                tokens_per_block;
+    uint32_t                compression_ratio = 1;
     DataType                store_dtype;
     bool                    is_paged;
-    size_t                  block_size_bytes_override = 0;
+    size_t                  block_size_bytes_override       = 0;
+    size_t                  block_size_bytes_alignment      = 0;
+    uint32_t                block_alignment_min_entries     = 0;
 };
+
+struct ExpectedDSV4Spec {
+    const char*       tag;
+    KVCacheRegionName region_name;
+    bool              is_paged;
+};
+
+constexpr std::array<ExpectedDSV4Spec, kDsv4PoolNum> kExpectedDsv4Specs = {
+    ExpectedDSV4Spec{"csa_kv", KVCacheRegionName::CSA_KV, true},
+    ExpectedDSV4Spec{"hca_kv", KVCacheRegionName::HCA_KV, true},
+    ExpectedDSV4Spec{"indexer_kv", KVCacheRegionName::INDEXER_KV, true},
+    ExpectedDSV4Spec{"indexer_state", KVCacheRegionName::INDEXER_STATE, false},
+    ExpectedDSV4Spec{"csa_state", KVCacheRegionName::CSA_STATE, false},
+    ExpectedDSV4Spec{"hca_state", KVCacheRegionName::HCA_STATE, false},
+    ExpectedDSV4Spec{"swa_kv", KVCacheRegionName::SWA_KV, false},
+};
+
+using DSV4SpecMap = std::map<std::string, KVCacheSpecPtr>;
 
 constexpr int kCsaCompressRatio     = 4;
 constexpr int kHcaCompressRatio     = 128;
@@ -159,52 +176,238 @@ size_t maybeSwaPrefillCpByteSliceBytes(uint32_t entries_per_block, const Paralle
     return full_stride_bytes / cp_size;
 }
 
-DSV4LayerSets classifyDSV4Layers(const std::vector<int>& compress_ratios) {
-    DSV4LayerSets sets;
-    const size_t  num_layers = compress_ratios.size();
+bool sameLayers(const std::vector<int>& lhs, const std::vector<int>& rhs) {
+    return lhs == rhs;
+}
 
-    for (size_t i = 0; i < num_layers; ++i) {
-        const int layer_id = static_cast<int>(i);
-        const int ratio    = compress_ratios[i];
-        sets.all_layers.push_back(layer_id);
-        if (ratio == 4) {
-            sets.csa_layers.push_back(layer_id);
-        } else if (ratio == 128) {
-            sets.hca_layers.push_back(layer_id);
-        } else if (ratio == 0) {
-            sets.swa_only_layers.push_back(layer_id);
+const KVCacheSpec& specForTag(const DSV4SpecMap& specs, const char* tag) {
+    const auto it = specs.find(tag);
+    RTP_LLM_CHECK_WITH_INFO(it != specs.end() && it->second != nullptr, "missing DSV4 kv_cache spec tag=%s", tag);
+    return *it->second;
+}
+
+bool isDsv4PagedSpec(const KVCacheSpec& spec) {
+    return dynamic_cast<const DSV4KVSpec*>(&spec) != nullptr;
+}
+
+uint32_t dsv4SpecEntryElems(const KVCacheSpec& spec) {
+    if (const auto* kv_spec = dynamic_cast<const DSV4KVSpec*>(&spec)) {
+        return kv_spec->entry_elems;
+    }
+    if (const auto* state_spec = dynamic_cast<const DSV4StateSpec*>(&spec)) {
+        return state_spec->state_dim;
+    }
+    RTP_LLM_CHECK_WITH_INFO(false, "DSV4 kv_cache spec tag=%s has unsupported concrete type", spec.tag.c_str());
+    return 0;
+}
+
+uint32_t dsv4SpecCompressionRatio(const KVCacheSpec& spec) {
+    const auto* kv_spec = dynamic_cast<const DSV4KVSpec*>(&spec);
+    RTP_LLM_CHECK_WITH_INFO(kv_spec != nullptr,
+                            "DSV4 kv_cache spec tag=%s must be DSV4KVSpec to have compression_ratio",
+                            spec.tag.c_str());
+    return kv_spec->compression_ratio;
+}
+
+DataType dsv4SpecStoreDtype(const KVCacheSpec& spec) {
+    if (const auto* kv_spec = dynamic_cast<const DSV4KVSpec*>(&spec)) {
+        return kv_spec->store_dtype;
+    }
+    if (const auto* state_spec = dynamic_cast<const DSV4StateSpec*>(&spec)) {
+        return state_spec->store_dtype;
+    }
+    RTP_LLM_CHECK_WITH_INFO(false, "DSV4 kv_cache spec tag=%s has unsupported concrete type", spec.tag.c_str());
+    return DataType::TYPE_INVALID;
+}
+
+size_t dsv4SpecBlockSizeBytesAlignment(const KVCacheSpec& spec) {
+    if (const auto* kv_spec = dynamic_cast<const DSV4KVSpec*>(&spec)) {
+        return kv_spec->block_size_bytes_alignment;
+    }
+    if (const auto* state_spec = dynamic_cast<const DSV4StateSpec*>(&spec)) {
+        return state_spec->block_size_bytes_alignment;
+    }
+    RTP_LLM_CHECK_WITH_INFO(false, "DSV4 kv_cache spec tag=%s has unsupported concrete type", spec.tag.c_str());
+    return 0;
+}
+
+uint32_t dsv4SpecBlockAlignmentMinEntries(const KVCacheSpec& spec) {
+    if (dynamic_cast<const DSV4KVSpec*>(&spec) != nullptr) {
+        return 0;
+    }
+    if (const auto* state_spec = dynamic_cast<const DSV4StateSpec*>(&spec)) {
+        return state_spec->block_size_alignment_min_entries;
+    }
+    RTP_LLM_CHECK_WITH_INFO(false, "DSV4 kv_cache spec tag=%s has unsupported concrete type", spec.tag.c_str());
+    return 0;
+}
+
+KVCacheSpecPtr makeFallbackDsv4Decl(const char* tag, const ExpectedDSV4Spec& expected, const ModelConfig& model_config) {
+    const bool     fp8_kv              = model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8;
+    const uint32_t head_dim            = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+    const uint32_t indexer_head_dim    = static_cast<uint32_t>(model_config.attn_config.indexer_head_dim);
+    const uint32_t kv_entry_elems      = fp8_kv ? DSV4_FP8_KV_ENTRY_BYTES : head_dim * 2;
+    const uint32_t indexer_entry_elems = fp8_kv ? DSV4_FP8_INDEXER_ENTRY_BYTES : indexer_head_dim * 2;
+
+    KVCacheSpecPtr spec;
+    if (expected.is_paged) {
+        auto kv_spec               = std::make_shared<DSV4KVSpec>();
+        kv_spec->entry_elems       = std::string(tag) == "indexer_kv" ? indexer_entry_elems : kv_entry_elems;
+        kv_spec->compression_ratio = std::string(tag) == "hca_kv" ? kHcaCompressRatio : kCsaCompressRatio;
+        kv_spec->store_dtype       = DataType::TYPE_UINT8;
+        spec                       = kv_spec;
+    } else {
+        auto state_spec        = std::make_shared<DSV4StateSpec>();
+        state_spec->store_dtype = std::string(tag) == "swa_kv" ? DataType::TYPE_UINT8 : DataType::TYPE_FP32;
+        if (std::string(tag) == "indexer_state") {
+            state_spec->state_dim = 4 * indexer_head_dim;
+        } else if (std::string(tag) == "csa_state") {
+            state_spec->state_dim = 4 * head_dim;
+        } else if (std::string(tag) == "hca_state") {
+            state_spec->state_dim = 2 * head_dim;
         } else {
-            RTP_LLM_LOG_WARNING("Unknown DSV4 compress_ratio %d at layer %zu, treating as HCA", ratio, i);
-            sets.hca_layers.push_back(layer_id);
+            state_spec->state_dim = kv_entry_elems;
+        }
+        spec = state_spec;
+    }
+    spec->tag   = tag;
+    spec->dtype = expected.is_paged || std::string(tag) == "swa_kv" ? DataType::TYPE_UINT8 : DataType::TYPE_FP32;
+    return spec;
+}
+
+std::pair<DSV4LayerSets, DSV4SpecMap> parseDSV4Specs(const ModelConfig& model_config) {
+    RTP_LLM_CHECK_WITH_INFO(!model_config.kv_cache_specs.empty(),
+                            "DSV4 cache config requires layer-wise model_config.kv_cache_specs; "
+                            "layer_compress_ratios fallback is disabled");
+
+    std::map<std::string, ExpectedDSV4Spec> expected_by_tag;
+    for (const auto& expected : kExpectedDsv4Specs) {
+        expected_by_tag.emplace(expected.tag, expected);
+    }
+
+    DSV4SpecMap                         specs;
+    std::map<std::string, std::string>  fingerprints;
+    std::map<std::string, std::vector<int>> layers_by_tag;
+    for (int layer_id = 0; layer_id < model_config.num_layers; ++layer_id) {
+        const auto layer_it = model_config.kv_cache_specs.find(layer_id);
+        RTP_LLM_CHECK_WITH_INFO(layer_it != model_config.kv_cache_specs.end(),
+                                "DSV4 kv_cache_specs missing layer %d",
+                                layer_id);
+        RTP_LLM_CHECK_WITH_INFO(!layer_it->second.empty(),
+                                "DSV4 kv_cache_specs layer %d has no specs",
+                                layer_id);
+        std::set<std::string> layer_tags;
+        for (const auto& spec : layer_it->second) {
+            RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "DSV4 kv_cache spec must not be null");
+            const auto& decl = *spec;
+            RTP_LLM_CHECK_WITH_INFO(!decl.tag.empty(), "DSV4 kv_cache spec has empty tag");
+            RTP_LLM_CHECK_WITH_INFO(layer_tags.insert(decl.tag).second,
+                                    "DSV4 layer %d has duplicate kv_cache spec tag=%s",
+                                    layer_id,
+                                    decl.tag.c_str());
+            const auto expected_it = expected_by_tag.find(decl.tag);
+            RTP_LLM_CHECK_WITH_INFO(expected_it != expected_by_tag.end(),
+                                    "unknown DSV4 kv_cache spec tag=%s",
+                                    decl.tag.c_str());
+            const auto& expected = expected_it->second;
+            RTP_LLM_CHECK_WITH_INFO(isDsv4PagedSpec(decl) == expected.is_paged,
+                                    "DSV4 kv_cache spec tag=%s has mismatched concrete spec type",
+                                    decl.tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(dsv4SpecEntryElems(decl) > 0,
+                                    "DSV4 kv_cache spec tag=%s must set entry_elems/state_dim",
+                                    decl.tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(dsv4SpecStoreDtype(decl) != DataType::TYPE_INVALID,
+                                    "DSV4 kv_cache spec tag=%s must set store_dtype",
+                                    decl.tag.c_str());
+            if (expected.is_paged) {
+                RTP_LLM_CHECK_WITH_INFO(dsv4SpecCompressionRatio(decl) > 0,
+                                        "DSV4 kv_cache spec tag=%s must set compression_ratio",
+                                        decl.tag.c_str());
+            }
+            const auto fingerprint = CacheConfig::specFingerprint(spec);
+            const auto fp_it       = fingerprints.find(decl.tag);
+            if (fp_it == fingerprints.end()) {
+                fingerprints.emplace(decl.tag, fingerprint);
+                specs.emplace(decl.tag, spec);
+            } else {
+                RTP_LLM_CHECK_WITH_INFO(fp_it->second == fingerprint,
+                                        "DSV4 kv_cache spec tag=%s has multiple physical prototypes",
+                                        decl.tag.c_str());
+            }
+            layers_by_tag[decl.tag].push_back(layer_id);
+        }
+    }
+    for (const auto& expected : kExpectedDsv4Specs) {
+        if (specs.count(expected.tag) == 0) {
+            specs.emplace(expected.tag, makeFallbackDsv4Decl(expected.tag, expected, model_config));
         }
     }
 
-    RTP_LLM_LOG_INFO("DSV4 layer classification: %zu total, %zu CSA, %zu HCA, %zu SWA-only",
+    DSV4LayerSets sets;
+    sets.csa_layers = layers_by_tag["csa_kv"];
+    sets.hca_layers = layers_by_tag["hca_kv"];
+    sets.all_layers = layers_by_tag["swa_kv"];
+    const auto& csa = sets.csa_layers;
+    const auto& hca = sets.hca_layers;
+    const auto& all = sets.all_layers;
+
+    RTP_LLM_CHECK_WITH_INFO(sameLayers(layers_by_tag["indexer_kv"], csa),
+                            "DSV4 indexer_kv layers must match csa_kv layers");
+    RTP_LLM_CHECK_WITH_INFO(sameLayers(layers_by_tag["indexer_state"], csa),
+                            "DSV4 indexer_state layers must match csa_kv layers");
+    RTP_LLM_CHECK_WITH_INFO(sameLayers(layers_by_tag["csa_state"], csa),
+                            "DSV4 csa_state layers must match csa_kv layers");
+    RTP_LLM_CHECK_WITH_INFO(sameLayers(layers_by_tag["hca_state"], hca),
+                            "DSV4 hca_state layers must match hca_kv layers");
+
+    std::set<int> compressed_layers;
+    for (int layer_id : csa) {
+        RTP_LLM_CHECK_WITH_INFO(compressed_layers.insert(layer_id).second,
+                                "DSV4 layer %d appears in multiple compressed specs",
+                                layer_id);
+    }
+    for (int layer_id : hca) {
+        RTP_LLM_CHECK_WITH_INFO(compressed_layers.insert(layer_id).second,
+                                "DSV4 layer %d appears in multiple compressed specs",
+                                layer_id);
+    }
+
+    std::set<int> all_layer_set(all.begin(), all.end());
+    RTP_LLM_CHECK_WITH_INFO(all_layer_set.size() == all.size(), "DSV4 swa_kv layers must be unique");
+    RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(all.size()) == model_config.num_layers,
+                            "DSV4 swa_kv layer count %zu != num_layers %ld",
+                            all.size(),
+                            model_config.num_layers);
+    for (int layer_id = 0; layer_id < model_config.num_layers; ++layer_id) {
+        RTP_LLM_CHECK_WITH_INFO(all_layer_set.count(layer_id) == 1,
+                                "DSV4 swa_kv layers must cover every model layer; missing %d",
+                                layer_id);
+    }
+    for (int layer_id : compressed_layers) {
+        RTP_LLM_CHECK_WITH_INFO(all_layer_set.count(layer_id) == 1,
+                                "DSV4 compressed layer %d is absent from swa_kv",
+                                layer_id);
+    }
+    for (int layer_id : all) {
+        if (compressed_layers.count(layer_id) == 0) {
+            sets.swa_only_layers.push_back(layer_id);
+        }
+    }
+
+    RTP_LLM_LOG_INFO("DSV4 spec layer classification: %zu total, %zu CSA, %zu HCA, %zu SWA-only",
                      sets.all_layers.size(),
                      sets.csa_layers.size(),
                      sets.hca_layers.size(),
                      sets.swa_only_layers.size());
-    return sets;
+    return {sets, specs};
 }
 
 std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
-                                             const ModelConfig&       model_config,
+                                             const DSV4SpecMap&       spec_decls,
                                              uint32_t                 kernel_tokens_per_block,
                                              uint32_t                 physical_tokens_per_block,
                                              const ParallelismConfig& parallelism_config,
                                              int                      gen_num_per_cycle) {
-    const auto& attn         = model_config.attn_config;
-    const auto  head_dim     = static_cast<uint32_t>(attn.size_per_head);
-    const auto  idx_head_dim = static_cast<uint32_t>(attn.indexer_head_dim);
-
-    const uint32_t idx_state_dim = 2 * idx_head_dim;
-    const uint32_t csa_state_dim = 2 * head_dim;
-    const uint32_t hca_state_dim = head_dim;
-
-    const bool     fp8_kv              = (attn.kv_cache_dtype == KvCacheDataType::FP8);
-    const uint32_t kv_entry_bytes      = fp8_kv ? kDsv4KvEntryBytesFp8 : kDsv4KvEntryBytesBf16;
-    const uint32_t indexer_entry_bytes = fp8_kv ? kDsv4IndexerEntryBytesFp8 : kDsv4IndexerEntryBytesBf16;
-
     const uint32_t csa_state_eb =
         maybeAdjustFixedEntriesForCpSharding(computeStateRing(kCsaCompressRatio, kCsaOverlap, gen_num_per_cycle),
                                              parallelism_config,
@@ -230,77 +433,95 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
     const uint32_t fixed_cp_size = fixedRegionCpSize(parallelism_config);
     const uint32_t fixed_tokens_per_block =
         fixed_cp_size > 1 ? physical_tokens_per_block * fixed_cp_size : physical_tokens_per_block;
+    auto paged_desc = [&](const char* tag,
+                           KVCacheRegionName region,
+                           const std::vector<int>* layers) -> DSV4PoolDesc {
+        const auto& decl             = specForTag(spec_decls, tag);
+        const auto  compression_ratio = dsv4SpecCompressionRatio(decl);
+        const auto  entry_elems       = dsv4SpecEntryElems(decl);
+        const auto  alignment         = dsv4SpecBlockSizeBytesAlignment(decl);
+        RTP_LLM_CHECK_WITH_INFO(kernel_tokens_per_block % compression_ratio == 0,
+                                "DSV4 kv_cache spec tag=%s compression_ratio=%u must divide kernel block %u",
+                                tag,
+                                compression_ratio,
+                                kernel_tokens_per_block);
+        return {tag,
+                region,
+                layers,
+                entry_elems,
+                kernel_tokens_per_block / compression_ratio,
+                physical_tokens_per_block,
+                compression_ratio,
+                dsv4SpecStoreDtype(decl),
+                true,
+                0,
+                alignment > 0 ? alignment :
+                                (entry_elems == DSV4_FP8_KV_ENTRY_BYTES ? DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES : 0),
+                0};
+    };
+    auto fixed_desc = [&](const char* tag,
+                          KVCacheRegionName region,
+                          const std::vector<int>* layers,
+                          uint32_t entries_per_block,
+                          uint32_t tokens_per_block,
+                          size_t block_size_bytes_override = 0) -> DSV4PoolDesc {
+        const auto& decl        = specForTag(spec_decls, tag);
+        const auto  entry_elems = dsv4SpecEntryElems(decl);
+        const auto  alignment   = dsv4SpecBlockSizeBytesAlignment(decl);
+        const auto  min_entries = dsv4SpecBlockAlignmentMinEntries(decl);
+        return {tag,
+                region,
+                layers,
+                entry_elems,
+                entries_per_block,
+                tokens_per_block,
+                1,
+                dsv4SpecStoreDtype(decl),
+                false,
+                block_size_bytes_override,
+                alignment > 0 ? alignment :
+                                (region == KVCacheRegionName::SWA_KV && entry_elems == DSV4_FP8_KV_ENTRY_BYTES
+                                     ? DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES
+                                     : 0),
+                min_entries > 0 ? min_entries : DSV4_SWA_WINDOW_ENTRIES};
+    };
+
     return {
-        {KVCacheRegionName::CSA_KV,
-         &sets.csa_layers,
-         kv_entry_bytes,
-         kernel_tokens_per_block / 4,
-         physical_tokens_per_block,
-         DataType::TYPE_UINT8,
-         true},
-        {KVCacheRegionName::HCA_KV,
-         &sets.hca_layers,
-         kv_entry_bytes,
-         kernel_tokens_per_block / 128,
-         physical_tokens_per_block,
-         DataType::TYPE_UINT8,
-         true},
-        {KVCacheRegionName::INDEXER_KV,
-         &sets.csa_layers,
-         indexer_entry_bytes,
-         kernel_tokens_per_block / 4,
-         physical_tokens_per_block,
-         DataType::TYPE_UINT8,
-         true},
-        {KVCacheRegionName::INDEXER_STATE,
-         &sets.csa_layers,
-         idx_state_dim * 2,
-         indexer_state_eb,
-         fixed_tokens_per_block,
-         DataType::TYPE_FP32,
-         false},
-        {KVCacheRegionName::CSA_STATE,
-         &sets.csa_layers,
-         csa_state_dim * 2,
-         csa_state_eb,
-         fixed_tokens_per_block,
-         DataType::TYPE_FP32,
-         false},
-        {KVCacheRegionName::HCA_STATE,
-         &sets.hca_layers,
-         hca_state_dim * 2,
-         hca_state_eb,
-         fixed_tokens_per_block,
-         DataType::TYPE_FP32,
-         false},
-        {KVCacheRegionName::SWA_KV,
-         &sets.all_layers,
-         kv_entry_bytes,
-         swa_kv_eb,
-         fixed_tokens_per_block,
-         DataType::TYPE_UINT8,
-         false,
-         swa_kv_block_size_bytes_override},
+        paged_desc("csa_kv", KVCacheRegionName::CSA_KV, &sets.csa_layers),
+        paged_desc("hca_kv", KVCacheRegionName::HCA_KV, &sets.hca_layers),
+        paged_desc("indexer_kv", KVCacheRegionName::INDEXER_KV, &sets.csa_layers),
+        fixed_desc("indexer_state", KVCacheRegionName::INDEXER_STATE, &sets.csa_layers, indexer_state_eb,
+                   fixed_tokens_per_block),
+        fixed_desc("csa_state", KVCacheRegionName::CSA_STATE, &sets.csa_layers, csa_state_eb, fixed_tokens_per_block),
+        fixed_desc("hca_state", KVCacheRegionName::HCA_STATE, &sets.hca_layers, hca_state_eb, fixed_tokens_per_block),
+        fixed_desc("swa_kv", KVCacheRegionName::SWA_KV, &sets.all_layers, swa_kv_eb, fixed_tokens_per_block,
+                   swa_kv_block_size_bytes_override),
     };
 }
 
 KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool) {
-    const auto layer_count = static_cast<uint32_t>(pool.layer_ids->size());
+    KVCacheSpecPtr spec;
     if (pool.is_paged) {
-        return std::make_shared<DSV4KVSpec>(pool.region_name,
-                                            layer_count,
+        spec = std::make_shared<DSV4KVSpec>(pool.region_name,
                                             pool.entry_elems,
                                             pool.entries_per_block,
                                             pool.store_dtype,
-                                            pool.tokens_per_block);
+                                            pool.tokens_per_block,
+                                            pool.compression_ratio,
+                                            pool.block_size_bytes_alignment);
+    } else {
+        spec = std::make_shared<DSV4StateSpec>(pool.region_name,
+                                               pool.entry_elems,
+                                               pool.entries_per_block,
+                                               pool.store_dtype,
+                                               pool.tokens_per_block,
+                                               pool.block_size_bytes_override,
+                                               pool.block_size_bytes_alignment,
+                                               pool.block_alignment_min_entries);
     }
-    return std::make_shared<DSV4StateSpec>(pool.region_name,
-                                           layer_count,
-                                           pool.entry_elems,
-                                           pool.entries_per_block,
-                                           pool.store_dtype,
-                                           pool.tokens_per_block,
-                                           pool.block_size_bytes_override);
+    spec->tag    = pool.tag;
+    spec->layers = *pool.layer_ids;
+    return spec;
 }
 
 }  // namespace
@@ -310,9 +531,9 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
                                         const ParallelismConfig& parallelism_config,
                                         const KVCacheConfig&     kv_cache_config,
                                         int                      gen_num_per_cycle) {
-    RTP_LLM_LOG_INFO("Creating DSV4 typed hybrid-pool cache config with %zu compress_ratios, "
+    RTP_LLM_LOG_INFO("Creating DSV4 typed hybrid-pool cache config with %zu declarative specs, "
                      "state ring slack=%d (gen_num_per_cycle)",
-                     model_config.attn_config.layer_compress_ratios.size(),
+                     model_config.kv_cache_specs.size(),
                      gen_num_per_cycle);
 
     const auto user_seq_size        = kv_cache_config.seq_size_per_block;
@@ -342,9 +563,15 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
                      parallelism_config.prefill_cp_config.kv_cache_sharded,
                      parallelism_config.tp_size);
 
-    const auto sets = classifyDSV4Layers(model_config.attn_config.layer_compress_ratios);
-    const auto pools = buildDSV4PoolDescs(
-        sets, model_config, kernel_tokens_per_block, physical_tokens_per_block, parallelism_config, gen_num_per_cycle);
+    const auto parsed     = parseDSV4Specs(model_config);
+    const auto& sets      = parsed.first;
+    const auto& spec_decls = parsed.second;
+    const auto pools = buildDSV4PoolDescs(sets,
+                                          spec_decls,
+                                          kernel_tokens_per_block,
+                                          physical_tokens_per_block,
+                                          parallelism_config,
+                                          gen_num_per_cycle);
     RTP_LLM_CHECK_WITH_INFO(pools.size() == kDsv4PoolNum, "DSV4 must produce %zu pools", kDsv4PoolNum);
 
     config.layer_num                                = static_cast<uint32_t>(sets.all_layers.size());
@@ -362,6 +589,7 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
     config.layer_ids.clear();
     config.group_types.clear();
     config.group_region_names.clear();
+    config.group_tags.clear();
     config.group_seq_size_per_block.clear();
     config.group_seq_size_per_block.reserve(pools.size());
     config.cache_specs.reserve(pools.size());
@@ -369,6 +597,7 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
     config.layer_ids.reserve(pools.size());
     config.group_types.reserve(pools.size());
     config.group_region_names.reserve(pools.size());
+    config.group_tags.reserve(pools.size());
     for (size_t gid = 0; gid < pools.size(); ++gid) {
         const auto& pool = pools[gid];
         auto        spec = makeDSV4Spec(pool);
@@ -393,6 +622,7 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
         config.layer_ids.push_back(*pool.layer_ids);
         config.group_types.push_back(pool.is_paged ? CacheGroupType::FULL : CacheGroupType::SWA);
         config.group_region_names.push_back(pool.region_name);
+        config.group_tags.push_back(pool.tag);
     }
 }
 

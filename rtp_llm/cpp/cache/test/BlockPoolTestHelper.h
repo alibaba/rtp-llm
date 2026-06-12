@@ -40,7 +40,6 @@ inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
         auto spec                = std::make_shared<MHAKVCacheSpec>();
         spec->type               = KVCacheSpecType::MultiHeadAttention;
         spec->dtype              = dtype;
-        spec->layer_num          = layer_num;
         spec->local_head_num_kv  = local_head_num_kv;
         spec->seq_size_per_block = seq_size_per_block;
         spec->size_per_head      = static_cast<uint32_t>(k_elems / denom);
@@ -50,7 +49,6 @@ inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
         auto spec                = std::make_shared<MLAKVCacheSpec>();
         spec->type               = KVCacheSpecType::MultiHeadLatentAttention;
         spec->dtype              = dtype;
-        spec->layer_num          = layer_num;
         spec->local_head_num_kv  = local_head_num_kv;
         spec->seq_size_per_block = seq_size_per_block;
         spec->kv_lora_rank       = static_cast<uint32_t>(k_elems / denom);

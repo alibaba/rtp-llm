@@ -262,7 +262,6 @@ private:
         kv_cache_config_.memory_cache_sync_timeout_ms = kTestMemoryCacheSyncTimeout;
 
         auto mha_spec       = std::make_shared<MHAKVCacheSpec>();
-        mha_spec->layer_num = layer_num;
         // mha_spec->block_nums         = block_num;
         mha_spec->local_head_num_kv  = 8;
         mha_spec->size_per_head      = 128;
@@ -2958,7 +2957,6 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
 
     auto mla_spec                = std::make_shared<rtp_llm::MLAKVCacheSpec>();
     mla_spec->type               = rtp_llm::KVCacheSpecType::MultiHeadLatentAttention;
-    mla_spec->layer_num          = static_cast<uint32_t>(kLayerNum);
     mla_spec->local_head_num_kv  = 1;
     mla_spec->seq_size_per_block = kSeqPerBlock;
     mla_spec->kv_lora_rank       = 512;
@@ -3261,14 +3259,12 @@ protected:
         kv_cache_config_.memory_cache_sync_timeout_ms = kTestMemoryCacheSyncTimeout;
 
         auto full_spec                = std::make_shared<MHAKVCacheSpec>();
-        full_spec->layer_num          = layer_num;
         full_spec->local_head_num_kv  = 4;
         full_spec->size_per_head      = 64;
         full_spec->seq_size_per_block = seq_size_per_block;
         full_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
 
         auto swa_spec                = std::make_shared<MHAKVCacheSpec>();
-        swa_spec->layer_num          = layer_num;
         swa_spec->local_head_num_kv  = 4;
         swa_spec->size_per_head      = 64;
         swa_spec->seq_size_per_block = seq_size_per_block;
@@ -3447,7 +3443,6 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_PureFullUsesSinglePool) {
     kv_cache_config_.memory_cache_sync_timeout_ms = 1000;
 
     auto spec                    = std::make_shared<MHAKVCacheSpec>();
-    spec->layer_num              = 4;
     spec->local_head_num_kv      = 8;
     spec->size_per_head          = 128;
     spec->seq_size_per_block     = 8;
