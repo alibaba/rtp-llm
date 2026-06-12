@@ -59,6 +59,7 @@ void CudaGraphRunner::capturePrefill() {
 
             inputs.attention_inputs.cu_seqlens.copy_(cu_seqlens_host);
             inputs.attention_inputs.cu_kv_seqlens.copy_(cu_kv_seqlens_host);
+            inputs.attention_inputs.sequence_lengths_plus_1_d.fill_(prefix_len);
         }
 
         inputs.attention_inputs.context_total_kv_length = seq_len;
