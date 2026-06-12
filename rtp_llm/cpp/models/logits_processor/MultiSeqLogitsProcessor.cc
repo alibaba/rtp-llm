@@ -15,7 +15,8 @@ MultiSeqLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> genera
     return processor_ptr;
 }
 
-void MultiSeqLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
+std::optional<ErrorInfo>
+MultiSeqLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
     size_t batch_size = finish_idx - start_idx;
     size_t vocab_size = inputs.logits.size(1);
 
@@ -24,7 +25,7 @@ void MultiSeqLogitsProcessor::process(const SamplerInputs& inputs, size_t start_
 
     // return early when no sequence needs processing
     if (!std::any_of(finished_mask_ptr, finished_mask_ptr + batch_size, [](bool v) { return v; })) {
-        return;
+        return std::nullopt;
     }
 
     // mask all logits of the finished sequences except the eos token
@@ -42,14 +43,17 @@ void MultiSeqLogitsProcessor::process(const SamplerInputs& inputs, size_t start_
     auto logit_mask = logit_mask_host_tensor.to(torch::kCUDA);
 
     maskLogits(logits, logit_mask);
+    return std::nullopt;
 }
 
 void MultiSeqLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
     // do nothing
 }
 
-void MultiSeqLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
+std::optional<ErrorInfo> MultiSeqLogitsProcessor::updateStatus(const torch::Tensor& new_tokens,
+                                                               int32_t              num_new_tokens) {
     // do nothing
+    return std::nullopt;
 }
 
 }  // namespace rtp_llm

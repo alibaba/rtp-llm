@@ -9,6 +9,7 @@
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
@@ -112,6 +113,14 @@ protected:
 private:
     GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
 
+    SpecLogitsVerifyRunner::LaunchResult runSpecLogitsVerify(const std::list<GenerateStreamPtr>& streams,
+                                                             const torch::Tensor&                draft_tokens);
+
+    SpecLogitsVerifyRunner::LaunchResult runSpecLogitsVerifyIfNeeded(const std::list<GenerateStreamPtr>& streams,
+                                                                     const GptModelInputs&              model_input,
+                                                                     const SamplerOutput&               draft_sampler_output,
+                                                                     const torch::Tensor&               draft_token_ids);
+
     std::unique_ptr<ModelBase>               model_;
     std::unique_ptr<Sampler>                 sampler_;
     std::unique_ptr<MtpBatchStreamProcessor> batch_stream_processor_;
@@ -140,5 +149,7 @@ private:
 
     bool     warm_up_;
     RoleType role_type_;
+
+    SpecLogitsVerifyRunner spec_logits_verify_runner_;
 };
 };  // namespace rtp_llm

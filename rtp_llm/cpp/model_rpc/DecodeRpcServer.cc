@@ -1,4 +1,3 @@
-#include <algorithm>
 #include <mutex>
 #include <memory>
 #include <unistd.h>

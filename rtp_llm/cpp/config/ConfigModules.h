@@ -371,6 +371,15 @@ struct FIFOSchedulerConfig {
     std::string to_string() const;
 };
 
+struct GrammarConfig {
+    std::vector<int32_t> override_stop_tokens;
+
+    bool constrained_json_disable_any_whitespace = false;
+    int  num_workers                             = 8;
+    // Byte cap on xgrammar's internal compiled-grammar cache; <=0 = unlimited.
+    int64_t compiler_cache_bytes = 512 * 1024 * 1024;
+};
+
 struct RuntimeConfig {
     int64_t max_generate_batch_size = 1;
 

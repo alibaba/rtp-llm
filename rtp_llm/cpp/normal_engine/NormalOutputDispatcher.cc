@@ -1,14 +1,47 @@
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
 #include "ATen/cuda/CUDAContext.h"
 #endif
 
 namespace rtp_llm {
+
+std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_output,
+                                                   const torch::Tensor& success_cpu,
+                                                   int                  batch_idx_in,
+                                                   int                  cur_batch_size) {
+    std::optional<ErrorInfo> error_info;
+    const auto               set_first_error = [&error_info](const ErrorInfo& error) {
+        if (!error_info.has_value()) {
+            error_info = error;
+        }
+    };
+
+    // Processor errors and sampling success both use sampler-input coordinates;
+    // output coordinates can diverge when beam search changes the batch size.
+    for (int i = 0; i < cur_batch_size; ++i) {
+        const size_t error_idx = static_cast<size_t>(batch_idx_in + i);
+        if (error_idx < sampler_output.processor_errors.size()
+            && sampler_output.processor_errors[error_idx].has_value()) {
+            set_first_error(sampler_output.processor_errors[error_idx].value());
+        }
+    }
+
+    if (success_cpu.defined()) {
+        const auto* success = success_cpu.data_ptr<bool>();
+        for (int i = 0; i < cur_batch_size; ++i) {
+            if (!success[batch_idx_in + i]) {
+                set_first_error(ErrorInfo(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed"));
+            }
+        }
+    }
+
+    return error_info;
+}
 
 absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                                               const MergedOutput& merge_outputs) const {
@@ -201,27 +234,25 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         }
     }
 
-    for (int i = 0; i < cur_batch_size; ++i) {
-        if (success_cpu.defined() && !(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {
-            stream->reportError(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
-        }
-    }
+    auto error_info = collectStreamSamplerError(sampler_output, success_cpu, batch_idx_in, cur_batch_size);
 
     RTP_LLM_LOG_DEBUG("stream [%ld], new_tokens size = [%ld]", stream->streamId(), new_tokens.numel());
 
-    stream->update({has_beam_search ? batch_new_all_token_ids : new_tokens,
-                    1,
-                    batch_hidden_states,
-                    batch_logits,
-                    current_softmax_result,
-                    batch_cum_log_probs,
-                    all_probs,
-                    loss,
-                    src_batch_indices,
-                    all_hidden_states,
-                    true,
-                    false,
-                    prompt_logits_output});
+    StreamUpdateInfo update_info{has_beam_search ? batch_new_all_token_ids : new_tokens,
+                                 1,
+                                 batch_hidden_states,
+                                 batch_logits,
+                                 current_softmax_result,
+                                 batch_cum_log_probs,
+                                 all_probs,
+                                 loss,
+                                 src_batch_indices,
+                                 all_hidden_states,
+                                 /*update_remote_generate=*/true,
+                                 /*force_update_info=*/false,
+                                 std::move(prompt_logits_output),
+                                 std::move(error_info)};
+    stream->update(update_info);
 }
 
 }  // namespace rtp_llm

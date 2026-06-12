@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/SpecialTokens.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
+#include <cstdint>
 #include <vector>
 #include <string>
 #include <map>
@@ -114,8 +115,9 @@ public:
     bool reverse_e_h_norm = false;
 
     // Model loading and quantization
-    std::string   tokenizer_path = "";
-    std::string   ckpt_path      = "";
+    std::string   tokenizer_path      = "";
+    std::string   ckpt_path           = "";
+    std::string   tokenizer_info_json = "";
     SpecialTokens special_tokens;
     QuantAlgo     quant_algo;
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -13,6 +15,7 @@ struct SpeculativeSamplerOutput {
 public:
     std::vector<torch::Tensor> accept_tokens;
     std::vector<int>           accept_len;
+    std::vector<std::optional<ErrorInfo>> processor_errors;
 };
 
 struct FastTopKSamplerOutput {

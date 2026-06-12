@@ -16,14 +16,14 @@ static constexpr int kMaxDivergeDepth = 8;
 // SYNC: 若修改此值，必须同步更新 Python generate_config.py::_MAX_DIVERGE_DEPTH
 // 以及 test_generate_config_validators.py::test_max_diverge_depth_sync 中的硬编码期望值。
 static_assert(kMaxDivergeDepth == 8,
-    "SYNC: update Python _MAX_DIVERGE_DEPTH and test_max_diverge_depth_sync expected value");
+              "SYNC: update Python _MAX_DIVERGE_DEPTH and test_max_diverge_depth_sync expected value");
 
 // cross_seq_diverge_start_combo "过大" 告警阈值，Python 侧 generate_config.py 使用相同值。
 static constexpr int kDivergeStartComboWarnThreshold = 100;
 // SYNC: 若修改此值，必须同步更新 Python generate_config.py::_DIVERGE_START_COMBO_WARN_THRESHOLD
 // 以及 test_generate_config_validators.py::test_diverge_start_combo_warn_threshold_sync 中的硬编码期望值。
 static_assert(kDivergeStartComboWarnThreshold == 100,
-    "SYNC: update Python _DIVERGE_START_COMBO_WARN_THRESHOLD and test expected value");
+              "SYNC: update Python _DIVERGE_START_COMBO_WARN_THRESHOLD and test expected value");
 
 RecommendationLogitsProcessor::RecommendationLogitsProcessor(std::vector<StreamRecommendationInfo> infos):
     infos_(std::move(infos)) {}
@@ -48,20 +48,18 @@ RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> 
     const bool needs_token_offset = false;
     // beam search 与跨序列去重互斥：updateMultiSeqStatus 会重排序列身份，破坏主序列不变量
     // combo_token_size == 1 时 diverge 与 ban 在同一步叠加，易导致采样退化，仅 combo_token_size >= 2 时启用
-    // C++ 自校验：num<=1 时 diverge 逻辑天然 no-op（i>0 分支不可达），但仍显式禁用以避免布尔开关处于「已置位但部分配置」状态
-    // SYNC: 以下判定条件必须与 Python generate_config.py::_check_cross_seq_ban_compatibility
-    // 中的判定逻辑保持一致（取反关系）。
-    // ━━ 新增/修改启用条件时的 CHECKLIST ━━
+    // C++ 自校验：num<=1 时 diverge 逻辑天然 no-op（i>0
+    // 分支不可达），但仍显式禁用以避免布尔开关处于「已置位但部分配置」状态 SYNC: 以下判定条件必须与 Python
+    // generate_config.py::_check_cross_seq_ban_compatibility 中的判定逻辑保持一致（取反关系）。 ━━
+    // 新增/修改启用条件时的 CHECKLIST ━━
     //   1. 同步修改另一侧的判定逻辑
     //   2. 更新双侧真值表测试：
     //      Python: TestCrossLanguageConstantSync::test_enable_conditions_sync
     //      C++:    RecommendationLogitsProcessorTest::testEnableConditionsTruthTable
     //   3. 确认新条件在双侧真值表中均有覆盖（正反例）
     //   未来演进：若条件进一步增多，应将真值表落为共享 JSON 数据文件（单一真源）。
-    const bool enable_cross_seq_ban = config->enable_cross_sequence_ban
-                                      && !config->hasNumBeams()
-                                      && config->combo_token_size >= 2
-                                      && num > 1;
+    const bool enable_cross_seq_ban =
+        config->enable_cross_sequence_ban && !config->hasNumBeams() && config->combo_token_size >= 2 && num > 1;
     // 可观测性：当用户显式开启但被降级禁用时，一次性输出所有不兼容原因
     // 使用 INTERVAL_LOG 避免高 QPS 下同一配置重复告警形成日志风暴
     if (config->enable_cross_sequence_ban && !enable_cross_seq_ban) {
@@ -79,19 +77,24 @@ RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> 
     }
     // 遮蔽深度上界校验：最大遮蔽 k = num-1，若超过 kMaxDivergeDepth 则警告采样可能退化
     if (enable_cross_seq_ban && num - 1 > kMaxDivergeDepth) {
-        RTP_LLM_INTERVAL_LOG(300, WARN,
-            "cross_sequence_ban: num_return_sequences=%d exceeds recommended max diverge depth %d, "
-            "sampling quality may degrade for higher-indexed sequences",
-            num, kMaxDivergeDepth);
+        RTP_LLM_INTERVAL_LOG(300,
+                             WARN,
+                             "cross_sequence_ban: num_return_sequences=%d exceeds recommended max diverge depth %d, "
+                             "sampling quality may degrade for higher-indexed sequences",
+                             num,
+                             kMaxDivergeDepth);
     }
     const int32_t diverge_start_combo = std::max(0, config->cross_seq_diverge_start_combo);
     if (config->cross_seq_diverge_start_combo < 0) {
-        RTP_LLM_INTERVAL_LOG(300, WARN, "cross_seq_diverge_start_combo is negative (%d), clamped to 0",
-                            config->cross_seq_diverge_start_combo);
+        RTP_LLM_INTERVAL_LOG(300,
+                             WARN,
+                             "cross_seq_diverge_start_combo is negative (%d), clamped to 0",
+                             config->cross_seq_diverge_start_combo);
     } else if (enable_cross_seq_ban && diverge_start_combo > kDivergeStartComboWarnThreshold) {
-        RTP_LLM_INTERVAL_LOG(300, WARN,
-            "cross_seq_diverge_start_combo=%d is very large, top-K diverge masking may never activate",
-            diverge_start_combo);
+        RTP_LLM_INTERVAL_LOG(300,
+                             WARN,
+                             "cross_seq_diverge_start_combo=%d is very large, top-K diverge masking may never activate",
+                             diverge_start_combo);
     }
     // 若为空,think_done 初始为 true,Processor 行为等同历史版本(从首个 token 起累 combo)。
     const std::vector<int>& end_think_token_ids = config->end_think_token_ids;
@@ -111,7 +114,8 @@ RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> 
     return processor_ptr;
 }
 
-void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
+std::optional<ErrorInfo>
+RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
     const size_t batch_size = finish_idx - start_idx;
     RTP_LLM_CHECK(batch_size == size());
 
@@ -122,7 +126,7 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
     // 确认无压缩。若未来引入 intra-stream 子序列管理，需增加显式重排检测。
 
     // 判断是否需要进行 banned combo 屏蔽或 top-K 分叉遮蔽
-    bool need_ban_process = false;
+    bool need_ban_process     = false;
     bool need_diverge_process = false;
     for (size_t i = 0; i < batch_size; ++i) {
         const auto& info = infos_[i];
@@ -133,14 +137,13 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
             need_ban_process = true;
         }
         // top-K 分叉：非主序列(i>0) + think完成 + 在 combo 起始位置 + 已达到分叉起始商品 + 开关开启
-        if (i > 0 && info.enable_cross_sequence_ban && info.think_done
-            && info.pos_in_combo == 0
+        if (i > 0 && info.enable_cross_sequence_ban && info.think_done && info.pos_in_combo == 0
             && info.completed_combo_count >= info.cross_seq_diverge_start_combo) {
             need_diverge_process = true;
         }
     }
     if (!need_ban_process && !need_diverge_process) {
-        return;
+        return std::nullopt;
     }
 
     auto         logits     = inputs.logits.narrow(0, start_idx, batch_size);
@@ -172,34 +175,35 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
         int max_k = 0;
         for (size_t i = 1; i < batch_size; ++i) {
             auto& info = infos_[i];
-            if (info.combo_token_size <= 0 || !info.enable_cross_sequence_ban || !info.think_done) continue;
-            if (info.pos_in_combo != 0
-                || info.completed_combo_count < info.cross_seq_diverge_start_combo) {
+            if (info.combo_token_size <= 0 || !info.enable_cross_sequence_ban || !info.think_done)
+                continue;
+            if (info.pos_in_combo != 0 || info.completed_combo_count < info.cross_seq_diverge_start_combo) {
                 continue;
             }
             int k = std::min({static_cast<int>(i), static_cast<int>(vocab_size) - 1, kMaxDivergeDepth});
-            if (k > max_k) max_k = k;
+            if (k > max_k)
+                max_k = k;
         }
         if (max_k > 0) {
             // 防御：确保 topk 的 k 不超过 vocab_size（torch::topk 要求 k <= dim_size）
             max_k = std::min(max_k, static_cast<int>(vocab_size));
             // 仅对非主序列(row 1~N-1)做 topk，避免对 row 0 的无效计算
             auto non_primary_logits = logits.narrow(0, 1, batch_size - 1);
-            auto topk_indices = std::get<1>(non_primary_logits.topk(max_k, /*dim=*/1));
+            auto topk_indices       = std::get<1>(non_primary_logits.topk(max_k, /*dim=*/1));
             for (size_t i = 1; i < batch_size; ++i) {
                 auto& info = infos_[i];
-                if (info.combo_token_size <= 0 || !info.enable_cross_sequence_ban || !info.think_done) continue;
-                if (info.pos_in_combo != 0
-                    || info.completed_combo_count < info.cross_seq_diverge_start_combo) {
+                if (info.combo_token_size <= 0 || !info.enable_cross_sequence_ban || !info.think_done)
+                    continue;
+                if (info.pos_in_combo != 0 || info.completed_combo_count < info.cross_seq_diverge_start_combo) {
                     continue;
                 }
                 // 防御：确保至少保留 1 个可选 token，同时不超过 kMaxDivergeDepth 避免采样退化
                 const int k = std::min({static_cast<int>(i), static_cast<int>(vocab_size) - 1, kMaxDivergeDepth});
-                if (k <= 0) continue;
+                if (k <= 0)
+                    continue;
                 // 从预计算的 batch topk indices 中裁剪前 k 个位置进行遮蔽
                 // topk_indices 行号 = i-1（因为 narrow 排除了 row 0）
-                logits[i].index_put_({topk_indices[i - 1].slice(0, 0, k)},
-                                     -std::numeric_limits<float>::infinity());
+                logits[i].index_put_({topk_indices[i - 1].slice(0, 0, k)}, -std::numeric_limits<float>::infinity());
             }
         }
     }
@@ -240,14 +244,15 @@ void RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t 
             logits.index_put_({rows_t, cols_t}, -std::numeric_limits<float>::infinity());
         }
     }
+    return std::nullopt;
 }
 
 void RecommendationLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
-    RTP_LLM_CHECK_WITH_INFO(!infos_.empty(),
-        "updateMultiSeqStatus called on empty processor");
+    RTP_LLM_CHECK_WITH_INFO(!infos_.empty(), "updateMultiSeqStatus called on empty processor");
     // 业务不变量：updateMultiSeqStatus 用于 beam search 重排序列，与 cross-sequence ban 互斥
     RTP_LLM_CHECK_WITH_INFO(
-        std::none_of(infos_.begin(), infos_.end(),
+        std::none_of(infos_.begin(),
+                     infos_.end(),
                      [](const StreamRecommendationInfo& info) { return info.enable_cross_sequence_ban; }),
         "updateMultiSeqStatus must not be called when cross_sequence_ban is enabled");
     std::vector<StreamRecommendationInfo> new_infos;
@@ -259,7 +264,8 @@ void RecommendationLogitsProcessor::updateMultiSeqStatus(const std::vector<int>&
     infos_ = std::move(new_infos);
 }
 
-bool RecommendationLogitsProcessor::advanceOneToken(StreamRecommendationInfo& info, int token_id,
+bool RecommendationLogitsProcessor::advanceOneToken(StreamRecommendationInfo&      info,
+                                                    int                            token_id,
                                                     std::vector<std::vector<int>>* new_combos) {
     if (info.combo_token_size <= 0) {
         return false;
@@ -289,7 +295,8 @@ bool RecommendationLogitsProcessor::advanceOneToken(StreamRecommendationInfo& in
         // 本次 token 即 combo 的最后一位:形成完整 combo 并加入去重集合
         std::vector<int> full_combo = info.current_prefix;
         full_combo.push_back(token_id);
-        if (new_combos) new_combos->push_back(full_combo);
+        if (new_combos)
+            new_combos->push_back(full_combo);
         info.banned_combos.insert(std::move(full_combo));
         info.current_prefix.clear();
         info.pos_in_combo = 0;
@@ -298,7 +305,8 @@ bool RecommendationLogitsProcessor::advanceOneToken(StreamRecommendationInfo& in
     }
 }
 
-void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
+std::optional<ErrorInfo> RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens,
+                                                                     int32_t              num_new_tokens) {
     RTP_LLM_CHECK(2 == new_tokens.dim());
     // 明确 sampler 输出契约:仅接受 int32,避免 dtype 变动后 data_ptr<int>() 静默读错字节。
     RTP_LLM_CHECK(new_tokens.scalar_type() == torch::kInt32);
@@ -313,12 +321,13 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
     // 强不变量断言：同 Processor 内所有 infos 的 enable_cross_sequence_ban 必须一致
     // 仅在跨序列 ban 开启时执行 O(N) 扫描，避免未启用时在采样热路径上引入无谓开销
     if (need_broadcast) {
-        RTP_LLM_CHECK_WITH_INFO(
-            std::all_of(infos_.begin(), infos_.end(),
-                        [&](const StreamRecommendationInfo& info) {
-                            return info.enable_cross_sequence_ban == infos_[0].enable_cross_sequence_ban;
-                        }),
-            "updateStatus: enable_cross_sequence_ban flag inconsistent across infos");
+        RTP_LLM_CHECK_WITH_INFO(std::all_of(infos_.begin(),
+                                            infos_.end(),
+                                            [&](const StreamRecommendationInfo& info) {
+                                                return info.enable_cross_sequence_ban
+                                                       == infos_[0].enable_cross_sequence_ban;
+                                            }),
+                                "updateStatus: enable_cross_sequence_ban flag inconsistent across infos");
     }
     std::vector<std::vector<std::vector<int>>> new_combos_per_seq;
     if (need_broadcast) {
@@ -331,11 +340,10 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
         }
 
         const int64_t stride = new_tokens.size(1);
-        RTP_LLM_CHECK_WITH_INFO(
-            stride >= num_new_tokens,
-            "updateStatus token shape mismatch: num_new_tokens=%d, new_tokens.size(1)=%ld",
-            num_new_tokens,
-            stride);
+        RTP_LLM_CHECK_WITH_INFO(stride >= num_new_tokens,
+                                "updateStatus token shape mismatch: num_new_tokens=%d, new_tokens.size(1)=%ld",
+                                num_new_tokens,
+                                stride);
 
         // Recommendation processor accepts two token layouts from GenerateStream::update:
         // 1) incremental tokens: [batch, num_new_tokens], used by non-beam sampling and n>1 returns;
@@ -343,7 +351,7 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
         // The current call's tensor shape is the local contract, avoiding config->hasNumBeams() guessing
         // which is too coarse for variable beam before expansion.
         const bool    use_token_offset = stride > num_new_tokens;
-        const int64_t offset = use_token_offset ? (info.current_output_length + info.input_length) : 0;
+        const int64_t offset           = use_token_offset ? (info.current_output_length + info.input_length) : 0;
 
         if (use_token_offset) {
             RTP_LLM_CHECK_WITH_INFO(
@@ -366,7 +374,6 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
 
         info.current_output_length += num_new_tokens;
     }
-
     // 跨序列增量广播（非对称模式）：将其他序列本步新完成的 combo 插入非主序列
     // 设计意图（primary-protected）：序列 0（主序列）仅保留自身产生的 banned_combos，不接收其他
     // 序列的 ban。补充序列接收所有其他序列的新增 combo，确保彼此不重复。
@@ -375,13 +382,15 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
     if (any_combo_completed && need_broadcast) {
         for (size_t i = 1; i < size(); ++i) {
             for (size_t j = 0; j < size(); ++j) {
-                if (j == i) continue;
+                if (j == i)
+                    continue;
                 for (const auto& combo : new_combos_per_seq[j]) {
                     infos_[i].banned_combos.insert(combo);
                 }
             }
         }
     }
+    return std::nullopt;
 }
 
 }  // namespace rtp_llm

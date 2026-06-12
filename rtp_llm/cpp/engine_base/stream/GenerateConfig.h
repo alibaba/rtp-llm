@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -48,7 +49,12 @@ public:
     std::optional<float>       top_p_min;
     std::optional<int>         top_p_reset_ids;
     std::optional<std::string> task_id;
-    std::string                adapter_name = "";
+    std::optional<std::string> json_schema;
+    std::optional<std::string> regex;
+    std::optional<std::string> ebnf;
+    std::optional<std::string> structural_tag;
+    bool                       grammar_terminate_without_stop_token = false;
+    std::string                adapter_name                         = "";
     std::vector<std::string>   adapter_names;
 
     std::vector<int>              select_tokens_id;
@@ -135,6 +141,11 @@ public:
         return maxNumBeams() > 1;
     }
 
+    bool hasStructuredOutputRequest() const noexcept {
+        // response_format envelope is projected to typed fields by Python ResponseFormatBuilder.
+        return json_schema.has_value() || regex.has_value() || ebnf.has_value() || structural_tag.has_value();
+    }
+
     void addSpecialTokens(const rtp_llm::SpecialTokens& special_tokens) {
         for (const auto& vec : special_tokens.stop_words_id_list) {
             std::vector<int> tmpVec;
@@ -148,6 +159,9 @@ public:
     }
 
     std::string debugString() const {
+        auto summarize_optional_string = [](const std::optional<std::string>& field) {
+            return field.has_value() ? "len=" + std::to_string(field->size()) : std::string("<unset>");
+        };
         std::stringstream debug_string;
         debug_string << "GenerateConfig {"
                      << "max_new_tokens:" << max_new_tokens << ", min_new_tokens:" << min_new_tokens
@@ -163,6 +177,10 @@ public:
                      << ", top_p:" << top_p << ", force_disable_sp_run: " << force_disable_sp_run
                      << ", force_sp_accept: " << force_sp_accept
                      << ", return_all_probs: " << static_cast<int>(return_all_probs)
+                     << ", json_schema: " << summarize_optional_string(json_schema)
+                     << ", regex: " << summarize_optional_string(regex)
+                     << ", ebnf: " << summarize_optional_string(ebnf)
+                     << ", structural_tag: " << summarize_optional_string(structural_tag)
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
                      << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
@@ -209,6 +227,10 @@ public:
         JSONIZE_OPTIONAL(top_p_min);
         JSONIZE_OPTIONAL(top_p_reset_ids);
         JSONIZE_OPTIONAL(task_id);
+        JSONIZE_OPTIONAL(json_schema);
+        JSONIZE_OPTIONAL(regex);
+        JSONIZE_OPTIONAL(ebnf);
+        JSONIZE_OPTIONAL(structural_tag);
         try {
             std::string adapter_name_;
             json.Jsonize("adapter_name", adapter_name_);

@@ -9,25 +9,22 @@ using namespace std;
 namespace rtp_llm {
 
 // 构造一个 StreamRecommendationInfo 便捷方法
-static StreamRecommendationInfo makeInfo(int32_t                                  combo_token_size,
-                                         const std::vector<std::vector<int>>&     banned,
-                                         bool                                     needs_token_offset = false,
-                                         int32_t                                  input_length   = 0) {
+static StreamRecommendationInfo makeInfo(int32_t                              combo_token_size,
+                                         const std::vector<std::vector<int>>& banned,
+                                         bool                                 needs_token_offset = false,
+                                         int32_t                              input_length       = 0) {
     std::set<std::vector<int>> banned_set(banned.begin(), banned.end());
     return StreamRecommendationInfo(combo_token_size, input_length, 0, needs_token_offset, banned_set);
 }
 
 // 分配一个仅装载 logits 的 SamplerInputs（vocab_size 可控）
-static SamplerInputs allocateSamplerInputs(size_t                                   batch_size,
-                                           size_t                                   vocab_size,
-                                           BaseLogitsProcessorPtr                   processor) {
+static SamplerInputs allocateSamplerInputs(size_t batch_size, size_t vocab_size, BaseLogitsProcessorPtr processor) {
     SamplerInputs sampler_inputs;
     sampler_inputs.batch_size     = batch_size;
     sampler_inputs.batch_size_out = batch_size;
     sampler_inputs.vocab_size     = vocab_size;
-    sampler_inputs.logits =
-        torch::zeros({(int64_t)batch_size, (int64_t)vocab_size},
-                     torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    sampler_inputs.logits         = torch::zeros({(int64_t)batch_size, (int64_t)vocab_size},
+                                         torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
 
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
     state_ptr->insert(processor, 0, batch_size);
@@ -39,10 +36,10 @@ class RecommendationLogitsProcessorTest: public DeviceTestBase {};
 
 // 场景 1：非 combo 末位时不做任何屏蔽
 TEST_F(RecommendationLogitsProcessorTest, testProcessNoMaskWhenNotLastPosition) {
-    const size_t batch_size = 1;
-    const size_t vocab_size = 100;
+    const size_t                          batch_size = 1;
+    const size_t                          vocab_size = 100;
     std::vector<StreamRecommendationInfo> infos;
-    auto info = makeInfo(3, {{10, 20, 30}});
+    auto                                  info = makeInfo(3, {{10, 20, 30}});
     // 处于 combo 的第 0 位，不应该屏蔽任何 token
     info.pos_in_combo   = 0;
     info.current_prefix = {};
@@ -63,11 +60,11 @@ TEST_F(RecommendationLogitsProcessorTest, testProcessNoMaskWhenNotLastPosition) 
 
 // 场景 2：在 combo 末位时，对命中前缀的 banned combo 的最后一个 token 做屏蔽
 TEST_F(RecommendationLogitsProcessorTest, testProcessMaskAtLastPosition) {
-    const size_t batch_size = 1;
-    const size_t vocab_size = 100;
+    const size_t                          batch_size = 1;
+    const size_t                          vocab_size = 100;
     std::vector<StreamRecommendationInfo> infos;
     // banned 有两组；前缀匹配第一组 (10, 20)，应屏蔽 30；不匹配第二组 (15, 25)
-    auto info = makeInfo(3, {{10, 20, 30}, {15, 25, 35}});
+    auto info           = makeInfo(3, {{10, 20, 30}, {15, 25, 35}});
     info.pos_in_combo   = 2;
     info.current_prefix = {10, 20};
     infos.push_back(info);
@@ -116,7 +113,7 @@ TEST_F(RecommendationLogitsProcessorTest, testUpdateStatusDedup) {
 
 // 场景 4：去重闭环 —— 生成第一个 combo 后，再次到达同一前缀时该 combo 的最后一位被屏蔽
 TEST_F(RecommendationLogitsProcessorTest, testDedupBlockRepeatedCombo) {
-    const size_t vocab_size = 100;
+    const size_t                          vocab_size = 100;
     std::vector<StreamRecommendationInfo> infos;
     infos.push_back(makeInfo(3, {}));
     auto processor = std::make_shared<RecommendationLogitsProcessor>(infos);
@@ -148,9 +145,9 @@ TEST_F(RecommendationLogitsProcessorTest, testDedupBlockRepeatedCombo) {
 // 场景 5：updateMultiSeqStatus 按 src_batch_indices 正确复制状态（独立副本）
 TEST_F(RecommendationLogitsProcessorTest, testUpdateMultiSeqStatusCopy) {
     std::vector<StreamRecommendationInfo> infos;
-    auto info = makeInfo(3, {{1, 2, 3}});
-    info.pos_in_combo   = 1;
-    info.current_prefix = {1};
+    auto                                  info = makeInfo(3, {{1, 2, 3}});
+    info.pos_in_combo                          = 1;
+    info.current_prefix                        = {1};
     infos.push_back(info);
     auto processor = std::make_shared<RecommendationLogitsProcessor>(infos);
 
@@ -169,24 +166,25 @@ TEST_F(RecommendationLogitsProcessorTest, testUpdateMultiSeqStatusCopy) {
 
 // 场景 6：fromGenerateInput 在 combo_token_size<=0 时返回 nullptr
 TEST_F(RecommendationLogitsProcessorTest, testFromGenerateInputDisabled) {
-    auto generate_input    = std::make_shared<GenerateInput>();
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    auto generate_input                                     = std::make_shared<GenerateInput>();
+    generate_input->generate_config                         = std::make_shared<GenerateConfig>();
     generate_input->generate_config->combo_token_size       = 0;
     generate_input->generate_config->banned_combo_token_ids = {};
     // 用 1 维的 input_ids 占位
     generate_input->input_ids = torch::zeros({1}, torch::kInt32);
 
-    auto p = RecommendationLogitsProcessor::fromGenerateInput(generate_input, 2);
-    ASSERT_EQ(nullptr, p);
+    auto result = RecommendationLogitsProcessor::fromGenerateInput(generate_input, 2);
+    ASSERT_EQ(nullptr, result);
 }
 
 // 场景 7：fromGenerateInput 在启用时正确初始化 banned_combos 并按 num 扩展 batch
 TEST_F(RecommendationLogitsProcessorTest, testFromGenerateInputEnabled) {
-    auto generate_input             = std::make_shared<GenerateInput>();
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    auto generate_input                                     = std::make_shared<GenerateInput>();
+    generate_input->generate_config                         = std::make_shared<GenerateConfig>();
     generate_input->generate_config->combo_token_size       = 3;
-    generate_input->generate_config->banned_combo_token_ids = {{1, 2, 3}, {4, 5, 6}, {7, 8}};  // 最后一个长度不等将被过滤
-    generate_input->input_ids                               = torch::zeros({5}, torch::kInt32);
+    generate_input->generate_config->banned_combo_token_ids = {
+        {1, 2, 3}, {4, 5, 6}, {7, 8}};  // 最后一个长度不等将被过滤
+    generate_input->input_ids = torch::zeros({5}, torch::kInt32);
 
     auto p = RecommendationLogitsProcessor::fromGenerateInput(generate_input, 2);
     ASSERT_NE(nullptr, p);
@@ -202,7 +200,7 @@ TEST_F(RecommendationLogitsProcessorTest, testFromGenerateInputEnabled) {
 TEST_F(RecommendationLogitsProcessorTest, testCrossSequenceBanAsymmetric) {
     // 模拟 2 条序列，combo_token_size=3，开启跨序列去重
     std::vector<StreamRecommendationInfo> infos;
-    std::set<std::vector<int>> empty_set;
+    std::set<std::vector<int>>            empty_set;
     infos.push_back(StreamRecommendationInfo(3, 0, 0, false, empty_set, {}, true));
     infos.push_back(StreamRecommendationInfo(3, 0, 0, false, empty_set, {}, true));
     auto processor = std::make_shared<RecommendationLogitsProcessor>(infos);
@@ -232,7 +230,7 @@ TEST_F(RecommendationLogitsProcessorTest, testCrossSequenceBanAsymmetric) {
 // 场景 9：关闭跨序列去重时，各序列独立维护 banned_combos
 TEST_F(RecommendationLogitsProcessorTest, testCrossSequenceBanDisabled) {
     std::vector<StreamRecommendationInfo> infos;
-    std::set<std::vector<int>> empty_set;
+    std::set<std::vector<int>>            empty_set;
     // enable_cross_sequence_ban = false
     infos.push_back(StreamRecommendationInfo(3, 0, 0, false, empty_set, {}, false));
     infos.push_back(StreamRecommendationInfo(3, 0, 0, false, empty_set, {}, false));
@@ -259,20 +257,19 @@ TEST_F(RecommendationLogitsProcessorTest, testCrossSequenceBanDisabled) {
 TEST_F(RecommendationLogitsProcessorTest, testTopKDivergeMasking) {
     // 3 条序列，combo_token_size=3，开启跨序列去重，diverge_start_combo=0
     std::vector<StreamRecommendationInfo> infos;
-    std::set<std::vector<int>> empty_set;
+    std::set<std::vector<int>>            empty_set;
     infos.push_back(StreamRecommendationInfo(3, 0, 0, false, empty_set, {}, true, 0));
     infos.push_back(StreamRecommendationInfo(3, 0, 0, false, empty_set, {}, true, 0));
     infos.push_back(StreamRecommendationInfo(3, 0, 0, false, empty_set, {}, true, 0));
     auto processor = std::make_shared<RecommendationLogitsProcessor>(infos);
 
     // 通过 allocateSamplerInputs 在 CUDA 上分配 logits，与生产环境一致
-    const size_t vocab_size = 5;
-    auto sampler_inputs = allocateSamplerInputs(3, vocab_size, processor);
+    const size_t vocab_size     = 5;
+    auto         sampler_inputs = allocateSamplerInputs(3, vocab_size, processor);
     // 填充 logits: 每行 = [1.0, 5.0, 3.0, 4.0, 2.0]
     // top-1=col1(5.0), top-2=col3(4.0)
-    auto logits_cpu = torch::tensor({{1.0f, 5.0f, 3.0f, 4.0f, 2.0f},
-                                      {1.0f, 5.0f, 3.0f, 4.0f, 2.0f},
-                                      {1.0f, 5.0f, 3.0f, 4.0f, 2.0f}});
+    auto logits_cpu =
+        torch::tensor({{1.0f, 5.0f, 3.0f, 4.0f, 2.0f}, {1.0f, 5.0f, 3.0f, 4.0f, 2.0f}, {1.0f, 5.0f, 3.0f, 4.0f, 2.0f}});
     sampler_inputs.logits.copy_(logits_cpu);
 
     // 所有序列 pos_in_combo=0 且 completed_combo_count=0 >= diverge_start=0
@@ -296,15 +293,15 @@ TEST_F(RecommendationLogitsProcessorTest, testTopKDivergeMasking) {
 TEST_F(RecommendationLogitsProcessorTest, testDivergeStartComboDelay) {
     // 2 条序列，combo_token_size=3，diverge_start_combo=1（前 1 个商品不分叉）
     std::vector<StreamRecommendationInfo> infos;
-    std::set<std::vector<int>> empty_set;
+    std::set<std::vector<int>>            empty_set;
     infos.push_back(StreamRecommendationInfo(3, 0, 0, false, empty_set, {}, true, 1));
     infos.push_back(StreamRecommendationInfo(3, 0, 0, false, empty_set, {}, true, 1));
     auto processor = std::make_shared<RecommendationLogitsProcessor>(infos);
 
     // 第 1 个 combo 开始时 completed_combo_count=0 < diverge_start=1，不应遮蔽
-    const size_t vocab_size = 3;
-    auto sampler_inputs1 = allocateSamplerInputs(2, vocab_size, processor);
-    auto init_vals1 = torch::tensor({{1.0f, 5.0f, 3.0f}, {1.0f, 5.0f, 3.0f}});
+    const size_t vocab_size      = 3;
+    auto         sampler_inputs1 = allocateSamplerInputs(2, vocab_size, processor);
+    auto         init_vals1      = torch::tensor({{1.0f, 5.0f, 3.0f}, {1.0f, 5.0f, 3.0f}});
     sampler_inputs1.logits.copy_(init_vals1);
     processor->process(sampler_inputs1, 0, 2);
 
@@ -324,7 +321,7 @@ TEST_F(RecommendationLogitsProcessorTest, testDivergeStartComboDelay) {
 
     // 第 2 个 combo 开始时，应该对序列 1 遮蔽
     auto sampler_inputs2 = allocateSamplerInputs(2, vocab_size, processor);
-    auto init_vals2 = torch::tensor({{1.0f, 5.0f, 3.0f}, {1.0f, 5.0f, 3.0f}});
+    auto init_vals2      = torch::tensor({{1.0f, 5.0f, 3.0f}, {1.0f, 5.0f, 3.0f}});
     sampler_inputs2.logits.copy_(init_vals2);
     processor->process(sampler_inputs2, 0, 2);
 
@@ -337,13 +334,13 @@ TEST_F(RecommendationLogitsProcessorTest, testDivergeStartComboDelay) {
 
 // 场景 12：combo_token_size==1 时跨序列去重被降级禁用（前置校验）
 TEST_F(RecommendationLogitsProcessorTest, testCrossSeqBanDisabledWhenComboSize1) {
-    auto generate_input             = std::make_shared<GenerateInput>();
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
-    generate_input->generate_config->combo_token_size            = 1;
-    generate_input->generate_config->enable_cross_sequence_ban   = true;
-    generate_input->generate_config->num_return_sequences        = 4;
-    generate_input->generate_config->banned_combo_token_ids      = {{5}};
-    generate_input->input_ids                                    = torch::zeros({3}, torch::kInt32);
+    auto generate_input                                        = std::make_shared<GenerateInput>();
+    generate_input->generate_config                            = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->combo_token_size          = 1;
+    generate_input->generate_config->enable_cross_sequence_ban = true;
+    generate_input->generate_config->num_return_sequences      = 4;
+    generate_input->generate_config->banned_combo_token_ids    = {{5}};
+    generate_input->input_ids                                  = torch::zeros({3}, torch::kInt32);
 
     auto p = RecommendationLogitsProcessor::fromGenerateInput(generate_input, 4);
     ASSERT_NE(nullptr, p);
@@ -360,8 +357,8 @@ TEST_F(RecommendationLogitsProcessorTest, testDivergeAndBanSimultaneous) {
     // 序列 1: pos_in_combo=0 —— 触发 diverge 遮蔽 (top-1)
     // 序列 2: pos_in_combo=2 且前缀匹配 banned combo —— 触发 ban 屏蔽
     std::vector<StreamRecommendationInfo> infos;
-    std::set<std::vector<int>> banned_with_match({{10, 20, 30}});
-    std::set<std::vector<int>> empty_set;
+    std::set<std::vector<int>>            banned_with_match({{10, 20, 30}});
+    std::set<std::vector<int>>            empty_set;
 
     // 序列 0: pos=0, 主序列
     auto info0 = StreamRecommendationInfo(3, 0, 0, false, empty_set, {}, true, 0);
@@ -372,25 +369,25 @@ TEST_F(RecommendationLogitsProcessorTest, testDivergeAndBanSimultaneous) {
     infos.push_back(info1);
 
     // 序列 2: pos=2, prefix={10,20}, banned={(10,20,30)} —— 待 ban
-    auto info2 = StreamRecommendationInfo(3, 0, 0, false, banned_with_match, {}, true, 0);
-    info2.pos_in_combo = 2;
+    auto info2           = StreamRecommendationInfo(3, 0, 0, false, banned_with_match, {}, true, 0);
+    info2.pos_in_combo   = 2;
     info2.current_prefix = {10, 20};
     infos.push_back(info2);
 
     auto processor = std::make_shared<RecommendationLogitsProcessor>(infos);
 
     // vocab_size=50，在 CUDA 上分配
-    const size_t vocab_size = 50;
-    auto sampler_inputs = allocateSamplerInputs(3, vocab_size, processor);
+    const size_t vocab_size     = 50;
+    auto         sampler_inputs = allocateSamplerInputs(3, vocab_size, processor);
     // 每行填充为 1.0，方便观察哪些位置被置为 -inf
     sampler_inputs.logits.fill_(1.0f);
 
     processor->process(sampler_inputs, 0, 3);
 
     auto result = sampler_inputs.logits.cpu();
-    auto data0 = result[0].data_ptr<float>();
-    auto data1 = result[1].data_ptr<float>();
-    auto data2 = result[2].data_ptr<float>();
+    auto data0  = result[0].data_ptr<float>();
+    auto data1  = result[1].data_ptr<float>();
+    auto data2  = result[2].data_ptr<float>();
 
     // 序列 0：主序列，所有位置仍为 1.0（无 diverge，无 ban）
     for (size_t j = 0; j < vocab_size; ++j) {
@@ -400,7 +397,8 @@ TEST_F(RecommendationLogitsProcessorTest, testDivergeAndBanSimultaneous) {
     // 序列 1：diverge 遮蔽 top-1（所有值都是 1.0，topk 选出第一个），应有恰好 1 个位置被置为 -inf
     int inf_count_seq1 = 0;
     for (size_t j = 0; j < vocab_size; ++j) {
-        if (std::isinf(data1[j]) && data1[j] < 0) inf_count_seq1++;
+        if (std::isinf(data1[j]) && data1[j] < 0)
+            inf_count_seq1++;
     }
     EXPECT_EQ(1, inf_count_seq1);  // top-1 遮蔽
 
@@ -415,7 +413,7 @@ TEST_F(RecommendationLogitsProcessorTest, testDivergeAndBanSimultaneous) {
 // 场景 14：updateMultiSeqStatus 与 cross-sequence ban 互斥——启用时调用应触发 assert
 TEST_F(RecommendationLogitsProcessorTest, testUpdateMultiSeqStatusRejectsWhenCrossSeqBanEnabled) {
     std::vector<StreamRecommendationInfo> infos;
-    std::set<std::vector<int>> empty_set;
+    std::set<std::vector<int>>            empty_set;
     // enable_cross_sequence_ban = true
     infos.push_back(StreamRecommendationInfo(3, 0, 0, false, empty_set, {}, true, 0));
     infos.push_back(StreamRecommendationInfo(3, 0, 0, false, empty_set, {}, true, 0));
@@ -428,7 +426,7 @@ TEST_F(RecommendationLogitsProcessorTest, testUpdateMultiSeqStatusRejectsWhenCro
 // 场景 15：updateMultiSeqStatus 在关闭 cross-sequence ban 时正常工作
 TEST_F(RecommendationLogitsProcessorTest, testUpdateMultiSeqStatusWorksWhenCrossSeqBanDisabled) {
     std::vector<StreamRecommendationInfo> infos;
-    std::set<std::vector<int>> empty_set;
+    std::set<std::vector<int>>            empty_set;
     // enable_cross_sequence_ban = false
     infos.push_back(StreamRecommendationInfo(3, 0, 0, false, empty_set, {}, false, 0));
     infos.push_back(StreamRecommendationInfo(3, 0, 0, false, empty_set, {}, false, 0));
@@ -443,8 +441,8 @@ TEST_F(RecommendationLogitsProcessorTest, testUpdateMultiSeqStatusWorksWhenCross
 // 场景 16：通过 fromGenerateInput 走多返回生产路径（num_return_sequences>1 但非 beam）
 // 验证普通多返回序列按增量 token [N, num_new_tokens] 读取，不触发 full-position offset。
 TEST_F(RecommendationLogitsProcessorTest, testFromGenerateInputProductionPath) {
-    auto generate_input             = std::make_shared<GenerateInput>();
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    auto generate_input                                            = std::make_shared<GenerateInput>();
+    generate_input->generate_config                                = std::make_shared<GenerateConfig>();
     generate_input->generate_config->combo_token_size              = 3;
     generate_input->generate_config->num_return_sequences          = 3;
     generate_input->generate_config->enable_cross_sequence_ban     = true;
@@ -492,8 +490,8 @@ TEST_F(RecommendationLogitsProcessorTest, testFromGenerateInputProductionPath) {
 // 场景 17：beam search 下保留 full-position token 矩阵路径
 // 验证 updateStatus 基于 new_tokens shape 动态启用 offset，曝光过滤/生成去重仍兼容 beam。
 TEST_F(RecommendationLogitsProcessorTest, testOffsetWithMultiTokenAdvance) {
-    auto generate_input             = std::make_shared<GenerateInput>();
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    auto generate_input                                            = std::make_shared<GenerateInput>();
+    generate_input->generate_config                                = std::make_shared<GenerateConfig>();
     generate_input->generate_config->combo_token_size              = 2;
     generate_input->generate_config->num_beams                     = 2;
     generate_input->generate_config->num_return_sequences          = 2;
@@ -511,9 +509,9 @@ TEST_F(RecommendationLogitsProcessorTest, testOffsetWithMultiTokenAdvance) {
         EXPECT_EQ(3, info.input_length);
     }
 
-    const int input_len = 3;
-    const int num_new = 2;
-    auto tokens = torch::zeros({2, input_len + num_new}, torch::kInt32);
+    const int input_len      = 3;
+    const int num_new        = 2;
+    auto      tokens         = torch::zeros({2, input_len + num_new}, torch::kInt32);
     tokens[0][input_len + 0] = 10;
     tokens[0][input_len + 1] = 11;
     tokens[1][input_len + 0] = 20;
@@ -530,7 +528,7 @@ TEST_F(RecommendationLogitsProcessorTest, testOffsetWithMultiTokenAdvance) {
     EXPECT_TRUE(p->infos()[1].banned_combos.count({20, 21}));
     EXPECT_FALSE(p->infos()[1].banned_combos.count({10, 11}));
 
-    auto tokens2 = torch::zeros({2, input_len + num_new + num_new}, torch::kInt32);
+    auto tokens2                        = torch::zeros({2, input_len + num_new + num_new}, torch::kInt32);
     tokens2[0][input_len + num_new + 0] = 30;
     tokens2[0][input_len + num_new + 1] = 31;
     tokens2[1][input_len + num_new + 0] = 40;
@@ -548,8 +546,8 @@ TEST_F(RecommendationLogitsProcessorTest, testOffsetWithMultiTokenAdvance) {
 // 场景 17b：variable beam 扩束前可能仍传增量 token，不能因 config->hasNumBeams() 误走 offset。
 // 第一轮用 [N,1] 增量 token，扩束后再用 full-position 矩阵，验证两种布局可在同一 processor 生命周期内切换。
 TEST_F(RecommendationLogitsProcessorTest, testDynamicTokenLayoutBeforeAndAfterBeamExpansion) {
-    auto generate_input             = std::make_shared<GenerateInput>();
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    auto generate_input                                            = std::make_shared<GenerateInput>();
+    generate_input->generate_config                                = std::make_shared<GenerateConfig>();
     generate_input->generate_config->combo_token_size              = 2;
     generate_input->generate_config->num_beams                     = 1;
     generate_input->generate_config->variable_num_beams            = {1, 2};
@@ -577,8 +575,8 @@ TEST_F(RecommendationLogitsProcessorTest, testDynamicTokenLayoutBeforeAndAfterBe
     EXPECT_EQ(1, p->infos()[0].pos_in_combo);
     EXPECT_EQ(1, p->infos()[1].pos_in_combo);
 
-    const int input_len = 3;
-    auto full_position_tokens = torch::zeros({2, input_len + 2}, torch::kInt32);
+    const int input_len                    = 3;
+    auto      full_position_tokens         = torch::zeros({2, input_len + 2}, torch::kInt32);
     full_position_tokens[0][input_len + 1] = 11;
     full_position_tokens[1][input_len + 1] = 21;
 
@@ -595,13 +593,18 @@ TEST_F(RecommendationLogitsProcessorTest, testDynamicTokenLayoutBeforeAndAfterBe
 // 场景 18：top-K 遮蔽深度上界保护 —— num_return_sequences=12 时，序列 11 的遮蔽深度
 // 应被 kMaxDivergeDepth(=8) 钳制，至少保留足够可选 token
 TEST_F(RecommendationLogitsProcessorTest, testDivergeDepthCappedByMaxLimit) {
-    const int N = 12;  // 超过 kMaxDivergeDepth=8
+    const int N          = 12;  // 超过 kMaxDivergeDepth=8
     const int combo_size = 2;
-    const int vocab = 20;
+    const int vocab      = 20;
 
     std::vector<StreamRecommendationInfo> infos;
     for (int i = 0; i < N; ++i) {
-        StreamRecommendationInfo info(combo_size, 0, 0, false, {}, {},
+        StreamRecommendationInfo info(combo_size,
+                                      0,
+                                      0,
+                                      false,
+                                      {},
+                                      {},
                                       /*enable_cross_sequence_ban=*/true,
                                       /*cross_seq_diverge_start_combo=*/0);
         infos.push_back(std::move(info));
@@ -648,13 +651,18 @@ TEST_F(RecommendationLogitsProcessorTest, testDivergeDepthCappedByMaxLimit) {
 // 场景 19：num_new_tokens > 1 批量推进（speculative decoding 场景）
 // 一次推 3 个 token，combo_size=2，同一序列在一次 updateStatus 中完成 1 个 combo 并开始下一个
 TEST_F(RecommendationLogitsProcessorTest, testBatchTokenAdvance) {
-    const int N = 2;
-    const int combo_size = 2;
+    const int                  N          = 2;
+    const int                  combo_size = 2;
     std::set<std::vector<int>> empty_set;
 
     std::vector<StreamRecommendationInfo> infos;
     for (int i = 0; i < N; ++i) {
-        StreamRecommendationInfo info(combo_size, 0, 0, false, empty_set, {},
+        StreamRecommendationInfo info(combo_size,
+                                      0,
+                                      0,
+                                      false,
+                                      empty_set,
+                                      {},
                                       /*enable_cross_sequence_ban=*/true,
                                       /*cross_seq_diverge_start_combo=*/0);
         infos.push_back(std::move(info));
@@ -663,9 +671,13 @@ TEST_F(RecommendationLogitsProcessorTest, testBatchTokenAdvance) {
 
     // 一次推 3 个 token: [A, B, C]
     // combo_size=2: token A+B 组成第 1 个 combo，token C 是第 2 个 combo 的第 1 位
-    auto tokens = torch::zeros({N, 3}, torch::kInt32);
-    tokens[0][0] = 10; tokens[0][1] = 11; tokens[0][2] = 20;
-    tokens[1][0] = 30; tokens[1][1] = 31; tokens[1][2] = 40;
+    auto tokens  = torch::zeros({N, 3}, torch::kInt32);
+    tokens[0][0] = 10;
+    tokens[0][1] = 11;
+    tokens[0][2] = 20;
+    tokens[1][0] = 30;
+    tokens[1][1] = 31;
+    tokens[1][2] = 40;
 
     p->updateStatus(tokens, 3);  // num_new_tokens=3
 
@@ -687,13 +699,18 @@ TEST_F(RecommendationLogitsProcessorTest, testBatchTokenAdvance) {
 
 // 场景 20：num_new_tokens=4，combo_size=2，同一序列一次 updateStatus 完成 2 个完整 combo
 TEST_F(RecommendationLogitsProcessorTest, testBatchTokenMultipleCombos) {
-    const int N = 2;
-    const int combo_size = 2;
+    const int                  N          = 2;
+    const int                  combo_size = 2;
     std::set<std::vector<int>> empty_set;
 
     std::vector<StreamRecommendationInfo> infos;
     for (int i = 0; i < N; ++i) {
-        StreamRecommendationInfo info(combo_size, 0, 0, false, empty_set, {},
+        StreamRecommendationInfo info(combo_size,
+                                      0,
+                                      0,
+                                      false,
+                                      empty_set,
+                                      {},
                                       /*enable_cross_sequence_ban=*/true,
                                       /*cross_seq_diverge_start_combo=*/0);
         infos.push_back(std::move(info));
@@ -702,9 +719,15 @@ TEST_F(RecommendationLogitsProcessorTest, testBatchTokenMultipleCombos) {
 
     // 一次推 4 个 token: combo_size=2 → 完成 2 个 combo
     // 序列 0: [A,B,C,D] → combo1=[A,B], combo2=[C,D]
-    auto tokens = torch::zeros({N, 4}, torch::kInt32);
-    tokens[0][0] = 1; tokens[0][1] = 2; tokens[0][2] = 3; tokens[0][3] = 4;
-    tokens[1][0] = 5; tokens[1][1] = 6; tokens[1][2] = 7; tokens[1][3] = 8;
+    auto tokens  = torch::zeros({N, 4}, torch::kInt32);
+    tokens[0][0] = 1;
+    tokens[0][1] = 2;
+    tokens[0][2] = 3;
+    tokens[0][3] = 4;
+    tokens[1][0] = 5;
+    tokens[1][1] = 6;
+    tokens[1][2] = 7;
+    tokens[1][3] = 8;
 
     p->updateStatus(tokens, 4);
 
@@ -729,15 +752,20 @@ TEST_F(RecommendationLogitsProcessorTest, testBatchTokenMultipleCombos) {
 
 // 场景 21：think prelude 未完成时不进 combo，完成后正常进 combo + 跨序列广播
 TEST_F(RecommendationLogitsProcessorTest, testThinkPreludeWithCrossSeqBan) {
-    const int N = 2;
-    const int combo_size = 2;
+    const int                  N          = 2;
+    const int                  combo_size = 2;
     std::set<std::vector<int>> empty_set;
     // end_think_token_ids = {99, 100}
     std::vector<int> end_think_ids = {99, 100};
 
     std::vector<StreamRecommendationInfo> infos;
     for (int i = 0; i < N; ++i) {
-        StreamRecommendationInfo info(combo_size, 0, 0, false, empty_set, end_think_ids,
+        StreamRecommendationInfo info(combo_size,
+                                      0,
+                                      0,
+                                      false,
+                                      empty_set,
+                                      end_think_ids,
                                       /*enable_cross_sequence_ban=*/true,
                                       /*cross_seq_diverge_start_combo=*/0);
         infos.push_back(std::move(info));
@@ -745,34 +773,39 @@ TEST_F(RecommendationLogitsProcessorTest, testThinkPreludeWithCrossSeqBan) {
     auto p = std::make_shared<RecommendationLogitsProcessor>(std::move(infos));
 
     // 第 1 步：推送非 end_think token，think 未完成，combo 不应推进
-    auto tokens1 = torch::zeros({N, 1}, torch::kInt32);
-    tokens1[0][0] = 50;  tokens1[1][0] = 50;
+    auto tokens1  = torch::zeros({N, 1}, torch::kInt32);
+    tokens1[0][0] = 50;
+    tokens1[1][0] = 50;
     p->updateStatus(tokens1, 1);
     EXPECT_EQ(0, p->infos()[0].pos_in_combo);  // combo 未推进
     EXPECT_EQ(0, p->infos()[0].completed_combo_count);
     EXPECT_FALSE(p->infos()[0].think_done);
 
     // 第 2 步：推送 end_think 序列的第一个 token (99)
-    auto tokens2 = torch::zeros({N, 1}, torch::kInt32);
-    tokens2[0][0] = 99;  tokens2[1][0] = 99;
+    auto tokens2  = torch::zeros({N, 1}, torch::kInt32);
+    tokens2[0][0] = 99;
+    tokens2[1][0] = 99;
     p->updateStatus(tokens2, 1);
     EXPECT_FALSE(p->infos()[0].think_done);  // 仅匹配一半
 
     // 第 3 步：推送 end_think 序列的第二个 token (100)，think 完成
-    auto tokens3 = torch::zeros({N, 1}, torch::kInt32);
-    tokens3[0][0] = 100;  tokens3[1][0] = 100;
+    auto tokens3  = torch::zeros({N, 1}, torch::kInt32);
+    tokens3[0][0] = 100;
+    tokens3[1][0] = 100;
     p->updateStatus(tokens3, 1);
     EXPECT_TRUE(p->infos()[0].think_done);
     EXPECT_EQ(0, p->infos()[0].pos_in_combo);  // combo 仍未开始
 
     // 第 4-5 步：think 完成后推送 combo token，应形成完整 combo 并广播
-    auto tokens4 = torch::zeros({N, 1}, torch::kInt32);
-    tokens4[0][0] = 10;  tokens4[1][0] = 30;
+    auto tokens4  = torch::zeros({N, 1}, torch::kInt32);
+    tokens4[0][0] = 10;
+    tokens4[1][0] = 30;
     p->updateStatus(tokens4, 1);
     EXPECT_EQ(1, p->infos()[0].pos_in_combo);  // combo 推进到第 1 位
 
-    auto tokens5 = torch::zeros({N, 1}, torch::kInt32);
-    tokens5[0][0] = 11;  tokens5[1][0] = 31;
+    auto tokens5  = torch::zeros({N, 1}, torch::kInt32);
+    tokens5[0][0] = 11;
+    tokens5[1][0] = 31;
     p->updateStatus(tokens5, 1);
     EXPECT_EQ(0, p->infos()[0].pos_in_combo);  // combo 完成，复位
     EXPECT_EQ(1, p->infos()[0].completed_combo_count);
@@ -787,29 +820,34 @@ TEST_F(RecommendationLogitsProcessorTest, testThinkPreludeWithCrossSeqBan) {
 // 场景 21：num_return_sequences=1 + enable_cross_sequence_ban=true 的 no-op 边界
 TEST_F(RecommendationLogitsProcessorTest, testSingleSequenceCrossSeqBanNoOp) {
     // N=1 时 updateStatus 跳过广播(size()>1 不满足)，process 跳过 diverge(i>0 不满足)
-    const int N = 1;
-    const size_t vocab_size = 10;
-    const int combo_size = 2;
-    std::set<std::vector<int>> banned = {{1, 2}};
+    const int                  N          = 1;
+    const size_t               vocab_size = 10;
+    const int                  combo_size = 2;
+    std::set<std::vector<int>> banned     = {{1, 2}};
 
     std::vector<StreamRecommendationInfo> infos;
-    StreamRecommendationInfo info(combo_size, 0, 0, false, banned, {},
-                                   /*enable_cross_sequence_ban=*/true,
-                                   /*cross_seq_diverge_start_combo=*/0);
-    info.pos_in_combo = 1;
-    info.current_prefix = {1};
+    StreamRecommendationInfo              info(combo_size,
+                                  0,
+                                  0,
+                                  false,
+                                  banned,
+                                  {},
+                                  /*enable_cross_sequence_ban=*/true,
+                                  /*cross_seq_diverge_start_combo=*/0);
+    info.pos_in_combo          = 1;
+    info.current_prefix        = {1};
     info.completed_combo_count = 1;
     infos.push_back(std::move(info));
 
     auto processor = std::make_shared<RecommendationLogitsProcessor>(std::move(infos));
-    auto inputs = allocateSamplerInputs(N, vocab_size, processor);
+    auto inputs    = allocateSamplerInputs(N, vocab_size, processor);
     inputs.logits.fill_(1.0f);
 
     processor->process(inputs, 0, N);
 
     // ban 应该正常工作：token 2 被封锁
     auto logits_cpu = inputs.logits.cpu();
-    auto acc = logits_cpu.accessor<float, 2>();
+    auto acc        = logits_cpu.accessor<float, 2>();
     EXPECT_FLOAT_EQ(-std::numeric_limits<float>::infinity(), acc[0][2]);
     // 其他 token 不受影响
     EXPECT_FLOAT_EQ(1.0f, acc[0][0]);
@@ -817,7 +855,7 @@ TEST_F(RecommendationLogitsProcessorTest, testSingleSequenceCrossSeqBanNoOp) {
     EXPECT_FLOAT_EQ(1.0f, acc[0][3]);
 
     // updateStatus 不应崩溃，且无广播发生
-    auto tokens = torch::zeros({N, 1}, torch::kInt32);
+    auto tokens  = torch::zeros({N, 1}, torch::kInt32);
     tokens[0][0] = 2;  // 完成 combo [1,2]
     processor->updateStatus(tokens, 1);
     EXPECT_EQ(2, processor->infos()[0].completed_combo_count);
@@ -826,20 +864,32 @@ TEST_F(RecommendationLogitsProcessorTest, testSingleSequenceCrossSeqBanNoOp) {
 
 // 场景 22：insert() flag 一致性校验
 TEST_F(RecommendationLogitsProcessorTest, testInsertFlagConsistencyCheck) {
-    const int combo_size = 3;
+    const int                  combo_size = 3;
     std::set<std::vector<int>> empty_set;
-    std::vector<int> no_think;
+    std::vector<int>           no_think;
 
     // 正向：flag 一致时 insert 成功
     {
         std::vector<StreamRecommendationInfo> infos_a;
-        infos_a.emplace_back(combo_size, 0, 0, false, empty_set, no_think,
-                             /*enable_cross_sequence_ban=*/true, 0);
+        infos_a.emplace_back(combo_size,
+                             0,
+                             0,
+                             false,
+                             empty_set,
+                             no_think,
+                             /*enable_cross_sequence_ban=*/true,
+                             0);
         auto proc_a = std::make_shared<RecommendationLogitsProcessor>(std::move(infos_a));
 
         std::vector<StreamRecommendationInfo> infos_b;
-        infos_b.emplace_back(combo_size, 0, 0, false, empty_set, no_think,
-                             /*enable_cross_sequence_ban=*/true, 0);
+        infos_b.emplace_back(combo_size,
+                             0,
+                             0,
+                             false,
+                             empty_set,
+                             no_think,
+                             /*enable_cross_sequence_ban=*/true,
+                             0);
         auto proc_b = std::make_shared<RecommendationLogitsProcessor>(std::move(infos_b));
 
         proc_a->insert(proc_b);
@@ -849,13 +899,25 @@ TEST_F(RecommendationLogitsProcessorTest, testInsertFlagConsistencyCheck) {
     // 反向：flag 不一致时触发 CHECK 失败
     {
         std::vector<StreamRecommendationInfo> infos_a;
-        infos_a.emplace_back(combo_size, 0, 0, false, empty_set, no_think,
-                             /*enable_cross_sequence_ban=*/true, 0);
+        infos_a.emplace_back(combo_size,
+                             0,
+                             0,
+                             false,
+                             empty_set,
+                             no_think,
+                             /*enable_cross_sequence_ban=*/true,
+                             0);
         auto proc_a = std::make_shared<RecommendationLogitsProcessor>(std::move(infos_a));
 
         std::vector<StreamRecommendationInfo> infos_b;
-        infos_b.emplace_back(combo_size, 0, 0, false, empty_set, no_think,
-                             /*enable_cross_sequence_ban=*/false, 0);
+        infos_b.emplace_back(combo_size,
+                             0,
+                             0,
+                             false,
+                             empty_set,
+                             no_think,
+                             /*enable_cross_sequence_ban=*/false,
+                             0);
         auto proc_b = std::make_shared<RecommendationLogitsProcessor>(std::move(infos_b));
 
         EXPECT_THROW(proc_a->insert(proc_b), std::exception);
@@ -864,8 +926,14 @@ TEST_F(RecommendationLogitsProcessorTest, testInsertFlagConsistencyCheck) {
     // 边界：insert nullptr 和空 processor 不崩溃
     {
         std::vector<StreamRecommendationInfo> infos_a;
-        infos_a.emplace_back(combo_size, 0, 0, false, empty_set, no_think,
-                             /*enable_cross_sequence_ban=*/true, 0);
+        infos_a.emplace_back(combo_size,
+                             0,
+                             0,
+                             false,
+                             empty_set,
+                             no_think,
+                             /*enable_cross_sequence_ban=*/true,
+                             0);
         auto proc_a = std::make_shared<RecommendationLogitsProcessor>(std::move(infos_a));
 
         proc_a->insert(nullptr);
@@ -879,21 +947,26 @@ TEST_F(RecommendationLogitsProcessorTest, testInsertFlagConsistencyCheck) {
 
 // 场景 23：think 模型 + 跨序列去重，think 前缀未完成时不应触发 diverge 遮蔽
 TEST_F(RecommendationLogitsProcessorTest, testThinkModeSkipsDiverge) {
-    const int N = 2;
-    const size_t vocab_size = 10;
-    const int combo_size = 2;
-    std::set<std::vector<int>> banned = {};
+    const int                  N          = 2;
+    const size_t               vocab_size = 10;
+    const int                  combo_size = 2;
+    std::set<std::vector<int>> banned     = {};
     // end_think_token_ids = {7, 8}，think 完成前不应遮蔽 topk
     std::vector<int> end_think = {7, 8};
 
     std::vector<StreamRecommendationInfo> infos;
     for (int i = 0; i < N; ++i) {
-        infos.emplace_back(combo_size, 0, 0, false, banned, end_think,
+        infos.emplace_back(combo_size,
+                           0,
+                           0,
+                           false,
+                           banned,
+                           end_think,
                            /*enable_cross_sequence_ban=*/true,
                            /*cross_seq_diverge_start_combo=*/0);
     }
     auto processor = std::make_shared<RecommendationLogitsProcessor>(std::move(infos));
-    auto inputs = allocateSamplerInputs(N, vocab_size, processor);
+    auto inputs    = allocateSamplerInputs(N, vocab_size, processor);
     inputs.logits.fill_(1.0f);
     // 给序列 1 的 token 0 一个较高的 logit，如果 diverge 触发则会被遮蔽
     inputs.logits[1][0] = 10.0f;
@@ -902,12 +975,12 @@ TEST_F(RecommendationLogitsProcessorTest, testThinkModeSkipsDiverge) {
     processor->process(inputs, 0, N);
 
     auto logits_cpu = inputs.logits.cpu();
-    auto acc = logits_cpu.accessor<float, 2>();
+    auto acc        = logits_cpu.accessor<float, 2>();
     // 序列 1 的 token 0 应该不被遮蔽（think 未完成，diverge 跳过）
     EXPECT_FLOAT_EQ(10.0f, acc[1][0]);
 
     // 现在完成 think：喂入 token 7, 8
-    auto tokens = torch::zeros({N, 1}, torch::kInt32);
+    auto tokens  = torch::zeros({N, 1}, torch::kInt32);
     tokens[0][0] = 7;
     tokens[1][0] = 7;
     processor->updateStatus(tokens, 1);
@@ -922,7 +995,7 @@ TEST_F(RecommendationLogitsProcessorTest, testThinkModeSkipsDiverge) {
     processor->process(inputs, 0, N);
 
     logits_cpu = inputs.logits.cpu();
-    acc = logits_cpu.accessor<float, 2>();
+    acc        = logits_cpu.accessor<float, 2>();
     // 序列 1 的 token 0 应被遮蔽（diverge k=1）
     EXPECT_FLOAT_EQ(-std::numeric_limits<float>::infinity(), acc[1][0]);
 }
@@ -937,12 +1010,12 @@ TEST_F(RecommendationLogitsProcessorTest, testProcessWithNonZeroStartIdx) {
 
     // 3 条序列，combo_token_size=3，开启 cross_seq_ban，diverge_start=0
     std::vector<StreamRecommendationInfo> infos;
-    std::set<std::vector<int>> empty_set;
+    std::set<std::vector<int>>            empty_set;
     for (size_t i = 0; i < proc_batch; ++i) {
         infos.push_back(StreamRecommendationInfo(3, 0, 0, false, empty_set, {}, true, 0));
     }
     // 设置序列 0 处于 combo 末位，有 banned combo [10,20,X] —— 测试 ban 逻辑
-    infos[0].pos_in_combo = 2;
+    infos[0].pos_in_combo   = 2;
     infos[0].current_prefix = {1, 2};
     infos[0].banned_combos.insert({1, 2, 3});
 
@@ -953,8 +1026,8 @@ TEST_F(RecommendationLogitsProcessorTest, testProcessWithNonZeroStartIdx) {
     sampler_inputs.batch_size     = global_batch;
     sampler_inputs.batch_size_out = global_batch;
     sampler_inputs.vocab_size     = vocab_size;
-    sampler_inputs.logits = torch::ones({(int64_t)global_batch, (int64_t)vocab_size},
-                                         torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    sampler_inputs.logits         = torch::ones({(int64_t)global_batch, (int64_t)vocab_size},
+                                        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     // 为所有行设置相同的 logit 值，使 top-1 为 col 0
     sampler_inputs.logits.index({torch::indexing::Slice(), 0}) = 10.0f;
 
@@ -966,7 +1039,7 @@ TEST_F(RecommendationLogitsProcessorTest, testProcessWithNonZeroStartIdx) {
     state_ptr->batchProcess(sampler_inputs);
 
     auto result = sampler_inputs.logits.cpu();
-    auto acc = result.accessor<float, 2>();
+    auto acc    = result.accessor<float, 2>();
 
     // row 0~1 (start_idx 前) 不属于本 processor，应完全不受影响
     EXPECT_FLOAT_EQ(10.0f, acc[0][0]);
@@ -1025,28 +1098,26 @@ TEST_F(RecommendationLogitsProcessorTest, testEnableConditionsTruthTable) {
     }
 
     for (const auto& c : truth_table) {
-        auto generate_input             = std::make_shared<GenerateInput>();
-        generate_input->generate_config = std::make_shared<GenerateConfig>();
-        generate_input->generate_config->num_beams                  = c.num_beams;
-        generate_input->generate_config->combo_token_size            = c.combo_token_size;
-        generate_input->generate_config->enable_cross_sequence_ban  = true;
-        generate_input->generate_config->banned_combo_token_ids     = {};
-        generate_input->input_ids = torch::zeros({1}, torch::kInt32);
+        auto generate_input                                        = std::make_shared<GenerateInput>();
+        generate_input->generate_config                            = std::make_shared<GenerateConfig>();
+        generate_input->generate_config->num_beams                 = c.num_beams;
+        generate_input->generate_config->combo_token_size          = c.combo_token_size;
+        generate_input->generate_config->enable_cross_sequence_ban = true;
+        generate_input->generate_config->banned_combo_token_ids    = {};
+        generate_input->input_ids                                  = torch::zeros({1}, torch::kInt32);
 
-        auto p = RecommendationLogitsProcessor::fromGenerateInput(
-            generate_input, c.num_return_sequences);
+        auto p = RecommendationLogitsProcessor::fromGenerateInput(generate_input, c.num_return_sequences);
 
         if (c.combo_token_size <= 0) {
             // combo_token_size <= 0 时 fromGenerateInput 返回 nullptr
-            ASSERT_EQ(nullptr, p) << "num_beams=" << c.num_beams
-                << ", combo=" << c.combo_token_size << ", num=" << c.num_return_sequences;
+            ASSERT_EQ(nullptr, p) << "num_beams=" << c.num_beams << ", combo=" << c.combo_token_size
+                                  << ", num=" << c.num_return_sequences;
         } else {
-            ASSERT_NE(nullptr, p) << "num_beams=" << c.num_beams
-                << ", combo=" << c.combo_token_size << ", num=" << c.num_return_sequences;
+            ASSERT_NE(nullptr, p) << "num_beams=" << c.num_beams << ", combo=" << c.combo_token_size
+                                  << ", num=" << c.num_return_sequences;
             for (const auto& info : p->infos()) {
                 EXPECT_EQ(c.expected_enabled, info.enable_cross_sequence_ban)
-                    << "num_beams=" << c.num_beams
-                    << ", combo=" << c.combo_token_size
+                    << "num_beams=" << c.num_beams << ", combo=" << c.combo_token_size
                     << ", num=" << c.num_return_sequences;
             }
         }

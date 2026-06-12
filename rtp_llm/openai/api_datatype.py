@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field
 
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.response_format import ResponseFormat
 from rtp_llm.utils.base_model_datatypes import AuxInfo
 
 
@@ -140,6 +141,7 @@ class ChatCompletionRequest(BaseModel):
     logprobs_mode: Optional[Literal["original", "default"]] = None
     top_logprobs: Optional[int] = None
     prompt_logprobs: Optional[int] = None
+    response_format: Optional[ResponseFormat] = None
 
     # ---- These functions are not implemented yet.
     # presence_penalty: Optional[float] = 0.0
@@ -174,14 +176,17 @@ class ChatCompletionRequest(BaseModel):
         else:
             return self.chat_template_kwargs
 
+    def get_enable_thinking(self, default: Optional[bool] = None) -> Optional[bool]:
+        chat_template_kwargs = self.get_chat_template_kwargs()
+        if chat_template_kwargs is None or "enable_thinking" not in chat_template_kwargs:
+            return default
+        enable_thinking = chat_template_kwargs["enable_thinking"]
+        if enable_thinking is True or enable_thinking is False:
+            return enable_thinking
+        raise ValueError("chat_template_kwargs.enable_thinking must be a boolean")
+
     def disable_thinking(self):
-        if (
-            self.get_chat_template_kwargs() is not None
-            and self.get_chat_template_kwargs().get("enable_thinking", True) is False
-        ):
-            return True
-        else:
-            return False
+        return self.get_enable_thinking() is False
 
 
 class BatchChatCompletionRequest(BaseModel):

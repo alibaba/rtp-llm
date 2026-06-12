@@ -1,9 +1,10 @@
-#include <algorithm>
 #include <cstring>
 #include "torch/all.h"
 #include "rtp_llm/cpp/normal_engine/NormalSamplerInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 
 namespace rtp_llm {
@@ -14,10 +15,10 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
     (void)model_inputs;
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_CHECK(!stream_groups.empty());
-    auto all_streams          = stream_groups.allStreams();
-    auto total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
-    auto total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
-    ReturnAllProbsMode return_all_probs = stream_groups.needReturnAllProbs();
+    auto               all_streams          = stream_groups.allStreams();
+    auto               total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
+    auto               total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
+    ReturnAllProbsMode return_all_probs     = stream_groups.needReturnAllProbs();
 
     SamplerInputs sampler_inputs = allocateSamplerInputs(stream_groups, total_batch_size_in, total_batch_size_out);
     fillSamplerCommonInputs(sampler_inputs, all_streams);
@@ -198,15 +199,18 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
 }
 
 void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&                sampler_inputs,
-                                                          std::list<GenerateStreamPtr>& all_streams,
-                                                          bool                          score_batch) const {
+                                                          std::list<GenerateStreamPtr>& all_streams) const {
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
-    std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, idx = 0](auto& stream) mutable {
+    size_t                   idx       = 0;
+    for (auto& stream : all_streams) {
+        const size_t batch_size = stream->currentBatchSize();
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-            state_ptr->insert(processor, idx, idx + stream->currentBatchSize());
+            if (processor) {
+                state_ptr->insert(processor, idx, idx + batch_size);
+            }
         }
-        idx += stream->currentBatchSize();
-    });
+        idx += batch_size;
+    }
     sampler_inputs.logits_processor_states_ptr = state_ptr;
 }
 

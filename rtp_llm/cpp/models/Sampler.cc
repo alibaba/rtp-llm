@@ -106,7 +106,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         return t.defined() ? std::optional<torch::Tensor>(t.narrow(0, offset, size)) : std::nullopt;
     };
 
-    preprocessLogits(inputs);
+    auto processor_errors = preprocessLogits(inputs);
 
     uint64_t max_seq_len   = inputs.token_ids.size(1);
     auto     num_beams_in  = inputs.num_beams_in.data_ptr<int64_t>();
@@ -306,13 +306,15 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                           std::move(all_cum_log_probs_out),
                           std::move(inputs.all_probs),
                           std::move(all_beam_indices),
-                          std::move(all_success)});
+                          std::move(all_success),
+                          std::move(processor_errors)});
 }
 
-void Sampler::preprocessLogits(const SamplerInputs& inputs) {
+std::vector<std::optional<ErrorInfo>> Sampler::preprocessLogits(const SamplerInputs& inputs) {
     if (inputs.logits_processor_states_ptr != nullptr) {
-        inputs.logits_processor_states_ptr->batchProcess(inputs);
+        return inputs.logits_processor_states_ptr->batchProcess(inputs);
     }
+    return {};
 }
 
 }  // namespace rtp_llm

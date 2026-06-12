@@ -15,6 +15,7 @@ from pydantic import (
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.response_format import ResponseFormatInput
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
@@ -144,6 +145,11 @@ class GenerateConfig(BaseModel):
     chat_id: Optional[str] = None
     task_id: Optional[Union[str, int]] = None
     request_format: str = RequestFormat.RAW
+    response_format: Optional[ResponseFormatInput] = None
+    json_schema: Optional[Union[str, Dict[str, Any]]] = None
+    regex: Optional[str] = None
+    ebnf: Optional[str] = None
+    structural_tag: Optional[Union[str, Dict[str, Any]]] = None
     # calculate_loss style: 0 for not calculate; 1 for sum; 2 for each token
     calculate_loss: int = 0
     return_logits: bool = False
@@ -481,7 +487,13 @@ class GenerateConfig(BaseModel):
         self.stop_words_list += special_tokens.stop_words_id_list
         self.stop_words_str += special_tokens.stop_words_str_list
 
-    def add_thinking_params(self, tokenizer, generate_env_config):
+    def add_thinking_params(
+        self,
+        tokenizer,
+        generate_env_config,
+        normalize_response_format: bool = True,
+        enable_thinking: Optional[bool] = None,
+    ):
         """Add thinking parameters from generate_env_config.
 
         Args:
@@ -490,11 +502,16 @@ class GenerateConfig(BaseModel):
         """
 
         end_think_token_id = generate_env_config.think_end_token_id
+        in_think_mode = (
+            bool(generate_env_config.think_mode)
+            if enable_thinking is None
+            else enable_thinking
+        )
         self.end_think_token_ids = (
             [end_think_token_id] if end_think_token_id != -1 else []
         )
         if (
-            bool(generate_env_config.think_mode)
+            in_think_mode
             and tokenizer
             and end_think_token_id == -1
         ):
@@ -505,9 +522,30 @@ class GenerateConfig(BaseModel):
                 think_end_tag, add_special_tokens=False
             )
             self.end_think_token_ids = tokenized_result
-        self.in_think_mode = (
-            bool(generate_env_config.think_mode) and len(self.end_think_token_ids) >= 0
+        self.in_think_mode = in_think_mode
+        if normalize_response_format:
+            self.apply_response_format(generate_env_config=generate_env_config)
+
+    def apply_response_format(
+        self,
+        generate_env_config: Optional[Any] = None,
+        reasoning_format: Optional[Any] = None,
+    ) -> None:
+        from rtp_llm.config.response_format_builder import (
+            ReasoningFormat,
+            ResponseFormatBuilder,
         )
+
+        if reasoning_format is None and generate_env_config is not None:
+            reasoning_format = ReasoningFormat.from_generate_env_config(
+                generate_env_config
+            )
+        ResponseFormatBuilder(self, reasoning_format=reasoning_format).apply()
+
+    def grammar_terminate_without_stop_token(self) -> bool:
+        from rtp_llm.config.response_format_builder import ResponseFormatBuilder
+
+        return ResponseFormatBuilder.grammar_terminate_without_stop_token(self)
 
     def add_stop_ids_from_str(self, tokenizer):
         ids_list = []
