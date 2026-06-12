@@ -27,11 +27,12 @@ import functools
 import json
 import logging
 import os
-from typing import List
+from typing import Dict, List
 
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.ops import DSV4KVSpec, DSV4StateSpec, DataType, KVCacheSpec, KvCacheDataType
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
@@ -57,6 +58,139 @@ from rtp_llm.utils.model_weight import (
 SCORING_FUNC_SOFTMAX = 0
 SCORING_FUNC_SIGMOID = 1
 SCORING_FUNC_SQRT_SOFTPLUS = 2  # DeepSeek-V4
+
+def _make_kv_cache_spec(
+    tag: str,
+    kind: str,
+    entry_elems: int,
+    dtype: DataType,
+    compression_ratio: int = 1,
+) -> KVCacheSpec:
+    if kind == "compressed_kv":
+        spec = DSV4KVSpec()
+        spec.entry_elems = int(entry_elems)
+        spec.compression_ratio = int(compression_ratio)
+        spec.store_dtype = dtype
+    else:
+        spec = DSV4StateSpec()
+        spec.state_dim = int(entry_elems)
+        spec.store_dtype = dtype
+    spec.tag = tag
+    spec.dtype = dtype
+    return spec
+
+
+def _build_dsv4_kv_cache_specs(config: ModelConfig) -> Dict[int, List[KVCacheSpec]]:
+    ratios = list(config.attn_config.layer_compress_ratios)
+
+    head_dim = int(config.attn_config.size_per_head)
+    indexer_head_dim = int(config.attn_config.indexer_head_dim)
+    # These defaults match BASE/BF16 cache. DeepSeekV4._post_build_model_config
+    # refreshes entry sizes after kv_cache_config/quantization finalizes kv_cache_dtype.
+    kv_entry_elems = head_dim * 2
+    indexer_entry_elems = indexer_head_dim * 2
+
+    csa_kv_spec = _make_kv_cache_spec(
+        "csa_kv", "compressed_kv", kv_entry_elems, DataType.TYPE_UINT8, 4
+    )
+    hca_kv_spec = _make_kv_cache_spec(
+        "hca_kv", "compressed_kv", kv_entry_elems, DataType.TYPE_UINT8, 128
+    )
+    indexer_kv_spec = _make_kv_cache_spec(
+        "indexer_kv", "compressed_kv", indexer_entry_elems, DataType.TYPE_UINT8, 4
+    )
+    indexer_state_spec = _make_kv_cache_spec(
+        "indexer_state", "fixed_state", 4 * indexer_head_dim, DataType.TYPE_FP32
+    )
+    csa_state_spec = _make_kv_cache_spec(
+        "csa_state", "fixed_state", 4 * head_dim, DataType.TYPE_FP32
+    )
+    hca_state_spec = _make_kv_cache_spec(
+        "hca_state", "fixed_state", 2 * head_dim, DataType.TYPE_FP32
+    )
+    swa_kv_spec = _make_kv_cache_spec(
+        "swa_kv", "sliding_window_kv", kv_entry_elems, DataType.TYPE_UINT8
+    )
+
+    layer_specs: Dict[int, List[KVCacheSpec]] = {}
+    for layer_id in range(config.num_layers):
+        ratio = int(ratios[layer_id]) if layer_id < len(ratios) else 0
+        if ratio == 4:
+            layer_specs[layer_id] = [
+                csa_kv_spec,
+                indexer_kv_spec,
+                indexer_state_spec,
+                csa_state_spec,
+                swa_kv_spec,
+            ]
+        elif ratio == 128:
+            layer_specs[layer_id] = [hca_kv_spec, hca_state_spec, swa_kv_spec]
+        else:
+            layer_specs[layer_id] = [swa_kv_spec]
+    return layer_specs
+
+
+def _refresh_dsv4_kv_cache_specs(config: ModelConfig) -> None:
+    expected_tags = [
+        "csa_kv",
+        "hca_kv",
+        "indexer_kv",
+        "indexer_state",
+        "csa_state",
+        "hca_state",
+        "swa_kv",
+    ]
+    expected_tag_set = set(expected_tags)
+
+    specs_by_tag = {}
+    for layer_id, layer_specs in config.kv_cache_specs.items():
+        seen_layer_tags = set()
+        for spec in layer_specs:
+            if not spec.tag:
+                raise ValueError("DeepSeek-V4 kv_cache spec tag must not be empty")
+            if spec.tag not in expected_tag_set:
+                raise ValueError(f"Unknown DeepSeek-V4 kv_cache spec tag: {spec.tag}")
+            if spec.tag in seen_layer_tags:
+                raise ValueError(
+                    f"DeepSeek-V4 kv_cache spec tag duplicated in layer {layer_id}: {spec.tag}"
+                )
+            seen_layer_tags.add(spec.tag)
+            specs_by_tag.setdefault(spec.tag, spec)
+
+    fp8_kv = config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
+    head_dim = int(config.attn_config.size_per_head)
+    indexer_head_dim = int(config.attn_config.indexer_head_dim)
+    kv_entry_elems = 584 if fp8_kv else head_dim * 2
+    indexer_entry_elems = 132 if fp8_kv else indexer_head_dim * 2
+
+    for tag in expected_tags:
+        spec = specs_by_tag.get(tag)
+        if spec is None:
+            continue
+        if tag in ("csa_kv", "hca_kv", "swa_kv"):
+            if hasattr(spec, "entry_elems"):
+                spec.entry_elems = kv_entry_elems
+            else:
+                spec.state_dim = kv_entry_elems
+            spec.store_dtype = DataType.TYPE_UINT8
+            spec.dtype = DataType.TYPE_UINT8
+        elif tag == "indexer_kv":
+            spec.entry_elems = indexer_entry_elems
+            spec.store_dtype = DataType.TYPE_UINT8
+            spec.dtype = DataType.TYPE_UINT8
+        elif tag == "indexer_state":
+            spec.state_dim = 4 * indexer_head_dim
+            spec.store_dtype = DataType.TYPE_FP32
+            spec.dtype = DataType.TYPE_FP32
+        elif tag == "csa_state":
+            spec.state_dim = 4 * head_dim
+            spec.store_dtype = DataType.TYPE_FP32
+            spec.dtype = DataType.TYPE_FP32
+        elif tag == "hca_state":
+            spec.state_dim = 2 * head_dim
+            spec.store_dtype = DataType.TYPE_FP32
+            spec.dtype = DataType.TYPE_FP32
+
 
 
 class DeepSeekV4Weight(DeepSeekV2Weight):
@@ -506,6 +640,11 @@ class DeepSeekV4(DeepSeekV2):
         DeepSeekV4._from_hf(config, ckpt_path)
         return config
 
+
+    @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        _refresh_dsv4_kv_cache_specs(model_config)
+
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 
@@ -609,6 +748,7 @@ class DeepSeekV4(DeepSeekV2):
         config.attn_config.indexer_head_dim = int(config_json["index_head_dim"])
         config.attn_config.indexer_head_num = int(config_json["index_n_heads"])
         config.attn_config.indexer_topk = int(config_json["index_topk"])
+        config.kv_cache_specs = _build_dsv4_kv_cache_specs(config)
 
         # ---- MoE ----
         scoring_func = config_json.get("scoring_func", "softmax")
@@ -791,6 +931,7 @@ class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
         config = super()._create_config(ckpt_path)
         config.num_layers = 1
         config.attn_config.layer_compress_ratios = [0]
+        config.kv_cache_specs = _build_dsv4_kv_cache_specs(config)
         config.moe_layer_index = list(range(config.num_layers))
         config.reverse_e_h_norm = True
         config.is_mtp = True
