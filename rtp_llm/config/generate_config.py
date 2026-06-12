@@ -50,6 +50,14 @@ class RoleAddr(BaseModel):
 
 
 class GenerateConfig(BaseModel):
+    # JSON-formatted dashscope/openai response_format spec passed through from
+    # the request so dash_sc encodes it on the wire. xgrammar enforcement is not
+    # wired up on this branch yet — the field is propagated for forward compat.
+    response_format: Optional[str] = None
+    json_format: bool = False
+    # JSON-formatted structural_tag spec for tool-call grammar. Same caveat as
+    # response_format: propagated, not yet enforced on this branch.
+    structural_tag: Optional[str] = None
     max_new_tokens: int = 32000
     # only for qwen agent fncall check max input tokens
     max_input_tokens: int = 32000

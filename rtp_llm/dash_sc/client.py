@@ -15,6 +15,7 @@ Usage (tokenizer same as frontend: ckpt_path, tokenizer_path, model_type):
 from __future__ import annotations
 
 import argparse
+import json
 import struct
 import sys
 from typing import Any
@@ -90,6 +91,30 @@ def append_sampling_params_to_model_infer_request(
     _append_fp32_scalar(request, "repetition_penalty", sampling.repetition_penalty)
     _append_fp32_scalar(request, "frequency_penalty", sampling.frequency_penalty)
     _append_fp32_scalar(request, "presence_penalty", sampling.presence_penalty)
+    if sampling.max_new_think_tokens is not None:
+        _append_int32_scalar(
+            request, "max_new_think_tokens", sampling.max_new_think_tokens
+        )
+    if sampling.max_new_tokens_from_completion_alias:
+        _append_int32_scalar(request, "max_completion_tokens", sampling.max_new_tokens)
+        if sampling.max_total_tokens is not None:
+            _append_int32_scalar(request, "max_tokens", sampling.max_total_tokens)
+    if sampling.response_format is not None:
+        response_format = sampling.response_format
+        if not isinstance(response_format, str):
+            response_format = json.dumps(
+                response_format, ensure_ascii=False, separators=(",", ":")
+            )
+        request.parameters["response_format"].string_param = response_format
+    if sampling.json_format:
+        request.parameters["json_format"].bool_param = True
+    if sampling.structural_tag is not None:
+        structural_tag = sampling.structural_tag
+        if not isinstance(structural_tag, str):
+            structural_tag = json.dumps(
+                structural_tag, ensure_ascii=False, separators=(",", ":")
+            )
+        request.parameters["tool_call_structural_tag"].string_param = structural_tag
 
     groups = sampling.stop_words_list
     if not groups:
@@ -129,6 +154,7 @@ def build_model_infer_request(
     input_ids: list[int],
     sampling: SamplingParams,
     return_input_ids: bool = False,
+    enable_thinking: bool | None = None,
 ) -> predict_v2_pb2.ModelInferRequest:
     """Build ``ModelInferRequest`` for ``ModelStreamInfer`` (sampling tensors + ``input_ids``)."""
     request = predict_v2_pb2.ModelInferRequest()
@@ -136,6 +162,8 @@ def build_model_infer_request(
     request.model_name = model_name
     append_sampling_params_to_model_infer_request(request, sampling)
     append_return_input_ids_to_model_infer_request(request, return_input_ids)
+    if enable_thinking is not None:
+        request.parameters["enable_thinking"].bool_param = bool(enable_thinking)
     append_input_ids_to_model_infer_request(request, input_ids)
     return request
 
@@ -280,6 +308,17 @@ def _parse_stop_token_ids_csv(s: str | None) -> tuple[tuple[int, ...], ...]:
     return (tuple(ids),) if ids else tuple()
 
 
+def _parse_optional_bool_arg(s: str | None) -> bool | None:
+    if s is None:
+        return None
+    value = str(s).strip().lower()
+    if value in {"1", "true", "yes", "y", "on", "enable", "enabled"}:
+        return True
+    if value in {"0", "false", "no", "n", "off", "disable", "disabled"}:
+        return False
+    raise argparse.ArgumentTypeError(f"invalid boolean value: {s!r}")
+
+
 def build_dash_sc_grpc_client_argparser() -> argparse.ArgumentParser:
     """CLI for ``main()``; callers may ``parse_args(argv)`` for tests or subprocesses."""
     parser = argparse.ArgumentParser(
@@ -317,7 +356,7 @@ def build_dash_sc_grpc_client_argparser() -> argparse.ArgumentParser:
         "--prompt",
         type=str,
         default="Hello, world!",
-        help="Prompt to encode and send",
+        help="Prompt to encode with tokenizer.encode and send as input_ids",
     )
     parser.add_argument(
         "--request_id",
@@ -404,6 +443,31 @@ def build_dash_sc_grpc_client_argparser() -> argparse.ArgumentParser:
         help="Send return_input_ids INT32 tensor (1) so server echoes prompt in prompt_token_ids",
     )
     parser.add_argument(
+        "--response_format",
+        type=str,
+        default="",
+        help='Optional JSON response_format, e.g. \'{"type":"json_object"}\'.',
+    )
+    parser.add_argument(
+        "--json_format",
+        action="store_true",
+        help="Set request.parameters['json_format']=true.",
+    )
+    parser.add_argument(
+        "--tool_call_structural_tag",
+        "--structural_tag",
+        dest="structural_tag",
+        type=str,
+        default="",
+        help="Optional tool-call structural_tag JSON sent as request.parameters['tool_call_structural_tag'].",
+    )
+    parser.add_argument(
+        "--enable_thinking",
+        type=_parse_optional_bool_arg,
+        default=None,
+        help="Optional request.parameters['enable_thinking'] boolean.",
+    )
+    parser.add_argument(
         "--dash_sc_grpc_config_json",
         type=str,
         default="",
@@ -441,6 +505,9 @@ def main():
         frequency_penalty=args.frequency_penalty,
         presence_penalty=args.presence_penalty,
         stop_words_list=_parse_stop_token_ids_csv(args.stop_token_ids or None),
+        response_format=args.response_format.strip() or None,
+        json_format=bool(args.json_format),
+        structural_tag=args.structural_tag.strip() or None,
     )
 
     request = build_model_infer_request(
@@ -449,6 +516,7 @@ def main():
         input_ids=input_ids,
         sampling=sampling,
         return_input_ids=args.return_input_ids,
+        enable_thinking=args.enable_thinking,
     )
 
     dash_sc_cfg = None

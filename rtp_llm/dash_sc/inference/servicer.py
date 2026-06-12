@@ -28,6 +28,7 @@ from rtp_llm.dash_sc.codec import (
     FINISH_REASON_LENGTH,
     FINISH_REASON_STOP_ENGINE_PARAM,
     FINISH_REASON_STOP_TIMEOUT,
+    DashScParameterError,
     OtherParams,
     SamplingParams,
     _token_ids_list_from_generate_output,
@@ -39,6 +40,7 @@ from rtp_llm.dash_sc.codec import (
     prepend_to_generated_ids_tensor,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
+from rtp_llm.dash_sc.proxy.access_record import ForwardAccessRecord
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
 from rtp_llm.server.request_headers import extract_request_headers
@@ -1203,7 +1205,11 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 request.id,
                 request.model_name,
             )
-            input_ids_list, sampling, other = parse_dash_sc_grpc_request(request)
+            try:
+                input_ids_list, sampling, other = parse_dash_sc_grpc_request(request)
+            except DashScParameterError as e:
+                yield build_parameter_error_response(str(request.id), str(e))
+                return
             if input_ids_list is None:
                 yield build_parameter_error_response(
                     str(request.id),
@@ -1251,7 +1257,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     generate_env_config=self._generate_env_config,
                     think_runtime=self._think_runtime,
                     phase2_request_id_factory=self._next_rtp_llm_request_id,
-                    access_agg=getattr(context, "_dash_sc_forward_access_record", None),
+                    access_agg=ForwardAccessRecord.from_context(context),
                 ):
                     yield resp
                 return

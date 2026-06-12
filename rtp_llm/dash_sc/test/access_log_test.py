@@ -1221,9 +1221,9 @@ class ProtocolErrorMessageTest(InterceptorTestBase):
 
     def test_backend_error_code_overrides_error_message_bucket(self) -> None:
         def inner(request, context):
-            context._dash_sc_forward_access_record.backend_error_code = (
-                "8400_MASTER_NO_AVAILABLE_WORKER"
-            )
+            access_record = ForwardAccessRecord.from_context(context)
+            assert access_record is not None
+            access_record.backend_error_code = "8400_MASTER_NO_AVAILABLE_WORKER"
             return self._make_error_response("FtRuntimeException: no worker")
 
         handler = _make_handler(
