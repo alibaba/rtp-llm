@@ -55,12 +55,13 @@ def build_multimodal_output_pb(
 class _EmbeddingRequest:
     """A single caller's submission to the GPU batch scheduler."""
 
-    __slots__ = ("work_items", "exception", "done")
+    __slots__ = ("work_items", "exception", "done", "cancelled")
 
     def __init__(self, work_items: List[MMWorkItem]):
         self.work_items = work_items
         self.exception: Optional[Exception] = None
         self.done = threading.Event()
+        self.cancelled = False
 
 
 # Sentinel pushed into _waiting to wake the executor thread on close().
@@ -113,6 +114,7 @@ class MMScheduler:
 
         self._waiting.put(req)
         if not req.done.wait(timeout=timeout_s):
+            req.cancelled = True
             raise TimeoutError(
                 f"MMScheduler: embedding wait timeout after {timeout_s * 1000:.0f}ms"
             )
@@ -170,6 +172,8 @@ class MMScheduler:
                 # Re-queue so the next _collect_batch sees it; run what we have.
                 self._waiting.put(_STOP)
                 break
+            if req.cancelled:
+                continue
             req_tokens = self._request_tokens(req)
             if (
                 len(batch) + 1 > self._max_batch_size
@@ -192,6 +196,9 @@ class MMScheduler:
         All-or-nothing: the batch is one forward, so on failure every request in
         it fails together. Isolating the culprit (per-request fallback) is not
         attempted — it would break the single-forward contract and failures are rare."""
+        batch = [req for req in batch if not req.cancelled]
+        if not batch:
+            return
         try:
             all_items: List[Tuple[_EmbeddingRequest, MMWorkItem]] = []
             for req in batch:
