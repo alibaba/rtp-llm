@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include <atomic>
+#include <mutex>
 
 namespace rtp_llm {
 
@@ -32,6 +33,7 @@ public:
     // 调用计数相关方法
     int  getBroadcastTpCallCount() const;
     int  getBroadcastTpCancelCallCount() const;
+    P2PConnectorBroadcastTpRequestPB getLastBroadcastTpRequest() const;
     int  getStartLoadCallCount() const;
     int  getGenerateStreamCallCount() const;
     void resetCallCounts();
@@ -48,6 +50,8 @@ private:
     ::grpc::Status   rpc_response_status_{::grpc::Status::OK};
     std::atomic<int> broadcast_tp_call_count_{0};
     std::atomic<int> broadcast_tp_cancel_call_count_{0};
+    mutable std::mutex              last_broadcast_tp_request_mutex_;
+    P2PConnectorBroadcastTpRequestPB last_broadcast_tp_request_;
     std::atomic<int> start_load_call_count_{0};
     std::atomic<int> generate_stream_call_count_{0};
 };

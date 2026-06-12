@@ -104,21 +104,24 @@ std::shared_ptr<PrefillServerCallerContext> PrefillServerCaller::callPrefill(con
     auto stub = connect_status.value().stub;
 
     auto context   = std::make_shared<PrefillServerCallerContext>(ip + ":" + std::to_string(port), unique_key);
-    context->stub_ = stub;
+    context->async_state_->stub = stub;
 
     // Preserve the original request shape for decode_entrance handoff so the
     // prefill side still recognizes it as a PD-separation request.
-    context->request_.CopyFrom(*request);
-    context->request_.set_client_id(process_id_);
-    context->request_.set_start_time(currentTimeUs());
-    context->request_.mutable_generate_config()->set_can_use_pd_separation(true);
-    context->request_.mutable_generate_config()->set_unique_key(unique_key);
+    context->async_state_->request.CopyFrom(*request);
+    context->async_state_->request.set_client_id(process_id_);
+    context->async_state_->request.set_start_time(currentTimeUs());
+    context->async_state_->request.mutable_generate_config()->set_can_use_pd_separation(true);
+    context->async_state_->request.mutable_generate_config()->set_unique_key(unique_key);
 
-    context->client_context_->set_deadline(std::chrono::system_clock::now() + std::chrono::microseconds(deadline_us));
+    context->async_state_->client_context->set_deadline(std::chrono::system_clock::now()
+                                                        + std::chrono::microseconds(deadline_us));
 
-    context->reader_ =
-        async_reader_factory_(context->stub_, context->client_context_.get(), context->request_, context->completion_queue_.get());
-    if (!context->reader_) {
+    context->async_state_->reader = async_reader_factory_(context->async_state_->stub,
+                                                          context->async_state_->client_context.get(),
+                                                          context->async_state_->request,
+                                                          context->async_state_->completion_queue.get());
+    if (!context->async_state_->reader) {
         RTP_LLM_LOG_WARNING("request [%lld] create async prefill reader failed, addr: %s",
                             request->request_id(),
                             prefill_addr.c_str());

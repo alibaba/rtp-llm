@@ -4,34 +4,117 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include <chrono>
+#include <condition_variable>
+#include <list>
 #include <thread>
 
 namespace rtp_llm {
 
+namespace {
+
+constexpr int64_t kPrefillWaitBudgetMs  = 100;
+constexpr int64_t kPrefillDrainBudgetMs = 100;
+
+class DeferredPrefillCompletionQueueDrainer {
+public:
+    static DeferredPrefillCompletionQueueDrainer& instance() {
+        static DeferredPrefillCompletionQueueDrainer drainer;
+        return drainer;
+    }
+
+    void enqueue(std::shared_ptr<PrefillServerCallerAsyncState> async_state) {
+        if (!async_state || !async_state->completion_queue) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mu_);
+        if (stop_) {
+            return;
+        }
+        pending_.push_back(std::move(async_state));
+        if (!started_) {
+            started_ = true;
+            thread_  = std::thread([this] { run(); });
+        }
+        cv_.notify_one();
+    }
+
+    ~DeferredPrefillCompletionQueueDrainer() {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+private:
+    DeferredPrefillCompletionQueueDrainer() = default;
+
+    void run() {
+        while (true) {
+            std::list<std::shared_ptr<PrefillServerCallerAsyncState>> local;
+            {
+                std::unique_lock<std::mutex> lock(mu_);
+                cv_.wait_for(lock, std::chrono::milliseconds(100), [this] { return stop_ || !pending_.empty(); });
+                if (stop_ && pending_.empty()) {
+                    return;
+                }
+                local.splice(local.end(), pending_);
+            }
+
+            std::list<std::shared_ptr<PrefillServerCallerAsyncState>> remaining;
+            for (auto& async_state : local) {
+                if (!async_state || !async_state->completion_queue) {
+                    continue;
+                }
+                void*      tag      = nullptr;
+                bool       ok       = false;
+                const auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(1);
+                auto       status   = async_state->completion_queue->AsyncNext(&tag, &ok, deadline);
+                if (status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+                    async_state->completion_queue_shutdown_drained_ = true;
+                    continue;
+                }
+                remaining.push_back(std::move(async_state));
+            }
+
+            if (!remaining.empty()) {
+                std::lock_guard<std::mutex> lock(mu_);
+                pending_.splice(pending_.end(), remaining);
+            }
+        }
+    }
+
+    std::mutex                                               mu_;
+    std::condition_variable                                  cv_;
+    std::list<std::shared_ptr<PrefillServerCallerAsyncState>> pending_;
+    bool                                                     stop_    = false;
+    bool                                                     started_ = false;
+    std::thread                                              thread_;
+};
+
+}  // namespace
+
 PrefillServerCallerContext::PrefillServerCallerContext(const std::string& prefill_addr, const std::string& unique_key):
     prefill_addr_(prefill_addr), unique_key_(unique_key), request_begin_time_us_(currentTimeUs()) {
-    client_context_   = std::make_shared<grpc::ClientContext>();
-    completion_queue_ = std::make_shared<grpc::CompletionQueue>();
+    async_state_                   = std::make_shared<PrefillServerCallerAsyncState>();
+    async_state_->client_context   = std::make_shared<grpc::ClientContext>();
+    async_state_->completion_queue = std::make_shared<grpc::CompletionQueue>();
 }
 
 PrefillServerCallerContext::~PrefillServerCallerContext() {
     {
         std::unique_lock<std::shared_mutex> lock(state_mutex_);
-        if (!rpc_started_ || !reader_) {
+        if (!rpc_started_ || !async_state_ || !async_state_->reader) {
             finished_ = true;
         }
     }
     cancel();
     wait();
-    if (!completion_queue_) {
-        return;
-    }
-    completion_queue_->Shutdown();
-    // Drain all remaining events per gRPC contract: after Shutdown(), Next() must be
-    // called until it returns SHUTDOWN to avoid leaking pending async operations.
-    void* drain_tag = nullptr;
-    bool  drain_ok  = false;
-    while (completion_queue_->Next(&drain_tag, &drain_ok)) {}
+    shutdownAndDrainCompletionQueue();
 }
 
 bool PrefillServerCallerContext::getPrefillReuseLensSnapshot(ReuseLensSnapshot& snapshot) {
@@ -98,6 +181,7 @@ bool PrefillServerCallerContext::updateReuseLensSnapshotLocked(const GenerateOut
 
 void PrefillServerCallerContext::cancel() {
     bool need_cancel = false;
+    auto async_state = async_state_;
     {
         std::unique_lock<std::shared_mutex> lock(state_mutex_);
         if (!finished_ && !cancel_requested_) {
@@ -105,16 +189,20 @@ void PrefillServerCallerContext::cancel() {
             need_cancel       = true;
         }
     }
-    if (need_cancel && client_context_) {
-        client_context_->TryCancel();
+    if (need_cancel && async_state && async_state->client_context) {
+        async_state->client_context->TryCancel();
         RTP_LLM_LOG_DEBUG("PrefillServerCallerContext::cancel: cancelled grpc request, prefill_addr: %s",
                           prefill_addr_.c_str());
     }
 }
 
 void PrefillServerCallerContext::wait() {
-    while (!done()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (!waitWithTimeoutMs(kPrefillWaitBudgetMs)) {
+        RTP_LLM_LOG_WARNING("[PD-DIAG] PrefillServerCallerContext::wait timed out, unique_key: %s, prefill_addr: %s, "
+                            "budget_ms: %ld",
+                            unique_key_.c_str(),
+                            prefill_addr_.c_str(),
+                            kPrefillWaitBudgetMs);
     }
 }
 
@@ -123,6 +211,7 @@ void PrefillServerCallerContext::startPolling() {
 }
 
 void PrefillServerCallerContext::handleReadChunkLocked(const GenerateOutputsPB& response) {
+    auto async_state = async_state_;
     if (!first_response_received_) {
         first_response_.CopyFrom(response);
         first_response_received_ = true;
@@ -133,15 +222,17 @@ void PrefillServerCallerContext::handleReadChunkLocked(const GenerateOutputsPB& 
     if (response.has_error_info() && response.error_info().error_code() != ErrorCodePB::NONE_ERROR) {
         error_info_ =
             ErrorInfo(transRPCErrorCode(response.error_info().error_code()), response.error_info().error_message());
-        status_ = grpc::Status(grpc::StatusCode::INTERNAL, error_info_.ToString());
+        if (async_state) {
+            async_state->status = grpc::Status(grpc::StatusCode::INTERNAL, error_info_.ToString());
+        }
         if (!cancel_requested_) {
             cancel_requested_ = true;
         }
-        if (client_context_) {
-            client_context_->TryCancel();
+        if (async_state && async_state->client_context) {
+            async_state->client_context->TryCancel();
         }
-        if (!finish_started_ && reader_) {
-            reader_->Finish(&status_, reinterpret_cast<void*>(2));
+        if (!finish_started_ && async_state && async_state->reader) {
+            async_state->reader->Finish(&async_state->status, reinterpret_cast<void*>(2));
             finish_started_ = true;
         }
         RTP_LLM_LOG_WARNING(
@@ -154,19 +245,20 @@ void PrefillServerCallerContext::handleReadChunkLocked(const GenerateOutputsPB& 
 
 void PrefillServerCallerContext::checkDone() {
     std::unique_lock<std::shared_mutex> lock(state_mutex_);
+    auto                                async_state = async_state_;
     if (finished_) {
         return;
     }
 
-    if (!rpc_started_ || !reader_) {
+    if (!rpc_started_ || !async_state || !async_state->reader) {
         finished_ = true;
         return;
     }
 
-    if (!completion_queue_) {
+    if (!async_state->completion_queue) {
         RTP_LLM_LOG_WARNING("PrefillServerCallerContext::checkDone: completion_queue is null");
         finished_ = true;
-        status_   = grpc::Status(grpc::StatusCode::INTERNAL, "completion_queue is null");
+        error_info_ = ErrorInfo(ErrorCode::UNKNOWN_ERROR, "completion_queue is null");
         return;
     }
 
@@ -177,7 +269,7 @@ void PrefillServerCallerContext::checkDone() {
     auto once_deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(1);
 
     // Wait for async operation to complete
-    auto next_status = completion_queue_->AsyncNext(&got_tag, &ok, once_deadline);
+    auto next_status = async_state->completion_queue->AsyncNext(&got_tag, &ok, once_deadline);
     if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
         // not finish yet
         return;
@@ -186,7 +278,7 @@ void PrefillServerCallerContext::checkDone() {
     if (next_status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
         finished_ = true;
         if (!finish_started_ && !cancel_requested_) {
-            status_ = grpc::Status(grpc::StatusCode::CANCELLED, "completion queue shutdown");
+            async_state->status = grpc::Status(grpc::StatusCode::CANCELLED, "completion queue shutdown");
         }
         return;
     }
@@ -196,28 +288,28 @@ void PrefillServerCallerContext::checkDone() {
             finished_ = true;
             RTP_LLM_LOG_WARNING("PrefillServerCallerContext::checkDone: failed to start stream, unique_key: %s",
                                 unique_key_.c_str());
-            status_ = grpc::Status(grpc::StatusCode::INTERNAL, "failed to start async prefill stream");
+            async_state->status = grpc::Status(grpc::StatusCode::INTERNAL, "failed to start async prefill stream");
             return;
         }
-        if (reader_) {
-            read_response_.Clear();
-            reader_->Read(&read_response_, reinterpret_cast<void*>(1));
+        if (async_state->reader) {
+            async_state->read_response.Clear();
+            async_state->reader->Read(&async_state->read_response, reinterpret_cast<void*>(1));
         }
         return;
     }
 
     if (got_tag == reinterpret_cast<void*>(1)) {
         if (ok) {
-            handleReadChunkLocked(read_response_);
-            if (!finished_ && !finish_started_ && reader_) {
-                read_response_.Clear();
-                reader_->Read(&read_response_, reinterpret_cast<void*>(1));
+            handleReadChunkLocked(async_state->read_response);
+            if (!finished_ && !finish_started_ && async_state->reader) {
+                async_state->read_response.Clear();
+                async_state->reader->Read(&async_state->read_response, reinterpret_cast<void*>(1));
             }
             return;
         }
 
-        if (!finish_started_ && reader_) {
-            reader_->Finish(&status_, reinterpret_cast<void*>(2));
+        if (!finish_started_ && async_state->reader) {
+            async_state->reader->Finish(&async_state->status, reinterpret_cast<void*>(2));
             finish_started_ = true;
         }
         return;
@@ -226,34 +318,34 @@ void PrefillServerCallerContext::checkDone() {
     if (got_tag == reinterpret_cast<void*>(2)) {
         finished_ = true;
         if (!ok) {
-            status_ = grpc::Status(grpc::StatusCode::INTERNAL, "prefill stream finish event failed");
+            async_state->status = grpc::Status(grpc::StatusCode::INTERNAL, "prefill stream finish event failed");
         }
         if (error_info_.hasError()) {
             return;
         }
-        if (cancel_requested_ && status_.ok()) {
-            status_ = grpc::Status(grpc::StatusCode::CANCELLED, "prefill request cancelled");
+        if (cancel_requested_ && async_state->status.ok()) {
+            async_state->status = grpc::Status(grpc::StatusCode::CANCELLED, "prefill request cancelled");
         }
-        if (!status_.ok() && !cancel_requested_) {
+        if (!async_state->status.ok() && !cancel_requested_) {
             ErrorCode resolved_code = ErrorCode::UNKNOWN_ERROR;
-            if (!status_.error_details().empty()) {
+            if (!async_state->status.error_details().empty()) {
                 ErrorDetailsPB error_details;
-                if (error_details.ParseFromString(status_.error_details())) {
+                if (error_details.ParseFromString(async_state->status.error_details())) {
                     resolved_code = static_cast<ErrorCode>(error_details.error_code());
                 }
             }
             if (resolved_code == ErrorCode::UNKNOWN_ERROR) {
-                resolved_code = transGrpcStatusToErrorCode(status_.error_code());
+                resolved_code = transGrpcStatusToErrorCode(async_state->status.error_code());
             }
-            error_info_ = ErrorInfo(resolved_code, status_.error_message());
+            error_info_ = ErrorInfo(resolved_code, async_state->status.error_message());
         }
-        if (!status_.ok()) {
+        if (!async_state->status.ok()) {
             RTP_LLM_LOG_WARNING(
                 "PrefillServerCallerContext::checkDone: prefill rpc failed, unique_key: %s, prefill_addr: %s, grpc_status: %d(%s)",
                 unique_key_.c_str(),
                 prefill_addr_.c_str(),
-                status_.error_code(),
-                status_.error_message().c_str());
+                async_state->status.error_code(),
+                async_state->status.error_message().c_str());
         }
         return;
     }
@@ -262,12 +354,54 @@ void PrefillServerCallerContext::checkDone() {
         finished_ = true;
         RTP_LLM_LOG_WARNING("PrefillServerCallerContext::checkDone: async next failed, unique_key: %s",
                             unique_key_.c_str());
-        status_ = grpc::Status(grpc::StatusCode::INTERNAL, "async get next event from grpc completion queue failed");
+        async_state->status =
+            grpc::Status(grpc::StatusCode::INTERNAL, "async get next event from grpc completion queue failed");
         return;
     }
 
     finished_ = true;
-    status_   = grpc::Status(grpc::StatusCode::INTERNAL, "unexpected grpc completion tag");
+    async_state->status = grpc::Status(grpc::StatusCode::INTERNAL, "unexpected grpc completion tag");
+}
+
+bool PrefillServerCallerContext::waitWithTimeoutMs(int64_t timeout_ms) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (done()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return done();
+}
+
+void PrefillServerCallerContext::shutdownAndDrainCompletionQueue() {
+    auto async_state = async_state_;
+    if (!async_state || !async_state->completion_queue || async_state->completion_queue_shutdown_drained_) {
+        return;
+    }
+    async_state->completion_queue->Shutdown();
+
+    void*      drain_tag = nullptr;
+    bool       drain_ok  = false;
+    const auto deadline  = std::chrono::system_clock::now() + std::chrono::milliseconds(kPrefillDrainBudgetMs);
+    while (true) {
+        auto next_status = async_state->completion_queue->AsyncNext(&drain_tag, &drain_ok, deadline);
+        if (next_status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
+            async_state->completion_queue_shutdown_drained_ = true;
+            return;
+        }
+        if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
+            RTP_LLM_LOG_WARNING("[PD-DIAG] PrefillServerCallerContext deferred CQ drain, unique_key: %s, "
+                                "prefill_addr: %s, budget_ms: %ld",
+                                unique_key_.c_str(),
+                                prefill_addr_.c_str(),
+                                kPrefillDrainBudgetMs);
+            async_state->completion_queue_shutdown_drained_ = true;
+            DeferredPrefillCompletionQueueDrainer::instance().enqueue(async_state);
+            async_state_.reset();
+            return;
+        }
+    }
 }
 
 }  // namespace rtp_llm

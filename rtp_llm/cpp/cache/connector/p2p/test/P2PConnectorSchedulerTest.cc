@@ -4,6 +4,8 @@
 #include "grpc++/grpc++.h"
 
 #include "autil/NetUtil.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorScheduler.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -110,6 +112,16 @@ protected:
         ASSERT_TRUE(scheduler_->init());
     }
 
+    void rebuildSchedulerWithLayerAttnTypes(const std::vector<CacheGroupType>& layer_attn_types) {
+        scheduler_.reset();
+        P2PConnectorSchedulerConfig cfg;
+        cfg.worker_grpc_addrs = tp_broadcast_addrs_;
+        cfg.worker_addrs.push_back("127.0.0.1:12345:" + std::to_string(prefill_server_->listenPort()));
+        cfg.layer_attn_types = layer_attn_types;
+        scheduler_           = std::make_unique<P2PConnectorScheduler>(std::move(cfg), nullptr);
+        ASSERT_TRUE(scheduler_->init());
+    }
+
 protected:
     std::vector<std::unique_ptr<TestRpcServer>> tp_broadcast_servers_;
     std::vector<std::string>                    tp_broadcast_addrs_;
@@ -159,6 +171,39 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnOK_BroadcastSuccess) {
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
         EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
         EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCancelCallCount(), 0);
+    }
+}
+
+TEST_F(P2PConnectorSchedulerTest, HandleRead_FiltersLinearLayersByAttentionType) {
+    rebuildSchedulerWithLayerAttnTypes({CacheGroupType::FULL, CacheGroupType::LINEAR});
+
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->initGroups(2, 2, {0, 1}, 1, {CacheGroupType::FULL, CacheGroupType::LINEAR});
+    resource->mutableBlockIds(0).assign({10, 11, 12, 13});
+    resource->mutableBlockIds(1).assign({NULL_BLOCK_IDX, 21, NULL_BLOCK_IDX, 25});
+    resource->cacheKeys() = {1000, 1001, 1002, 1003};
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    ErrorInfo error_info =
+        scheduler_->sendKVCache(resource, "test_linear_filter", 1009, decode_transfer_servers, currentTimeMs() + 1000);
+
+    ASSERT_TRUE(error_info.ok());
+    for (const auto& server : tp_broadcast_servers_) {
+        auto request = server->service()->getLastBroadcastTpRequest();
+        ASSERT_EQ(request.layer_blocks_size(), 2);
+
+        const auto& full_layer = request.layer_blocks(0);
+        EXPECT_EQ(full_layer.layer_id(), 0u);
+        EXPECT_EQ(full_layer.block_ids_size(), 4);
+
+        const auto& linear_layer = request.layer_blocks(1);
+        EXPECT_EQ(linear_layer.layer_id(), 1u);
+        ASSERT_EQ(linear_layer.block_ids_size(), 1);
+        ASSERT_EQ(linear_layer.cache_keys_size(), 1);
+        EXPECT_EQ(linear_layer.block_ids(0), 25u);
+        EXPECT_EQ(linear_layer.cache_keys(0), 1003);
     }
 }
 
