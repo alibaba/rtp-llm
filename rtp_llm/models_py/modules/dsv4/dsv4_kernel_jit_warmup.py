@@ -70,6 +70,8 @@ _FP8_MQA_LOGITS_JIT_WARMED_KEYS: set[tuple] = set()
 _SWA_SLOT_DEQUANT_JIT_WARMED_KEYS: set[tuple] = set()
 _DEEPGEMM_WARMUP_COMPILE_RETRIES = 2
 _TILELANG_WARMUP_COMPILE_RETRIES = 2
+_TRITON_WARMUP_COMPILE_RETRIES = 2
+_TRITON_WARMUP_TMPDIR_ENV = "DSV4_TRITON_WARMUP_TMPDIR"
 
 
 def _cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
@@ -249,6 +251,73 @@ def _is_tilelang_transient_nvcc_compile_error(error: BaseException) -> bool:
     return False
 
 
+def _iter_exception_chain(error: BaseException) -> Iterable[BaseException]:
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop()
+        obj_id = id(current)
+        if obj_id in seen:
+            continue
+        seen.add(obj_id)
+        yield current
+        for nested in (current.__cause__, current.__context__):
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+
+
+def _is_triton_transient_ptxas_compile_error(error: BaseException) -> bool:
+    saw_ptxas_failure = False
+    saw_tmp_log_missing = False
+    for current in _iter_exception_chain(error):
+        message = str(current)
+        if "ptxas" in message and "non-zero exit status" in message:
+            saw_ptxas_failure = True
+        if isinstance(current, FileNotFoundError):
+            filename = getattr(current, "filename", None) or message
+            basename = os.path.basename(str(filename).strip("'\""))
+            if basename.startswith("tmp") and basename.endswith(".log"):
+                saw_tmp_log_missing = True
+    return saw_ptxas_failure and saw_tmp_log_missing
+
+
+def _triton_warmup_rank_tmpdir(rank: int) -> str:
+    base_dir = (
+        os.environ.get(_TRITON_WARMUP_TMPDIR_ENV)
+        or os.environ.get("TRITON_CACHE_DIR")
+        or os.environ.get("DG_JIT_CACHE_DIR")
+        or "/tmp"
+    )
+    return os.path.join(
+        base_dir,
+        "rtp_llm_dsv4_triton_warmup_tmp",
+        f"rank_{int(rank)}",
+    )
+
+
+def _activate_triton_warmup_tmpdir() -> tuple[str, str | None]:
+    previous_tmpdir = os.environ.get("TMPDIR")
+    tmpdir = _triton_warmup_rank_tmpdir(_dist_rank())
+    try:
+        os.makedirs(tmpdir, exist_ok=True)
+    except Exception:
+        tmpdir = os.path.join(
+            "/tmp",
+            "rtp_llm_dsv4_triton_warmup_tmp",
+            f"rank_{_dist_rank()}",
+        )
+        os.makedirs(tmpdir, exist_ok=True)
+    os.environ["TMPDIR"] = tmpdir
+    return tmpdir, previous_tmpdir
+
+
+def _restore_tmpdir(previous_tmpdir: str | None) -> None:
+    if previous_tmpdir is None:
+        os.environ.pop("TMPDIR", None)
+    else:
+        os.environ["TMPDIR"] = previous_tmpdir
+
+
 def _run_deepgemm_warmup_launch_with_retry(
     label: str,
     detail: str,
@@ -316,6 +385,47 @@ def _run_tilelang_warmup_launch_with_retry(
             _sync_cuda(device)
             _release_cuda_cache(device)
             time.sleep(0.2 * attempt)
+
+    assert last_error is not None
+    raise last_error
+
+
+def _run_triton_warmup_launch_with_retry(
+    label: str,
+    detail: str,
+    launch_fn: Any,
+    *,
+    device: torch.device,
+) -> None:
+    """Retry transient Triton ptxas temp-file failures during startup warmup."""
+
+    last_error: BaseException | None = None
+    attempts = _TRITON_WARMUP_COMPILE_RETRIES + 1
+    tmpdir, previous_tmpdir = _activate_triton_warmup_tmpdir()
+    try:
+        logging.info("[%s] Triton warmup TMPDIR=%s", label, tmpdir)
+        for attempt in range(1, attempts + 1):
+            try:
+                launch_fn()
+                return
+            except Exception as error:
+                if not _is_triton_transient_ptxas_compile_error(error):
+                    raise
+                last_error = error
+                if attempt >= attempts:
+                    break
+                logging.warning(
+                    "[%s] %s hit transient Triton ptxas failure on attempt %d/%d; retrying",
+                    label,
+                    detail,
+                    attempt,
+                    attempts,
+                )
+                _sync_cuda(device)
+                _release_cuda_cache(device)
+                time.sleep(0.2 * attempt)
+    finally:
+        _restore_tmpdir(previous_tmpdir)
 
     assert last_error is not None
     raise last_error

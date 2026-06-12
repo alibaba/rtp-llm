@@ -1,9 +1,12 @@
 import inspect
 import os
+import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import torch
 import torch.nn as nn
@@ -46,6 +49,7 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _generate_mhc_prenorm_warmup_specs,
     _run_deepgemm_warmup_launch_with_retry,
     _run_tilelang_warmup_launch_with_retry,
+    _run_triton_warmup_launch_with_retry,
     _sm100_dense_layout_signature,
     resolve_dense_gemm_warmup_max_m,
 )
@@ -998,6 +1002,94 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             _run_tilelang_warmup_launch_with_retry(
                 "test",
                 "shape=(24, 28672)",
+                launch,
+                device=torch.device("cpu"),
+            )
+
+    def test_triton_warmup_retry_handles_ptxas_tmp_log_race(self):
+        calls = []
+
+        def launch():
+            calls.append(None)
+            if len(calls) == 1:
+                cause = RuntimeError(
+                    "Command '['/usr/local/cuda-13.2/bin/ptxas', '-lineinfo']' "
+                    "returned non-zero exit status 255."
+                )
+                raise FileNotFoundError(
+                    "[Errno 2] No such file or directory: "
+                    "'/jit_cache/rtp_llm_dsv4_triton_warmup_tmp/rank_3/tmpabc123.log'"
+                ) from cause
+
+        _run_triton_warmup_launch_with_retry(
+            "test",
+            "shape S=1 T=262144 H=128 D=512",
+            launch,
+            device=torch.device("cpu"),
+        )
+
+        self.assertEqual(len(calls), 2)
+
+    def test_triton_warmup_retry_handles_called_process_context(self):
+        calls = []
+
+        def launch():
+            calls.append(None)
+            if len(calls) == 1:
+                try:
+                    raise subprocess.CalledProcessError(255, ["ptxas", "-lineinfo"])
+                except subprocess.CalledProcessError:
+                    raise FileNotFoundError(
+                        "[Errno 2] No such file or directory: "
+                        "'/jit_cache/rtp_llm_dsv4_triton_warmup_tmp/rank_3/tmpabc123.log'"
+                    )
+
+        _run_triton_warmup_launch_with_retry(
+            "test",
+            "shape S=1 T=262144 H=128 D=512",
+            launch,
+            device=torch.device("cpu"),
+        )
+
+        self.assertEqual(len(calls), 2)
+
+    def test_triton_warmup_retry_uses_rank_local_tmpdir_and_restores(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "TRITON_CACHE_DIR": tmpdir,
+                    "WORLD_RANK": "3",
+                    "TMPDIR": "/old/tmp",
+                },
+                clear=True,
+            ):
+                _run_triton_warmup_launch_with_retry(
+                    "test",
+                    "shape S=1 T=16",
+                    lambda: None,
+                    device=torch.device("cpu"),
+                )
+
+                self.assertEqual(os.environ["TMPDIR"], "/old/tmp")
+                self.assertTrue(
+                    os.path.isdir(
+                        os.path.join(
+                            tmpdir,
+                            "rtp_llm_dsv4_triton_warmup_tmp",
+                            "rank_3",
+                        )
+                    )
+                )
+
+    def test_triton_warmup_retry_does_not_swallow_other_errors(self):
+        def launch():
+            raise FileNotFoundError("/tmp/not-a-triton-log.txt")
+
+        with self.assertRaisesRegex(FileNotFoundError, "not-a-triton"):
+            _run_triton_warmup_launch_with_retry(
+                "test",
+                "shape S=1 T=262144",
                 launch,
                 device=torch.device("cpu"),
             )

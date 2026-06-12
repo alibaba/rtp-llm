@@ -697,6 +697,9 @@ class DeepSeekV4Model(GptModelBase):
             from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
                 v4_indexer_score as _v4_idx,
             )
+            from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
+                _run_triton_warmup_launch_with_retry,
+            )
 
             if len(self.v4.layers) > 2:
                 _idx = self.v4.layers[2].attn.indexer  # first CSA layer (ratio=4)
@@ -714,15 +717,32 @@ class DeepSeekV4Model(GptModelBase):
                     (1, 1, _H), dtype=_torch.bfloat16, device=device_str
                 )
                 # Decode shape (no mask).
-                _v4_idx(_q_dec, _kv_dec, _w_dec, q_pos=None, compress_ratio=1)
+                _run_triton_warmup_launch_with_retry(
+                    "DSV4IndexerScore",
+                    f"decode shape S=1 T={_T_dec} H={_H} D={_D}",
+                    lambda: _v4_idx(
+                        _q_dec,
+                        _kv_dec,
+                        _w_dec,
+                        q_pos=None,
+                        compress_ratio=1,
+                    ),
+                    device=_torch.device(device_str),
+                )
                 # Prefill mask variant — only matters if CSA prefill goes through
                 # graph capture. Cheap to prewarm regardless.
-                _v4_idx(
-                    _q_dec,
-                    _kv_dec,
-                    _w_dec,
-                    q_pos=_torch.zeros((1, 1), dtype=_torch.int32, device=device_str),
-                    compress_ratio=_ratio,
+                _q_pos_dec = _torch.zeros((1, 1), dtype=_torch.int32, device=device_str)
+                _run_triton_warmup_launch_with_retry(
+                    "DSV4IndexerScore",
+                    f"prefill-mask shape S=1 T={_T_dec} H={_H} D={_D} ratio={_ratio}",
+                    lambda: _v4_idx(
+                        _q_dec,
+                        _kv_dec,
+                        _w_dec,
+                        q_pos=_q_pos_dec,
+                        compress_ratio=_ratio,
+                    ),
+                    device=_torch.device(device_str),
                 )
 
             if os.environ.get("DSV4_PREWARM_FLASH_MLA_SWA", "1") != "0":
