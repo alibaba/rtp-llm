@@ -35,6 +35,13 @@ CachedEnvFlag cacheEnvFlag(const char* env_name, const char* log_tag, const char
 
 // REBASE CONFLICT CONTEXT(cdc1b18b6): keep the new base broadcast timeout helper
 // and the source branch cached env flags for GLM5 MTP/device-input paths.
+bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
+    const char* env = std::getenv(env_name);
+    const bool  on  = env != nullptr && std::string(env) == "1";
+    RTP_LLM_LOG_INFO("[%s] %s=%s -> %s=%d", log_tag, env_name, env ? env : "(unset)", label, static_cast<int>(on));
+    return on;
+}
+
 int readEnvIntOnce(const char* env_name, int default_value, const char* log_tag) {
     const char* env   = std::getenv(env_name);
     int         value = default_value;

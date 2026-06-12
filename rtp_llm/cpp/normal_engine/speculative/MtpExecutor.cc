@@ -2622,6 +2622,15 @@ bool MtpExecutor::useAsyncDeviceState() const {
     return kAsyncDeviceStateFlag.on;
 }
 
+bool MtpExecutor::useAsyncPrepare() const {
+    static const bool logged = []() {
+        logCachedEnvFlag(kAsyncPrepareFlag);
+        return true;
+    }();
+    (void)logged;
+    return kAsyncPrepareFlag.on;
+}
+
 bool MtpExecutor::useDropBroadSync() const {
     static const bool logged = []() {
         logCachedEnvFlag(kDropBroadSyncFlag);
@@ -2879,6 +2888,15 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         auto status = processor->dispatchDecode(stream_groups_copy, spec_decode_copy, draft_prefill_copy);
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("[stream-async] dispatchDecode (worker) failed: %s", status.ToString().c_str());
+        }
+
+        // REBASE CONFLICT CONTEXT(518707c73): keep source branch targeted
+        // stream/event ordering for linear-attention KV swaps after the new base
+        // async dispatch worker finishes specUpdate/swapLinearBlocks.
+        for (auto& stream : worker_streams) {
+            auto event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+            event->record(cuda_graph::graphGetCurrentStream());
+            stream->setPendingSwapDoneEvent(std::static_pointer_cast<void>(event));
         }
     });
 

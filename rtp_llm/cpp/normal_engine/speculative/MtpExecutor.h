@@ -163,6 +163,8 @@ protected:
     // gating for GLM5 MTP; keep it with the new base stop_requested_ path.
     bool useAsyncDeviceState() const;
 
+    bool useAsyncPrepare() const;
+
     // Opt-in gate to skip the broad sync at decodeStep start.
     // Device state, epoch-guarded clears, and single-slotted workers preserve
     // correctness while bookkeeping overlaps the next step.

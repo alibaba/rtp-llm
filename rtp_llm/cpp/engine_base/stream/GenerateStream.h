@@ -496,6 +496,22 @@ public:
         return sp_output_buffer_;
     }
 
+    // REBASE CONFLICT CONTEXT(518707c73): source branch added an opaque CUDA
+    // event for linear-attention KV swaps; keep accessors with the new base
+    // async device-state fields so MtpExecutor can order the next target verify.
+    void setPendingSwapDoneEvent(std::shared_ptr<void> event) {
+        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
+        pending_swap_done_event_ = std::move(event);
+    }
+    std::shared_ptr<void> getPendingSwapDoneEvent() const {
+        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
+        return pending_swap_done_event_;
+    }
+    void clearPendingSwapDoneEvent() {
+        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
+        pending_swap_done_event_.reset();
+    }
+
     // Count worker claims on this stream's KV resource.
     // releaseResource waits for zero so worker-side update/specUpdate cannot
     // write into blocks already returned to the pool.
