@@ -243,6 +243,40 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         )
         self.assertEqual(shapes[("fp8", 16, 32)]["name"], "fp8_a")
 
+    def test_collect_dense_shapes_includes_model_level_mtp_projections(self):
+        root = nn.Module()
+        root.v4 = nn.Module()
+
+        MainFp8Linear = _module_type(
+            "CudaFp8DeepGEMMLinear",
+            {
+                "N": 512,
+                "K": 7168,
+                "weight": torch.empty((512, 7168), dtype=torch.bfloat16),
+                "weight_scales": torch.empty((512, 14), dtype=torch.int32),
+                "scale_ue8m0": True,
+            },
+        )
+        root.v4.add_module("main_dense", MainFp8Linear())
+
+        MtpFp8Linear = _module_type(
+            "CudaFp8DeepGEMMLinear",
+            {
+                "N": 7168,
+                "K": 7168,
+                "weight": torch.empty((7168, 7168), dtype=torch.bfloat16),
+                "weight_scales": torch.empty((56, 56), dtype=torch.int32),
+                "scale_ue8m0": True,
+            },
+        )
+        root.e_proj = MtpFp8Linear()
+        root.h_proj = MtpFp8Linear()
+
+        shapes = _collect_dsv4_dense_gemm_shapes(root)
+        self.assertIn(("fp8", 512, 7168), shapes)
+        self.assertIn(("fp8", 7168, 7168), shapes)
+        self.assertEqual(shapes[("fp8", 7168, 7168)]["name"], "e_proj")
+
     def test_collect_mhc_prenorm_shapes_uses_tilelang_units_only(self):
         root = nn.Module()
         TileLangHCUnit = _module_type(
