@@ -152,10 +152,12 @@ public class DispatcherInspectionHandler {
             JSONArray targetsOut = new JSONArray();
             for (BatchScheduleTarget t : targets) {
                 JSONObject addr = new JSONObject();
-                addr.put("role", t.getRole().name());
+                addr.put("role", t.getRole() == null ? null : t.getRole().name());
                 addr.put("ip", t.getServerIp());
                 addr.put("httpPort", t.getHttpPort());
                 addr.put("grpcPort", t.getGrpcPort());
+                addr.put("arpcPort", t.getArpcPort());
+                addr.put("preAssignable", BatchChunkAssembler.isPreAssignable(t));
                 targetsOut.add(addr);
             }
             out.put("preAssignTargets", targetsOut);

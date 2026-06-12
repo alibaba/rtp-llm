@@ -37,6 +37,7 @@ class RoundRobinLoadBalancerTest {
 
     @BeforeEach
     void setUp() {
+        LoadBalanceStrategyFactory.resetForTesting();
         clearWorkerMaps();
         engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         configService = new ConfigService();
@@ -47,6 +48,7 @@ class RoundRobinLoadBalancerTest {
     @AfterEach
     void tearDown() {
         clearWorkerMaps();
+        LoadBalanceStrategyFactory.resetForTesting();
     }
 
     @Test

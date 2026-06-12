@@ -15,15 +15,17 @@ public interface PvRecord {
     boolean isSuccess();
 
     default void emit(org.slf4j.Logger pvLogger) {
+        String json;
         try {
-            String json = JsonUtils.toStringOrEmpty(this);
-            if (isSuccess()) {
-                pvLogger.info(json);
-            } else {
-                pvLogger.error(json);
-            }
+            json = JsonUtils.toString(this);
         } catch (Exception ex) {
             Logger.error("Failed to serialize PV log data", ex);
+            return;
+        }
+        if (isSuccess()) {
+            pvLogger.info(json);
+        } else {
+            pvLogger.error(json);
         }
     }
 }

@@ -61,10 +61,12 @@ public class BatchHandler {
                 return badRequest("expected a JSON object body");
             }
             JSONArray arr = BatchBodyParser.findArrayField(body, spec.getRequestArrayField());
-            if (arr == null) {
-                // Registered path, but the body is not batch-shaped (legacy `prompt`,
-                // single-string `input`): forward verbatim to one FE per the registry
-                // contract. PassthroughClient emits its own pv record.
+            if (arr == null || !spec.canSplit(arr)) {
+                // Registered path, but this body is not a splittable batch: either the array
+                // field is absent (legacy `prompt`, single-string `input`), or it is a single
+                // structured input the endpoint must keep whole (e.g. /v1/embeddings receiving
+                // one multimodal input as List[ContentPart]/List[ChatMessage]). Forward verbatim
+                // to one FE per the registry contract. PassthroughClient emits its own pv record.
                 delegatedToPassthrough.set(true);
                 return passthroughClient.forward(request, bytes);
             }

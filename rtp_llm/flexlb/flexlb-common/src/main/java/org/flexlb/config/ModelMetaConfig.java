@@ -31,6 +31,15 @@ public class ModelMetaConfig {
         }
     }
 
+    /** Removes a registered route. Lets tests undo a {@link #putServiceRoute} so the
+     *  process-wide route table stays free of cross-test residue. */
+    public static void removeServiceRoute(String serviceId) {
+        ServiceRoute removed = modelServiceRoute.remove(serviceId);
+        if (removed != null && Boolean.TRUE.equals(removed.getLoadBalance())) {
+            loadBalanceSyncModels.remove(IdUtils.getModelNameByServiceId(removed.getServiceId()));
+        }
+    }
+
     public ServiceRoute getServiceRoute(String serviceId) {
         return modelServiceRoute.get(serviceId);
 

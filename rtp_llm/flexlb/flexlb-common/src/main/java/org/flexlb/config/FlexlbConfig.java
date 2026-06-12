@@ -3,9 +3,9 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.Setter;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.EngineType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.enums.EngineType;
 
 import java.util.Collection;
 

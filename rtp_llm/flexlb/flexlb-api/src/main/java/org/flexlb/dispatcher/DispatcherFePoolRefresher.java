@@ -56,7 +56,22 @@ public class DispatcherFePoolRefresher {
             Logger.warn("dispatcher FE pool boot seed failed (listener/poll will retry): serviceId={}, err={}: {}",
                     serviceId, e.getClass().getSimpleName(), e.getMessage());
         }
-        serviceDiscovery.listen(serviceId, hosts -> applyUrls(toUrls(hosts), "listener"));
+        // The discovery client drives this callback from its own push thread; an exception
+        // escaping here (or out of listen() itself) could kill that thread and silence future
+        // pushes. Swallow and lean on the 30s poll to repair.
+        try {
+            serviceDiscovery.listen(serviceId, hosts -> {
+                try {
+                    applyUrls(toUrls(hosts), "listener");
+                } catch (Exception e) {
+                    Logger.warn("dispatcher FE pool listener callback failed (poll will repair): "
+                            + "serviceId={}, err={}: {}", serviceId, e.getClass().getSimpleName(), e.getMessage());
+                }
+            });
+        } catch (Exception e) {
+            Logger.warn("dispatcher FE pool listen() registration failed (poll will repair): "
+                    + "serviceId={}, err={}: {}", serviceId, e.getClass().getSimpleName(), e.getMessage());
+        }
     }
 
     /**

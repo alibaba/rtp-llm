@@ -1,7 +1,5 @@
 package org.flexlb.dispatcher;
 
-import static org.flexlb.dispatcher.BatchEndpointSpec.FailedItemFactory;
-
 import org.junit.jupiter.api.Test;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.springframework.web.reactive.function.server.RouterFunction;
@@ -9,6 +7,7 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 
 import java.util.List;
 
+import static org.flexlb.dispatcher.BatchEndpointSpec.FailedItemFactory;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -20,10 +19,10 @@ class DispatchRouterTest {
 
     private static final BatchEndpointSpec BATCH_INFER =
             new BatchEndpointSpec("/batch_infer", "prompt_batch", "response_batch",
-                    FailedItemFactory.NULL, null, false);
+                    FailedItemFactory.NULL, null, false, false);
     private static final BatchEndpointSpec EMBEDDINGS =
             new BatchEndpointSpec("/v1/embeddings", "input", "data",
-                    FailedItemFactory.EMBEDDING_NULL, EmbeddingMerger.INSTANCE, true);
+                    FailedItemFactory.EMBEDDING_NULL, EmbeddingMerger.INSTANCE, true, true);
 
     @Test
     void nonDispatcherPathsAreNotMatched() {

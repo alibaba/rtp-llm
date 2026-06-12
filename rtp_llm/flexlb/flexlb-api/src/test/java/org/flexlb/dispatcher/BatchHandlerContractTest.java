@@ -107,6 +107,38 @@ class BatchHandlerContractTest {
     }
 
     @Test
+    void objectElementEmbeddingsInputFallsThroughToPassthrough() {
+        // A single multimodal/chat embedding input is an array of ContentPart/ChatMessage
+        // objects — one input, not a batch. Splitting it per element would fragment the
+        // input into broken sub-requests.
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/embeddings");
+        stubBody("{\"model\":\"m\",\"input\":["
+                + "{\"type\":\"image_url\",\"image_url\":{\"url\":\"http://x/y.png\"}},"
+                + "{\"type\":\"text\",\"text\":\"describe\"}]}");
+        ServerResponse passthroughResponse = stubPassthroughResponse();
+
+        ServerResponse out = handler.handle(serverRequest, spec).block();
+
+        assertSame(passthroughResponse, out,
+                "object-element input is a single embedding input and must reach FE whole");
+        verifyNoInteractions(fanoutService, batchScheduleClient);
+    }
+
+    @Test
+    void stringListEmbeddingsInputStillSplits() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/embeddings");
+        stubBody("{\"model\":\"m\",\"input\":[\"a\",\"b\",\"c\"]}");
+        when(fanoutService.dispatchChunks(anyString(), anyList(), any()))
+                .thenReturn(Mono.just(List.of(SubBatchResult.failed(3, 0, "fe_http_500"))));
+
+        handler.handle(serverRequest, spec).block();
+
+        verifyNoInteractions(passthroughClient);
+        org.mockito.Mockito.verify(fanoutService)
+                .dispatchChunks(eq("/v1/embeddings"), anyList(), eq(spec));
+    }
+
+    @Test
     void nonObjectBodyIsRejectedWith400WithoutTouchingFe() {
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
         stubBody("[1,2,3]");

@@ -4,7 +4,9 @@ import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.enums.EngineType;
+import org.flexlb.exception.ServiceDiscoveryException;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -113,6 +115,8 @@ class EngineSyncRunnerTest {
         assertTrue(status.isAlive());
         assertEquals("group-a", status.getGroup());
         assertEquals("site-a", status.getSite());
+        assertEquals(roleType.getCode(), status.getRole(),
+                "role must use the RoleType code format that RoleType.matches() consumers expect");
         assertTrue(status.getStatusLastUpdateTime().get() > 0);
     }
 
@@ -174,6 +178,27 @@ class EngineSyncRunnerTest {
         assertFalse(stale.isAlive(),
                 "a worker missing from discovery must be non-routable immediately, not after the removal threshold");
         assertTrue(workerStatusMap.get("10.0.0.1:23950").isAlive());
+    }
+
+    @Test
+    void embedding_engine_keeps_workers_alive_when_discovery_fails() {
+        WorkerStatus alive = new WorkerStatus();
+        alive.setIp("10.0.0.9");
+        alive.setPort(23950);
+        alive.setAlive(true);
+        alive.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
+        workerStatusMap.put("10.0.0.9:23950", alive);
+
+        when(workerAddressService.getEngineWorkerList(modelName, roleType))
+                .thenThrow(new ServiceDiscoveryException(
+                        BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, "vipserver down", null));
+
+        newRunner(EngineType.EMBEDDING).run();
+
+        assertTrue(alive.isAlive(),
+                "a failed discovery round must keep the previous alive state — only a successful "
+                        + "round may mark embedding workers dead");
+        assertTrue(workerStatusMap.containsKey("10.0.0.9:23950"));
     }
 
     @Test

@@ -11,8 +11,8 @@ import reactor.test.StepVerifier;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.flexlb.dispatcher.DispatcherTestSupport.fePool;
 import static org.flexlb.dispatcher.DispatcherTestSupport.feHealthChecker;
+import static org.flexlb.dispatcher.DispatcherTestSupport.fePool;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
