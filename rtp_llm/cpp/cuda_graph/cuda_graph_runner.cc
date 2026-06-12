@@ -441,7 +441,9 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
 
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
-    inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
+    // Use arange instead of zeros to diversify token routing in MoE models,
+    // preventing all tokens from being routed to the same expert rank.
+    inputs.input_ids = torch::arange(max_num_token_, options_cuda_int32_);
     // input_lengths [batch_size, int32] (decode only)
     inputs.attention_inputs.input_lengths   = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32_);
     inputs.attention_inputs.input_lengths   = inputs.attention_inputs.input_lengths.pin_memory();
@@ -616,8 +618,6 @@ void CudaGraphRunner::initCapture() {
         }
 
         PyModelInputs inputs;
-        // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
-        inputs.input_ids     = torch::zeros({max_num_token_}, options_cuda_int32_);
         inputs.input_hiddens = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
@@ -632,7 +632,15 @@ void CudaGraphRunner::initCapture() {
         // get real output data type (params already prepared in attn impl __init__/create_params)
         auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
-        py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+        try {
+            py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("initCapture forward failed: %s", e.what());
+            throw;
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("initCapture forward failed with unknown exception");
+            throw;
+        }
         RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);
