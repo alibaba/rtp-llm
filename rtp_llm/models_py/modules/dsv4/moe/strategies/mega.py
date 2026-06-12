@@ -37,6 +37,7 @@ from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from ..warmup_sync import sync_cuda_graph_warmup_ranks
 
 _MEGA_MOE_JIT_WARMED_KEYS: set[tuple] = set()
+_MEGA_MOE_NVCC_TMPDIR_ENV = "DSV4_MEGA_MOE_NVCC_TMPDIR"
 _PRE_KERNEL_BARRIER_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER"
 _PRE_KERNEL_BARRIER_VERBOSE_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER_VERBOSE"
 _PRE_KERNEL_BARRIER_LOGGED_KEYS: set[tuple[int, int]] = set()
@@ -49,6 +50,45 @@ def _mega_output_capacity(buf, requested_capacity: int) -> int:
     if aligned_capacity is not None:
         capacity = max(capacity, int(aligned_capacity))
     return capacity
+
+
+def _mega_moe_rank_nvcc_tmpdir(rank: int) -> str:
+    base_dir = (
+        os.environ.get(_MEGA_MOE_NVCC_TMPDIR_ENV)
+        or os.environ.get("DG_JIT_CACHE_DIR")
+        or os.environ.get("TRITON_CACHE_DIR")
+        or "/tmp"
+    )
+    return os.path.join(
+        base_dir,
+        "rtp_llm_dsv4_mega_moe_nvcc",
+        f"rank_{int(rank)}",
+    )
+
+
+def _activate_mega_moe_rank_nvcc_tmpdir(rank: int) -> tuple[str, str | None]:
+    """Use a rank-local nvcc temp dir during MegaMoE warmup compilation."""
+
+    previous_tmpdir = os.environ.get("TMPDIR")
+    tmpdir = _mega_moe_rank_nvcc_tmpdir(rank)
+    try:
+        os.makedirs(tmpdir, exist_ok=True)
+    except Exception:
+        tmpdir = os.path.join(
+            "/tmp",
+            "rtp_llm_dsv4_mega_moe_nvcc",
+            f"rank_{int(rank)}",
+        )
+        os.makedirs(tmpdir, exist_ok=True)
+    os.environ["TMPDIR"] = tmpdir
+    return tmpdir, previous_tmpdir
+
+
+def _restore_tmpdir(previous_tmpdir: str | None) -> None:
+    if previous_tmpdir is None:
+        os.environ.pop("TMPDIR", None)
+    else:
+        os.environ["TMPDIR"] = previous_tmpdir
 
 
 def _pre_kernel_barrier_enabled() -> bool:
@@ -305,7 +345,13 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 cfg.moe_inter_dim,
                 num_sms,
             )
-        self.warmup_jit(token_counts)
+        tmpdir, previous_tmpdir = _activate_mega_moe_rank_nvcc_tmpdir(rank)
+        try:
+            if rank == 0:
+                logging.info("[DSV4 MegaMoE] rank-local nvcc TMPDIR=%s", tmpdir)
+            self.warmup_jit(token_counts)
+        finally:
+            _restore_tmpdir(previous_tmpdir)
         _MEGA_MOE_JIT_WARMED_KEYS.add(warmup_key)
         if rank == 0:
             logging.info(
