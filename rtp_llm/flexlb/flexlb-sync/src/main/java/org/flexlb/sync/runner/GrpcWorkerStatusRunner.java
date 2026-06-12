@@ -119,6 +119,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 workerStatus.setAlive(newWorkerStatus.isAlive());
                 workerStatus.setDpSize(newWorkerStatus.getDpSize());
                 workerStatus.setTpSize(newWorkerStatus.getTpSize());
+                workerStatus.setDpStatuses(newWorkerStatus.getDpStatuses());
 
                 // Update status timestamp and record actual sync interval
                 long nowUs = System.nanoTime() / 1000;
@@ -150,6 +151,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setDpSize(newWorkerStatus.getDpSize());
             workerStatus.setTpSize(newWorkerStatus.getTpSize());
             workerStatus.setAlive(newWorkerStatus.isAlive());
+            workerStatus.setDpStatuses(newWorkerStatus.getDpStatuses());
             workerStatus.getStatusVersion().set(responseVersion != null ? responseVersion : -1L);
             workerStatus.getLatestFinishedTaskVersion().set(newWorkerStatus.getLatestFinishedVersion() != null ? newWorkerStatus.getLatestFinishedVersion() : -1L);
 

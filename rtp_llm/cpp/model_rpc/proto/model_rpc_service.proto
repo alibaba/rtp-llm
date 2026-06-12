@@ -2,6 +2,23 @@
 syntax = "proto3";
 import "google/protobuf/wrappers.proto";
 
+// =============================================================================
+// Master ↔ Engine boundary contract (DP-aware deployments)
+// =============================================================================
+// 1. Service discovery exposes EXACTLY ONE address per pod, which is DP0's
+//    endpoint (the leader rank). Master MUST NOT directly connect to dp_rank>0.
+// 2. Cross-rank fan-out (status aggregation, batch dispatch) is handled inside
+//    the pod via DpInternalService. DP0 collects per-rank status via
+//    DpInternalGetWorkerStatus / DpInternalGetCacheStatus and returns the
+//    aggregated view to Master.
+// 3. WorkerStatusPB / CacheStatusPB outer fields are aggregate-of-pod
+//    (sum / max / min / AND / union). Per-rank breakdown lives in
+//    dp_status[] / dp_cache[], filled only by DP0 when dp_size>1.
+// 4. dp_size==1 is the default; outer fields then equal the only rank's
+//    values, dp_status[] / dp_cache[] are empty, and Master treats the pod
+//    as a single-point worker (legacy ShortestTTFT/WeightedCache strategies).
+// =============================================================================
+
 message TensorPB {
     enum DataType {
         FP32 = 0;
@@ -25,6 +42,10 @@ message IntMatrix {
     repeated IntVector rows = 1;
 }
 
+// Endpoint of one role inside a pod. Master service discovery exposes exactly
+// one RoleAddrPB per (pod, role) — and when dp_size>1 that address is always
+// DP0's. Per-rank endpoints (for dp_rank>0) are NOT registered externally;
+// they live inside the pod and are reached only by DP0 via DpInternalService.
 message RoleAddrPB {
     enum RoleType {
         PDFUSION = 0;
@@ -146,6 +167,18 @@ message GenerateInputPB {
     int64 start_time = 6;
     int32 batch_group_size = 7;
     google.protobuf.Int64Value batch_group_id = 8;
+    // V1-α DP batching: assigned by Master at schedule time. Engine MUST pin the
+    // request to this DP slot and MUST NOT reshuffle. The DP barrier only kicks in
+    // on the pd_separation path (max_new_tokens > 1 && num_beams <= 1).
+    int64 dp_rank = 9;
+    // V1-α DP batching: prompt prefix block hashes precomputed by Master so prefill
+    // can skip re-hashing. Same source as Request.block_cache_keys on the
+    // Master HTTP /rtp_llm/schedule entry.
+    repeated int64 cache_hash_key = 10;
+    // V1 DP-controller: placeholder injected by DP0 into empty slots of a partial
+    // batch so every DP worker runs in lockstep. V1 always ships full batches, so
+    // this remains false; V1.x partial-batch handling will set it.
+    bool is_fake_query = 11;
 }
 
 message AuxInfoPB {
@@ -345,12 +378,26 @@ message CacheVersionPB {
     bool need_cache_keys = 2;
 }
 
+// Aggregate-of-pod cache status returned by DP0.
+//   available_kv_cache / total_kv_cache : sum across DP ranks
+//   cache_keys                          : union across DP ranks (any-rank match)
+//   dp_cache[]                          : per-rank breakdown (empty when dp_size==1);
+//                                         each element's own dp_cache[] is empty
+//                                         (peers respond via DpInternalGetCacheStatus
+//                                         and never re-aggregate, so the recursion
+//                                         terminates at depth 1)
+//   ip / grpc_port                      : populated by DP0 on each dp_cache[] entry
+//                                         from local ParallelismConfig.dp_peer_addrs;
+//                                         left empty on the outer message
 message CacheStatusPB {
     int64 available_kv_cache = 1;
     int64 total_kv_cache = 2;
     int64 block_size = 3;
     int64 version = 4;
     map<int64, bool> cache_keys = 5;
+    repeated CacheStatusPB dp_cache = 6;
+    string ip = 7;
+    int32 grpc_port = 8;
 }
 
 message UpdateSchedulerInfoRequestPB {
@@ -402,6 +449,22 @@ message UpdateWeightsRequestPB {
     string method = 3;
 }
 
+// Aggregate-of-pod worker status returned by DP0.
+//   available_concurrency / waiting_query_len / running_query_len : sum across DP ranks
+//   step_latency_ms                                               : max
+//   iterate_count / latest_finished_version                       : min (safe lower bound)
+//   alive                                                         : AND
+//   running_task_info / finished_task_list                        : union (tasks carry dp_rank)
+//   dp_status[]                                                   : per-rank breakdown (empty
+//                                                                   when dp_size==1); each
+//                                                                   element's own dp_status[]
+//                                                                   is empty (recursion
+//                                                                   terminates at depth 1)
+//   ip / grpc_port                                                : populated by DP0 on each
+//                                                                   dp_status[] entry; left
+//                                                                   empty on the outer message
+//
+// dp_size==1 callers see the legacy flat message — outer fields equal the only rank's values.
 message WorkerStatusPB {
     string role = 1;
     int32 available_concurrency = 2;
@@ -417,6 +480,9 @@ message WorkerStatusPB {
     bool alive = 13;
     string precision = 14;
     int64 latest_finished_version = 15;
+    repeated WorkerStatusPB dp_status = 16;
+    string ip = 17;
+    int32 grpc_port = 18;
 }
 
 message EmbeddingInputPB {
@@ -590,6 +656,28 @@ message FunctionResponsePB {
 
 message BatchGenerateInputPB {
     repeated GenerateInputPB inputs = 1;
+    // V1-α DP batching: per-batch unique ID assigned by Master, used for ack
+    // correlation, lookup, and cascade Cancel. Required for the async Enqueue path;
+    // the legacy synchronous BatchGenerateCall ignores it.
+    int64 batch_id = 2;
+}
+
+// V1-α DP batching: Master.Enqueue acknowledgement, returned immediately
+// (before prefill actually runs).
+message EnqueueAckPB {
+    int64 batch_id = 1;
+    bool accepted = 2;
+    string error_message = 3;
+}
+
+// V1-α DP batching: Frontend → Decode token-stream pull request.
+message FetchRequestPB {
+    int64 request_id = 1;
+}
+
+// V1-α DP batching: Master → P/D cancel request. Idempotent.
+message CancelRequestPB {
+    int64 request_id = 1;
 }
 
 message BatchGenerateResultPB {
@@ -606,6 +694,18 @@ service RpcService {
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);
     rpc BatchGenerateCall(BatchGenerateInputPB) returns (BatchGenerateOutputsPB);
+    // V1-α DP batching: Master → Prefill async fire-and-forget batch submission.
+    // Engine MUST treat every input sharing the same batch_id as a DP-aligned atomic
+    // step: forward together in one step, never split, never interleaved with other
+    // queued requests, and slot-pinned by input.dp_rank.
+    rpc Enqueue(BatchGenerateInputPB) returns (EnqueueAckPB);
+    // V1-α DP batching: Frontend → Decode token stream pull by request_id, replacing
+    // the legacy GenerateStreamCall→Prefill path (KV is still pushed from Prefill to
+    // Decode by RemoteGenerate).
+    rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
+    // V1-α DP batching: Master → P/D cascade cancel. Idempotent — unknown or
+    // already-completed request_ids also return success.
+    rpc Cancel(CancelRequestPB) returns (EmptyPB);
     rpc RemoteLoad(BroadcastLoadRequestPB) returns (BroadcastLoadResponsePB);
     rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
@@ -635,4 +735,32 @@ service MultimodalRpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
+}
+
+// Intra-pod ONLY. DP0 fan-out to peer DP workers (dp_rank > 0). Master / FlexLB
+// / Frontend MUST NOT target this service — peer endpoints are not registered
+// in service discovery and the responses are NOT aggregated (they are the
+// caller-local view, used by DP0 to assemble the outer aggregate).
+message DpInternalEnqueueRequestPB {
+    GenerateInputPB input = 1;
+}
+
+message DpInternalEnqueueResponsePB {
+    int64 request_id = 1;
+    ErrorDetailsPB error_info = 2;
+}
+
+service DpInternalService {
+    // DP0 → peer rank: deliver one slot of a batch. Atomicity / DP barrier are
+    // enforced collectively by all peers having received their slot before the
+    // next forward step.
+    rpc DpInternalEnqueue(DpInternalEnqueueRequestPB) returns (DpInternalEnqueueResponsePB);
+    // DP0 → peer rank: probe local status to build the outer
+    // WorkerStatusPB.dp_status / CacheStatusPB.dp_cache. Peer returns its own
+    // local view; never re-aggregates (the outer dp_status[]/dp_cache[] on the
+    // peer response stays empty, terminating the recursion at depth 1).
+    rpc DpInternalGetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
+    rpc DpInternalGetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
+    // DP0 → peer rank: cascade cancel for partial Enqueue rollback. Idempotent.
+    rpc DpInternalCancel(CancelRequestPB) returns (EmptyPB);
 }

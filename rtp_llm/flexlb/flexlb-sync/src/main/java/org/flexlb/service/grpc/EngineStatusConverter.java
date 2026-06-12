@@ -1,11 +1,15 @@
 package org.flexlb.service.grpc;
 
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.DpRankCacheStatus;
+import org.flexlb.dao.master.DpRankStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.domain.worker.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -47,7 +51,28 @@ public class EngineStatusConverter {
         // Convert finished task list
         response.setFinishedTaskInfo(convertToTaskInfoList(workerStatusPB.getFinishedTaskListList()));
 
+        if (workerStatusPB.getDpSize() > 1 && workerStatusPB.getDpStatusCount() > 0) {
+            response.setDpStatuses(convertDpStatusList(workerStatusPB.getDpStatusList()));
+        }
+
         return response;
+    }
+
+    private static List<DpRankStatus> convertDpStatusList(List<EngineRpcService.WorkerStatusPB> dpStatusList) {
+        List<DpRankStatus> out = new ArrayList<>(dpStatusList.size());
+        for (int rank = 0; rank < dpStatusList.size(); rank++) {
+            EngineRpcService.WorkerStatusPB pb = dpStatusList.get(rank);
+            out.add(new DpRankStatus(
+                    rank,
+                    pb.getIp(),
+                    pb.getGrpcPort(),
+                    pb.getAvailableConcurrency(),
+                    pb.getRunningQueryLen(),
+                    pb.getWaitingQueryLen(),
+                    pb.getIterateCount(),
+                    pb.getAlive()));
+        }
+        return out;
     }
 
     /**
@@ -64,7 +89,28 @@ public class EngineStatusConverter {
         Set<Long> cachedKeysSet = cacheKeysMap.keySet();
         cacheStatus.setCachedKeys(cachedKeysSet);
         cacheStatus.setCacheKeySize(cacheKeysMap.size());
+
+        if (cacheStatusPB.getDpCacheCount() > 0) {
+            cacheStatus.setDpCaches(convertDpCacheList(cacheStatusPB.getDpCacheList()));
+        }
+
         return cacheStatus;
+    }
+
+    private static List<DpRankCacheStatus> convertDpCacheList(List<EngineRpcService.CacheStatusPB> dpCacheList) {
+        List<DpRankCacheStatus> out = new ArrayList<>(dpCacheList.size());
+        for (int rank = 0; rank < dpCacheList.size(); rank++) {
+            EngineRpcService.CacheStatusPB pb = dpCacheList.get(rank);
+            out.add(new DpRankCacheStatus(
+                    rank,
+                    pb.getIp(),
+                    pb.getGrpcPort(),
+                    pb.getAvailableKvCache(),
+                    pb.getTotalKvCache(),
+                    pb.getBlockSize(),
+                    new HashSet<>(pb.getCacheKeysMap().keySet())));
+        }
+        return out;
     }
 
     /**
