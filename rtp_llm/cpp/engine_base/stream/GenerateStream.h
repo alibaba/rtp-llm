@@ -36,6 +36,8 @@ struct StreamUpdateInfo {
     const torch::Tensor all_hidden_states;
     bool                update_remote_generate = true;
     bool                force_update_info      = false;
+    // prompt scoring
+    std::optional<PromptLogitsOutput> prompt_logits;
 };
 
 struct StreamSpecUpdateInfo {
@@ -171,6 +173,7 @@ public:
     bool   calculateLoss() const;
     bool   calculateSoftmaxProbs() const;
     bool   returnLogits() const;
+    bool   returnPromptLogits() const;
     bool   returnCumLogProbs() const;
     bool   genTimeline() const;
     int    profileStep() const;

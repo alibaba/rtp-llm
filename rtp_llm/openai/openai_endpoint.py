@@ -6,6 +6,7 @@ from typing import Any, AsyncGenerator, List, Optional
 
 from fastapi import Request
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, ReturnAllProbsMode
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig
@@ -214,6 +215,28 @@ class OpenaiEndpoint(object):
                     config.return_all_probs = ReturnAllProbsMode.DEFAULT
         if request.logprobs or request.functions:
             config.is_streaming = True
+        if request.prompt_logprobs is not None:
+            if request.prompt_logprobs <= 0:
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    f"prompt_logprobs must be positive, got {request.prompt_logprobs}",
+                )
+            config.return_prompt_logits = True
+            config.prompt_logits_top_k = request.prompt_logprobs
+            config.max_new_tokens = 1
+            config.is_streaming = False
+            config.reuse_cache = False
+            request.stream = False
+        if config.return_prompt_logits and request.prompt_logprobs is None:
+            if config.prompt_logits_top_k <= 0:
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    f"prompt_logits_top_k must be positive, got {config.prompt_logits_top_k}",
+                )
+            config.max_new_tokens = min(config.max_new_tokens, 1)
+            config.is_streaming = False
+            config.reuse_cache = False
+            request.stream = False
         config.convert_select_tokens(len(self.tokenizer), self.tokenizer)
 
         if (
@@ -410,6 +433,8 @@ class OpenaiEndpoint(object):
         debug_info: Optional[DebugInfo],
         tokenizer: Optional[Any] = None,
     ) -> CompleteResponseAsyncGenerator:
+        captured_prompt_logits = {}
+
         async def response_generator():
             debug_info_responded = False
 
@@ -427,6 +452,9 @@ class OpenaiEndpoint(object):
                         for output_ids in response.extra_outputs.output_ids
                     ]
 
+                if response.prompt_logits is not None:
+                    captured_prompt_logits["data"] = response.prompt_logits
+
                 yield ChatCompletionStreamResponse(
                     choices=response.choices,
                     usage=response.usage,
@@ -436,13 +464,16 @@ class OpenaiEndpoint(object):
                 )
                 debug_info_responded = True
 
-        complete_response_collect_func = partial(
-            OpenaiEndpoint._collect_complete_response,
-            debug_info=debug_info,
-            tokenizer=tokenizer,
-        )
+        async def collect_with_prompt_logits(generator):
+            resp = await OpenaiEndpoint._collect_complete_response(
+                generator, debug_info=debug_info, tokenizer=tokenizer
+            )
+            if "data" in captured_prompt_logits:
+                resp.prompt_logprobs = captured_prompt_logits["data"]
+            return resp
+
         return CompleteResponseAsyncGenerator(
-            response_generator(), complete_response_collect_func
+            response_generator(), collect_with_prompt_logits
         )
 
     def _get_debug_info(
@@ -500,6 +531,12 @@ class OpenaiEndpoint(object):
         )
 
         mm_inputs = rendered_input.multimodal_inputs
+
+        if generate_config.return_prompt_logits and mm_inputs:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "prompt scoring does not support multimodal inputs",
+            )
 
         if generate_config.sp_advice_prompt != "":
             generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
@@ -575,6 +612,11 @@ class OpenaiEndpoint(object):
             if chat_request.stream:
                 raise ValueError(
                     f"batch chat completion does not support streaming (request index {i})"
+                )
+            if chat_request.prompt_logprobs is not None:
+                raise ValueError(
+                    f"batch chat completion does not support prompt_logprobs (request index {i}), "
+                    "use General protocol with force_batch instead"
                 )
             chat_request.stream = False
             gen_input, generate_config = self._prepare_chat_input(

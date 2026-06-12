@@ -109,6 +109,19 @@ def trans_input(input_py: GenerateInput):
     )
     generate_config_pb.calculate_loss = input_py.generate_config.calculate_loss
     generate_config_pb.return_logits = input_py.generate_config.return_logits
+    generate_config_pb.return_prompt_logits = (
+        input_py.generate_config.return_prompt_logits
+    )
+    generate_config_pb.prompt_logits_top_k = (
+        input_py.generate_config.prompt_logits_top_k
+    )
+    generate_config_pb.prompt_logits_start = (
+        input_py.generate_config.prompt_logits_start
+    )
+    generate_config_pb.prompt_logits_end = input_py.generate_config.prompt_logits_end
+    generate_config_pb.return_target_logprob = (
+        input_py.generate_config.return_target_logprob
+    )
     generate_config_pb.return_incremental = input_py.generate_config.return_incremental
     generate_config_pb.return_hidden_states = (
         input_py.generate_config.return_hidden_states
@@ -170,9 +183,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.combo_token_size = input_py.generate_config.combo_token_size
     for i in range(len(input_py.generate_config.banned_combo_token_ids)):
         banned_combo = generate_config_pb.banned_combo_token_ids.rows.add()
-        banned_combo.values.extend(
-            input_py.generate_config.banned_combo_token_ids[i]
-        )
+        banned_combo.values.extend(input_py.generate_config.banned_combo_token_ids[i])
 
     for role_addr in input_py.generate_config.role_addrs:
         role_addr_pb = RoleAddrPB()
@@ -300,6 +311,23 @@ def trans_output(
         else None
     )
 
+    prompt_logits_data = None
+    if output_pb.HasField("prompt_logits") and output_pb.prompt_logits.HasField(
+        "topk_logprobs"
+    ):
+        pl_pb = output_pb.prompt_logits
+        prompt_logits_data = {
+            "topk_logprobs": trans_tensor(pl_pb.topk_logprobs),
+            "topk_token_ids": trans_tensor(pl_pb.topk_token_ids),
+            "target_logprobs": (
+                trans_tensor(pl_pb.target_logprobs)
+                if pl_pb.HasField("target_logprobs")
+                else None
+            ),
+            "start_pos": pl_pb.start_pos,
+            "end_pos": pl_pb.end_pos,
+        }
+
     outputs_py = GenerateOutputs()
     input_token_ids = input_py.token_ids.reshape(1, -1)
 
@@ -376,6 +404,9 @@ def trans_output(
 
         if all_all_probs is not None:
             output_py.all_probs = all_all_probs[i]
+
+        if prompt_logits_data is not None:
+            output_py.prompt_logits = prompt_logits_data
 
         if (
             logits_index is not None

@@ -56,6 +56,11 @@ public:
     int                           calculate_loss           = 0;
     int                           hidden_states_cut_dim    = 0;
     bool                          return_logits            = false;
+    bool                          return_prompt_logits     = false;
+    int                           prompt_logits_top_k      = 64;
+    int                           prompt_logits_start      = -1;
+    int                           prompt_logits_end        = -1;
+    bool                          return_target_logprob    = true;
     bool                          return_cum_log_probs     = false;
     bool                          return_incremental       = false;
     bool                          return_hidden_states     = false;
@@ -210,6 +215,11 @@ public:
         JSONIZE(select_tokens_str);
         JSONIZE(calculate_loss);
         JSONIZE(return_logits);
+        JSONIZE(return_prompt_logits);
+        JSONIZE(prompt_logits_top_k);
+        JSONIZE(prompt_logits_start);
+        JSONIZE(prompt_logits_end);
+        JSONIZE(return_target_logprob);
         JSONIZE(return_incremental);
         JSONIZE(return_hidden_states);
         JSONIZE(return_all_hidden_states);

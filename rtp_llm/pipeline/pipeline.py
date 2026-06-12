@@ -99,7 +99,7 @@ class Pipeline(object):
         special_tokens: Any,
         tokenizer: BaseTokenizer,
         generate_env_config,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> GenerateConfig:
         if isinstance(generate_config, dict):
             config = GenerateConfig.create_generate_config(generate_config, **kwargs)
@@ -123,7 +123,7 @@ class Pipeline(object):
         prompt: str,
         request_id: int = None,
         urls: Optional[List[str]] = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> Iterator[GenerateResponse]:
 
         q = queue.Queue()
@@ -169,7 +169,7 @@ class Pipeline(object):
         prompt: str,
         request_id: int = None,
         urls: Optional[List[str]] = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> AsyncGenerator[GenerateResponse, None]:
         begin_time = current_time_ms()
 
@@ -182,7 +182,7 @@ class Pipeline(object):
             len(self.tokenizer),
             self._special_tokens,
             self.tokenizer,
-            **kwargs
+            **kwargs,
         )
         mm_inputs = (
             [
@@ -213,6 +213,31 @@ class Pipeline(object):
         # 避免重复编码 prompt。
         parse_and_fill_banned_combo(prompt, generate_config, self.tokenizer)
         token_ids = self.tokenizer.encode(prompt)
+
+        if generate_config.return_prompt_logits:
+            if mm_inputs:
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    "prompt scoring does not support multimodal inputs",
+                )
+            prompt_len = len(token_ids)
+            start = (
+                generate_config.prompt_logits_start
+                if generate_config.prompt_logits_start >= 0
+                else 0
+            )
+            end = (
+                generate_config.prompt_logits_end
+                if generate_config.prompt_logits_end >= 0
+                else prompt_len
+            )
+            if start >= prompt_len:
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    f"prompt_logits_start ({start}) >= prompt length ({prompt_len})",
+                )
+            if end > prompt_len:
+                generate_config.prompt_logits_end = prompt_len
 
         if generate_config.sp_advice_prompt != "":
             generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
@@ -252,7 +277,7 @@ class Pipeline(object):
         stop_word_str_list: List[str],
         stop_word_str_slices: List[str],
         token_buffer: str,
-        **kwargs: Any
+        **kwargs: Any,
     ):
         if generate_config.return_incremental:
             text = token_buffer + text
@@ -289,7 +314,7 @@ class Pipeline(object):
         stop_word_ids: List[int],
         stop_word_id_slices: List[int],
         ouput_tokens_list: List[torch.Tensor],
-        **kwargs: Any
+        **kwargs: Any,
     ) -> Tuple[List[str], List[int]]:
         tokens_lists_for_decode_input = []
         output_lens = []
@@ -345,7 +370,7 @@ class Pipeline(object):
         decoded_batch = self.tokenizer.batch_decode(
             token_lists_to_decode,
             skip_special_tokens=generate_config.skip_special_tokens,
-            **kwargs
+            **kwargs,
         )
         newly_decoded_texts = [text.rstrip("\uFFFD") for text in decoded_batch]
         all_texts = newly_decoded_texts
@@ -360,7 +385,7 @@ class Pipeline(object):
                 stop_word_str_list,
                 stop_word_str_slices,
                 "",
-                **kwargs
+                **kwargs,
             )
 
             if generate_config.out_prefix:
@@ -381,7 +406,7 @@ class Pipeline(object):
         decoding_states: List[DecodingState],
         token_buffers: List[str],
         ouput_tokens_list: List[torch.Tensor],
-        **kwargs: Any
+        **kwargs: Any,
     ) -> Tuple[List[str], List[int]]:
         """处理增量解码的逻辑。"""
         num_outputs = len(generate_outputs.generate_outputs)
@@ -445,7 +470,7 @@ class Pipeline(object):
                 stop_word_str_list,
                 stop_word_str_slices,
                 token_buffers[i],
-                **kwargs
+                **kwargs,
             )
 
             if generate_config.out_prefix:
@@ -468,7 +493,7 @@ class Pipeline(object):
         token_ids: List[int],
         mm_inputs: List[MultimodalInput],
         generate_config: GenerateConfig,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
 
@@ -534,7 +559,7 @@ class Pipeline(object):
                     decoding_states,
                     token_buffers,
                     ouput_tokens_list,
-                    **kwargs
+                    **kwargs,
                 )
             else:
                 (
@@ -549,7 +574,7 @@ class Pipeline(object):
                     stop_word_ids,
                     stop_word_id_slices,
                     ouput_tokens_list,
-                    **kwargs
+                    **kwargs,
                 )
 
             kmonitor.report(
@@ -584,7 +609,7 @@ class Pipeline(object):
         base_request_id: int,
         generate_config_json: dict,
         generate_env_config=None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> List[GenerateResponse]:
         generate_config = self.create_generate_config(
             generate_config_json,
@@ -592,7 +617,7 @@ class Pipeline(object):
             self._special_tokens,
             self.tokenizer,
             generate_env_config=generate_env_config,
-            **kwargs
+            **kwargs,
         )
         generate_config.is_streaming = False
 

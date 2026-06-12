@@ -214,6 +214,7 @@ class StreamResponseObject:
     usage: Optional[UsageInfo] = None
     aux_info: Optional[AuxInfo] = None
     extra_outputs: Optional[ChatCompletionExtraOutputs] = None
+    prompt_logits: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -448,14 +449,71 @@ class CustomChatRenderer:
             )
         )
 
+        prompt_logits_data = None
+        if generate_config.return_prompt_logits:
+            output_generator, prompt_logits_data = await self._extract_prompt_logits(
+                output_generator
+            )
+
         # 处理非流式请求的合并逻辑
         if not generate_config.is_streaming:
             output_generator = await self._merge_non_streaming_outputs(output_generator)
 
-        async for response in self.render_response_stream(
-            output_generator, request, generate_config
-        ):
-            yield response
+        if generate_config.return_prompt_logits:
+            last_response = None
+            async for response in self.render_response_stream(
+                output_generator, request, generate_config
+            ):
+                if last_response is not None:
+                    yield last_response
+                last_response = response
+            if last_response is not None:
+                if prompt_logits_data is not None:
+                    last_response.prompt_logits = prompt_logits_data
+                yield last_response
+        else:
+            async for response in self.render_response_stream(
+                output_generator, request, generate_config
+            ):
+                yield response
+
+    async def _extract_prompt_logits(
+        self, output_generator: AsyncGenerator[GenerateOutputs, None]
+    ) -> Tuple[AsyncGenerator[GenerateOutputs, None], Optional[Dict[str, Any]]]:
+        collected = []
+        prompt_logits_data = None
+        async for outputs in output_generator:
+            if prompt_logits_data is None:
+                for out in outputs.generate_outputs:
+                    if out.prompt_logits is not None:
+                        pl = out.prompt_logits
+                        prompt_logits_data = {
+                            "start_pos": pl.get("start_pos", 0),
+                            "end_pos": pl.get("end_pos", 0),
+                            "topk_logprobs": (
+                                pl["topk_logprobs"].tolist()
+                                if hasattr(pl["topk_logprobs"], "tolist")
+                                else pl["topk_logprobs"]
+                            ),
+                            "topk_token_ids": (
+                                pl["topk_token_ids"].tolist()
+                                if hasattr(pl["topk_token_ids"], "tolist")
+                                else pl["topk_token_ids"]
+                            ),
+                        }
+                        if pl.get("target_logprobs") is not None:
+                            t = pl["target_logprobs"]
+                            prompt_logits_data["target_logprobs"] = (
+                                t.tolist() if hasattr(t, "tolist") else t
+                            )
+                        break
+            collected.append(outputs)
+
+        async def replay():
+            for o in collected:
+                yield o
+
+        return replay(), prompt_logits_data
 
     async def _merge_non_streaming_outputs(
         self, output_generator: AsyncGenerator[GenerateOutputs, None]

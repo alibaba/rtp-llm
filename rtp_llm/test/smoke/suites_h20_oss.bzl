@@ -231,6 +231,12 @@ def h20_oss_suites():
                 smoke_args="--reserver_runtime_mem_mb 20000 --json_model_override_args '{\\\"rope_scaling\\\":{\\\"type\\\":\\\"yarn\\\",\\\"factor\\\":2.0,\\\"original_max_position_embeddings\\\":32768,\\\"beta_slow\\\":1.0,\\\"beta_fast\\\":1.0,\\\"mscale\\\":1.0,\\\"extrapolation_factor\\\":1.0}}' --seq_size_per_block 64 --act_type BF16 --warm_up 0",
                 gpu_type=["H20"],
             ),
+            smoke_test(
+                name="dense_prompt_scoring",
+                task_info="data/model/qwen25/q_r_prompt_scoring.json",
+                smoke_args="--act_type BF16 --warm_up 0",
+                gpu_type=["H20"],
+            ),
         ],
     )
 
