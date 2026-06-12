@@ -127,7 +127,11 @@ def local_rank_start(
                 deferred_sigterm_timer.daemon = True
                 deferred_sigterm_timer.start()
                 return
-            logging.info("Local rank received second SIGTERM, shutting down now")
+            logging.info(
+                "Local rank ignoring duplicate SIGTERM while waiting for "
+                "parent-staged backend shutdown"
+            )
+            return
         if deferred_sigterm_timer is not None:
             deferred_sigterm_timer.cancel()
             deferred_sigterm_timer = None
