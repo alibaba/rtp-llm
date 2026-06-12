@@ -39,7 +39,6 @@ CacheConfig makeCPHybridConfig() {
     auto linear_spec                = std::make_shared<LinearKVCacheSpec>();
     linear_spec->type               = KVCacheSpecType::LinearAttention;
     linear_spec->dtype              = config.dtype;
-    linear_spec->layer_num          = 2;
     linear_spec->local_num_k_heads  = 1;
     linear_spec->local_num_v_heads  = 1;
     linear_spec->head_k_dim         = 1;
@@ -51,7 +50,6 @@ CacheConfig makeCPHybridConfig() {
     auto full_spec                = std::make_shared<MHAKVCacheSpec>();
     full_spec->type               = KVCacheSpecType::MultiHeadAttention;
     full_spec->dtype              = config.dtype;
-    full_spec->layer_num          = 2;
     full_spec->local_head_num_kv  = 1;
     full_spec->size_per_head      = 1;
     full_spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);

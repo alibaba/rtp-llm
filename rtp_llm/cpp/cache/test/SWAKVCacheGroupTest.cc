@@ -43,7 +43,6 @@ private:
 
 std::shared_ptr<DSV4StateSpec> makeDsv4StateSpec(KVCacheRegionName region_name, int seq_size_per_block) {
     return std::make_shared<DSV4StateSpec>(region_name,
-                                           /*layer_count=*/1,
                                            /*state_elements=*/1024,
                                            /*block_entries=*/128,
                                            DataType::TYPE_FP32,

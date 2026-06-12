@@ -117,6 +117,7 @@ static ModelConfig makeDSV4ManagerFlashModelConfig() {
     }
     ratios.push_back(0);
     mc.attn_config.layer_compress_ratios = ratios;
+    setDsv4KvCacheSpecs(mc);
     return mc;
 }
 
