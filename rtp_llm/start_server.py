@@ -20,7 +20,7 @@ from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.ops import RoleType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
-from rtp_llm.utils.process_manager import ProcessManager
+from rtp_llm.utils.process_manager import HealthCheckFatalError, ProcessManager
 
 setup_logging()
 
@@ -74,7 +74,7 @@ def start_backend_server_impl(
             return True
 
         if startup_status["error"]:
-            raise Exception(startup_status["error"])
+            raise HealthCheckFatalError(startup_status["error"])
 
         # Non-blocking check if data is available
         if pipe_reader.poll(timeout=0):
@@ -97,12 +97,12 @@ def start_backend_server_impl(
                     error = f"Backend server start failed: {error_msg}"
                     startup_status["error"] = error
                     pipe_reader.close()
-                    raise Exception(error)
+                    raise HealthCheckFatalError(error)
             except EOFError:
                 error = "Backend server pipe closed unexpectedly"
                 startup_status["error"] = error
                 pipe_reader.close()
-                raise Exception(error)
+                raise HealthCheckFatalError(error)
 
         return False
 

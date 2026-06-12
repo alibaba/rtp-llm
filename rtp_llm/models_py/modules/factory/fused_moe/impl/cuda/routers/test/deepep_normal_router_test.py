@@ -30,7 +30,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal
 )
 from rtp_llm.ops import MoeConfig, NcclCommConfig, ParallelismConfig
 from rtp_llm.test.utils.numeric_util import per_token_cast_back
-from rtp_llm.test.utils.port_util import PortManager
+from rtp_llm.test.utils.port_util import PortManager, get_random_start_port
 
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128  # isort:skip
 
@@ -205,8 +205,9 @@ def worker_function(
 
 
 def test_single(world_size: int, test_tp_size: int, use_fp8: bool):
-    port_manager = PortManager()
-    ports, locks = port_manager.get_consecutive_ports(1)
+    # Need 10 consecutive ports: nccl_port+0 (init), +1 (dp_tp), +6 (ffn_tp), +9 (tp)
+    port_manager = PortManager(start_port=get_random_start_port())
+    ports, locks = port_manager.get_consecutive_ports(10)
     nccl_port = ports[0]
 
     dp_size = world_size // test_tp_size

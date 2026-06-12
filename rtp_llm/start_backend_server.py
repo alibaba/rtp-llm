@@ -355,7 +355,11 @@ def multi_rank_start(
     manager.set_processes(processes)
     manager.monitor_and_release_processes()
 
-    return processes
+    # If we get here, at least one rank died. Use os._exit() instead of
+    # sys.exit() to skip atexit handlers / __del__ / finally blocks, which
+    # can deadlock when CUDA/NCCL state is partially torn down.
+    logging.error("Backend rank monitoring ended, force exiting backend process")
+    os._exit(1)
 
 
 def load_gpu_nic_affinity():

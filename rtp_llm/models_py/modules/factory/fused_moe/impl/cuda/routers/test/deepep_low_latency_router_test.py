@@ -31,7 +31,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_la
 )
 from rtp_llm.ops import MoeConfig, NcclCommConfig, ParallelismConfig, RuntimeConfig
 from rtp_llm.test.utils.numeric_util import per_token_cast_back
-from rtp_llm.test.utils.port_util import PortManager, PortsContext
+from rtp_llm.test.utils.port_util import PortManager, PortsContext, get_random_start_port
 
 NUM_TOKEN_PER_RANK = 64
 HIDDEN_SIZE = 7168
@@ -298,8 +298,9 @@ def _spawn_wrapper(
 
 
 def test_deepep_low_latency_router():
-    port_manager = PortManager()
-    ports, locks = port_manager.get_consecutive_ports(1)
+    # Need 12 consecutive ports: nccl_port+0 through nccl_port+11 used by _init_router
+    port_manager = PortManager(start_port=get_random_start_port())
+    ports, locks = port_manager.get_consecutive_ports(12)
     nccl_port = ports[0]
 
     world_size = 2
