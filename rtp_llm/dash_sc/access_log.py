@@ -51,6 +51,7 @@ from google.protobuf.json_format import MessageToDict
 
 from rtp_llm.access_logger.log_utils import get_handler
 from rtp_llm.dash_sc.codec import (
+    parse_ds_header_attributes,
     parse_input_ids_from_request,
     parse_other_params,
     parse_sampling_params,
@@ -605,16 +606,12 @@ class _RpcAggregate:
     def _sync_repetition_fields(self) -> None:
         monitor = self._ensure_repetition_monitor()
         self.output_repetition = monitor.output_repetition
-        self.output_repetition_classification = (
-            monitor.output_repetition_classification
-        )
+        self.output_repetition_classification = monitor.output_repetition_classification
         self.output_repetition_check_ms = monitor.output_repetition_check_ms
         self.output_repetition_impl = monitor.output_repetition_impl
         self.tool_call_loop_result = monitor.tool_call_loop_result
         self.tool_call_loop_check_ms = monitor.tool_call_loop_check_ms
-        self.tool_call_loop_output_span_count = (
-            monitor.tool_call_loop_output_span_count
-        )
+        self.tool_call_loop_output_span_count = monitor.tool_call_loop_output_span_count
 
     def capture_request(self, request) -> None:
         """Capture a request message.
@@ -650,9 +647,10 @@ class _RpcAggregate:
                     self._repetition_monitor.set_input_ids(ids)
         if self.generate_config is None:
             try:
-                sampling = parse_sampling_params(request)
+                ds_attrs = parse_ds_header_attributes(request)
+                sampling = parse_sampling_params(request, ds_attrs)
                 self.generate_config = _sampling_to_dict(sampling)
-                other = parse_other_params(request)
+                other = parse_other_params(request, ds_attrs)
                 self.generate_config["enable_thinking"] = other.enable_thinking
                 self.generate_config["max_new_think_tokens"] = (
                     other.max_new_think_tokens
@@ -891,9 +889,7 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
                 ),
                 window_capped=str(repetition.window_capped).lower(),
             )
-            kmonitor.report(
-                AccMetrics.OUTPUT_REPETITION_QPS_METRIC, 1, repetition_tags
-            )
+            kmonitor.report(AccMetrics.OUTPUT_REPETITION_QPS_METRIC, 1, repetition_tags)
             kmonitor.report(
                 GaugeMetrics.OUTPUT_REPETITION_UNIT_SIZE_METRIC,
                 repetition.repeat_unit_size,

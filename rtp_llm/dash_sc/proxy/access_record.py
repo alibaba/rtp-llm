@@ -22,6 +22,7 @@ import time
 from typing import Any, Optional
 
 from rtp_llm.dash_sc.codec import (
+    parse_ds_header_attributes,
     parse_input_ids_from_request,
     parse_other_params,
     parse_sampling_params,
@@ -255,9 +256,10 @@ class ForwardAccessRecord:
                 self.input_len = len(ids)
         if self.generate_config is None:
             try:
-                sampling = parse_sampling_params(request)
+                ds_attrs = parse_ds_header_attributes(request)
+                sampling = parse_sampling_params(request, ds_attrs)
                 self.generate_config = _sampling_to_dict(sampling)
-                other = parse_other_params(request)
+                other = parse_other_params(request, ds_attrs)
                 self.generate_config["enable_thinking"] = other.enable_thinking
                 self.generate_config["max_new_think_tokens"] = (
                     other.max_new_think_tokens

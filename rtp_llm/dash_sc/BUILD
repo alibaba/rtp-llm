@@ -32,6 +32,7 @@ py_library(
         "proxy/servicer.py",
         "repetition_monitor.py",
         "server.py",
+        "structural_tag.py",
         "think.py",
     ],
     data = [
@@ -45,6 +46,7 @@ py_library(
         "//rtp_llm/access_logger:access_logger",
         "//rtp_llm/dash_sc/proto:predict_v2_py_proto",
         "//rtp_llm/metrics:metrics",
+        "//rtp_llm:utils",
     ],
 )
 

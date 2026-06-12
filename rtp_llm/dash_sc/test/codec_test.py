@@ -11,6 +11,7 @@ import torch
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
     FINISH_REASON_USE_PARAMETER_STATUS,
+    DashScParameterError,
     OtherParams,
     SamplingParams,
     build_error_response,
@@ -32,6 +33,68 @@ def _unpack_int32_le(raw: bytes) -> list[int]:
 
 def _unpack_int64_le(raw: bytes) -> list[int]:
     return [int(x) for x in struct.unpack("<%dq" % (len(raw) // 8), raw)]
+
+
+def _tool_call_structural_tag() -> dict:
+    return {
+        "format": {
+            "type": "triggered_tags",
+            "triggers": ["<｜DSML｜invoke"],
+            "tags": [
+                {
+                    "type": "tag",
+                    "begin": '<｜DSML｜invoke name="get_weather">',
+                    "content": {
+                        "type": "json_schema",
+                        "json_schema": {"type": "object"},
+                    },
+                    "end": "</｜DSML｜invoke>",
+                }
+            ],
+        }
+    }
+
+
+def _dashscope_sequence_tool_call_structural_tag() -> dict:
+    return {
+        "format": {
+            "type": "sequence",
+            "elements": [
+                {"type": "const_string", "value": "<｜DSML｜tool_calls>\n"},
+                {
+                    "type": "tags_with_separator",
+                    "tags": [
+                        {
+                            "type": "tag",
+                            "begin": '<｜DSML｜invoke name="get_weather">',
+                            "content": {
+                                "type": "json_schema",
+                                "json_schema": {"type": "object"},
+                            },
+                            "end": "</｜DSML｜invoke>",
+                        }
+                    ],
+                    "separator": "\n",
+                    "at_least_one": True,
+                    "stop_after_first": True,
+                },
+                {"type": "const_string", "value": "\n</｜DSML｜tool_calls>"},
+            ],
+        }
+    }
+
+
+def _dashscope_sequence_as_tag_structural_tag() -> dict:
+    tag = _dashscope_sequence_tool_call_structural_tag()
+    begin, content, end = tag["format"]["elements"]
+    return {
+        "format": {
+            "type": "tag",
+            "begin": begin["value"],
+            "content": content,
+            "end": end["value"],
+        }
+    }
 
 
 def _add_tensor(
@@ -155,13 +218,54 @@ class DashScGrpcRequestTest(TestCase):
             json.loads(sp.to_generate_config().response_format), {"type": "json_object"}
         )
 
-    def test_parse_sampling_response_format_array_compat(self) -> None:
-        req = predict_v2_pb2.ModelInferRequest()
-        req.parameters["response_format"].string_param = json.dumps(
-            [{"type": "json_object"}]
+    def test_build_model_infer_request_carries_structural_tag_response_format(
+        self,
+    ) -> None:
+        response_format = {
+            "type": "structural_tag",
+            "format": _dashscope_sequence_tool_call_structural_tag()["format"],
+        }
+        normalized_response_format = {
+            "type": "structural_tag",
+            "format": _dashscope_sequence_as_tag_structural_tag()["format"],
+        }
+        req = build_model_infer_request(
+            request_id="test",
+            model_name="default",
+            input_ids=[1, 2, 3],
+            sampling=SamplingParams(
+                max_new_tokens=16,
+                response_format=json.dumps(response_format, ensure_ascii=False),
+            ),
         )
+
         sp = parse_sampling_params(req)
-        self.assertEqual(json.loads(sp.response_format), {"type": "json_object"})
+        config = sp.to_generate_config()
+
+        self.assertIsNone(sp.response_format)
+        self.assertIsNone(config.response_format)
+        self.assertEqual(
+            json.loads(sp.structural_tag),
+            {"format": normalized_response_format["format"]},
+        )
+        self.assertEqual(
+            json.loads(config.structural_tag),
+            {"format": normalized_response_format["format"]},
+        )
+
+    def test_parse_sampling_response_format_array_compat(self) -> None:
+        cases = [
+            [{"type": "json_object"}, {"type": "json_schema", "json_schema": {}}],
+            [json.dumps({"type": "json_object"})],
+        ]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                req = predict_v2_pb2.ModelInferRequest()
+                req.parameters["response_format"].string_param = json.dumps(payload)
+                sp = parse_sampling_params(req)
+                self.assertEqual(
+                    json.loads(sp.response_format), {"type": "json_object"}
+                )
 
     def _assert_guided_json_response_format(self, response_format, schema) -> None:
         self.assertEqual(
@@ -280,6 +384,182 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(json.loads(sp.response_format), {"type": "json_object"})
         self.assertTrue(sp.json_format)
         self.assertIs(op.enable_thinking, False)
+
+    def test_parse_sampling_tool_call_structural_tag_parameter(self) -> None:
+        tag = _tool_call_structural_tag()
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["tool_call_structural_tag"].string_param = json.dumps(
+            tag, ensure_ascii=False
+        )
+
+        sp = parse_sampling_params(req)
+        config = sp.to_generate_config()
+
+        self.assertEqual(json.loads(sp.structural_tag), tag)
+        self.assertEqual(json.loads(config.structural_tag), tag)
+        self.assertIsNone(config.response_format)
+        self.assertFalse(config.json_format)
+
+    def test_parse_sampling_normalizes_dashscope_sequence_structural_tag(self) -> None:
+        tag = _dashscope_sequence_tool_call_structural_tag()
+        normalized = _dashscope_sequence_as_tag_structural_tag()
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["tool_call_structural_tag"].string_param = json.dumps(
+            tag, ensure_ascii=False
+        )
+
+        sp = parse_sampling_params(req)
+
+        self.assertEqual(json.loads(sp.structural_tag), normalized)
+        self.assertEqual(json.loads(sp.to_generate_config().structural_tag), normalized)
+
+    def test_parse_sampling_tool_call_structural_tag_unwraps_dashscope_list(
+        self,
+    ) -> None:
+        tag = _tool_call_structural_tag()
+        ignored = {
+            "format": {
+                "type": "triggered_tags",
+                "triggers": ["<ignored>"],
+                "tags": [
+                    {
+                        "type": "tag",
+                        "begin": "<ignored>",
+                        "end": "</ignored>",
+                    }
+                ],
+            }
+        }
+        cases = [
+            {
+                "tool_call_structural_tag": json.dumps(
+                    [json.dumps(tag, ensure_ascii=False)], ensure_ascii=False
+                )
+            },
+            {
+                "tool_call_structural_tag": json.dumps(
+                    [tag, ignored], ensure_ascii=False
+                )
+            },
+            {
+                "ds_header_attributes": json.dumps(
+                    {
+                        "parameters": {
+                            "tool_call_structural_tag": [
+                                json.dumps(tag, ensure_ascii=False)
+                            ]
+                        }
+                    },
+                    ensure_ascii=False,
+                )
+            },
+        ]
+
+        for params in cases:
+            with self.subTest(params=tuple(params)):
+                req = predict_v2_pb2.ModelInferRequest()
+                for name, value in params.items():
+                    req.parameters[name].string_param = value
+
+                sp = parse_sampling_params(req)
+
+                self.assertEqual(json.loads(sp.structural_tag), tag)
+
+    def test_parse_sampling_empty_tool_call_structural_tag_list_is_ignored(
+        self,
+    ) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["tool_call_structural_tag"].string_param = "[]"
+
+        sp = parse_sampling_params(req)
+
+        self.assertIsNone(sp.structural_tag)
+
+    def test_parse_sampling_bad_tool_call_structural_tag_json_is_rejected(
+        self,
+    ) -> None:
+        cases = [
+            "not-json",
+            json.dumps(["not-json"], ensure_ascii=False),
+        ]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                req = predict_v2_pb2.ModelInferRequest()
+                req.parameters["tool_call_structural_tag"].string_param = payload
+
+                with self.assertRaisesRegex(
+                    DashScParameterError, "tool_call_structural_tag"
+                ):
+                    parse_sampling_params(req)
+
+    def test_parse_sampling_structural_tag_top_level_shape_validation(
+        self,
+    ) -> None:
+        cases = [
+            {},
+            {"foo": "bar"},
+            {"structures": []},
+        ]
+        for tag in cases:
+            with self.subTest(tag=tag):
+                req = predict_v2_pb2.ModelInferRequest()
+                req.parameters["tool_call_structural_tag"].string_param = json.dumps(
+                    tag, ensure_ascii=False
+                )
+
+                with self.assertRaisesRegex(
+                    DashScParameterError, "invalid tool_call_structural_tag"
+                ):
+                    parse_sampling_params(req)
+
+    def test_parse_sampling_structural_tag_alias_and_nested_dash_parameters(
+        self,
+    ) -> None:
+        tag = {
+            "format": {
+                "type": "triggered_tags",
+                "triggers": ["<tool_call>"],
+                "tags": [
+                    {
+                        "type": "tag",
+                        "begin": "<tool_call>",
+                        "content": {"type": "json_schema", "json_schema": {}},
+                        "end": "</tool_call>",
+                    }
+                ],
+            }
+        }
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"parameters": {"structural_tag": tag}}, ensure_ascii=False
+        )
+
+        sp = parse_sampling_params(req)
+        self.assertEqual(json.loads(sp.structural_tag), tag)
+
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["structural_tag"].string_param = json.dumps(
+            tag, ensure_ascii=False
+        )
+        sp = parse_sampling_params(req)
+        self.assertEqual(json.loads(sp.to_generate_config().structural_tag), tag)
+
+    def test_build_model_infer_request_carries_tool_call_structural_tag(self) -> None:
+        tag = _tool_call_structural_tag()
+        req = build_model_infer_request(
+            request_id="r-structural-tag",
+            model_name="m",
+            input_ids=[1, 2, 3],
+            sampling=SamplingParams(
+                max_new_tokens=16,
+                structural_tag=json.dumps(tag, ensure_ascii=False),
+            ),
+        )
+
+        self.assertIn("tool_call_structural_tag", req.parameters)
+        sp = parse_sampling_params(req)
+        self.assertEqual(json.loads(sp.structural_tag), tag)
+        self.assertEqual(json.loads(sp.to_generate_config().structural_tag), tag)
 
     def test_parse_sampling_max_completion_tokens_parameter_alias_wins(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()

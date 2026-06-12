@@ -28,6 +28,7 @@ from rtp_llm.dash_sc.codec import (
     FINISH_REASON_LENGTH,
     FINISH_REASON_STOP_ENGINE_PARAM,
     FINISH_REASON_STOP_TIMEOUT,
+    DashScParameterError,
     OtherParams,
     SamplingParams,
     _token_ids_list_from_generate_output,
@@ -1215,7 +1216,11 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 request.id,
                 request.model_name,
             )
-            input_ids_list, sampling, other = parse_dash_sc_grpc_request(request)
+            try:
+                input_ids_list, sampling, other = parse_dash_sc_grpc_request(request)
+            except DashScParameterError as e:
+                yield build_parameter_error_response(str(request.id), str(e))
+                return
             if input_ids_list is None:
                 yield build_parameter_error_response(
                     str(request.id),
