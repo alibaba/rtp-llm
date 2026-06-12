@@ -74,6 +74,9 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         checker.check(resolver.is_bf16(config))
         checker.check(has_deep_gemm())
         checker.check(get_sm()[0] >= 9)
+        from rtp_llm.models_py.utils.arch import is_sm12x
+
+        checker.check(not is_sm12x())
         checker.check(not config.enable_cuda_graph)
 
     def __init__(

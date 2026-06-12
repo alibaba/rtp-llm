@@ -1,0 +1,126 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "tokenizer_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response": " I am looking for a Flask alternative that is similar",
+                "iter_count": 10,
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s5",
+                    "$prompt:s3"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 9,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": " I am looking for a Flask alternative that is"
+                    },
+                    {
+                        "response": "\n\nI am trying to use the screen manager"
+                    }
+                ],
+                "iter_count": 10,
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "num_return_sequences": 2,
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response": [
+                    " I am looking for a Flask alternative that is similar",
+                    " I am looking for a Flask alternative that is similar"
+                ],
+                "iter_count": 10,
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "stop_words_str": [
+                        "a lighthouse"
+                    ]
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response": " I am looking for a Flask alternative that is similar",
+                "iter_count": 10,
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "stop_words_str": [
+                        "a lighthouse"
+                    ]
+                },
+                "yield_generator": false
+            },
+            "result": {
+                "response": " I am looking for a Flask alternative that is similar",
+                "iter_count": 10,
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s5",
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "return_incremental": true,
+                    "stop_words_str": [
+                        "a lighthouse"
+                    ]
+                },
+                "yield_generator": true
+            },
+            "result": {
+                "response": " I am looking for a Flask alternative that is similar",
+                "iter_count": 10,
+                "finished": true
+            }
+        }
+    ]
+}
