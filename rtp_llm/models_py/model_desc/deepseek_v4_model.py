@@ -866,7 +866,7 @@ class DeepSeekV4Model(GptModelBase):
                     fixed_region_cp_size=_fixed_region_cp_size,
                     fixed_region_prefill_sliced=_fixed_region_prefill_sliced,
                 )
-                _dense_shapes = _collect_dsv4_dense_gemm_shapes(self.v4)
+                _dense_shapes = _collect_dsv4_dense_gemm_shapes(self)
                 _dense_gemm_prefill_chunk_size = 0
                 if not self._is_decode_role and chunked_moe_enabled():
                     _dense_gemm_prefill_chunk_size = max(
