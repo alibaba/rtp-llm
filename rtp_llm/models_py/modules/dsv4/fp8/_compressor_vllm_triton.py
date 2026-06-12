@@ -144,6 +144,9 @@ def _save_partial_states_kernel(
         "seq_start",
         "n_raw",
         "kv_cache_block_size",
+        "KV_BLOCK_STRIDE",
+        "NUM_STATE_BLOCKS",
+        "NUM_KV_BLOCKS",
     ]
 )
 def _fused_kv_compress_norm_rope_insert_sparse_attn(
@@ -196,9 +199,9 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     QUANT_BLOCK: tl.constexpr,
     TOKEN_STRIDE: tl.constexpr,
     SCALE_DIM: tl.constexpr,
-    KV_BLOCK_STRIDE: tl.constexpr,
-    NUM_STATE_BLOCKS: tl.constexpr,
-    NUM_KV_BLOCKS: tl.constexpr,
+    KV_BLOCK_STRIDE,
+    NUM_STATE_BLOCKS,
+    NUM_KV_BLOCKS,
     BATCHED: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     STATE_RING_ENTRIES: tl.constexpr,
@@ -294,8 +297,8 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
 
     row_base = (
         state_cache_ptr
-        + block_numbers_i64 * state_cache_stride0
-        + block_offsets * state_cache_stride1
+        + block_numbers_i64 * state_cache_stride0.to(tl.int64)
+        + block_offsets.to(tl.int64) * state_cache_stride1.to(tl.int64)
         + head_offset
     )
     cache_mask = valid_block[:, None] & mask[None, :]
@@ -334,7 +337,9 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     if kv_block_idx >= NUM_KV_BLOCKS:
         _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
 
-    cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE
+    cache_block_ptr = (
+        k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE.to(tl.int64)
+    )
     fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
     scale_ptr = (
         cache_block_ptr
@@ -413,6 +418,9 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
         "seq_start",
         "n_raw",
         "kv_cache_block_size",
+        "KV_BLOCK_STRIDE",
+        "NUM_STATE_BLOCKS",
+        "NUM_KV_BLOCKS",
     ]
 )
 def _fused_kv_compress_norm_rope_insert_indexer_attn(
@@ -465,9 +473,9 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     QUANT_BLOCK: tl.constexpr,
     TOKEN_STRIDE: tl.constexpr,
     SCALE_DIM: tl.constexpr,
-    KV_BLOCK_STRIDE: tl.constexpr,
-    NUM_STATE_BLOCKS: tl.constexpr,
-    NUM_KV_BLOCKS: tl.constexpr,
+    KV_BLOCK_STRIDE,
+    NUM_STATE_BLOCKS,
+    NUM_KV_BLOCKS,
     BATCHED: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     STATE_RING_ENTRIES: tl.constexpr,
@@ -561,8 +569,8 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
 
     row_base = (
         state_cache_ptr
-        + block_numbers_i64 * state_cache_stride0
-        + block_offsets * state_cache_stride1
+        + block_numbers_i64 * state_cache_stride0.to(tl.int64)
+        + block_offsets.to(tl.int64) * state_cache_stride1.to(tl.int64)
         + head_offset
     )
     cache_mask = valid_block[:, None] & mask[None, :]
@@ -605,7 +613,9 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     if kv_block_idx >= NUM_KV_BLOCKS:
         _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
 
-    cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE
+    cache_block_ptr = (
+        k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE.to(tl.int64)
+    )
     fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
     scale_ptr = (
         cache_block_ptr

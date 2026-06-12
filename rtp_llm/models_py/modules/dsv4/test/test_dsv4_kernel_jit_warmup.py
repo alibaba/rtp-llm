@@ -1,3 +1,4 @@
+import inspect
 import os
 import sys
 import types
@@ -35,6 +36,7 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _collect_dsv4_batched_fp8_einsum_shapes,
     _collect_dsv4_dense_gemm_shapes,
     _collect_dsv4_fp8_mqa_logits_shapes,
+    _collect_dsv4_mhc_head_fused_shapes,
     _collect_dsv4_mhc_prenorm_shapes,
     _compute_mhc_prenorm_num_split,
     _cp_padded_tokens_per_rank_bound,
@@ -46,6 +48,7 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _sm100_dense_layout_signature,
     resolve_dense_gemm_warmup_max_m,
 )
+import rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup as warmup_module
 
 
 def _module_type(name, attrs):
@@ -283,6 +286,13 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             "TileLangHCUnit",
             {
                 "fn": torch.empty((24, 16384), dtype=torch.float32),
+                "base": torch.empty((24,), dtype=torch.float32),
+                "scale": torch.empty((3,), dtype=torch.float32),
+                "dim": 4096,
+                "hc_mult": 4,
+                "norm_eps": 1.0e-5,
+                "hc_eps": 1.0e-6,
+                "hc_sinkhorn_iters": 20,
             },
         )
         TileLangHCHead = _module_type(
@@ -305,6 +315,43 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         shapes = _collect_dsv4_mhc_prenorm_shapes(root)
         self.assertEqual(sorted(shapes.keys()), [(24, 16384)])
         self.assertEqual(shapes[(24, 16384)]["name"], "attn_hc")
+        self.assertEqual(shapes[(24, 16384)]["dim"], 4096)
+        self.assertEqual(shapes[(24, 16384)]["hc_mult"], 4)
+        self.assertEqual(shapes[(24, 16384)]["hc_sinkhorn_iters"], 20)
+
+    def test_collect_mhc_head_fused_shapes_uses_tilelang_heads_only(self):
+        root = nn.Module()
+        TileLangHCHead = _module_type(
+            "TileLangHCHead",
+            {
+                "fn": torch.empty((4, 16384), dtype=torch.float32),
+                "base": torch.empty((4,), dtype=torch.float32),
+                "scale": torch.empty((1,), dtype=torch.float32),
+                "dim": 4096,
+                "hc_mult": 4,
+                "norm_eps": 1.0e-5,
+                "hc_eps": 1.0e-6,
+            },
+        )
+        FallbackHCHead = _module_type(
+            "FallbackHCHead",
+            {
+                "fn": torch.empty((4, 16384), dtype=torch.float32),
+                "base": torch.empty((4,), dtype=torch.float32),
+                "scale": torch.empty((1,), dtype=torch.float32),
+                "dim": 4096,
+                "hc_mult": 4,
+            },
+        )
+        root.add_module("head_hc", TileLangHCHead())
+        root.add_module("head_hc_same_shape", TileLangHCHead())
+        root.add_module("fallback_head", FallbackHCHead())
+
+        shapes = _collect_dsv4_mhc_head_fused_shapes(root)
+        self.assertEqual(sorted(shapes.keys()), [(4, 4096)])
+        self.assertEqual(shapes[(4, 4096)]["name"], "head_hc")
+        self.assertEqual(tuple(shapes[(4, 4096)]["base"].shape), (4,))
+        self.assertEqual(tuple(shapes[(4, 4096)]["scale"].shape), (1,))
 
     def test_collect_batched_fp8_einsum_shapes_uses_wo_a_buffers(self):
         root = nn.Module()
@@ -429,6 +476,375 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             ),
             8,
         )
+
+    def test_mhc_warmup_launches_prenorm_gemm_and_pre_big_fuse(self):
+        calls = []
+        shapes = {
+            (24, 16384): {
+                "name": "attn_hc",
+                "fn": torch.empty((24, 16384), dtype=torch.float32),
+                "base": torch.empty((24,), dtype=torch.float32),
+                "scale": torch.empty((3,), dtype=torch.float32),
+                "dim": 4096,
+                "hc_mult": 4,
+                "norm_eps": 1.0e-6,
+                "hc_eps": 1.0e-6,
+                "hc_sinkhorn_iters": 20,
+            }
+        }
+
+        def with_patch(name, value):
+            old = getattr(warmup_module, name)
+            setattr(warmup_module, name, value)
+            return old
+
+        old_values = {}
+        try:
+            old_values["_is_cuda_device"] = with_patch(
+                "_is_cuda_device", lambda device: True
+            )
+            old_values["_assert_not_capturing"] = with_patch(
+                "_assert_not_capturing", lambda: None
+            )
+            old_values["_get_deep_gemm_num_sms"] = with_patch(
+                "_get_deep_gemm_num_sms", lambda device: 148
+            )
+            old_values["_mhc_prenorm_deepgemm_backend_name"] = with_patch(
+                "_mhc_prenorm_deepgemm_backend_name", lambda: "deepgemm"
+            )
+            old_values["_mhc_prenorm_deepgemm_backend_enabled"] = with_patch(
+                "_mhc_prenorm_deepgemm_backend_enabled", lambda: True
+            )
+            old_values["_generate_mhc_prenorm_warmup_specs"] = with_patch(
+                "_generate_mhc_prenorm_warmup_specs",
+                lambda **kwargs: ((8, 65), (1, 129)),
+            )
+            old_values["_dist_rank"] = with_patch("_dist_rank", lambda: 0)
+            old_values["_sync_cuda"] = with_patch("_sync_cuda", lambda device: None)
+            old_values["_release_cuda_cache"] = with_patch(
+                "_release_cuda_cache", lambda device: None
+            )
+            old_values["_run_deepgemm_warmup_launches_serialized"] = with_patch(
+                "_run_deepgemm_warmup_launches_serialized",
+                lambda label, fn: fn(),
+            )
+            old_values["_run_deepgemm_warmup_launch_with_retry"] = with_patch(
+                "_run_deepgemm_warmup_launch_with_retry",
+                lambda label, desc, launch_fn, device: (
+                    calls.append(("gemm", desc)),
+                    launch_fn(),
+                ),
+            )
+            old_values["_launch_dummy_mhc_prenorm_gemm"] = with_patch(
+                "_launch_dummy_mhc_prenorm_gemm",
+                lambda **kwargs: calls.append(("gemm_launch", kwargs["num_splits"])),
+            )
+            old_values["_launch_dummy_mhc_pre_big_fuse"] = with_patch(
+                "_launch_dummy_mhc_pre_big_fuse",
+                lambda **kwargs: calls.append(("fuse_launch", kwargs["num_splits"])),
+            )
+            warmup_module._MHC_PRENORM_GEMM_JIT_WARMED_KEYS.clear()
+
+            warmup_module.warmup_mhc_prenorm_gemm_jit(
+                shapes,
+                max_m=1024,
+                device=torch.device("cuda"),
+            )
+        finally:
+            for name, value in old_values.items():
+                setattr(warmup_module, name, value)
+            warmup_module._MHC_PRENORM_GEMM_JIT_WARMED_KEYS.clear()
+
+        self.assertEqual(
+            [c for c in calls if c[0] == "gemm_launch"],
+            [("gemm_launch", 8), ("gemm_launch", 1)],
+        )
+        self.assertEqual(
+            [c for c in calls if c[0] == "fuse_launch"],
+            [("fuse_launch", 8), ("fuse_launch", 1)],
+        )
+
+    def test_mhc_head_fused_warmup_uses_batched_two_token_shape(self):
+        calls = []
+        shapes = {
+            (4, 4096): {
+                "name": "head_hc",
+                "fn": torch.empty((4, 16384), dtype=torch.float32),
+                "base": torch.empty((4,), dtype=torch.float32),
+                "scale": torch.empty((1,), dtype=torch.float32),
+                "norm_eps": 1.0e-6,
+                "hc_eps": 1.0e-6,
+            }
+        }
+
+        def with_patch(name, value):
+            old = getattr(warmup_module, name)
+            setattr(warmup_module, name, value)
+            return old
+
+        old_values = {}
+        try:
+            old_values["_is_cuda_device"] = with_patch(
+                "_is_cuda_device", lambda device: True
+            )
+            old_values["_assert_not_capturing"] = with_patch(
+                "_assert_not_capturing", lambda: None
+            )
+            old_values["_dist_rank"] = with_patch("_dist_rank", lambda: 0)
+            old_values["_sync_cuda"] = with_patch("_sync_cuda", lambda device: None)
+            old_values["_release_cuda_cache"] = with_patch(
+                "_release_cuda_cache", lambda device: None
+            )
+            old_values["_run_deepgemm_warmup_launches_serialized"] = with_patch(
+                "_run_deepgemm_warmup_launches_serialized",
+                lambda label, fn: fn(),
+            )
+            old_values["_launch_dummy_mhc_head_fused"] = with_patch(
+                "_launch_dummy_mhc_head_fused",
+                lambda **kwargs: calls.append(
+                    (
+                        kwargs["key"],
+                        tuple(kwargs["token_values"]),
+                        kwargs["info"]["name"],
+                    )
+                ),
+            )
+
+            import rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang as mhc_tilelang
+
+            old_enabled = mhc_tilelang.tk_mhc_head_fused_enabled
+            mhc_tilelang.tk_mhc_head_fused_enabled = lambda: True
+            self.addCleanup(
+                lambda: setattr(
+                    mhc_tilelang, "tk_mhc_head_fused_enabled", old_enabled
+                )
+            )
+
+            warmup_module._MHC_HEAD_FUSED_JIT_WARMED_KEYS.clear()
+            warmup_module.warmup_mhc_head_fused_jit(
+                shapes,
+                device=torch.device("cuda"),
+            )
+        finally:
+            for name, value in old_values.items():
+                setattr(warmup_module, name, value)
+            warmup_module._MHC_HEAD_FUSED_JIT_WARMED_KEYS.clear()
+
+        self.assertEqual(calls, [((4, 4096), (2,), "head_hc")])
+
+    def test_mhc_head_fused_warmup_skips_when_disabled(self):
+        calls = []
+        shapes = {
+            (4, 4096): {
+                "name": "head_hc",
+                "fn": torch.empty((4, 16384), dtype=torch.float32),
+            }
+        }
+
+        old_disabled = os.environ.get("DSV4_MHC_HEAD_FUSED")
+        old_launch = warmup_module._launch_dummy_mhc_head_fused
+        try:
+            os.environ["DSV4_MHC_HEAD_FUSED"] = "0"
+            warmup_module._launch_dummy_mhc_head_fused = lambda **kwargs: calls.append(
+                kwargs
+            )
+            warmup_module._MHC_HEAD_FUSED_JIT_WARMED_KEYS.clear()
+            warmup_module.warmup_mhc_head_fused_jit(
+                shapes,
+                device=torch.device("cuda"),
+            )
+        finally:
+            if old_disabled is None:
+                os.environ.pop("DSV4_MHC_HEAD_FUSED", None)
+            else:
+                os.environ["DSV4_MHC_HEAD_FUSED"] = old_disabled
+            warmup_module._launch_dummy_mhc_head_fused = old_launch
+            warmup_module._MHC_HEAD_FUSED_JIT_WARMED_KEYS.clear()
+
+        self.assertEqual(calls, [])
+
+    def test_collect_mhc_head_fused_shapes_skips_fallback_head(self):
+        root = nn.Module()
+        FallbackHCHead = _module_type(
+            "FallbackHCHead",
+            {
+                "fn": torch.empty((4, 16384), dtype=torch.float32),
+                "dim": 4096,
+                "hc_mult": 4,
+            },
+        )
+        root.add_module("fallback_head", FallbackHCHead())
+
+        self.assertEqual(_collect_dsv4_mhc_head_fused_shapes(root), {})
+
+    def test_slot_dequant_warmup_uses_padded_cp_full_stride(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
+
+        calls = []
+        local_slice_bytes = 74880
+        cp_size = 2
+        expected_full_stride = local_slice_bytes * cp_size
+        expected_entries = expected_full_stride // _swa_dequant_triton.ENTRY_BYTES
+
+        def fake_dequantize(pool_3d, slot_indices):
+            calls.append(
+                (
+                    tuple(pool_3d.shape),
+                    tuple(pool_3d.stride()),
+                    slot_indices.tolist(),
+                )
+            )
+            return torch.empty(
+                (int(slot_indices.numel()), _swa_dequant_triton.HEAD_DIM),
+                dtype=torch.bfloat16,
+                device=pool_3d.device,
+            )
+
+        def with_patch(obj, name, value):
+            old = getattr(obj, name)
+            setattr(obj, name, value)
+            return old
+
+        old_values = []
+        try:
+            old_values.append(
+                (
+                    warmup_module,
+                    "_is_cuda_device",
+                    with_patch(warmup_module, "_is_cuda_device", lambda device: True),
+                )
+            )
+            old_values.append(
+                (
+                    warmup_module,
+                    "_assert_not_capturing",
+                    with_patch(warmup_module, "_assert_not_capturing", lambda: None),
+                )
+            )
+            old_values.append(
+                (
+                    warmup_module,
+                    "_swa_kv_local_slice_bytes",
+                    with_patch(
+                        warmup_module,
+                        "_swa_kv_local_slice_bytes",
+                        lambda kv_cache: local_slice_bytes,
+                    ),
+                )
+            )
+            old_values.append(
+                (
+                    warmup_module,
+                    "_dist_rank",
+                    with_patch(warmup_module, "_dist_rank", lambda: 0),
+                )
+            )
+            old_values.append(
+                (
+                    warmup_module,
+                    "_sync_cuda",
+                    with_patch(warmup_module, "_sync_cuda", lambda device: None),
+                )
+            )
+            old_values.append(
+                (
+                    _swa_dequant_triton,
+                    "dequantize_slots_to_bf16",
+                    with_patch(
+                        _swa_dequant_triton,
+                        "dequantize_slots_to_bf16",
+                        fake_dequantize,
+                    ),
+                )
+            )
+            warmup_module._SWA_SLOT_DEQUANT_JIT_WARMED_KEYS.clear()
+
+            warmup_module.warmup_dsv4_fp8_swa_slot_dequant_jit(
+                kv_cache=object(),
+                cp_size=cp_size,
+                device=torch.device("cpu"),
+            )
+        finally:
+            for obj, name, value in old_values:
+                setattr(obj, name, value)
+            warmup_module._SWA_SLOT_DEQUANT_JIT_WARMED_KEYS.clear()
+
+        self.assertEqual(
+            calls,
+            [
+                (
+                    (1, expected_entries, _swa_dequant_triton.ENTRY_BYTES),
+                    (
+                        expected_full_stride,
+                        _swa_dequant_triton.ENTRY_BYTES,
+                        1,
+                    ),
+                    [0, -1],
+                )
+            ],
+        )
+
+    def test_mhc_pre_big_fuse_warmup_initializes_tilelang_env_first(self):
+        source = inspect.getsource(warmup_module._launch_dummy_mhc_pre_big_fuse)
+        self.assertIn("tilelang_kernels", source)
+        self.assertIn("pre_big_fuse_kernel", source)
+        self.assertLess(
+            source.find("tilelang_kernels"),
+            source.find("pre_big_fuse_kernel"),
+        )
+
+    def test_jit_kernel_specialization_contracts(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import _compressor_vllm_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_kv_insert_triton
+
+        compress_src = inspect.getsource(
+            _compressor_vllm_triton._fused_kv_compress_norm_rope_insert_sparse_attn.fn
+        )
+        self.assertIn('"KV_BLOCK_STRIDE"', compress_src)
+        self.assertIn("KV_BLOCK_STRIDE,", compress_src)
+        self.assertNotIn("KV_BLOCK_STRIDE: tl.constexpr", compress_src)
+        self.assertIn('"NUM_STATE_BLOCKS"', compress_src)
+        self.assertIn('"NUM_KV_BLOCKS"', compress_src)
+        self.assertNotIn("NUM_STATE_BLOCKS: tl.constexpr", compress_src)
+        self.assertNotIn("NUM_KV_BLOCKS: tl.constexpr", compress_src)
+        indexer_src = inspect.getsource(
+            _compressor_vllm_triton._fused_kv_compress_norm_rope_insert_indexer_attn.fn
+        )
+        self.assertIn('"KV_BLOCK_STRIDE"', indexer_src)
+        self.assertIn('"NUM_STATE_BLOCKS"', indexer_src)
+        self.assertIn('"NUM_KV_BLOCKS"', indexer_src)
+        self.assertNotIn("KV_BLOCK_STRIDE: tl.constexpr", indexer_src)
+        self.assertNotIn("NUM_STATE_BLOCKS: tl.constexpr", indexer_src)
+        self.assertNotIn("NUM_KV_BLOCKS: tl.constexpr", indexer_src)
+
+        quant_src = inspect.getsource(
+            _swa_kv_insert_triton._quantize_and_insert_k_kernel.fn
+        )
+        self.assertIn('"block_stride"', quant_src)
+        self.assertIn('"num_cache_blocks"', quant_src)
+        self.assertNotIn("block_stride: tl.constexpr", quant_src)
+        self.assertNotIn("num_cache_blocks: tl.constexpr", quant_src)
+
+        dequant_src = inspect.getsource(_swa_dequant_triton._dequantize_slots_kernel.fn)
+        self.assertIn('"pool_block_stride"', dequant_src)
+        self.assertIn('"num_cache_blocks"', dequant_src)
+        self.assertNotIn("pool_block_stride: tl.constexpr", dequant_src)
+        self.assertNotIn("num_cache_blocks: tl.constexpr", dequant_src)
+
+        gather_src = inspect.getsource(
+            _swa_dequant_triton._gather_k_cache_packed_kernel.fn
+        )
+        self.assertIn('"out_stride0"', gather_src)
+        self.assertIn('"out_stride1"', gather_src)
+        self.assertIn('"offset"', gather_src)
+        self.assertIn('"max_blocks_per_seq"', gather_src)
+        self.assertIn('"block_stride"', gather_src)
+        self.assertNotIn("out_stride0: tl.constexpr", gather_src)
+        self.assertNotIn("out_stride1: tl.constexpr", gather_src)
+        self.assertNotIn("offset: tl.constexpr", gather_src)
+        self.assertNotIn("max_blocks_per_seq: tl.constexpr", gather_src)
+        self.assertNotIn("block_stride: tl.constexpr", gather_src)
 
     def test_deepgemm_warmup_retry_handles_nvcc_compile_failure(self):
         calls = []

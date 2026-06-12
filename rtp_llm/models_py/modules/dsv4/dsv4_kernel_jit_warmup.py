@@ -12,6 +12,7 @@ import logging
 import os
 import time
 from functools import lru_cache, partial
+from importlib import import_module
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
@@ -64,7 +65,9 @@ _BRANCH_KERNEL_JIT_WARMED_KEYS: set[tuple] = set()
 _DENSE_GEMM_JIT_WARMED_KEYS: set[tuple] = set()
 _BATCHED_FP8_EINSUM_JIT_WARMED_KEYS: set[tuple] = set()
 _MHC_PRENORM_GEMM_JIT_WARMED_KEYS: set[tuple] = set()
+_MHC_HEAD_FUSED_JIT_WARMED_KEYS: set[tuple] = set()
 _FP8_MQA_LOGITS_JIT_WARMED_KEYS: set[tuple] = set()
+_SWA_SLOT_DEQUANT_JIT_WARMED_KEYS: set[tuple] = set()
 _DEEPGEMM_WARMUP_COMPILE_RETRIES = 2
 
 
@@ -521,8 +524,12 @@ def _warmup_fused_kv_compress_norm_rope_insert(
         dtype=torch.float32,
         device=device,
     )
-    kv_raw = torch.zeros((n_raw, raw_width), dtype=torch.float32, device=device)
-    score_raw = torch.zeros_like(kv_raw)
+    # Match the production fused output split:
+    # ``kv_flat=fused[:, :raw_width]`` and ``score_flat=fused[:, raw_width:]``
+    # are strided views with row stride ``2 * raw_width``.
+    fused_raw = torch.zeros((n_raw, 2 * raw_width), dtype=torch.float32, device=device)
+    kv_raw = fused_raw[:, :raw_width]
+    score_raw = fused_raw[:, raw_width:]
     ape = torch.zeros((compress_ratio, raw_width), dtype=torch.float32, device=device)
     rms_norm_weight = torch.ones((head_dim,), dtype=torch.bfloat16, device=device)
     cos_sin_cache = torch.zeros(
@@ -676,12 +683,67 @@ def _collect_dsv4_mhc_prenorm_shapes(model: Any) -> Dict[tuple[int, int], dict]:
         k_value = int(fn.shape[1])
         if n_value <= 0 or k_value <= 0:
             continue
+        scale = getattr(module, "scale", None)
+        base = getattr(module, "base", None)
         key = (n_value, k_value)
         if key not in shapes:
-            shapes[key] = {"name": module_name, "fn": fn}
+            shapes[key] = {
+                "name": module_name,
+                "fn": fn,
+                "scale": scale if isinstance(scale, torch.Tensor) else None,
+                "base": base if isinstance(base, torch.Tensor) else None,
+                "dim": int(getattr(module, "dim", 0) or 0),
+                "hc_mult": int(getattr(module, "hc_mult", 4) or 4),
+                "norm_eps": float(getattr(module, "norm_eps", 1.0e-6)),
+                "hc_eps": float(getattr(module, "hc_eps", 1.0e-6)),
+                "hc_sinkhorn_iters": int(
+                    getattr(module, "hc_sinkhorn_iters", 20) or 20
+                ),
+            }
 
     logging.info(
         "[DSV4 mHC DeepGEMM] collected prenorm shapes: count=%d shapes=%s",
+        len(shapes),
+        sorted(shapes.keys()),
+    )
+    return shapes
+
+
+def _collect_dsv4_mhc_head_fused_shapes(model: Any) -> Dict[tuple[int, int], dict]:
+    """Collect final mHC head-fuse TileLang shapes from live TileLang HC heads."""
+
+    shapes: Dict[tuple[int, int], dict] = {}
+    for module_name, module in model.named_modules():
+        if module.__class__.__name__ != "TileLangHCHead":
+            continue
+        fn = getattr(module, "fn", None)
+        if not isinstance(fn, torch.Tensor) or fn.dim() != 2:
+            continue
+        if fn.dtype != torch.float32:
+            continue
+        hc_mult = int(getattr(module, "hc_mult", 4) or 4)
+        dim = int(getattr(module, "dim", 0) or 0)
+        if dim <= 0:
+            dim = int(fn.shape[1]) // max(hc_mult, 1)
+        if hc_mult <= 0 or dim <= 0:
+            continue
+        if int(fn.shape[0]) != hc_mult or int(fn.shape[1]) != hc_mult * dim:
+            continue
+        scale = getattr(module, "scale", None)
+        base = getattr(module, "base", None)
+        key = (hc_mult, dim)
+        if key not in shapes:
+            shapes[key] = {
+                "name": module_name,
+                "fn": fn,
+                "scale": scale if isinstance(scale, torch.Tensor) else None,
+                "base": base if isinstance(base, torch.Tensor) else None,
+                "norm_eps": float(getattr(module, "norm_eps", 1.0e-6)),
+                "hc_eps": float(getattr(module, "hc_eps", 1.0e-6)),
+            }
+
+    logging.info(
+        "[DSV4 mHCHeadFused] collected head shapes: count=%d shapes=%s",
         len(shapes),
         sorted(shapes.keys()),
     )
@@ -1154,6 +1216,15 @@ def _mhc_prenorm_deepgemm_backend_enabled() -> bool:
     return requested == "deepgemm"
 
 
+def _mhc_prenorm_deepgemm_backend_name() -> str:
+    requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
+    if requested in ("", "auto", "deepgemm", "dg"):
+        return "deepgemm"
+    if requested in ("tilelang", "single"):
+        return "tilelang_single"
+    return requested
+
+
 def _compute_mhc_prenorm_num_split(
     *,
     m_value: int,
@@ -1385,31 +1456,35 @@ def warmup_mhc_prenorm_gemm_jit(
     max_m: int,
     device: torch.device,
 ) -> None:
-    """Compile reachable DeepGEMM mHC prenorm GEMM split-K variants."""
+    """Compile reachable mHC prenorm GEMM and TileLang post-fuse variants."""
 
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
         return
-    if not _mhc_prenorm_deepgemm_backend_enabled():
-        return
     _assert_not_capturing()
 
+    backend = _mhc_prenorm_deepgemm_backend_name()
+    deepgemm_enabled = _mhc_prenorm_deepgemm_backend_enabled()
     num_sms = _get_deep_gemm_num_sms(device)
     shape_keys = tuple(sorted(shapes.keys()))
-    specs_by_shape = {
-        key: _generate_mhc_prenorm_warmup_specs(
-            max_m=int(max_m),
-            k_value=int(key[1]),
-            num_sms=num_sms,
-        )
-        for key in shape_keys
-    }
+    if deepgemm_enabled:
+        specs_by_shape = {
+            key: _generate_mhc_prenorm_warmup_specs(
+                max_m=int(max_m),
+                k_value=int(key[1]),
+                num_sms=num_sms,
+            )
+            for key in shape_keys
+        }
+    else:
+        specs_by_shape = {key: ((1, 1),) for key in shape_keys if int(max_m) > 0}
     specs_by_shape = {key: specs for key, specs in specs_by_shape.items() if specs}
     if not specs_by_shape:
         return
 
     warmup_key = (
         int(max_m),
+        str(backend),
         tuple((key, specs_by_shape.get(key, ())) for key in shape_keys),
         int(num_sms),
         str(device),
@@ -1421,15 +1496,16 @@ def warmup_mhc_prenorm_gemm_jit(
     if rank == 0:
         total_launches = sum(len(specs) for specs in specs_by_shape.values())
         logging.info(
-            "[DSV4 mHC DeepGEMM] JIT warmup start: %d shapes, %d num_splits launches, max_m=%d, num_sms=%d: %s",
+            "[DSV4 mHC] JIT warmup start: %d shapes, %d num_splits launches, max_m=%d, num_sms=%d, backend=%s: %s",
             len(shape_keys),
             total_launches,
             int(max_m),
             num_sms,
+            backend,
             shape_keys,
         )
         logging.info(
-            "[DSV4 mHC DeepGEMM] representative split specs: %s",
+            "[DSV4 mHC] representative split specs: %s",
             {key: specs_by_shape.get(key, ()) for key in shape_keys},
         )
 
@@ -1437,27 +1513,90 @@ def warmup_mhc_prenorm_gemm_jit(
         for key in shape_keys:
             info = shapes[key]
             for num_splits, m_value in specs_by_shape.get(key, ()):
-                _run_deepgemm_warmup_launch_with_retry(
-                    "DSV4 mHC DeepGEMM",
-                    f"shape={key} num_splits={num_splits} m={m_value}",
-                    partial(
-                        _launch_dummy_mhc_prenorm_gemm,
-                        key=key,
-                        info=info,
-                        m_value=m_value,
-                        num_splits=num_splits,
+                if deepgemm_enabled:
+                    _run_deepgemm_warmup_launch_with_retry(
+                        "DSV4 mHC DeepGEMM",
+                        f"shape={key} num_splits={num_splits} m={m_value}",
+                        partial(
+                            _launch_dummy_mhc_prenorm_gemm,
+                            key=key,
+                            info=info,
+                            m_value=m_value,
+                            num_splits=num_splits,
+                            device=device,
+                        ),
                         device=device,
-                    ),
+                    )
+                _launch_dummy_mhc_pre_big_fuse(
+                    key=key,
+                    info=info,
+                    m_value=m_value,
+                    num_splits=num_splits,
                     device=device,
                 )
             _sync_cuda(device)
             _release_cuda_cache(device)
 
     t0 = time.time()
-    _run_deepgemm_warmup_launches_serialized("DSV4 mHC DeepGEMM", _run_warmup_launches)
+    _run_deepgemm_warmup_launches_serialized("DSV4 mHC", _run_warmup_launches)
     if rank == 0:
-        logging.info("[DSV4 mHC DeepGEMM] JIT warmup done in %.2fs", time.time() - t0)
+        logging.info("[DSV4 mHC] JIT warmup done in %.2fs", time.time() - t0)
     _MHC_PRENORM_GEMM_JIT_WARMED_KEYS.add(warmup_key)
+
+
+@torch.inference_mode()
+def warmup_mhc_head_fused_jit(
+    shapes: Dict[tuple[int, int], dict],
+    *,
+    device: torch.device,
+) -> None:
+    """Compile the final TileLang fused mHC head before the first real request."""
+
+    device = torch.device(device)
+    if not _is_cuda_device(device) or not shapes:
+        return
+    _assert_not_capturing()
+
+    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
+        tk_mhc_head_fused_enabled,
+    )
+
+    if not tk_mhc_head_fused_enabled():
+        return
+
+    shape_keys = tuple(sorted(shapes.keys()))
+    warmup_key = (shape_keys, str(device))
+    if warmup_key in _MHC_HEAD_FUSED_JIT_WARMED_KEYS:
+        return
+
+    rank = _dist_rank()
+    if rank == 0:
+        logging.info(
+            "[DSV4 mHCHeadFused] JIT warmup start: %d shapes: %s",
+            len(shape_keys),
+            shape_keys,
+        )
+
+    def _run_warmup_launches() -> None:
+        for key in shape_keys:
+            _launch_dummy_mhc_head_fused(
+                key=key,
+                info=shapes[key],
+                token_values=(2,),
+                device=device,
+            )
+            _sync_cuda(device)
+            _release_cuda_cache(device)
+
+    t0 = time.time()
+    _run_deepgemm_warmup_launches_serialized(
+        "DSV4 mHCHeadFused", _run_warmup_launches
+    )
+    if rank == 0:
+        logging.info(
+            "[DSV4 mHCHeadFused] JIT warmup done in %.2fs", time.time() - t0
+        )
+    _MHC_HEAD_FUSED_JIT_WARMED_KEYS.add(warmup_key)
 
 
 @torch.inference_mode()
@@ -1508,6 +1647,92 @@ def warmup_fp8_mqa_logits_jit(
     if rank == 0:
         logging.info("[DSV4 FP8MQALogits] JIT warmup done in %.2fs", time.time() - t0)
     _FP8_MQA_LOGITS_JIT_WARMED_KEYS.add(warmup_key)
+
+
+def _swa_kv_local_slice_bytes(kv_cache: Any) -> int:
+    try:
+        from rtp_llm.ops.compute_ops import KVCacheRegionName
+    except Exception:
+        return 0
+
+    layer_count = len(getattr(kv_cache, "kv_cache_base_by_layer", []) or [])
+    for layer_id in range(layer_count):
+        try:
+            layer_kv = kv_cache.get_layer_cache(layer_id, KVCacheRegionName.SWA_KV)
+        except Exception:
+            continue
+        base = getattr(layer_kv, "kv_cache_base", None)
+        if not isinstance(base, torch.Tensor) or base.numel() == 0 or base.dim() != 2:
+            continue
+        return int(base.view(torch.uint8).shape[1])
+    return 0
+
+
+@torch.inference_mode()
+def warmup_dsv4_fp8_swa_slot_dequant_jit(
+    *,
+    kv_cache: Any,
+    cp_size: int,
+    device: torch.device,
+) -> None:
+    """Compile the CP byte-sliced SWA slot dequant kernel with real block width."""
+
+    device = torch.device(device)
+    if not _is_cuda_device(device) or kv_cache is None:
+        return
+    _assert_not_capturing()
+
+    cp_size = int(cp_size)
+    if cp_size <= 1:
+        return
+    local_slice_bytes = _swa_kv_local_slice_bytes(kv_cache)
+    if local_slice_bytes <= 0:
+        logging.info("[DSV4 SWA SlotDequant] skip JIT warmup: no SWA_KV pool")
+        return
+
+    from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
+        ENTRY_BYTES,
+        dequantize_slots_to_bf16,
+    )
+
+    full_stride_bytes = int(local_slice_bytes) * cp_size
+    entries_per_block = full_stride_bytes // ENTRY_BYTES
+    if entries_per_block <= 0:
+        logging.info(
+            "[DSV4 SWA SlotDequant] skip JIT warmup: full_stride_bytes=%d entry_bytes=%d",
+            full_stride_bytes,
+            ENTRY_BYTES,
+        )
+        return
+    warmup_key = (int(full_stride_bytes), int(entries_per_block), str(device))
+    if warmup_key in _SWA_SLOT_DEQUANT_JIT_WARMED_KEYS:
+        return
+
+    rank = _dist_rank()
+    if rank == 0:
+        logging.info(
+            "[DSV4 SWA SlotDequant] JIT warmup start: "
+            "local_slice_bytes=%d cp_size=%d full_stride_bytes=%d entries_per_block=%d",
+            local_slice_bytes,
+            cp_size,
+            full_stride_bytes,
+            entries_per_block,
+        )
+    t0 = time.time()
+    full_raw = torch.zeros((1, full_stride_bytes), dtype=torch.uint8, device=device)
+    full_view = full_raw.as_strided(
+        (1, entries_per_block, ENTRY_BYTES),
+        (full_stride_bytes, ENTRY_BYTES, 1),
+    )
+    slot_indices = torch.tensor([0, -1], dtype=torch.long, device=device)
+    out = dequantize_slots_to_bf16(full_view, slot_indices)
+    del full_raw, full_view, slot_indices, out
+    _sync_cuda(device)
+    if rank == 0:
+        logging.info(
+            "[DSV4 SWA SlotDequant] JIT warmup done in %.2fs", time.time() - t0
+        )
+    _SWA_SLOT_DEQUANT_JIT_WARMED_KEYS.add(warmup_key)
 
 
 def _create_dummy_fp8_input(
@@ -1656,6 +1881,139 @@ def _launch_dummy_mhc_prenorm_gemm(
     sqrsum = torch.empty((num_splits, m_value), dtype=torch.float32, device=device)
     tf32_hc_prenorm_gemm(x, info["fn"], out, sqrsum, int(num_splits))
     del x, out, sqrsum
+
+
+def _launch_dummy_mhc_pre_big_fuse(
+    *,
+    key: tuple[int, int],
+    info: dict,
+    m_value: int,
+    num_splits: int,
+    device: torch.device,
+) -> None:
+    from rtp_llm.models_py.modules.dsv4 import tilelang_kernels  # noqa: F401
+
+    _mhc_pre_big_fuse = import_module(
+        "rtp_llm.models_py.3rdparty.tile_kernels.mhc.pre_big_fuse_kernel"
+    )._mhc_pre_big_fuse
+
+    n_value, k_value = key
+    mhc_mult = int(info.get("hc_mult", 4) or 4)
+    hidden_size = int(info.get("dim", 0) or 0)
+    if hidden_size <= 0:
+        hidden_size = int(k_value) // max(mhc_mult, 1)
+    norm_eps = float(info.get("norm_eps", 1.0e-6))
+    hc_eps = float(info.get("hc_eps", 1.0e-6))
+    sinkhorn_iters = int(info.get("hc_sinkhorn_iters", 20) or 20)
+
+    gemm_out_mul = torch.zeros(
+        (num_splits, m_value, n_value), dtype=torch.float32, device=device
+    )
+    gemm_out_sqrsum = torch.ones(
+        (num_splits, m_value), dtype=torch.float32, device=device
+    )
+    scale = info.get("scale")
+    if not isinstance(scale, torch.Tensor) or tuple(scale.shape) != (3,):
+        scale = torch.ones((3,), dtype=torch.float32, device=device)
+    else:
+        scale = scale.to(device=device, dtype=torch.float32)
+    base = info.get("base")
+    if not isinstance(base, torch.Tensor) or tuple(base.shape) != (n_value,):
+        base = torch.zeros((n_value,), dtype=torch.float32, device=device)
+    else:
+        base = base.to(device=device, dtype=torch.float32)
+    residual = torch.zeros(
+        (m_value, mhc_mult, hidden_size), dtype=torch.bfloat16, device=device
+    )
+    post_mix = torch.empty((m_value, mhc_mult), dtype=torch.float32, device=device)
+    comb_mix = torch.empty(
+        (m_value, mhc_mult * mhc_mult), dtype=torch.float32, device=device
+    )
+    layer_input = torch.empty(
+        (m_value, hidden_size), dtype=torch.bfloat16, device=device
+    )
+    _mhc_pre_big_fuse(
+        hidden_size,
+        norm_eps,
+        hc_eps,
+        hc_eps,
+        2.0,
+        sinkhorn_iters,
+        n_splits=int(num_splits),
+        mhc_mult=mhc_mult,
+    )(
+        gemm_out_mul,
+        gemm_out_sqrsum,
+        scale,
+        base,
+        residual,
+        post_mix,
+        comb_mix,
+        layer_input,
+    )
+    del (
+        gemm_out_mul,
+        gemm_out_sqrsum,
+        scale,
+        base,
+        residual,
+        post_mix,
+        comb_mix,
+        layer_input,
+    )
+
+
+def _launch_dummy_mhc_head_fused(
+    *,
+    key: tuple[int, int],
+    info: dict,
+    token_values: Iterable[int],
+    device: torch.device,
+) -> None:
+    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_head_fused
+
+    hc_mult, hidden_size = key
+    fn = info.get("fn")
+    if not isinstance(fn, torch.Tensor) or tuple(fn.shape) != (
+        hc_mult,
+        hc_mult * hidden_size,
+    ):
+        fn = torch.zeros(
+            (hc_mult, hc_mult * hidden_size), dtype=torch.float32, device=device
+        )
+    else:
+        fn = fn.to(device=device, dtype=torch.float32)
+    scale = info.get("scale")
+    if not isinstance(scale, torch.Tensor) or scale.numel() != 1:
+        scale = torch.ones((1,), dtype=torch.float32, device=device)
+    else:
+        scale = scale.to(device=device, dtype=torch.float32).reshape(1)
+    base = info.get("base")
+    if not isinstance(base, torch.Tensor) or tuple(base.shape) != (hc_mult,):
+        base = torch.zeros((hc_mult,), dtype=torch.float32, device=device)
+    else:
+        base = base.to(device=device, dtype=torch.float32)
+    norm_eps = float(info.get("norm_eps", 1.0e-6))
+    hc_eps = float(info.get("hc_eps", 1.0e-6))
+
+    for token_count in token_values:
+        token_count = max(int(token_count), 1)
+        residual = torch.zeros(
+            (1, token_count, hc_mult, hidden_size),
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        out = tk_mhc_head_fused(
+            residual,
+            fn,
+            scale,
+            base,
+            norm_eps=norm_eps,
+            pre_eps=hc_eps,
+            hc_mult=hc_mult,
+        )
+        del residual, out
+    del fn, scale, base
 
 
 def _launch_dummy_fp8_mqa_logits(

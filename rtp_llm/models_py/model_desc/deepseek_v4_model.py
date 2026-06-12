@@ -818,12 +818,15 @@ class DeepSeekV4Model(GptModelBase):
                     _collect_dsv4_batched_fp8_einsum_shapes,
                     _collect_dsv4_dense_gemm_shapes,
                     _collect_dsv4_fp8_mqa_logits_shapes,
+                    _collect_dsv4_mhc_head_fused_shapes,
                     _collect_dsv4_mhc_prenorm_shapes,
                     resolve_dense_gemm_warmup_max_m,
                     warmup_batched_fp8_einsum_jit,
                     warmup_compressor_combine_branch_kernels,
                     warmup_dense_gemm_jit,
+                    warmup_dsv4_fp8_swa_slot_dequant_jit,
                     warmup_fp8_mqa_logits_jit,
+                    warmup_mhc_head_fused_jit,
                     warmup_mhc_prenorm_gemm_jit,
                 )
 
@@ -881,6 +884,9 @@ class DeepSeekV4Model(GptModelBase):
                         _prefill_cp_enabled = bool(_prefill_cp_config.is_enabled())
                     except Exception:
                         _prefill_cp_enabled = False
+                _prefill_kv_cache_sharded = bool(
+                    getattr(_prefill_cp_config, "kv_cache_sharded", False)
+                )
                 _prefill_cp_size = (
                     int(getattr(self.parallelism_config, "tp_size", 1) or 1)
                     if _prefill_cp_enabled
@@ -927,6 +933,23 @@ class DeepSeekV4Model(GptModelBase):
                     max_m=_dense_gemm_max_m,
                     device=_jit_device,
                 )
+                _mhc_head_fused_shapes = _collect_dsv4_mhc_head_fused_shapes(self.v4)
+                warmup_mhc_head_fused_jit(
+                    _mhc_head_fused_shapes,
+                    device=_jit_device,
+                )
+                if (
+                    self.fp8_kv_cache
+                    and not self._is_decode_role
+                    and _prefill_cp_enabled
+                    and _prefill_cp_size > 1
+                    and _prefill_kv_cache_sharded
+                ):
+                    warmup_dsv4_fp8_swa_slot_dequant_jit(
+                        kv_cache=self.kv_cache,
+                        cp_size=_prefill_cp_size,
+                        device=_jit_device,
+                    )
                 _fp8_mqa_logits_shapes = _collect_dsv4_fp8_mqa_logits_shapes(self.v4)
                 warmup_fp8_mqa_logits_jit(
                     _fp8_mqa_logits_shapes,

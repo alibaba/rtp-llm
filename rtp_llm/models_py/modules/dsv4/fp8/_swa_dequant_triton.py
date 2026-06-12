@@ -437,7 +437,15 @@ def dequantize_and_gather_k_cache_slots(
     )
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "out_stride0",
+        "out_stride1",
+        "offset",
+        "max_blocks_per_seq",
+        "block_stride",
+    ]
+)
 def _gather_k_cache_packed_kernel(
     out_ptr,
     out_stride0,
@@ -447,11 +455,11 @@ def _gather_k_cache_packed_kernel(
     block_table_ptr,
     offset,
     gather_lens_ptr,
-    max_blocks_per_seq: tl.constexpr,
+    max_blocks_per_seq,
     cache_block_size: tl.constexpr,
     token_data_size: tl.constexpr,
     scale_dim: tl.constexpr,
-    block_stride: tl.constexpr,
+    block_stride,
 ):
     """Gather paged FP8 cache into true per-token packed slots.
 
@@ -480,18 +488,27 @@ def _gather_k_cache_packed_kernel(
         block_in_seq = pos // cache_block_size
         pos_in_block = pos % cache_block_size
 
-        block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
+        block_table_row_ptr = (
+            block_table_ptr
+            + batch_idx.to(tl.int64) * max_blocks_per_seq.to(tl.int64)
+        )
         physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)
         tl.device_assert(physical_block_idx >= 0, "block_table contains -1")
 
-        cache_block_ptr = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+        cache_block_ptr = (
+            k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride.to(tl.int64)
+        )
         token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
         token_scale_ptr = (
             cache_block_ptr
             + cache_block_size * token_data_size
             + pos_in_block * scale_dim
         )
-        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+        output_row_ptr = (
+            out_ptr
+            + batch_idx.to(tl.int64) * out_stride0.to(tl.int64)
+            + (offset.to(tl.int64) + i.to(tl.int64)) * out_stride1.to(tl.int64)
+        )
 
         data = tl.load(token_data_ptr + data_offsets, mask=data_mask, other=0)
         tl.store(output_row_ptr + data_offsets, data, mask=data_mask)
@@ -700,12 +717,18 @@ def dequantize_swa_window_to_bf16(
 # --------------------------------------------------------------------------
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "out_stride0",
+        "pool_block_stride",
+        "num_cache_blocks",
+    ]
+)
 def _dequantize_slots_kernel(
     out_ptr,  # [N, 512] bf16
     out_stride0,
     pool_ptr,  # [num_blocks, block_size, 584] uint8
-    pool_block_stride: tl.constexpr,  # bytes per block (may be padded > bs*584)
+    pool_block_stride,  # bytes per block (may be padded > bs*584)
     slot_indices_ptr,  # [N] int64
     block_size: tl.constexpr,
     fp8_dim: tl.constexpr,  # 448
@@ -713,7 +736,7 @@ def _dequantize_slots_kernel(
     scale_dim: tl.constexpr,  # 8
     quant_block: tl.constexpr,  # 64
     token_data_size: tl.constexpr,  # 576
-    num_cache_blocks: tl.constexpr,
+    num_cache_blocks,
     n_quant_blocks: tl.constexpr,  # 7
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
 ):
@@ -738,7 +761,7 @@ def _dequantize_slots_kernel(
     if blk >= num_cache_blocks:
         _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
 
-    cache_block_ptr = pool_ptr + blk * pool_block_stride
+    cache_block_ptr = pool_ptr + blk * pool_block_stride.to(tl.int64)
     token_data_ptr = cache_block_ptr + off * token_data_size
     token_scale_ptr = cache_block_ptr + block_size * token_data_size + off * scale_dim
     token_fp8_ptr = token_data_ptr

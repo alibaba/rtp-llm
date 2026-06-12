@@ -42,7 +42,7 @@ def _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS: tl.constexpr) -> None:
         )
 
 
-@triton.jit(do_not_specialize=["num_tokens"])
+@triton.jit(do_not_specialize=["num_tokens", "block_stride", "num_cache_blocks"])
 def _quantize_and_insert_k_kernel(
     # Inputs
     k_ptr,  # [num_tokens, 512] bf16
@@ -58,8 +58,8 @@ def _quantize_and_insert_k_kernel(
     quant_block: tl.constexpr,  # 64 (NoPE quantization tile size)
     cache_block_size: tl.constexpr,  # tokens per pool block (RTP-LLM: 256)
     token_data_size: tl.constexpr,  # 576 = 448 + 128
-    block_stride: tl.constexpr,  # bytes per block (TMA-padded; from k_cache.stride(0))
-    num_cache_blocks: tl.constexpr,
+    block_stride,  # bytes per block (TMA-padded; from k_cache.stride(0))
+    num_cache_blocks,
     fp8_max: tl.constexpr,  # 448.0
     n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding tile-loop iter)
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
@@ -89,7 +89,9 @@ def _quantize_and_insert_k_kernel(
 
     # int64: block_idx * block_stride can overflow int32 with many blocks
     # (e.g. >= 14K at block_stride 149504 → 2^31). Matches dequant kernel.
-    cache_block_ptr = k_cache_ptr + block_idx.to(tl.int64) * block_stride
+    cache_block_ptr = (
+        k_cache_ptr + block_idx.to(tl.int64) * block_stride.to(tl.int64)
+    )
 
     token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
     token_scale_ptr = (
