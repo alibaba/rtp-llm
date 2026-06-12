@@ -251,6 +251,10 @@ class VitConfig:
         self.disable_access_log: bool = False
         self.use_local_preprocess: bool = False
         self.vit_proxy_load_balance_strategy: str = "round_robin"
+        self.use_gpu_batch: bool = False
+        self.gpu_batch_wait_ms: int = 10
+        self.gpu_max_batch_size: int = 8
+        self.gpu_max_batch_tokens: int = 1048576
 
     def to_string(self):
         return (
