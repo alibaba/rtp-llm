@@ -1,0 +1,35 @@
+{
+  "comparison": "RTP-LLM TP=1 vs vLLM TP=1",
+  "model": "GLM-5-BF16-4layer",
+  "dtype": "BF16",
+  "attention": "sparse MLA (flashmla_sparse)",
+  "results": {
+    "short (5 tok in, 20 tok out)": {
+      "rtp_len": 20,
+      "vllm_len": 20,
+      "match_count": 10,
+      "total_compared": 20,
+      "match_pct": 50.0,
+      "first_diff_pos": 10,
+      "status": "DIFF at pos 10"
+    },
+    "medium (23 tok in, 100 tok out)": {
+      "rtp_len": 100,
+      "vllm_len": 100,
+      "match_count": 100,
+      "total_compared": 100,
+      "match_pct": 100.0,
+      "first_diff_pos": -1,
+      "status": "PERFECT MATCH"
+    },
+    "4k input + 1k output": {
+      "rtp_len": 1000,
+      "vllm_len": 1000,
+      "match_count": 41,
+      "total_compared": 1000,
+      "match_pct": 4.1,
+      "first_diff_pos": 19,
+      "status": "DIFF at pos 19"
+    }
+  }
+}

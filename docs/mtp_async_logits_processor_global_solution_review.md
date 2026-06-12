@@ -21,13 +21,13 @@ Related:
 
 回答三个关键问题：
 
-1. **方案合理吗？**  
+1. **方案合理吗？**
    合理。`applied_processor_ids`、artifact ownership、显式 commit capability、processor state epoch 是 P0 级别的结构性改造。
 
-2. **需要改动吗？**  
+2. **需要改动吗？**
    需要。当前 `has_active_processor`、跳过所有 `SpecLogitsProcessor`、`isStateful()` 多义复用、缺少 state epoch / capability policy，这些都是下一次 bug 的入口。
 
-3. **改完就能修复当前 bug 吗？**  
+3. **改完就能修复当前 bug 吗？**
    能覆盖当前这类 bug 的根因：silent skip、旧状态构造 mask、buffer 被下一轮覆盖、unsupported processor 被误当 no-op。但它不能单独保证模型能力、搜索插件输出质量、xgrammar 编译性能、所有 PD replay corner case；这些要靠测试矩阵和指标继续兜住。
 
 ## 1. 当前验证状态

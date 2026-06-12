@@ -1,0 +1,30 @@
+{
+  "comparison_type": "RTP-LLM TP=1 vs vLLM TP=1",
+  "model": "/home/zw193905/models/GLM-5-BF16-4layer",
+  "results": {
+    "short": {
+      "rtp_len": 20,
+      "vllm_len": 20,
+      "match_count": 10,
+      "match_ratio": 0.5,
+      "first_diff_pos": 10,
+      "status": "DIFF at pos 10"
+    },
+    "medium": {
+      "rtp_len": 100,
+      "vllm_len": 100,
+      "match_count": 100,
+      "match_ratio": 1.0,
+      "first_diff_pos": -1,
+      "status": "PERFECT MATCH"
+    },
+    "long_4k": {
+      "rtp_len": 200,
+      "vllm_len": 200,
+      "match_count": 42,
+      "match_ratio": 0.21,
+      "first_diff_pos": 42,
+      "status": "DIFF at pos 42"
+    }
+  }
+}
