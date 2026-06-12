@@ -1,6 +1,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
@@ -452,6 +453,46 @@ void execBroadcast(const BroadcastParams& params) {
     fn(tensors, params.root, static_cast<int>(params.mode));
 }
 
+void execBroadcastCpu(const BroadcastParams& params) {
+    RTP_LLM_CHECK_WITH_INFO(params.root == 0,
+                            "execBroadcastCpu supports only root=0; got %ld",
+                            static_cast<long>(params.root));
+    RTP_LLM_CHECK_WITH_INFO(params.mode == ParallelMode::TP,
+                            "execBroadcastCpu supports only ParallelMode::TP; got %d",
+                            static_cast<int>(params.mode));
+
+    auto& bcast = CpuTpBroadcaster::instance();
+    if (bcast.isInitialized()) {
+        // Pure CPU path via UDS (no GPU stream, no Python, no cudaSync).
+        // Caller must guarantee CPU tensors with identical (count, nbytes)
+        // on every rank — see execBroadcastCpu doc in ExecOps.h.
+        for (auto& t : params.buffers) {
+            RTP_LLM_CHECK_WITH_INFO(
+                t.is_cpu(), "execBroadcastCpu requires CPU tensors (got device=%s)", t.device().str().c_str());
+            // Pinned tensors from torch::empty(...).pin_memory() are already
+            // contiguous; .contiguous() is a no-op fast path.
+            auto contig = t.contiguous();
+            bcast.broadcast(contig.data_ptr(), contig.nbytes(), params.root);
+            if (!contig.is_same(t)) {
+                t.copy_(contig);
+            }
+        }
+        return;
+    }
+    // Fallback (broadcaster not initialized — typically cross-node TP):
+    // delegate to NCCL via the Python callback. The historical contract for
+    // this callsite (tpSyncModelInputs CPU broadcasts) requires the data to
+    // be readable on the current thread immediately after this returns, so
+    // preserve the original sync + cudaSyncAndCheck sequence.
+    execBroadcast(params);
+    execSyncCommunication(false);
+    cudaSyncAndCheck();
+}
+
+bool isCpuTpBroadcasterInitialized() {
+    return CpuTpBroadcaster::instance().isInitialized();
+}
+
 AllReduceOutput execAllReduce(const AllReduceParams& params) {
     py::function fn;
     {
@@ -609,6 +650,31 @@ void registerExecCtxOps(pybind11::module& m) {
             g_allgather_fn = py::function();
         },
         "Clear registered Python communication callbacks.");
+
+    m.def(
+        "init_cpu_tp_broadcaster",
+        [](int tp_rank, int tp_size, const std::string& base_path) {
+            // Release GIL: rank 0 blocks in accept() and rank K blocks in
+            // connect() retry until the peer arrives. Holding the GIL would
+            // dead-lock any other Python thread waiting to enter the runtime
+            // (e.g. logging) and is unnecessary — initialize() touches no
+            // Python state.
+            py::gil_scoped_release release;
+            CpuTpBroadcaster::instance().initialize(tp_rank, tp_size, base_path);
+        },
+        py::arg("tp_rank"),
+        py::arg("tp_size"),
+        py::arg("base_path"),
+        "Bootstrap the UDS-backed intra-node TP broadcaster used by tpSyncModelInputs. "
+        "Must be called by every TP rank with the same base_path; rank 0 binds, others connect.");
+
+    m.def(
+        "destroy_cpu_tp_broadcaster",
+        []() {
+            py::gil_scoped_release release;
+            CpuTpBroadcaster::instance().reset();
+        },
+        "Tear down the UDS-backed intra-node TP broadcaster and clear its singleton state.");
 }
 
 }  // namespace rtp_llm

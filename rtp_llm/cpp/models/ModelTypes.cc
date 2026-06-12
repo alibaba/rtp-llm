@@ -2,12 +2,21 @@
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
+#include <string>
+
 namespace rtp_llm {
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
     if (parallelism_config.tp_size <= 1) {
         return;
     }
+
+    // The UDS-backed CPU broadcaster (used by execBroadcastCpu below) is
+    // bootstrapped from Python in collective_torch._register_process_groups_to_cpp,
+    // which guarantees deterministic timing across TP siblings. Cross-node TP
+    // skips the init and falls back to NCCL automatically inside execBroadcastCpu.
+
+    // first sync stage: shape hints
     const size_t shape_hints_size = GptModelInputIndex::gptModelInputLength;
     auto         shape_hints_t    = torch::empty({(int64_t)shape_hints_size}, torch::kInt32).pin_memory();
     auto         shape_hints_ptr  = shape_hints_t.data_ptr<int32_t>();
@@ -65,9 +74,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
-    execBroadcast({{shape_hints_t}, 0});
-    execSyncCommunication(false);
-    cudaSyncAndCheck();
+
+    // CPU broadcast: routed through CpuTpBroadcaster (UDS) when intra-node;
+    // execBroadcastCpu's fallback path keeps the NCCL+cudaSyncAndCheck
+    // contract for cross-node TP.
+    execBroadcastCpu({{shape_hints_t}, 0});
 
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;
@@ -89,9 +100,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             mm_features_shape_ptr[i] =
                 inputs.multimodal_features.has_value() ? inputs.multimodal_features.value()[i].size(0) : 0;
         }
-        execBroadcast({{mm_features_shape_t}, 0});
-        execSyncCommunication(false);
-        cudaSyncAndCheck();
+        // CPU broadcast (UDS path; fallback handles cudaSyncAndCheck).
+        execBroadcastCpu({{mm_features_shape_t}, 0});
     }
 
     // extra-input element counts broadcast: each extra-input is an opaque flat 1-D tensor,
@@ -330,13 +340,23 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // Broadcast at most 2 packed buffers instead of N individual tensors.
     std::vector<torch::Tensor> packed_buffers;
     if (cpu_packed.defined()) {
-        packed_buffers.push_back(cpu_packed);
+        if (isCpuTpBroadcasterInitialized()) {
+            // Intra-node CPU broadcast goes over UDS to avoid NCCL's
+            // device-wide sync on these small host tensors.
+            execBroadcastCpu({{cpu_packed}, 0});
+        } else {
+            // Cross-node fallback keeps the historical single NCCL broadcast
+            // for the packed CPU+GPU payloads instead of splitting it in two.
+            packed_buffers.push_back(cpu_packed);
+        }
     }
     if (gpu_packed.defined()) {
         packed_buffers.push_back(gpu_packed);
     }
-    execBroadcast({packed_buffers, 0});
-    cudaSyncAndCheck();
+    if (!packed_buffers.empty()) {
+        execBroadcast({packed_buffers, 0});
+        cudaSyncAndCheck();
+    }
 
     // Unpack from packed buffers back to each tensor's original storage.
     if (!is_root) {
