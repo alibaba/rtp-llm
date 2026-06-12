@@ -226,11 +226,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     private synchronized void recomputeTotalAndRefresh() {
-        long sum = 0;
+        long max = 0;
         for (BatchInflight batch : inflightBatches.values()) {
-            sum += batch.predictTimeMs();
+            max = Math.max(max, batch.predictTimeMs());
         }
-        totalPredictTimeMs.set(sum);
+        totalPredictTimeMs.set(max);
         refreshEstimatedWaitingTime();
     }
 

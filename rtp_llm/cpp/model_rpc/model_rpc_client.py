@@ -45,8 +45,8 @@ def _is_finished_response(outputs_pb: GenerateOutputsPB) -> bool:
     return bool(finished) and all(finished)
 
 
-def trans_role_type(role_type: RoleType) -> RoleTypePB:
-    return RoleTypePB(role_type.value)
+def trans_role_type(role_type: RoleType) -> int:
+    return role_type.value
 
 
 def _trans_jsonable_option(config_pb, config, field_name):

@@ -164,7 +164,13 @@ public final class WorkerBatcher {
                 return;
             }
 
-            // 2. urgent → dispatch head alone
+            // 2. backpressure → prefill overloaded, hold in FlexLB queue to form larger batches
+            if (ep.getInflightBatchCount() >= 2) {
+                arrival.awaitNanos(1_000_000L);
+                return;
+            }
+
+            // 3. urgent → dispatch head alone
             if (budgetMs < marginMs) {
                 queue.poll();
                 handler.onUrgent(head,

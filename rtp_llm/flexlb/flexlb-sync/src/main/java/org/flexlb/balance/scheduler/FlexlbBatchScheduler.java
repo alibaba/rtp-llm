@@ -34,6 +34,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -41,6 +42,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 @Component
 public class FlexlbBatchScheduler implements BatchDecisionHandler {
@@ -179,17 +181,37 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler {
         for (BatchItem item : items) {
             inflight.put(item.requestId(), new InflightEntry(item));
         }
+
+        // Compute predMs and commit to endpoint synchronously so backpressure gate sees correct inflight count
+        String ipPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
+        PrefillEndpoint ep = endpointRegistry.getPrefill(ipPort);
+        List<BatchRequest> profiles = items.stream()
+                .map(item -> new BatchRequest(item.requestId(), item.seqLen(), item.hitCache()))
+                .toList();
+        long predMs = 0;
+        long batchId = batchIdGenerator.incrementAndGet();
+        if (ep != null) {
+            PrefillTimePredictor predictor = ep.getPredictor();
+            predMs = predictor.predictBatchMs(profiles);
+            ep.commitBatch(batchId, predMs, profiles);
+        }
+
+        final long finalPredMs = predMs;
+        final long finalBatchId = batchId;
         try {
-            dispatchExecutor.execute(() -> dispatch(items, prefill, meta));
+            dispatchExecutor.execute(() -> dispatch(items, prefill, meta, finalBatchId, finalPredMs));
         } catch (java.util.concurrent.RejectedExecutionException e) {
             Logger.warn("FlexLB batch dispatch rejected (executor shutdown), failing {} items", items.size());
+            if (ep != null) {
+                ep.releaseBatch(finalBatchId);
+            }
             for (BatchItem item : items) {
                 failAck(item, e);
             }
         }
     }
 
-    void dispatch(List<BatchItem> items, ServerStatus prefill, DispatchMeta meta) {
+    void dispatch(List<BatchItem> items, ServerStatus prefill, DispatchMeta meta, long batchId, long predMs) {
         List<BatchItem> activeItems = items.stream()
                 .filter(item -> !isCancelled(item) && !item.future().isDone())
                 .toList();
@@ -198,16 +220,36 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler {
                 completeCancelled(item);
             }
         }
+        String ipPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
         if (activeItems.isEmpty()) {
+            PrefillEndpoint ep = endpointRegistry.getPrefill(ipPort);
+            if (ep != null) {
+                ep.releaseBatch(batchId);
+            }
             return;
         }
 
-        long batchId = batchIdGenerator.incrementAndGet();
+        // If some items were cancelled, repack the inflight batch
+        if (activeItems.size() < items.size()) {
+            PrefillEndpoint ep = endpointRegistry.getPrefill(ipPort);
+            if (ep != null) {
+                Set<Long> cancelledIds = items.stream()
+                        .filter(item -> !activeItems.contains(item))
+                        .map(BatchItem::requestId)
+                        .collect(Collectors.toSet());
+                ep.repackBatch(batchId, cancelledIds);
+            }
+        }
+
         EngineRpcService.EnqueueBatchRequestPB request;
         try {
             request = buildBatchRequest(batchId, activeItems);
         } catch (Exception e) {
             Logger.error("Failed to build FlexLB batch request batchId: {}", batchId, e);
+            PrefillEndpoint ep = endpointRegistry.getPrefill(ipPort);
+            if (ep != null) {
+                ep.releaseBatch(batchId);
+            }
             for (BatchItem item : activeItems) {
                 failAck(item, e);
             }
@@ -218,19 +260,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler {
         for (BatchItem item : activeItems) {
             profiles.add(new BatchRequest(item.requestId(), item.seqLen(), item.hitCache()));
         }
-        String ipPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
-        PrefillEndpoint ep = endpointRegistry.getPrefill(ipPort);
-        PrefillTimePredictor predictor = ep.getPredictor();
-        long predMs = predictor.predictBatchMs(profiles);
         long now = System.currentTimeMillis();
         BatchItem head = activeItems.get(0);
         long waitMs = now - head.enqueuedAtMs();
         long budgetMs = head.deadlineMs() - now;
         logBatchDispatch(batchId, activeItems, profiles, predMs, meta, waitMs, budgetMs, prefill);
-
-        if (ep != null) {
-            ep.commitBatch(batchId, predMs, profiles);
-        }
 
         try {
             long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();

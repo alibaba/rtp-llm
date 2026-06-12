@@ -146,7 +146,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         if (response.getServerStatus() != null) {
             for (ServerStatus ss : response.getServerStatus()) {
                 builder.addServerStatus(EngineRpcService.FlexlbServerStatusPB.newBuilder()
-                        .setRole(EngineRpcService.RoleTypePB.valueOf(ss.getRole().getCode()))
+                        .setRole(EngineRpcService.RoleTypePB.valueOf(ss.getRole().getProtoName()))
                         .setServerIp(ss.getServerIp() != null ? ss.getServerIp() : "")
                         .setHttpPort(ss.getHttpPort())
                         .setGrpcPort(ss.getGrpcPort())

@@ -149,6 +149,7 @@ public class ConfigService {
                 || type == Double.class
                 || type == boolean.class
                 || type == Boolean.class
+                || type == String.class
                 || type.isEnum();
     }
 
@@ -173,7 +174,9 @@ public class ConfigService {
      */
     @SuppressWarnings({"unchecked", "rawtypes"})
     private Object parseValue(String value, Class<?> targetType) {
-        if (targetType == int.class || targetType == Integer.class) {
+        if (targetType == String.class) {
+            return value;
+        } else if (targetType == int.class || targetType == Integer.class) {
             return Integer.parseInt(value);
         } else if (targetType == long.class || targetType == Long.class) {
             return Long.parseLong(value);

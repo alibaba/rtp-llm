@@ -49,4 +49,11 @@ public enum RoleType {
             case VIT -> StrategyErrorType.NO_VIT_WORKER;
         };
     }
+
+    /**
+     * Get the proto enum constant name (ROLE_TYPE_XXX)
+     */
+    public String getProtoName() {
+        return "ROLE_TYPE_" + this.name();
+    }
 }

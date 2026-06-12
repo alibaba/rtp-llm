@@ -67,10 +67,10 @@ public class HttpLoadBalanceServer {
     private Mono<ServerResponse> debugMode(ServerRequest serverRequest) {
         return serverRequest.bodyToMono(LogLevelUpdateRequest.class)
                 .flatMap(logLevelUpdateRequest -> {
-                    Logger.setGlobalLogLevel(logLevelUpdateRequest.getLogLevel());
+                    Logger.setLevel(logLevelUpdateRequest.getLogLevel());
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just("Success! logLevel=" + Logger.getGlobalLogLevel()), String.class);
+                            .body(Mono.just("Success! logLevel=" + Logger.getLevel()), String.class);
                 }).onErrorResume(e -> {
                     Logger.error("update logLevel error", e);
                     return ServerResponse.status(500)
