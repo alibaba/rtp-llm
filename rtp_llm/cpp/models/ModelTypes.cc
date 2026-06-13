@@ -21,8 +21,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     // first sync stage: shape hints
     const size_t shape_hints_size = GptModelInputIndex::gptModelInputLength;
-    auto         shape_hints_t    = torch::empty({(int64_t)shape_hints_size}, torch::kInt32).pin_memory();
-    auto         shape_hints_ptr  = shape_hints_t.data_ptr<int32_t>();
+    // Long-sequence MTP prefill can carry hidden-state tensors whose numel
+    // exceeds int32, e.g. 524288 * 6144. Keep all shape hints int64 so non-root
+    // TP ranks do not see overflowed dimensions when allocating buffers.
+    auto shape_hints_t   = torch::empty({(int64_t)shape_hints_size}, torch::kInt64).pin_memory();
+    auto shape_hints_ptr = shape_hints_t.data_ptr<int64_t>();
     shape_hints_ptr[GptModelInputIndex::comboTokens] = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::inputLengths] =
         inputs.input_lengths.defined() ? inputs.input_lengths.numel() : 0;
@@ -92,7 +95,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         if (inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.is_cuda()) {
             device_bits |= GptModelInputDeviceBit::kDeviceBitLmOutputIndexes;
         }
-        shape_hints_ptr[GptModelInputIndex::tensorDeviceMap] = static_cast<int32_t>(device_bits);
+        shape_hints_ptr[GptModelInputIndex::tensorDeviceMap] = static_cast<int64_t>(device_bits);
     }
 
     // CPU broadcast: routed through CpuTpBroadcaster (UDS) when intra-node;
@@ -131,7 +134,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     auto   combo_position_ids_size = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
     auto   text_tokens_mask_size   = shape_hints_ptr[GptModelInputIndex::textTokensMask];
     auto   mm_features_locs_size   = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
-    auto   hidden_states_size      = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates];
+    auto   hidden_states_size      = (size_t)shape_hints_ptr[GptModelInputIndex::mtpHiddenStates];
     size_t request_length          = shape_hints_ptr[GptModelInputIndex::gptModelRequestLength];
 
     auto allocBuf = [&](rtp_llm::DataType       dtype,

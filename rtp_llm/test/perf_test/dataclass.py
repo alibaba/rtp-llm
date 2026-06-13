@@ -16,6 +16,7 @@ class ResponseInfo:
     prefill_time: float = 0.0
     decode_time: float = 0.0
     decode_time_per_token: float = 0.0
+    reuse_len: int = 0
     """
     output example:
     {
@@ -59,6 +60,11 @@ class ResponseInfo:
         self.decode_time_per_token = (
             self.decode_time / (self.output_len - 1) if self.output_len > 1 else 0.0
         )
+        self.reuse_len = max(
+            aux_info.get("reuse_len", 0),
+            aux_info.get("prefill_total_reuse_len", 0),
+            aux_info.get("decode_total_reuse_len", 0),
+        )
 
 
 @dataclass
@@ -78,6 +84,9 @@ class TestResultMetrics:
     avg_decode_time: float = 0.0
     max_decode_time: float = 0.0
     decode_time_var: float = 0.0
+    avg_reuse_len: float = 0.0
+    max_reuse_len: int = 0
+    avg_reuse_hit_rate: float = 0.0
 
 
 def analyze_results(responses: List[ResponseInfo]) -> TestResultMetrics:
@@ -130,6 +139,16 @@ def analyze_results(responses: List[ResponseInfo]) -> TestResultMetrics:
                     (r.decode_time_per_token - metrics.avg_decode_time) ** 2
                     for r in success_requests
                 ]
+            )
+            / success_count
+        )
+        metrics.avg_reuse_len = (
+            sum([r.reuse_len for r in success_requests]) / success_count
+        )
+        metrics.max_reuse_len = max([r.reuse_len for r in success_requests])
+        metrics.avg_reuse_hit_rate = (
+            sum(
+                [r.reuse_len / r.input_len for r in success_requests if r.input_len > 0]
             )
             / success_count
         )
@@ -208,6 +227,9 @@ def create_metrics_table(
                     "avg_wait_time": metrics.avg_wait_time,
                     "avg_prefill_time": metrics.avg_prefill_time,
                     "avg_decode_time": metrics.avg_decode_time,
+                    "avg_reuse_len": metrics.avg_reuse_len,
+                    "max_reuse_len": metrics.max_reuse_len,
+                    "avg_reuse_hit_rate": metrics.avg_reuse_hit_rate,
                 }
             )
         else:

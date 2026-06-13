@@ -29,6 +29,13 @@ def _select_mla_block_id_host(attn_inputs: PyAttentionInputs) -> torch.Tensor:
     return attn_inputs.kv_cache_kernel_block_id_host
 
 
+def _select_mla_block_id_device(attn_inputs: PyAttentionInputs) -> torch.Tensor:
+    block_id = getattr(attn_inputs, "kv_cache_block_id_device", None)
+    if isinstance(block_id, torch.Tensor) and block_id.numel() > 0:
+        return block_id
+    return attn_inputs.kv_cache_kernel_block_id_device
+
+
 class MlaFlashInferImplBase(MlaImplBase):
 
     def __init__(
@@ -286,10 +293,11 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             and attn_inputs.prefix_lengths.is_cuda
             and attn_inputs.kv_cache_kernel_block_id_device is not None
         ):
+            block_id_device = _select_mla_block_id_device(attn_inputs)
             self.fmha_params.fill_prefill_cuda_graph_params(
                 attn_inputs.input_lengths,
                 attn_inputs.prefix_lengths,
-                attn_inputs.kv_cache_kernel_block_id_device,
+                block_id_device,
                 self.seq_size_per_block,
                 cached_total_tokens,
             )
@@ -448,9 +456,10 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
             and attn_inputs.sequence_lengths_plus_1_d is not None
             and attn_inputs.kv_cache_kernel_block_id_device is not None
         ):
+            block_id_device = _select_mla_block_id_device(attn_inputs)
             self.fmha_params.fill_decode_cuda_graph_params(
                 attn_inputs.sequence_lengths_plus_1_d,
-                attn_inputs.kv_cache_kernel_block_id_device,
+                block_id_device,
                 self.seq_size_per_block,
             )
             self.fmha_impl.plan_cuda_graph(attn_inputs)

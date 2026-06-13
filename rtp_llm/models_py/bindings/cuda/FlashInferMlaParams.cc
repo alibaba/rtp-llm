@@ -604,6 +604,8 @@ void FlashInferMlaAttnParams::fillDecodeCudaGraphParams(torch::Tensor sequence_l
     set_i32_shape(reuse_cache_page_indice_h, {0});
     set_i32_shape(batch_reuse_info_vec_d, {batch_size, 4});
     set_i32_shape(batch_reuse_info_vec_h, {batch_size, 4});
+    slot_mapping_d_.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
+    slot_mapping_h_.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
 
     cudaStream_t stream = GET_CURRENT_STREAM();
     invokePrepareFlashInferDecodeParams(sequence_lengths_plus_1_d.data_ptr<int32_t>(),
@@ -615,6 +617,7 @@ void FlashInferMlaAttnParams::fillDecodeCudaGraphParams(torch::Tensor sequence_l
                                         qo_indptr_d.data_ptr<int32_t>(),
                                         kvlen_d.data_ptr<int32_t>(),
                                         positions_d.data_ptr<int32_t>(),
+                                        slot_mapping_d_.data_ptr<int64_t>(),
                                         batch_size,
                                         max_blocks_per_batch,
                                         seq_size_per_block,
@@ -630,7 +633,7 @@ void FlashInferMlaAttnParams::fillDecodeCudaGraphParams(torch::Tensor sequence_l
     kvlen                        = kvlen_d;
     positions                    = positions_d;
     batch_reuse_info_vec         = batch_reuse_info_vec_d;
-    slot_mapping                 = torch::Tensor();
+    slot_mapping                 = slot_mapping_d_;
 }
 
 void FlashInferMlaAttnParams::fillPrefillCudaGraphParams(torch::Tensor input_lengths_d,

@@ -5,7 +5,7 @@ import logging
 import os
 import shutil
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from rtp_llm.test.perf_test.dataset import KNOWN_DATASETS, extract_arg
 from rtp_llm.test.perf_test.distribution_runner import DistributionRunner
@@ -16,7 +16,7 @@ from rtp_llm.test.perf_test.hub_download import (
 )
 from rtp_llm.test.perf_test.sampling import prepare_distribution_config
 from rtp_llm.test.perf_test.server import EngineServer
-from rtp_llm.test.perf_test.test_util import create_query
+from rtp_llm.test.perf_test.test_util import create_query, create_reuse_cache_queries
 
 
 def run_single(
@@ -65,6 +65,15 @@ def parse_args():
         default="1024,4096",
         help="Comma-separated input lengths for grid mode",
     )
+    perf.add_argument(
+        "--grid_cases",
+        type=str,
+        default="",
+        help=(
+            "Optional comma-separated batch:input_len pairs for grid mode. "
+            "When set, only these cases are run while the output remains grid-shaped."
+        ),
+    )
     dataset_group = perf.add_mutually_exclusive_group()
     dataset_group.add_argument(
         "--dataset_name",
@@ -111,6 +120,15 @@ def parse_args():
         type=int,
         default=1,
         help="Number of measurement rounds requested by BUILD configs. Currently recorded only.",
+    )
+    perf.add_argument(
+        "--prefill_reuse_cache_hit_rate",
+        type=float,
+        default=0.0,
+        help=(
+            "When >0, prefill grid mode seeds a shared prefix before each run and "
+            "measures prompts whose target prefix-cache hit rate is this value."
+        ),
     )
 
     engine = parser.add_argument_group(
@@ -190,6 +208,7 @@ def _write_test_info(args: argparse.Namespace, remaining_args: List[str]) -> Non
         "concurrency_limit": args.concurrency_limit,
         "decode_test_length": args.decode_test_length,
         "num_measures": args.num_measures,
+        "prefill_reuse_cache_hit_rate": args.prefill_reuse_cache_hit_rate,
         "dataset_name": args.dataset_name or None,
         "dataset_path": args.dataset_path or args.dataset or None,
     }
@@ -204,6 +223,62 @@ def _effective_grid_max_seq_len(
 ) -> int:
     needed_seq_len = max(input_len_list) + args.decode_test_length
     return max(needed_seq_len, args.max_seq_len)
+
+
+def _parse_grid_cases(grid_cases: str) -> Optional[List[Tuple[int, int]]]:
+    if not grid_cases.strip():
+        return None
+
+    cases: List[Tuple[int, int]] = []
+    seen = set()
+    for raw_case in grid_cases.split(","):
+        case = raw_case.strip()
+        if not case:
+            continue
+        parts = case.split(":")
+        if len(parts) != 2:
+            raise ValueError(
+                f"Invalid --grid_cases item {case!r}; expected batch:input_len"
+            )
+        try:
+            batch_size = int(parts[0])
+            input_len = int(parts[1])
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid --grid_cases item {case!r}; batch and input_len must be integers"
+            ) from e
+        if batch_size <= 0 or input_len <= 0:
+            raise ValueError(
+                f"Invalid --grid_cases item {case!r}; values must be positive"
+            )
+        parsed_case = (batch_size, input_len)
+        if parsed_case not in seen:
+            seen.add(parsed_case)
+            cases.append(parsed_case)
+
+    if not cases:
+        raise ValueError("--grid_cases did not contain any valid cases")
+    return cases
+
+
+def _positive_int_arg(argv: List[str], key: str, default: int) -> int:
+    value = extract_arg(argv, key)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as e:
+        raise ValueError(f"Invalid --{key} value {value!r}; expected integer") from e
+    if parsed <= 0:
+        raise ValueError(f"Invalid --{key} value {value!r}; expected positive integer")
+    return parsed
+
+
+def _reuse_query_variant_count(profile: bool = True) -> int:
+    warmup_runs = int(os.environ.get("PERF_FORMAL_WARMUP_RUNS", "1"))
+    measure_runs = int(os.environ.get("PERF_MEASURE_RUNS", "1"))
+    profile_runs = int(os.environ.get("PERF_PROFILE_RUNS", "1" if profile else "0"))
+    return max(1, warmup_runs + measure_runs + profile_runs)
 
 
 def main() -> str:
@@ -269,8 +344,10 @@ def main() -> str:
     else:
         batch_size_list = [int(x) for x in args.batch_size.split(",")]
         input_len_list = [int(x) for x in args.input_len.split(",")]
-        needed_seq_len = max(input_len_list) + args.decode_test_length
-        effective_max_seq_len = max(needed_seq_len, args.max_seq_len)
+        grid_cases = _parse_grid_cases(args.grid_cases)
+        if grid_cases:
+            batch_size_list = sorted({batch_size for batch_size, _ in grid_cases})
+            input_len_list = sorted({input_len for _, input_len in grid_cases})
 
         server = EngineServer(args, remaining)
         server.start(
@@ -279,6 +356,22 @@ def main() -> str:
         )
 
         input_query_dict = create_query(input_len_list=input_len_list)
+        reuse_cache_query_dict = None
+        if args.prefill_reuse_cache_hit_rate > 0.0 and args.partial in (0, 2):
+            tokenizer_path = (
+                extract_arg(remaining, "tokenizer_path")
+                or extract_arg(remaining, "checkpoint_path")
+                or os.environ.get("TOKENIZER_PATH", "")
+            )
+            reuse_cache_query_dict = create_reuse_cache_queries(
+                tokenizer_path=tokenizer_path,
+                input_len_list=input_len_list,
+                hit_rate=args.prefill_reuse_cache_hit_rate,
+                seq_size_per_block=_positive_int_arg(
+                    remaining, "seq_size_per_block", 1
+                ),
+                num_variants=_reuse_query_variant_count(),
+            )
 
         if args.partial in (0, 1):
             GridRunner(
@@ -291,6 +384,7 @@ def main() -> str:
                 dump_json_path=args.result_dir,
                 decode_test_length=args.decode_test_length,
                 generate_config=generate_config,
+                grid_cases=grid_cases,
             ).run()
         if args.partial in (0, 2):
             GridRunner(
@@ -303,6 +397,8 @@ def main() -> str:
                 dump_json_path=args.result_dir,
                 decode_test_length=args.decode_test_length,
                 generate_config=generate_config,
+                grid_cases=grid_cases,
+                reuse_cache_query_dict=reuse_cache_query_dict,
             ).run()
         _collect_timeline_files(args.result_dir)
         server.stop()
