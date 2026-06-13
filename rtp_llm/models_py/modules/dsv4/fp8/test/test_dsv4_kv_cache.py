@@ -81,20 +81,32 @@ sys.modules["kernel"] = _kernel
 # Add official model path
 OFFICIAL_DIR = "/home/tanboyu.tby/cuda_study/models/DeepSeek/official"
 sys.path.insert(0, OFFICIAL_DIR)
+_OFFICIAL_MODEL_AVAILABLE = os.path.exists(os.path.join(OFFICIAL_DIR, "model.py"))
+pytestmark = pytest.mark.skipif(
+    not _OFFICIAL_MODEL_AVAILABLE,
+    reason="official DeepSeek model.py is not available in this environment",
+)
 
-# Set official model's world_size before importing
-import model as _official_model
+if _OFFICIAL_MODEL_AVAILABLE:
+    # Set official model's world_size before importing
+    import model as _official_model
 
-_official_model.world_size = 1
+    _official_model.world_size = 1
 
-# Import official implementation
-from model import Attention as OfficialAttention
-from model import Compressor as OfficialCompressor
-from model import Indexer as OfficialIndexer
-from model import ModelArgs as OfficialArgs
+    # Import official implementation
+    from model import Attention as OfficialAttention
+    from model import Compressor as OfficialCompressor
+    from model import Indexer as OfficialIndexer
+    from model import ModelArgs as OfficialArgs
 
-# Monkey-patch module-level functions that need CUDA (defined in model.py, not kernel)
-_official_model.rotate_activation = _mock_rotate_activation
+    # Monkey-patch module-level functions that need CUDA (defined in model.py, not kernel)
+    _official_model.rotate_activation = _mock_rotate_activation
+else:
+    _official_model = None
+    OfficialAttention = None
+    OfficialCompressor = None
+    OfficialIndexer = None
+    OfficialArgs = None
 
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8 as OurAttention
 from rtp_llm.models_py.modules.dsv4.fp8.attention import _get_window_topk_idxs

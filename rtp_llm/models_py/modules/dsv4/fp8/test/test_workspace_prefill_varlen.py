@@ -36,8 +36,13 @@ from unittest import mock
 import torch
 
 from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV, SWA_KV
+from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
+    build_cp_byte_sliced_slot_compaction,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8 as Attention
 from rtp_llm.models_py.modules.dsv4.fp8.attention import WorkspaceMeta
+
+_SWA_FP8_ENTRY_BYTES = 584
 
 
 # -------------------------------------------------------------------------
@@ -61,9 +66,13 @@ class _StubAttention:
         block_tables: Optional[dict] = None,
         eb_by_type: Optional[dict] = None,
         kv_cache_present: bool = True,
+        cp_byte_sliced: bool = False,
+        cp_size: int = 2,
     ) -> None:
         self.window_size = window_size
         self.compress_ratio = compress_ratio
+        self._cp_byte_sliced = bool(cp_byte_sliced)
+        self._cp_size = int(cp_size)
 
         class _StubKvCache:
             group_region_names = [SWA_KV, CSA_KV, HCA_KV]
@@ -73,9 +82,54 @@ class _StubAttention:
         self._kv_cache = _StubKvCache() if kv_cache_present else None
         self._block_tables_by_type = block_tables
         self._eb_by_type = eb_by_type or {}
+        swa_bt = block_tables.get(SWA_KV) if block_tables is not None else None
+        if self._cp_byte_sliced and swa_bt is not None:
+            swa_eb = int(self._eb_by_type.get(SWA_KV, 0))
+            num_blocks = int(swa_bt.max().item()) + 1
+            local_slice_bytes = max(1, swa_eb * _SWA_FP8_ENTRY_BYTES // self._cp_size)
+            self._raw_u8 = torch.empty(
+                num_blocks,
+                local_slice_bytes,
+                dtype=torch.uint8,
+                device=swa_bt.device,
+            )
+        else:
+            self._raw_u8 = None
 
     def _pool_entries_per_block(self, attn_type: int) -> int:
         return int(self._eb_by_type.get(attn_type, 0))
+
+    def _swa_entries_per_block(self) -> int:
+        return self._pool_entries_per_block(SWA_KV)
+
+    def _swa_cp_byte_sliced(self) -> bool:
+        return self._cp_byte_sliced
+
+    def _pool_raw_u8(self, attn_type: int) -> Optional[torch.Tensor]:
+        if attn_type != SWA_KV:
+            return None
+        return self._raw_u8
+
+    def _build_swa_cp_byte_compaction(
+        self,
+        slot_mapping: torch.Tensor,
+        full_entries_per_block: int,
+        validation_site: str,
+        negative_mode: str,
+        gather_lens: Optional[torch.Tensor] = None,
+    ):
+        if not self._swa_cp_byte_sliced():
+            return None
+        raw = self._pool_raw_u8(SWA_KV)
+        assert raw is not None, "byte-sliced FP8 SWA pool unavailable"
+        return build_cp_byte_sliced_slot_compaction(
+            slot_mapping,
+            full_entries_per_block=full_entries_per_block,
+            num_blocks=int(raw.shape[0]),
+            validation_site=validation_site,
+            negative_mode=negative_mode,
+            gather_lens=gather_lens,
+        )
 
     # Bind the unbound methods so the stub quacks correctly.
     _build_workspace_meta = Attention._build_workspace_meta
@@ -131,6 +185,7 @@ def _make_stub(
     swa_eb_override: Optional[int] = None,
     cmp_eb_override: Optional[int] = None,
     device: Optional[torch.device] = None,
+    cp_byte_sliced: bool = False,
 ) -> _StubAttention:
     """Build a stub attention with paired SWA + CSA/HCA pools.
 
@@ -175,6 +230,7 @@ def _make_stub(
         block_tables=block_tables,
         eb_by_type=eb_by_type,
         kv_cache_present=kv_cache_present,
+        cp_byte_sliced=cp_byte_sliced,
     )
 
 
@@ -581,6 +637,26 @@ class BuildWorkspaceMetaVarlenTest(unittest.TestCase):
         stub = _make_stub(win=8, compress_ratio=4, n_reqs=2)
         m = _build_meta_varlen(stub, [0, 32], [8, 6], with_dense_cmp_topk=False)
         self.assertIsNone(m.dense_cmp_topk)
+
+    def test_cp_byte_sliced_precomputes_swa_cache_compaction(self) -> None:
+        stub = _make_stub(
+            win=8,
+            compress_ratio=4,
+            n_reqs=2,
+            blocks_per_req=4,
+            swa_eb=16,
+            cmp_eb=8,
+            cp_byte_sliced=True,
+        )
+        m = _build_meta_varlen(stub, [0, 32], [8, 6], with_dense_cmp_topk=False)
+        self.assertIsNotNone(m.swa_cache_slot_mapping)
+        self.assertIsNotNone(m.swa_cache_compaction)
+        self.assertEqual(
+            tuple(m.swa_cache_compaction.compact_slots.shape),
+            tuple(m.swa_cache_slot_mapping.shape),
+        )
+        self.assertEqual(m.swa_cache_compaction.gather_lens_cpu, (0, 7))
+        self.assertGreater(int(m.swa_cache_compaction.unique_blocks.numel()), 0)
 
     # ----- Block table slicing under B>1 ----------------------------------
     def test_block_table_sliced_to_active_b(self) -> None:

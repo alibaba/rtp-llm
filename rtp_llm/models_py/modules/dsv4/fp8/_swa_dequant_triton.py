@@ -22,6 +22,9 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
+    CPByteSlicedSlotCompaction,
+)
 from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
     invalid_kv_access_validation_enabled,
     trap_invalid_kv_access_enabled,
@@ -488,16 +491,15 @@ def _gather_k_cache_packed_kernel(
         block_in_seq = pos // cache_block_size
         pos_in_block = pos % cache_block_size
 
-        block_table_row_ptr = (
-            block_table_ptr
-            + batch_idx.to(tl.int64) * max_blocks_per_seq.to(tl.int64)
-        )
+        block_table_row_ptr = block_table_ptr + batch_idx.to(
+            tl.int64
+        ) * max_blocks_per_seq.to(tl.int64)
         physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)
         tl.device_assert(physical_block_idx >= 0, "block_table contains -1")
 
-        cache_block_ptr = (
-            k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride.to(tl.int64)
-        )
+        cache_block_ptr = k_cache_ptr + physical_block_idx.to(
+            tl.int64
+        ) * block_stride.to(tl.int64)
         token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
         token_scale_ptr = (
             cache_block_ptr
@@ -845,51 +847,16 @@ def dequantize_slots_to_bf16(
     return out
 
 
-def _compact_cp_byte_sliced_slots(
-    slot_mapping: torch.Tensor,
-    *,
-    full_entries_per_block: int,
-    num_blocks: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Map real full-block slots to compact scratch slots.
-
-    CP byte slicing is a storage concern. This helper only remaps physical
-    block ids; it does not know anything about the SWA data/scale layout.
-    """
-    slots = slot_mapping.reshape(-1).to(dtype=torch.int64, device=slot_mapping.device).contiguous()
-    validate_slot_mapping(
-        "swa.gather_cp_byte.slot_indices",
-        slots,
-        block_size=full_entries_per_block,
-        num_blocks=num_blocks,
-        negative_mode="skip_any",
-    )
-    valid = slots >= 0
-    valid_slots = slots[valid]
-    if valid_slots.numel() == 0:
-        return (
-            torch.empty((0,), dtype=torch.long, device=slots.device),
-            torch.full_like(slot_mapping, -1, dtype=torch.long),
-        )
-
-    block_ids = valid_slots // int(full_entries_per_block)
-    block_offsets = valid_slots % int(full_entries_per_block)
-    unique_blocks, inverse = torch.unique(block_ids, sorted=True, return_inverse=True)
-    compact_flat = torch.full_like(slots, -1)
-    compact_flat[valid] = inverse.to(torch.long) * int(full_entries_per_block) + block_offsets
-    return unique_blocks, compact_flat.view_as(slot_mapping).contiguous()
-
-
 def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     out: torch.Tensor,
     k_cache_raw: torch.Tensor,
     slot_mapping: torch.Tensor,
     gather_lens: Optional[torch.Tensor],
     offset: int,
-    *,
     full_entries_per_block: int,
     cp_rank: int,
     cp_size: int,
+    compaction: CPByteSlicedSlotCompaction,
 ) -> None:
     """Reconstruct CP byte-sliced SWA entries with all_gather, then dequantize.
 
@@ -928,25 +895,28 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     W = int(slot_mapping.shape[1])
     if B == 0 or W == 0:
         return
-    slots_i64 = slot_mapping.to(device=out.device, dtype=torch.int64).contiguous()
-    unique_blocks, compact_slots = _compact_cp_byte_sliced_slots(
-        slots_i64,
-        full_entries_per_block=full_entries_per_block,
-        num_blocks=int(k_cache_raw.shape[0]),
-    )
+    assert (
+        compaction is not None
+    ), "CP byte-sliced SWA gather requires metadata-precomputed compaction"
+    unique_blocks = compaction.unique_blocks
+    compact_slots = compaction.compact_slots
     if unique_blocks.numel() == 0:
         out[:, offset : offset + W, :].zero_()
         return
 
     from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 
-    local_slices = k_cache_raw.index_select(0, unique_blocks).contiguous()  # [num_unique_blocks, local_slice_bytes]
+    local_slices = k_cache_raw.index_select(
+        0, unique_blocks
+    ).contiguous()  # [num_unique_blocks, local_slice_bytes]
     gathered = all_gather(local_slices, group=Group.TP).view(
         cp_size, int(unique_blocks.numel()), int(k_cache_raw.shape[1])
     )
-    full_raw = gathered.permute(1, 0, 2).reshape(
-        int(unique_blocks.numel()), cp_size * int(k_cache_raw.shape[1])
-    ).contiguous() # [num_unique_blocks, full_block_bytes]
+    full_raw = (
+        gathered.permute(1, 0, 2)
+        .reshape(int(unique_blocks.numel()), cp_size * int(k_cache_raw.shape[1]))
+        .contiguous()
+    )  # [num_unique_blocks, full_block_bytes]
     full_view = full_raw.as_strided(
         (int(unique_blocks.numel()), full_entries_per_block, ENTRY_BYTES),
         (int(full_raw.shape[1]), ENTRY_BYTES, 1),
@@ -956,8 +926,10 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     if gather_lens is None:
         out[:, offset : offset + W, :].copy_(restored_3d)
         return
-    gather_lens_cpu = gather_lens.to(device="cpu", dtype=torch.int32).reshape(-1)
-    for b in range(B):
-        gl = int(gather_lens_cpu[b].item())
+    gather_lens_cpu = compaction.gather_lens_cpu
+    assert (
+        len(gather_lens_cpu) == B
+    ), "CP byte-sliced SWA gather compaction must include per-request gather_lens_cpu"
+    for b, gl in enumerate(gather_lens_cpu):
         if gl > 0:
             out[b, offset : offset + gl, :].copy_(restored_3d[b, :gl, :])

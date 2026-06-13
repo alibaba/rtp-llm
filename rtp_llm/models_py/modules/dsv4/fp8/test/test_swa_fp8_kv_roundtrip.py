@@ -27,17 +27,23 @@ from __future__ import annotations
 
 import math
 import unittest
+from unittest import mock
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
+    build_cp_byte_sliced_slot_compaction,
+)
 from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
     dequantize_and_gather_k_cache,
     dequantize_and_gather_k_cache_slots,
+    dequantize_and_gather_k_cache_slots_cp_byte_sliced,
     dequantize_packed_k_cache_flat,
     gather_k_cache_packed,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
     quantize_and_insert_k_cache,
+    quantize_and_insert_k_cache_cp_byte_sliced,
 )
 
 HEAD_DIM = 512
@@ -45,6 +51,61 @@ NOPE_DIM = 448
 HEAD_BYTES = 584  # 448 fp8 + 128 bf16 + 8 uint8 scale
 FP8_MAX = 448.0
 QUANT_BLOCK = 64
+
+
+class CPByteSlicedSlotCompactionTest(unittest.TestCase):
+    def test_boundary_cases(self) -> None:
+        cases = [
+            {
+                "name": "all_negative_slots",
+                "slots": torch.tensor([[-1, -2], [-3, -1]], dtype=torch.int64),
+                "gather_lens": torch.tensor([0, 0], dtype=torch.int32),
+                "negative_mode": "skip_any",
+                "expected_unique": [],
+                "expected_compact": [[-1, -1], [-1, -1]],
+                "expected_gather_lens": (0, 0),
+            },
+            {
+                "name": "single_block",
+                "slots": torch.tensor([[8, 10, -1], [15, 9, 8]], dtype=torch.int64),
+                "gather_lens": torch.tensor([3, 3], dtype=torch.int32),
+                "negative_mode": "skip_minus_one",
+                "expected_unique": [1],
+                "expected_compact": [[0, 2, -1], [7, 1, 0]],
+                "expected_gather_lens": (3, 3),
+            },
+            {
+                "name": "gather_lens_none",
+                "slots": torch.tensor([[16, 17], [24, -1]], dtype=torch.int64),
+                "gather_lens": None,
+                "negative_mode": "skip_minus_one",
+                "expected_unique": [2, 3],
+                "expected_compact": [[0, 1], [8, -1]],
+                "expected_gather_lens": (),
+            },
+        ]
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                compaction = build_cp_byte_sliced_slot_compaction(
+                    case["slots"],
+                    full_entries_per_block=8,
+                    num_blocks=4,
+                    validation_site=f"test.{case['name']}",
+                    negative_mode=case["negative_mode"],
+                    gather_lens=case["gather_lens"],
+                )
+                self.assertEqual(
+                    compaction.unique_blocks.detach().cpu().tolist(),
+                    case["expected_unique"],
+                )
+                self.assertEqual(
+                    compaction.compact_slots.detach().cpu().tolist(),
+                    case["expected_compact"],
+                )
+                self.assertEqual(
+                    compaction.gather_lens_cpu,
+                    case["expected_gather_lens"],
+                )
 
 
 def _ue8m0_reference_max_scale(token_nope_bf16: torch.Tensor) -> float:
@@ -430,6 +491,152 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
         self._assert_rope_exact(expected, recovered)
         self.assertTrue(torch.all(out[0, 5] == 0))
         self.assertTrue(torch.all(out[0, 128:] == -3))
+
+    def test_cp_byte_sliced_precomputed_compaction_roundtrip(self):
+        """CP byte-sliced read/write must consume precomputed compaction only."""
+        cp_size = 2
+        full_entries_per_block = 16
+        num_blocks = 4
+        local_slice_bytes = full_entries_per_block * HEAD_BYTES // cp_size
+        write_slots = torch.tensor(
+            [16, 17, 18, 19, 32, 33, 34, 35, 48, 49],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        compressed_kv = torch.randn(
+            write_slots.numel(), HEAD_DIM, dtype=torch.bfloat16, device=self.device
+        )
+        raw_by_rank = [
+            torch.zeros(
+                num_blocks,
+                local_slice_bytes,
+                dtype=torch.uint8,
+                device=self.device,
+            )
+            for _ in range(cp_size)
+        ]
+        write_compaction = build_cp_byte_sliced_slot_compaction(
+            write_slots,
+            full_entries_per_block=full_entries_per_block,
+            num_blocks=num_blocks,
+            validation_site="test.cp_byte.write",
+            negative_mode="skip_minus_one",
+        )
+
+        for cp_rank, raw in enumerate(raw_by_rank):
+            quantize_and_insert_k_cache_cp_byte_sliced(
+                compressed_kv,
+                raw,
+                write_slots,
+                full_entries_per_block=full_entries_per_block,
+                cp_rank=cp_rank,
+                cp_size=cp_size,
+                compaction=write_compaction,
+            )
+
+        read_slots = torch.tensor(
+            [
+                [16, 17, -1, 32, 33, 34],
+                [35, 48, 49, -1, -1, -1],
+            ],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        gather_lens = torch.tensor([6, 3], dtype=torch.int32, device=self.device)
+        read_compaction = build_cp_byte_sliced_slot_compaction(
+            read_slots,
+            full_entries_per_block=full_entries_per_block,
+            num_blocks=num_blocks,
+            validation_site="test.cp_byte.read",
+            negative_mode="skip_any",
+            gather_lens=gather_lens,
+        )
+
+        def fake_all_gather(tensor, group):
+            del group
+            expected_local = raw_by_rank[0].index_select(
+                0, read_compaction.unique_blocks
+            )
+            self.assertEqual(tuple(tensor.shape), tuple(expected_local.shape))
+            return torch.cat(
+                [
+                    raw.index_select(0, read_compaction.unique_blocks)
+                    for raw in raw_by_rank
+                ],
+                dim=0,
+            )
+
+        out = torch.full((2, 6, HEAD_DIM), -7, dtype=torch.bfloat16, device=self.device)
+        with mock.patch(
+            "rtp_llm.models_py.distributed.collective_torch.all_gather",
+            side_effect=fake_all_gather,
+        ):
+            dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                out=out,
+                k_cache_raw=raw_by_rank[0],
+                slot_mapping=read_slots,
+                gather_lens=gather_lens,
+                offset=0,
+                full_entries_per_block=full_entries_per_block,
+                cp_rank=0,
+                cp_size=cp_size,
+                compaction=read_compaction,
+            )
+
+        slot_to_k = {
+            int(slot): compressed_kv[i] for i, slot in enumerate(write_slots.tolist())
+        }
+        for b in range(read_slots.shape[0]):
+            for j in range(int(gather_lens[b].item())):
+                slot = int(read_slots[b, j].item())
+                if slot < 0:
+                    self.assertTrue(torch.all(out[b, j] == 0))
+                    continue
+                expected = slot_to_k[slot].unsqueeze(0)
+                recovered = out[b, j].unsqueeze(0)
+                self._assert_rope_exact(expected, recovered)
+                self._assert_nope_within_ue8m0_bound(expected, recovered)
+        self.assertTrue(torch.all(out[1, 3:] == -7))
+
+    def test_cp_byte_sliced_runtime_requires_compaction(self):
+        cp_size = 2
+        full_entries_per_block = 16
+        num_blocks = 3
+        local_slice_bytes = full_entries_per_block * HEAD_BYTES // cp_size
+        raw = torch.zeros(
+            num_blocks,
+            local_slice_bytes,
+            dtype=torch.uint8,
+            device=self.device,
+        )
+        k = torch.randn(2, HEAD_DIM, dtype=torch.bfloat16, device=self.device)
+        slots = torch.tensor([16, 17], dtype=torch.int64, device=self.device)
+        with self.assertRaisesRegex(AssertionError, "metadata-precomputed compaction"):
+            quantize_and_insert_k_cache_cp_byte_sliced(
+                k,
+                raw,
+                slots,
+                full_entries_per_block=full_entries_per_block,
+                cp_rank=0,
+                cp_size=cp_size,
+                compaction=None,
+            )
+
+        out = torch.zeros(1, 2, HEAD_DIM, dtype=torch.bfloat16, device=self.device)
+        read_slots = slots.view(1, 2)
+        gather_lens = torch.tensor([2], dtype=torch.int32, device=self.device)
+        with self.assertRaisesRegex(AssertionError, "metadata-precomputed compaction"):
+            dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                out=out,
+                k_cache_raw=raw,
+                slot_mapping=read_slots,
+                gather_lens=gather_lens,
+                offset=0,
+                full_entries_per_block=full_entries_per_block,
+                cp_rank=0,
+                cp_size=cp_size,
+                compaction=None,
+            )
 
 
 if __name__ == "__main__":

@@ -29,6 +29,9 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
 from rtp_llm.models_py.modules.dsv4.fp8 import _swa_ops_triton as _swa_ops
+from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
+    build_cp_byte_sliced_slot_compaction,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8 as Attention
 from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     SwaPrefillMeta,
@@ -36,6 +39,8 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     _get_window_topk_idxs,
     _get_window_topk_idxs_varlen,
 )
+
+_SWA_FP8_ENTRY_BYTES = 584
 
 
 class _StubKvCache:
@@ -64,10 +69,14 @@ class _StubAttention:
         eb: int,
         kv_cache_present: bool = True,
         kv_cache: Optional[object] = None,
+        cp_byte_sliced: bool = False,
+        cp_size: int = 2,
     ) -> None:
         self.window_size = window_size
         self.compress_ratio = compress_ratio
         self._eb = eb
+        self._cp_byte_sliced = bool(cp_byte_sliced)
+        self._cp_size = int(cp_size)
         self._kv_cache = (
             (kv_cache if kv_cache is not None else _StubKvCache(eb))
             if kv_cache_present
@@ -76,11 +85,54 @@ class _StubAttention:
         self._block_tables_by_type = (
             {SWA_KV: block_table_swa} if block_table_swa is not None else None
         )
+        if self._cp_byte_sliced and block_table_swa is not None:
+            num_blocks = int(block_table_swa.max().item()) + 1
+            local_slice_bytes = max(1, eb * _SWA_FP8_ENTRY_BYTES // self._cp_size)
+            self._raw_u8 = torch.empty(
+                num_blocks,
+                local_slice_bytes,
+                dtype=torch.uint8,
+                device=block_table_swa.device,
+            )
+        else:
+            self._raw_u8 = None
 
     def _pool_entries_per_block(self, attn_type: int) -> int:
         if attn_type != SWA_KV:
             return 0
         return self._eb
+
+    def _swa_entries_per_block(self) -> int:
+        return self._eb
+
+    def _swa_cp_byte_sliced(self) -> bool:
+        return self._cp_byte_sliced
+
+    def _pool_raw_u8(self, attn_type: int) -> Optional[torch.Tensor]:
+        if attn_type != SWA_KV:
+            return None
+        return self._raw_u8
+
+    def _build_swa_cp_byte_compaction(
+        self,
+        slot_mapping: torch.Tensor,
+        full_entries_per_block: int,
+        validation_site: str,
+        negative_mode: str,
+        gather_lens: Optional[torch.Tensor] = None,
+    ):
+        if not self._swa_cp_byte_sliced():
+            return None
+        raw = self._pool_raw_u8(SWA_KV)
+        assert raw is not None, "byte-sliced FP8 SWA pool unavailable"
+        return build_cp_byte_sliced_slot_compaction(
+            slot_mapping,
+            full_entries_per_block=full_entries_per_block,
+            num_blocks=int(raw.shape[0]),
+            validation_site=validation_site,
+            negative_mode=negative_mode,
+            gather_lens=gather_lens,
+        )
 
     # Bind the unbound leaf builder so the stub quacks correctly.
     _build_swa_prefill_meta_varlen = Attention._build_swa_prefill_meta_varlen
@@ -299,6 +351,7 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
         eb: int = 256,
         kv_cache_present: bool = True,
         kv_cache: Optional[object] = None,
+        cp_byte_sliced: bool = False,
     ) -> _StubAttention:
         bt = _make_block_table(n_reqs, blocks_per_req, self.device)
         return _StubAttention(
@@ -308,6 +361,7 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
             eb=eb,
             kv_cache_present=kv_cache_present,
             kv_cache=kv_cache,
+            cp_byte_sliced=cp_byte_sliced,
         )
 
     def _build_meta_legacy(
@@ -316,10 +370,10 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
         """Local B==1 scalar reference for the varlen path's B==1 collapse."""
         win = stub.window_size
         is_swa_only = stub.compress_ratio == 0
-        topk_length_kv_full: Optional[torch.Tensor] = None
-        if is_swa_only or stub._kv_cache is None:
-            positions = torch.arange(S, device=self.device, dtype=torch.int32)
-            topk_length_kv_full = torch.clamp(positions + 1, max=win)
+        positions = torch.arange(S, device=self.device, dtype=torch.int32)
+        topk_length_kv_full: Optional[torch.Tensor] = torch.clamp(
+            positions + 1, max=win
+        )
 
         bt = (
             stub._block_tables_by_type.get(SWA_KV)
@@ -366,7 +420,7 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
                 slot_mapping=slot_mapping,
                 query_start_loc=query_start_loc,
                 combined_seq_lens=combined_seq_lens,
-                topk_length_kv_full=None,
+                topk_length_kv_full=topk_length_kv_full,
                 combined_gather_lens=None,
                 combined_gather_len_max=0,
                 M=0,
@@ -615,6 +669,56 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
             [5, 6, 7, 8, 8, 8, 8, 8], dtype=torch.int32, device=self.device
         )
         self.assertTrue(torch.equal(meta.combined_lens, expected_cmb))
+
+    def test_cp_byte_sliced_swa_only_precomputes_write_and_cache_compaction(
+        self,
+    ) -> None:
+        win = 8
+        stub = self._build_stub(
+            win=win,
+            compress_ratio=0,
+            n_reqs=2,
+            blocks_per_req=4,
+            eb=16,
+            cp_byte_sliced=True,
+        )
+        meta = self._build_meta_varlen(stub, [4, 12], [3, 2])
+        self.assertIsNotNone(meta.slot_mapping)
+        self.assertIsNotNone(meta.slot_compaction)
+        self.assertEqual(
+            tuple(meta.slot_compaction.compact_slots.shape),
+            tuple(meta.slot_mapping.shape),
+        )
+        self.assertGreater(int(meta.slot_compaction.unique_blocks.numel()), 0)
+        self.assertIsNotNone(meta.cache_slot_mapping)
+        self.assertIsNotNone(meta.cache_compaction)
+        self.assertEqual(
+            tuple(meta.cache_compaction.compact_slots.shape),
+            tuple(meta.cache_slot_mapping.shape),
+        )
+        self.assertEqual(meta.cache_compaction.gather_lens_cpu, (4, 7))
+
+    def test_cp_byte_sliced_compressed_layers_precompute_write_compaction(
+        self,
+    ) -> None:
+        for compress_ratio in (4, 128):
+            with self.subTest(compress_ratio=compress_ratio):
+                stub = self._build_stub(
+                    win=8,
+                    compress_ratio=compress_ratio,
+                    n_reqs=2,
+                    blocks_per_req=4,
+                    eb=16,
+                    cp_byte_sliced=True,
+                )
+                meta = self._build_meta_varlen(stub, [0, 12], [3, 2])
+                self.assertIsNotNone(meta.slot_mapping)
+                self.assertIsNotNone(meta.slot_compaction)
+                self.assertEqual(
+                    tuple(meta.slot_compaction.compact_slots.shape),
+                    tuple(meta.slot_mapping.shape),
+                )
+                self.assertIsNone(meta.cache_compaction)
 
     def test_large_physical_swa_write_slot_mapping_tail_mask(self) -> None:
         """SWA write meta must use physical row tokens and small ring entries.

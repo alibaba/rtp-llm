@@ -23,6 +23,9 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
+    CPByteSlicedSlotCompaction,
+)
 from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
     trap_invalid_kv_access_enabled,
     validate_slot_mapping,
@@ -89,9 +92,7 @@ def _quantize_and_insert_k_kernel(
 
     # int64: block_idx * block_stride can overflow int32 with many blocks
     # (e.g. >= 14K at block_stride 149504 → 2^31). Matches dequant kernel.
-    cache_block_ptr = (
-        k_cache_ptr + block_idx.to(tl.int64) * block_stride.to(tl.int64)
-    )
+    cache_block_ptr = k_cache_ptr + block_idx.to(tl.int64) * block_stride.to(tl.int64)
 
     token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
     token_scale_ptr = (
@@ -219,51 +220,14 @@ def quantize_and_insert_k_cache(
     )
 
 
-def _compact_cp_byte_sliced_slots(
-    slot_mapping: torch.Tensor,
-    *,
-    full_entries_per_block: int,
-    num_blocks: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Map real full-block slots to compact scratch slots.
-
-    CP byte slicing is a storage concern. This helper only remaps physical
-    block ids; it does not know anything about the SWA data/scale layout.
-    """
-    if slot_mapping.dtype != torch.long:
-        slot_mapping = slot_mapping.to(torch.long)
-    slots = slot_mapping.reshape(-1).contiguous()
-    validate_slot_mapping(
-        "swa.quantize_and_insert_cp_byte.slot_mapping",
-        slots,
-        block_size=full_entries_per_block,
-        num_blocks=num_blocks,
-        negative_mode="skip_minus_one",
-    )
-    valid = slots >= 0
-    valid_slots = slots[valid]
-    if valid_slots.numel() == 0:
-        return (
-            torch.empty((0,), dtype=torch.long, device=slots.device),
-            torch.full_like(slot_mapping, -1),
-        )
-
-    block_ids = valid_slots // int(full_entries_per_block)
-    block_offsets = valid_slots % int(full_entries_per_block)
-    unique_blocks, inverse = torch.unique(block_ids, sorted=True, return_inverse=True)
-    compact_flat = torch.full_like(slots, -1)
-    compact_flat[valid] = inverse.to(torch.long) * int(full_entries_per_block) + block_offsets
-    return unique_blocks, compact_flat.view_as(slot_mapping).contiguous()
-
-
 def quantize_and_insert_k_cache_cp_byte_sliced(
     k: torch.Tensor,
     k_cache_raw: torch.Tensor,
     slot_mapping: torch.Tensor,
-    *,
     full_entries_per_block: int,
     cp_rank: int,
     cp_size: int,
+    compaction: CPByteSlicedSlotCompaction,
 ) -> None:
     assert (
         k.dim() == 2 and k.shape[1] == _INPUT_DIM
@@ -273,21 +237,21 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
         f"k_cache_raw must be [num_blocks, local_slice_bytes] uint8, got "
         f"{tuple(k_cache_raw.shape)} / {k_cache_raw.dtype}"
     )
-    assert k_cache_raw.stride(1) == 1, f"k_cache_raw must be byte-contiguous, got {k_cache_raw.stride()}"
+    assert (
+        k_cache_raw.stride(1) == 1
+    ), f"k_cache_raw must be byte-contiguous, got {k_cache_raw.stride()}"
     full_entries_per_block = int(full_entries_per_block)
     cp_rank = int(cp_rank)
     cp_size = int(cp_size)
     assert full_entries_per_block > 0 and cp_size > 1 and 0 <= cp_rank < cp_size
-    if slot_mapping.dtype != torch.long:
-        slot_mapping = slot_mapping.to(torch.long)
     num_tokens = int(slot_mapping.shape[0])
     if num_tokens == 0:
         return
-    unique_blocks, compact_slots = _compact_cp_byte_sliced_slots(
-        slot_mapping,
-        full_entries_per_block=full_entries_per_block,
-        num_blocks=int(k_cache_raw.shape[0]),
-    )
+    assert (
+        compaction is not None
+    ), "CP byte-sliced SWA insert requires metadata-precomputed compaction"
+    unique_blocks = compaction.unique_blocks
+    compact_slots = compaction.compact_slots
     if unique_blocks.numel() == 0:
         return
 
@@ -310,4 +274,6 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
         full_view,
         compact_slots,
     )
-    k_cache_raw.index_copy_(0, unique_blocks, full_raw[:, slice_start:slice_end].contiguous())
+    k_cache_raw.index_copy_(
+        0, unique_blocks, full_raw[:, slice_start:slice_end].contiguous()
+    )

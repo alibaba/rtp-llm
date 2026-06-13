@@ -75,6 +75,7 @@ def _call(
         kv_block_table=stub._kv_block_table,
         kv_eb=stub._kv_eb,
         use_varlen=False,
+        has_prefix=sp_int > 0,
     )
 
 
@@ -311,6 +312,7 @@ class IndexerFP8PrepareVarlenTest(unittest.TestCase):
             kv_block_table=self.bt,
             kv_eb=self.kv_eb,
             use_varlen=False,
+            has_prefix=True,
         )
         new = IndexerFP8.prepare(
             self.stub,
@@ -321,6 +323,7 @@ class IndexerFP8PrepareVarlenTest(unittest.TestCase):
             kv_block_table=self.bt,
             kv_eb=self.kv_eb,
             use_varlen=True,
+            has_prefix=True,
             **kw,
         )
         # Scalar fields
@@ -354,6 +357,7 @@ class IndexerFP8PrepareVarlenTest(unittest.TestCase):
             kv_block_table=self.bt,
             kv_eb=self.kv_eb,
             use_varlen=True,
+            has_prefix=True,
             **kw,
         )
         self.assertEqual(meta.M, 28)
@@ -379,6 +383,7 @@ class IndexerFP8PrepareVarlenTest(unittest.TestCase):
             kv_block_table=self.bt,
             kv_eb=self.kv_eb,
             use_varlen=True,
+            has_prefix=True,
             **kw,
         )
         wrapped_kw = dict(kw)
@@ -399,6 +404,7 @@ class IndexerFP8PrepareVarlenTest(unittest.TestCase):
             kv_block_table=self.bt,
             kv_eb=self.kv_eb,
             use_varlen=True,
+            has_prefix=True,
             **wrapped_kw,
         )
         self.assertTrue(torch.equal(wrapped.positions_d, flat.positions_d))
@@ -427,6 +433,7 @@ class IndexerFP8PrepareVarlenTest(unittest.TestCase):
             kv_block_table=self.bt,
             kv_eb=self.kv_eb,
             use_varlen=True,
+            has_prefix=True,
             **kw,
         )
         ke_cpu = meta.ke.cpu()
@@ -454,6 +461,7 @@ class IndexerFP8PrepareVarlenTest(unittest.TestCase):
             kv_block_table=self.bt,
             kv_eb=self.kv_eb,
             use_varlen=True,
+            has_prefix=True,
             **kw,
         )
         self.assertEqual(meta.block_table_i32.shape, (2, 16))
@@ -476,6 +484,7 @@ class IndexerFP8PrepareVarlenTest(unittest.TestCase):
             kv_block_table=self.bt,
             kv_eb=self.kv_eb,
             use_varlen=True,
+            has_prefix=True,
             **kw,
         )
         positions = kw["position_ids"]
@@ -500,6 +509,7 @@ class IndexerFP8PrepareVarlenTest(unittest.TestCase):
             kv_block_table=self.bt,
             kv_eb=self.kv_eb,
             use_varlen=False,
+            has_prefix=False,
             **kw,
         )
         # Legacy path: M = 1*16, T = (0+16)//4 = 4, cu_kv_seqlens=[0,4]
