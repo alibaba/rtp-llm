@@ -45,6 +45,7 @@ _DSV4_FP8_TESTS = [
     "test_swa_slot_mapping",
     "test_varlen_prefill_oracle",
     "test_workspace_prefill_varlen",
+    "test_no_recompile",
 ]
 
 _DSV4_FP8_CPU_TESTS = [
