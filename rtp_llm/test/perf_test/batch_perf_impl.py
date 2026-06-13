@@ -122,17 +122,14 @@ class BatchPerfImpl(object):
         warmup_runs: Optional[int] = None,
         measure_runs: Optional[int] = None,
         profile_runs: Optional[int] = None,
+        reuse_cache_seed_query: Optional[Union[str, List[str]]] = None,
+        query_variants: Optional[List[Union[str, List[str]]]] = None,
+        target_reuse_len: int = 0,
     ):
         self.base_port = base_port
         self.dp_size = dp_size
         self.batch_size = batch_size
-        if isinstance(query, str):
-            self.input_queries = [query] * batch_size
-        else:
-            assert (
-                len(query) == batch_size
-            ), f"query list length {len(query)} != batch_size {batch_size}"
-            self.input_queries = query
+        self.input_queries = self._normalize_queries(query)
         self.is_decode = is_decode
         self.max_requests_per_process = 128
         self.num_processes = max(
@@ -147,6 +144,18 @@ class BatchPerfImpl(object):
         self.profile = profile
         self.generate_config = generate_config or {}
         self.profile_trace_name = profile_trace_name
+        self.query_variants = (
+            [self._normalize_queries(q) for q in query_variants]
+            if query_variants
+            else []
+        )
+        self.query_variant_index = 0
+        self.reuse_cache_seed_queries = (
+            self._normalize_seed_queries(reuse_cache_seed_query)
+            if reuse_cache_seed_query
+            else []
+        )
+        self.target_reuse_len = target_reuse_len
         self.warmup_runs = (
             int(os.environ.get("PERF_FORMAL_WARMUP_RUNS", "1"))
             if warmup_runs is None
@@ -163,25 +172,125 @@ class BatchPerfImpl(object):
             else int(profile_runs)
         )
 
+    def _normalize_queries(self, query: Union[str, List[str]]) -> List[str]:
+        if isinstance(query, str):
+            return [query] * self.batch_size
+        assert (
+            len(query) == self.batch_size
+        ), f"query list length {len(query)} != batch_size {self.batch_size}"
+        return query
+
+    def _normalize_seed_queries(self, query: Union[str, List[str]]) -> List[str]:
+        if isinstance(query, str):
+            return [query]
+        assert query, "reuse-cache seed query list must not be empty"
+        return query
+
+    def _next_input_queries(self) -> List[str]:
+        if not self.query_variants:
+            return self.input_queries
+        variant = self.query_variants[
+            min(self.query_variant_index, len(self.query_variants) - 1)
+        ]
+        self.query_variant_index += 1
+        return variant
+
+    def _seed_reuse_cache(self) -> None:
+        if not self.reuse_cache_seed_queries:
+            return
+        seed_config = dict(self.generate_config)
+        seed_config.update({"reuse_cache": True, "enable_device_cache": True})
+        logging.info(
+            "[PERF_REUSE_CACHE_SEED] trace=%s seed_requests=%d target_reuse_len=%d",
+            self.profile_trace_name,
+            len(self.reuse_cache_seed_queries),
+            self.target_reuse_len,
+        )
+        responses = _curl_server_batch_worker(
+            list(range(len(self.reuse_cache_seed_queries))),
+            self.base_port,
+            self.reuse_cache_seed_queries,
+            self.is_decode,
+            self.decode_test_length,
+            self.wait_time,
+            False,
+            seed_config,
+            "",
+        )
+        metric = analyze_results(responses)
+        check_with_info(
+            metric.success_requests == metric.total_requests,
+            "reuse-cache seed failed: "
+            f"{metric.success_requests}/{metric.total_requests} succeeded",
+        )
+
+    def _validate_reuse_metric(self, metric: TestResultMetrics) -> None:
+        if self.target_reuse_len <= 0 or metric.success_requests == 0:
+            return
+        tolerance = max(64.0, self.target_reuse_len * 0.02)
+        delta = abs(metric.avg_reuse_len - self.target_reuse_len)
+        check_with_info(
+            delta <= tolerance,
+            "reuse-cache hit length is outside tolerance: "
+            f"target={self.target_reuse_len}, actual_avg={metric.avg_reuse_len:.2f}, "
+            f"tolerance={tolerance:.2f}, trace={self.profile_trace_name}",
+        )
+
+    def _prearm_profile(self) -> None:
+        # Pre-arm via /start_profile with enable_all_rank=true so that all
+        # TP/DP ranks profile the upcoming request. Controlled by env
+        # PERF_PREARM_PROFILE=1.
+        if os.environ.get("PERF_PREARM_PROFILE", "0") != "1":
+            return
+        try:
+            num_steps = _effective_profile_steps(
+                self.is_decode, self.decode_test_length
+            )
+            arm_sleep = float(os.environ.get("PERF_PROFILE_ARM_SLEEP", "2"))
+            r = requests.post(
+                f"http://127.0.0.1:{self.base_port}/start_profile",
+                json={
+                    "gen_timeline": True,
+                    "trace_name": self.profile_trace_name or "perf_prearm",
+                    "start_step": 0,
+                    "num_steps": num_steps,
+                    "enable_all_rank": True,
+                },
+                timeout=60,
+            )
+            logging.info(
+                f"[PERF_PREARM_PROFILE] num_steps={num_steps} arm_sleep={arm_sleep} "
+                f"-> {r.status_code} {r.text[:200]}"
+            )
+            time.sleep(arm_sleep)
+        except Exception as e:
+            logging.warning(f"[PERF_PREARM_PROFILE] failed: {e}")
+
     # warmup (JIT compile), measure timing, profile (optional, torch profiler affects accuracy)
     def run(self):
         self._set_concurrency()
         for i in range(self.warmup_runs):
+            self._seed_reuse_cache()
             logging.info(
                 "[PERF_WARMUP_RUN] %d/%d trace=%s",
                 i + 1,
                 self.warmup_runs,
                 self.profile_trace_name,
             )
-            _ = self._curl_server()
+            _ = self._curl_server(input_queries=self._next_input_queries())
 
         all_measure_responses: List[ResponseInfo] = []
         for i in range(self.measure_runs):
-            responses = self._curl_server_responses()
+            self._seed_reuse_cache()
+            responses = self._curl_server_responses(
+                input_queries=self._next_input_queries()
+            )
             metric = analyze_results(responses)
+            self._validate_reuse_metric(metric)
             logging.info(
                 "[PERF_MEASURE_RUN] %d/%d trace=%s success=%d/%d "
-                "avg_prefill_ms=%.3f avg_total_ms=%.3f avg_wait_ms=%.3f",
+                "avg_prefill_ms=%.3f avg_total_ms=%.3f avg_wait_ms=%.3f "
+                "avg_reuse_len=%.2f avg_reuse_hit_rate=%.6f",
                 i + 1,
                 self.measure_runs,
                 self.profile_trace_name,
@@ -190,49 +299,27 @@ class BatchPerfImpl(object):
                 metric.avg_prefill_time,
                 metric.avg_total_time,
                 metric.avg_wait_time,
+                metric.avg_reuse_len,
+                metric.avg_reuse_hit_rate,
             )
             all_measure_responses.extend(responses)
         results = analyze_results(all_measure_responses)
+        self._validate_reuse_metric(results)
 
         if self.profile and self.profile_runs > 0:
-            # Pre-arm via /start_profile with enable_all_rank=true so that
-            # all TP/DP ranks profile the upcoming request.  Requires the
-            # NormalEngine::step() patch that ticks BEFORE process(), so
-            # the first post-configure tick starts the profiler in time
-            # for the next process() to be captured.  Controlled by env
-            # PERF_PREARM_PROFILE=1.
-            if os.environ.get("PERF_PREARM_PROFILE", "0") == "1":
-                try:
-                    num_steps = _effective_profile_steps(
-                        self.is_decode, self.decode_test_length
-                    )
-                    arm_sleep = float(os.environ.get("PERF_PROFILE_ARM_SLEEP", "2"))
-                    r = requests.post(
-                        f"http://127.0.0.1:{self.base_port}/start_profile",
-                        json={
-                            "gen_timeline": True,
-                            "trace_name": self.profile_trace_name or "perf_prearm",
-                            "start_step": 0,
-                            "num_steps": num_steps,
-                            "enable_all_rank": True,
-                        },
-                        timeout=60,
-                    )
-                    logging.info(
-                        f"[PERF_PREARM_PROFILE] num_steps={num_steps} arm_sleep={arm_sleep} "
-                        f"-> {r.status_code} {r.text[:200]}"
-                    )
-                    time.sleep(arm_sleep)
-                except Exception as e:
-                    logging.warning(f"[PERF_PREARM_PROFILE] failed: {e}")
             for i in range(self.profile_runs):
+                self._seed_reuse_cache()
+                self._prearm_profile()
                 logging.info(
                     "[PERF_PROFILE_RUN] %d/%d trace=%s",
                     i + 1,
                     self.profile_runs,
                     self.profile_trace_name,
                 )
-                _ = self._curl_server(True)
+                _ = self._curl_server(
+                    True,
+                    input_queries=self._next_input_queries(),
+                )
             time.sleep(int(os.environ.get("PERF_PROFILE_FLUSH_SLEEP", "60")))
         return results
 
@@ -270,7 +357,12 @@ class BatchPerfImpl(object):
             time.sleep(3)
         raise Exception(f"failed to set concurrency after retries: {last_error}")
 
-    def _curl_server_responses(self, profile: bool = False) -> List[ResponseInfo]:
+    def _curl_server_responses(
+        self,
+        profile: bool = False,
+        input_queries: Optional[List[str]] = None,
+    ) -> List[ResponseInfo]:
+        effective_queries = input_queries or self.input_queries
         request_batches: List[List[int]] = []
         for i in range(0, self.batch_size, self.max_requests_per_process):
             batch_indices = list(
@@ -280,7 +372,7 @@ class BatchPerfImpl(object):
 
         futures: List[Future[List[ResponseInfo]]] = []
         for batch_indices in request_batches:
-            batch_queries = [self.input_queries[i] for i in batch_indices]
+            batch_queries = [effective_queries[i] for i in batch_indices]
             futures.append(
                 self.executor.submit(
                     _curl_server_batch_worker,
@@ -302,8 +394,12 @@ class BatchPerfImpl(object):
 
         return all_responses
 
-    def _curl_server(self, profile: bool = False) -> TestResultMetrics:
-        return analyze_results(self._curl_server_responses(profile))
+    def _curl_server(
+        self,
+        profile: bool = False,
+        input_queries: Optional[List[str]] = None,
+    ) -> TestResultMetrics:
+        return analyze_results(self._curl_server_responses(profile, input_queries))
 
     def dump_results(self, results: List[Dict[str, Any]]):
         for result in results:

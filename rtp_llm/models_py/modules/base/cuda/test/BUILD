@@ -77,3 +77,11 @@ py_test (
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test (
+    name = "indexer_k_quant_and_cache_test",
+    srcs = ["indexer_k_quant_and_cache_test.py"],
+    deps = py_test_deps,
+    tags = ["open_skip", "H20"],
+    exec_properties = {'gpu':'H20'},
+)

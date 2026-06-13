@@ -32,6 +32,7 @@ __global__ void prepareFlashInferDecodeParamsKernel(const int32_t* sequence_leng
                                                     int32_t*       qo_indptr,
                                                     int32_t*       kvlen,
                                                     int32_t*       positions,
+                                                    int64_t*       slot_mapping,
                                                     int32_t        batch_size,
                                                     int32_t        max_blocks_per_batch,
                                                     int32_t        seq_size_per_block) {
@@ -53,6 +54,11 @@ __global__ void prepareFlashInferDecodeParamsKernel(const int32_t* sequence_leng
         positions[batch]              = seq_len - 1;
         kvlen[batch]                  = seq_len;
         paged_kv_last_page_len[batch] = (seq_len - 1) % safe_page_sz + 1;
+        const int32_t block_index     = (seq_len - 1) / safe_page_sz;
+        const int32_t block_offset    = (seq_len - 1) % safe_page_sz;
+        const int32_t block_number =
+            block_index < max_blocks_per_batch ? block_ids[batch * max_blocks_per_batch + block_index] : 0;
+        slot_mapping[batch] = static_cast<int64_t>(block_number) * safe_page_sz + static_cast<int64_t>(block_offset);
 
         const int32_t pages_to_copy = pages < max_blocks_per_batch ? pages : max_blocks_per_batch;
         for (int32_t page = 0; page < pages_to_copy; ++page) {
@@ -209,6 +215,7 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                          int32_t*       qo_indptr,
                                          int32_t*       kvlen,
                                          int32_t*       positions,
+                                         int64_t*       slot_mapping,
                                          int32_t        batch_size,
                                          int32_t        max_blocks_per_batch,
                                          int32_t        seq_size_per_block,
@@ -217,7 +224,7 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
     TORCH_CHECK(block_ids != nullptr, "block_ids is null");
     TORCH_CHECK(batch_indice != nullptr && page_indice != nullptr && decode_page_indptr != nullptr
                     && paged_kv_last_page_len != nullptr && qo_indptr != nullptr && kvlen != nullptr
-                    && positions != nullptr,
+                    && positions != nullptr && slot_mapping != nullptr,
                 "FlashInfer decode metadata output buffer is null");
     if (batch_size <= 0 || max_blocks_per_batch <= 0) {
         return;
@@ -231,6 +238,7 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                                              qo_indptr,
                                                              kvlen,
                                                              positions,
+                                                             slot_mapping,
                                                              batch_size,
                                                              max_blocks_per_batch,
                                                              seq_size_per_block);

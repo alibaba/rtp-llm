@@ -17,8 +17,9 @@ Two scenarios are tested:
 
 from unittest import TestCase, main, skipIf
 
-# libth_transformer_config must be loaded first to register types referenced
-# by librtp_compute_ops's pybind default args.
+# libth_transformer_config must be loaded before librtp_compute_ops to
+# register types referenced by pybind default args. Import torch first so
+# libtorch_nvshmem.so from torch/lib is discoverable by the loader.
 import libth_transformer_config  # noqa: F401
 import torch
 from librtp_compute_ops import PyAttentionInputs
@@ -232,6 +233,7 @@ class TestSparseMlaTargetVerifyParams(TestCase):
             "paged_kv_last_page_len": ref_params.paged_kv_last_page_len_d.clone(),
             "page_indice": ref_params.page_indice_d.clone(),
             "expanded_seq_lens": ref_params.expanded_seq_lens.clone(),
+            "slot_mapping": ref_params.slot_mapping.clone(),
             "page_count": int(ref_params.decode_page_indptr_d[self.batch_size].item()),
         }
 
@@ -262,6 +264,7 @@ class TestSparseMlaTargetVerifyParams(TestCase):
         self.assertEqual(test_params.ke.numel(), 0)
         self.assertEqual(test_params.topk_indices_offset.numel(), 0)
         self.assertEqual(test_params.expanded_seq_lens.shape[0], self.batch_size)
+        self.assertEqual(test_params.slot_mapping.shape[0], self.batch_size)
 
         # Value match against CPU baseline
         torch.testing.assert_close(
@@ -298,6 +301,11 @@ class TestSparseMlaTargetVerifyParams(TestCase):
             test_params.page_indice_d[: ref["page_count"]],
             ref["page_indice"][: ref["page_count"]],
             msg="page_indice",
+        )
+        torch.testing.assert_close(
+            test_params.slot_mapping[: self.batch_size],
+            ref["slot_mapping"][: self.batch_size],
+            msg="slot_mapping",
         )
 
     def test_kernel_matches_cpu_after_decode_mutation(self):
