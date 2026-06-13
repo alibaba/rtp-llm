@@ -1,17 +1,14 @@
 package org.flexlb.sync.runner;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.domain.worker.WorkerStatusResponse;
+import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.BalanceStatusEnum;
-import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -20,8 +17,6 @@ import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -104,8 +99,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 return;
             }
 
-
-            // Only report success worker status check info
             engineHealthReporter.reportStatusCheckRemoteInfo(modelName, ipPort, newWorkerStatus.getRole(), startTime);
 
             Long responseVersion = newWorkerStatus.getStatusVersion();
@@ -113,6 +106,9 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 logger.info("workerStatuses.get(ip) is null for gRPC call");
                 return;
             }
+
+            workerStatus.setSite(site);
+            workerStatus.setGroup(group);
 
             WorkerEndpoint ep = endpointRegistry != null ? endpointRegistry.get(ipPort) : null;
             if (ep != null) {
@@ -124,45 +120,36 @@ public class GrpcWorkerStatusRunner implements Runnable {
             }
 
             long currentVersion = workerStatus.getStatusVersion().get();
-            if (currentVersion >= responseVersion) {
-                logger.info("query engine worker status via gRPC, version is not updated, currentVersion: {}, responseVersion: {}",
+            WorkerEndpoint ep = endpointRegistry != null ? endpointRegistry.get(ipPort) : null;
+            if (currentVersion < responseVersion) {
+                // 1. WorkerStatusResponse directly updates WorkerStatus
+                workerStatus.updateFromResponse(newWorkerStatus);
+
+                // 2. Notify EP (calibration) — passes both updated status and raw response
+                if (ep != null) {
+                    ep.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
+                }
+
+                // 3. Notify scheduler (cleanup finished requests)
+                if (batchScheduler != null) {
+                    batchScheduler.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
+                }
+            } else {
+                logger.info("query engine worker status via gRPC, version is not updated, "
+                                + "currentVersion: {}, responseVersion: {}",
                         currentVersion, responseVersion);
-
-                Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
-                Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
-                List<Long> finished = extractFinishedRequestIds(finishedTaskInfo);
-                if (batchScheduler != null && !finished.isEmpty()) {
-                    batchScheduler.onRequestsFinished(finished);
-                }
-
-                if (endpointRegistry != null) {
-                    calibrateEndpoint(runningTaskInfo, finishedTaskInfo);
-                }
-
-                // Report success even when version is not updated
-                engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
-                    Optional.ofNullable(runningTaskInfo).map(Map::size).orElse(0),
-                    Optional.ofNullable(finishedTaskInfo).map(Map::size).orElse(0));
-
-                logWorkerStatusUpdate(startTime, workerStatus);
-                return;
             }
 
-            Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
-            Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
-
-            List<Long> finished = extractFinishedRequestIds(finishedTaskInfo);
-            if (batchScheduler != null && !finished.isEmpty()) {
-                batchScheduler.onRequestsFinished(finished);
+            // 4. Update latestFinishedVersion if remote is ahead (always, regardless of status version)
+            Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();
+            if (latestFinishedVersion != null
+                    && latestFinishedVersion > workerStatus.getLatestFinishedTaskVersion().get()) {
+                workerStatus.getLatestFinishedTaskVersion().set(latestFinishedVersion);
             }
 
-            if (endpointRegistry != null) {
-                calibrateEndpoint(runningTaskInfo, finishedTaskInfo);
-            }
-
-            engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
-                    Optional.ofNullable(runningTaskInfo).map(Map::size).orElse(0),
-                    Optional.ofNullable(finishedTaskInfo).map(Map::size).orElse(0));
+            engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus, ep,
+                    Optional.ofNullable(newWorkerStatus.getRunningTaskInfo()).map(Map::size).orElse(0),
+                    Optional.ofNullable(newWorkerStatus.getFinishedTaskInfo()).map(Map::size).orElse(0));
 
             logWorkerStatusUpdate(startTime, workerStatus);
 
@@ -170,17 +157,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
             log("engine worker status check via gRPC exception, msg: " + e.getMessage());
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, ip, roleType);
         }
-    }
-
-    private static List<Long> extractFinishedRequestIds(Map<String, TaskInfo> finishedTaskInfo) {
-        if (finishedTaskInfo == null) {
-            return List.of();
-        }
-        List<Long> ids = new ArrayList<>(finishedTaskInfo.size());
-        for (TaskInfo task : finishedTaskInfo.values()) {
-            ids.add(task.getRequestId());
-        }
-        return ids;
     }
 
     private void logWorkerStatusUpdate(long startTime, WorkerStatus workerStatus) {
@@ -201,7 +177,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 workerStatus.getTpSize(),
                 workerStatus.getAvailableKvCacheTokens(),
                 workerStatus.getUsedKvCacheTokens(),
-                workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().values().stream().filter(t -> t.getPhase() != TaskPhase.RUNNING).count() : 0,
+                workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().values().stream().filter(t -> t.getPhase() != org.flexlb.enums.TaskPhase.RUNNING).count() : 0,
                 workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().size() : 0,
                 workerStatus.getStatusVersion(),
                 System.nanoTime() / 1000 - startTime);
@@ -215,22 +191,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, ip, roleType);
         } else {
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, ip, roleType);
-        }
-    }
-
-    private void calibrateEndpoint(Map<String, TaskInfo> runningTaskInfo,
-                                    Map<String, TaskInfo> finishedTaskInfo) {
-        if (roleType == RoleType.PREFILL) {
-            PrefillEndpoint ep = endpointRegistry.getPrefill(ipPort);
-            if (ep != null) {
-                ep.calibrate(finishedTaskInfo, runningTaskInfo);
-            }
-        } else if (roleType == RoleType.DECODE) {
-            DecodeEndpoint ep = endpointRegistry.getDecode(ipPort);
-            if (ep != null) {
-                ep.calibrate(runningTaskInfo, finishedTaskInfo,
-                        ep.getAvailableKvCacheTokens().get());
-            }
         }
     }
 

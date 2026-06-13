@@ -23,7 +23,9 @@ route_logger = logging.getLogger("route_logger")
 
 SUCCESS_CODE = 200
 DEFAULT_REQUEST_PRIORITY = 100
-DEFAULT_FLEXLB_GRPC_PORT = 7003
+# gRPC = HTTP + 2 for FlexLB's own servers (consistent with FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET).
+# This is NOT the same as the backend engine offset (HTTP+1)—see CommonConstants.GRPC_PORT_OFFSET.
+FLEXLB_GRPC_PORT_OFFSET = 2
 BEARER_PREFIX = "Bearer "
 
 
@@ -111,15 +113,20 @@ class MasterClient:
             master_config if master_config is not None else MasterConfig()
         )
         self.host_service: Optional[HostService] = host_service
-        self.flexlb_grpc_port = getattr(
-            self.master_config, "flexlb_grpc_port", DEFAULT_FLEXLB_GRPC_PORT
-        )
         self._channels: Dict[str, grpc.aio.Channel] = {}
         self.latest_queue_length: int = 0
 
     def _get_grpc_target(self, addr: str) -> str:
+        """Resolve gRPC target from service discovery address (ip:HTTP_PORT).
+
+        gRPC port is always derived as HTTP port + FLEXLB_GRPC_PORT_OFFSET.
+        """
         ip = addr.split(":")[0]
-        return f"{ip}:{self.flexlb_grpc_port}"
+        try:
+            http_port = int(addr.split(":")[1])
+            return f"{ip}:{http_port + FLEXLB_GRPC_PORT_OFFSET}"
+        except (IndexError, ValueError):
+            return f"{ip}:{7001 + FLEXLB_GRPC_PORT_OFFSET}"
 
     def _get_channel(self, target: str) -> grpc.aio.Channel:
         if target not in self._channels:

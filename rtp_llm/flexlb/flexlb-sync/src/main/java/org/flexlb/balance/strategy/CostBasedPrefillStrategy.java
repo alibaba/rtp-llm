@@ -73,9 +73,8 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         }
 
         Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
-        PrefillTimePredictor predictor = getPredictor(eligible, config);
 
-        List<PrefillEndpoint> survivors = applyHardFilters(eligible, seqLen, config, predictor);
+        List<PrefillEndpoint> survivors = applyHardFilters(eligible, seqLen, config);
 
         PrefillEndpoint best = null;
         long bestScore = Long.MAX_VALUE;
@@ -83,7 +82,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
 
         for (PrefillEndpoint ep : survivors) {
             long cacheHit = calculateCacheHit(ep, cacheMatchResults);
-            long score = computeScore(ep, seqLen, cacheHit, config, predictor);
+            long score = computeScore(ep, seqLen, cacheHit, config);
 
             if (score < bestScore) {
                 bestScore = score;
@@ -102,7 +101,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
     }
 
     private List<PrefillEndpoint> applyHardFilters(List<PrefillEndpoint> eligible, long seqLen,
-                                                FlexlbConfig config, PrefillTimePredictor predictor) {
+                                                FlexlbConfig config) {
         long sloMs = config.resolveSloMs(seqLen);
         long sloRiskMarginMs = config.getCostSloRiskMarginMs();
         double hotspotMultiplier = config.getCostHotspotMultiplier();
@@ -117,11 +116,14 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         long avgWaitMs = sumWaitMs / eligible.size();
         long avgPendingCount = sumPendingCount / eligible.size();
 
-        long singlePrefillMs = predictor.predictBatchMs(
-                List.of(new BatchRequest(0, seqLen, 0)));
-
         List<PrefillEndpoint> survivors = new ArrayList<>(eligible.size());
         for (PrefillEndpoint ep : eligible) {
+            PrefillTimePredictor predictor = ep.getPredictor();
+            if (predictor == null) continue;
+
+            long singlePrefillMs = predictor.predictBatchMs(
+                    List.of(new BatchRequest(0, seqLen, 0)));
+
             long endpointWaitMs = ep.getEstimatedWaitingTimeMs();
             long pendingCount = ep.getBatcherQueueSize() + ep.getInflightRequestCount();
 
@@ -151,12 +153,13 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
     }
 
     private long computeScore(PrefillEndpoint ep, long seqLen, long cacheHit,
-                              FlexlbConfig config, PrefillTimePredictor predictor) {
+                              FlexlbConfig config) {
         BatcherSnapshot snap = ep.getBatcherSnapshot();
 
+        PrefillTimePredictor predictor = ep.getPredictor();
         long batcherWaitMs;
         if (snap.queueSize() == 0) {
-            long predMs = predictor.estimateMs(seqLen, cacheHit);
+            long predMs = predictor != null ? predictor.estimateMs(seqLen, cacheHit) : 0;
             batcherWaitMs = Math.max(0, config.resolveSloMs(seqLen) - predMs - config.getCostSloRiskMarginMs());
         } else {
             batcherWaitMs = Math.max(0, snap.headDeadlineMs() - System.currentTimeMillis() - config.getCostSloRiskMarginMs());
@@ -170,18 +173,6 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         return batcherWaitMs + endpointWaitMs;
     }
 
-    private PrefillTimePredictor getPredictor(List<PrefillEndpoint> eligible, FlexlbConfig config) {
-        for (PrefillEndpoint ep : eligible) {
-            PrefillTimePredictor p = ep.getPredictor();
-            if (p != null) {
-                return p;
-            }
-        }
-        return new PrefillTimePredictor(
-                config.getCostAlpha0(), config.getCostAlpha1(), config.getCostAlpha2(),
-                config.getCostAlpha3(), config.getCostAlpha4(), config.getCostAlpha5());
-    }
-
     private List<PrefillEndpoint> getAvailableEndpoints(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
         Map<String, WorkerEndpoint> workerEndpointMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
         if (MapUtils.isEmpty(workerEndpointMap)) {
@@ -193,7 +184,7 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         }
         List<PrefillEndpoint> result = new ArrayList<>();
         for (WorkerEndpoint ep : workerEndpointMap.values()) {
-            if (!ep.isAlive() || !resourceMeasure.isResourceAvailable(ep)) {
+            if (!ep.getStatus().isAlive() || !resourceMeasure.isResourceAvailable(ep)) {
                 continue;
             }
             if (ep instanceof PrefillEndpoint pe && pe.isAvailable()) {
@@ -209,14 +200,14 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
     }
 
     private long calculateCacheHit(PrefillEndpoint ep, Map<String, Integer> cacheMatchResults) {
-        if (ep.getCacheStatus() == null || cacheMatchResults == null) {
+        if (ep.getStatus().getCacheStatus() == null || cacheMatchResults == null) {
             return 0L;
         }
         Integer prefixMatchLength = cacheMatchResults.get(ep.ipPort());
         if (prefixMatchLength == null) {
             return 0L;
         }
-        return ep.getCacheStatus().getBlockSize() * prefixMatchLength;
+        return ep.getStatus().getCacheStatus().getBlockSize() * prefixMatchLength;
     }
 
     private void reportCacheHitMetrics(RoleType roleType, String ip, long hitCacheTokens, long seqLen) {
@@ -230,11 +221,11 @@ public class CostBasedPrefillStrategy implements LoadBalancer {
         result.setRole(roleType);
         result.setRequestId(requestId);
         result.setPrefillTime(score);
-        result.setGroup(ep.getGroup());
+        result.setGroup(ep.getStatus().getGroup());
         result.setServerIp(ep.getIp());
         result.setHttpPort(ep.getHttpPort());
         result.setGrpcPort(CommonUtils.toGrpcPort(ep.getHttpPort()));
-        result.setDpRank(ep.getDpRank());
+        result.setDpRank(ep.getStatus().getDpRank());
         return result;
     }
 }

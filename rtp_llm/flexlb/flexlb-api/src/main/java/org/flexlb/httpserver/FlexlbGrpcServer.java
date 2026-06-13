@@ -18,7 +18,13 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class FlexlbGrpcServer {
 
-    private static final int DEFAULT_GRPC_PORT = 7003;
+    /**
+     * Offset from HTTP port to gRPC port for FlexLB's own servers.
+     * This is separate from CommonConstants.GRPC_PORT_OFFSET which applies
+     * to backend inference engine ports (HTTP+1→gRPC).
+     */
+    static final int FLEXLB_GRPC_PORT_OFFSET = 2;
+    private static final int DEFAULT_HTTP_PORT = 7001;
 
     private final FlexlbServiceImpl flexlbServiceImpl;
     private final ConfigService configService;
@@ -36,10 +42,10 @@ public class FlexlbGrpcServer {
 
     @PostConstruct
     public void start() throws IOException {
-        int port = configService.loadBalanceConfig().getFlexlbGrpcPort();
-        if (port <= 0) {
-            port = DEFAULT_GRPC_PORT;
-        }
+        // Always derive gRPC port from HTTP port.
+        int httpPort = Integer.parseInt(
+                System.getProperty("server.port", String.valueOf(DEFAULT_HTTP_PORT)));
+        int port = httpPort + FLEXLB_GRPC_PORT_OFFSET;
 
         this.bossGroup = new NioEventLoopGroup(1);
 

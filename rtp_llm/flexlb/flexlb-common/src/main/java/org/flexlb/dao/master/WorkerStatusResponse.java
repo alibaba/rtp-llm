@@ -1,10 +1,8 @@
-package org.flexlb.domain.worker;
+package org.flexlb.dao.master;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
-import org.flexlb.dao.master.CacheStatus;
-import org.flexlb.dao.master.TaskInfo;
 
 import java.util.Map;
 

@@ -70,15 +70,12 @@ public class FlexlbGrpcForwarder {
     }
 
     private int resolveGrpcPort(String masterHostIpPort) {
-        int flexlbGrpcPort = configService.loadBalanceConfig().getFlexlbGrpcPort();
-        if (flexlbGrpcPort > 0) {
-            return flexlbGrpcPort;
-        }
+        // Always derive gRPC port from HTTP port using the same offset as FlexlbGrpcServer.
         String[] parts = masterHostIpPort.split(":");
         if (parts.length >= 2) {
-            return Integer.parseInt(parts[1]) + 2;
+            return Integer.parseInt(parts[1]) + FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET;
         }
-        return 7003;
+        return 7001 + FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET;
     }
 
     private ManagedChannel createChannel(String ip, int port) {

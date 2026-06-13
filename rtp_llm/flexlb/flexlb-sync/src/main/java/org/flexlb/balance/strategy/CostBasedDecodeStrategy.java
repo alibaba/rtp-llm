@@ -69,7 +69,7 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
         DecodeEndpoint selectedEndpoint = weightedRandomSelection(survivors);
 
         if (selectedEndpoint != null) {
-            long prefixLength = calcPrefixMatchLength(selectedEndpoint.getCacheStatus(), balanceContext.getRequest().getBlockCacheKeys());
+            long prefixLength = calcPrefixMatchLength(selectedEndpoint.getStatus().getCacheStatus(), balanceContext.getRequest().getBlockCacheKeys());
             return buildServerStatus(selectedEndpoint, seqLen, prefixLength, roleType, balanceContext.getRequestId());
         }
 
@@ -88,7 +88,7 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
         }
         List<DecodeEndpoint> result = new ArrayList<>();
         for (WorkerEndpoint ep : workerEndpointMap.values()) {
-            if (!ep.isAlive() || !resourceMeasure.isResourceAvailable(ep)) {
+            if (!ep.getStatus().isAlive() || !resourceMeasure.isResourceAvailable(ep)) {
                 continue;
             }
             if (ep instanceof DecodeEndpoint de && de.isAvailable()) {
@@ -116,7 +116,7 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
         long sumCacheUsed = 0;
         for (DecodeEndpoint ep : eligible) {
             sumLoad += ep.getTotalLoad();
-            sumCacheUsed += ep.getUsedKvCacheTokens().get();
+            sumCacheUsed += ep.getStatus().getUsedKvCacheTokens().get();
         }
         long avgLoad = sumLoad / eligible.size();
         long avgCacheUsed = sumCacheUsed / eligible.size();
@@ -124,7 +124,7 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
         List<DecodeEndpoint> survivors = new ArrayList<>(eligible.size());
         for (DecodeEndpoint ep : eligible) {
             long availableKv = ep.getAvailableKvTokens();
-            long totalKv = ep.getUsedKvCacheTokens().get() + ep.getAvailableKvCacheTokens().get();
+            long totalKv = ep.getStatus().getUsedKvCacheTokens().get() + ep.getStatus().getAvailableKvCacheTokens().get();
             if (totalKv > 0 && availableKv < seqLen) {
                 continue;
             }
@@ -134,7 +134,7 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
                 continue;
             }
             if (imbalanceMultiplier > 0 && avgCacheUsed > 0
-                    && ep.getUsedKvCacheTokens().get() > avgCacheUsed * imbalanceMultiplier) {
+                    && ep.getStatus().getUsedKvCacheTokens().get() > avgCacheUsed * imbalanceMultiplier) {
                 continue;
             }
             survivors.add(ep);
@@ -142,7 +142,7 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
 
         if (survivors.isEmpty()) {
             DecodeEndpoint leastUsed = eligible.stream()
-                    .min(Comparator.comparingLong(ep -> ep.getUsedKvCacheTokens().get()))
+                    .min(Comparator.comparingLong(ep -> ep.getStatus().getUsedKvCacheTokens().get()))
                     .orElse(null);
             if (leastUsed != null) {
                 survivors.add(leastUsed);
@@ -181,7 +181,7 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
 
         long totalCacheUsed = 0;
         for (DecodeEndpoint ep : candidateEndpoints) {
-            totalCacheUsed += ep.getUsedKvCacheTokens().get();
+            totalCacheUsed += ep.getStatus().getUsedKvCacheTokens().get();
         }
         double avgCacheUsed = (double) totalCacheUsed / workerCount;
 
@@ -191,7 +191,7 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
         Long firstCacheUsed = null;
 
         for (DecodeEndpoint ep : candidateEndpoints) {
-            long cacheUsed = ep.getUsedKvCacheTokens().get();
+            long cacheUsed = ep.getStatus().getUsedKvCacheTokens().get();
             double normalizedValue = cacheUsed - avgCacheUsed;
 
             if (firstCacheUsed == null) {
@@ -228,7 +228,7 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
         }
 
         return weightedEndpoints.stream()
-                .min(Comparator.comparingLong(w -> w.endpoint.getUsedKvCacheTokens().get()))
+                .min(Comparator.comparingLong(w -> w.endpoint.getStatus().getUsedKvCacheTokens().get()))
                 .map(w -> w.endpoint)
                 .orElse(null);
     }
@@ -243,8 +243,8 @@ public class CostBasedDecodeStrategy implements LoadBalancer {
             result.setServerIp(optimalEndpoint.getIp());
             result.setHttpPort(optimalEndpoint.getHttpPort());
             result.setGrpcPort(CommonUtils.toGrpcPort(optimalEndpoint.getHttpPort()));
-            result.setDpRank(optimalEndpoint.getDpRank());
-            result.setGroup(optimalEndpoint.getGroup());
+            result.setDpRank(optimalEndpoint.getStatus().getDpRank());
+            result.setGroup(optimalEndpoint.getStatus().getGroup());
             result.setRequestId(requestId);
         } catch (Exception e) {
             Logger.error("buildServerStatus error", e);

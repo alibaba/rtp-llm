@@ -8,6 +8,7 @@ import org.flexlb.balance.strategy.BatchRequest;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -31,16 +32,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final AtomicReference<Long> estimatedWaitingTimeMs = new AtomicReference<>(0L);
     private volatile WorkerBatcher batcher;
 
-    public PrefillEndpoint(String ip, int httpPort, int grpcPort, WorkerStatus status, FlexlbConfig config,
+    public PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
                            BatchDecisionHandler handler) {
-        super(ip, httpPort, grpcPort, status);
+        super(status);
         this.predictor = createPredictor(config);
         this.batcher = createBatcher(config, handler);
         this.batcher.start();
     }
 
     private WorkerBatcher createBatcher(FlexlbConfig config, BatchDecisionHandler handler) {
-        String key = getIp() + ":" + getGrpcPort();
+        String key = status.getIpPort();
         return new WorkerBatcher(key, this, config, handler);
     }
 
@@ -112,6 +113,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return newBatch;
     }
 
+    @Override
+    public void onWorkerStatusUpdate(WorkerStatus ws, WorkerStatusResponse resp) {
+        super.onWorkerStatusUpdate(ws, resp);
+        calibrate(resp.getFinishedTaskInfo(), resp.getRunningTaskInfo());
+    }
+
     /**
      * Full calibration against worker status report.
      */
@@ -128,10 +135,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
             for (TaskInfo task : finishedTaskInfo.values()) {
                 long batchId = task.getBatchId();
                 if (batchId < 0) {
-                    if (task.getErrorCode() != 0) {
-                        logger.warn("Prefill calibrate: finished request reqId={} has no valid batchId, error={}",
-                                task.getRequestId(), task.getErrorMessage());
-                    }
+                    logger.warn("Prefill calibrate: finished request reqId={} has no valid batchId, errorCode={}, error={}",
+                            task.getRequestId(), task.getErrorCode(), task.getErrorMessage());
                     continue;
                 }
                 if (task.getErrorCode() == 0) {
@@ -183,7 +188,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
         }
 
-        // Phase 5: recompute cumulative and refresh snapshot
+        // Phase 6: recompute cumulative and refresh snapshot
         recomputeTotalAndRefresh();
     }
 
@@ -207,6 +212,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
             count += batch.requests().size();
         }
         return count;
+    }
+
+    @Override
+    public long getRunningLoad() {
+        return getEstimatedWaitingTimeMs();
+    }
+
+    @Override
+    public int getLocalTaskCount() {
+        return getInflightRequestCount();
     }
 
     public PrefillTimePredictor getPredictor() {

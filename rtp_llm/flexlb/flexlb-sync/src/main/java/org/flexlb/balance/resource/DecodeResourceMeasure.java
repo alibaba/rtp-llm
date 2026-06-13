@@ -59,21 +59,21 @@ public class DecodeResourceMeasure implements ResourceMeasure {
 
     @Override
     public boolean isResourceAvailable(WorkerEndpoint endpoint) {
-        if (endpoint == null || !endpoint.isAlive()) {
+        if (endpoint == null || !endpoint.getStatus().isAlive()) {
             return false;
         }
         if (isConcurrencyLimitReached(endpoint)) {
             return false;
         }
-        long used = endpoint.getUsedKvCacheTokens().get();
-        long available = endpoint.getAvailableKvCacheTokens().get();
+        long used = endpoint.getStatus().getUsedKvCacheTokens().get();
+        long available = endpoint.getStatus().getAvailableKvCacheTokens().get();
         long total = used + available;
         if (total == 0) {
-            endpoint.getResourceAvailable().set(true);
+            endpoint.getStatus().getResourceAvailable().set(true);
             return true;
         }
         long usagePercentage = (long) ((used * 100.0) / total);
-        return endpoint.updateResourceAvailabilityWithHysteresis(usagePercentage, availableThreshold, hysteresisBiasPercent);
+        return endpoint.getStatus().updateResourceAvailabilityWithHysteresis(usagePercentage, availableThreshold, hysteresisBiasPercent);
     }
 
     @Override
@@ -156,8 +156,8 @@ public class DecodeResourceMeasure implements ResourceMeasure {
     }
 
     private long calculateDecodeConcurrency(WorkerEndpoint endpoint) {
-        if (MapUtils.isNotEmpty(endpoint.getRunningTaskList())) {
-            return endpoint.getRunningTaskList().size();
+        if (MapUtils.isNotEmpty(endpoint.getStatus().getRunningTaskList())) {
+            return endpoint.getStatus().getRunningTaskList().size();
         }
         return 0;
     }

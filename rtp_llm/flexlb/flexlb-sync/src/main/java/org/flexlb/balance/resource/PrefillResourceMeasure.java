@@ -4,7 +4,6 @@ import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.enums.TaskPhase;
@@ -44,11 +43,11 @@ public class PrefillResourceMeasure implements ResourceMeasure {
 
     @Override
     public boolean isResourceAvailable(WorkerEndpoint endpoint) {
-        if (endpoint == null || !endpoint.isAlive()) {
+        if (endpoint == null || !endpoint.getStatus().isAlive()) {
             return false;
         }
         long queueSize = countWaitingTasks(endpoint);
-        return endpoint.updateResourceAvailabilityWithHysteresis(queueSize, queueSizeThreshold, hysteresisBiasPercent);
+        return endpoint.getStatus().updateResourceAvailabilityWithHysteresis(queueSize, queueSizeThreshold, hysteresisBiasPercent);
     }
 
     @Override
@@ -99,10 +98,10 @@ public class PrefillResourceMeasure implements ResourceMeasure {
     }
 
     private static long countWaitingTasks(WorkerEndpoint endpoint) {
-        if (MapUtils.isEmpty(endpoint.getRunningTaskList())) {
+        if (MapUtils.isEmpty(endpoint.getStatus().getRunningTaskList())) {
             return 0;
         }
-        return endpoint.getRunningTaskList().values().stream()
+        return endpoint.getStatus().getRunningTaskList().values().stream()
                 .filter(t -> t.getPhase() != TaskPhase.RUNNING).count();
     }
 }

@@ -16,8 +16,10 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -159,6 +161,29 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler {
         }
     }
 
+    /**
+     * Unified status-update entry point called when the gRPC-reported version
+     * has advanced.  Extracts finished request ids from the response and
+     * cleans up inflight entries.
+     *
+     * @param ws       the updated status (already applied via {@link WorkerStatus#updateFromResponse})
+     * @param response fresh worker status from gRPC
+     */
+    public void onWorkerStatusUpdate(WorkerStatus ws, WorkerStatusResponse response) {
+        if (response == null) {
+            return;
+        }
+        Map<String, TaskInfo> finishedTaskInfo = response.getFinishedTaskInfo();
+        if (finishedTaskInfo == null || finishedTaskInfo.isEmpty()) {
+            return;
+        }
+        List<Long> ids = new ArrayList<>(finishedTaskInfo.size());
+        for (TaskInfo task : finishedTaskInfo.values()) {
+            ids.add(task.getRequestId());
+        }
+        onRequestsFinished(ids);
+    }
+
     public void removeInflight(long requestId) {
         inflight.remove(requestId);
     }
@@ -178,9 +203,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler {
 
     private void flushItems(List<BatchItem> items, DispatchMeta meta) {
         ServerStatus prefill = items.get(0).prefill();
-        for (BatchItem item : items) {
-            inflight.put(item.requestId(), new InflightEntry(item));
-        }
 
         // Compute predMs and commit to endpoint synchronously so backpressure gate sees correct inflight count
         String ipPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
@@ -309,7 +331,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler {
                 batchId, items.size(), totalTokens, totalHit, predMs,
                 meta.reason(), waitMs, budgetMs, String.format("%.4f", meta.fillRatio()),
                 meta.batchMaxTokens(), meta.queueDepth(),
-                prefill.getServerIp(), prefill.getGrpcPort(),
+                prefill.getServerIp(), prefill.getHttpPort(),
                 itemDetail);
     }
 
@@ -639,8 +661,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler {
 
     @Override
     public void onOfferFailure(BatchItem item, Throwable error) {
+        removeInflight(item.requestId());
         rollback(item.routeResponse());
-        item.future().completeExceptionally(error);
+        if (!item.future().isDone()) {
+            item.future().completeExceptionally(error);
+        }
     }
 
     private static final class BatchRequestBuildException extends RuntimeException {

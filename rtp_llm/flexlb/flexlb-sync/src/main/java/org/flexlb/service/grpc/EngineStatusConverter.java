@@ -2,7 +2,7 @@ package org.flexlb.service.grpc;
 
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
-import org.flexlb.domain.worker.WorkerStatusResponse;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.TaskPhase;
 

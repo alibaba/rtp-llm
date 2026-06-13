@@ -88,7 +88,7 @@ public class RandomStrategy implements LoadBalancer {
     }
 
     private boolean isWorkerAvailable(BalanceContext balanceContext, RoleType roleType, WorkerEndpoint ep) {
-        if (ep == null || !ep.isAlive()) {
+        if (ep == null || !ep.getStatus().isAlive()) {
             return false;
         }
 
@@ -111,9 +111,9 @@ public class RandomStrategy implements LoadBalancer {
             result.setServerIp(ep.getIp());
             result.setHttpPort(ep.getHttpPort());
             result.setGrpcPort(CommonUtils.toGrpcPort(ep.getHttpPort()));
-            result.setDpRank(ep.getDpRank());
+            result.setDpRank(ep.getStatus().getDpRank());
             result.setRole(roleType);
-            result.setGroup(ep.getGroup());
+            result.setGroup(ep.getStatus().getGroup());
             result.setRequestId(requestId);
         } catch (Exception e) {
             Logger.error("buildServerStatus error", e);

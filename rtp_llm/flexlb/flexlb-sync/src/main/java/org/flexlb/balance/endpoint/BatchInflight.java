@@ -7,5 +7,10 @@ import java.util.List;
 public record BatchInflight(
         long batchId,
         long predictTimeMs,
-        List<BatchRequest> requests
-) {}
+        List<BatchRequest> requests,
+        long createdAtMs
+) {
+    public BatchInflight(long batchId, long predictTimeMs, List<BatchRequest> requests) {
+        this(batchId, predictTimeMs, requests, System.currentTimeMillis());
+    }
+}

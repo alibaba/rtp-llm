@@ -283,8 +283,6 @@ public class FlexlbConfig {
 
     private long prefillLbTimeoutMs = 5000;
 
-    private int flexlbGrpcPort = 7003;
-
     // ========== Decode Load Balance Hard Filter Configuration ==========
 
     private double decodeHotspotMultiplier = 3.0;

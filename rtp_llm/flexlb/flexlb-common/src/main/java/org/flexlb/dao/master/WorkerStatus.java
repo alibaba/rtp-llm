@@ -18,9 +18,11 @@ public class WorkerStatus {
     private String group;
     private String ip;
     private int port;
+    private int grpcPort;
     private String site;
     private Long availableConcurrency;
     private boolean alive;
+    private AtomicBoolean available = new AtomicBoolean(true);
     private AtomicLong availableKvCacheTokens = new AtomicLong();
     private AtomicLong usedKvCacheTokens = new AtomicLong();
     private CacheStatus cacheStatus;
@@ -49,6 +51,46 @@ public class WorkerStatus {
     public void decKvCacheFree(long len) {
         availableKvCacheTokens.accumulateAndGet(len, (current, decrement) ->
                 Math.max(0, current - decrement));
+    }
+
+    public boolean isAvailable() {
+        return available.get();
+    }
+
+    public void setAvailable(boolean v) {
+        this.available.set(v);
+    }
+
+    /**
+     * Absorb all dynamic engine fields from a gRPC status response.
+     * Topology labels ({@code site}, {@code group}) are NOT set here —
+     * they are managed externally by the sync runner.
+     */
+    public void updateFromResponse(WorkerStatusResponse resp) {
+        if (resp == null) {
+            return;
+        }
+        this.role = resp.getRole();
+        this.alive = resp.isAlive();
+        this.availableConcurrency = resp.getAvailableConcurrency();
+        this.stepLatencyMs = resp.getStepLatencyMs();
+        this.iterateCount = resp.getIterateCount();
+        this.dpSize = resp.getDpSize();
+        this.tpSize = resp.getTpSize();
+        this.dpRank = resp.getDpRank();
+        this.availableKvCacheTokens.set(resp.getAvailableKvCacheTokens());
+        this.cacheStatus = resp.getCacheStatus();
+        this.runningTaskList = resp.getRunningTaskInfo();
+        this.statusVersion.set(resp.getStatusVersion() != null ? resp.getStatusVersion() : -1L);
+        this.latestFinishedTaskVersion.set(
+                resp.getLatestFinishedVersion() != null ? resp.getLatestFinishedVersion() : -1L);
+
+        long nowUs = System.nanoTime() / 1000;
+        long prev = this.statusLastUpdateTime.get();
+        if (prev > 0) {
+            this.statusUpdateIntervalUs.set(nowUs - prev);
+        }
+        this.statusLastUpdateTime.set(nowUs);
     }
 
 
@@ -88,40 +130,5 @@ public class WorkerStatus {
             return null;
         }
         return ip + ":" + port;
-    }
-
-    /**
-     * Create a defensive snapshot suitable for external reads.
-     * Mutable fields ({@code AtomicLong}, {@code Map}) are copied so that
-     * mutations on the snapshot do not affect the original.
-     */
-    public WorkerStatus toSnapshot() {
-        WorkerStatus s = new WorkerStatus();
-        s.role = this.role;
-        s.group = this.group;
-        s.ip = this.ip;
-        s.port = this.port;
-        s.site = this.site;
-        s.availableConcurrency = this.availableConcurrency;
-        s.alive = this.alive;
-        s.availableKvCacheTokens = new AtomicLong(this.availableKvCacheTokens.get());
-        s.usedKvCacheTokens = new AtomicLong(this.usedKvCacheTokens.get());
-        s.cacheStatus = this.cacheStatus;
-        s.runningTaskList = this.runningTaskList;
-        s.latestFinishedTaskVersion = new AtomicLong(this.latestFinishedTaskVersion.get());
-        s.stepLatencyMs = this.stepLatencyMs;
-        s.iterateCount = this.iterateCount;
-        s.dpSize = this.dpSize;
-        s.tpSize = this.tpSize;
-        s.dpRank = this.dpRank;
-        s.statusLastUpdateTime = new AtomicLong(this.statusLastUpdateTime.get());
-        s.statusUpdateIntervalUs = new AtomicLong(this.statusUpdateIntervalUs.get());
-        s.cacheLastUpdateTime = new AtomicLong(this.cacheLastUpdateTime.get());
-        s.lastSelectedTime = new AtomicLong(this.lastSelectedTime.get());
-        s.resourceAvailable = new AtomicBoolean(this.resourceAvailable.get());
-        s.statusCheckInProgress = new AtomicBoolean(this.statusCheckInProgress.get());
-        s.cacheCheckInProgress = new AtomicBoolean(this.cacheCheckInProgress.get());
-        s.statusVersion = new AtomicLong(this.statusVersion.get());
-        return s;
     }
 }

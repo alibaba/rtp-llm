@@ -2,6 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.enums.TaskPhase;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,8 +22,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private volatile long reportedKvAvailable;
     private volatile int confirmedRunningCount;
 
-    public DecodeEndpoint(String ip, int httpPort, int grpcPort, WorkerStatus status) {
-        super(ip, httpPort, grpcPort, status);
+    public DecodeEndpoint(WorkerStatus status) {
+        super(status);
     }
 
     public void reserve(long requestId, long kvTokens) {
@@ -37,6 +38,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
             totalKvTokens.addAndGet(-removed.kvTokens());
             refreshEstimatedAvailableKvTokens();
         }
+    }
+
+    @Override
+    public void onWorkerStatusUpdate(WorkerStatus ws, WorkerStatusResponse resp) {
+        super.onWorkerStatusUpdate(ws, resp);
+        calibrate(resp.getRunningTaskInfo(), resp.getFinishedTaskInfo(),
+                status.getAvailableKvCacheTokens().get());
     }
 
     /**
@@ -99,6 +107,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public int getTotalLoad() {
         return confirmedRunningCount + inflightRequests.size();
+    }
+
+    @Override
+    public long getRunningLoad() {
+        return getTotalLoad();
+    }
+
+    @Override
+    public int getLocalTaskCount() {
+        return getInflightCount();
     }
 
     ConcurrentHashMap<Long, RequestInflight> getInflightRequests() {

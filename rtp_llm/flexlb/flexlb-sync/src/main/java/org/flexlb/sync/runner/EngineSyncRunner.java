@@ -119,13 +119,7 @@ public class EngineSyncRunner implements Runnable {
                     long removalThresholdUs = Math.max(3 * actualIntervalUs, 1_000_000L);
                     if (System.nanoTime() / 1000 - lastTime > removalThresholdUs) {
                         cachedWorkerStatuses.remove(ipPort);
-                        if (endpointRegistry != null) {
-                            WorkerEndpoint ep = endpointRegistry.get(ipPort);
-                            if (ep != null) {
-                                ep.setAvailable(false);
-                            }
-                        }
-                        logger.info("[unavailable] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
+                        logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
                     }
                 }
             }
@@ -178,19 +172,31 @@ public class EngineSyncRunner implements Runnable {
 
             if (size >= 2) {
                 double sumStepLatency = 0.0;
-                for (WorkerStatus workerStatus : workerStatusMap.values()) {
+                double sumRunningLoad = 0.0;
+                for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
+                    WorkerStatus workerStatus = entry.getValue();
                     sumStepLatency += workerStatus.getStepLatencyMs();
+                    WorkerEndpoint ep = endpointRegistry != null ? endpointRegistry.get(entry.getKey()) : null;
+                    sumRunningLoad += ep != null ? ep.getRunningLoad() : 0;
                 }
                 double meanStepLatency = sumStepLatency / size;
+                double meanRunningLoad = sumRunningLoad / size;
 
+                // Calculate variance (sample variance using Bessel correction)
                 double sumStepLatencyOfSquaredDiffs = 0.0;
-                for (WorkerStatus workerStatus : workerStatusMap.values()) {
+                double sumRunningLoadOfSquaredDiffs = 0.0;
+                for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
+                    WorkerStatus workerStatus = entry.getValue();
                     double diff = workerStatus.getStepLatencyMs() - meanStepLatency;
+                    WorkerEndpoint ep = endpointRegistry != null ? endpointRegistry.get(entry.getKey()) : null;
+                    double diff2 = (ep != null ? ep.getRunningLoad() : 0) - meanRunningLoad;
                     sumStepLatencyOfSquaredDiffs += diff * diff;
+                    sumRunningLoadOfSquaredDiffs += diff2 * diff2;
                 }
-                double variance = sumStepLatencyOfSquaredDiffs / (size - 1);
+                double variance = sumStepLatencyOfSquaredDiffs / (size - 1); // Sample variance
+                double variance2 = sumRunningLoadOfSquaredDiffs / (size - 1);
 
-                engineHealthReporter.reportLatencyMetric(modelName, this.roleType.toString(), variance);
+                engineHealthReporter.reportLatencyMetric(modelName, this.roleType.toString(), variance, variance2);
                 logger.info("EngineSyncRunner finished for model: {}, role: {}", modelName, roleType);
             } else {
                 logger.debug("Less than 2 workers, skipping variance calculation for model: {}", modelName);
@@ -218,8 +224,8 @@ public class EngineSyncRunner implements Runnable {
         String ip = workerStatus.getIp();
         int httpPort = workerStatus.getPort();
         int grpcPort = CommonUtils.toGrpcPort(httpPort);
+        workerStatus.setGrpcPort(grpcPort);
 
-        WorkerEndpoint ep;
         if (roleType == RoleType.PREFILL) {
             long dpSize = workerStatus.getDpSize();
             if (dpSize > 1) {
@@ -229,21 +235,11 @@ public class EngineSyncRunner implements Runnable {
                 logger.error(message);
                 throw new UnsupportedOperationException(message);
             }
-            ep = endpointRegistry.ensurePrefillEndpoint(ipPort, ip, httpPort, grpcPort, workerStatus);
+            endpointRegistry.ensurePrefillEndpoint(ipPort, workerStatus);
         } else if (roleType == RoleType.DECODE) {
-            ep = endpointRegistry.ensureDecodeEndpoint(ipPort, ip, httpPort, grpcPort, workerStatus);
+            endpointRegistry.ensureDecodeEndpoint(ipPort, workerStatus);
         } else {
             throw new IllegalArgumentException("Unsupported role type: " + roleType);
-        }
-        if (ep != null) {
-            reactivateIfNecessary(ep, ipPort);
-        }
-    }
-
-    private void reactivateIfNecessary(WorkerEndpoint ep, String ipPort) {
-        if (!ep.isAvailable()) {
-            ep.setAvailable(true);
-            logger.info("[reactivate] worker back in service discovery, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
         }
     }
 }

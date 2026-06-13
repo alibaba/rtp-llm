@@ -44,14 +44,14 @@ public class EndpointRegistry {
         return prefillEndpoints.computeIfAbsent(ipPort, factory);
     }
 
-    public PrefillEndpoint ensurePrefillEndpoint(String ipPort, String ip, int httpPort, int grpcPort, WorkerStatus status) {
+    public PrefillEndpoint ensurePrefillEndpoint(String ipPort, WorkerStatus status) {
         return prefillEndpoints.computeIfAbsent(ipPort,
-                k -> new PrefillEndpoint(ip, httpPort, grpcPort, status, configService.loadBalanceConfig(), batchScheduler));
+                k -> new PrefillEndpoint(status, configService.loadBalanceConfig(), batchScheduler));
     }
 
-    public DecodeEndpoint ensureDecodeEndpoint(String ipPort, String ip, int httpPort, int grpcPort, WorkerStatus status) {
+    public DecodeEndpoint ensureDecodeEndpoint(String ipPort, WorkerStatus status) {
         return decodeEndpoints.computeIfAbsent(ipPort,
-                k -> new DecodeEndpoint(ip, httpPort, grpcPort, status));
+                k -> new DecodeEndpoint(status));
     }
 
     public Map<String, PrefillEndpoint> getPrefillEndpoints(String group) {
@@ -79,7 +79,7 @@ public class EndpointRegistry {
         Map<String, T> result = new LinkedHashMap<>();
         for (Map.Entry<String, T> entry : endpoints.entrySet()) {
             T ep = entry.getValue();
-            if (group == null || group.equals(ep.getGroup())) {
+            if (group == null || group.equals(ep.getStatus().getGroup())) {
                 result.put(entry.getKey(), ep);
             }
         }

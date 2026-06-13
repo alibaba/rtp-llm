@@ -5,6 +5,7 @@ import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.SingleThreadEventExecutor;
 import lombok.Data;
 import org.apache.commons.collections4.CollectionUtils;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
@@ -51,14 +52,17 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 import static org.flexlb.constant.MetricConstant.ENGINE_DECODE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.ENGINE_FINISHED_TASK_LIST_SIZE;
+import static org.flexlb.constant.MetricConstant.ENGINE_LOCAL_TASK_MAP_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT;
 import static org.flexlb.constant.MetricConstant.ENGINE_PREFILL_WORKER_NUMBER;
+import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_QUEUE_TIME;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_AVAILABLE_CONCURRENCY;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_SUCCESS_PERIOD;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_RT;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_SUCCESS_QPS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_STEP_LATENCY_VAR;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.FORWARD_TO_MASTER_RESULT;
@@ -121,10 +125,14 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_BALANCING_MASTER_SCHEDULE_RT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
+        this.monitor.register(ENGINE_RUNNING_QUEUE_TIME, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_LOCAL_TASK_MAP_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+
         this.monitor.register(ZK_MASTER_NODE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ZK_MASTER_EVENT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         this.monitor.register(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(CACHE_STATUS_CHECK_VISITOR_RT, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, FlexMetricType.QPS);
         this.monitor.register(CACHE_STATUS_CHECK_SUCCESS_PERIOD, FlexMetricType.GAUGE);
@@ -138,10 +146,11 @@ public class EngineHealthReporter {
         this.monitor.register(FORWARD_TO_MASTER_RESULT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
     }
 
-    public void reportLatencyMetric(String modelName, String role, double stepLatencyVariance) {
+    public void reportLatencyMetric(String modelName, String role, double result, double result2) {
         FlexMetricTags metricTags = FlexMetricTags.of("model", modelName, "role", role);
-        monitor.report(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, metricTags, stepLatencyVariance);
-        logger.debug("Latency metric - model: {}, role: {}, stepLatencyVar: {}", modelName, role, stepLatencyVariance);
+        monitor.report(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, metricTags, result);
+        monitor.report(ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR, metricTags, result2);
+        logger.debug("Latency metric - model: {}, role: {}, stepLatency: {}, queryLen: {}", modelName, role, result, result2);
     }
 
     @Scheduled(fixedRate = 2000)
@@ -211,6 +220,7 @@ public class EngineHealthReporter {
 
     public void reportStatusCheckerSuccess(String modelName,
                                            WorkerStatus workerStatus,
+                                           WorkerEndpoint ep,
                                            int runningTaskInfoSize,
                                            int finishedTaskListSize) {
 
@@ -228,6 +238,11 @@ public class EngineHealthReporter {
         if (lastUpdateTime > 0) {
             monitor.report(ENGINE_STATUS_CHECK_SUCCESS_PERIOD, metricTags, (double) System.nanoTime() / 1000 - lastUpdateTime);
         }
+        monitor.report(ENGINE_RUNNING_QUEUE_TIME, metricTags, ep != null ? ep.getRunningLoad() : 0);
+
+        // Report local task cache size
+        monitor.report(ENGINE_LOCAL_TASK_MAP_SIZE, metricTags, ep != null ? ep.getLocalTaskCount() : 0);
+
         metricTags = FlexMetricTags.of(
                 "engineIp", workerStatus.getIp(),
                 "role", workerStatus.getRole());
