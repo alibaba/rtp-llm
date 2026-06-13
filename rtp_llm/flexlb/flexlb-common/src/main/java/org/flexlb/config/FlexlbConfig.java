@@ -105,7 +105,7 @@ public class FlexlbConfig {
      * Prefill role queuing threshold
      * When below this threshold, the Worker is considered available
      */
-    private long prefillQueueSizeThreshold = 3;
+    private long prefillQueueSizeThreshold = 64;
 
     /**
      * KV cache available threshold for DECODE role (percentage)

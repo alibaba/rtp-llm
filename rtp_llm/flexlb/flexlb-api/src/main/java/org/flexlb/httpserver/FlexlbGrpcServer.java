@@ -8,6 +8,7 @@ import io.netty.channel.socket.nio.NioServerSocketChannel;
 import org.flexlb.config.ConfigService;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
@@ -29,22 +30,30 @@ public class FlexlbGrpcServer {
     private final FlexlbServiceImpl flexlbServiceImpl;
     private final ConfigService configService;
     private final EventLoopGroup workerGroup;
+    private final Environment environment;
     private Server server;
     private NioEventLoopGroup bossGroup;
 
     public FlexlbGrpcServer(FlexlbServiceImpl flexlbServiceImpl,
                             ConfigService configService,
-                            @Qualifier("managedChannelEventLoopGroup") EventLoopGroup workerGroup) {
+                            @Qualifier("managedChannelEventLoopGroup") EventLoopGroup workerGroup,
+                            Environment environment) {
         this.flexlbServiceImpl = flexlbServiceImpl;
         this.configService = configService;
         this.workerGroup = workerGroup;
+        this.environment = environment;
     }
 
     @PostConstruct
     public void start() throws IOException {
         // Always derive gRPC port from HTTP port.
-        int httpPort = Integer.parseInt(
-                System.getProperty("server.port", String.valueOf(DEFAULT_HTTP_PORT)));
+        // server.port may come from --server.port CLI arg (Spring Environment only)
+        // or from -Dserver.port JVM property; check both.
+        String portStr = environment.getProperty("server.port");
+        if (portStr == null) {
+            portStr = System.getProperty("server.port", String.valueOf(DEFAULT_HTTP_PORT));
+        }
+        int httpPort = Integer.parseInt(portStr);
         int port = httpPort + FLEXLB_GRPC_PORT_OFFSET;
 
         this.bossGroup = new NioEventLoopGroup(1);

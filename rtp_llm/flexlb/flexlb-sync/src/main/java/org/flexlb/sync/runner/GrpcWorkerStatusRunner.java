@@ -110,13 +110,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setSite(site);
             workerStatus.setGroup(group);
 
-            WorkerEndpoint ep = endpointRegistry != null ? endpointRegistry.get(ipPort) : null;
-            if (ep != null) {
-                ep.updateFromGrpcResponse(newWorkerStatus);
-                // Restore site/group that were set during construction (updateFromGrpcResponse
-                // preserves existing values, but ensure they match constructor params)
-                ep.setSite(site);
-                ep.setGroup(group);
+            
             }
 
             long currentVersion = workerStatus.getStatusVersion().get();
