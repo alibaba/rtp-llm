@@ -52,7 +52,6 @@ struct LinearKVCacheSpec: public KVCacheSpec {
                                 linear_config.linear_value_head_dim);
 
         type               = KVCacheSpecType::LinearAttention;
-        layer_num          = 1;  // Will be set by caller
         local_head_num_kv  = static_cast<uint32_t>(std::max(
             1,
             (linear_config.linear_num_value_heads > 1) ?
@@ -132,6 +131,10 @@ struct LinearKVCacheSpec: public KVCacheSpec {
 
         // For Linear attention implementation, return the full blocks without any head-based partitioning
         return {0, k_block_bytes, k_block_bytes, v_block_bytes};
+    }
+
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<LinearKVCacheSpec>(*this);
     }
 
     std::string debugString(size_t indent = 0) const override {

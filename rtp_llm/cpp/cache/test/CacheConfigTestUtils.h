@@ -4,11 +4,87 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::test {
+
+
+inline void setDefaultKvCacheSpec(ModelConfig& model_config) {
+    std::vector<int> layers;
+    layers.reserve(static_cast<size_t>(model_config.num_layers));
+    for (int i = 0; i < static_cast<int>(model_config.num_layers); ++i) {
+        layers.push_back(i);
+    }
+
+    KVCacheSpecPtr spec;
+    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
+        auto mla_spec           = std::make_shared<MLAKVCacheSpec>();
+        mla_spec->type          = KVCacheSpecType::MultiHeadLatentAttention;
+        mla_spec->kv_lora_rank  = static_cast<uint32_t>(model_config.attn_config.kv_lora_rank);
+        mla_spec->rope_head_dim = static_cast<uint32_t>(model_config.attn_config.rope_head_dim);
+        spec                    = mla_spec;
+    } else {
+        auto mha_spec            = std::make_shared<MHAKVCacheSpec>();
+        mha_spec->type           = KVCacheSpecType::MultiHeadAttention;
+        mha_spec->size_per_head  = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+        spec                     = mha_spec;
+    }
+    spec->tag                = "default";
+    spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    model_config.kv_cache_specs.clear();
+    for (int layer_id : layers) {
+        model_config.kv_cache_specs[static_cast<int64_t>(layer_id)] = {spec};
+    }
+}
+
+inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
+    std::vector<int> full_layers;
+    std::vector<int> linear_layers;
+    const auto&      types = model_config.hybrid_attention_config.hybrid_attention_types;
+    RTP_LLM_CHECK_WITH_INFO(types.size() == static_cast<size_t>(model_config.num_layers),
+                            "hybrid_attention_types size %zu != num_layers %ld",
+                            types.size(),
+                            model_config.num_layers);
+    for (int i = 0; i < static_cast<int>(model_config.num_layers); ++i) {
+        if (types[static_cast<size_t>(i)] == HybridAttentionType::LINEAR) {
+            linear_layers.push_back(i);
+        } else {
+            full_layers.push_back(i);
+        }
+    }
+
+    auto full_spec                = std::make_shared<MHAKVCacheSpec>();
+    full_spec->tag                = "full";
+    full_spec->type               = KVCacheSpecType::MultiHeadAttention;
+    full_spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    full_spec->size_per_head      = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+
+    const auto& linear_config           = model_config.linear_attention_config;
+    auto        linear_spec             = std::make_shared<LinearKVCacheSpec>();
+    linear_spec->tag                    = "linear";
+    linear_spec->type                   = KVCacheSpecType::LinearAttention;
+    linear_spec->seq_size_per_block     = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    linear_spec->head_k_dim             = static_cast<uint32_t>(linear_config.linear_key_head_dim);
+    linear_spec->head_v_dim             = static_cast<uint32_t>(linear_config.linear_value_head_dim);
+    linear_spec->conv_kernel_dim        = static_cast<uint32_t>(linear_config.linear_conv_kernel_dim);
+    linear_spec->ssm_state_dtype        = linear_config.ssm_state_dtype;
+    linear_spec->conv_state_dtype       = linear_config.conv_state_dtype;
+    model_config.kv_cache_specs.clear();
+    for (int layer_id : full_layers) {
+        model_config.kv_cache_specs[static_cast<int64_t>(layer_id)] = {full_spec};
+    }
+    for (int layer_id : linear_layers) {
+        model_config.kv_cache_specs[static_cast<int64_t>(layer_id)] = {linear_spec};
+    }
+}
 
 // A tiny helper for unit tests to construct a minimal MultiHeadAttention KV cache config.
 //
@@ -33,7 +109,6 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     spec->type               = KVCacheSpecType::MultiHeadAttention;
     spec->dtype              = dtype;
     spec->seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
-    spec->layer_num          = static_cast<uint32_t>(layer_num);
     spec->local_head_num_kv  = local_head_num_kv;
     spec->size_per_head      = size_per_head;
     config.cache_specs.push_back(spec);
@@ -48,7 +123,7 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     config.layer_attn_types.assign(layer_num, CacheGroupType::FULL);
 
     config.kv_block_stride_bytes = spec->block_size_bytes();
-    config.kv_block_size_bytes   = static_cast<size_t>(spec->block_size_bytes() * spec->layer_num);
+    config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * spec->block_size_bytes();
 
     if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
         const size_t kv_scale_kv_stride       = static_cast<size_t>(spec->local_head_num_kv) * tokens_per_block;
@@ -107,7 +182,6 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     auto linear_spec                = std::make_shared<LinearKVCacheSpec>();
     linear_spec->type               = KVCacheSpecType::LinearAttention;
     linear_spec->dtype              = dtype;
-    linear_spec->layer_num          = static_cast<uint32_t>(config.group_layer_num);
     linear_spec->local_num_k_heads  = 1;
     linear_spec->local_num_v_heads  = 1;
     linear_spec->head_k_dim         = 1;
@@ -120,7 +194,6 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     full_spec->type               = KVCacheSpecType::MultiHeadAttention;
     full_spec->dtype              = dtype;
     full_spec->seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
-    full_spec->layer_num          = static_cast<uint32_t>(config.group_layer_num);
     full_spec->local_head_num_kv  = local_head_num_kv;
     full_spec->size_per_head      = size_per_head;
 

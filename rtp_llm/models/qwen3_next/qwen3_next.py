@@ -10,7 +10,12 @@ from rtp_llm.models.qwen3_next.qwen3_next_weight import (
     Qwen35DenseWeight,
     Qwen35MoeWeight,
 )
-from rtp_llm.ops import HybridAttentionType
+from rtp_llm.ops import (
+    HybridAttentionType,
+    KVCacheSpecType,
+    LinearKVCacheSpec,
+    MHAKVCacheSpec,
+)
 
 
 class Qwen3NextBase(BaseModel):
@@ -135,6 +140,35 @@ class Qwen3NextBase(BaseModel):
         config.linear_attention_config.linear_value_head_dim = config_json[
             "linear_value_head_dim"
         ]
+
+    @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        full_spec = MHAKVCacheSpec()
+        full_spec.tag = "full"
+        full_spec.type = KVCacheSpecType.MultiHeadAttention
+        full_spec.seq_size_per_block = int(model_config.attn_config.tokens_per_block)
+        full_spec.size_per_head = int(model_config.attn_config.size_per_head)
+
+        linear_config = model_config.linear_attention_config
+        linear_spec = LinearKVCacheSpec()
+        linear_spec.tag = "linear"
+        linear_spec.type = KVCacheSpecType.LinearAttention
+        linear_spec.seq_size_per_block = int(model_config.attn_config.tokens_per_block)
+        linear_spec.head_k_dim = int(linear_config.linear_key_head_dim)
+        linear_spec.head_v_dim = int(linear_config.linear_value_head_dim)
+        linear_spec.conv_kernel_dim = int(linear_config.linear_conv_kernel_dim)
+        linear_spec.ssm_state_dtype = linear_config.ssm_state_dtype
+        linear_spec.conv_state_dtype = linear_config.conv_state_dtype
+
+        layer_specs = {}
+        for layer_id, attn_type in enumerate(
+            model_config.hybrid_attention_config.hybrid_attention_types
+        ):
+            if attn_type == HybridAttentionType.LINEAR:
+                layer_specs[layer_id] = [linear_spec]
+            else:
+                layer_specs[layer_id] = [full_spec]
+        model_config.kv_cache_specs = layer_specs
 
 
 class Qwen3Next(Qwen3NextBase):

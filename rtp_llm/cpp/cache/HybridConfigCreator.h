@@ -3,6 +3,7 @@
 #include <memory>
 #include <vector>
 #include <utility>
+#include <string>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 
@@ -25,12 +26,17 @@ private:
                                                                           const std::vector<int>& linear_layers,
                                                                           const std::vector<int>& full_layers,
                                                                           rtp_llm::DataType       dtype);
-    static KVCacheSpecPtr                                createFullAttentionSpec(const ModelConfig&       model_config,
-                                                                                 const ParallelismConfig& parallelism_config,
-                                                                                 rtp_llm::DataType        dtype);
-    static KVCacheSpecPtr                                createLinearAttentionSpec(const ModelConfig&       model_config,
-                                                                                   const ParallelismConfig& parallelism_config,
-                                                                                   rtp_llm::DataType        dtype);
+    static KVCacheSpecPtr getSpecByTag(const ModelConfig& model_config, const std::string& tag);
+    static void           prepareFullAttentionSpec(KVCacheSpecPtr            spec,
+                                                   const ModelConfig&       model_config,
+                                                   const ParallelismConfig& parallelism_config,
+                                                   rtp_llm::DataType        dtype,
+                                                   uint32_t                 layer_num);
+    static void           prepareLinearAttentionSpec(KVCacheSpecPtr            spec,
+                                                     const ModelConfig&       model_config,
+                                                     const ParallelismConfig& parallelism_config,
+                                                     rtp_llm::DataType        dtype,
+                                                     uint32_t                 layer_num);
     static std::pair<std::vector<std::vector<int>>, std::vector<std::vector<int>>>
     createLayerGroups(const std::vector<int>& linear_layers, const std::vector<int>& full_layers, int& group_layer_num);
     static void setupCacheConfigSpecs(CacheConfig&                         config,

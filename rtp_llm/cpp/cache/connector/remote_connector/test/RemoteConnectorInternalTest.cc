@@ -128,7 +128,6 @@ public:
     void SetUp() override {
         rtp_llm::initLogger();
         auto mha_spec                = std::make_shared<MHAKVCacheSpec>();
-        mha_spec->layer_num          = layer_num_;
         mha_spec->local_head_num_kv  = 8;
         mha_spec->size_per_head      = 128;
         mha_spec->seq_size_per_block = 8;
@@ -136,7 +135,7 @@ public:
         mha_spec->type               = KVCacheSpecType::MultiHeadAttention;
         cache_config_.block_num      = 8;
         cache_config_.cache_specs.push_back(mha_spec);
-        byte_size_per_block_           = static_cast<size_t>(mha_spec->block_size_bytes() * mha_spec->layer_num);
+        byte_size_per_block_           = static_cast<size_t>(mha_spec->block_size_bytes() * layer_num_);
         cache_config_.block_size_bytes = byte_size_per_block_;
         cache_config_.dtype            = rtp_llm::DataType::TYPE_FP16;
         cache_config_.group_types.push_back(CacheGroupType::FULL);

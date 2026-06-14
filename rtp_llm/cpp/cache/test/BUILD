@@ -42,6 +42,7 @@ cc_library(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/config:model_config",
     ],
     visibility = ["//visibility:public"],
 )

@@ -14,7 +14,6 @@ static std::shared_ptr<LinearKVCacheSpec> makeLinearSpec(uint32_t seq_size_per_b
     auto spec                = std::make_shared<LinearKVCacheSpec>();
     spec->type               = KVCacheSpecType::LinearAttention;
     spec->dtype              = rtp_llm::DataType::TYPE_FP16;
-    spec->layer_num          = 2;
     spec->local_num_k_heads  = 1;
     spec->local_num_v_heads  = 1;
     spec->head_k_dim         = 1;

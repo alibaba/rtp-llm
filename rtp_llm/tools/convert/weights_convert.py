@@ -263,6 +263,7 @@ class WeightConverter:
             profiling_debug_logging_config=ProfilingDebugLoggingConfig(),
             embedding_config=None,  # Fake loader doesn't need embedding_config
         )
+        self.model_cls._post_build_model_config(model_config)
 
         model_config.num_layers = int(
             env_params.get("HACK_LAYER_NUM", str(model_config.num_layers))

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -7,6 +9,7 @@
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 
@@ -21,8 +24,17 @@ struct CacheConfig {
     std::vector<std::vector<int>> full_groups;    // for hybrid attention
     std::vector<CacheGroupType>   group_types;    // for hybrid attention
     std::vector<CacheGroupType>   layer_attn_types;
+    std::vector<std::string>      group_tags;          // group id -> semantic cache tag
+    std::vector<std::vector<int>> layer_to_group_ids;  // layer id -> all group ids needed by the layer
+    std::vector<std::map<std::string, int>> layer_tag_to_group_id;  // layer id -> semantic tag -> group id
     std::vector<int>              layer_to_group_id;
     std::vector<int>              layer_to_block_stride_bytes;
+    std::vector<size_t>           group_seq_size_per_block;
+    std::vector<size_t>           group_kv_block_stride_bytes;
+    std::vector<size_t>           group_kv_scale_stride_bytes;
+    std::vector<size_t>           group_block_size_bytes;
+    std::vector<uint32_t>         group_block_nums;
+    bool                          use_independent_block_pools = false;
 
     // Model configuration
     rtp_llm::DataType dtype;
@@ -69,6 +81,215 @@ struct CacheConfig {
         return std::max<int>(1, static_cast<int>(cache_specs.size()));
     }
 
+    int groupIdForLayerTag(int layer_id, const std::string& tag) const {
+        if (layer_id < 0 || static_cast<size_t>(layer_id) >= layer_tag_to_group_id.size()) {
+            return -1;
+        }
+        const auto& tag_to_group = layer_tag_to_group_id[static_cast<size_t>(layer_id)];
+        const auto  it           = tag_to_group.find(tag);
+        return it == tag_to_group.end() ? -1 : it->second;
+    }
+
+    static std::string specFingerprint(const KVCacheSpecPtr& spec) {
+        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheConfig got null kv_cache spec");
+        std::ostringstream os;
+        os << "tag=" << spec->tag << ";type=" << static_cast<int>(spec->type) << ";dtype=" << static_cast<int>(spec->dtype)
+           << ";local_head_num_kv=" << spec->local_head_num_kv
+           << ";seq_size_per_block=" << spec->seq_size_per_block;
+        if (const auto* mha = dynamic_cast<const MHAKVCacheSpec*>(spec.get())) {
+            os << ";mha.size_per_head=" << mha->size_per_head;
+        } else if (const auto* mla = dynamic_cast<const MLAKVCacheSpec*>(spec.get())) {
+            os << ";mla.kv_lora_rank=" << mla->kv_lora_rank << ";mla.rope_head_dim=" << mla->rope_head_dim;
+        } else if (const auto* linear = dynamic_cast<const LinearKVCacheSpec*>(spec.get())) {
+            os << ";linear.local_num_k_heads=" << linear->local_num_k_heads
+               << ";linear.local_num_v_heads=" << linear->local_num_v_heads
+               << ";linear.head_k_dim=" << linear->head_k_dim
+               << ";linear.head_v_dim=" << linear->head_v_dim
+               << ";linear.conv_kernel_dim=" << linear->conv_kernel_dim
+               << ";linear.ssm_state_dtype=" << static_cast<int>(linear->ssm_state_dtype)
+               << ";linear.conv_state_dtype=" << static_cast<int>(linear->conv_state_dtype);
+        }
+        return os.str();
+    }
+
+    static CacheGroupType inferGroupType(const KVCacheSpecPtr& spec) {
+        return spec->type == KVCacheSpecType::LinearAttention ? CacheGroupType::LINEAR : CacheGroupType::FULL;
+    }
+
+    void fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&    specs,
+                          const std::vector<std::vector<int>>& layers_by_group,
+                          const std::vector<CacheGroupType>&   types,
+                          const std::vector<std::string>&      tags = {}) {
+        const size_t group_num = specs.size();
+        RTP_LLM_CHECK_WITH_INFO(group_num > 0, "CacheConfig::fromGroupedSpecs requires at least one cache spec");
+        RTP_LLM_CHECK_WITH_INFO(layers_by_group.size() == group_num,
+                                "CacheConfig::fromGroupedSpecs layer group count %zu != spec count %zu",
+                                layers_by_group.size(),
+                                group_num);
+        RTP_LLM_CHECK_WITH_INFO(types.size() == group_num,
+                                "CacheConfig::fromGroupedSpecs group type count %zu != spec count %zu",
+                                types.size(),
+                                group_num);
+        RTP_LLM_CHECK_WITH_INFO(tags.empty() || tags.size() == group_num,
+                                "CacheConfig::fromGroupedSpecs tag count %zu != spec count %zu",
+                                tags.size(),
+                                group_num);
+        RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "CacheConfig::fromGroupedSpecs requires positive layer_num");
+
+        cache_specs.clear();
+        global_layer_ids.clear();
+        layer_ids.clear();
+        group_types.clear();
+        group_tags.clear();
+
+        cache_specs.reserve(group_num);
+        global_layer_ids.reserve(group_num);
+        layer_ids.reserve(group_num);
+        group_types.reserve(group_num);
+        group_tags.reserve(group_num);
+
+        layer_to_group_id.assign(layer_num, -1);
+        layer_to_group_ids.assign(layer_num, std::vector<int>());
+        layer_attn_types.assign(layer_num, CacheGroupType::FULL);
+        layer_tag_to_group_id.assign(layer_num, std::map<std::string, int>());
+
+        std::map<std::string, std::string> tag_fingerprints;
+        for (size_t gid = 0; gid < group_num; ++gid) {
+            const auto& spec = specs[gid];
+            RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheConfig::fromGroupedSpecs got null spec at group %zu", gid);
+
+            std::string tag = tags.empty() ? spec->tag : tags[gid];
+            if (tag.empty() && group_num == 1) {
+                tag = "default";
+            }
+            RTP_LLM_CHECK_WITH_INFO(!tag.empty(),
+                                    "CacheConfig::fromGroupedSpecs requires non-empty tag for cache spec %zu",
+                                    gid);
+            const auto fingerprint = specFingerprint(spec);
+            const auto fp_it       = tag_fingerprints.find(tag);
+            if (fp_it == tag_fingerprints.end()) {
+                tag_fingerprints.emplace(tag, fingerprint);
+            } else {
+                RTP_LLM_CHECK_WITH_INFO(fp_it->second == fingerprint,
+                                        "CacheConfig::fromGroupedSpecs tag=%s has multiple physical prototypes",
+                                        tag.c_str());
+            }
+
+            auto stored_spec = spec->clone();
+            stored_spec->tag = tag;
+            stored_spec->layers = layers_by_group[gid];
+
+            cache_specs.push_back(stored_spec);
+            global_layer_ids.push_back(layers_by_group[gid]);
+            layer_ids.push_back(layers_by_group[gid]);
+            group_types.push_back(types[gid]);
+            group_tags.push_back(tag);
+
+            std::vector<bool> seen_layer(static_cast<size_t>(layer_num), false);
+            for (int layer_id : layers_by_group[gid]) {
+                RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layer_num,
+                                        "CacheConfig::fromGroupedSpecs tag=%s has invalid layer id %d for layer_num=%u",
+                                        tag.c_str(),
+                                        layer_id,
+                                        layer_num);
+                const auto layer = static_cast<size_t>(layer_id);
+                RTP_LLM_CHECK_WITH_INFO(!seen_layer[layer],
+                                        "CacheConfig::fromGroupedSpecs tag=%s has duplicate layer id %d",
+                                        tag.c_str(),
+                                        layer_id);
+                seen_layer[layer] = true;
+
+                layer_to_group_ids[layer].push_back(static_cast<int>(gid));
+                layer_tag_to_group_id[layer][tag] = static_cast<int>(gid);
+                if (layer_to_group_id[layer] < 0) {
+                    layer_to_group_id[layer] = static_cast<int>(gid);
+                    layer_attn_types[layer] = types[gid];
+                }
+            }
+        }
+
+        for (size_t layer = 0; layer < static_cast<size_t>(layer_num); ++layer) {
+            RTP_LLM_CHECK_WITH_INFO(layer_to_group_id[layer] >= 0,
+                                    "CacheConfig::fromGroupedSpecs missing group mapping for layer %zu",
+                                    layer);
+        }
+    }
+
+    void fromLayerSpecs(const std::map<int64_t, std::vector<KVCacheSpecPtr>>& layer_specs) {
+        RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "CacheConfig::fromLayerSpecs requires positive layer_num");
+        RTP_LLM_CHECK_WITH_INFO(layer_specs.size() == static_cast<size_t>(layer_num),
+                                "CacheConfig::fromLayerSpecs layer map size %zu != layer_num %u",
+                                layer_specs.size(),
+                                layer_num);
+
+        std::vector<KVCacheSpecPtr> specs;
+        std::vector<std::vector<int>> layers_by_group;
+        std::vector<CacheGroupType> types;
+        std::vector<std::string> tags;
+        std::map<std::string, size_t> tag_to_group;
+        std::map<std::string, std::string> tag_fingerprints;
+
+        for (uint32_t layer_id = 0; layer_id < layer_num; ++layer_id) {
+            const auto layer_it = layer_specs.find(static_cast<int64_t>(layer_id));
+            RTP_LLM_CHECK_WITH_INFO(layer_it != layer_specs.end(),
+                                    "CacheConfig::fromLayerSpecs missing specs for layer %u",
+                                    layer_id);
+            RTP_LLM_CHECK_WITH_INFO(!layer_it->second.empty(),
+                                    "CacheConfig::fromLayerSpecs layer %u has no specs",
+                                    layer_id);
+            std::map<std::string, bool> layer_seen_tags;
+            for (const auto& spec : layer_it->second) {
+                RTP_LLM_CHECK_WITH_INFO(spec != nullptr,
+                                        "CacheConfig::fromLayerSpecs layer %u has null spec",
+                                        layer_id);
+                std::string tag = spec->tag;
+                if (tag.empty() && layer_it->second.size() == 1) {
+                    tag = "default";
+                }
+                RTP_LLM_CHECK_WITH_INFO(!tag.empty(),
+                                        "CacheConfig::fromLayerSpecs layer %u has empty cache spec tag",
+                                        layer_id);
+                RTP_LLM_CHECK_WITH_INFO(layer_seen_tags.emplace(tag, true).second,
+                                        "CacheConfig::fromLayerSpecs layer %u has duplicate tag=%s",
+                                        layer_id,
+                                        tag.c_str());
+
+                const auto fingerprint = specFingerprint(spec);
+                const auto fp_it = tag_fingerprints.find(tag);
+                if (fp_it == tag_fingerprints.end()) {
+                    tag_fingerprints.emplace(tag, fingerprint);
+                } else {
+                    RTP_LLM_CHECK_WITH_INFO(fp_it->second == fingerprint,
+                                            "CacheConfig::fromLayerSpecs tag=%s has multiple physical prototypes",
+                                            tag.c_str());
+                }
+
+                auto group_it = tag_to_group.find(tag);
+                if (group_it == tag_to_group.end()) {
+                    const size_t gid = specs.size();
+                    tag_to_group.emplace(tag, gid);
+                    specs.push_back(spec);
+                    layers_by_group.emplace_back();
+                    types.push_back(inferGroupType(spec));
+                    tags.push_back(tag);
+                    group_it = tag_to_group.find(tag);
+                }
+                layers_by_group[group_it->second].push_back(static_cast<int>(layer_id));
+            }
+        }
+
+        fromGroupedSpecs(specs, layers_by_group, types, tags);
+    }
+
+    void finalizeBlockNums(uint32_t global_block_num) {
+        if (!use_independent_block_pools || group_block_nums.empty()) {
+            return;
+        }
+        for (auto& group_block_num : group_block_nums) {
+            group_block_num = global_block_num;
+        }
+    }
+
     std::string debugString(size_t indent = 0) const {
         const std::string indent_str = std::string(indent, ' ');
         const std::string indent1    = indent_str + "  ";
@@ -113,6 +334,7 @@ struct CacheConfig {
         OUTPUT_FIELD(group_layer_num);
         OUTPUT_FIELD(linear_group_num);
         OUTPUT_FIELD(full_group_num);
+        os << indent1 << "group_block_nums=" << rtp_llm::vectorToString(group_block_nums) << "\n";
         os << "\n";
 
         // Cache specification section
@@ -142,6 +364,15 @@ struct CacheConfig {
         for (size_t i = 0; i < group_types.size(); ++i) {
             os << static_cast<int>(group_types[i]);
             if (i + 1 < group_types.size()) {
+                os << ",";
+            }
+        }
+        os << "]\n";
+        OUTPUT_FIELD_EXPR("group_tags.size()", group_tags.size());
+        os << indent1 << "group_tags=[";
+        for (size_t i = 0; i < group_tags.size(); ++i) {
+            os << group_tags[i];
+            if (i + 1 < group_tags.size()) {
                 os << ",";
             }
         }

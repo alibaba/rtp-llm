@@ -1,4 +1,20 @@
 py_test(
+    name = "kv_cache_specs_test",
+    srcs = [
+        "kv_cache_specs_test.py",
+    ],
+    data = [
+        "//:th_transformer_config",
+    ],
+    deps = [
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:config_ops",
+        "//rtp_llm:fastapi",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "generate_config_test",
     srcs = [
         "generate_config_test.py",
