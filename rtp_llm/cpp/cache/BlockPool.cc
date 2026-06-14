@@ -43,7 +43,7 @@ void BlockPool::initializeCacheBuffer() {
                                     .pin_memory();
     } else {
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+                                             torch::TensorOptions().dtype(torch::kUInt8).device(getTorchDevice()));
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
@@ -500,7 +500,7 @@ BlockPool::convertIndexToBuffer(int layer_id, int block_id, int partition_count,
 }
 
 MemoryType BlockPool::where() const {
-    return cache_aligned_buffer_.is_cuda() ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
+    return (cache_aligned_buffer_.is_cuda() || cache_aligned_buffer_.is_xpu()) ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
 }
 
 void BlockPool::checkLayoutValidity(int layout_id) const {

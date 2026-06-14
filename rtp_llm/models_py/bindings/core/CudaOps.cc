@@ -21,6 +21,8 @@
 #include "rtp_llm/models_py/bindings/common/kernels/batch_copy.h"
 #include "rtp_llm/models_py/bindings/common/kernels/copy_utils.h"
 #include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
+#elif USING_XPU
+#include <c10/xpu/XPUStream.h>
 #endif
 
 using namespace std;
@@ -153,7 +155,80 @@ void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask) {
     }
 }
 
-#else  // ROCm / non-CUDA
+#elif USING_XPU
+
+// ============================================================
+// Copy ops (XPU)
+// ============================================================
+
+void runtimeCopy(const CopyParams& params) {
+    params.check();
+    const auto& src = params.src;
+    const auto& dst = params.dst;
+    if (src.data_ptr() == dst.data_ptr()) {
+        return;
+    }
+    dst.copy_(src, /*non_blocking=*/src.is_xpu() && dst.is_xpu());
+}
+
+void multiMergeCopy(const MultiMergeCopyParams& params) {
+    sycl::queue& queue = c10::xpu::getCurrentXPUStream();
+    for (size_t i = 0; i < params.src_ptrs.size(); i++) {
+        auto dst = static_cast<char*>(params.dst_ptr) + params.dst_offsets[i];
+        queue.memcpy(dst, params.src_ptrs[i], params.copy_size[i]);
+    }
+    // Rely on same-queue ordering; callers that need host-visible
+    // results must synchronize at a higher level.
+}
+
+static void batchCopyFallback(const BatchCopyParams& params) {
+    auto gpu_device = getTorchDevice();
+    for (uint32_t copy_type_enum = 0; copy_type_enum < BatchCopyParams::TYPE_SIZE; ++copy_type_enum) {
+        auto   copy_type       = BatchCopyParams::CopyType(copy_type_enum);
+        auto&  buffers         = params.copy_buffers[copy_type];
+        size_t copy_batch_size = buffers.sizes.size();
+        if (copy_batch_size == 0)
+            continue;
+
+        for (size_t i = 0; i < copy_batch_size; ++i) {
+            size_t        bytes      = buffers.sizes[i];
+            torch::Device dst_device = torch::kCPU, src_device = torch::kCPU;
+            switch (copy_type) {
+                case BatchCopyParams::D2D:
+                    dst_device = gpu_device;
+                    src_device = gpu_device;
+                    break;
+                case BatchCopyParams::D2H:
+                    dst_device = torch::kCPU;
+                    src_device = gpu_device;
+                    break;
+                case BatchCopyParams::H2D:
+                    dst_device = gpu_device;
+                    src_device = torch::kCPU;
+                    break;
+                case BatchCopyParams::H2H:
+                    break;
+                default:
+                    RTP_LLM_FAIL("Unexpected CopyType %d", copy_type);
+                    break;
+            }
+            auto dst_tensor =
+                torch::from_blob(buffers.dst_ptr[i], {(int64_t)bytes}, torch::dtype(torch::kUInt8).device(dst_device));
+            auto src_tensor = torch::from_blob(const_cast<void*>(buffers.src_ptr[i]),
+                                               {(int64_t)bytes},
+                                               torch::dtype(torch::kUInt8).device(src_device));
+            runtimeCopy({dst_tensor, src_tensor, params.overlapped});
+        }
+    }
+}
+
+void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask) {
+    // XPU fallback: mask semantics match CUDA kernel — mask==1 means BLOCKED.
+    auto bool_mask = mask.to(torch::kBool);
+    logits.masked_fill_(bool_mask, -std::numeric_limits<float>::infinity());
+}
+
+#else  // ROCm
 
 namespace {
 at::hip::HIPStream& getOverlapStream() {
