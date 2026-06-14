@@ -177,7 +177,8 @@ void logMtpDecodeModelInput(const char* tag, const GptModelInputs& input) {
     }
     RTP_LLM_LOG_INFO("[debug-mtp-decode-data][%s] combo=%s input_lengths=%s sequence_lengths=%s "
                      "prefix_lengths=%s sequence_lengths_plus_1=%s lm_output_indexes=%s "
-                     "last_hidden=%s kv_kernel=%s kv_block=%s is_target_verify=%d is_fake_stream=%d",
+                     "last_hidden=%s kv_kernel=%s kv_block=%s is_target_verify=%d "
+                     "mtp_iteration_step=%d is_fake_stream=%d",
                      tag,
                      debugTensorSummary(input.combo_tokens).c_str(),
                      debugTensorSummary(input.input_lengths).c_str(),
@@ -189,6 +190,7 @@ void logMtpDecodeModelInput(const char* tag, const GptModelInputs& input) {
                      debugTensorSummary(input.kv_cache_kernel_block_id, 0).c_str(),
                      debugTensorSummary(input.kv_cache_block_id, 0).c_str(),
                      static_cast<int>(input.is_target_verify),
+                     input.mtp_iteration_step,
                      static_cast<int>(input.is_fake_stream));
 }
 
@@ -1214,6 +1216,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             }
         }
         tpSyncModelInputs(model_input, parallelism_config_);
+        model_input.mtp_iteration_step = 0;
         maybePrintModelInput(model_input, "prefill post draft model");
         int64_t     start_time_us           = autil::TimeUtility::currentTimeInMicroSeconds();
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
@@ -1222,7 +1225,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         // Source = main (just ran prefill; its pre-hc buffer is current).
         maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
-        draft_model_output = std::move(draft_model_->forward(model_input));
+        draft_model_output             = std::move(draft_model_->forward(model_input));
+        model_input.mtp_iteration_step = -1;
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -1934,6 +1938,7 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
     maybePrintModelInput(model_input, "decode target model");
     model_input.is_target_verify        = true;
+    model_input.mtp_iteration_step      = -1;
     model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
     RTP_LLM_LOG_DEBUG(
         "[MTP decode] target model verify forward start, input_lengths_size=%ld, prefix_lengths_size=%ld, seq_lengths_size=%ld",
@@ -2170,6 +2175,7 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     // empirical trace and earlier Method 6.1 (DP AllReduce) attempt.
     const bool use_sp_prefill_cuda_graph = sp_prefill_draft_model_ != nullptr;
     const bool any_fake_in_dp            = model_input.is_fake_stream;  // diagnostic only
+    model_input.mtp_iteration_step       = 0;
     RTP_LLM_PROFILE_SCOPE_DYNAMIC(
         "executor.mtp.decode_step(draft_model_forward,use_sp=%d,sp_cg=%d,sp_prefill_cg=%d,is_fake=%d,any_fake_dp=%d)",
         static_cast<int>(use_sp_prefill_cuda_graph),
@@ -2200,6 +2206,7 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
         if (!cp_context_request) {
             maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *sp_prefill_draft_model_);
         }
+        draft_model_->copyMtpIterationTopkCacheFrom(*sp_prefill_draft_model_);
         if (debugCompareSpPrefillEnabled()) {
             auto clone_if_defined = [](const torch::Tensor& t) { return t.defined() ? t.clone() : torch::Tensor(); };
             auto graph_logits_snapshot     = clone_if_defined(draft_prefill_model_output.logits);
@@ -2256,6 +2263,7 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
             maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_model_);
         }
     }
+    model_input.mtp_iteration_step = -1;
     logMtpDecodeModelOutput("draft_prefill_forward_output", draft_prefill_model_output, model_input.is_fake_stream);
     return draft_prefill_model_output;
 }
@@ -2556,10 +2564,12 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             return;
         }
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d/%d start, batch_size %zu", i, propose_step_ - 1, batch_size);
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        int64_t start_time_us          = autil::TimeUtility::currentTimeInMicroSeconds();
+        model_input.mtp_iteration_step = i + 1;
         ensureModelInputsOnCuda(model_input, "draft_decode.loop_forward");
         logMtpDecodeModelInput("draft_decode_loop_forward_input", model_input);
-        draft_decode_model_output = std::move(draft_model_->forward(model_input));
+        draft_decode_model_output      = std::move(draft_model_->forward(model_input));
+        model_input.mtp_iteration_step = -1;
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *draft_model_);
         logMtpDecodeModelOutput(

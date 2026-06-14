@@ -8,11 +8,18 @@ class Glm5RawPromptTest(unittest.TestCase):
     def test_wraps_plain_glm5_raw_prompt(self):
         self.assertEqual(
             maybe_wrap_glm5_raw_prompt("glm_5", "你是谁", RequestFormat.RAW),
-            "<|user|>你是谁\n<|assistant|><think></think>",
+            "[gMASK]<sop><|user|>你是谁<|assistant|><think></think>",
         )
 
     def test_keeps_formatted_glm5_prompt(self):
         prompt = "<|user|>你是谁\n<|assistant|><think></think>"
+        self.assertEqual(
+            maybe_wrap_glm5_raw_prompt("glm_5", prompt, RequestFormat.RAW),
+            "[gMASK]<sop><|user|>你是谁\n<|assistant|><think></think>",
+        )
+
+    def test_keeps_prefixed_formatted_glm5_prompt(self):
+        prompt = "[gMASK]<sop><|user|>你是谁<|assistant|><think></think>"
         self.assertEqual(
             maybe_wrap_glm5_raw_prompt("glm_5", prompt, RequestFormat.RAW), prompt
         )
