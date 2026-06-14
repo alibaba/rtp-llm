@@ -28,6 +28,7 @@ from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3YarnRotaryEmbedding,
 )
 from rtp_llm.ops import MlaOpsType
+from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -182,8 +183,9 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                 )
             )
 
-        # indexer weight
-        if self.model_config.attn_config.is_sparse:
+        # GLM-5.2 shared DSA layers do not have indexer weights; they reuse
+        # top-k indices computed by the latest full layer.
+        if dsa_layer_has_indexer(self.model_config, layer_id):
             mla_layer_weights.extend(
                 [
                     MlaAttnAtomicWeight(
@@ -712,6 +714,15 @@ class DeepSeekV2(BaseModel):
                 config.attn_config.indexer_head_dim = config_json["index_head_dim"]
                 config.attn_config.indexer_head_num = config_json["index_n_heads"]
                 config.attn_config.indexer_topk = config_json["index_topk"]
+                config.index_topk_freq = int(config_json.get("index_topk_freq", 1))
+                config.index_skip_topk_offset = config_json.get(
+                    "index_skip_topk_offset", None
+                )
+                config.index_topk_pattern = config_json.get("index_topk_pattern", None)
+                config.indexer_types = config_json.get("indexer_types", None)
+                config.index_share_for_mtp_iteration = bool(
+                    config_json.get("index_share_for_mtp_iteration", False)
+                )
 
     @staticmethod
     def get_weight_cls():

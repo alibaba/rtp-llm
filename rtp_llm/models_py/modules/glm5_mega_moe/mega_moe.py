@@ -350,9 +350,39 @@ class GLM5MegaMoE(nn.Module):
             """Dequantize FP8 per-block to BF16."""
             shape = w_fp8.shape  # [E, N, K]
             E_, N_, K_ = shape
+            if K_ % fp8_block != 0:
+                raise ValueError(
+                    f"FP8 MoE K dimension must be divisible by {fp8_block}, "
+                    f"got weight shape={tuple(shape)}"
+                )
+            if not torch.is_floating_point(w_scale):
+                raise ValueError(
+                    "MegaMoE FP8 fallback requires raw floating-point FP8 "
+                    "checkpoint scales. Got packed/transformed scale "
+                    f"dtype={w_scale.dtype}, shape={tuple(w_scale.shape)}. "
+                    "For moe_strategy=mega_moe, MoE weights should be wrapped "
+                    "to FP4 at load time before MegaMoeWrapper initialization."
+                )
             n_blocks_k = K_ // fp8_block
+            n_blocks_n = (N_ + fp8_block - 1) // fp8_block
+            if w_scale.shape == (E_, N_, n_blocks_k):
+                scale_per_row = w_scale
+            elif w_scale.shape == (E_, n_blocks_n, n_blocks_k):
+                scale_per_row = w_scale.repeat_interleave(fp8_block, dim=1)[:, :N_, :]
+            elif w_scale.numel() == E_ * N_ * n_blocks_k:
+                scale_per_row = w_scale.reshape(E_, N_, n_blocks_k)
+            elif w_scale.numel() == E_ * n_blocks_n * n_blocks_k:
+                scale_per_block = w_scale.reshape(E_, n_blocks_n, n_blocks_k)
+                scale_per_row = scale_per_block.repeat_interleave(fp8_block, dim=1)[
+                    :, :N_, :
+                ]
+            else:
+                raise ValueError(
+                    "Cannot interpret FP8 MoE scale shape "
+                    f"{tuple(w_scale.shape)} for weight shape={tuple(shape)}"
+                )
             w_f = w_fp8.float().view(E_, N_, n_blocks_k, fp8_block)
-            s_exp = w_scale.view(E_, N_, n_blocks_k, 1).expand_as(w_f)
+            s_exp = scale_per_row.to(dtype=w_f.dtype).unsqueeze(-1).expand_as(w_f)
             return (w_f * s_exp).reshape(E_, N_, K_).to(torch.bfloat16)
 
         w1_bf16 = _dequant_fp8(w1_fp8, w1_scale)  # [E, inter, D]
