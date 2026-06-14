@@ -29,6 +29,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 )
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
+from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
 
 try:
@@ -317,9 +318,15 @@ class GenericMoeLayer(nn.Module):
 
 
 class DecodeLayerOutput:
-    def __init__(self, hidden_states: torch.Tensor, residual: torch.Tensor):
+    def __init__(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        topk_indices: Optional[torch.Tensor] = None,
+    ):
         self.hidden_states = hidden_states
         self.residual = residual
+        self.topk_indices = topk_indices
 
 
 class GenericMoeDecoderLayer(nn.Module):
@@ -352,6 +359,8 @@ class GenericMoeDecoderLayer(nn.Module):
                 quant_config,
                 hw_kernel_config,
                 global_weights=global_weights,
+                has_indexer=dsa_layer_has_indexer(config, layer_idx),
+                reuse_topk_indices=dsa_layer_skips_topk(config, layer_idx),
             )
         else:
             attn_configs = config.getAttentionConfigs(
@@ -458,7 +467,9 @@ class GenericMoeDecoderLayer(nn.Module):
         residual: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
+        prev_topk_indices: Optional[torch.Tensor] = None,
     ) -> DecodeLayerOutput:
+        topk_indices = None
         if self._fuse_input_norm_quant and hidden_states.dim() == 2:
             bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
                 hidden_states,
@@ -468,18 +479,38 @@ class GenericMoeDecoderLayer(nn.Module):
                 group_size=128,
                 scale_ue8m0=self._fuse_input_scale_ue8m0,
             )
-            hidden_states = self.self_attn(
-                hidden_states=bf16_hs,
-                fmha_impl=fmha_impl,
-                kv_cache=kv_cache,
-                x_fp8=fp8_hs,
-                x_scale=scale,
-            )
+            if isinstance(self.self_attn, MlaAttention):
+                hidden_states, topk_indices = self.self_attn(
+                    hidden_states=bf16_hs,
+                    fmha_impl=fmha_impl,
+                    kv_cache=kv_cache,
+                    x_fp8=fp8_hs,
+                    x_scale=scale,
+                    prev_topk_indices=prev_topk_indices,
+                    return_topk=True,
+                )
+            else:
+                hidden_states = self.self_attn(
+                    hidden_states=bf16_hs,
+                    fmha_impl=fmha_impl,
+                    kv_cache=kv_cache,
+                    x_fp8=fp8_hs,
+                    x_scale=scale,
+                )
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-            hidden_states = self.self_attn(
-                hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
-            )
+            if isinstance(self.self_attn, MlaAttention):
+                hidden_states, topk_indices = self.self_attn(
+                    hidden_states=hidden_states,
+                    fmha_impl=fmha_impl,
+                    kv_cache=kv_cache,
+                    prev_topk_indices=prev_topk_indices,
+                    return_topk=True,
+                )
+            else:
+                hidden_states = self.self_attn(
+                    hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
+                )
 
         if self._fuse_post_norm_quant and hidden_states.dim() == 2:
             fp8_hs, scale = fused_add_rmsnorm_fp8_quant(
@@ -507,7 +538,7 @@ class GenericMoeDecoderLayer(nn.Module):
             )
             hidden_states = self.mlp(hidden_states)
 
-        return DecodeLayerOutput(hidden_states, residual)
+        return DecodeLayerOutput(hidden_states, residual, topk_indices)
 
 
 class GenericMoeModel(GptModelBase):
@@ -591,6 +622,7 @@ class GenericMoeModel(GptModelBase):
             _rt.record("embed_out", hidden_states)
 
         residual = torch.zeros_like(hidden_states)
+        prev_topk_indices = None
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)
             output = decoder_layer(
@@ -598,9 +630,11 @@ class GenericMoeModel(GptModelBase):
                 residual,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                prev_topk_indices=prev_topk_indices,
             )
             hidden_states = output.hidden_states
             residual = output.residual
+            prev_topk_indices = output.topk_indices
             if _rt_on:
                 _rt.record(f"layer{i:02d}_hidden", hidden_states)
                 _rt.record(f"layer{i:02d}_residual", residual)

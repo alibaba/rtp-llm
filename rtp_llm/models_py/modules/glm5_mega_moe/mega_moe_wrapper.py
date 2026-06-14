@@ -161,27 +161,41 @@ class MegaMoeWrapper(nn.Module):
 
         if w1 is None or w2 is None or s1 is None or s2 is None:
             raise ValueError(
-                "MegaMoeWrapper requires load-time FP4 MoE weights "
+                "MegaMoeWrapper requires load-time FP4 or FP8 MoE weights "
                 "(moe_w1, moe_w2, moe_s1, moe_s2). Runtime/module-init "
-                "FP4 quantization is not supported."
-            )
-        if w1.dtype != torch.int8 or w2.dtype != torch.int8:
-            raise ValueError(
-                "MegaMoeWrapper only accepts load-time FP4 int8 weights. "
-                "Runtime/module-init FP4 quantization is not supported. "
-                f"Got moe_w1 dtype={w1.dtype}, moe_w2 dtype={w2.dtype}."
+                "quantization without checkpoint scales is not supported."
             )
 
-        w1_up, w1_gate = _split_stacked_moe_w1_up_gate(w1)
-        s1_up, s1_gate = _split_stacked_moe_w1_up_gate(s1)
-        del w1, s1
-        self.mega_moe.setup_weights_from_fp4(
-            w1_w=_restack_gate_up(w1_gate, w1_up),
-            w1_s=_restack_gate_up(s1_gate, s1_up),
-            w2_w=w2,
-            w2_s=s2,
-        )
-        del w1_up, w1_gate, s1_up, s1_gate, w2, s2
+        if w1.dtype == torch.int8 and w2.dtype == torch.int8:
+            w1_up, w1_gate = _split_stacked_moe_w1_up_gate(w1)
+            s1_up, s1_gate = _split_stacked_moe_w1_up_gate(s1)
+            del w1, s1
+            self.mega_moe.setup_weights_from_fp4(
+                w1_w=_restack_gate_up(w1_gate, w1_up),
+                w1_s=_restack_gate_up(s1_gate, s1_up),
+                w2_w=w2,
+                w2_s=s2,
+            )
+            del w1_up, w1_gate, s1_up, s1_gate, w2, s2
+        elif w1.dtype == torch.float8_e4m3fn and w2.dtype == torch.float8_e4m3fn:
+            w1_up, w1_gate = _split_stacked_moe_w1_up_gate(w1)
+            s1_up, s1_gate = _split_stacked_moe_w1_up_gate(s1)
+            del w1, s1
+            self.mega_moe.setup_weights_from_fp8(
+                w1_fp8=w1_gate,
+                w1_scale=s1_gate,
+                w2_fp8=w2,
+                w2_scale=s2,
+                w3_fp8=w1_up,
+                w3_scale=s1_up,
+            )
+            del w1_up, w1_gate, s1_up, s1_gate, w2, s2
+        else:
+            raise ValueError(
+                "MegaMoeWrapper only accepts load-time FP4 int8 or FP8 e4m3 "
+                "weights with checkpoint scales. "
+                f"Got moe_w1 dtype={w1.dtype}, moe_w2 dtype={w2.dtype}."
+            )
         torch.cuda.empty_cache()
 
         self.expert_num = n_routed_experts

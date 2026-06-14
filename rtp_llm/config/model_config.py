@@ -87,6 +87,11 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        "index_topk_freq",
+        "index_skip_topk_offset",
+        "index_topk_pattern",
+        "indexer_types",
+        "index_share_for_mtp_iteration",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
