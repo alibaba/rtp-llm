@@ -39,7 +39,14 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.common.strategy.batched_tr
     BatchedTritonStrategy,
 )
 
-if device_type == DeviceType.ROCm:
+if device_type == DeviceType.Xpu:
+    # ========== XPU Registry ==========
+    # XPU: no custom MOE kernels yet. Use common batched triton strategy only.
+    registry = StrategyRegistry()
+    registry.register(BatchedTritonStrategy())
+    FusedMoeFactory.set_registry(registry)
+
+elif device_type == DeviceType.ROCm:
     # ========== ROCm Registry ==========
 
     # MoE strategies
