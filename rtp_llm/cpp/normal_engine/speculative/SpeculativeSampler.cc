@@ -34,7 +34,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                                      const std::list<GenerateStreamPtr>& streams,
                                      SamplerOutput&                      draft_sampler_output,
                                      SamplerOutput&                      target_sampler_output) const {
-    torch::Device target_device = getTorchCudaDevice();
+    torch::Device target_device = getTorchDevice();
     torch::Device host_device   = torch::Device(torch::kCPU);
 
     int batch_size = streams.size();
