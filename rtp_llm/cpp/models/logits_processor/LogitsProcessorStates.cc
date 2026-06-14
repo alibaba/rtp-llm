@@ -1,15 +1,19 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 
 #include <algorithm>
+#include <exception>
+#include <string>
 #include <utility>
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDACachingAllocator.h>
-#include "rtp_llm/cpp/models/logits_processor/xgrammar/xgrammar_kernels.h"
+#include "rtp_llm/cpp/models/logits_processor/grammar_kernels/xgrammar_kernels.h"
 #endif
 
 using namespace std;
@@ -34,9 +38,7 @@ void LogitsProcessorStates::batchProcess(const SamplerInputs& inputs) {
     const bool has_spec_mask = inputs.spec_vocab_mask_gpu.defined();
     if (has_spec_mask) {
 #if USING_CUDA
-        // Spec mask is allocated on a separate copy stream; tell the caching
-        // allocator it is being consumed on the current compute stream so
-        // the storage is not recycled prematurely.
+        // Spec mask was allocated on a copy stream; pin it to the compute stream.
         if (inputs.spec_vocab_mask_gpu.is_cuda()) {
             c10::cuda::CUDACachingAllocator::recordStream(
                 inputs.spec_vocab_mask_gpu.storage().data_ptr(),
@@ -48,12 +50,9 @@ void LogitsProcessorStates::batchProcess(const SamplerInputs& inputs) {
         // Producer (MtpExecutor::buildSpecGrammarMask) and consumer live in different
         // modules now; assert the cross-module contract loudly so a producer-side
         // shape/device drift fails here instead of silently masking the wrong row.
-        RTP_LLM_CHECK_WITH_INFO(logits.defined() && logits.dim() == 2,
-                                "MTP verify logits must be defined 2-D tensor");
-        RTP_LLM_CHECK_WITH_INFO(inputs.spec_vocab_mask_gpu.dim() == 2,
-                                "MTP verify spec mask must be 2-D");
-        RTP_LLM_CHECK_WITH_INFO(inputs.spec_vocab_mask_gpu.is_contiguous(),
-                                "MTP verify spec mask must be contiguous");
+        RTP_LLM_CHECK_WITH_INFO(logits.defined() && logits.dim() == 2, "MTP verify logits must be defined 2-D tensor");
+        RTP_LLM_CHECK_WITH_INFO(inputs.spec_vocab_mask_gpu.dim() == 2, "MTP verify spec mask must be 2-D");
+        RTP_LLM_CHECK_WITH_INFO(inputs.spec_vocab_mask_gpu.is_contiguous(), "MTP verify spec mask must be contiguous");
         RTP_LLM_CHECK_WITH_INFO(inputs.spec_vocab_mask_gpu.device() == logits.device(),
                                 "MTP verify spec mask device (%s) must match logits device (%s)",
                                 inputs.spec_vocab_mask_gpu.device().str().c_str(),
@@ -87,15 +86,34 @@ void LogitsProcessorStates::batchProcess(const SamplerInputs& inputs) {
             && i < processor_ids_.size() && isProcessorApplied(inputs, processor_ids_[i])) {
             continue;
         }
-        logits_processors_[i]->process(inputs, intervals_[i].first, intervals_[i].second);
+        // Per-processor try/catch: each processor maps 1:1 to a stream slice, so any
+        // RTP_LLM_CHECK throw (or std::exception leaking through process()) belongs
+        // to that stream alone. Sampler::forward and preprocessLogits have no
+        // try/catch, so without this guard a single stream's check failure aborts
+        // the whole batch. Route the failure through the processor's own reporter
+        // so the offending stream's error_info_ is set; other streams continue.
+        try {
+            logits_processors_[i]->process(inputs, intervals_[i].first, intervals_[i].second);
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("logits processor #%zu threw during process(): %s; isolating to its stream",
+                                i,
+                                e.what());
+            logits_processors_[i]->reportErrorViaReporter(ErrorCode::EXECUTION_EXCEPTION,
+                                                          std::string("logits processor exception: ") + e.what(),
+                                                          /*stream_lock_held=*/false);
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("logits processor #%zu threw unknown exception during process(); "
+                                "isolating to its stream",
+                                i);
+            logits_processors_[i]->reportErrorViaReporter(ErrorCode::EXECUTION_EXCEPTION,
+                                                          "logits processor unknown exception",
+                                                          /*stream_lock_held=*/false);
+        }
     }
 }
 
-void LogitsProcessorStates::insert(const BaseLogitsProcessorPtr& ptr,
-                                   size_t                        start,
-                                   size_t                        finish,
-                                   uint64_t                      stream_id,
-                                   size_t                        processor_idx) {
+void LogitsProcessorStates::insert(
+    const BaseLogitsProcessorPtr& ptr, size_t start, size_t finish, uint64_t stream_id, size_t processor_idx) {
     logits_processors_.push_back(ptr);
     intervals_.push_back(std::make_pair(start, finish));
     processor_ids_.push_back({stream_id, processor_idx});

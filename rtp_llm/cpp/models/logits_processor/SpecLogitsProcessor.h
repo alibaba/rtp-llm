@@ -30,10 +30,7 @@ public:
 
     virtual bool isSpecVerifyEligible() const = 0;
 
-    // Pure wrt committed processor state. Implementations may use a local
-    // copy/rollback, but the externally committed state must be unchanged.
-    // Return cap in [0, propose_step]. If draft[j] is rejected by the
-    // processor state, return j so the target row j can provide a replacement.
+    // Must not mutate committed state. Returns accept cap in [0, propose_step].
     virtual int tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) = 0;
 
     static size_t bitmaskWordCount(size_t vocab_size) {

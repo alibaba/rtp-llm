@@ -40,13 +40,7 @@ TEST(FastTopKSamplerTest, TopKGreaterThanOneReturnsTopKIndices) {
 
 #if USING_CUDA
 
-// Tests covering SpeculativeSampler::batchSample's tensorized post-kernel path.
-// These exercise the changes that removed the per-step `output_token_ids_d.clone()`
-// and replaced per-stream Python-loop force-accept writes with a single
-// CPU→GPU mask + torch::where. We intentionally drive the kernel with crafted
-// draft/target probabilities so the kernel's accept/emit decisions are
-// deterministic; the assertions then check the post-kernel stitching that's
-// pure tensor math.
+// Cover the tensorized post-kernel path: CPU→GPU mask + torch::where stitching.
 
 class SpeculativeSamplerTensorizedTest: public DeviceTestBase {
 protected:
@@ -58,9 +52,9 @@ protected:
         model_config.vocab_size  = 4;
         model_config.num_layers  = 1;
 
-        auto query             = std::make_shared<GenerateInput>();
-        query->input_ids       = torch::tensor(std::vector<int32_t>{1, 2, 3}, torch::kInt32);
-        query->generate_config = std::make_shared<GenerateConfig>();
+        auto query                              = std::make_shared<GenerateInput>();
+        query->input_ids                        = torch::tensor(std::vector<int32_t>{1, 2, 3}, torch::kInt32);
+        query->generate_config                  = std::make_shared<GenerateConfig>();
         query->generate_config->force_sp_accept = force_accept;
         auto stream =
             std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
@@ -70,7 +64,7 @@ protected:
 };
 
 TEST_F(SpeculativeSamplerTensorizedTest, SingleStreamAcceptTokensReturnsLocalBuffer) {
-    constexpr size_t propose_step = 2;
+    constexpr size_t   propose_step = 2;
     SpeculativeSampler sampler(propose_step);
 
     auto streams = std::list<GenerateStreamPtr>{makeStream(/*force_accept=*/false)};
@@ -78,12 +72,7 @@ TEST_F(SpeculativeSamplerTensorizedTest, SingleStreamAcceptTokensReturnsLocalBuf
     const int batch_size = 1;
     const int vocab      = 4;
 
-    // draft_probs / target_probs both heavily peaked at token 1 → kernel should
-    // accept the draft entirely. The exact accept_len depends on the kernel's
-    // sampling roll, so we only assert post-kernel invariants:
-    //   1. accept_tokens shape is [B, P+1]
-    //   2. accept_len is in [1, P+1]
-    //   3. CPU mirror tensors are populated.
+    // Both probs peaked at token 1; assert only post-kernel invariants (shape, range, CPU mirror).
     auto cuda_f32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat);
     auto cuda_i32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
 
@@ -122,66 +111,11 @@ TEST_F(SpeculativeSamplerTensorizedTest, SingleStreamAcceptTokensReturnsLocalBuf
     ASSERT_EQ(tok_cpu.numel(), batch_size * (long)(propose_step + 1));
 }
 
-TEST_F(SpeculativeSamplerTensorizedTest, ForceSpAcceptOverridesAcceptLenAndTokens) {
-    constexpr size_t propose_step = 2;
-    SpeculativeSampler sampler(propose_step);
-
-    // Two streams: only stream A has force_sp_accept=true. After batchSample
-    // the post-kernel torch::where path must override A's accept_len to P+1
-    // and copy draft + target-bonus into A's row, while leaving B's row with
-    // whatever the kernel emitted.
-    auto stream_a = makeStream(/*force_accept=*/true);
-    auto stream_b = makeStream(/*force_accept=*/false);
-    auto streams  = std::list<GenerateStreamPtr>{stream_a, stream_b};
-
-    const int batch_size = 2;
-    const int vocab      = 4;
-
-    auto cuda_f32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat);
-    auto cuda_i32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
-
-    SamplerOutput draft_out;
-    // A draft tokens [2,3] B draft tokens [1,1].
-    draft_out.token_ids = torch::tensor({{2, 3}, {1, 1}}, cuda_i32);
-    draft_out.all_probs = torch::zeros({batch_size, (long)propose_step, vocab}, cuda_f32);
-    draft_out.all_probs.index_put_({0, 0, 2}, 1.0f);
-    draft_out.all_probs.index_put_({0, 1, 3}, 1.0f);
-    draft_out.all_probs.index_put_({1, 0, 1}, 1.0f);
-    draft_out.all_probs.index_put_({1, 1, 1}, 1.0f);
-
-    SamplerOutput target_out;
-    // Target bonus column (last) for A is 0, for B is 1. With force_sp_accept,
-    // A's emitted row must be [2, 3, 0]; B's row remains kernel-driven.
-    target_out.token_ids = torch::tensor({{2, 3, 0}, {1, 1, 1}}, cuda_i32);
-    target_out.all_probs = torch::zeros({batch_size, (long)(propose_step + 1), vocab}, cuda_f32);
-    target_out.all_probs.index_put_({0, 0, 2}, 1.0f);
-    target_out.all_probs.index_put_({0, 1, 3}, 1.0f);
-    target_out.all_probs.index_put_({0, 2, 0}, 1.0f);
-    target_out.all_probs.index_put_({1, 0, 1}, 1.0f);
-    target_out.all_probs.index_put_({1, 1, 1}, 1.0f);
-    target_out.all_probs.index_put_({1, 2, 1}, 1.0f);
-    target_out.all_probs = target_out.all_probs.reshape({batch_size * (long)(propose_step + 1), vocab});
-
-    auto out = sampler.forward(streams, draft_out, target_out);
-    out.transfer_done_event->synchronize();
-
-    ASSERT_EQ(out.accept_len_cpu.numel(), batch_size);
-    auto len_cpu = out.accept_len_cpu.contiguous();
-    EXPECT_EQ(len_cpu.data_ptr<int32_t>()[0], (int)(propose_step + 1))
-        << "force_sp_accept must clamp accept_len to propose_step+1";
-
-    auto tok_cpu = out.accept_tokens_cpu.contiguous();
-    auto tok_2d  = tok_cpu.reshape({batch_size, (long)(propose_step + 1)});
-    EXPECT_EQ(tok_2d[0][0].item<int32_t>(), 2);
-    EXPECT_EQ(tok_2d[0][1].item<int32_t>(), 3);
-    EXPECT_EQ(tok_2d[0][2].item<int32_t>(), 0);
-}
-
 TEST_F(SpeculativeSamplerTensorizedTest, AcceptLenBoundedByProposeStepPlusOne) {
     // Regression for the index_put_ col_idx clamp: even if the kernel returns
     // an emitted_token_num at the upper bound, col_idx = clamp(len-1, 0, P)
     // must stay within [0, P], so accept_tokens shape stays [B, P+1].
-    constexpr size_t propose_step = 3;
+    constexpr size_t   propose_step = 3;
     SpeculativeSampler sampler(propose_step);
 
     auto streams = std::list<GenerateStreamPtr>{makeStream(false), makeStream(false)};

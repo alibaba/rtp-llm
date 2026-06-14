@@ -78,11 +78,11 @@ MtpBatchStreamProcessor::gatherDecodeModelInput(const StreamGroups& stream_group
     return model_input;
 }
 
-absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
-    const StreamGroups&                         stream_groups,
-    const GptModelInputs&                       model_inputs,
-    const GptModelOutputs&                      model_output,
-    const MtpSpecLogitsVerifyResult& spec_logits_result) const {
+absl::StatusOr<SamplerInputs>
+MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
+                                                const GptModelInputs&                       model_inputs,
+                                                const GptModelOutputs&                      model_output,
+                                                const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result) const {
     (void)model_inputs;
     RTP_LLM_CHECK(!stream_groups.empty());
     auto               all_streams      = stream_groups.allStreams();
@@ -288,20 +288,12 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     torch::Tensor&                               hidden_states_d_t,
     size_t&                                      total_accept_len) {
     speculative_sampler_output.transfer_done_event->synchronize();
-    const auto& accept_lens    = speculative_sampler_output.accept_len_cpu;
-    const auto& accept_tokens  = speculative_sampler_output.accept_tokens_cpu;
+    const auto& accept_lens   = speculative_sampler_output.accept_len_cpu;
+    const auto& accept_tokens = speculative_sampler_output.accept_tokens_cpu;
 
-    // Bound each accept_len BEFORE sum(): an out-of-range row would let
-    // total_accept_len blow past propose_step_+1 per stream, OOM the pinned
-    // allocator on the combo_tokens alloc, and the memcpy below would read
-    // past accept_tokens row bounds. Per-row check is the only load-bearing
-    // guard — shape/dtype come from SpeculativeSampler's internal contract.
+    // Per-row bound check before sum(): caps total_accept_len so combo_tokens alloc
+    // and the memcpy below stay within accept_tokens row bounds.
     {
-        // Hold the contiguous() result in a named local: a temporary's
-        // .data_ptr() would dangle once the temporary is destroyed at the
-        // end of the full-expression. accept_lens is currently already
-        // contiguous so contiguous() returns self, but a future caller
-        // that hands in a strided tensor would otherwise read freed memory.
         auto           accept_lens_c = accept_lens.contiguous();
         const int32_t* len_ptr       = accept_lens_c.data_ptr<int32_t>();
         for (size_t i = 0; i < batch_size; ++i) {
@@ -313,7 +305,7 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
         }
     }
 
-    total_accept_len           = static_cast<size_t>(accept_lens.sum().item<int64_t>());
+    total_accept_len = static_cast<size_t>(accept_lens.sum().item<int64_t>());
 
     model_input.combo_tokens = torch::empty({(int64_t)total_accept_len}, torch::kInt32).pin_memory();
 
@@ -332,13 +324,13 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
                accept_tokens.data_ptr<int>() + static_cast<int64_t>(i) * (propose_step_ + 1),
                static_cast<size_t>(cur_accept_len) * sizeof(int));
 
-        auto hidden_slice = model_output.all_hidden_states.narrow(0, static_cast<int64_t>(i) * (propose_step_ + 1),
-                                                                  cur_accept_len);
+        auto hidden_slice =
+            model_output.all_hidden_states.narrow(0, static_cast<int64_t>(i) * (propose_step_ + 1), cur_accept_len);
         hidden_states_list.push_back(hidden_slice);
 
         model_input.input_lengths.data_ptr<int>()[static_cast<int64_t>(i)] = cur_accept_len;
         token_offset += cur_accept_len;
-        lm_output_indexes.data_ptr<int>()[static_cast<int64_t>(i)]         = token_offset - 1;
+        lm_output_indexes.data_ptr<int>()[static_cast<int64_t>(i)] = token_offset - 1;
     }
 
     hidden_states_d_t              = torch::cat(hidden_states_list).contiguous();
@@ -482,18 +474,14 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1) {
-            auto slice_t =
-                draft_model_output.all_hidden_states.narrow(0, token_offset + cur_accept_len - 1, 1);
+            auto slice_t       = draft_model_output.all_hidden_states.narrow(0, token_offset + cur_accept_len - 1, 1);
             last_hidden_states = slice_t;
         }
 
         torch::Tensor accept_tokens_tensor =
             accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
-        spec_update_infos.push_back({accept_tokens_tensor,
-                                     cur_accept_len,
-                                     -1,
-                                     std::move(last_hidden_states),
-                                     std::move(propose_all_probs)});
+        spec_update_infos.push_back(
+            {accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
 
         token_offset += accept_len[batch_idx_out].item<int32_t>();
         batch_idx_in += cur_batch_size;
@@ -566,7 +554,5 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
 
     model_input.last_hidden_states = all_hidden_states;
 }
-
-
 
 }  // namespace rtp_llm

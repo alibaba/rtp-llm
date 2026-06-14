@@ -1,5 +1,5 @@
-#include "rtp_llm/cpp/models/logits_processor/xgrammar/GrammarSchemaValidator.h"
-#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBackend.h"
+#include "rtp_llm/cpp/engine_base/grammar/GrammarSchemaValidator.h"
+#include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #include "autil/legacy/json.h"
@@ -28,9 +28,9 @@ bool hasKey(const JsonMap& map, const std::string& key) {
     return map.find(key) != map.end();
 }
 
-void walkSchema(const autil::legacy::Any& node,
-                const std::string& path,
-                int depth,
+void walkSchema(const autil::legacy::Any&        node,
+                const std::string&               path,
+                int                              depth,
                 std::vector<UnsupportedFeature>& issues) {
     if (depth > kMaxRefDepth) {
         issues.push_back({path, "$ref recursion depth exceeded"});
@@ -120,21 +120,14 @@ void walkSchema(const autil::legacy::Any& node,
 }
 
 static constexpr size_t kMaxRegexEbnfSize = 64 * 1024;  // 64 KiB
-// structural_tag is deserialized via autil::legacy::json::ParseJson and then
-// recursively walked by sanitizeStructuralFormat; both are recursive and have
-// no built-in depth limit. A user-controlled payload of pure-`[` nesting
-// within the 64 KiB byte cap can still reach ~32k levels and overflow the
-// worker thread's 8 MiB stack, sending SIGSEGV — uncatchable by the worker's
-// catch(...). Reject obviously-deep payloads at admission so the worker
-// thread never sees them. 256 levels is well above any realistic structural
-// schema (sequence/or/tag/triggered_tags trees rarely exceed ~10 levels).
+// Pre-admission depth cap; recursive parse/walk would otherwise overflow the worker stack.
 static constexpr int kMaxStructuralTagDepth = 256;
 
 GrammarValidateResult scanStructuralTagDepth(const std::string& s) {
-    int depth     = 0;
-    int max_depth = 0;
-    bool in_str  = false;
-    bool escape  = false;
+    int  depth     = 0;
+    int  max_depth = 0;
+    bool in_str    = false;
+    bool escape    = false;
     for (char c : s) {
         if (in_str) {
             if (escape) {
@@ -150,14 +143,16 @@ GrammarValidateResult scanStructuralTagDepth(const std::string& s) {
             in_str = true;
         } else if (c == '{' || c == '[') {
             ++depth;
-            if (depth > max_depth) max_depth = depth;
+            if (depth > max_depth)
+                max_depth = depth;
             if (depth > kMaxStructuralTagDepth) {
                 return {GrammarValidateStatus::TooLarge,
-                        "structural_tag nesting exceeds maximum depth ("
-                            + std::to_string(kMaxStructuralTagDepth) + ")"};
+                        "structural_tag nesting exceeds maximum depth (" + std::to_string(kMaxStructuralTagDepth)
+                            + ")"};
             }
         } else if (c == '}' || c == ']') {
-            if (depth > 0) --depth;
+            if (depth > 0)
+                --depth;
         }
     }
     return {GrammarValidateStatus::Ok, ""};
@@ -165,8 +160,7 @@ GrammarValidateResult scanStructuralTagDepth(const std::string& s) {
 
 GrammarValidateResult validateRegexEbnfKeyLightweight(const GrammarKeyCpp& key) {
     if (key.key_string.size() > kMaxRegexEbnfSize) {
-        return {GrammarValidateStatus::TooLarge,
-                "regex/ebnf grammar exceeds maximum size limit (64 KiB)"};
+        return {GrammarValidateStatus::TooLarge, "regex/ebnf grammar exceeds maximum size limit (64 KiB)"};
     }
     if (key.key_string.empty()) {
         return {GrammarValidateStatus::InvalidSyntax, "empty grammar string"};
@@ -187,17 +181,13 @@ GrammarValidateResult validateGrammarKey(const GrammarKeyCpp& key) {
         return {GrammarValidateStatus::Ok, ""};
     }
 
-    // regex/ebnf syntax compilation runs in the async worker (compileNow) so
-    // compile_timeout_ms and singleflight protect the request path.
     if (key.key_type != "json") {
         return validateRegexEbnfKeyLightweight(key);
     }
 
     if (key.key_string.size() > kMaxSchemaSize) {
-        RTP_LLM_LOG_INFO("[grammar_schema_validate] rejected: schema too large (%zu bytes)",
-                         key.key_string.size());
-        return {GrammarValidateStatus::TooLarge,
-                "JSON schema exceeds maximum size limit (1 MiB)"};
+        RTP_LLM_LOG_INFO("[grammar_schema_validate] rejected: schema too large (%zu bytes)", key.key_string.size());
+        return {GrammarValidateStatus::TooLarge, "JSON schema exceeds maximum size limit (1 MiB)"};
     }
 
     // "$$ANY$$" is the response_format=json_object sentinel; not a JSON Schema document.
@@ -211,8 +201,7 @@ GrammarValidateResult validateGrammarKey(const GrammarKeyCpp& key) {
         autil::legacy::FastFromJsonString(root, key.key_string);
     } catch (const std::exception& e) {
         RTP_LLM_LOG_INFO("[grammar_schema_validate] rejected: invalid JSON syntax: %s", e.what());
-        return {GrammarValidateStatus::InvalidSyntax,
-                std::string("invalid JSON schema syntax: ") + e.what()};
+        return {GrammarValidateStatus::InvalidSyntax, std::string("invalid JSON schema syntax: ") + e.what()};
     }
 
     // Walk for unsupported features
@@ -222,7 +211,8 @@ GrammarValidateResult validateGrammarKey(const GrammarKeyCpp& key) {
     if (!issues.empty()) {
         std::string detail = "unsupported JSON Schema feature(s): ";
         for (size_t i = 0; i < issues.size() && i < 3; ++i) {
-            if (i > 0) detail += ", ";
+            if (i > 0)
+                detail += ", ";
             detail += "'" + issues[i].keyword + "'";
             if (!issues[i].path.empty()) {
                 detail += " at " + issues[i].path;
@@ -231,8 +221,7 @@ GrammarValidateResult validateGrammarKey(const GrammarKeyCpp& key) {
         if (issues.size() > 3) {
             detail += " (and " + std::to_string(issues.size() - 3) + " more)";
         }
-        RTP_LLM_LOG_INFO("[grammar_schema_validate] rejected key=%s: %s",
-                         key.brief().c_str(), detail.c_str());
+        RTP_LLM_LOG_INFO("[grammar_schema_validate] rejected key=%s: %s", key.brief().c_str(), detail.c_str());
         return {GrammarValidateStatus::UnsupportedFeature, detail};
     }
 

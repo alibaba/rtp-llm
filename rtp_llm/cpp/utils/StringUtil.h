@@ -79,11 +79,7 @@ inline bool startsWith(const std::string& str, const std::string& prefix) {
     return str.compare(0, prefix.size(), prefix) == 0;
 }
 
-// Summarize a potentially large / sensitive optional string for debug
-// logging. Emits "<unset>" when missing; otherwise emits length + a
-// stable 64-bit hash of the content so log lines don't leak full
-// user-controlled payloads (grammar schemas, regex sources, …) while
-// still letting operators distinguish runs.
+// "<unset>" or "len=N hash=0x..." — avoids logging full grammar/schema bodies.
 inline std::string summarizeOptionalString(const std::optional<std::string>& field) {
     if (!field.has_value()) {
         return "<unset>";

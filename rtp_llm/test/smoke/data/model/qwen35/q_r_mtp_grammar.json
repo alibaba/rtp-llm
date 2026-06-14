@@ -29,26 +29,63 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 0,
+                "created": 1781319404,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "",
-                            "partial": false
+                            "content": "#3498db",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
                         },
-                        "finish_reason": "stop"
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
                 "usage": {
-                    "prompt_tokens": 0,
-                    "total_tokens": 0,
-                    "completion_tokens": 0
-                }
-            },
-            "grammar_constraint_only": true
+                    "prompt_tokens": 19,
+                    "total_tokens": 26,
+                    "completion_tokens": 7,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 24140.837,
+                    "iter_count": 7,
+                    "prefix_len": 0,
+                    "input_len": 19,
+                    "output_len": 7,
+                    "step_output_len": 7,
+                    "first_token_cost_time": 23502.625,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            }
         },
         {
             "endpoint": "/v1/chat/completions",
@@ -76,26 +113,63 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 0,
+                "created": 1781319405,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "",
-                            "partial": false
+                            "content": "90210",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
                         },
-                        "finish_reason": "stop"
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
                 "usage": {
-                    "prompt_tokens": 0,
-                    "total_tokens": 0,
-                    "completion_tokens": 0
-                }
-            },
-            "grammar_constraint_only": true
+                    "prompt_tokens": 19,
+                    "total_tokens": 25,
+                    "completion_tokens": 6,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 861.905,
+                    "iter_count": 6,
+                    "prefix_len": 0,
+                    "input_len": 19,
+                    "output_len": 6,
+                    "step_output_len": 6,
+                    "first_token_cost_time": 513.63,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            }
         },
         {
             "endpoint": "/v1/chat/completions",
@@ -147,26 +221,63 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 0,
+                "created": 1781319410,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "",
-                            "partial": false
+                            "content": "{\n  \"name\": \"Elena Vance\",\n  \"age\": 32,\n  \"city\": \"Portland, Oregon, USA\"\n}",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
                         },
-                        "finish_reason": "stop"
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
                 "usage": {
-                    "prompt_tokens": 0,
-                    "total_tokens": 0,
-                    "completion_tokens": 0
-                }
-            },
-            "grammar_constraint_only": true
+                    "prompt_tokens": 19,
+                    "total_tokens": 54,
+                    "completion_tokens": 35,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 4874.269,
+                    "iter_count": 35,
+                    "prefix_len": 0,
+                    "input_len": 19,
+                    "output_len": 35,
+                    "step_output_len": 35,
+                    "first_token_cost_time": 2496.49,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            }
         }
     ]
 }

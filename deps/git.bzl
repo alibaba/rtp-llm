@@ -78,10 +78,7 @@ def git_deps():
         ],
     )
 
-    # xgrammar v0.1.32 — structured output (json_schema/regex) grammar engine.
-    # init_submodules=True to fetch 3rdparty/dlpack (required header-only dep).
-    # Internal source overrides this in internal_source/deps/git.bzl with a
-    # gitlab mirror and selective submodule init (skips cpptrace/googletest).
+    # xgrammar v0.1.32 — init_submodules=True for 3rdparty/dlpack header.
     new_git_repository(
         name = "xgrammar",
         remote = "https://github.com/mlc-ai/xgrammar.git",

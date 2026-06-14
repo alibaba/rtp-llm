@@ -16,16 +16,20 @@ namespace {
 
 using JsonMap = autil::legacy::json::JsonMap;
 
-// One primitive for the whole file: read an Any as a string. Bare strings
-// pass through; nested objects/arrays are re-serialized to JSON. Empty strings
-// and serialization failures collapse to nullopt so callers can `if (auto s =
-// ...)` uniformly. This is the SOLE place the try-string-then-serialize
-// pattern lives — every other helper goes through it.
+// Boundary normalization: grammar fields are strings (regex/ebnf/structural_tag)
+// or nested JSON-Schema (json_schema envelope's "schema" sub-object). Scalars
+// — null/bool/number — are never legitimate payloads; rejecting here prevents
+// e.g. {"type":"regex","pattern":42} silently compiling literal regex "42".
 std::optional<std::string> anyToString(const autil::legacy::Any& value) {
-    try {
+    namespace ajson = autil::legacy::json;
+    if (ajson::IsJsonString(value)) {
         const auto s = autil::legacy::AnyCast<std::string>(value);
         return s.empty() ? std::nullopt : std::optional<std::string>(s);
-    } catch (...) {}
+    }
+    if (!ajson::IsJsonMap(value) && !ajson::IsJsonArray(value)) {
+        throw std::invalid_argument(std::string("grammar payload must be a string or JSON object, got ")
+                                    + ajson::GetJsonTypeName(value));
+    }
     try {
         return autil::legacy::ToJsonString(value, true);
     } catch (...) {
@@ -33,16 +37,13 @@ std::optional<std::string> anyToString(const autil::legacy::Any& value) {
     }
 }
 
-// map[key] -> anyToString. Replaces the old extractJsonField.
 std::optional<std::string> mapField(const JsonMap& map, const char* key) {
     const auto it = map.find(key);
     return it == map.end() ? std::nullopt : anyToString(it->second);
 }
 
-// If `payload` parses as an OpenAI json_schema envelope ({"name":..., "schema": {...}}),
-// return the unwrapped schema; otherwise nullopt (caller treats payload as-is).
-// Bare JSON Schemas commonly have type/properties/$schema/$defs/$ref at top
-// level — if any is present, the payload is itself a schema, not an envelope.
+// Unwrap an OpenAI json_schema envelope ({"name":..., "schema": {...}}); return
+// nullopt for bare schemas (top-level type/properties/$schema/$defs/$ref).
 std::optional<std::string> unwrapJsonSchemaEnvelope(const std::string& payload) {
     try {
         const auto map = autil::legacy::AnyCast<JsonMap>(autil::legacy::json::ParseJson(payload));
@@ -60,12 +61,8 @@ std::optional<std::string> unwrapJsonSchemaEnvelope(const std::string& payload) 
     }
 }
 
-// Sole normalization point for response_format. When a request arrives with
-// response_format set but no concrete grammar field, we populate the matching
-// grammar field so the engine can compile the constraint. The Python layer
-// only passes response_format through verbatim (there is no Python-side
-// normalizer); doing it here means every client — Python gRPC, native C++
-// HTTP, non-Python gRPC — gets identical behavior.
+// Sole normalization point for response_format → concrete grammar field, used by
+// every client (Python gRPC, native C++ HTTP, non-Python gRPC).
 struct NormalizedGrammar {
     std::optional<std::string> json_schema;
     std::optional<std::string> regex;
@@ -73,20 +70,16 @@ struct NormalizedGrammar {
     std::optional<std::string> structural_tag;
 
     bool empty() const {
-        return !json_schema.has_value() && !regex.has_value() && !ebnf.has_value()
-               && !structural_tag.has_value();
+        return !json_schema.has_value() && !regex.has_value() && !ebnf.has_value() && !structural_tag.has_value();
     }
 };
 
-// Per-type dispatch table: type-name -> (payload-field, NormalizedGrammar member).
-// Every entry uses the same {mapField, optional unwrap} extraction path; adding
-// a new grammar type is one row. text/json_object stay outside because they
-// have no payload field (sentinel and literal default, respectively).
+// Per-type dispatch table: adding a new grammar type is one row.
 struct ResponseFormatRule {
-    const char*                                    type_name;
-    const char*                                    payload_key;
-    std::optional<std::string> NormalizedGrammar::*target;
-    bool                                           unwrap_envelope;
+    const char*                type_name;
+    const char*                payload_key;
+    std::optional<std::string> NormalizedGrammar::* target;
+    bool                                            unwrap_envelope;
 };
 static constexpr ResponseFormatRule kResponseFormatRules[] = {
     {"json_schema", "json_schema", &NormalizedGrammar::json_schema, true},
@@ -95,10 +88,7 @@ static constexpr ResponseFormatRule kResponseFormatRules[] = {
     {"structural_tag", "structural_tag", &NormalizedGrammar::structural_tag, false},
 };
 
-// Parse the OpenAI-style response_format envelope. The single backstop at the
-// end rejects anything that didn't yield a usable grammar field AND wasn't the
-// explicit "text" sentinel, so unknown / malformed types produce INVALID_PARAMS
-// instead of silently falling through as unconstrained.
+// Parse OpenAI response_format; backstop rejects anything that wasn't "text" or a usable grammar.
 NormalizedGrammar normalizeResponseFormat(const std::string& response_format_str) {
     NormalizedGrammar out;
 
@@ -137,12 +127,10 @@ NormalizedGrammar normalizeResponseFormat(const std::string& response_format_str
                     raw = std::move(unwrapped);
                 }
             }
-            // Reject explicitly-empty payloads ("{}", "[]") — they would
-            // otherwise compile as "match anything" and silently relax
-            // constraints. Mirrors the Pydantic-side rejection of empty schema.
-            if (raw && (*raw == "{}" || *raw == "[]")) {
-                raw.reset();
-            }
+            // "{}"/"[]" are legal "any JSON" schemas under JSON Schema 2020-12
+            // and compile to a valid-JSON grammar (equivalent in spirit to
+            // response_format=json_object). Pass them through; downstream
+            // xgrammar handles the constraint correctly.
             out.*(rule.target) = std::move(raw);
             break;
         }
@@ -281,6 +269,11 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     }
 
     if (generate_config->json_schema.has_value()) {
+        // Unwrap OpenAI {name, schema} envelope so the legacy direct-set path
+        // converges to the same internal representation as the response_format
+        // branch above. "{}"/"[]" are kept as-is — they are legal "any JSON"
+        // schemas under JSON Schema 2020-12 and equivalent in spirit to
+        // response_format=json_object.
         if (auto unwrapped = unwrapJsonSchemaEnvelope(*generate_config->json_schema)) {
             generate_config->json_schema = std::move(*unwrapped);
         }
@@ -288,10 +281,8 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     // Mirror the Python normalizer: only fall back to response_format if NO
     // concrete grammar field was supplied. If any one was set, respect the
     // client's explicit choice.
-    const bool any_grammar_set = generate_config->json_schema.has_value()
-                                 || generate_config->regex.has_value()
-                                 || generate_config->ebnf.has_value()
-                                 || generate_config->structural_tag.has_value();
+    const bool any_grammar_set = generate_config->json_schema.has_value() || generate_config->regex.has_value()
+                                 || generate_config->ebnf.has_value() || generate_config->structural_tag.has_value();
     if (!any_grammar_set && config_proto->has_response_format()) {
         auto norm = normalizeResponseFormat(config_proto->response_format().value());
         if (norm.json_schema.has_value()) {
@@ -307,11 +298,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
             generate_config->structural_tag = std::move(*norm.structural_tag);
         }
     }
-    // QueryConverter is the sole normalization point: the grammar intent (if any)
-    // now lives in the concrete fields above. Drop the raw envelope so a non-grammar
-    // response_format (e.g. {"type":"text"}) does not leave hasStructuredOutputRequest()
-    // — which only sees the optional's presence — spuriously true and route a plain
-    // request through the grammar admission path.
+    // Drop raw envelope so {"type":"text"} doesn't trip hasStructuredOutputRequest().
     generate_config->response_format.reset();
 
     return generate_config;

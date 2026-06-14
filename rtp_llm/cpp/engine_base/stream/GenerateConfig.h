@@ -128,16 +128,9 @@ public:
         return maxNumBeams() > 1;
     }
 
-    // True iff the request asks for structured output. By the time this is
-    // queried, QueryConverter has normalized any grammar-bearing response_format
-    // into the concrete fields and cleared a non-grammar envelope (e.g. "text"),
-    // so a lingering response_format means a raw envelope that still needs
-    // normalization downstream. Schedulers and admission gates query this instead
-    // of inspecting individual fields so adding a new structured-output kind does
-    // not require touching scheduler code.
     bool hasStructuredOutputRequest() const noexcept {
-        return json_schema.has_value() || regex.has_value() || ebnf.has_value()
-               || structural_tag.has_value() || response_format.has_value();
+        return json_schema.has_value() || regex.has_value() || ebnf.has_value() || structural_tag.has_value()
+               || response_format.has_value();
     }
 
     void addSpecialTokens(const rtp_llm::SpecialTokens& special_tokens) {
@@ -169,8 +162,7 @@ public:
                      << ", force_sp_accept: " << force_sp_accept
                      << ", return_all_probs: " << static_cast<int>(return_all_probs)
                      << ", json_schema: " << summarizeOptionalString(json_schema)
-                     << ", regex: " << summarizeOptionalString(regex)
-                     << ", ebnf: " << summarizeOptionalString(ebnf)
+                     << ", regex: " << summarizeOptionalString(regex) << ", ebnf: " << summarizeOptionalString(ebnf)
                      << ", structural_tag: " << summarizeOptionalString(structural_tag)
                      << ", response_format: " << summarizeOptionalString(response_format)
                      << ", stop_words_list:" << vectorsToString(stop_words_list)

@@ -1144,24 +1144,23 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register GrammarConfig
     py::class_<GrammarConfig>(m, "GrammarConfig")
         .def(py::init<>())
-        .def_readwrite("grammar_backend", &GrammarConfig::grammar_backend)
         .def_readwrite("constrained_json_disable_any_whitespace",
                        &GrammarConfig::constrained_json_disable_any_whitespace)
         .def_readwrite("compile_timeout_ms", &GrammarConfig::compile_timeout_ms)
         .def_readwrite("num_workers", &GrammarConfig::num_workers)
+        .def_readwrite("compiler_cache_bytes", &GrammarConfig::compiler_cache_bytes)
         .def_readwrite("tokenizer_info_json", &GrammarConfig::tokenizer_info_json)
         .def_readwrite("override_stop_tokens", &GrammarConfig::override_stop_tokens)
         .def("__repr__",
              [](const GrammarConfig& c) {
                  std::ostringstream oss;
-                 oss << "GrammarConfig(grammar_backend=" << c.grammar_backend
-                     << ", constrained_json_disable_any_whitespace=" << c.constrained_json_disable_any_whitespace
-                     << ", compile_timeout_ms=" << c.compile_timeout_ms
-                     << ", num_workers=" << c.num_workers
-                     << ", tokenizer_info_json_size=" << c.tokenizer_info_json.size()
-                     << ", override_stop_tokens=[";
+                 oss << "GrammarConfig(constrained_json_disable_any_whitespace="
+                     << c.constrained_json_disable_any_whitespace << ", compile_timeout_ms=" << c.compile_timeout_ms
+                     << ", num_workers=" << c.num_workers << ", compiler_cache_bytes=" << c.compiler_cache_bytes
+                     << ", tokenizer_info_json_size=" << c.tokenizer_info_json.size() << ", override_stop_tokens=[";
                  for (size_t i = 0; i < c.override_stop_tokens.size(); ++i) {
-                     if (i) oss << ",";
+                     if (i)
+                         oss << ",";
                      oss << c.override_stop_tokens[i];
                  }
                  oss << "])";
@@ -1169,59 +1168,28 @@ PYBIND11_MODULE(libth_transformer_config, m) {
              })
         .def(py::pickle(
             [](const GrammarConfig& self) {
-                return py::make_tuple(self.grammar_backend,
-                                      self.constrained_json_disable_any_whitespace,
+                return py::make_tuple(self.constrained_json_disable_any_whitespace,
                                       self.compile_timeout_ms,
                                       self.num_workers,
                                       self.tokenizer_info_json,
-                                      self.override_stop_tokens);
+                                      self.override_stop_tokens,
+                                      self.compiler_cache_bytes);
             },
             [](py::tuple t) {
-                if (t.size() != 6 && t.size() != 7)
+                if (t.size() != 5 && t.size() != 6)
                     throw std::runtime_error("Invalid state!");
                 GrammarConfig c;
                 try {
-                    c.grammar_backend                         = t[0].cast<std::string>();
-                    c.constrained_json_disable_any_whitespace = t[1].cast<bool>();
-                    c.compile_timeout_ms                      = t[2].cast<int64_t>();
-                    c.num_workers                             = t[3].cast<int>();
-                    c.tokenizer_info_json                     = t[4].cast<std::string>();
-                    c.override_stop_tokens                    = t[5].cast<std::vector<int32_t>>();
-                    // t[6] was mask_wait_timeout_ms in older pickles; ignored.
+                    c.constrained_json_disable_any_whitespace = t[0].cast<bool>();
+                    c.compile_timeout_ms                      = t[1].cast<int64_t>();
+                    c.num_workers                             = t[2].cast<int>();
+                    c.tokenizer_info_json                     = t[3].cast<std::string>();
+                    c.override_stop_tokens                    = t[4].cast<std::vector<int32_t>>();
+                    if (t.size() >= 6) {
+                        c.compiler_cache_bytes = t[5].cast<int64_t>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("GrammarConfig unpickle error: ") + e.what());
-                }
-                return c;
-            }));
-
-    // Register ReasoningConfig
-    py::class_<ReasoningConfig>(m, "ReasoningConfig")
-        .def(py::init<>())
-        .def_readwrite("reasoning_parser", &ReasoningConfig::reasoning_parser)
-        .def_readwrite("think_start_id", &ReasoningConfig::think_start_id)
-        .def_readwrite("think_end_id", &ReasoningConfig::think_end_id)
-        .def("__repr__",
-             [](const ReasoningConfig& c) {
-                 std::ostringstream oss;
-                 oss << "ReasoningConfig(reasoning_parser=" << c.reasoning_parser
-                     << ", think_start_id=" << c.think_start_id
-                     << ", think_end_id=" << c.think_end_id << ")";
-                 return oss.str();
-             })
-        .def(py::pickle(
-            [](const ReasoningConfig& self) {
-                return py::make_tuple(self.reasoning_parser, self.think_start_id, self.think_end_id);
-            },
-            [](py::tuple t) {
-                if (t.size() != 3)
-                    throw std::runtime_error("Invalid state!");
-                ReasoningConfig c;
-                try {
-                    c.reasoning_parser = t[0].cast<std::string>();
-                    c.think_start_id   = t[1].cast<int64_t>();
-                    c.think_end_id     = t[2].cast<int64_t>();
-                } catch (const std::exception& e) {
-                    throw std::runtime_error(std::string("ReasoningConfig unpickle error: ") + e.what());
                 }
                 return c;
             }));
