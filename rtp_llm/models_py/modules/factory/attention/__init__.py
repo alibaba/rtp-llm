@@ -28,7 +28,20 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import (
 )
 
 device_type = get_device_type()
-if device_type == DeviceType.ROCm:
+if device_type == DeviceType.Xpu:
+    from rtp_llm.models_py.modules.factory.attention.xpu_impl.sdpa import (
+        XpuSdpaPrefillImpl,
+        XpuSdpaDecodeImpl,
+    )
+    from rtp_llm.models_py.modules.factory.attention.xpu_impl.vllm_flash_attn import (
+        XpuVllmFlashAttnPrefillImpl,
+        XpuVllmFlashAttnDecodeImpl,
+    )
+    PREFILL_MHA_IMPS.append(XpuVllmFlashAttnPrefillImpl)
+    PREFILL_MHA_IMPS.append(XpuSdpaPrefillImpl)
+    DECODE_MHA_IMPS.append(XpuVllmFlashAttnDecodeImpl)
+    DECODE_MHA_IMPS.append(XpuSdpaDecodeImpl)
+elif device_type == DeviceType.ROCm:
     # Import to register ROCm FMHA implementations
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
         AiterDecodeImplAsm,

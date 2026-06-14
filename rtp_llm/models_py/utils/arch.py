@@ -2,7 +2,7 @@ from typing import Tuple
 
 import torch
 
-from rtp_llm.device.device_type import DeviceType, get_device_type, is_cuda, is_hip
+from rtp_llm.device.device_type import DeviceType, get_device_type, is_cuda, is_hip, is_xpu
 
 
 def get_num_device_sms() -> int:

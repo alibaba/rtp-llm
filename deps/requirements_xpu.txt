@@ -1,0 +1,69 @@
+# Standalone XPU requirements — does NOT inherit requirements_base.txt.
+# Packages that are CUDA-only (bitsandbytes, cpm_kernels, pynvml, auto_gptq,
+# autoawq, tensorrt*, flash_attn, flashinfer*, deep_gemm, deep_ep, nvidia-*,
+# xfastertransformer*, decord, onnx) are deliberately excluded.
+#
+# Install with:
+#   pip install -r deps/requirements_xpu.txt \
+#       --extra-index-url https://download.pytorch.org/whl/xpu
+
+# ---------- Pin torch/torchvision to prevent CUDA upgrade ----------
+# These must already be installed from the XPU index. Pinning here stops
+# pip from pulling the generic (CUDA) torch when resolving transitive deps.
+torch==2.10.0+xpu
+torchvision==0.25.0+xpu
+
+# ---------- Server framework ----------
+fastapi>=0.115.6
+uvicorn>=0.30.0
+grpcio==1.78.0
+grpcio-tools==1.78.0
+protobuf>=4.25
+
+# ---------- Model loading ----------
+transformers==4.57.6
+safetensors>=0.7.0
+sentencepiece>=0.2.0
+tiktoken>=0.7.0
+einops
+librosa
+
+# ---------- Core utilities ----------
+numpy<2.0a0,>=1.25
+pydantic>=2.0
+requests
+jinja2
+orjson
+sympy
+psutil
+pyyaml
+filelock>=3.20.0
+setproctitle
+nest_asyncio
+typing-extensions
+importlib_metadata
+setuptools>=60.5.0
+
+# ---------- Application / API ----------
+aiohttp
+concurrent_log_handler
+dacite
+dashscope>=1.11.0
+json5
+lru-dict
+openai
+partial_json_parser
+Pillow
+pillow-avif-plugin>=1.5.2
+pillow-heif
+portalocker
+oss2
+prettytable
+timm
+
+# ---------- Misc ----------
+jieba
+sentence-transformers==2.7.0
+pybind11_stubgen
+py-spy
+thrift

@@ -1,5 +1,6 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
+#include <algorithm>
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
@@ -286,7 +287,285 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
                                int64_t(stream));
 }
 
-#else  // !USING_CUDA — ROCm platform
+#elif USING_XPU  // XPU platform — pure PyTorch sampling
+
+torch::Device getTorchDevice();
+
+GreedyOutput sampleGreedy(const GreedyParams& params) {
+    const auto batch_size        = params.logits.size(0);
+    const auto vocab_size_padded = params.logits.size(1);
+    const auto step              = params.step;
+    auto       device            = getTorchDevice();  // returns torch::kXPU
+
+    // Verify sampling parameters are on CPU (constructed by SamplerInputGatherer)
+    RTP_LLM_CHECK(params.temperature.is_cpu());
+    RTP_LLM_CHECK(params.top_k.is_cpu());
+    RTP_LLM_CHECK(params.top_p.is_cpu());
+
+    // [batch_size, step + 1] -> GPU
+    auto device_tokens     = params.token_ids.to(device);
+    auto transposed_tokens = device_tokens.transpose(0, 1).contiguous();
+
+    // 0. Unsupported feature guard
+    if (params.no_repeat_ngram_size.has_value()) {
+        const auto& nrn = params.no_repeat_ngram_size.value();
+        if (std::any_of(nrn.data_ptr<int32_t>(),
+                        nrn.data_ptr<int32_t>() + batch_size,
+                        [](int32_t s) { return s != 0; })) {
+            RTP_LLM_CHECK_WITH_INFO(false,
+                "no_repeat_ngram_size is not yet supported on XPU. "
+                "Set no_repeat_ngram_size=0 when running on Intel GPU.");
+        }
+    }
+
+    // 0.5 do_sample: match CUDA semantics — save raw logits for
+    // do_sample=false rows so they can be restored after penalties,
+    // giving those rows argmax on unmodified logits.
+    torch::Tensor saved_logits;
+    if (params.do_sample.has_value()) {
+        auto top_k_ptr = params.top_k.data_ptr<int32_t>();
+        bool any_greedy = false;
+        for (int64_t b = 0; b < batch_size; b++) {
+            if (!params.do_sample.value().data_ptr<bool>()[b]) {
+                top_k_ptr[b] = 1;
+                any_greedy = true;
+            }
+        }
+        if (any_greedy) {
+            saved_logits = params.logits.clone();
+        }
+    }
+
+    // 1. Temperature
+    if (std::any_of(params.temperature.data_ptr<float>(),
+                    params.temperature.data_ptr<float>() + batch_size,
+                    [](float t) { return t != 1.0f; })) {
+        for (int64_t b = 0; b < batch_size; b++) {
+            float t = params.temperature.data_ptr<float>()[b];
+            if (t != 1.0f && t > 0.0f) {
+                params.logits[b].div_(t);
+            }
+        }
+    }
+
+    // 1.5 Force greedy on per-row temperature==0 in mixed batches.
+    // The all-zero temperature fast path below is skipped when only some rows
+    // are 0, so mark those rows top_k=1 to make the per-row top_k filter pick
+    // the argmax token deterministically (instead of softmax/multinomial).
+    {
+        auto top_k_force = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
+        for (int64_t b = 0; b < batch_size; b++) {
+            if (params.temperature.data_ptr<float>()[b] == 0.0f) {
+                top_k_force[b] = 1;
+            }
+        }
+    }
+
+    // 2. Repetition / presence / frequency penalty
+    // Uses vectorized PyTorch ops to avoid slow element-wise CPU access on device tensors.
+    if (params.repetition_penalty.has_value()) {
+        TORCH_CHECK(params.presence_penalty.has_value() && params.frequency_penalty.has_value(),
+            "XPU sampling: repetition_penalty is set but presence_penalty and/or "
+            "frequency_penalty are missing. All three must be provided together.");
+        const auto& rep_pen  = params.repetition_penalty.value();
+        const auto& pres_pen = params.presence_penalty.value();
+        const auto& freq_pen = params.frequency_penalty.value();
+        for (int64_t b = 0; b < batch_size; b++) {
+            float rp = rep_pen.data_ptr<float>()[b];
+            float pp = pres_pen.data_ptr<float>()[b];
+            float fp = freq_pen.data_ptr<float>()[b];
+            if (rp == 1.0f && pp == 0.0f && fp == 0.0f) continue;
+            auto row = params.logits[b];
+            // Use per-row actual length: decode rows use sequence_lengths,
+            // context rows use input_lengths, to avoid reading padding tokens.
+            const auto decoder_batch_size = params.sequence_lengths.size(0);
+            int actual_len;
+            if (b < decoder_batch_size) {
+                actual_len = params.sequence_lengths.data_ptr<int32_t>()[b];
+            } else {
+                actual_len = params.input_lengths.data_ptr<int32_t>()[b];
+            }
+            actual_len = std::min(actual_len, (int)step);
+            if (actual_len <= 0) continue;
+            auto past_tokens = transposed_tokens.slice(0, 0, actual_len).select(1, b);
+
+            // Build frequency histogram on-device: freq_count[token_id] = count
+            // This replaces the O(step * unique_tokens) CPU-side nested loop.
+            auto freq_count = torch::zeros({vocab_size_padded},
+                                           past_tokens.options().dtype(torch::kFloat));
+            freq_count.scatter_add_(0, past_tokens.to(torch::kLong),
+                                    torch::ones({past_tokens.size(0)},
+                                                torch::TensorOptions().dtype(torch::kFloat)
+                                                    .device(past_tokens.device())));
+            auto appeared = freq_count > 0;  // mask of tokens that appeared
+
+            // Apply repetition penalty: score = score/rp if score>0, score*rp if score<0
+            if (rp != 1.0f) {
+                auto pos_mask = (row > 0) & appeared;
+                auto neg_mask = (row < 0) & appeared;
+                // Divide positive scores by rp, multiply negative scores by rp
+                auto adjusted = torch::where(pos_mask, row / rp,
+                                torch::where(neg_mask, row * rp, row));
+                row.copy_(adjusted);
+            }
+            // Apply presence penalty: subtract pp for every appeared token
+            if (pp != 0.0f) {
+                row.sub_(pp * appeared.to(torch::kFloat));
+            }
+            // Apply frequency penalty: subtract fp*count for every token
+            if (fp != 0.0f) {
+                row.sub_(fp * freq_count);
+            }
+        }
+    }
+
+    // 2.5 Restore raw logits for do_sample=false rows (after penalties).
+    if (saved_logits.defined() && params.do_sample.has_value()) {
+        for (int64_t b = 0; b < batch_size; b++) {
+            if (!params.do_sample.value().data_ptr<bool>()[b]) {
+                params.logits[b].copy_(saved_logits[b]);
+            }
+        }
+        saved_logits.reset();
+    }
+
+    // 2.6 Temperature==0 fast path (greedy argmax)
+    // When temperature is 0, the intent is greedy decoding.
+    // Skip the expensive softmax→multinomial path and use argmax directly.
+    if (std::all_of(params.temperature.data_ptr<float>(),
+                    params.temperature.data_ptr<float>() + batch_size,
+                    [](float t) { return t == 0.0f; })
+        && !params.output_all_probs.has_value()) {
+        auto samples_t = transposed_tokens.slice(0, step, step + 1).squeeze(0);
+        auto selected  = torch::argmax(params.logits, -1, false);
+        samples_t.copy_(selected);
+        if (params.cum_log_probs.has_value()) {
+            auto probs = torch::softmax(params.logits, -1);
+            auto token_prob = probs.gather(1, selected.unsqueeze(-1).to(torch::kLong)).squeeze(1);
+            auto cum_log_probs_t = params.cum_log_probs.value();
+            cum_log_probs_t.add_(token_prob.log().to(cum_log_probs_t.device()));
+        }
+        params.token_ids.copy_(transposed_tokens.transpose(0, 1).contiguous());
+        return GreedyOutput{};
+    }
+
+    // 3. Top-k=1 fast path (greedy argmax)
+    auto top_k_ptr = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
+    if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [](uint32_t t) { return t == 1; })
+        && !params.output_all_probs.has_value()) {
+        auto samples_t      = transposed_tokens.slice(0, step, step + 1).squeeze(0);
+        auto selected       = torch::argmax(params.logits, -1, false);
+        samples_t.copy_(selected);
+        if (params.cum_log_probs.has_value()) {
+            auto probs       = torch::softmax(params.logits, -1);
+            auto token_prob  = probs.gather(1, selected.unsqueeze(-1).to(torch::kLong)).squeeze(1);
+            auto cum_log_probs_t = params.cum_log_probs.value();
+            cum_log_probs_t.add_(token_prob.log().to(cum_log_probs_t.device()));
+        }
+        params.token_ids.copy_(transposed_tokens.transpose(0, 1).contiguous());
+        return GreedyOutput{};
+    }
+
+    // 4. Softmax -> probabilities
+    auto probs_t = torch::softmax(params.logits, -1);
+    params.logits.copy_(probs_t);
+
+    // 5. Apply top_k filtering
+    // Clone so in-place top_k/top_p filtering below does not mutate probs_t,
+    // which must remain the original (pre-filter) softmax source for
+    // return_original_all_probs and cum_log_probs.
+    auto filtered_probs = probs_t.clone();
+    bool has_top_k = !std::all_of(top_k_ptr, top_k_ptr + batch_size, [](uint32_t t) { return t <= 0; });
+    if (has_top_k) {
+        for (int64_t b = 0; b < batch_size; b++) {
+            int64_t k = top_k_ptr[b] <= 0 ? vocab_size_padded : (int64_t)top_k_ptr[b];
+            // Clamp k into [1, vocab_size_padded] so an out-of-range top_k can
+            // never trigger an out-of-bounds topk() call.
+            if (k < 1) k = 1;
+            if (k > vocab_size_padded) k = vocab_size_padded;
+            if (k < vocab_size_padded) {
+                auto row                    = filtered_probs[b];
+                auto [topk_vals, topk_inds] = row.topk(k);
+                auto min_val                = topk_vals[-1];
+                row.masked_fill_(row < min_val, 0.0f);
+            }
+        }
+    }
+
+    // 6. Apply top_p filtering
+    auto top_p_ptr = params.top_p.data_ptr<float>();
+    std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [](float t) { return std::abs(t) < 1e-7f ? 1.0f : t; });
+    bool has_top_p = !std::all_of(top_p_ptr, top_p_ptr + batch_size, [](float t) { return std::abs(t - 1.0f) < 1e-7f; });
+    if (has_top_p) {
+        for (int64_t b = 0; b < batch_size; b++) {
+            float p = top_p_ptr[b];
+            if (std::abs(p - 1.0f) >= 1e-7f) {
+                auto row                            = filtered_probs[b];
+                auto [sorted_probs, sorted_indices] = row.sort(/*dim=*/0, /*descending=*/true);
+                auto cumsum                         = sorted_probs.cumsum(0);
+                auto mask                           = cumsum - sorted_probs > p;
+                sorted_probs.masked_fill_(mask, 0.0f);
+                row.scatter_(0, sorted_indices, sorted_probs);
+            }
+        }
+    }
+
+    // 7. Re-normalize and sample
+    auto row_sums  = filtered_probs.sum(-1, true);
+    filtered_probs = filtered_probs / row_sums.clamp_min(1e-10f);
+    auto selected  = torch::multinomial(filtered_probs, 1, false).squeeze(-1);
+
+    // Use per-request generators when available (respects request-level random seeds)
+    for (int64_t b = 0; b < batch_size; b++) {
+        if (params.generator[b].defined()) {
+            // selected[b] = ... does NOT write back in-place in C++ libtorch;
+            // use select(0,b).copy_() to update the underlying storage.
+            auto sampled = torch::multinomial(
+                filtered_probs[b].unsqueeze(0), 1, false, params.generator[b]).squeeze();
+            selected.select(0, b).copy_(sampled);
+        }
+    }
+
+    auto samples_t = transposed_tokens.slice(0, step, step + 1).squeeze(0);
+    samples_t.copy_(selected);
+
+    bool need_output_all_probs = params.output_all_probs.has_value();
+    if (need_output_all_probs) {
+        if (params.return_original_all_probs) {
+            // Write pre-filter softmax probabilities (before top_k/top_p filtering)
+            params.output_all_probs.value().copy_(probs_t);
+        } else {
+            params.output_all_probs.value().copy_(filtered_probs);
+        }
+    }
+
+    // 8. Update cum_log_probs
+    if (params.cum_log_probs.has_value()) {
+        // Use the same probability source as output_all_probs for consistency
+        auto& prob_source = (params.return_original_all_probs) ? probs_t : filtered_probs;
+        auto token_prob = prob_source.gather(1, selected.unsqueeze(-1).to(torch::kLong)).squeeze(1);
+        auto cum_log_probs_t = params.cum_log_probs.value();
+        cum_log_probs_t.add_(token_prob.log().to(cum_log_probs_t.device()));
+    }
+
+    // 9. Copy back
+    params.token_ids.copy_(transposed_tokens.transpose(0, 1).contiguous());
+    return GreedyOutput{};
+}
+
+// XPU: Speculative (draft-model) sampling is not supported.
+// This requires chain_speculative_sampling kernel which performs rejection sampling
+// between draft and target model probabilities. A pure PyTorch implementation would
+// need: (1) compute acceptance probability min(1, target_prob/draft_prob),
+// (2) accept/reject each drafted token, (3) resample rejected positions.
+// TODO(xpu): Implement PyTorch fallback when speculative decoding is needed on XPU.
+void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
+    RTP_LLM_CHECK_WITH_INFO(false,
+        "Speculative sampling is not supported on XPU. "
+        "Disable speculative decoding (draft model) when running on Intel GPU.");
+}
+
+#else  // ROCm platform (fallback)
 
 }  // namespace rtp_llm — temporarily close for includes
 
@@ -537,6 +816,6 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
                                  int64_t(stream));
 }
 
-#endif  // USING_CUDA
+#endif  // USING_CUDA / USING_XPU / USING_ROCM
 
 }  // namespace rtp_llm

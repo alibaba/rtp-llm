@@ -89,7 +89,7 @@ class AutoModel:
             enable_comm_overlap=engine_config.device_resource_config.enable_comm_overlap,
             mla_ops_type=int(model_config.mla_ops_type),
         )
-        self.device = "cuda"
+        self.device = "xpu" if (hasattr(torch, "xpu") and torch.xpu.is_available()) else "cuda"
 
         # init kv cache and bind it to py model
         self.tokens_per_block = self.model_config.attn_config.tokens_per_block
@@ -140,13 +140,19 @@ class AutoModel:
             CacheGroupType.FULL for _ in range(self.layer_num)
         ]
 
-        per_layer_shape = [
-            self.block_nums,
-            2,
-            self.kv_head_num,
-            self.tokens_per_block,
-            self.size_per_head,
-        ]
+        # KV cache layout differs by device:
+        #   CUDA/ROCm: [num_blocks, 2, kv_heads, tokens_per_block, head_dim]
+        #   XPU:       [num_blocks, 2, tokens_per_block, kv_heads, head_dim]
+        if str(self.device).startswith("xpu"):
+            per_layer_shape = [
+                self.block_nums, 2,
+                self.tokens_per_block, self.kv_head_num, self.size_per_head,
+            ]
+        else:
+            per_layer_shape = [
+                self.block_nums, 2,
+                self.kv_head_num, self.tokens_per_block, self.size_per_head,
+            ]
         self.kv_cache.kv_cache_base_by_layer = [
             torch.zeros(per_layer_shape, dtype=self.compute_dtype, device=self.device)
             for _ in range(self.layer_num)
@@ -202,7 +208,9 @@ class AutoModel:
         # sequence_lengths is index, so minus 1
         attention_inputs.sequence_lengths = torch.tensor(
             [sequence_length - 1], dtype=torch.int32
-        ).pin_memory()
+        )
+        if self.device == "cuda":
+            attention_inputs.sequence_lengths = attention_inputs.sequence_lengths.pin_memory()
         attention_inputs.kv_cache_block_id_device = torch.tensor(
             [[i for i in range(1, need_block_nums + 1)]],
             dtype=torch.int32,
