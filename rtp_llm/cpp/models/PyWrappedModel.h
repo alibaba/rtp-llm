@@ -178,7 +178,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py_model_                 = py_instance;
     auto py_initialize_method = py_model_.attr("initialize");
     py_init_result            = py_initialize_method(init_resources);
-    if (enable_cuda_graph_) {
+    if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value() && !is_prefill_cuda_graph_mode) {
+        RTP_LLM_LOG_WARNING(
+            "CUDA graph enabled but kv_cache_layer_layout not available (warmup?), skipping graph capture");
+        enable_cuda_graph_ = false;
+    } else if (enable_cuda_graph_) {
 #if USING_CUDA || USING_ROCM
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
 
@@ -201,10 +205,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // >0 = factor (Mrope models such as qwen3-vl / qwen35-moe set rope_config.style
         // = Mrope and rope_config.index_factor accordingly). No Python reflection — the
         // rope style is intrinsic to the model description and already populated here.
-        graph_params.position_id_len_factor =
-            (description_.attention_conf.rope_config.style == RopeStyle::Mrope)
-                ? description_.attention_conf.rope_config.index_factor
-                : 0;
+        graph_params.position_id_len_factor = (description_.attention_conf.rope_config.style == RopeStyle::Mrope) ?
+                                                  description_.attention_conf.rope_config.index_factor :
+                                                  0;
 
         if (kv_cache_layer_to_group.size() > 0) {
             graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;
