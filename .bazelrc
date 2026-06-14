@@ -65,7 +65,8 @@ build:sm8x --action_env TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.6,8.9"
 build:sm8x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.6,8.9"
 build:sm9x --action_env TF_CUDA_COMPUTE_CAPABILITIES="9.0"
 build:sm9x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="9.0"
-build:sm10x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="10.0"
+build:sm10x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="10.0,10.3"
+build:sm10x --host_action_env  TF_CUDA_COMPUTE_CAPABILITIES="10.0,10.3"
 build:cuda12 --action_env TF_CUDA_VERSION="12.4"
 build:cuda12 --host_action_env TF_CUDA_VERSION="12.4"
 build:cuda12 --define=using_cuda12=true
@@ -141,6 +142,8 @@ build:cuda13_arm --host_copt=-Wno-missing-field-initializers
 # can swap in CUDA-13-specific deps (cutlass_cu13, flashinfer_cpp_cu13)
 # without being tied to the ARM path's using_cuda13_arm.
 build:cuda13 --config=cuda13_base
+build:cuda13 --action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+build:cuda13 --host_action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 # Same -Wno-* set as cuda13_arm — gcc 10 (al8) on the CUDA 13 toolchain is
 # strict enough to flag warnings in third-party code (grpc tcp_posix.cc:
 # `(flag & MSG_CTRUNC) == 1` triggers -Werror=tautological-compare; etc.).

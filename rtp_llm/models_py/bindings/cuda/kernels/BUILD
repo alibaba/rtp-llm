@@ -6,6 +6,7 @@ package(default_visibility = ["//rtp_llm:__subpackages__"])
 sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '--cuda-include-ptx=sm_100', '--cuda-gpu-arch=sm_100',
     '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
+    '--cuda-include-ptx=sm_103a', '--cuda-gpu-arch=sm_103a',
 ]
 
 cuda_deps = [

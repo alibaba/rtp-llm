@@ -963,6 +963,10 @@ class Glm5Mtp(DeepSeekV2):
         config.num_layers = num_mtp_layers
         config.moe_layer_index = [i for i in range(config.num_layers)]
         config.is_mtp = True
+        # GLM-5.2 target keeps its DSA index sharing from config.json, but the
+        # MTP draft model must compute top-k indices independently on every
+        # speculative step.
+        config.index_share_for_mtp_iteration = False
         # Keep DSA enabled on the MTP layer to match HF ckpt (layer 78 ships
         # indexer weights) and to match sglang/vllm (both build the indexer
         # gated on ``hasattr(config, "index_topk")`` / ``is_deepseek_dsa(config)``
