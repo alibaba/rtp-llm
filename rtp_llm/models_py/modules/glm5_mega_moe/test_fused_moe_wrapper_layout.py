@@ -23,6 +23,9 @@ class _FakeMegaMoE:
     def setup_weights_from_fp4(self, **kwargs):
         self.fp4_kwargs = kwargs
 
+    def setup_weights_from_fp8(self, **kwargs):
+        self.fp8_kwargs = kwargs
+
     def setup_shared_expert_from_fp4(self, **kwargs):
         self.shared_fp4_kwargs = kwargs
 
@@ -61,22 +64,33 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
                     config, _parallelism(), weights, moe_config=None, layer_idx=0
                 )
 
-    def test_fp8_stacked_moe_w1_is_rejected(self):
+    def test_fp8_stacked_moe_w1_reorders_up_gate_for_deepgemm(self):
         config = _config(hidden_size=8, inter=4)
-        w1 = torch.zeros((2, 8, 8), dtype=torch.float32).to(torch.float8_e4m3fn)
+        up_w = torch.full((2, 4, 8), 3, dtype=torch.float32).to(torch.float8_e4m3fn)
+        gate_w = torch.full((2, 4, 8), 7, dtype=torch.float32).to(torch.float8_e4m3fn)
+        up_s = torch.full((2, 4, 1), 5, dtype=torch.float32)
+        gate_s = torch.full((2, 4, 1), 11, dtype=torch.float32)
         w2 = torch.zeros((2, 8, 4), dtype=torch.float32).to(torch.float8_e4m3fn)
+        s2 = torch.ones((2, 8, 1), dtype=torch.float32)
         weights = {
-            W.moe_w1: w1,
-            W.moe_s1: torch.ones((2, 8, 1), dtype=torch.float32),
+            W.moe_w1: torch.cat([up_w, gate_w], dim=1),
+            W.moe_s1: torch.cat([up_s, gate_s], dim=1),
             W.moe_w2: w2,
-            W.moe_s2: torch.ones((2, 8, 1), dtype=torch.float32),
+            W.moe_s2: s2,
         }
 
         with patch.object(mega_moe_wrapper, "GLM5MegaMoE", _FakeMegaMoE):
-            with self.assertRaisesRegex(ValueError, "load-time FP4 int8"):
-                mega_moe_wrapper.MegaMoeWrapper(
-                    config, _parallelism(), weights, moe_config=None, layer_idx=0
-                )
+            mega_moe_wrapper.MegaMoeWrapper(
+                config, _parallelism(), weights, moe_config=None, layer_idx=0
+            )
+
+        captured = _FakeMegaMoE.instance.fp8_kwargs
+        torch.testing.assert_close(captured["w1_fp8"], gate_w)
+        torch.testing.assert_close(captured["w1_scale"], gate_s)
+        torch.testing.assert_close(captured["w2_fp8"], w2)
+        torch.testing.assert_close(captured["w2_scale"], s2)
+        torch.testing.assert_close(captured["w3_fp8"], up_w)
+        torch.testing.assert_close(captured["w3_scale"], up_s)
 
     def test_fp4_stacked_moe_w1_reorders_up_gate_for_deepgemm(self):
         config = _config(hidden_size=8, inter=4)

@@ -175,6 +175,7 @@ class GenericMoeMTPModel(GptModelBase):
             self._write_mtp_debug_buffer("fc_hidden", hidden_states)
 
         residual = torch.zeros_like(hidden_states)
+        prev_topk_indices = None
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)
             output = decoder_layer(
@@ -182,9 +183,11 @@ class GenericMoeMTPModel(GptModelBase):
                 residual,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                prev_topk_indices=prev_topk_indices,
             )
             hidden_states = output.hidden_states
             residual = output.residual
+            prev_topk_indices = output.topk_indices
             if mtp_debug_enabled and i == 0:
                 self._write_mtp_debug_buffer("layer0_hidden", hidden_states)
                 self._write_mtp_debug_buffer("layer0_residual", residual)

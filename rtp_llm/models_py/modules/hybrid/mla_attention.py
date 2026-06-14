@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -46,6 +46,8 @@ class MlaAttention(nn.Module):
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
         global_weights: Optional[Dict[str, torch.Tensor]] = None,
+        has_indexer: Optional[bool] = None,
+        reuse_topk_indices: bool = False,
     ):
         super().__init__()
         self.attn_config = attn_config
@@ -62,8 +64,12 @@ class MlaAttention(nn.Module):
         self.softmax_scale = self.q_head_dim ** (-0.5)
         self.layer_idx = layer_idx
         self.token_per_block = attn_config.kernel_tokens_per_block
+        self.has_indexer = (
+            bool(attn_config.is_sparse) if has_indexer is None else has_indexer
+        )
+        self.reuse_topk_indices = bool(reuse_topk_indices)
 
-        if attn_config.is_sparse:
+        if self.has_indexer:
             self.indexer = Indexer(
                 attn_config,
                 weights,
@@ -169,7 +175,18 @@ class MlaAttention(nn.Module):
         x_scale: Optional[torch.Tensor] = None,
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
+        prev_topk_indices: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
+        if self.reuse_topk_indices:
+            if not fmha_impl.is_sparse():
+                return None
+            if prev_topk_indices is None:
+                raise RuntimeError(
+                    f"DSA shared layer {self.layer_idx} needs previous top-k "
+                    "indices, but none were provided"
+                )
+            return prev_topk_indices
+
         if self.indexer is None:
             return None
         q_for_indexer = q_c if self.q_lora_rank > 0 else q_view
@@ -194,7 +211,9 @@ class MlaAttention(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         x_fp8: Optional[torch.Tensor] = None,
         x_scale: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        prev_topk_indices: Optional[torch.Tensor] = None,
+        return_topk: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
         q_c = None
         q_c_fp8 = None
@@ -277,6 +296,7 @@ class MlaAttention(nn.Module):
             x_scale,
             q_c_fp8,
             q_c_scale,
+            prev_topk_indices,
         )
         attn_output = fmha_impl.forward(
             q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
@@ -293,4 +313,6 @@ class MlaAttention(nn.Module):
         attn_output = self.o_proj(attn_output)
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
+        if return_topk:
+            return attn_output, topk_indices
         return attn_output

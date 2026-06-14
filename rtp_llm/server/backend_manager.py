@@ -51,9 +51,11 @@ class BackendManager(object):
             self.py_env_configs,
             nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
         )
+        if engine_config.moe_config.moe_strategy:
+            os.environ["MOE_STRATEGY"] = engine_config.moe_config.moe_strategy
 
         need_dist = engine_config.parallelism_config.world_size > 1
-        if not need_dist and os.environ.get("MOE_STRATEGY") in (
+        if not need_dist and engine_config.moe_config.moe_strategy in (
             "mega_moe",
             "mega_moe_fused",
         ):
