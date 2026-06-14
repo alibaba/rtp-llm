@@ -557,6 +557,11 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     ll_num_max_token = py_env_configs.concurrency_config.concurrency_limit
     sp_type = py_env_configs.sp_config.type  # Get SpeculativeType enum value
     if py_env_configs.sp_config.type != SpeculativeType.NONE:
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            raise ValueError(
+                "Speculative decoding is not supported on XPU. "
+                "Disable speculative decoding (sp_config.type = NONE) "
+                "when running on Intel GPU.")
         ll_num_max_token *= py_env_configs.sp_config.gen_num_per_cycle + 1
 
     auto_configure_deepep(
