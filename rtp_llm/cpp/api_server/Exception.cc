@@ -15,6 +15,8 @@ HttpApiServerException::Type transErrorCodeToHttpExceptionType(ErrorCode code) {
         case ErrorCode::WAIT_TO_RUN_TIMEOUT:
         case ErrorCode::LOAD_CACHE_TIMEOUT:
             return HttpApiServerException::GENERATE_TIMEOUT_ERROR;
+        case ErrorCode::CANCELLED:
+            return HttpApiServerException::CANCELLED_ERROR;
         case ErrorCode::GET_HOST_FAILED:
             return HttpApiServerException::GET_HOST_ERROR;
         case ErrorCode::GET_CONNECTION_FAILED:

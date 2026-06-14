@@ -456,6 +456,56 @@ TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_ResourceAlreadyInStore_Remov
     EXPECT_EQ(entry, nullptr);
 }
 
+// Regression: if decode cancels after prefill has already published the resource,
+// we still need a tombstone so a late StartLoad/side-channel notify is ignored.
+TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_ResourceAlreadyInStore_LeavesTombstoneForLateSideChannel) {
+    const std::string unique_key  = "test_cancel_existing_late_notify";
+    const int64_t     request_id  = 3005;
+    const int64_t     deadline_ms = getDeadlineMs(5000);
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+
+    stream_store_->markCancelled(unique_key);
+    EXPECT_TRUE(stream_store_->isMarkedCancelled(unique_key));
+
+    P2PConnectorResourceEntry::SideChannelData side_data;
+    side_data.has_first_token = true;
+    side_data.first_token_id  = 123;
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
+
+    P2PConnectorResourceEntry::SideChannelData consumed_data;
+    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+}
+
+TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_ClearsExistingSideChannelAndBlocksRewrite) {
+    const std::string unique_key  = "test_cancel_clears_existing_side_channel";
+    const int64_t     request_id  = 3006;
+    const int64_t     deadline_ms = getDeadlineMs(5000);
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+
+    P2PConnectorResourceEntry::SideChannelData initial_side_data;
+    initial_side_data.has_first_token = true;
+    initial_side_data.first_token_id  = 321;
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, initial_side_data);
+
+    stream_store_->markCancelled(unique_key);
+    EXPECT_TRUE(stream_store_->isMarkedCancelled(unique_key));
+
+    P2PConnectorResourceEntry::SideChannelData consumed_data;
+    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+
+    P2PConnectorResourceEntry::SideChannelData late_side_data;
+    late_side_data.has_first_token = true;
+    late_side_data.first_token_id  = 654;
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, late_side_data);
+    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+}
+
 // markCancelled before resource arrives → addResource rejects the resource on arrival
 TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_ResourceNotYetInStore_RejectsSubsequentAdd) {
     const std::string unique_key  = "test_cancel_before_add";
@@ -494,8 +544,9 @@ TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_DoesNotAffectOtherKeys) {
     EXPECT_EQ(entry->request_id, request_id);
 }
 
-// After markCancelled rejects addResource(), the cancel record is consumed and the key can be reused
-TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_CancelRecordConsumedAfterRejection) {
+// After markCancelled rejects addResource(), the tombstone must remain so late notify/add
+// for the same cancelled request cannot revive the key before TTL expiry.
+TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_RejectedAddKeepsTombstoneAndBlocksLateNotify) {
     const std::string unique_key  = "test_cancel_record_consumed";
     const int64_t     request_id  = 3004;
     const int64_t     deadline_ms = getDeadlineMs(5000);
@@ -504,13 +555,16 @@ TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_CancelRecordConsumedAfterRej
 
     stream_store_->markCancelled(unique_key);
 
-    // First add is rejected (consumes the cancel record)
     EXPECT_FALSE(stream_store_->addResource(meta, resource));
+    EXPECT_TRUE(stream_store_->isMarkedCancelled(unique_key));
 
-    // Second add for the same key (e.g. a new request with the same key) succeeds
-    ASSERT_TRUE(stream_store_->addResource(meta, resource));
-    auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 200);
-    ASSERT_NE(entry, nullptr);
+    P2PConnectorResourceEntry::SideChannelData late_side_data;
+    late_side_data.has_first_token = true;
+    late_side_data.first_token_id  = 777;
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, late_side_data);
+
+    P2PConnectorResourceEntry::SideChannelData consumed_data;
+    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
 }
 
 // ==================== Hold-ms Deadline Tests ====================
@@ -647,6 +701,35 @@ TEST_F(P2PConnectorResourceStoreHoldMsTest, TombstoneCleanedUpAfterTTL) {
     EXPECT_FALSE(short_ttl_store->isMarkedCancelled(unique_key));
 }
 
+TEST_F(P2PConnectorResourceStoreHoldMsTest, RejectedAddCanReuseKeyAfterTombstoneTtlExpires) {
+    const std::string unique_key  = "hold_ms_reuse_after_ttl";
+    const int64_t     request_id  = 4006;
+
+    auto short_ttl_store = std::make_unique<P2PConnectorResourceStore>(
+        nullptr, /*timeout_check_interval_ms=*/50, /*prefill_resource_hold_ms=*/50, /*cancelled_keys_ttl_ms=*/200);
+    ASSERT_TRUE(short_ttl_store->init());
+
+    auto short_meta = std::make_shared<MockMeta>();
+    short_meta->setUniqueKey(unique_key);
+    short_meta->setRequestId(request_id);
+    short_meta->setDeadlineMs(currentTimeMs() + 5000);
+    short_meta->setPrefillAddr("127.0.0.1", 12345);
+    short_meta->setPrefillTpSize(1);
+
+    auto resource = createMockKVCacheResource();
+    short_ttl_store->markCancelled(unique_key);
+    EXPECT_FALSE(short_ttl_store->addResource(short_meta, resource));
+    EXPECT_TRUE(short_ttl_store->isMarkedCancelled(unique_key));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_FALSE(short_ttl_store->isMarkedCancelled(unique_key));
+
+    ASSERT_TRUE(short_ttl_store->addResource(short_meta, resource));
+    auto entry = short_ttl_store->waitAndStealResource(unique_key, currentTimeMs() + 200);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->request_id, request_id);
+}
+
 // Resource that is stolen before hold_ms expires does NOT create a tombstone
 TEST_F(P2PConnectorResourceStoreHoldMsTest, StolenBeforeExpiry_NoTombstone) {
     const std::string unique_key  = "hold_ms_stolen_early";
@@ -749,6 +832,24 @@ TEST_F(P2PConnectorResourceStoreHoldMsTest, ResourceExpiry_AlsoCleansSideChannel
 
     // Side-channel data should also be cleaned up
     P2PConnectorResourceEntry::SideChannelData consumed_data;
+    EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+}
+
+TEST_F(P2PConnectorResourceStoreHoldMsTest, SideChannelWithoutEntryIsClampedToHoldWindow) {
+    const std::string unique_key  = "hold_ms_side_channel_without_entry";
+    const int64_t     deadline_ms = getDeadlineMs(3600000);
+
+    P2PConnectorResourceEntry::SideChannelData side_data;
+    side_data.has_first_token = true;
+    side_data.first_token_id  = 909;
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
+
+    P2PConnectorResourceEntry::SideChannelData consumed_data;
+    ASSERT_TRUE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
+    EXPECT_EQ(consumed_data.first_token_id, 909);
+
+    stream_store_->notifySideChannelReady(unique_key, deadline_ms, side_data);
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
     EXPECT_FALSE(stream_store_->consumeSideChannelData(unique_key, consumed_data));
 }
 

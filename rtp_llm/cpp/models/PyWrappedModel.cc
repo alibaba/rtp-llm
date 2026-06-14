@@ -26,6 +26,45 @@ using namespace std;
 
 namespace rtp_llm {
 
+namespace {
+
+class CacheStoreAsyncWriterGuard {
+public:
+    explicit CacheStoreAsyncWriterGuard(CacheStoreAsyncWriter* writer): writer_(writer) {
+        if (writer_) {
+            writer_->init();
+        }
+    }
+
+    ~CacheStoreAsyncWriterGuard() {
+        if (!writer_ || finished_) {
+            return;
+        }
+        try {
+            finished_ = true;
+            writer_->waitAllDone();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("CacheStoreAsyncWriterGuard cleanup failed during exception unwind: %s", e.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("CacheStoreAsyncWriterGuard cleanup failed during exception unwind: unknown exception");
+        }
+    }
+
+    void waitAllDone() {
+        if (!writer_ || finished_) {
+            return;
+        }
+        finished_ = true;
+        writer_->waitAllDone();
+    }
+
+private:
+    CacheStoreAsyncWriter* writer_   = nullptr;
+    bool                   finished_ = false;
+};
+
+}  // namespace
+
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
     if (tensor.device().is_cuda()) {
         return tensor;
@@ -96,7 +135,9 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     }
 
     if (inputs.combo_position_ids.defined()) {
-        py_attn_inputs.combo_position_ids = tensorHoldHostAndToCuda(inputs.combo_position_ids);
+        auto position_ids                = tensorHoldHostAndToCuda(inputs.combo_position_ids);
+        py_attn_inputs.combo_position_ids = position_ids;
+        py_attn_inputs.position_ids       = position_ids;
     }
 
     // Calculate cu_seqlens
@@ -319,6 +360,9 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     if (pinned_check_remaining_ > 0) {
         --pinned_check_remaining_;
     }
+    const bool                 use_async_cache_store_writer = !inputs.warmup && inputs.pd_separation;
+    CacheStoreAsyncWriterGuard cache_store_writer_guard(
+        use_async_cache_store_writer ? cache_store_async_writer_.get() : nullptr);
 
     {
         py::gil_scoped_acquire gil;
@@ -341,7 +385,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         auto embedding_inputs      = buildPyEmbeddingInputs(micro_inputs);
         auto multimodal_inputs     = buildPyMultimodalInputs(micro_inputs);
         auto bert_embedding_inputs = buildBertEmbeddingInputs(micro_inputs);
-        if (!inputs.warmup && inputs.pd_separation) {
+        if (use_async_cache_store_writer) {
             py_attn_inputs.cache_store_inputs = prepareWriteCacheParams(micro_inputs);
         }
         torch::Tensor combo_position_ids = micro_inputs.combo_position_ids.defined() ?
@@ -364,10 +408,6 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                               bert_embedding_inputs});
     }
 
-    if (!inputs.warmup && inputs.pd_separation) {
-        cache_store_async_writer_->init();
-    }
-
     fusedCopy(d2d_copies_);
 
     std::vector<PyModelOutputs> py_model_outputs;
@@ -383,9 +423,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                             py_model_outputs.size(),
                             input_list.size());
 
-    if (!inputs.warmup && inputs.pd_separation) {
-        cache_store_async_writer_->waitAllDone();
-    }
+    cache_store_writer_guard.waitAllDone();
 
     // TODO: merge hidden states in one tensor
     torch::Tensor hidden_states;
@@ -494,10 +532,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (device_props_.enable_prefill_cp) {
             attention_inputs.context_parallel_info = cp_params;
         }
+        const bool                 use_async_cache_store_writer = !inputs.warmup && inputs.pd_separation;
+        CacheStoreAsyncWriterGuard cache_store_writer_guard(
+            use_async_cache_store_writer ? cache_store_async_writer_.get() : nullptr);
 
-        if (!inputs.warmup && inputs.pd_separation) {
+        if (use_async_cache_store_writer) {
             attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
-            cache_store_async_writer_->init();
         }
         setupKVCacheForAttentionInputs(attention_inputs, inputs);
 
@@ -546,9 +586,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             hidden_states         = py_model_outputs.hidden_states.clone();
         }
 
-        if (!inputs.warmup && inputs.pd_separation) {
-            cache_store_async_writer_->waitAllDone();
-        }
+        cache_store_writer_guard.waitAllDone();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
         if (device_props_.enable_prefill_cp) {

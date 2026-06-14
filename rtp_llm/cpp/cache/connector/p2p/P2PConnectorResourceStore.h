@@ -109,6 +109,7 @@ private:
                                                                              std::chrono::system_clock::time_point timeout_tp,
                                                                              const std::function<bool()>&          is_cancelled);
     std::shared_ptr<P2PConnectorResourceEntry> stealResourceEntryLocked(const std::string& unique_key);
+    // Requires side_channel_map_mutex_.
     void                                       clearSideChannelDataLocked(const std::string& unique_key);
 
 private:

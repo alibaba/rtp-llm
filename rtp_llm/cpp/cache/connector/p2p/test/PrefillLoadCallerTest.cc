@@ -191,6 +191,25 @@ TEST_F(PrefillLoadCallerTest, Load_ParsesLegacyStartLoadResponse) {
     EXPECT_EQ(result->side_channel_payload.propose_hidden.shape_size(), 2);
 }
 
+TEST_F(PrefillLoadCallerTest, Load_ParsesStructuredPayloadWhenFirstTokenIsZero) {
+    server_->service()->setFirstGenerateTokenId(0);
+
+    std::string unique_key   = "test_load_structured_zero_token";
+    int64_t     request_id   = 1008;
+    int64_t     deadline_ms  = currentTimeMs() + 5000;
+    std::string prefill_ip   = "127.0.0.1";
+    uint32_t    prefill_port = static_cast<uint32_t>(server_->listenPort());
+
+    auto result = client_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, nullptr);
+    ASSERT_NE(result, nullptr);
+
+    bool success = waitDone(result);
+    EXPECT_TRUE(success);
+    EXPECT_TRUE(result->side_channel_payload.has_data);
+    EXPECT_TRUE(result->side_channel_payload.has_first_token);
+    EXPECT_EQ(result->side_channel_payload.first_token_id, 0);
+}
+
 TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_RpcStatusFailed) {
     // 设置服务器返回 RPC 错误状态
     server_->service()->setRpcResponseStatus(::grpc::Status(grpc::StatusCode::INTERNAL, "Internal error"));

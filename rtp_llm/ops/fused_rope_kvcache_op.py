@@ -17,6 +17,13 @@ from libth_transformer_config import (
 )
 
 
+def _get_attention_position_ids(attn_inputs: PyAttentionInputs) -> Optional[torch.Tensor]:
+    position_ids = getattr(attn_inputs, "position_ids", None)
+    if position_ids is not None and position_ids.numel() > 0:
+        return position_ids
+    return attn_inputs.combo_position_ids
+
+
 @dataclass
 class FusedRopeAttnParams:
     kv_cache_offset: Optional[torch.Tensor]
@@ -51,7 +58,7 @@ class FusedRopeKVCachePrefillOpBase:
             kv_cache_offset = None
         kv_cache_offset_h = None # not used
 
-        position_ids = attn_inputs.combo_position_ids
+        position_ids = _get_attention_position_ids(attn_inputs)
         if attn_inputs.context_parallel_info is not None:
             position_ids = attn_inputs.context_parallel_info.prefill_shuffle_indices
 
@@ -229,7 +236,7 @@ class FusedRopeKVCacheDecodeOp:
             kv_cache_offset,
             kv_cache_offset_h,
             attn_inputs.padding_offset,
-            attn_inputs.combo_position_ids,
+            _get_attention_position_ids(attn_inputs),
             attn_inputs.cu_seqlens,
             attn_inputs.cu_kv_seqlens,
             attn_inputs.input_lengths,

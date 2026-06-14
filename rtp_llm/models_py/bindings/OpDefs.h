@@ -193,6 +193,9 @@ struct PyAttentionInputs {
     int           total_tokens            = 0;
     torch::Tensor padding_offset;
     torch::Tensor combo_position_ids;
+    // Compatibility alias for internal PPU bindings that already switched to
+    // the position_ids name.
+    torch::Tensor position_ids;
 
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;

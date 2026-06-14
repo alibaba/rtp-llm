@@ -341,7 +341,15 @@ void writeCacheToConnector(const CacheStoreInputs& param, IKVCacheConnectorCoord
                 std::numeric_limits<int64_t>::max();
         auto layer_context =
             std::make_shared<WriteCacheLayerContext>(held_resource, request_id, makeConnectorEvent(event), deadline_ms);
-        connector_coordinator->asyncWriteByLayer(global_layer_id, layer_context);
+        auto async_context = connector_coordinator->asyncWriteByLayer(global_layer_id, layer_context);
+        if (!async_context) {
+            RTP_LLM_LOG_ERROR("writeCacheToConnector: asyncWriteByLayer failed, request_id=%ld, batch_id=%zu, "
+                              "layer_id=%d",
+                              request_id,
+                              batch_id,
+                              param.layer_id);
+            connector_coordinator->reportP2PCacheWriteFailure();
+        }
     }
 }
 

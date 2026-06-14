@@ -221,6 +221,43 @@ TEST_F(InferenceServiceTest, InferResponseFailed_ParseRequestBodyFailed) {
     writer_ptr.release();
 }
 
+TEST_F(InferenceServiceTest, InferResponseFailed_BatchEnqueueCancelledMapsToCancelledError) {
+    auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
+    ASSERT_TRUE(writer != nullptr);
+    std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer);
+
+    http_server::HttpRequest request;
+    const std::string        body = R"({"prompt": "hello"})";
+    request._request              = CreateHttpPacket(body);
+
+    auto                           mock_stream = CreateMockGenerateStream();
+    auto                           stream      = std::dynamic_pointer_cast<GenerateStream>(mock_stream);
+    std::vector<GenerateStreamPtr> streams({stream});
+    mock_stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
+
+    EXPECT_CALL(*mock_writer_, isConnected()).WillOnce(Return(true));
+    EXPECT_CALL(*mock_engine_, batchEnqueue(Matcher<const std::vector<std::shared_ptr<GenerateInput>>&>(_)))
+        .WillOnce(Return(streams));
+    EXPECT_CALL(*mock_stream, hasError()).WillOnce(Return(true));
+    EXPECT_CALL(*mock_metric_reporter_, reportQpsMetric(Eq("unknown")));
+    EXPECT_CALL(*mock_token_processor_, encode(StrEq("hello")));
+
+    try {
+        inference_service_->inferResponse(10086, writer_ptr, request);
+        FAIL() << "should throw HttpApiServerException::CANCELLED_ERROR";
+    } catch (const HttpApiServerException& e) {
+        EXPECT_EQ(e.getType(), HttpApiServerException::CANCELLED_ERROR);
+        EXPECT_EQ(e.getMessage(), "request cancelled by user");
+    } catch (const std::exception& e) {
+        FAIL() << "should throw HttpApiServerException::CANCELLED_ERROR instead of std::exception";
+    }
+
+    EXPECT_EQ(inference_service_->controller_->current_concurrency_, 0);
+
+    // 需要手动释放 unique_ptr 的所有权, 避免 double free
+    writer_ptr.release();
+}
+
 TEST_F(InferenceServiceTest, InferResponseFailed_NoPromptInRequest) {
     auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
     ASSERT_TRUE(writer != nullptr);

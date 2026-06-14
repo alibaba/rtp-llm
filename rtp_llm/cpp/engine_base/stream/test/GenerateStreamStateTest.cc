@@ -1,11 +1,13 @@
-
 #include "gtest/gtest.h"
+
+#include <unordered_map>
 
 #define private public
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -46,6 +48,31 @@ protected:
         ModelConfig   model_config;
         RuntimeConfig runtime_config;
         model_config.max_seq_len = 2048;
+        return std::make_shared<NormalGenerateStream>(
+            generate_input, model_config, runtime_config, resource_context, nullptr);
+    }
+
+    GenerateStreamPtr createStreamWithSystemPrompt(const std::vector<int>& input_tokens,
+                                                   const std::vector<int>& prompt_tokens,
+                                                   int                     max_seq_len) {
+        cache_manager_ =
+            std::make_shared<KVCacheManager>(init_config(), /*warmup=*/false, /*metrics_reporter=*/nullptr);
+        EXPECT_TRUE(cache_manager_->init());
+        ResourceContext resource_context;
+        resource_context.cache_manager = cache_manager_;
+        resource_context.system_prompt = std::make_shared<SystemPrompt>(
+            std::unordered_map<std::string, SystemPromptParams>{{"long_prompt", SystemPromptParams(prompt_tokens, {})}});
+
+        std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
+        std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
+        generate_config->num_return_sequences = 1;
+        generate_config->task_id              = "long_prompt";
+        generate_input->input_ids =
+            torch::tensor(std::vector<int32_t>(input_tokens.begin(), input_tokens.end()), torch::kInt32);
+        generate_input->generate_config = generate_config;
+        ModelConfig   model_config;
+        RuntimeConfig runtime_config;
+        model_config.max_seq_len = max_seq_len;
         return std::make_shared<NormalGenerateStream>(
             generate_input, model_config, runtime_config, resource_context, nullptr);
     }
@@ -196,6 +223,26 @@ TEST_F(GenerateStreamStateTest, testReportErrorAndReleaseResource) {
     stream->releaseResource();
     ASSERT_TRUE(stream->isFinished());
     ASSERT_TRUE(stream->hasError());
+}
+
+TEST_F(GenerateStreamStateTest, testLongPromptErrorKeepsMetricsAndDebugPathsSafe) {
+    auto stream = createStreamWithSystemPrompt({1, 2, 3, 4}, {11, 12, 13}, /*max_seq_len=*/6);
+
+    ASSERT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::LONG_PROMPT_ERROR);
+    ASSERT_NE(stream->getCompleteTokenIds(), nullptr);
+    EXPECT_EQ(stream->outputTokenLen(), 0);
+
+    auto kmon_tags = kmonitor::MetricsTags();
+    auto reporter  = std::make_shared<kmonitor::MetricsReporter>("", "", kmon_tags);
+    stream->setMetricsReporter(reporter);
+    stream->generate_status_->status = StreamState::FINISHED;
+
+    EXPECT_NO_THROW({
+        const auto debug_string = stream->debugString();
+        EXPECT_FALSE(debug_string.empty());
+        stream->reportMetric();
+    });
 }
 
 // ============================================================================

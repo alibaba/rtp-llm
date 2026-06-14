@@ -29,6 +29,16 @@ void StoreWaitContextChecker::checkOnce() {
     auto                        iter = contexts_.begin();
     while (iter != contexts_.end()) {
         auto& context = *iter;
+        const bool event_ready = !context.event || context.event->query();
+
+        if (context.timed_out) {
+            if (event_ready) {
+                iter = contexts_.erase(iter);
+            } else {
+                ++iter;
+            }
+            continue;
+        }
 
         // check timeout
         if (currentTimeMs() >= context.deadline_ms) {
@@ -46,12 +56,17 @@ void StoreWaitContextChecker::checkOnce() {
                 metrics_reporter_->report<P2PConnectorMetrics, PrefillWorkerStoreMetricsCollector>(
                     nullptr, context.collector.get());
             }
-            iter = contexts_.erase(iter);
+            if (event_ready) {
+                iter = contexts_.erase(iter);
+            } else {
+                context.timed_out = true;
+                ++iter;
+            }
             continue;
         }
 
         // check event readiness
-        if (!context.event || context.event->query()) {
+        if (event_ready) {
             if (computed_buffers_) {
                 computed_buffers_->addBuffer(context.request_id, context.layer_cache_buffer, context.deadline_ms);
             }

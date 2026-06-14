@@ -611,7 +611,10 @@ class ModelRpcClient(object):
                 batch_input_pb, timeout=grpc_timeout_seconds
             )
 
-            results = []
+            # Keep batch semantics all-or-nothing even when talking to an older
+            # backend that still encodes per-item failures inside an OK RPC
+            # response. Surface the batch failure before converting any success
+            # prefix so callers never silently drop partial results.
             for i, result_pb in enumerate(response.results):
                 if (
                     result_pb.HasField("error_info")
@@ -621,6 +624,9 @@ class ModelRpcClient(object):
                         ExceptionType.UNKNOWN_ERROR,
                         f"batch item {i} failed: {result_pb.error_info.error_message}",
                     )
+
+            results = []
+            for i, result_pb in enumerate(response.results):
                 stream_state = StreamState()
                 output = trans_output(
                     inputs[i],

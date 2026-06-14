@@ -243,6 +243,27 @@ void PrefillServerCallerContext::handleReadChunkLocked(const GenerateOutputsPB& 
     }
 }
 
+void PrefillServerCallerContext::setErrorInfoFromStatusLocked(const grpc::Status& status) {
+    if (status.ok() || error_info_.hasError()) {
+        return;
+    }
+    if (cancel_requested_ && status.error_code() == grpc::StatusCode::CANCELLED) {
+        return;
+    }
+
+    ErrorCode resolved_code = ErrorCode::UNKNOWN_ERROR;
+    if (!status.error_details().empty()) {
+        ErrorDetailsPB error_details;
+        if (error_details.ParseFromString(status.error_details())) {
+            resolved_code = static_cast<ErrorCode>(error_details.error_code());
+        }
+    }
+    if (resolved_code == ErrorCode::UNKNOWN_ERROR) {
+        resolved_code = transGrpcStatusToErrorCode(status.error_code());
+    }
+    error_info_ = ErrorInfo(resolved_code, status.error_message());
+}
+
 void PrefillServerCallerContext::checkDone() {
     std::unique_lock<std::shared_mutex> lock(state_mutex_);
     auto                                async_state = async_state_;
@@ -265,10 +286,10 @@ void PrefillServerCallerContext::checkDone() {
     void* got_tag = nullptr;
     bool  ok      = false;
 
-    // Calculate timeout (non-blocking, use short timeout)
-    auto once_deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(1);
+    // Decode hot path must never block here. Poll only already-ready CQ events.
+    auto once_deadline = std::chrono::system_clock::now();
 
-    // Wait for async operation to complete
+    // Poll for any already-completed async operation.
     auto next_status = async_state->completion_queue->AsyncNext(&got_tag, &ok, once_deadline);
     if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
         // not finish yet
@@ -278,7 +299,9 @@ void PrefillServerCallerContext::checkDone() {
     if (next_status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
         finished_ = true;
         if (!finish_started_ && !cancel_requested_) {
-            async_state->status = grpc::Status(grpc::StatusCode::CANCELLED, "completion queue shutdown");
+            async_state->status =
+                grpc::Status(grpc::StatusCode::INTERNAL, "completion queue shutdown before prefill finished");
+            setErrorInfoFromStatusLocked(async_state->status);
         }
         return;
     }
@@ -289,6 +312,7 @@ void PrefillServerCallerContext::checkDone() {
             RTP_LLM_LOG_WARNING("PrefillServerCallerContext::checkDone: failed to start stream, unique_key: %s",
                                 unique_key_.c_str());
             async_state->status = grpc::Status(grpc::StatusCode::INTERNAL, "failed to start async prefill stream");
+            setErrorInfoFromStatusLocked(async_state->status);
             return;
         }
         if (async_state->reader) {
@@ -320,24 +344,11 @@ void PrefillServerCallerContext::checkDone() {
         if (!ok) {
             async_state->status = grpc::Status(grpc::StatusCode::INTERNAL, "prefill stream finish event failed");
         }
-        if (error_info_.hasError()) {
-            return;
-        }
-        if (cancel_requested_ && async_state->status.ok()) {
+        if (!error_info_.hasError() && cancel_requested_ && async_state->status.ok()) {
             async_state->status = grpc::Status(grpc::StatusCode::CANCELLED, "prefill request cancelled");
         }
-        if (!async_state->status.ok() && !cancel_requested_) {
-            ErrorCode resolved_code = ErrorCode::UNKNOWN_ERROR;
-            if (!async_state->status.error_details().empty()) {
-                ErrorDetailsPB error_details;
-                if (error_details.ParseFromString(async_state->status.error_details())) {
-                    resolved_code = static_cast<ErrorCode>(error_details.error_code());
-                }
-            }
-            if (resolved_code == ErrorCode::UNKNOWN_ERROR) {
-                resolved_code = transGrpcStatusToErrorCode(async_state->status.error_code());
-            }
-            error_info_ = ErrorInfo(resolved_code, async_state->status.error_message());
+        if (!error_info_.hasError()) {
+            setErrorInfoFromStatusLocked(async_state->status);
         }
         if (!async_state->status.ok()) {
             RTP_LLM_LOG_WARNING(
@@ -356,11 +367,13 @@ void PrefillServerCallerContext::checkDone() {
                             unique_key_.c_str());
         async_state->status =
             grpc::Status(grpc::StatusCode::INTERNAL, "async get next event from grpc completion queue failed");
+        setErrorInfoFromStatusLocked(async_state->status);
         return;
     }
 
     finished_ = true;
     async_state->status = grpc::Status(grpc::StatusCode::INTERNAL, "unexpected grpc completion tag");
+    setErrorInfoFromStatusLocked(async_state->status);
 }
 
 bool PrefillServerCallerContext::waitWithTimeoutMs(int64_t timeout_ms) {

@@ -108,6 +108,7 @@ private:
     friend class PrefillServerCaller;
     bool updateReuseLensSnapshotLocked(const GenerateOutputsPB& response);
     void handleReadChunkLocked(const GenerateOutputsPB& response);
+    void setErrorInfoFromStatusLocked(const grpc::Status& status);
     bool waitWithTimeoutMs(int64_t timeout_ms);
     void shutdownAndDrainCompletionQueue();
 

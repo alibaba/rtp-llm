@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/TestRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/BlockInfo.h"
@@ -229,6 +230,15 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenSchedulerHandleReadFailed
     connector_->handleRead(request, response);
 
     EXPECT_NE(response.error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_TRUE(connector_->streamStore()->isMarkedCancelled(unique_key));
+
+    P2PConnectorResourceEntry::SideChannelData data;
+    data.has_first_token = true;
+    data.first_token_id  = 1001;
+    connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
+
+    P2PConnectorResourceEntry::SideChannelData consumed_data;
+    EXPECT_FALSE(connector_->streamStore()->consumeSideChannelData(unique_key, consumed_data));
 }
 
 // 测试: waitSideChannelReady 超时（first token not found），返回 INTERNAL 错误

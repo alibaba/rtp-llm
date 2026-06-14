@@ -447,8 +447,8 @@ bool PrefillLoadCaller::Result::pollCompletionQueue() {
 void PrefillLoadCaller::Result::updateStreamFromResponse() {
     if (response.has_payload()) {
         const auto& payload = response.payload();
-        side_channel_payload.has_first_token =
-            payload.has_first_generate_token() || payload.first_generate_token_id() != 0;
+        // `has_first_generate_token` is a semantic bool field, not proto presence.
+        side_channel_payload.has_first_token   = payload.has_first_generate_token();
         side_channel_payload.first_token_id   = payload.first_generate_token_id();
         side_channel_payload.total_reuse_len  = payload.total_reuse_len();
         side_channel_payload.local_reuse_len  = payload.local_reuse_len();

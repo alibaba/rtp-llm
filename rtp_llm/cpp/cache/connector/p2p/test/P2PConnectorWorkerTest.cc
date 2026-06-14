@@ -1124,7 +1124,9 @@ TEST_F(P2PConnectorWorkerTest, CancelHandleRead_SkipsQueuedAsyncSendTasks) {
 TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackTimeoutSkipsQueuedAsyncSendTasks) {
     int64_t     request_id  = 3008;
     std::string unique_key  = "test_timeout_skips_queued_send";
-    int64_t     deadline_ms = currentTimeMs() + 5000;
+    // Keep the request deadline close so callback wait times out before the
+    // queued async sender tasks get a chance to start running.
+    int64_t     deadline_ms = currentTimeMs() + 150;
 
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     for (uint32_t i = 0; i < 8; ++i) {
@@ -1169,6 +1171,49 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_CallbackTimeoutSkipsQueued
     EXPECT_TRUE(result.hasError());
     EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
     EXPECT_EQ(mock_sender_->getTransferCallCount(), 4);
+}
+
+TEST_F(P2PConnectorWorkerTest, SendKVCache_DelayedCallbacksDoNotThrottleDispatch) {
+    worker_config_.layer_all_num = 6;
+    prefill_.reset();
+    decode_.reset();
+    prefill_ =
+        std::make_unique<P2PConnectorWorkerPrefill>(worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+    prefill_->init(10 * 1000);
+    decode_ = std::make_unique<P2PConnectorWorkerDecode>(
+        worker_config_, mock_layer_block_converter_, nullptr, mock_receiver_);
+    computed_buffers_ = prefill_->getComputedBuffersStore();
+
+    const int64_t   request_id  = 3009;
+    const std::string unique_key  = "test_dispatch_not_blocked_by_callback_completion";
+    const int64_t   deadline_ms = currentTimeMs() + 5000;
+
+    for (int layer_id = 0; layer_id < static_cast<int>(worker_config_.layer_all_num); ++layer_id) {
+        addComputedBuffer(request_id, layer_id, deadline_ms);
+    }
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+
+    mock_sender_->setShouldSucceed(true);
+    mock_sender_->setAsyncCallback(true);
+    mock_sender_->setCallbackDelayMs(300);
+
+    ErrorInfo   result;
+    std::thread send_thread([&]() {
+        result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
+    });
+
+    const bool observed_all_dispatches = mock_sender_->waitForTransferCallCount(6, std::chrono::milliseconds(200));
+    if (send_thread.joinable()) {
+        send_thread.join();
+    }
+
+    EXPECT_TRUE(observed_all_dispatches)
+        << "all layer sends should be dispatched before remote callbacks complete; callback latency must not throttle "
+           "sender-pool scheduling";
+    EXPECT_TRUE(result.ok());
+    EXPECT_EQ(mock_sender_->getTransferCallCount(), 6);
 }
 
 // 异步回调错峰完成，覆盖 waitSendCallbacksWithTimeout 中 result_cv 多次 wait_for 唤醒
@@ -1386,6 +1431,34 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_TransferFailure_KVCacheResourceReleas
 
     EXPECT_TRUE(weak_resource.expired()) << "BUG: KVCacheResource still alive after failed sendKVCache() — "
                                             "blocks remain connectorReference'd even when transfer failed";
+}
+
+TEST_F(P2PConnectorWorkerTest, SendKVCache_AsymmetricTpFailure_RemovesComputedBufferAndLeavesTombstone) {
+    const int64_t   request_id  = 5006;
+    const std::string unique_key  = "test_asymmetric_tp_failure_cleanup";
+    const int64_t   deadline_ms = currentTimeMs() + 5000;
+
+    auto                           resource      = createKVCacheResource(0, 2);
+    std::weak_ptr<KVCacheResource> weak_resource = resource;
+    addComputedBufferWithResource(request_id, 0, deadline_ms, resource);
+    addComputedBufferWithResource(request_id, 1, deadline_ms, resource);
+    resource.reset();
+    ASSERT_FALSE(weak_resource.expired());
+
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
+    decode_transfer_servers.push_back({"127.0.0.1", 12345});
+    decode_transfer_servers.push_back({"127.0.0.1", 12346});
+    decode_transfer_servers.push_back({"127.0.0.1", 12347});
+
+    ErrorInfo result = prefill_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
+
+    EXPECT_TRUE(result.hasError());
+    EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_ASYMMETRIC_TP_FAILED);
+    EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr);
+    EXPECT_TRUE(weak_resource.expired())
+        << "failed asymmetric TP routing should still release connector-held KV references";
+    EXPECT_EQ(computed_buffers_->addBuffer(request_id, createLayerCacheBuffer(0), deadline_ms), nullptr)
+        << "failed sendKVCache should leave a tombstone so late-arriving layers cannot recreate the request buffer";
 }
 
 TEST_F(P2PConnectorWorkerTest, SendKVCache_Timeout_ReleasesQueuedAsyncTaskResources) {

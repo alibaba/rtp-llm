@@ -327,7 +327,9 @@ public:
     }
 
     size_t outputTokenLen() const {
-        return seqLength() - inputLength();
+        const int seq_length   = seqLength();
+        const int input_length = inputLength();
+        return seq_length > input_length ? seq_length - input_length : 0;
     }
 
     void setReturnLastHiddenStates(bool flag) {

@@ -18,9 +18,9 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr size_t kSenderPoolThreadCount                = 4;
-constexpr size_t kSenderPoolQueueSize                  = 10000;
-constexpr int    kMaxOutstandingAsyncSendTasksPerRequest = static_cast<int>(kSenderPoolThreadCount * 2);
+constexpr size_t kSenderPoolThreadCount                   = 4;
+constexpr size_t kSenderPoolQueueSize                     = 10000;
+constexpr int    kMaxOutstandingAsyncSendTasksPerRequest  = static_cast<int>(kSenderPoolThreadCount * 2);
 
 int64_t addWithSaturation(int64_t base_ms, int64_t delta_ms) {
     if (delta_ms <= 0) {
@@ -31,6 +31,22 @@ int64_t addWithSaturation(int64_t base_ms, int64_t delta_ms) {
     }
     return base_ms + delta_ms;
 }
+
+class ComputedBufferCleanupGuard {
+public:
+    ComputedBufferCleanupGuard(ComputedLayerCacheBufferStore* store, int64_t request_id):
+        store_(store), request_id_(request_id) {}
+
+    ~ComputedBufferCleanupGuard() {
+        if (store_) {
+            store_->removeBuffer(request_id_);
+        }
+    }
+
+private:
+    ComputedLayerCacheBufferStore* store_{nullptr};
+    int64_t                        request_id_{0};
+};
 
 }  // namespace
 
@@ -262,7 +278,6 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
                 tp_partition_ctxs,
                 unique_key,
                 return_deadline_ms,
-                sent_count,
                 kMaxOutstandingAsyncSendTasksPerRequest,
                 cancel_flag,
                 transfer_result);
@@ -279,7 +294,6 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
                                                      const std::vector<AsymmetricTPContext>&    tp_partition_ctxs,
                                                      const std::string&                         unique_key,
                                                      int64_t                                    transfer_deadline_ms,
-                                                     int                                        scheduled_transfer_count,
                                                      int                                        max_outstanding_tasks,
                                                      const std::shared_ptr<std::atomic<bool>>&  cancel_flag,
                                                      const std::shared_ptr<SendTransferResult>& transfer_result) {
@@ -311,11 +325,7 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
     };
 
     for (const auto& partition_ctx : tp_partition_ctxs) {
-        if (!waitForAsyncSendSlot(transfer_result,
-                                  scheduled_transfer_count + count,
-                                  max_outstanding_tasks,
-                                  transfer_deadline_ms,
-                                  cancel_flag)) {
+        if (!waitForAsyncSendSlot(transfer_result, max_outstanding_tasks, transfer_deadline_ms, cancel_flag)) {
             return count;
         }
 
@@ -349,9 +359,26 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
         auto task_state                   = std::make_shared<AsyncSendTaskState>();
         task_state->send_request          = send_req_shared;
         task_state->buffer_keepalive      = layer_cache_buffer;
+        transfer_result->async_send_task_count.fetch_add(1, std::memory_order_relaxed);
         registerAsyncSendTask(unique_key, task_state);
 
-        auto task = [sender = sender_, task_state, done_cb, cancel_flag, partition_layer_key]() mutable {
+        auto task_with_slot = [sender = sender_,
+                               task_state,
+                               done_cb,
+                               cancel_flag,
+                               partition_layer_key,
+                               transfer_result]() mutable {
+            struct AsyncSendSlotGuard {
+                explicit AsyncSendSlotGuard(const std::shared_ptr<SendTransferResult>& transfer_result):
+                    transfer_result(transfer_result) {}
+                ~AsyncSendSlotGuard() {
+                    transfer_result->async_send_task_count.fetch_sub(1, std::memory_order_relaxed);
+                    std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
+                    transfer_result->result_cv.notify_all();
+                }
+                std::shared_ptr<SendTransferResult> transfer_result;
+            } slot_guard(transfer_result);
+
             transfer::SendRequestPtr      send_req_local;
             std::shared_ptr<LayerCacheBuffer> buffer_keepalive_local;
             if (!task_state->takeForStart(&send_req_local, &buffer_keepalive_local)) {
@@ -383,7 +410,7 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
             // tasks that never start release this ref via AsyncSendTaskState.
             (void)buffer_keepalive_local;
         };
-        auto async_task = task;
+        auto async_task = task_with_slot;
 
         if (!async_sender_pool_
             || async_sender_pool_->pushTask(std::move(async_task)) != autil::ThreadPoolBase::ERROR_NONE) {
@@ -393,7 +420,7 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
                 "[HANG-DIAG/OPT-A2] async_sender_pool pushTask failed, fallback to inline send, "
                 "partition_layer_key=%s",
                 partition_layer_key.c_str());
-            task();
+            task_with_slot();
         }
     }
     return count;
@@ -401,7 +428,6 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
 
 bool P2PConnectorWorkerPrefill::waitForAsyncSendSlot(
     const std::shared_ptr<SendTransferResult>& transfer_result,
-    int                                        scheduled_transfer_count,
     int                                        max_outstanding_tasks,
     int64_t                                    return_deadline_ms,
     const std::shared_ptr<std::atomic<bool>>&  cancel_flag) const {
@@ -410,8 +436,7 @@ bool P2PConnectorWorkerPrefill::waitForAsyncSendSlot(
     }
 
     std::unique_lock<std::mutex> lock(transfer_result->result_mutex);
-    while (scheduled_transfer_count - transfer_result->done_count.load(std::memory_order_relaxed)
-           >= max_outstanding_tasks) {
+    while (transfer_result->async_send_task_count.load(std::memory_order_relaxed) >= max_outstanding_tasks) {
         if (cancel_flag && cancel_flag->load(std::memory_order_relaxed)) {
             return false;
         }
@@ -422,8 +447,8 @@ bool P2PConnectorWorkerPrefill::waitForAsyncSendSlot(
         transfer_result->result_cv.wait_for(
             lock,
             std::chrono::milliseconds(return_deadline_ms - now),
-            [&transfer_result, scheduled_transfer_count, max_outstanding_tasks, &cancel_flag]() {
-                return scheduled_transfer_count - transfer_result->done_count.load(std::memory_order_relaxed)
+            [&transfer_result, max_outstanding_tasks, &cancel_flag]() {
+                return transfer_result->async_send_task_count.load(std::memory_order_relaxed)
                            < max_outstanding_tasks
                        || (cancel_flag && cancel_flag->load(std::memory_order_relaxed));
             });
@@ -511,6 +536,8 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
             return ErrorInfo::OkStatus();
         }
     }
+
+    ComputedBufferCleanupGuard computed_buffer_cleanup(computed_buffers_.get(), request_id);
 
     // D（deadline_ms）为 RPC 语义截止；return_deadline_ms = D - return_before，与 decode recv_req.deadline_ms 对齐。
     const int64_t return_before_ms   = config_.p2p_read_return_before_deadline_ms;
@@ -648,14 +675,6 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
         std::lock_guard<std::mutex> lock(handle_cancel_mutex_);
         handle_cancel_flags_.erase(unique_key);
     }
-
-    // Always remove the computed buffer entry. This is safe because the caller (handleRead)
-    // holds a whole-request KVCacheResourcePtr in resource_entry, which keeps all blocks
-    // allocated via connector_ref_counter until handleRead returns. The per-layer refs here
-    // are redundant for block lifetime safety.
-    // This also marks the request_id as removed, preventing late-arriving layers from
-    // StoreWaitContextChecker from creating orphan entries that pin blocks (LACK MEM).
-    computed_buffers_->removeBuffer(request_id);
 
     auto send_result = determineSendResult(transfer_result,
                                            cancel_flag,

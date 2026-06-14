@@ -8,6 +8,17 @@ namespace rtp_llm {
 
 namespace {
 
+class ImmediateSuccessContext: public AsyncContext {
+public:
+    void waitDone() override {}
+    bool done() const override {
+        return true;
+    }
+    bool success() const override {
+        return true;
+    }
+};
+
 class RecordingCoordinator: public IKVCacheConnectorCoordinator {
 public:
     bool hasActiveConnectors() const override {
@@ -40,7 +51,10 @@ public:
         called_layer_id   = layer_id;
         captured_request  = layer_context->requestId();
         captured_resource = std::make_shared<KVCacheResource>(layer_context->kvCacheResource());
-        return nullptr;
+        if (fail_async_write) {
+            return nullptr;
+        }
+        return std::make_shared<ImmediateSuccessContext>();
     }
 
     std::shared_ptr<KVCacheResource> holdKVCacheResourceForConnector(const KVCacheResource& resource,
@@ -49,9 +63,15 @@ public:
         return std::make_shared<KVCacheResource>(resource);
     }
 
+    void reportP2PCacheWriteFailure() override {
+        ++write_failure_count;
+    }
+
     int64_t                          captured_request = -1;
     int                              called_layer_id  = -1;
     std::shared_ptr<KVCacheResource> captured_resource;
+    bool                             fail_async_write  = false;
+    int                              write_failure_count = 0;
 };
 
 CacheStoreInputs makeLinearInputs() {
@@ -93,6 +113,19 @@ TEST(P2PLinearWriteTest, LinearGroupOnlyWritesLastBlockToConnector) {
     ASSERT_EQ(layer_blocks.size(), 1u);
     ASSERT_EQ(layer_blocks[0]->blocks().size(), 1u);
     EXPECT_EQ(layer_blocks[0]->blocks()[0], 12);
+}
+
+TEST(P2PLinearWriteTest, AsyncWriteFailureIsReportedToCoordinator) {
+    RecordingCoordinator coordinator;
+    coordinator.fail_async_write = true;
+    KvCacheInfo kv_cache_info;
+
+    auto inputs = makeLinearInputs();
+    execWriteCacheStore(inputs, kv_cache_info, false, nullptr, &coordinator);
+
+    EXPECT_EQ(coordinator.write_failure_count, 1);
+    ASSERT_NE(coordinator.captured_resource, nullptr);
+    EXPECT_EQ(coordinator.called_layer_id, 0);
 }
 
 }  // namespace rtp_llm

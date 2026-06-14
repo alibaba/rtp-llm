@@ -39,6 +39,7 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateOutputsPB,
+    ErrorCodePB,
     GenerateInputPB,
     GenerateOutputsPB,
     TensorPB,
@@ -89,7 +90,8 @@ class FakeStub:
 
 class FakeBatchStub:
 
-    def __init__(self):
+    def __init__(self, failing_indexes=None):
+        self.failing_indexes = set(failing_indexes or [])
         self.last_timeout = None
         self.last_batch_size = 0
         self.last_channel = None
@@ -98,8 +100,12 @@ class FakeBatchStub:
         self.last_timeout = timeout
         self.last_batch_size = len(input.inputs)
         response = BatchGenerateOutputsPB()
-        for _ in input.inputs:
+        for i, _ in enumerate(input.inputs):
             result = response.results.add()
+            if i in self.failing_indexes:
+                result.error_info.error_code = ErrorCodePB.UNKNOWN_ERROR
+                result.error_info.error_message = f"fake batch item {i} failed"
+                continue
             output_pb = result.final_output.flatten_output
             output_pb.output_ids.data_type = TensorPB.DataType.INT32
             output_pb.output_ids.shape.extend([1, 1])
@@ -563,6 +569,45 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(decode_role_addr.ip, "10.0.0.11")
         self.assertEqual(decode_role_addr.grpc_port, 10111)
         self.assertEqual(decode_role_addr.http_port, 10110)
+
+    def test_batch_enqueue_treats_item_error_as_whole_batch_failure(self):
+        client = ModelRpcClient(
+            ["127.0.0.1:10101"],
+            {},
+            0,
+            False,
+        )
+        fake_stub = FakeBatchStub(failing_indexes={1})
+
+        async def fake_get(_):
+            return object()
+
+        client._channel_pool.get = fake_get
+
+        inputs = [
+            GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(aux_info=True),
+                request_id=0,
+                mm_inputs=[],
+            ),
+            GenerateInput(
+                token_ids=torch.tensor([4, 5, 6]),
+                generate_config=GenerateConfig(aux_info=True),
+                request_id=1,
+                mm_inputs=[],
+            ),
+        ]
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=fake_stub,
+        ):
+            with self.assertRaises(FtRuntimeException) as cm:
+                asyncio.run(client.batch_enqueue(inputs))
+
+        self.assertEqual(cm.exception.exception_type, ExceptionType.UNKNOWN_ERROR)
+        self.assertEqual(cm.exception.message, "batch item 1 failed: fake batch item 1 failed")
 
     def test_handle_grpc_error_maps_resource_exhausted_to_malloc_error(self):
         # Regression: prefill's LACK MEM surfaces to decode as a grpc

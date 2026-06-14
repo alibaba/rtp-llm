@@ -825,6 +825,8 @@ TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelRestoresSpeculativeTensor
     server_call_result->side_channel_payload.has_data        = true;
     server_call_result->side_channel_payload.has_first_token = true;
     server_call_result->side_channel_payload.first_token_id  = 7;
+    server_call_result->side_channel_payload.propose_tokens.push_back(11);
+    server_call_result->side_channel_payload.propose_tokens.push_back(12);
     server_call_result->side_channel_payload.propose_tokens  = {7, 9};
     server_call_result->side_channel_payload.position_ids    = {0, 1, 2};
 
@@ -989,6 +991,121 @@ TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelPreservesZeroFirstToken) 
     auto all_tokens = stream_->completeTokenIdsVec(0);
     ASSERT_EQ(all_tokens.size(), 7);
     EXPECT_EQ(all_tokens.back(), 0);
+}
+
+TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelFirstTokenSkipsFinishCheckWhenNonTerminal) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource                   = stream_->streamCacheResource();
+    stream_->generate_status_->status = StreamState::LOADING_CACHE;
+
+    auto server_call_result                                  = std::make_shared<PrefillLoadCaller::Result>();
+    server_call_result->side_channel_payload.has_data        = true;
+    server_call_result->side_channel_payload.has_first_token = true;
+    server_call_result->side_channel_payload.first_token_id  = 7;
+
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    auto p2p_ctx = std::make_shared<P2PConnectorAsyncReadContext>(kv_resource, nullptr, server_call_result, nullptr, 0);
+    auto fused_read = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{p2p_ctx});
+    auto read_ctx   = std::make_shared<FusedAsyncReadContext>(
+        std::shared_ptr<FusedAsyncContext>(), kv_resource, std::shared_ptr<Meta>());
+    read_ctx->setFusedReadContext(fused_read);
+
+    resource.updateReuseLengthsFromContext(read_ctx);
+
+    EXPECT_FALSE(stream_->hasEvent(StreamEvents::GenerateDone));
+    EXPECT_EQ(stream_->sub_generate_status_[0], StreamState::RUNNING);
+    EXPECT_EQ(stream_->moveToNext(), StreamState::WAITING);
+    EXPECT_FALSE(stream_->isFinished());
+    auto all_tokens = stream_->completeTokenIdsVec(0);
+    ASSERT_EQ(all_tokens.size(), 7);
+    EXPECT_EQ(all_tokens.back(), 7);
+}
+
+TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelFirstTokenChecksMaxNewTokensFinish) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource                    = stream_->streamCacheResource();
+    stream_->generate_status_->status = StreamState::LOADING_CACHE;
+    stream_->generate_input_->generate_config->max_new_tokens = 1;
+
+    auto server_call_result                                  = std::make_shared<PrefillLoadCaller::Result>();
+    server_call_result->side_channel_payload.has_data        = true;
+    server_call_result->side_channel_payload.has_first_token = true;
+    server_call_result->side_channel_payload.first_token_id  = 7;
+
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    auto p2p_ctx = std::make_shared<P2PConnectorAsyncReadContext>(kv_resource, nullptr, server_call_result, nullptr, 0);
+    auto fused_read = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{p2p_ctx});
+    auto read_ctx   = std::make_shared<FusedAsyncReadContext>(
+        std::shared_ptr<FusedAsyncContext>(), kv_resource, std::shared_ptr<Meta>());
+    read_ctx->setFusedReadContext(fused_read);
+
+    resource.updateReuseLengthsFromContext(read_ctx);
+
+    EXPECT_TRUE(stream_->hasEvent(StreamEvents::GenerateDone));
+    EXPECT_EQ(stream_->sub_generate_status_[0], StreamState::FINISHED);
+    EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(stream_->isFinished());
+    auto all_tokens = stream_->completeTokenIdsVec(0);
+    ASSERT_EQ(all_tokens.size(), 7);
+    EXPECT_EQ(all_tokens.back(), 7);
+}
+
+TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelFirstTokenChecksStopWordsFinish) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource                    = stream_->streamCacheResource();
+    stream_->generate_status_->status = StreamState::LOADING_CACHE;
+    stream_->generate_input_->generate_config->stop_words_list = {{7}};
+
+    auto server_call_result                                  = std::make_shared<PrefillLoadCaller::Result>();
+    server_call_result->side_channel_payload.has_data        = true;
+    server_call_result->side_channel_payload.has_first_token = true;
+    server_call_result->side_channel_payload.first_token_id  = 7;
+
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    auto p2p_ctx = std::make_shared<P2PConnectorAsyncReadContext>(kv_resource, nullptr, server_call_result, nullptr, 0);
+    auto fused_read = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{p2p_ctx});
+    auto read_ctx   = std::make_shared<FusedAsyncReadContext>(
+        std::shared_ptr<FusedAsyncContext>(), kv_resource, std::shared_ptr<Meta>());
+    read_ctx->setFusedReadContext(fused_read);
+
+    resource.updateReuseLengthsFromContext(read_ctx);
+
+    EXPECT_TRUE(stream_->hasEvent(StreamEvents::GenerateDone));
+    EXPECT_EQ(stream_->sub_generate_status_[0], StreamState::FINISHED);
+    EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(stream_->isFinished());
+    auto all_tokens = stream_->completeTokenIdsVec(0);
+    ASSERT_EQ(all_tokens.size(), 7);
+    EXPECT_EQ(all_tokens.back(), 7);
+}
+
+TEST_F(StreamCacheResourceTest, testApplyP2PSideChannelFirstTokenChecksEosFinish) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource                    = stream_->streamCacheResource();
+    stream_->generate_status_->status = StreamState::LOADING_CACHE;
+    stream_->generate_input_->generate_config->min_new_tokens = 1;
+
+    auto server_call_result                                  = std::make_shared<PrefillLoadCaller::Result>();
+    server_call_result->side_channel_payload.has_data        = true;
+    server_call_result->side_channel_payload.has_first_token = true;
+    server_call_result->side_channel_payload.first_token_id  = stream_->specialTokens().eos_token_id;
+
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    auto p2p_ctx = std::make_shared<P2PConnectorAsyncReadContext>(kv_resource, nullptr, server_call_result, nullptr, 0);
+    auto fused_read = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{p2p_ctx});
+    auto read_ctx   = std::make_shared<FusedAsyncReadContext>(
+        std::shared_ptr<FusedAsyncContext>(), kv_resource, std::shared_ptr<Meta>());
+    read_ctx->setFusedReadContext(fused_read);
+
+    resource.updateReuseLengthsFromContext(read_ctx);
+
+    EXPECT_TRUE(stream_->hasEvent(StreamEvents::GenerateDone));
+    EXPECT_EQ(stream_->sub_generate_status_[0], StreamState::FINISHED);
+    EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(stream_->isFinished());
+    auto all_tokens = stream_->completeTokenIdsVec(0);
+    ASSERT_EQ(all_tokens.size(), 7);
+    EXPECT_EQ(all_tokens.back(), stream_->specialTokens().eos_token_id);
 }
 
 TEST_F(StreamCacheResourceTest, testWaitLoadCacheDone_ZeroReuseLen_DoesNotOverwriteExisting) {

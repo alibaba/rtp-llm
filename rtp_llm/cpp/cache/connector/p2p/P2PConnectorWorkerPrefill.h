@@ -60,6 +60,10 @@ private:
 
     struct SendTransferResult {
         std::atomic<int>        done_count{0};
+        // Async sender-pool tasks that are queued/running but have not yet
+        // returned from sender->send(). Throttling dispatch must use this
+        // counter instead of remote transfer completion done_count.
+        std::atomic<int>        async_send_task_count{0};
         std::atomic<bool>       all_success{true};
         mutable std::mutex      result_mutex;
         std::condition_variable result_cv;
@@ -82,13 +86,11 @@ private:
                               const std::vector<AsymmetricTPContext>&    tp_partition_ctxs,
                               const std::string&                         unique_key,
                               int64_t                                    transfer_deadline_ms,
-                              int                                        scheduled_transfer_count,
                               int                                        max_outstanding_tasks,
                               const std::shared_ptr<std::atomic<bool>>&  cancel_flag,
                               const std::shared_ptr<SendTransferResult>& transfer_result);
 
     bool waitForAsyncSendSlot(const std::shared_ptr<SendTransferResult>& transfer_result,
-                              int                                        scheduled_transfer_count,
                               int                                        max_outstanding_tasks,
                               int64_t                                    return_deadline_ms,
                               const std::shared_ptr<std::atomic<bool>>&  cancel_flag) const;

@@ -377,6 +377,27 @@ TEST_F(PrefillServerCallerTest, CancelMarksContextDoneAndUnsuccessful) {
     EXPECT_TRUE(server.service()->waitCancelled(std::chrono::seconds(1)));
 }
 
+TEST_F(PrefillServerCallerTest, PendingDonePollingIsNonBlocking) {
+    FakePrefillRpcServer server(std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kWaitForCancel));
+    ASSERT_TRUE(server.start());
+
+    auto context = callPrefill(server, 1013, "non-blocking-poll");
+    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(server.service()->waitStarted(std::chrono::seconds(1)));
+
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < 32; ++i) {
+        EXPECT_FALSE(context->done());
+    }
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+
+    EXPECT_LT(elapsed_ms, 80);
+
+    context->cancel();
+    ASSERT_TRUE(waitDone(context));
+}
+
 TEST_F(PrefillServerCallerTest, AsyncDecodeEntrancePrefillPreservesPdSeparationRequestShape) {
     FakePrefillRpcServer server(
         std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kCaptureForwardedRequest));

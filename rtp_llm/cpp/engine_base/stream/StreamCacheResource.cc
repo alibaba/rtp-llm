@@ -104,6 +104,44 @@ private:
 
 // ----------------------------- P2P Side-Channel Apply -----------------------------
 
+static bool matchesStopWordsAfterP2PFirstToken(GenerateStream* stream, int32_t first_token_id) {
+    const auto& generate_config = stream->generateConfig();
+    const auto  special_tokens  = stream->specialTokens();
+    auto        complete_tokens  = stream->completeTokenIdsVec(0);
+    complete_tokens.push_back(first_token_id);
+
+    for (const auto& stop_words : generate_config->stop_words_list) {
+        if (generate_config->ignore_eos && stop_words.size() == 1 && stop_words[0] == special_tokens.eos_token_id) {
+            continue;
+        }
+        if (complete_tokens.size() < stop_words.size()) {
+            continue;
+        }
+        if (std::equal(stop_words.rbegin(), stop_words.rend(), complete_tokens.rbegin())) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool p2pFirstTokenShouldCheckFinish(GenerateStream* stream, int32_t first_token_id) {
+    if (stream->seqLength() + 1 >= stream->maxTokenNum()) {
+        return true;
+    }
+
+    const auto& generate_config = stream->generateConfig();
+    if (stream->seqLength() + 1 < stream->inputLength() + generate_config->min_new_tokens) {
+        return false;
+    }
+
+    const auto special_tokens = stream->specialTokens();
+    if (!generate_config->ignore_eos && first_token_id == special_tokens.eos_token_id) {
+        return true;
+    }
+
+    return matchesStopWordsAfterP2PFirstToken(stream, first_token_id);
+}
+
 // Extract P2P side-channel payload from FusedAsyncReadContext and apply to GenerateStream.
 // Returns true if P2P payload was found and applied, false otherwise.
 static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadContext>& read_context,
@@ -136,6 +174,7 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
     // stream_->mutex_ held.
     // 1. First token: append to stream
     if (payload->has_first_token) {
+        const bool first_token_should_finish = p2pFirstTokenShouldCheckFinish(stream, payload->first_token_id);
         stream->setIsContextStream(false);
         stream->step();
         auto new_tokens                   = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
@@ -152,7 +191,7 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                                    .all_hidden_states      = {},
                                    .update_remote_generate = false,
                                    .force_update_info      = false,
-                                   .skip_finish_check      = true});
+                                   .skip_finish_check      = !first_token_should_finish});
     }
 
     // 2. Reuse lengths

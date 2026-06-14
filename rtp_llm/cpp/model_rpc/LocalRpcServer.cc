@@ -234,30 +234,25 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         std::shared_ptr<GenerateInput> input;
         auto                           err = prepareInput(request->inputs(i), input);
         if (!err.ok()) {
-            // Fill error results for all requests (0..batch_size-1) to maintain 1:1 mapping
-            for (int j = 0; j < batch_size; j++) {
-                auto* result = response->add_results();
-                auto* err_pb = result->mutable_error_info();
-                err_pb->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
-                if (j == i) {
-                    err_pb->set_error_message("multimodal processing failed: " + err.ToString());
-                } else {
-                    err_pb->set_error_message("batch aborted due to multimodal failure at index " + std::to_string(i));
-                }
-            }
-            return grpc::Status::OK;
+            return serializeErrorMsg(std::to_string(request->inputs(i).request_id()),
+                                     ErrorInfo(err.code(),
+                                               "batch item " + std::to_string(i)
+                                                   + " failed during multimodal processing: " + err.ToString()));
         }
         inputs.push_back(input);
     }
 
-    // batchEnqueue contract: returned vector is 1:1 with `inputs` (same size, same order).
-    // Streams that failed checkInputLength carry an error reported via reportError() and surface
-    // it through collectStreamOutput → nextOutput → ErrorInfo path below.
+    // The RPC itself is all-or-nothing: any per-item failure upgrades the whole
+    // BatchGenerateCall to a non-OK status so clients never observe a silently
+    // truncated "successful prefix" of the batch.
     auto streams = engine_->batchEnqueue(inputs);
 
     // collectStreamOutput is currently SERIAL: streams[0] must finish before streams[1] is drained.
     // For batch decode this is bounded (all streams advance together), but TODO: parallelize for
     // mixed-length batches.
+    bool      has_batch_error  = false;
+    int       failed_item_idx  = -1;
+    ErrorInfo first_batch_error = ErrorInfo::OkStatus();
     for (int i = 0; i < (int)streams.size(); i++) {
         auto* result = response->add_results();
 
@@ -268,6 +263,12 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
             err_pb->set_error_code(err.code() == ErrorCode::CANCELLED ? ErrorCodePB::CANCELLED :
                                                                         ErrorCodePB::UNKNOWN_ERROR);
             err_pb->set_error_message(err.ToString());
+            if (!has_batch_error) {
+                has_batch_error = true;
+                failed_item_idx = i;
+                first_batch_error = ErrorInfo(err.code(),
+                                              "batch item " + std::to_string(i) + " failed: " + err.ToString());
+            }
         } else {
             auto* output_pb = result->mutable_final_output();
             QueryConverter::transResponse(output_pb,
@@ -276,6 +277,10 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
                                           maga_init_params_.misc_config.aux_string,
                                           streams[i]->specialTokens().eos_token_id);
         }
+    }
+
+    if (has_batch_error) {
+        return serializeErrorMsg(std::to_string(request->inputs(failed_item_idx).request_id()), first_batch_error);
     }
 
     RTP_LLM_LOG_INFO("batch generate done, batch_size=%d", batch_size);

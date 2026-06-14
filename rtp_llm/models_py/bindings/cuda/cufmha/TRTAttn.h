@@ -15,6 +15,9 @@ struct TRTAttn: public ParamsBase {
     torch::Tensor kv_cache_offset_h;
 
     torch::Tensor padding_offset;
+    // Compatibility alias for internal PPU bindings that already switched to
+    // the cp_position_ids name.
+    torch::Tensor cp_position_ids;
     torch::Tensor cu_seqlens;
     torch::Tensor cu_kv_seqlens;
     torch::Tensor input_lengths;

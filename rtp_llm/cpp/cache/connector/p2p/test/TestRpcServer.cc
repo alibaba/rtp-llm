@@ -121,6 +121,7 @@ std::string encodeFp32TensorBytes(std::initializer_list<float> values) {
             unknown_fields->AddLengthDelimited(8, encodePackedVarints({11, 12}));
         } else {
             auto* payload = response->mutable_payload();
+            payload->set_has_first_generate_token(true);
             payload->set_first_generate_token_id(first_generate_token_id_);
         }
     } else {

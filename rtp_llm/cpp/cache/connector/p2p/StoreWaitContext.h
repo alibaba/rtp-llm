@@ -19,6 +19,7 @@ struct StoreWaitContext {
     std::shared_ptr<LayerCacheBuffer>                   layer_cache_buffer;
     int64_t                                             deadline_ms;
     std::shared_ptr<PrefillWorkerStoreMetricsCollector> collector;
+    bool                                                timed_out = false;
 
     StoreWaitContext(int64_t                                             request_id,
                      std::shared_ptr<torch::Event>                       event,

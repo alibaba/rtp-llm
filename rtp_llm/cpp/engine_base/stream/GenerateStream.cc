@@ -46,6 +46,12 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     // including in updatePrefix() and the init failure path below.
     generate_status_ = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
 
+    // complete_token_ids_ must exist before any early return so destructor/debug/metrics
+    // paths can safely observe a failed stream (for example LONG_PROMPT_ERROR from updatePrefix()).
+    const size_t init_batch_size = batchSize(0);
+    complete_token_ids_ = std::make_shared<CompleteTokenIds>(
+        init_batch_size, maxBatchSize(), max_seq_len_, model_config.attn_config.tokens_per_block);
+
     if (!updatePrefix(resource_context.system_prompt)) {
         return;
     }
@@ -59,8 +65,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     // Note it is invalid to use currentBatchSize here, because currentBatchSize depends on complete_token_ids_,
     // which has not been initialized yet
-    const size_t init_batch_size = batchSize(0);
-
     begin_time_us_ = input->begin_time_us;
     if (generate_input_->generate_config->calculate_loss && inputLength() > 1) {
         loss_ = torch::zeros({(int64_t)inputLength() - 1}, torch::kFloat32);
@@ -71,8 +75,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     if (generate_input_->generate_config->return_all_hidden_states) {
         setReturnLastHiddenStates(true);
     }
-    complete_token_ids_ = std::make_shared<CompleteTokenIds>(
-        init_batch_size, maxBatchSize(), max_seq_len_, model_config.attn_config.tokens_per_block);
     if (!complete_token_ids_->init(input, extra_reserve_token_num)) {
         reportError(ErrorCode::LONG_PROMPT_ERROR,
                     "input len " + std::to_string(inputLength()) + " exceeds max_seq_len "

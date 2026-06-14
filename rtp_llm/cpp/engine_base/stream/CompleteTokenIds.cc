@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
+#include <algorithm>
 #include <sstream>
 
 namespace rtp_llm {
@@ -8,7 +9,11 @@ CompleteTokenIds::CompleteTokenIds(int batch_size, int max_batch_size, int max_s
     batch_size_(batch_size),
     max_batch_size_(max_batch_size),
     max_seq_len_(max_seq_len),
-    seq_size_per_block_(seq_size_per_block) {}
+    seq_size_per_block_(seq_size_per_block),
+    seq_length_(0),
+    common_len_(0),
+    start_check_seq_length_(0),
+    complete_token_ids_(torch::zeros({std::max(max_batch_size, 1), 1}, torch::kInt32)) {}
 
 CompleteTokenIds::CompleteTokenIds(const CompleteTokenIds& other, bool share, int shift_token_num):
     batch_size_(other.batch_size_),
