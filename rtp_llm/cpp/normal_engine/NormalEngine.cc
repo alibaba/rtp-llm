@@ -51,6 +51,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
     runtime_config(params.runtime_config),
+    grammar_config_(params.grammar_config),
     eplb_config(params.eplb_config),
     pd_sep_config(params.pd_sep_config),
     profiling_debug_logging_config(params.profiling_debug_logging_config),
@@ -148,7 +149,8 @@ void NormalEngine::initScheduler() {
                                            parallelism_config,
                                            model_specific_config,
                                            resource_context_.cache_manager,
-                                           metrics_reporter_));
+                                           metrics_reporter_,
+                                           1));
         RTP_LLM_LOG_INFO("create fifo scheduler done");
     }
 }
@@ -403,6 +405,7 @@ absl::Status NormalEngine::trySaveStepError() const {
 std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    stream->initProcessorStreamRefs();
     return stream;
 }
 
@@ -414,6 +417,7 @@ void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    stream->initProcessorStreamRefs();
     stream->setReserveStep(reserve_step_);
     (void)scheduler_->enqueue(stream);
     return stream;
@@ -426,6 +430,7 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
     for (auto& inp : inputs) {
         auto stream = std::make_shared<NormalGenerateStream>(
             inp, model_config_, runtime_config, resource_context_, metrics_reporter_);
+        stream->initProcessorStreamRefs();
         stream->setReserveStep(reserve_step_);
         streams.push_back(stream);
     }

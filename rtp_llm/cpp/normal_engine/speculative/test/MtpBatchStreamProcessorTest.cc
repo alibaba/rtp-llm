@@ -12,7 +12,6 @@
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
-#include "rtp_llm/cpp/config/ConfigModules.h"
 
 using namespace std;
 
@@ -154,10 +153,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     auto stream_groups = StreamGroups({stream1, stream2});
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
-    spec_decode_output.accept_len = {5, 1};
-
-    spec_decode_output.accept_tokens = {torch::tensor({{2, 3, 1, 3, 2}}, torch::kInt32),
-                                        torch::tensor({{2}}, torch::kInt32)};
+    spec_decode_output.accept_len_cpu    = torch::tensor({5, 1}, torch::kInt32);
+    spec_decode_output.accept_tokens_cpu = torch::tensor({{2, 3, 1, 3, 2}, {2, 0, 0, 0, 0}}, torch::kInt32);
 
     MergedOutput draft_prefill_output;
     draft_prefill_output.model_output.all_hidden_states =
@@ -513,8 +510,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     auto& model_input = model_input_status.value();
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
-    spec_decode_output.accept_len    = {3, 1};
-    spec_decode_output.accept_tokens = {torch::tensor({{2, 3, 1}}, torch::kInt32), torch::tensor({{2}}, torch::kInt32)};
+    spec_decode_output.accept_len_cpu    = torch::tensor({3, 1}, torch::kInt32);
+    spec_decode_output.accept_tokens_cpu = torch::tensor({{2, 3, 1}, {2, 0, 0}}, torch::kInt32);
 
     torch::Tensor hidden_states_d_t;
     size_t        total_accept_len;

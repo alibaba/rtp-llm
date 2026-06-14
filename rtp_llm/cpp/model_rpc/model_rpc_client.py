@@ -1,6 +1,7 @@
 import functools
+import json
 import logging
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Mapping, Optional, Union
 
 import grpc
 from grpc import StatusCode
@@ -9,12 +10,56 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
+    ErrorCodePB,
     ErrorDetailsPB,
     GenerateInputPB,
     GenerateOutputsPB,
     MultimodalInputPB,
     RoleAddrPB,
 )
+
+# Mirror of cpp/model_rpc/RpcErrorCode.h::transRPCErrorCode — kept in lock-step with the proto.
+_RPC_TO_EXCEPTION_TYPE: dict[int, "ExceptionType"] = {
+    ErrorCodePB.NONE_ERROR: ExceptionType.UNKNOWN_ERROR,  # treated as "no info"
+    ErrorCodePB.UNKNOWN_ERROR: ExceptionType.UNKNOWN_ERROR,
+    ErrorCodePB.CANCELLED: ExceptionType.CANCELLED,
+    ErrorCodePB.LOAD_CACHE_TIMEOUT: ExceptionType.LOAD_CACHE_TIMEOUT,
+    ErrorCodePB.CACHE_STORE_LOAD_CONNECT_FAILED: ExceptionType.CACHE_STORE_LOAD_CONNECT_FAILED,
+    ErrorCodePB.CACHE_STORE_LOAD_SEND_REQUEST_FAILED: ExceptionType.CACHE_STORE_LOAD_SEND_REQUEST_FAILED,
+    ErrorCodePB.CACHE_STORE_CALL_PREFILL_TIMEOUT: ExceptionType.CACHE_STORE_CALL_PREFILL_TIMEOUT,
+    ErrorCodePB.CACHE_STORE_LOAD_RDMA_CONNECT_FAILED: ExceptionType.CACHE_STORE_LOAD_RDMA_CONNECT_FAILED,
+    ErrorCodePB.CACHE_STORE_LOAD_RDMA_WRITE_FAILED: ExceptionType.CACHE_STORE_LOAD_RDMA_WRITE_FAILED,
+    ErrorCodePB.CACHE_STORE_LOAD_BUFFER_TIMEOUT: ExceptionType.CACHE_STORE_LOAD_BUFFER_TIMEOUT,
+    ErrorCodePB.P2P_CONNECTOR_CALL_PREFILL_FAILED: ExceptionType.P2P_CONNECTOR_CALL_PREFILL_FAILED,
+    ErrorCodePB.P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED: ExceptionType.P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+    ErrorCodePB.P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED: ExceptionType.P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+    ErrorCodePB.P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED: ExceptionType.P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+    ErrorCodePB.P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED: ExceptionType.P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED,
+    ErrorCodePB.P2P_CONNECTOR_WORKER_ASYMMETRIC_TP_FAILED: ExceptionType.P2P_CONNECTOR_WORKER_ASYMMETRIC_TP_FAILED,
+    ErrorCodePB.P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT: ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT,
+    ErrorCodePB.P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED: ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED,
+    ErrorCodePB.P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED: ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED,
+    ErrorCodePB.P2P_CONNECTOR_WORKER_READ_TRANSFER_RDMA_FAILED: ExceptionType.P2P_CONNECTOR_WORKER_READ_TRANSFER_RDMA_FAILED,
+    ErrorCodePB.P2P_CONNECTOR_WORKER_READ_BUFFER_MISMATCH: ExceptionType.P2P_CONNECTOR_WORKER_READ_BUFFER_MISMATCH,
+    ErrorCodePB.P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_TIMEOUT: ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_TIMEOUT,
+    ErrorCodePB.P2P_CONNECTOR_WORKER_READ_FAILED: ExceptionType.P2P_CONNECTOR_WORKER_READ_FAILED,
+    ErrorCodePB.P2P_CONNECTOR_WORKER_READ_CANCELED: ExceptionType.P2P_CONNECTOR_WORKER_READ_CANCELLED,
+    ErrorCodePB.P2P_CONNECTOR_WORKER_READ_TIMEOUT: ExceptionType.P2P_CONNECTOR_WORKER_READ_TIMEOUT,
+    ErrorCodePB.P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE: ExceptionType.P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
+    ErrorCodePB.INVALID_PARAMS: ExceptionType.INVALID_PARAMS,
+    ErrorCodePB.ERROR_GENERATE_CONFIG_FORMAT: ExceptionType.ERROR_GENERATE_CONFIG_FORMAT,
+    ErrorCodePB.GENERATE_TIMEOUT: ExceptionType.GENERATE_TIMEOUT,
+    ErrorCodePB.MALLOC_FAILED: ExceptionType.MALLOC_ERROR,
+    ErrorCodePB.DECODE_MALLOC_FAILED: ExceptionType.DECODE_MALLOC_FAILED,
+    ErrorCodePB.WAIT_TO_RUN_TIMEOUT: ExceptionType.WAIT_TO_RUN_TIMEOUT,
+    ErrorCodePB.OUT_OF_VOCAB_RANGE: ExceptionType.OUT_OF_VOCAB_RANGE,
+    ErrorCodePB.LONG_PROMPT_ERROR: ExceptionType.LONG_PROMPT_ERROR,
+    ErrorCodePB.EXCEEDS_KV_CACHE_MAX_LEN: ExceptionType.EXCEEDS_KV_CACHE_MAX_LEN,
+    ErrorCodePB.EXECUTION_EXCEPTION: ExceptionType.EXECUTION_EXCEPTION,
+    ErrorCodePB.OUTPUT_QUEUE_FULL: ExceptionType.OUTPUT_QUEUE_FULL,
+    ErrorCodePB.OUTPUT_QUEUE_IS_EMPTY: ExceptionType.OUTPUT_QUEUE_IS_EMPTY,
+    ErrorCodePB.FINISHED: ExceptionType.FINISHED,
+}
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
@@ -33,6 +78,15 @@ from rtp_llm.utils.grpc_util import (
 )
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
+
+_JSON_PB_KW = {"ensure_ascii": False, "separators": (",", ":")}
+
+
+def _pb_string_value_for_json_field(value: Union[str, Mapping[str, Any]]) -> str:
+    """Protobuf StringValue fields expect a string; GenerateConfig may use dict (e.g. OpenAI response_format)."""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, **_JSON_PB_KW)
 
 
 class StreamState:
@@ -73,6 +127,9 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.end_think_token_ids.extend(
         input_py.generate_config.end_think_token_ids
     )
+    generate_config_pb.begin_think_token_ids.extend(
+        input_py.generate_config.begin_think_token_ids
+    )
     generate_config_pb.in_think_mode = input_py.generate_config.in_think_mode
     generate_config_pb.num_beams = input_py.generate_config.num_beams
     generate_config_pb.variable_num_beams.extend(
@@ -99,6 +156,26 @@ def trans_input(input_py: GenerateInput):
     trans_option(generate_config_pb, input_py.generate_config, "top_p_decay")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_min")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_reset_ids")
+    if input_py.generate_config.json_schema is not None:
+        generate_config_pb.json_schema.value = _pb_string_value_for_json_field(
+            input_py.generate_config.json_schema
+        )
+    trans_option(generate_config_pb, input_py.generate_config, "regex")
+    trans_option(generate_config_pb, input_py.generate_config, "ebnf")
+    if input_py.generate_config.structural_tag is not None:
+        generate_config_pb.structural_tag.value = _pb_string_value_for_json_field(
+            input_py.generate_config.structural_tag
+        )
+    # Envelope validation lives in C++ QueryConverter::normalizeResponseFormat — pass through raw.
+    if input_py.generate_config.response_format is not None:
+        rf = input_py.generate_config.response_format
+        skip_empty = (isinstance(rf, str) and not rf.strip()) or (
+            isinstance(rf, dict) and not rf
+        )
+        if not skip_empty:
+            generate_config_pb.response_format.value = _pb_string_value_for_json_field(
+                rf
+            )
     trans_option(generate_config_pb, input_py.generate_config, "adapter_name")
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "task_id", functools.partial(str)
@@ -170,9 +247,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.combo_token_size = input_py.generate_config.combo_token_size
     for i in range(len(input_py.generate_config.banned_combo_token_ids)):
         banned_combo = generate_config_pb.banned_combo_token_ids.rows.add()
-        banned_combo.values.extend(
-            input_py.generate_config.banned_combo_token_ids[i]
-        )
+        banned_combo.values.extend(input_py.generate_config.banned_combo_token_ids[i])
 
     for role_addr in input_py.generate_config.role_addrs:
         role_addr_pb = RoleAddrPB()
@@ -546,8 +621,12 @@ class ModelRpcClient(object):
                     result_pb.HasField("error_info")
                     and result_pb.error_info.error_message
                 ):
+                    # PB enum renumbered (dense) — static dict, not raw ErrorCode cast.
+                    exc_type = _RPC_TO_EXCEPTION_TYPE.get(
+                        result_pb.error_info.error_code, ExceptionType.UNKNOWN_ERROR
+                    )
                     raise FtRuntimeException(
-                        ExceptionType.UNKNOWN_ERROR,
+                        exc_type,
                         f"batch item {i} failed: {result_pb.error_info.error_message}",
                     )
                 stream_state = StreamState()

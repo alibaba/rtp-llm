@@ -118,9 +118,8 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                 )
                 for _ in range(n)
             ]
-        else:
-            # logprobs模式下使用普通StreamStatus
-            return [StreamStatus(request) for _ in range(n)]
+        # logprobs模式下使用普通StreamStatus
+        return [StreamStatus(request) for _ in range(n)]
 
     @override
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:

@@ -1,5 +1,4 @@
 import json
-import logging
 from typing import Optional
 
 from jinja2 import Environment
@@ -67,13 +66,8 @@ class Qwen3CoderRenderer(ReasoningToolBaseRenderer):
     ) -> Optional[ReasoningParser]:
         if not self.in_think_mode(request):
             return None
-
-        try:
-            rendered_result = self.render_chat(request)
-            if rendered_result.rendered_prompt.endswith(self.think_start_tag):
-                return ReasoningParser(model_type="qwen3-thinking")
-        except Exception as e:
-            logging.error(f"Failed to render chat in _create_reasoning_parser: {e}")
+        if self.prompt_preopens_think(request):
+            return ReasoningParser(model_type="qwen3-thinking")
         return ReasoningParser(model_type="qwen3")
 
 

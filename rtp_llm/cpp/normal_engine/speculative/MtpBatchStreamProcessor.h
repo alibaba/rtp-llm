@@ -2,6 +2,8 @@
 
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 
 namespace rtp_llm {
@@ -13,9 +15,7 @@ public:
                             const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                             const CacheConfig&                 cache_config,
                             const SpeculativeExecutionConfig&  sp_config,
-                            bool                               warm_up):
-        NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
-        propose_step_(sp_config.gen_num_per_cycle) {}
+                            bool                               warm_up);
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
@@ -27,9 +27,10 @@ public:
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups) const;
 
-    absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&    stream_groups,
-                                                         const GptModelInputs&  model_inputs,
-                                                         const GptModelOutputs& model_output) const;
+    absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
+                                                         const GptModelInputs&                       model_inputs,
+                                                         const GptModelOutputs&                      model_output,
+                                                         const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result) const;
 
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups, GptModelInputs& model_input);
 
@@ -80,6 +81,7 @@ protected:
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 
 protected:
-    int propose_step_;
+    int  propose_step_;
+    bool warm_up_;
 };
 }  // namespace rtp_llm

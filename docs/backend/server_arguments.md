@@ -100,6 +100,14 @@ This page lists server arguments used to configure the behavior and performance 
 | `--max-batch-size` | Override system maximum batch size. | 0 |
 | `--enable-flashinfer-sample-kernel` | Enables FlashInfer sampling kernel. | True |
 
+## Grammar / Constrained Decoding
+
+| Arguments | Description | Defaults |
+|-----------|-------------|----------|
+| `--constrained_json_disable_any_whitespace` | Disable XGrammar's any-whitespace mode for JSON schemas. | False |
+| `--grammar_compile_timeout_ms` | Per-compile wall-clock timeout (ms) inside the GrammarCompiler queue. | 60000 |
+| `--grammar_num_workers` | Size of the C++ compile worker pool. | 32 |
+
 ## Logging & Profiling
 
 | Arguments | Description | Defaults |

@@ -4,13 +4,18 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import TensorPB
 
 
 def trans_option(pb_object, py_object, name):
-    if getattr(py_object, name):
-        getattr(pb_object, name).value = getattr(py_object, name)
+    # is-not-None, not truthiness — preserves 0/""/False.
+    value = getattr(py_object, name)
+    if value is not None:
+        pb_field = getattr(pb_object, name)
+        pb_field.value = value
 
 
 def trans_option_cast(pb_object, py_object, name, func):
-    if getattr(py_object, name):
-        getattr(pb_object, name).value = func(getattr(py_object, name))
+    value = getattr(py_object, name)
+    if value is not None:
+        pb_field = getattr(pb_object, name)
+        pb_field.value = func(value)
 
 
 def trans_grpc_dtype(type: TensorPB.DataType):

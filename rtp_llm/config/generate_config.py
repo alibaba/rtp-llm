@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import json
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
@@ -9,6 +10,45 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
+
+_GRAMMAR_RESPONSE_FORMAT_TYPES = frozenset(
+    {"json_schema", "json_object", "regex", "ebnf", "structural_tag"}
+)
+
+
+def _parse_response_format(
+    rf: Optional[Union[str, Dict[str, Any]]],
+) -> Optional[Dict[str, Any]]:
+    """Parse response_format once; None means no constraint."""
+    if not rf:
+        return None
+    if isinstance(rf, dict):
+        return rf if rf else None
+    if isinstance(rf, str):
+        stripped = rf.strip()
+        if not stripped:
+            return None
+        parsed = json.loads(stripped)
+        if not isinstance(parsed, dict):
+            raise TypeError("response_format JSON must be an object")
+        return parsed
+    raise TypeError(f"response_format has unsupported type {type(rf).__name__}")
+
+
+def _response_format_is_grammar(
+    rf: Optional[Union[str, Dict[str, Any]]],
+    parsed: Optional[Dict[str, Any]] = None,
+) -> bool:
+    # Empty string / None / empty object mean "no structured-output constraint";
+    # only known response_format.type values below request grammar handling.
+    if parsed is None:
+        try:
+            parsed = _parse_response_format(rf)
+        except (json.JSONDecodeError, TypeError):
+            return False
+    if not parsed:
+        return False
+    return parsed.get("type") in _GRAMMAR_RESPONSE_FORMAT_TYPES
 
 
 class RequestFormat:
@@ -59,6 +99,7 @@ class GenerateConfig(BaseModel):
     )
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     end_think_token_ids: List[int] = []
+    begin_think_token_ids: List[int] = []
     num_beams: int = 1
     variable_num_beams: List[int] = []
     do_sample: bool = True
@@ -99,6 +140,11 @@ class GenerateConfig(BaseModel):
     chat_id: Optional[str] = None
     task_id: Optional[Union[str, int]] = None
     request_format: str = RequestFormat.RAW
+    response_format: Optional[Union[str, Dict[str, Any]]] = None
+    json_schema: Optional[Union[str, Dict[str, Any]]] = None
+    regex: Optional[str] = None
+    ebnf: Optional[str] = None
+    structural_tag: Optional[str] = None
     # calculate_loss style: 0 for not calculate; 1 for sum; 2 for each token
     calculate_loss: int = 0
     return_logits: bool = False
@@ -416,3 +462,62 @@ class GenerateConfig(BaseModel):
             )
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
+
+        self._validate_grammar_constraints()
+
+    def _validate_grammar_constraints(self) -> None:
+        parsed_response_format: Optional[Dict[str, Any]] = None
+        if self.response_format is not None:
+            try:
+                parsed_response_format = _parse_response_format(self.response_format)
+            except (json.JSONDecodeError, TypeError) as e:
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    f"response_format is not valid JSON: {e}",
+                )
+
+        if self._grammar_constraint_count(parsed_response_format) > 1:
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "only one grammar constraint (json_schema / regex / ebnf / "
+                "structural_tag / grammar response_format) may be set per request",
+            )
+
+        # NormalOutputDispatcher skips per-token matcher advance under beam search → schema-illegal tokens.
+        if (
+            self.has_num_beams() or self.num_return_sequences > 1
+        ) and self._has_grammar_constraint(parsed_response_format):
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "grammar-constrained decoding (json_schema / regex / ebnf / "
+                "structural_tag / response_format) is not supported with beam "
+                "search (num_beams > 1 or num_return_sequences > 1)",
+            )
+
+    def _has_grammar_constraint(
+        self, parsed_response_format: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        if (
+            self.json_schema is not None
+            or self.regex is not None
+            or self.ebnf is not None
+            or self.structural_tag is not None
+        ):
+            return True
+        return _response_format_is_grammar(self.response_format, parsed_response_format)
+
+    def _grammar_constraint_count(
+        self, parsed_response_format: Optional[Dict[str, Any]] = None
+    ) -> int:
+        count = 0
+        if self.json_schema is not None:
+            count += 1
+        if self.regex is not None:
+            count += 1
+        if self.ebnf is not None:
+            count += 1
+        if self.structural_tag is not None:
+            count += 1
+        if _response_format_is_grammar(self.response_format, parsed_response_format):
+            count += 1
+        return count

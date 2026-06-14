@@ -346,6 +346,21 @@ class CustomChatRenderer:
         self.extra_stop_words: List[str] = []
         self.extra_stop_word_ids_list: List[List[int]] = []
 
+    def prompt_preopens_think(self, request: ChatCompletionRequest) -> bool:
+        """Return True if the rendered prompt leaves the assistant turn inside
+        an open `<think>` block (Qwen3.5 with enable_thinking=true), so the
+        model's first emitted text belongs to reasoning. Whitespace-tolerant
+        suffix match: chat templates may end the assistant prefix with
+        `<think>`, `<think>\\n`, or `<think>\\n\\n` depending on version."""
+        if not self.think_mode or not self.think_start_tag:
+            return False
+        try:
+            prompt = self.render_chat(request).rendered_prompt
+        except Exception as exc:
+            logging.error("prompt_preopens_think render failed: %s", exc)
+            return False
+        return prompt.rstrip().endswith(self.think_start_tag.strip())
+
     def __str__(self) -> str:
         return str(self.get_renderer_info())
 

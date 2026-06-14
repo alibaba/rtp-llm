@@ -89,6 +89,9 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             }
         }
         RTP_LLM_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
+        if (result.value().generate_outputs.empty()) {
+            continue;
+        }
         GenerateOutputsPB outputs_pb;
 
         QueryConverter::transResponse(&outputs_pb,
@@ -116,11 +119,24 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
     }
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
 
+    // The loop exits via either nextOutput() returning a non-FINISHED error (already
+    // serialized above) or via isActive()==false. The latter conflates two terminal
+    // states: clean finish vs. async-reported error (e.g. logits processor reportError
+    // arriving after the last output was consumed). Without this check, an errored
+    // stream returns gRPC OK and the client silently treats it as success.
+    if (stream->hasError()) {
+        return serializeErrorMsg(request_key, stream->statusInfo());
+    }
+
     return grpc::Status::OK;
 }
 
 ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) {
-    output = QueryConverter::transQuery(&input_pb);
+    try {
+        output = QueryConverter::transQuery(&input_pb);
+    } catch (const std::invalid_argument& e) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, e.what());
+    }
     if (mm_processor_ != nullptr && output->multimodal_inputs) {
         RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
         auto mm_res = mm_processor_->updateMultimodalFeatures(output);
@@ -148,6 +164,14 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
             break;
         }
         last_outputs = output_result.value();
+    }
+    // Same race shape as pollStreamOutput: the loop exits via isFinished()==true
+    // or via FINISHED on nextOutput(), but an async-reported error (e.g. logits
+    // processor reportError arriving after the last output was consumed) could
+    // be observable only after we leave the loop. Without this check the batch
+    // path returns OkStatus and the client treats it as success.
+    if (stream->hasError()) {
+        return stream->statusInfo();
     }
     return ErrorInfo::OkStatus();
 }
@@ -204,15 +228,17 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         std::shared_ptr<GenerateInput> input;
         auto                           err = prepareInput(request->inputs(i), input);
         if (!err.ok()) {
-            // Fill error results for all requests (0..batch_size-1) to maintain 1:1 mapping
+            const ErrorCodePB code_pb = transErrorCodeToRPC(err.code());
             for (int j = 0; j < batch_size; j++) {
                 auto* result = response->add_results();
                 auto* err_pb = result->mutable_error_info();
-                err_pb->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
                 if (j == i) {
-                    err_pb->set_error_message("multimodal processing failed: " + err.ToString());
+                    err_pb->set_error_code(code_pb);
+                    err_pb->set_error_message("prepareInput failed: " + err.ToString());
                 } else {
-                    err_pb->set_error_message("batch aborted due to multimodal failure at index " + std::to_string(i));
+                    err_pb->set_error_code(ErrorCodePB::CANCELLED);
+                    err_pb->set_error_message("batch aborted due to prepareInput failure at index "
+                                              + std::to_string(i));
                 }
             }
             return grpc::Status::OK;
@@ -234,9 +260,11 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         GenerateOutputs last_outputs;
         auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
         if (!err.ok()) {
+            // Per-ErrorCode mapping (instead of CANCELLED / UNKNOWN binary) so the
+            // Python client can distinguish INVALID_PARAMS / GENERATE_TIMEOUT /
+            // OOM / etc. and raise the matching FtRuntimeException.
             auto* err_pb = result->mutable_error_info();
-            err_pb->set_error_code(err.code() == ErrorCode::CANCELLED ? ErrorCodePB::CANCELLED :
-                                                                        ErrorCodePB::UNKNOWN_ERROR);
+            err_pb->set_error_code(transErrorCodeToRPC(err.code()));
             err_pb->set_error_message(err.ToString());
         } else {
             auto* output_pb = result->mutable_final_output();

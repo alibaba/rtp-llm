@@ -112,7 +112,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
-    LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
+    LogitsProcessorFactory::init(
+        params.model_config_.ckpt_path, params.sp_config.tree_decode_config, params.grammar_config);
     cudaProfilerBegin();
 }
 
@@ -186,7 +187,6 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         CHECK_AND_RETURN_REF(sampler_input,
                              batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
         sampler_output = std::move(sampler_->forward(sampler_input));
-        RTP_LLM_LOG_DEBUG("sampler forward done");
         executor_collector.sample_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     {

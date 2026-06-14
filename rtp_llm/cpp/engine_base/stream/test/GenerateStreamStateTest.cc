@@ -12,6 +12,8 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
+#include <stdexcept>
+
 using namespace std;
 
 namespace rtp_llm {

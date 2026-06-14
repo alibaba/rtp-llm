@@ -50,6 +50,8 @@ test_suite(
         ":smoke_h20_moe",
         ":smoke_h20_next",
         ":smoke_h20_kimi_linear",
+        ":smoke_h20_grammar",
+        ":smoke_h20_grammar_heavy",
         ":smoke_cuda_remote_cache",
         ":smoke_rocm_basic",
         ":smoke_rocm_dense",

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include <algorithm>
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
@@ -15,6 +16,13 @@ void BaseLogitsProcessor::memFill(const torch::Tensor& new_tokens_logits, size_t
     RTP_LLM_CHECK(new_tokens_logits.dim() == 1);
     auto tensor = new_tokens_logits;
     tensor.fill_(neg_inf);
+    // Bound by both vocab_size (logical) and the actual tensor size (physical).
+    // Caller-supplied token_id may come from per-request config; an OOB write
+    // here would silently corrupt sampler state or segfault.
+    const size_t bound = std::min<size_t>(vocab_size, static_cast<size_t>(tensor.size(0)));
+    if (index >= bound) {
+        return;
+    }
     tensor[index] = 1;
 }
 

@@ -86,34 +86,37 @@ struct EngineInitParams {
         showDebugInfo();
     }
 
-    size_t                       model_id;
-    ModelConfig                  model_config_;
-    ParallelismConfig            parallelism_config;
-    NcclCommConfig               nccl_comm_config;  // NCCL ip/ports
-    py::object                   server_config;     // Python ServerConfig; RPC/HTTP ports read from it
-    RuntimeConfig                runtime_config;
-    EPLBConfig                   eplb_config;
-    PDSepConfig                  pd_sep_config;
-    ConcurrencyConfig            concurrency_config;
-    FMHAConfig                   fmha_config;
-    KVCacheConfig                kv_cache_config;
-    ProfilingDebugLoggingConfig  profiling_debug_logging_config;
-    HWKernelConfig               hw_kernel_config;
-    DeviceResourceConfig         device_resource_config;
-    MoeConfig                    moe_config;
-    ModelSpecificConfig          model_specific_config;
-    SpeculativeExecutionConfig   sp_config;
-    CacheStoreConfig             cache_store_config;
-    MiscellaneousConfig          misc_config;
-    ArpcConfig                   arpc_config;
-    GrpcConfig                   grpc_config;
-    FfnDisAggregateConfig        ffn_disaggregate_config;
-    VitConfig                    vit_config;
-    rtp_llm::Weights             gpt_weights;
-    py::object                   py_model;
-    py::object                   py_eplb;
-    py::object                   py_sp_model;
-    py::object                   weight_manager;
+    size_t                      model_id;
+    ModelConfig                 model_config_;
+    ParallelismConfig           parallelism_config;
+    NcclCommConfig              nccl_comm_config;  // NCCL ip/ports
+    py::object                  server_config;     // Python ServerConfig; RPC/HTTP ports read from it
+    RuntimeConfig               runtime_config;
+    EPLBConfig                  eplb_config;
+    PDSepConfig                 pd_sep_config;
+    ConcurrencyConfig           concurrency_config;
+    FMHAConfig                  fmha_config;
+    KVCacheConfig               kv_cache_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    HWKernelConfig              hw_kernel_config;
+    DeviceResourceConfig        device_resource_config;
+    MoeConfig                   moe_config;
+    ModelSpecificConfig         model_specific_config;
+    SpeculativeExecutionConfig  sp_config;
+    CacheStoreConfig            cache_store_config;
+    MiscellaneousConfig         misc_config;
+    ArpcConfig                  arpc_config;
+    GrpcConfig                  grpc_config;
+    FfnDisAggregateConfig       ffn_disaggregate_config;
+    VitConfig                   vit_config;
+    rtp_llm::Weights            gpt_weights;
+    py::object                  py_model;
+    py::object                  py_eplb;
+    py::object                  py_sp_model;
+    py::object                  weight_manager;
+    // Grammar/structured-output config (empty tokenizer_info_json = disabled);
+    // tokenizer_info_json is populated in RtpLLMOp::initModel.
+    GrammarConfig                grammar_config;
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
 
 public:

@@ -30,10 +30,11 @@ public:
         for (size_t i = 0; i < batch_size; i++) {
             auto think_info = StreamThinkInfo(think_mode,
                                               max_thinking_tokens[i],
+                                              std::vector<int>{},
                                               end_think_token_ids,
                                               0,
                                               0,
-                                              0,
+                                              false,
                                               std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids));
             think_info.dfa_ptr->forceSetStatus(think_status[i]);
             think_infos.push_back(think_info);
@@ -159,7 +160,7 @@ TEST_F(SamplerTest, testUpdateStatus) {
         processor->updateStatus(new_token, 1);
 
         auto                proc        = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
-        std::vector<size_t> status_list = proc->thinkEndTokensStatus();
+        std::vector<size_t> status_list = ThinkModeLogitsProcessorTestPeer::thinkEndTokensStatus(*proc);
         EXPECT_EQ(0, status_list[0]);
         EXPECT_EQ(0, status_list[1]);
         EXPECT_EQ(1, status_list[2]);
@@ -179,7 +180,7 @@ TEST_F(SamplerTest, testUpdateStatus) {
         processor->updateStatus(new_token, 1);
 
         auto                proc        = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
-        std::vector<size_t> status_list = proc->thinkEndTokensStatus();
+        std::vector<size_t> status_list = ThinkModeLogitsProcessorTestPeer::thinkEndTokensStatus(*proc);
         EXPECT_EQ(0, status_list[0]);
         EXPECT_EQ(0, status_list[1]);
         EXPECT_EQ(2, status_list[2]);
@@ -199,65 +200,11 @@ TEST_F(SamplerTest, testUpdateStatus) {
         processor->updateStatus(new_token, 1);
 
         auto                proc        = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
-        std::vector<size_t> status_list = proc->thinkEndTokensStatus();
+        std::vector<size_t> status_list = ThinkModeLogitsProcessorTestPeer::thinkEndTokensStatus(*proc);
         EXPECT_EQ(1, status_list[0]);
         EXPECT_EQ(0, status_list[1]);
         EXPECT_EQ(1, status_list[2]);
         EXPECT_EQ(2, status_list[3]);
-    }
-}
-
-std::vector<float> tensorToVector(const at::Tensor& tensor, size_t size) {
-    std::vector<float> vec(size, 0);
-    for (size_t i = 0; i < tensor.size(0); ++i) {
-        vec[i] = tensor[i].item<float>();
-    }
-    return vec;
-}
-
-TEST_F(SamplerTest, testSetVocabMask) {
-    {
-        SamplerDataBuilder     builder;
-        size_t                 batch_size          = 4;
-        size_t                 vocab_size          = 10;
-        size_t                 max_length          = 10;
-        std::vector<int>       end_think_token_ids = {5, 6};
-        std::vector<int>       max_thinking_tokens = {3, 3, 3, 3};
-        std::vector<int>       think_status        = {0, 0, 1, 1};
-        BaseLogitsProcessorPtr processor =
-            builder.generateLogitsProcessor(true, max_thinking_tokens, end_think_token_ids, think_status);
-
-        SamplerInputs sampler_inputs =
-            builder.allocate({batch_size, vocab_size, max_length}, {processor}, {batch_size});
-        std::vector<int> sequence_lengths = {1, 2, 3, 4};
-        builder.setSequenceLengths(sampler_inputs, sequence_lengths);
-        EXPECT_EQ(
-            std::vector<int>(sampler_inputs.sequence_lengths.data_ptr<int>(),
-                             sampler_inputs.sequence_lengths.data_ptr<int>() + sampler_inputs.sequence_lengths.numel()),
-            std::vector<int>({1, 2, 3, 4}));
-
-        auto think_processor = std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processor);
-
-        for (size_t i = 0; i < batch_size; i++) {
-            think_processor->setVocabMask(think_processor->think_infos_[i].dfa_ptr,
-                                          sampler_inputs.logits[i],
-                                          1,
-                                          end_think_token_ids,
-                                          vocab_size,
-                                          i % 2 == 0 ? true : false);
-        }
-
-        float neg_inf = -std::numeric_limits<float>::max();
-
-        std::vector<float> expect_vec_0 = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        std::vector<float> expect_vec_1 = {
-            neg_inf, neg_inf, neg_inf, neg_inf, neg_inf, 1, neg_inf, neg_inf, neg_inf, neg_inf};
-        std::vector<float> expect_vec_2 = {
-            neg_inf, neg_inf, neg_inf, neg_inf, neg_inf, neg_inf, 1, neg_inf, neg_inf, neg_inf};
-        EXPECT_SIMILAR(expect_vec_1, tensorToVector(sampler_inputs.logits[0], 10), 1e-6);
-        EXPECT_SIMILAR(expect_vec_0, tensorToVector(sampler_inputs.logits[1], 10), 1e-6);
-        EXPECT_SIMILAR(expect_vec_2, tensorToVector(sampler_inputs.logits[2], 10), 1e-6);
-        EXPECT_SIMILAR(expect_vec_0, tensorToVector(sampler_inputs.logits[3], 10), 1e-6);
     }
 }
 

@@ -5,8 +5,10 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <unistd.h>
 #include <limits.h>
 #include <c10/core/InferenceMode.h>
@@ -89,7 +91,7 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 }
 
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
-    static int max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * 1000;
+    const int max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * 1000;
     auto       begin_time_us       = currentTimeUs();
     while (!stream->hasError() && stream->getStatus() == StreamState::WAITING) {
         usleep(100);
@@ -110,7 +112,14 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
-    auto input                            = QueryConverter::transQuery(prefill_context.rpc_context.request);
+    std::shared_ptr<GenerateInput> input;
+    try {
+        input = QueryConverter::transQuery(prefill_context.rpc_context.request);
+    } catch (const std::invalid_argument& e) {
+        prefill_context.error_info = ErrorInfo(ErrorCode::INVALID_PARAMS, e.what());
+        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        return;
+    }
     input->generate_config->pd_separation = true;
     if (engine_->isMTPEagle()) {
         input->generate_config->force_disable_sp_run = false;

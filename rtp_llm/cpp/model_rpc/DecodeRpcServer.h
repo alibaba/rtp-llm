@@ -62,6 +62,8 @@ private:
     void         prepareGenerateContext(DecodeGenerateContext& decode_context);
     void         allocateResource(DecodeGenerateContext& decode_context);
     grpc::Status allocateResourceFunc(DecodeGenerateContext& decode_context);
+    ErrorInfo    waitStreamReady(const DecodeGenerateContext&           decode_context,
+                                 const std::shared_ptr<GenerateStream>& stream);
     void         loadCacheFromPrefill(DecodeGenerateContext& decode_context);
     void         localGenerate(DecodeGenerateContext& decode_context);
 

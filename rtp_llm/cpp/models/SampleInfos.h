@@ -1,8 +1,12 @@
 #pragma once
 
+#include <memory>
+#include <vector>
+
 #include <torch/all.h>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
+#include "rtp_llm/cpp/models/SpecLogitsProcessorTypes.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 
 namespace rtp_llm {
@@ -57,6 +61,13 @@ public:
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
 
     std::vector<at::Generator> generator;
+
+    // MTP verify: int32 packed bitmask [batch * (propose_step + 1), bitmask_words];
+    // bit=1 allowed. defined() iff this batch is a spec-verify batch.
+    torch::Tensor                      spec_vocab_mask_gpu;
+    torch::Tensor                      spec_cap_gpu;
+    std::vector<SpecLogitsProcessorId> spec_applied_processors;
+    int                                spec_propose_step = 0;
 };
 
 struct SamplerOutput {

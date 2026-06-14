@@ -1,12 +1,28 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include <numeric>
+
+#include <algorithm>
 #include <cstring>
+#include <numeric>
+#include <utility>
+#include <vector>
 
 namespace rtp_llm {
+
+MtpBatchStreamProcessor::MtpBatchStreamProcessor(const ModelConfig&                 model_config,
+                                                 const PDSepConfig&                 pd_sep_config,
+                                                 const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
+                                                 const CacheConfig&                 cache_config,
+                                                 const SpeculativeExecutionConfig&  sp_config,
+                                                 bool                               warm_up):
+    NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
+    propose_step_(sp_config.gen_num_per_cycle),
+    warm_up_(warm_up) {}
 
 absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups& stream_groups,
                                                       const MergedOutput& prefill_output,
@@ -62,8 +78,11 @@ MtpBatchStreamProcessor::gatherDecodeModelInput(const StreamGroups& stream_group
     return model_input;
 }
 
-absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
-    const StreamGroups& stream_groups, const GptModelInputs& model_inputs, const GptModelOutputs& model_output) const {
+absl::StatusOr<SamplerInputs>
+MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
+                                                const GptModelInputs&                       model_inputs,
+                                                const GptModelOutputs&                      model_output,
+                                                const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result) const {
     (void)model_inputs;
     RTP_LLM_CHECK(!stream_groups.empty());
     auto               all_streams      = stream_groups.allStreams();
@@ -79,6 +98,13 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
     SamplerInputs sampler_inputs =
         allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_);
     fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
+    setLogitsProcessorInputs(sampler_inputs, all_streams, /*score_batch=*/true);
+    if (spec_logits_result.has_active_processor) {
+        sampler_inputs.spec_vocab_mask_gpu     = spec_logits_result.spec_vocab_mask_gpu;
+        sampler_inputs.spec_cap_gpu            = spec_logits_result.spec_cap_gpu;
+        sampler_inputs.spec_applied_processors = spec_logits_result.applied_processors;
+        sampler_inputs.spec_propose_step       = static_cast<int>(propose_step_);
+    }
 
     int batch_idx = 0;
     for (auto& stream : all_streams) {
@@ -97,7 +123,8 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
                           tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
     }
 
-    auto vocab_size = (size_t)model_output.logits.size(1);
+    auto vocab_size           = (size_t)model_output.logits.size(1);
+    sampler_inputs.vocab_size = vocab_size;
     if (return_all_probs != ReturnAllProbsMode::NONE) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
@@ -112,7 +139,7 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
                       tensorDebugStringWithData<float>(sampler_inputs.logits.cpu(), 10).c_str());
 
     RTP_LLM_LOG_DEBUG("gatherSamplerInput done");
-    return std::move(sampler_inputs);
+    return sampler_inputs;
 }
 
 void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&                stream_groups,
@@ -260,8 +287,25 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     const size_t                                 batch_size,
     torch::Tensor&                               hidden_states_d_t,
     size_t&                                      total_accept_len) {
-    auto& accept_lens = speculative_sampler_output.accept_len;
-    total_accept_len  = std::accumulate(accept_lens.begin(), accept_lens.end(), 0);
+    speculative_sampler_output.transfer_done_event->synchronize();
+    const auto& accept_lens   = speculative_sampler_output.accept_len_cpu;
+    const auto& accept_tokens = speculative_sampler_output.accept_tokens_cpu;
+
+    // Per-row bound check before sum(): caps total_accept_len so combo_tokens alloc
+    // and the memcpy below stay within accept_tokens row bounds.
+    {
+        auto           accept_lens_c = accept_lens.contiguous();
+        const int32_t* len_ptr       = accept_lens_c.data_ptr<int32_t>();
+        for (size_t i = 0; i < batch_size; ++i) {
+            RTP_LLM_CHECK_WITH_INFO(len_ptr[i] > 0 && len_ptr[i] <= static_cast<int32_t>(propose_step_ + 1),
+                                    "invalid accept_len[%zu]=%d (propose_step=%zu)",
+                                    i,
+                                    len_ptr[i],
+                                    propose_step_);
+        }
+    }
+
+    total_accept_len = static_cast<size_t>(accept_lens.sum().item<int64_t>());
 
     model_input.combo_tokens = torch::empty({(int64_t)total_accept_len}, torch::kInt32).pin_memory();
 
@@ -269,24 +313,24 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     auto lm_output_indexes = torch::empty({(int64_t)batch_size}, torch::kInt32).pin_memory();
 
     std::vector<torch::Tensor> hidden_states_list;
-    for (int i = 0; i < batch_size; i++) {
-        RTP_LLM_CHECK_WITH_INFO(accept_lens[i] == (size_t)speculative_sampler_output.accept_tokens[i].numel(),
-                                "accept_lens[%d] = %d, speculative_sampler_output.accept_tokens[%d].numel() = %d",
+    for (size_t i = 0; i < batch_size; i++) {
+        const int cur_accept_len = accept_lens[static_cast<int64_t>(i)].item<int32_t>();
+        RTP_LLM_CHECK_WITH_INFO(cur_accept_len > 0 && cur_accept_len <= static_cast<int>(propose_step_ + 1),
+                                "invalid accept_len[%zu]=%d",
                                 i,
-                                accept_lens[i],
-                                i,
-                                speculative_sampler_output.accept_tokens[i].numel());
+                                cur_accept_len);
 
         memcpy(model_input.combo_tokens.data_ptr<int>() + token_offset,
-               speculative_sampler_output.accept_tokens[i].data_ptr<int>(),
-               accept_lens[i] * sizeof(int));
+               accept_tokens.data_ptr<int>() + static_cast<int64_t>(i) * (propose_step_ + 1),
+               static_cast<size_t>(cur_accept_len) * sizeof(int));
 
-        auto hidden_slice = model_output.all_hidden_states.narrow(0, i * (propose_step_ + 1), accept_lens[i]);
+        auto hidden_slice =
+            model_output.all_hidden_states.narrow(0, static_cast<int64_t>(i) * (propose_step_ + 1), cur_accept_len);
         hidden_states_list.push_back(hidden_slice);
 
-        model_input.input_lengths.data_ptr<int>()[i] = accept_lens[i];
-        token_offset += accept_lens[i];
-        lm_output_indexes.data_ptr<int>()[i] = token_offset - 1;
+        model_input.input_lengths.data_ptr<int>()[static_cast<int64_t>(i)] = cur_accept_len;
+        token_offset += cur_accept_len;
+        lm_output_indexes.data_ptr<int>()[static_cast<int64_t>(i)] = token_offset - 1;
     }
 
     hidden_states_d_t              = torch::cat(hidden_states_list).contiguous();
@@ -408,8 +452,9 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const speculative::SpeculativeSamplerOutput& spec_decode_output,
     const MergedOutput&                          draft_prefill_output,
     std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const {
-    const auto& accept_len    = spec_decode_output.accept_len;
-    const auto& accept_tokens = spec_decode_output.accept_tokens;
+    spec_decode_output.transfer_done_event->synchronize();
+    const auto& accept_len    = spec_decode_output.accept_len_cpu;
+    const auto& accept_tokens = spec_decode_output.accept_tokens_cpu;
 
     const auto& draft_model_output   = draft_prefill_output.model_output;
     const auto& draft_sampler_output = draft_prefill_output.sampler_output;
@@ -422,24 +467,23 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
 
-        // speculative decoding info
         torch::Tensor propose_all_probs =
             draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
 
+        const int cur_accept_len = accept_len[batch_idx_out].item<int32_t>();
+
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1) {
-            auto slice_t =
-                draft_model_output.all_hidden_states.narrow(0, token_offset + accept_len[batch_idx_out] - 1, 1);
+            auto slice_t       = draft_model_output.all_hidden_states.narrow(0, token_offset + cur_accept_len - 1, 1);
             last_hidden_states = slice_t;
         }
 
-        spec_update_infos.push_back({accept_tokens[batch_idx_out],
-                                     accept_len[batch_idx_out],
-                                     -1,
-                                     std::move(last_hidden_states),
-                                     std::move(propose_all_probs)});
+        torch::Tensor accept_tokens_tensor =
+            accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
+        spec_update_infos.push_back(
+            {accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
 
-        token_offset += accept_len[batch_idx_out];
+        token_offset += accept_len[batch_idx_out].item<int32_t>();
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
     }

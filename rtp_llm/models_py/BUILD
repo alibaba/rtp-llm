@@ -36,13 +36,14 @@ py_library(
     data = [":cutlass_moe_config"],
     deps = [
         ":utils",
-        "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:moriep_wrapper",
         "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
-        "@//:using_cuda12": flashinfer + deep,
+        "@//:using_cuda12": [
+            "//rtp_llm/models_py/triton_kernels:triton_kernels",
+        ] + flashinfer + deep,
         "@//:using_ppu": deep,
         "@//:using_rocm": [
             "//rtp_llm/models_py/modules/base/rocm:rocm_base",

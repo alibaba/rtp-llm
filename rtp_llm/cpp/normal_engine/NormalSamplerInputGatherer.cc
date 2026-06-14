@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalSamplerInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 
 namespace rtp_llm {
@@ -201,11 +202,32 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
                                                           std::list<GenerateStreamPtr>& all_streams,
                                                           bool                          score_batch) const {
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
-    std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, idx = 0](auto& stream) mutable {
-        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
-            state_ptr->insert(processor, idx, idx + stream->currentBatchSize());
+    std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, score_batch, idx = 0](auto& stream) mutable {
+        const auto stream_id = static_cast<uint64_t>(stream->streamId());
+        if (score_batch) {
+            const int score_len = static_cast<int>(stream->scoreLen());
+            size_t    processor_idx = 0;
+            for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+                if (!processor || processor->isStateful()) {
+                    ++processor_idx;
+                    continue;
+                }
+                for (int i = 0; i < score_len; ++i) {
+                    state_ptr->insert(processor, idx + i, idx + i + 1, stream_id, processor_idx);
+                }
+                ++processor_idx;
+            }
+            idx += score_len;
+        } else {
+            size_t processor_idx = 0;
+            for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+                if (processor) {
+                    state_ptr->insert(processor, idx, idx + stream->currentBatchSize(), stream_id, processor_idx);
+                }
+                ++processor_idx;
+            }
+            idx += stream->currentBatchSize();
         }
-        idx += stream->currentBatchSize();
     });
     sampler_inputs.logits_processor_states_ptr = state_ptr;
 }

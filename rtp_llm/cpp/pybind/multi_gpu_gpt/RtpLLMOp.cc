@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
+#include "rtp_llm/cpp/pybind/multi_gpu_gpt/XGrammarBootstrap.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 
 using namespace std;
@@ -208,6 +209,9 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 py_eplb);
         params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
         params.server_config    = engine_config.attr("server_config");
+        params.grammar_config   = engine_config.attr("grammar_config").cast<GrammarConfig>();
+        bootstrapGrammarConfigFromModel(model, params.grammar_config);
+        engine_config.attr("grammar_config") = params.grammar_config;
         model_id_++;
         if (parallelism_config.tp_rank == 0) {
             // kmon metric init

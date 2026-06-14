@@ -4,6 +4,22 @@ from typing import Any, Dict, List, Union
 from transformers import AutoTokenizer
 
 
+def _register_model_type_aliases() -> None:
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+    aliases = {"qwen3_5_moe": "qwen3_moe"}
+    for alias, target in aliases.items():
+        if alias in CONFIG_MAPPING:
+            continue
+        try:
+            CONFIG_MAPPING.register(alias, CONFIG_MAPPING[target], exist_ok=True)
+        except KeyError:
+            pass
+
+
+_register_model_type_aliases()
+
+
 class BaseTokenizer:
     def __init__(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
         self.path = tokenizer_path
