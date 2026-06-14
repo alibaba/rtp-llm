@@ -11,9 +11,12 @@ class DeviceType(IntEnum):
     ArmCpu = 3
     ROCm = 4
     Ppu = 5
+    Xpu = 6
 
 
 def get_device_type() -> DeviceType:
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        return DeviceType.Xpu
     if torch.cuda.is_available():
         if hasattr(torch.version, "hip") and torch.version.hip is not None:
             return DeviceType.ROCm
@@ -32,3 +35,7 @@ def is_cuda() -> bool:
 
 def is_hip() -> bool:
     return get_device_type() == DeviceType.ROCm
+
+
+def is_xpu() -> bool:
+    return get_device_type() == DeviceType.Xpu

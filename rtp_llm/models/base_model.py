@@ -123,6 +123,8 @@ class BaseModel(object):
 
     def _get_device_str(self) -> str:
         """Get device string from parallelism_config."""
+        if hasattr(torch, 'xpu') and torch.xpu.is_available():
+            return f"xpu:{self.parallelism_config.local_rank}"
         return f"cuda:{self.parallelism_config.local_rank}"
 
     @timer_wrapper(description="load model")

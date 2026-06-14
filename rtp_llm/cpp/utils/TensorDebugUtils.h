@@ -26,7 +26,7 @@ std::string tensorDebugStringWithData(const torch::Tensor& t, size_t count = 0) 
     if (!t.defined())
         return "(undefined)";
     auto meta = tensorDebugString(t);
-    if (t.is_cuda())
+    if (t.is_cuda() || t.is_xpu())
         return meta + ", Device tensor data can NOT be dumped";
     auto cpu_t = t.contiguous();
     auto base  = cpu_t.data_ptr<T>();

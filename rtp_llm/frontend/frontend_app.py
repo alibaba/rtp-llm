@@ -18,7 +18,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from typing_extensions import override
 from uvicorn import Config, Server
-from uvicorn.loops.auto import auto_loop_setup
+try:
+    from uvicorn.loops.auto import auto_loop_setup
+except ImportError:
+    from uvicorn.loops.auto import auto_loop_factory as auto_loop_setup
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
