@@ -247,10 +247,10 @@ py_library(
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
-        # cuda13 lock currently ships flash-mla + tilelang (no flashinfer /
-        # fast-hadamard yet); rebuilds for those tracked separately.
-        "@//:using_cuda13_x86": ["flash-mla", "tilelang"],
-        "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
+        # cuda13 lock currently ships flash-mla + tilelang + fast-hadamard
+        # (flashinfer rebuilds are tracked separately).
+        "@//:using_cuda13_x86": flashmla,
+        "@//:using_cuda13_arm": flashmla,
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,

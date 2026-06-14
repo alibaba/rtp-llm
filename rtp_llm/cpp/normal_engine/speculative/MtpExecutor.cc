@@ -1180,6 +1180,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
         if (model_input.is_fake_stream) {
+            if (cp_enabled) {
+                model_input.combo_tokens  = saved_combo_tokens;
+                model_input.input_lengths = saved_input_lengths;
+            }
             model_input.last_hidden_states = model_output.all_hidden_states;
         } else {
             CHECK_AND_RETURN_REF(sampler_input,
@@ -1201,15 +1205,18 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     // draft model prefill
+    bool use_target_mtp_hidden_buffer = false;
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
-        // DSv4 MTP consumes a special pre-hc residual buffer instead of the
-        // normal model_output.all_hidden_states tensor. GLM MTP consumes the
-        // target model's final-norm hidden states, so keep and broadcast the
-        // post-layer hidden unless the source model exposes a special buffer.
+        // DSv4 exposes a special rank-local pre-hc residual buffer. Models
+        // without that buffer (GLM5/GenericMoe MTP) use the restored full
+        // hidden from model_output.all_hidden_states; after tpSyncModelInputs
+        // the draft PyWrappedModel CP path slices it with the same CP planner
+        // used for combo_tokens.
         if (cp_enabled) {
-            auto target_mtp_hidden = model_->getMtpTargetHiddenStates(-1);
-            if (target_mtp_hidden.defined() && target_mtp_hidden.numel() > 0) {
+            auto target_mtp_hidden       = model_->getMtpTargetHiddenStates(-1);
+            use_target_mtp_hidden_buffer = target_mtp_hidden.defined() && target_mtp_hidden.numel() > 0;
+            if (use_target_mtp_hidden_buffer) {
                 model_input.last_hidden_states = torch::Tensor();
             }
         }
@@ -1221,9 +1228,19 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
         model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
-        // Source = main (just ran prefill; its pre-hc buffer is current).
-        maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
-        draft_model_output             = std::move(draft_model_->forward(model_input));
+        if (!cp_enabled || use_target_mtp_hidden_buffer) {
+            // Source = main (just ran prefill; its pre-hc buffer is current).
+            maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(model_input.last_hidden_states.defined()
+                                        && model_input.last_hidden_states.size(0) == model_input.combo_tokens.size(0),
+                                    "CP MTP restored hidden rows must match combo tokens before draft split: "
+                                    "hidden_rows=%ld combo_tokens=%ld",
+                                    model_input.last_hidden_states.defined() ? model_input.last_hidden_states.size(0) :
+                                                                               -1,
+                                    model_input.combo_tokens.size(0));
+        }
+        draft_model_output = std::move(draft_model_->forward(model_input));
         model_input.mtp_iteration_step = -1;
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }

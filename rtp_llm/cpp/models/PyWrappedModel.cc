@@ -62,11 +62,6 @@ const bool kPdDebugEnabled = []() {
     return env != nullptr && std::string(env) == "1";
 }();
 
-const bool kMtpPrefillDebugEnabled = []() {
-    const char* env = std::getenv("RTP_LLM_DEBUG_MTP_PREFILL_DATA");
-    return env != nullptr && std::string(env) != "0";
-}();
-
 const bool kMtpDecodeDebugEnabled = []() {
     const char* env = std::getenv("RTP_LLM_DEBUG_MTP_DECODE_DATA");
     return env != nullptr && std::string(env) != "0";
@@ -74,10 +69,6 @@ const bool kMtpDecodeDebugEnabled = []() {
 
 bool pdDebugEnabled() {
     return kPdDebugEnabled;
-}
-
-bool mtpPrefillDebugEnabled() {
-    return kMtpPrefillDebugEnabled;
 }
 
 bool mtpDecodeDebugEnabled() {
@@ -138,64 +129,6 @@ std::string logitsTopKSummary(const torch::Tensor& logits, int64_t k = 8) {
     } catch (const std::exception& e) {
         return std::string("topk_error=") + e.what();
     }
-}
-
-torch::Tensor tryGetMtpGraphPreNormHidden(py::object& py_model, int64_t num_tokens) {
-    py::gil_scoped_acquire gil;
-    if (!py_model || !py::hasattr(py_model, "get_mtp_target_hidden_states")
-        || !py::hasattr(py_model, "get_mtp_last_hidden_states")) {
-        return torch::Tensor();
-    }
-    py::object result = py_model.attr("get_mtp_target_hidden_states")(num_tokens);
-    if (result.is_none()) {
-        return torch::Tensor();
-    }
-    return result.cast<torch::Tensor>();
-}
-
-torch::Tensor tryGetMtpGraphNormalizedHidden(py::object& py_model, int64_t num_tokens) {
-    py::gil_scoped_acquire gil;
-    if (!py_model || !py::hasattr(py_model, "get_mtp_normalized_hidden_states")) {
-        return torch::Tensor();
-    }
-    py::object result = py_model.attr("get_mtp_normalized_hidden_states")(num_tokens);
-    if (result.is_none()) {
-        return torch::Tensor();
-    }
-    return result.cast<torch::Tensor>();
-}
-
-struct MtpFinalNormParams {
-    torch::Tensor weight;
-    double        eps{0.0};
-};
-
-MtpFinalNormParams tryGetMtpFinalNormParams(py::object& py_model) {
-    py::gil_scoped_acquire gil;
-    MtpFinalNormParams     params;
-    if (!py_model || !py::hasattr(py_model, "get_mtp_final_layernorm_weight")
-        || !py::hasattr(py_model, "get_mtp_final_layernorm_eps")) {
-        return params;
-    }
-    py::object weight = py_model.attr("get_mtp_final_layernorm_weight")();
-    if (weight.is_none()) {
-        return params;
-    }
-    params.weight = weight.cast<torch::Tensor>();
-    params.eps    = py_model.attr("get_mtp_final_layernorm_eps")().cast<double>();
-    return params;
-}
-
-torch::Tensor applyMtpFinalRmsNorm(const torch::Tensor& hidden, const torch::Tensor& weight, double eps) {
-    auto hidden_fp32 = hidden.to(torch::kFloat32);
-    auto variance    = hidden_fp32.pow(2).mean(-1, /*keepdim=*/true);
-    auto normalized  = hidden_fp32 * torch::rsqrt(variance + eps);
-    auto result      = normalized.to(hidden.scalar_type());
-    auto norm_weight = weight;
-    if (norm_weight.device() != hidden.device() || norm_weight.scalar_type() != hidden.scalar_type()) {
-        norm_weight = norm_weight.to(hidden.options());
-    }
-    return result * norm_weight;
 }
 
 }  // namespace
@@ -1101,7 +1034,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
-        bool           skip_final_layernorm = true;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
         if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
@@ -1116,48 +1048,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
             hidden_states = py_model_outputs.hidden_states.clone();
-            if (is_prefill_cuda_graph_mode_) {
-                auto mtp_norm_params = tryGetMtpFinalNormParams(py_model_);
-                if (mtp_norm_params.weight.defined()) {
-                    auto graph_pre_norm = hidden_states;
-                    hidden_states = applyMtpFinalRmsNorm(graph_pre_norm, mtp_norm_params.weight, mtp_norm_params.eps);
-                    static std::atomic<int> mtp_graph_output_norm_log_budget{4};
-                    if (mtpPrefillDebugEnabled()
-                        && mtp_graph_output_norm_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-                        RTP_LLM_LOG_INFO(
-                            "[PyWrappedModel] using graph pre-norm hidden for MTP final RMSNorm in prefill CUDA graph post layers: graph_pre_norm=%s normalized=%s",
-                            tensorSummary(graph_pre_norm, 0).c_str(),
-                            tensorSummary(hidden_states, 0).c_str());
-                    }
-                } else {
-                    auto mtp_pre_norm = tryGetMtpGraphPreNormHidden(py_model_, hidden_states.size(0));
-                    auto mtp_norm     = tryGetMtpGraphNormalizedHidden(py_model_, hidden_states.size(0));
-                    if (mtp_norm.defined() && mtp_norm.sizes() == hidden_states.sizes()) {
-                        hidden_states = mtp_norm;
-                        static std::atomic<int> mtp_graph_norm_log_budget{4};
-                        if (mtpPrefillDebugEnabled()
-                            && mtp_graph_norm_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-                            RTP_LLM_LOG_INFO(
-                                "[PyWrappedModel] using MTP normalized buffer for prefill CUDA graph post layers: %s",
-                                tensorSummary(hidden_states, 0).c_str());
-                        }
-                    } else if (mtp_norm.defined()) {
-                        RTP_LLM_LOG_WARNING(
-                            "[PyWrappedModel] ignored MTP normalized CUDA graph buffer due to shape mismatch: buffer=%s graph_hidden=%s",
-                            tensorSummary(mtp_norm, 0).c_str(),
-                            tensorSummary(hidden_states, 0).c_str());
-                    } else if (weights_.final_layernorm && mtp_pre_norm.defined()
-                               && mtp_pre_norm.sizes() == hidden_states.sizes()) {
-                        hidden_states        = mtp_pre_norm;
-                        skip_final_layernorm = false;
-                    } else if (mtp_pre_norm.defined() && mtp_pre_norm.sizes() != hidden_states.sizes()) {
-                        RTP_LLM_LOG_WARNING(
-                            "[PyWrappedModel] ignored MTP pre-norm CUDA graph buffer due to shape mismatch: buffer=%s graph_hidden=%s",
-                            tensorSummary(mtp_pre_norm, 0).c_str(),
-                            tensorSummary(hidden_states, 0).c_str());
-                    }
-                }
-            }
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
@@ -1260,7 +1150,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             }
             return outputs;
         }
-        return callForwardPostLayers(hidden_states, inputs, skip_final_layernorm);
+        return callForwardPostLayers(hidden_states, inputs, true);
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

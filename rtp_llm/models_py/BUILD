@@ -62,9 +62,8 @@ py_library(
         ],
         "//conditions:default": [],
     }) + select({
-        # cuda13 lock currently ships flash-mla + tilelang (no fast-hadamard).
-        "@//:using_cuda13_x86": ["flash-mla", "tilelang"],
-        "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
+        "@//:using_cuda13_x86": flashmla,
+        "@//:using_cuda13_arm": flashmla,
         "@//:using_cuda12_9_x86": flashmla,
         "@//:using_cuda12_arm": flashmla,
         "//conditions:default": [],
