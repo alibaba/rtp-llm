@@ -364,6 +364,9 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // 2. Repetition / presence / frequency penalty
     // Uses vectorized PyTorch ops to avoid slow element-wise CPU access on device tensors.
     if (params.repetition_penalty.has_value()) {
+        TORCH_CHECK(params.presence_penalty.has_value() && params.frequency_penalty.has_value(),
+            "XPU sampling: repetition_penalty is set but presence_penalty and/or "
+            "frequency_penalty are missing. All three must be provided together.");
         const auto& rep_pen  = params.repetition_penalty.value();
         const auto& pres_pen = params.presence_penalty.value();
         const auto& freq_pen = params.frequency_penalty.value();

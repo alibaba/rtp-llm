@@ -7,6 +7,12 @@ from typing import List
 
 import torch
 
+# XPU C++ engine support: detect Intel GPU
+_xpu_mode = hasattr(torch, 'xpu') and torch.xpu.is_available()
+if _xpu_mode:
+    logging.info("XPU mode: using C++ engine with built .so libraries")
+
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 libs_path = os.path.join(parent_dir, "libs")
@@ -101,11 +107,6 @@ try:
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
-# frontend cannot load libpython3.10.so, so we need to load it manually
-import sysconfig
-from ctypes import cdll
-
-cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + "/libpython3.10.so")
 
 try:
     from libth_transformer_config import (

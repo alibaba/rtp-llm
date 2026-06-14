@@ -112,9 +112,12 @@ class WeightManager:
         self._weights: ModelWeights = weight
         self._weights_loader: ModelLoader = model_weights_loader
         self._weight_module = self._weights_loader._model_weights_info
-        self._working_stream: torch.cuda.Stream = torch.cuda.Stream(
-            device=self._device,
-        )
+        if hasattr(torch, 'xpu') and torch.xpu.is_available():
+            self._working_stream = None  # XPU: streams managed by runtime
+        else:
+            self._working_stream: torch.cuda.Stream = torch.cuda.Stream(
+                device=self._device,
+            )
         # TODO: Consider the actual need for this lock. If updates are always
         # serialized via the server's request handling, a per-update lock might
         # be redundant or require finer-grained locking within _weights.update_...
@@ -211,7 +214,12 @@ class WeightManager:
         logging.info(
             f"update weight request: {name}, shape: {tensor.shape}, device: {tensor.device}, dtype: {tensor.dtype}"
         )
-        with torch.cuda.stream(self._working_stream):
+        if self._working_stream is not None:
+            stream_ctx = torch.cuda.stream(self._working_stream)
+        else:
+            import contextlib
+            stream_ctx = contextlib.nullcontext()
+        with stream_ctx:
             config = self._weights_loader.get_load_config()
             if "layers" in name:
                 # This is a layer-specific weight
@@ -273,4 +281,5 @@ class WeightManager:
                         f"{stored_name} not found. wanted name list is {[w.name for w in self._weight_module.weights]}"
                     )
 
-            self._working_stream.synchronize()
+            if self._working_stream is not None:
+                self._working_stream.synchronize()
