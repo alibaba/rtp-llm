@@ -176,13 +176,14 @@ class MlaAttention(nn.Module):
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
+        force_reuse_topk_indices: bool = False,
     ) -> Optional[torch.Tensor]:
-        if self.reuse_topk_indices:
+        if self.reuse_topk_indices or force_reuse_topk_indices:
             if not fmha_impl.is_sparse():
                 return None
             if prev_topk_indices is None:
                 raise RuntimeError(
-                    f"DSA shared layer {self.layer_idx} needs previous top-k "
+                    f"DSA layer {self.layer_idx} needs previous top-k "
                     "indices, but none were provided"
                 )
             return prev_topk_indices
@@ -212,6 +213,7 @@ class MlaAttention(nn.Module):
         x_fp8: Optional[torch.Tensor] = None,
         x_scale: Optional[torch.Tensor] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
+        force_reuse_topk_indices: bool = False,
         return_topk: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
@@ -297,6 +299,7 @@ class MlaAttention(nn.Module):
             q_c_fp8,
             q_c_scale,
             prev_topk_indices,
+            force_reuse_topk_indices,
         )
         attn_output = fmha_impl.forward(
             q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
