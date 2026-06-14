@@ -468,6 +468,7 @@ class GenericMoeDecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
+        force_reuse_topk_indices: bool = False,
     ) -> DecodeLayerOutput:
         topk_indices = None
         if self._fuse_input_norm_quant and hidden_states.dim() == 2:
@@ -487,6 +488,7 @@ class GenericMoeDecoderLayer(nn.Module):
                     x_fp8=fp8_hs,
                     x_scale=scale,
                     prev_topk_indices=prev_topk_indices,
+                    force_reuse_topk_indices=force_reuse_topk_indices,
                     return_topk=True,
                 )
             else:
@@ -505,6 +507,7 @@ class GenericMoeDecoderLayer(nn.Module):
                     fmha_impl=fmha_impl,
                     kv_cache=kv_cache,
                     prev_topk_indices=prev_topk_indices,
+                    force_reuse_topk_indices=force_reuse_topk_indices,
                     return_topk=True,
                 )
             else:

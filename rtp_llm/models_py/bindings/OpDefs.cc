@@ -75,9 +75,8 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
         .def(pybind11::init<>())
         .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "KV cache for all layers")
-        .def_readonly("is_speculative",
-                      &PyModelInitResources::is_speculative,
-                      "True when speculative decoding is active")
+        .def_readonly(
+            "is_speculative", &PyModelInitResources::is_speculative, "True when speculative decoding is active")
         .def_readonly("is_decode_role",
                       &PyModelInitResources::is_decode_role,
                       "True when this model instance runs in decode role")
@@ -139,6 +138,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
         .def_readwrite("is_target_verify", &PyAttentionInputs::is_target_verify)
+        .def_readwrite("mtp_iteration_step", &PyAttentionInputs::mtp_iteration_step)
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)
         .def_readwrite("input_lengths", &PyAttentionInputs::input_lengths)

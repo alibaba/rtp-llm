@@ -90,6 +90,12 @@ struct GptModelInputs {
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
 
+    // MTP draft iteration marker for GLM-5.2 DSA top-k sharing:
+    // -1: not an MTP draft iteration or unknown
+    //  0: first draft step, compute and publish top-k indices
+    // >0: later draft steps, reuse top-k indices from step 0
+    int mtp_iteration_step = -1;
+
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
 

@@ -216,8 +216,8 @@ struct KVCache {
 
 struct PyModelInitResources {
     std::optional<KVCache> kv_cache;
-    bool                   is_speculative = false;
-    bool                   is_decode_role = false;
+    bool                   is_speculative         = false;
+    bool                   is_decode_role         = false;
     int64_t                max_context_batch_size = 1;
 };
 
@@ -265,6 +265,7 @@ struct PyContextParallelParams {
 struct PyAttentionInputs {
     bool          is_prefill{false};
     bool          is_target_verify{false};
+    int           mtp_iteration_step{-1};
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor input_lengths;
