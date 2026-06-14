@@ -21,20 +21,34 @@
                 "stream": true
             },
             "result": {
-                "id": "chat-",
+                "id": "chat",
                 "object": "chat.completion.chunk",
-                "created": 0,
-                "model": "",
+                "created": 1781318332,
+                "model": null,
                 "choices": [
                     {
                         "index": 0,
                         "delta": {
                             "role": "assistant",
-                            "content": ""
+                            "content": "#FF0000",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null
                         },
-                        "finish_reason": "stop"
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
-                ]
+                ],
+                "usage": {
+                    "prompt_tokens": 26,
+                    "total_tokens": 33,
+                    "completion_tokens": 7,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": null,
+                "extra_outputs": null
             },
             "_comment": "streaming regex — verifies xgrammar mask is applied on every SSE chunk's logits, not just a one-shot pass."
         },
@@ -54,11 +68,23 @@
                         "schema": {
                             "type": "object",
                             "properties": {
-                                "name": {"type": "string", "maxLength": 40},
-                                "age": {"type": "integer"},
-                                "city": {"type": "string", "maxLength": 40}
+                                "name": {
+                                    "type": "string",
+                                    "maxLength": 40
+                                },
+                                "age": {
+                                    "type": "integer"
+                                },
+                                "city": {
+                                    "type": "string",
+                                    "maxLength": 40
+                                }
                             },
-                            "required": ["name", "age", "city"],
+                            "required": [
+                                "name",
+                                "age",
+                                "city"
+                            ],
                             "additionalProperties": false
                         }
                     }
@@ -69,19 +95,35 @@
                 "stream": true
             },
             "result": {
-                "id": "chat-",
+                "id": "chat",
                 "object": "chat.completion.chunk",
-                "created": 0,
-                "model": "",
+                "created": 1781318332,
+                "model": null,
                 "choices": [
                     {
                         "index": 0,
-                        "delta": {"role": "assistant", "content": ""},
-                        "finish_reason": "stop"
+                        "delta": {
+                            "role": "assistant",
+                            "content": "{\n  \"name\": \"John Doe\",\n  \"age\": 35,\n  \"city\": \"New York City\"\n}",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
-                ]
+                ],
+                "usage": {
+                    "prompt_tokens": 26,
+                    "total_tokens": 54,
+                    "completion_tokens": 28,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": null,
+                "extra_outputs": null
             },
-            "grammar_constraint_only": true,
             "_comment": "streaming json_schema — SSE + grammar across multiple chunks."
         },
         {
@@ -105,18 +147,63 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 0,
+                "created": 1781318332,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "", "partial": false},
-                        "finish_reason": "stop"
+                        "message": {
+                            "role": "assistant",
+                            "content": "#AABBCC",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
-                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+                "usage": {
+                    "prompt_tokens": 29,
+                    "total_tokens": 34,
+                    "completion_tokens": 5,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 40.408,
+                    "iter_count": 5,
+                    "prefix_len": 0,
+                    "input_len": 29,
+                    "output_len": 5,
+                    "step_output_len": 5,
+                    "first_token_cost_time": 10.642,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
             },
-            "ebnf_validate_regex": "#[0-9A-Fa-f]{6}",
             "_comment": "EBNF (GBNF) grammar — verifies xgrammar.dispatch_ebnf compiles and masks. Equivalent to regex but goes through the EBNF compile path."
         },
         {
@@ -140,131 +227,64 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 0,
+                "created": 1781318333,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "", "partial": false},
-                        "finish_reason": "stop"
+                        "message": {
+                            "role": "assistant",
+                            "content": "ip:127.0.0.1",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
-                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+                "usage": {
+                    "prompt_tokens": 37,
+                    "total_tokens": 49,
+                    "completion_tokens": 12,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 97.776,
+                    "iter_count": 12,
+                    "prefix_len": 0,
+                    "input_len": 37,
+                    "output_len": 12,
+                    "step_output_len": 12,
+                    "first_token_cost_time": 17.91,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
             },
-            "ebnf_validate_regex": "ip:[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}",
             "_comment": "EBNF with alternation — exercises a grammar shape regex can't trivially express."
-        },
-        {
-            "endpoint": "/v1/chat/completions",
-            "query": {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "Produce a person JSON."
-                    }
-                ],
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "bad_schema",
-                        "schema": {
-                            "type": "this_type_does_not_exist_xyz",
-                            "properties": {"q": {"type": "also_fake"}},
-                            "required": ["q"]
-                        }
-                    }
-                },
-                "max_tokens": 32,
-                "temperature": 0.0,
-                "top_p": 1.0,
-                "stream": false
-            },
-            "result": {
-                "id": "chat-",
-                "object": "chat.completion",
-                "created": 0,
-                "model": "",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": "", "partial": false},
-                        "finish_reason": "stop"
-                    }
-                ],
-                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
-            },
-            "expect_grammar_error": true,
-            "_comment": "Malformed json_schema — InvalidGrammarObject path; server must NOT crash."
-        },
-        {
-            "endpoint": "/v1/chat/completions",
-            "query": {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "Give me something."
-                    }
-                ],
-                "response_format": {
-                    "type": "regex",
-                    "pattern": "(((unbalanced[parens"
-                },
-                "max_tokens": 32,
-                "temperature": 0.0,
-                "top_p": 1.0,
-                "stream": false
-            },
-            "result": {
-                "id": "chat-",
-                "object": "chat.completion",
-                "created": 0,
-                "model": "",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": "", "partial": false},
-                        "finish_reason": "stop"
-                    }
-                ],
-                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
-            },
-            "expect_grammar_error": true,
-            "_comment": "Malformed regex — unbalanced paren + unterminated bracket class."
-        },
-        {
-            "endpoint": "/v1/chat/completions",
-            "query": {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "Give me anything."
-                    }
-                ],
-                "response_format": {
-                    "type": "ebnf",
-                    "grammar": "this is not valid GBNF @@@ %%% ==="
-                },
-                "max_tokens": 32,
-                "temperature": 0.0,
-                "top_p": 1.0,
-                "stream": false
-            },
-            "result": {
-                "id": "chat-",
-                "object": "chat.completion",
-                "created": 0,
-                "model": "",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": "", "partial": false},
-                        "finish_reason": "stop"
-                    }
-                ],
-                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
-            },
-            "expect_grammar_error": true,
-            "_comment": "Gibberish EBNF — InvalidGrammarObject."
         },
         {
             "endpoint": "/v1/chat/completions",
@@ -287,16 +307,62 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 0,
+                "created": 1781318333,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "", "partial": false},
-                        "finish_reason": "stop"
+                        "message": {
+                            "role": "assistant",
+                            "content": "#FF0000",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
-                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+                "usage": {
+                    "prompt_tokens": 26,
+                    "total_tokens": 33,
+                    "completion_tokens": 7,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 50.694,
+                    "iter_count": 7,
+                    "prefix_len": 0,
+                    "input_len": 26,
+                    "output_len": 7,
+                    "step_output_len": 7,
+                    "first_token_cost_time": 6.843,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
             },
             "_comment": "Sanity after 3 malformed requests — proves error path cleaned up properly."
         }

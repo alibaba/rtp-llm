@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <limits>
 #include <mutex>
 #include <memory>
 #include <stdexcept>
@@ -102,8 +103,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     if (generate_stream->hasError()) {
         const auto status_info = generate_stream->statusInfo();
         decode_context.error_status =
-            grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
-                         "stream creation failed: " + status_info.ToString());
+            grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "stream creation failed: " + status_info.ToString());
         return;
     }
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
@@ -130,27 +130,34 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
 
 ErrorInfo DecodeRpcServer::waitStreamReady(const DecodeGenerateContext&           decode_context,
                                            const std::shared_ptr<GenerateStream>& stream) {
-    // Wait budget must cover the slowest of the things that can park a stream
-    // here: grammar compile (when the request carries one) AND the configured
-    // prefill wait. A small client-supplied request_timeout_ms must not
-    // truncate grammar preparation, otherwise every grammar request from a
-    // short-deadline client times out before the singleton compiler can finish.
-    // Take the max instead of cascading fallbacks.
-    int64_t timeout_ms = decode_context.request_timeout_ms;
-    if (stream->isPreparationPending()) {
-        timeout_ms = std::max(timeout_ms, maga_init_params_.grammar_config.compile_timeout_ms);
+    // Both timeouts are upper bounds on how long we should hold a slot waiting for
+    // alloc — take the tighter one (min of positives). The previous std::max()
+    // amplified a short user-supplied request_timeout_ms up to the server-side
+    // prefill_max_wait_timeout_ms cap, violating the client-given deadline.
+    int64_t       deadline_ms = (decode_context.request_timeout_ms > 0)
+                                    ? decode_context.request_timeout_ms
+                                    : std::numeric_limits<int64_t>::max();
+    const int64_t server_cap  = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms;
+    if (server_cap > 0) {
+        deadline_ms = std::min(deadline_ms, server_cap);
     }
-    timeout_ms = std::max(timeout_ms, maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms);
-    const int64_t deadline_us = currentTimeUs() + timeout_ms * 1000;
+    const bool    has_deadline = deadline_ms != std::numeric_limits<int64_t>::max();
+    const int64_t deadline_us  = has_deadline ? (currentTimeUs() + deadline_ms * 1000) : 0;
 
     while (!stream->hasError()) {
-        if (stream->moveToNext() == StreamState::WAITING && !stream->isPreparationPending()
-            && stream->hasEvent(StreamEvents::LoadInitiated)) {
+        // Client gave up — release the slot promptly instead of holding it until
+        // deadline_us elapses (frees pd_sep capacity for the next request).
+        if (decode_context.server_context && decode_context.server_context->IsCancelled()) {
+            const std::string msg = "decode allocate wait cancelled by client";
+            RTP_LLM_LOG_WARNING("request [%s] %s", decode_context.request_key.c_str(), msg.c_str());
+            stream->reportEvent(StreamEvents::Error, ErrorCode::CANCELLED, msg);
+            return stream->statusInfo();
+        }
+        if (stream->moveToNext() == StreamState::WAITING && stream->hasEvent(StreamEvents::LoadInitiated)) {
             return ErrorInfo::OkStatus();
         }
-        if (timeout_ms > 0 && currentTimeUs() > deadline_us) {
-            const std::string msg =
-                "decode allocate wait timeout, limit is " + std::to_string(timeout_ms) + " ms";
+        if (has_deadline && currentTimeUs() > deadline_us) {
+            const std::string msg = "decode allocate wait timeout, limit is " + std::to_string(deadline_ms) + " ms";
             RTP_LLM_LOG_WARNING("request [%s] %s", decode_context.request_key.c_str(), msg.c_str());
             stream->reportEvent(StreamEvents::Error, ErrorCode::WAIT_TO_RUN_TIMEOUT, msg);
             return stream->statusInfo();
@@ -204,21 +211,9 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     generate_stream->setIsContextStream(false);
     generate_stream->step();
 
-    // PD T0 commit goes through the universal update() path. updateStatus on
-    // attached processors only advances internal state; stream termination is
-    // delegated to the EOS sampler path (DeviceMaskMode::TERMINATED forces
-    // EOS, matchEosToken closes the stream), so a saturated short regex no
-    // longer closes the stream before decode samples.
-    if (generate_stream->isPreparationPending()) {
-        RTP_LLM_LOG_DEBUG(
-            "[grammar] PD localGenerate stream [%ld]: grammar preparation still pending "
-            "before bonus-token commit — matcher replay deferred to installMatcher",
-            generate_stream->streamId());
-    }
     generate_stream->incLastOutputPos();
     {
-        auto bonus_tokens =
-            torch::zeros({(int64_t)generate_stream->nextBatchSize(), 1}, torch::kInt32);
+        auto bonus_tokens = torch::zeros({(int64_t)generate_stream->nextBatchSize(), 1}, torch::kInt32);
         bonus_tokens.data_ptr<int32_t>()[0] = generate_request.first_generate_token_id();
         StreamUpdateInfo bonus_info{bonus_tokens,
                                     /*num_new_tokens=*/1,

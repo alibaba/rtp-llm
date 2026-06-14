@@ -18,11 +18,7 @@ from unittest import IsolatedAsyncioTestCase, TestCase, main
 from unittest.mock import MagicMock
 
 from rtp_llm.config.py_config_modules import GenerateEnvConfig
-from rtp_llm.openai.api_datatype import (
-    ChatCompletionRequest,
-    ChatMessage,
-    RoleEnum,
-)
+from rtp_llm.openai.api_datatype import ChatCompletionRequest, ChatMessage, RoleEnum
 from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
     RenderedInputs,

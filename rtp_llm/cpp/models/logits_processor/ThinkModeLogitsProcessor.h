@@ -71,6 +71,15 @@ struct StreamThinkInfo {
 
 class ThinkModeLogitsProcessorTestPeer;
 
+// Snapshot of think state published lock-free for spec verifiers. Combines the
+// eligibility flag, the cloned info, and a monotonic version counter so the spec
+// path observes a consistent triple via a single atomic_load.
+struct ThinkModeSpecSnapshot {
+    bool            eligible = false;
+    StreamThinkInfo info;
+    uint64_t        version = 0;
+};
+
 class ThinkModeLogitsProcessor: public BaseLogitsProcessor, public SpecLogitsProcessor {
 public:
     ThinkModeLogitsProcessor() = default;
@@ -78,29 +87,30 @@ public:
     ~ThinkModeLogitsProcessor() override = default;
 
     static std::shared_ptr<ThinkModeLogitsProcessor> fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,
-                                                                      int32_t                        num);
+                                                                       int32_t                        num);
 
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
     void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
     void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
 
-    bool isSpecVerifyEligible() const override;
-    int  tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
-    bool isStateful() const override;
+    bool    isSpecVerifyEligible() const override;
+    int     tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
+    bool    isStateful() const override;
+    int64_t acceptedTokenLen() const override;
 
 private:
     friend class ThinkModeLogitsProcessorTestPeer;
 
     void publishSpecSnapshotLocked();
 
-    std::vector<StreamThinkInfo>                 think_infos_;
-    mutable std::mutex                           mutex_;
+    std::vector<StreamThinkInfo> think_infos_;
+    mutable std::mutex           mutex_;
     // `spec_eligible_` is fixed at construction time: only updateMultiSeqStatus
     // could resize think_infos_, and that path is only taken for beam search,
     // which is itself ineligible for spec. So the flag never needs to flip.
-    bool                                         spec_eligible_         = false;
-    std::shared_ptr<const StreamThinkInfo>       spec_snapshot_;
-    uint64_t                                     spec_snapshot_version_ = 0;
+    bool                                          spec_eligible_ = false;
+    std::shared_ptr<const ThinkModeSpecSnapshot>  spec_snapshot_;
+    uint64_t                                      spec_snapshot_version_ = 0;
 };
 
 using ThinkModeLogitsProcessorPtr = std::shared_ptr<ThinkModeLogitsProcessor>;

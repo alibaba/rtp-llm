@@ -68,8 +68,8 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         }
     }
 
-    auto draft_token_probs_d_t  = draft_token_probs;
-    auto target_token_probs_d_t = target_token_probs;
+    auto          draft_token_probs_d_t  = draft_token_probs;
+    auto          target_token_probs_d_t = target_token_probs;
     torch::Tensor output_token_ids_d =
         torch::zeros({(long)batch_size, (long)propose_step_ + 1},
                      torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false));
@@ -89,19 +89,15 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                                       output_emitted_token_num_d});
     }
 
-    auto accept_len_d = output_emitted_token_num_d;
-    // Reuse output_token_ids_d directly: it was allocated locally above, is
-    // only written by execChainSpeculativeSampling, and has no further consumer
-    // besides this index_put_ + (optional) torch::where below. The previous
-    // .clone() added a per-step GPU alloc + full memcpy on the decode hot path.
+    auto accept_len_d    = output_emitted_token_num_d;
     auto accept_tokens_d = output_token_ids_d;
 
     const int64_t token_stride = target_token_ids_d_t.size(1);
-    auto          target_3d    = target_token_ids_d_t.reshape({(long)batch_size, (long)propose_step_ + 1, token_stride});
+    auto          target_3d = target_token_ids_d_t.reshape({(long)batch_size, (long)propose_step_ + 1, token_stride});
     auto          target_last_col = target_3d.select(2, token_stride - 1);
 
-    auto row_idx = torch::arange(batch_size, target_token_ids_d_t.options().dtype(torch::kLong));
-    auto col_idx = (accept_len_d - 1).clamp(0, static_cast<int64_t>(propose_step_)).to(torch::kLong);
+    auto row_idx     = torch::arange(batch_size, target_token_ids_d_t.options().dtype(torch::kLong));
+    auto col_idx     = (accept_len_d - 1).clamp(0, static_cast<int64_t>(propose_step_)).to(torch::kLong);
     auto last_tokens = target_last_col.gather(1, col_idx.unsqueeze(1)).squeeze(1);
     accept_tokens_d.index_put_({row_idx, col_idx}, last_tokens);
 
@@ -114,9 +110,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     }
     if (has_force) {
         RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample.forceSpAccept");
-        // Build the mask on CPU and ship it to GPU once. Per-element writes via
-        // force_mask[idx] = true on a CUDA tensor lower to one H2D scalar copy
-        // per stream, which shows up as a string of tiny memcpys in profiles.
+        // Build the mask on CPU and H2D once; per-element CUDA writes would lower to many tiny memcpys.
         std::vector<uint8_t> force_mask_cpu(batch_size, 0);
         {
             int idx = 0;
@@ -127,25 +121,18 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                 idx++;
             }
         }
-        // Pin the host buffer so the H2D copy is a real async DMA. Without
-        // pin_memory(), PyTorch internally pin+copies a pageable source on
-        // every .to(non_blocking=true) call, silently stripping non_blocking
-        // (defeats the perf intent) and risks reading freed memory if the
-        // pageable tensor goes out of scope before transfer_done_event fires
-        // — should PyTorch ever start honoring non_blocking on pageable.
-        auto force_mask_host = torch::from_blob(force_mask_cpu.data(),
-                                                {batch_size},
-                                                torch::TensorOptions().dtype(torch::kBool))
-                                   .clone()
-                                   .pin_memory();
-        auto force_mask = force_mask_host.to(target_device, /*non_blocking=*/true);
+        // Pin so .to(non_blocking) is a real async DMA; pageable source strips non_blocking.
+        auto force_mask_host =
+            torch::from_blob(force_mask_cpu.data(), {batch_size}, torch::TensorOptions().dtype(torch::kBool))
+                .clone()
+                .pin_memory();
+        auto force_mask    = force_mask_host.to(target_device, /*non_blocking=*/true);
         auto target_bonus  = target_last_col.select(1, static_cast<int64_t>(propose_step_));
         auto forced_tokens = torch::cat({draft_token_ids_d_t, target_bonus.unsqueeze(1)}, 1);
         auto force_mask_2d = force_mask.unsqueeze(1).expand_as(accept_tokens_d);
         accept_tokens_d    = torch::where(force_mask_2d, forced_tokens, accept_tokens_d);
-        accept_len_d       = torch::where(force_mask,
-                                    torch::full_like(accept_len_d, static_cast<int32_t>(propose_step_ + 1)),
-                                    accept_len_d);
+        accept_len_d       = torch::where(
+            force_mask, torch::full_like(accept_len_d, static_cast<int32_t>(propose_step_ + 1)), accept_len_d);
     }
 
     sample_output.accept_tokens = accept_tokens_d;

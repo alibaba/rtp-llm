@@ -104,9 +104,7 @@ This page lists server arguments used to configure the behavior and performance 
 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
-| `--grammar_backend` | Constrained decoding backend. `xgrammar` or `none`. | `xgrammar` |
 | `--constrained_json_disable_any_whitespace` | Disable XGrammar's any-whitespace mode for JSON schemas. | False |
-| `--reasoning_parser` | sglang-compatible detector key (e.g. `qwen3`, `deepseek-r1`). Empty = reasoner disabled. | `""` |
 | `--grammar_compile_timeout_ms` | Per-compile wall-clock timeout (ms) inside the GrammarCompiler queue. | 60000 |
 | `--grammar_num_workers` | Size of the C++ compile worker pool. | 32 |
 

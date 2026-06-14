@@ -48,7 +48,6 @@ from rtp_llm.server.server_args.profile_debug_logging_group_args import (
 from rtp_llm.server.server_args.quantization_group_args import (
     init_quantization_group_args,
 )
-from rtp_llm.server.server_args.reasoning_group_args import init_reasoning_group_args
 from rtp_llm.server.server_args.render_group_args import init_render_group_args
 from rtp_llm.server.server_args.role_group_args import init_role_group_args
 from rtp_llm.server.server_args.rpc_discovery_group_args import (
@@ -448,7 +447,6 @@ def init_all_group_args(
     init_gang_group_args(parser, py_env_configs.distribute_config)
     init_generate_group_args(parser, py_env_configs.generate_env_config)
     init_grammar_group_args(parser, py_env_configs.grammar_config)
-    init_reasoning_group_args(parser, py_env_configs.reasoning_config)
     init_hw_kernel_group_args(parser, py_env_configs.py_hw_kernel_config)
     init_kv_cache_group_args(parser, py_env_configs.kv_cache_config)
     init_load_group_args(parser, py_env_configs.load_config, py_env_configs.model_args)

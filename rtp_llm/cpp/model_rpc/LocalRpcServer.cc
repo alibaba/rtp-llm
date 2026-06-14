@@ -120,6 +120,15 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
     }
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
 
+    // The loop exits via either nextOutput() returning a non-FINISHED error (already
+    // serialized above) or via isActive()==false. The latter conflates two terminal
+    // states: clean finish vs. async-reported error (e.g. logits processor reportError
+    // arriving after the last output was consumed). Without this check, an errored
+    // stream returns gRPC OK and the client silently treats it as success.
+    if (stream->hasError()) {
+        return serializeErrorMsg(request_key, stream->statusInfo());
+    }
+
     return grpc::Status::OK;
 }
 
@@ -127,10 +136,6 @@ ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::sha
     try {
         output = QueryConverter::transQuery(&input_pb);
     } catch (const std::invalid_argument& e) {
-        // QueryConverter throws std::invalid_argument when the proto carries
-        // a malformed or unsupported response_format envelope. Translate to
-        // INVALID_PARAMS so the client sees an explicit rejection rather
-        // than a silently unconstrained generation.
         return ErrorInfo(ErrorCode::INVALID_PARAMS, e.what());
     }
     if (mm_processor_ != nullptr && output->multimodal_inputs) {
@@ -160,6 +165,14 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
             break;
         }
         last_outputs = output_result.value();
+    }
+    // Same race shape as pollStreamOutput: the loop exits via isFinished()==true
+    // or via FINISHED on nextOutput(), but an async-reported error (e.g. logits
+    // processor reportError arriving after the last output was consumed) could
+    // be observable only after we leave the loop. Without this check the batch
+    // path returns OkStatus and the client treats it as success.
+    if (stream->hasError()) {
+        return stream->statusInfo();
     }
     return ErrorInfo::OkStatus();
 }
@@ -216,11 +229,6 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         std::shared_ptr<GenerateInput> input;
         auto                           err = prepareInput(request->inputs(i), input);
         if (!err.ok()) {
-            // prepareInput covers both QueryConverter (response_format / structured-output
-            // parsing → INVALID_PARAMS) and multimodal feature update; preserve the real
-            // ErrorCode via transErrorCodeToRPC instead of collapsing everything into
-            // UNKNOWN_ERROR + "multimodal processing failed", which mis-attributes a
-            // structured-output rejection as a multimodal fault.
             const ErrorCodePB code_pb = transErrorCodeToRPC(err.code());
             for (int j = 0; j < batch_size; j++) {
                 auto* result = response->add_results();

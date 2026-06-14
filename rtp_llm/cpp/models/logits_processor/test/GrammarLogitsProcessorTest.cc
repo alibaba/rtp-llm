@@ -5,11 +5,11 @@
 // terminated matcher leaves rows at allow-all instead of CHECK-failing inside
 // xgrammar.
 //
-// Run: bazel test //rtp_llm/cpp/models/logits_processor/xgrammar/test:grammar_logits_processor_test --config=cuda12_9
+// Run: bazel test //rtp_llm/cpp/models/logits_processor/test:grammar_logits_processor_test --config=cuda12_9
 
-#include "rtp_llm/cpp/models/logits_processor/xgrammar/GrammarLogitsProcessor.h"
-#include "rtp_llm/cpp/models/logits_processor/xgrammar/RtpGrammarMatcher.h"
-#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBackend.h"
+#include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
+#include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
+#include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 
 #include <gtest/gtest.h>
@@ -46,13 +46,24 @@ XGrammarBackendOptions defaultOptions() {
     return opts;
 }
 
+struct ProcessorBundle {
+    std::shared_ptr<GrammarLogitsProcessor> proc;
+    std::shared_ptr<RtpGrammarMatcher>      matcher;
+
+    GrammarLogitsProcessor* operator->() const noexcept {
+        return proc.get();
+    }
+};
+
 // Build a GrammarLogitsProcessor over a regex matcher. The stream is null —
 // tryAcceptAndFillBitmask only touches the matcher, never the stream.
-std::shared_ptr<GrammarLogitsProcessor> makeProcessor(XGrammarBackend& backend, const std::string& regex) {
+ProcessorBundle makeProcessor(XGrammarBackend& backend, const std::string& regex) {
     auto compiled = backend.compileNow({"regex", regex}).compiled;
     EXPECT_TRUE(compiled);
-    std::shared_ptr<RtpGrammarMatcher> matcher = backend.createMatcher(compiled);
-    return std::make_shared<GrammarLogitsProcessor>(std::move(matcher), /*stream=*/nullptr);
+    std::shared_ptr<RtpGrammarMatcher> matcher =
+        backend.createMatcher(compiled, /*require_reasoning=*/false, /*think_end_token_ids=*/std::nullopt);
+    auto proc = std::make_shared<GrammarLogitsProcessor>(matcher);
+    return {std::move(proc), std::move(matcher)};
 }
 
 bool rowAllows(const std::vector<int32_t>& bm, size_t words, int row, int token) {
@@ -136,7 +147,7 @@ TEST(GrammarLogitsProcessorTest, TerminatedMatcherLeavesAllowAllWithoutCrash) {
     int cap = 0;
     ASSERT_NO_THROW({ cap = proc->tryAcceptAndFillBitmask(req); });
     EXPECT_EQ(cap, 2) << "grammar completes after 'ab'; trailing draft must not advance matcher";
-    EXPECT_FALSE(proc->grammarMatcher()->isTerminated())
+    EXPECT_FALSE(proc.matcher.get()->isTerminated())
         << "provisional accepts must roll back committed matcher state";
     // Unfilled rows stay at allow-all (init + fill_row never reached offset 2+).
     EXPECT_TRUE(rowAllows(bm, words, 3, kX));
@@ -160,16 +171,16 @@ TEST(GrammarLogitsProcessorTest, VerifyCapStopsWhenDraftContinuesWithEos) {
 
     const int cap = proc->tryAcceptAndFillBitmask(req);
     EXPECT_EQ(cap, 2);
-    EXPECT_FALSE(proc->grammarMatcher()->isTerminated());
+    EXPECT_FALSE(proc.matcher.get()->isTerminated());
 }
 
 TEST(GrammarLogitsProcessorTest, VerifyCapZeroWhenGrammarAlreadyComplete) {
     XGrammarBackend backend(makeAsciiTokenizerInfoJson(), defaultOptions());
     auto               proc = makeProcessor(backend, "ab");
 
-    ASSERT_TRUE(proc->grammarMatcher()->acceptToken(kA));
-    ASSERT_TRUE(proc->grammarMatcher()->acceptToken(kB));
-    EXPECT_TRUE(proc->isGrammarMatcherComplete());
+    ASSERT_TRUE(proc.matcher.get()->acceptToken(kA));
+    ASSERT_TRUE(proc.matcher.get()->acceptToken(kB));
+    EXPECT_TRUE(proc.matcher->isTerminated());
 
     const int            propose_step = 2;
     const size_t         words        = SpecLogitsProcessor::bitmaskWordCount(128);
@@ -184,7 +195,7 @@ TEST(GrammarLogitsProcessorTest, VerifyCapZeroWhenGrammarAlreadyComplete) {
     req.vocab_size         = 128;
 
     EXPECT_EQ(proc->tryAcceptAndFillBitmask(req), 0);
-    EXPECT_TRUE(proc->isGrammarMatcherComplete());
+    EXPECT_TRUE(proc.matcher->isTerminated());
 }
 
 // tryAcceptAndFillBitmask must leave the matcher's committed state unchanged

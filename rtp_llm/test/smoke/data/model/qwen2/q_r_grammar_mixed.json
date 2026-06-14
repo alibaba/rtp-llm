@@ -23,16 +23,62 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 0,
+                "created": 1781319203,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "", "partial": false},
-                        "finish_reason": "stop"
+                        "message": {
+                            "role": "assistant",
+                            "content": "#FF0000",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
-                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+                "usage": {
+                    "prompt_tokens": 26,
+                    "total_tokens": 33,
+                    "completion_tokens": 7,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 397.241,
+                    "iter_count": 7,
+                    "prefix_len": 0,
+                    "input_len": 26,
+                    "output_len": 7,
+                    "step_output_len": 7,
+                    "first_token_cost_time": 334.42,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
             },
             "_comment": "Mixed-batch Q1 (grammar regex). re.fullmatch check — if a non-grammar neighbour's logits are NOT masked but the active-index path is buggy, this stream's mask row could be overwritten and it would produce non-hex output."
         },
@@ -53,18 +99,63 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 0,
+                "created": 1781319203,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "", "partial": false},
-                        "finish_reason": "stop"
+                        "message": {
+                            "role": "assistant",
+                            "content": "Hello! How can I assist you today?",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
-                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+                "usage": {
+                    "prompt_tokens": 26,
+                    "total_tokens": 36,
+                    "completion_tokens": 10,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 201.313,
+                    "iter_count": 10,
+                    "prefix_len": 0,
+                    "input_len": 26,
+                    "output_len": 10,
+                    "step_output_len": 10,
+                    "first_token_cost_time": 107.688,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
             },
-            "skip_content_check": true,
             "_comment": "Mixed-batch Q2 (NO response_format). If the scheduler places this into the same batch as a grammar stream and the parallel-fill / active-subset indexing leaks a hex-only bitmask onto this row, this stream's output will be empty (all logits -inf) or garbled — _validate_well_formed flags either."
         },
         {
@@ -83,11 +174,23 @@
                         "schema": {
                             "type": "object",
                             "properties": {
-                                "name": {"type": "string", "maxLength": 40},
-                                "age": {"type": "integer"},
-                                "city": {"type": "string", "maxLength": 40}
+                                "name": {
+                                    "type": "string",
+                                    "maxLength": 40
+                                },
+                                "age": {
+                                    "type": "integer"
+                                },
+                                "city": {
+                                    "type": "string",
+                                    "maxLength": 40
+                                }
                             },
-                            "required": ["name", "age", "city"],
+                            "required": [
+                                "name",
+                                "age",
+                                "city"
+                            ],
                             "additionalProperties": false
                         }
                     }
@@ -100,18 +203,63 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 0,
+                "created": 1781319203,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "", "partial": false},
-                        "finish_reason": "stop"
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\n  \"name\": \"John Doe\",\n  \"age\": 35,\n  \"city\": \"New York City\"\n}",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
-                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+                "usage": {
+                    "prompt_tokens": 26,
+                    "total_tokens": 54,
+                    "completion_tokens": 28,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 668.735,
+                    "iter_count": 28,
+                    "prefix_len": 0,
+                    "input_len": 26,
+                    "output_len": 28,
+                    "step_output_len": 28,
+                    "first_token_cost_time": 364.795,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
             },
-            "grammar_constraint_only": true,
             "_comment": "Mixed-batch Q3 (grammar json_schema). Differs in length from Q1+Q2, so across 5 concurrent threads the per-thread position spread causes heterogeneous batching at the server."
         },
         {
@@ -131,18 +279,63 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 0,
+                "created": 1781319205,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "", "partial": false},
-                        "finish_reason": "stop"
+                        "message": {
+                            "role": "assistant",
+                            "content": "Red and blue.",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
-                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+                "usage": {
+                    "prompt_tokens": 23,
+                    "total_tokens": 28,
+                    "completion_tokens": 5,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 172.463,
+                    "iter_count": 5,
+                    "prefix_len": 0,
+                    "input_len": 23,
+                    "output_len": 5,
+                    "step_output_len": 5,
+                    "first_token_cost_time": 130.653,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
             },
-            "skip_content_check": true,
             "_comment": "Mixed-batch Q4 (NO response_format). Second non-grammar sidecar to reduce the chance that 'first non-grammar query always runs alone'."
         },
         {
@@ -161,11 +354,21 @@
                         "schema": {
                             "type": "object",
                             "properties": {
-                                "name": {"type": "string"},
-                                "age": {"type": "integer"},
-                                "city": {"type": "string"}
+                                "name": {
+                                    "type": "string"
+                                },
+                                "age": {
+                                    "type": "integer"
+                                },
+                                "city": {
+                                    "type": "string"
+                                }
                             },
-                            "required": ["name", "age", "city"]
+                            "required": [
+                                "name",
+                                "age",
+                                "city"
+                            ]
                         }
                     }
                 },
@@ -177,19 +380,63 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 0,
+                "created": 1781319205,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "{\n  \"name\": \"John Doe\",\n  \"age\": 35,\n  \"city\": \"New York City\"\n}", "partial": false},
-                        "finish_reason": "stop"
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\n  \"name\": \"John Doe\",\n  \"age\": 35,\n  \"city\": \"New York City\"\n}",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
-                "usage": {"prompt_tokens": 26, "total_tokens": 54, "completion_tokens": 28},
-                "aux_info": {"iter_count": 28, "input_len": 26, "output_len": 28, "step_output_len": 28, "pd_sep": false, "reuse_len": 0, "local_reuse_len": 0, "remote_reuse_len": 0, "memory_reuse_len": 0}
+                "usage": {
+                    "prompt_tokens": 26,
+                    "total_tokens": 54,
+                    "completion_tokens": 28,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 296.22,
+                    "iter_count": 28,
+                    "prefix_len": 0,
+                    "input_len": 26,
+                    "output_len": 28,
+                    "step_output_len": 28,
+                    "first_token_cost_time": 14.862,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
             },
-            "grammar_constraint_only": true,
             "_comment": "Same-schema person JSON #1 — cache-miss path. grammar_constraint_only: BF16 + concurrency_test=True + TP2DP2 NCCL ordering can shift one token; only the schema needs to hold."
         },
         {
@@ -208,11 +455,21 @@
                         "schema": {
                             "type": "object",
                             "properties": {
-                                "name": {"type": "string"},
-                                "age": {"type": "integer"},
-                                "city": {"type": "string"}
+                                "name": {
+                                    "type": "string"
+                                },
+                                "age": {
+                                    "type": "integer"
+                                },
+                                "city": {
+                                    "type": "string"
+                                }
                             },
-                            "required": ["name", "age", "city"]
+                            "required": [
+                                "name",
+                                "age",
+                                "city"
+                            ]
                         }
                     }
                 },
@@ -224,19 +481,63 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 0,
+                "created": 1781319206,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "{\n  \"name\": \"John Doe\",\n  \"age\": 35,\n  \"city\": \"New York City\"\n}", "partial": false},
-                        "finish_reason": "stop"
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\n  \"name\": \"John Doe\",\n  \"age\": 35,\n  \"city\": \"New York City\"\n}",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
-                "usage": {"prompt_tokens": 24, "total_tokens": 52, "completion_tokens": 28},
-                "aux_info": {"iter_count": 28, "input_len": 24, "output_len": 28, "step_output_len": 28, "pd_sep": false, "reuse_len": 0, "local_reuse_len": 0, "remote_reuse_len": 0, "memory_reuse_len": 0}
+                "usage": {
+                    "prompt_tokens": 24,
+                    "total_tokens": 52,
+                    "completion_tokens": 28,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 1611.687,
+                    "iter_count": 28,
+                    "prefix_len": 0,
+                    "input_len": 24,
+                    "output_len": 28,
+                    "step_output_len": 28,
+                    "first_token_cost_time": 1319.796,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
             },
-            "grammar_constraint_only": true,
             "_comment": "Same-schema person JSON #2 — cache-hit path (XGrammarBackendCpp::getCached short-circuit). grammar_constraint_only: same flaky-byte rationale as Q5."
         },
         {
@@ -260,16 +561,62 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 0,
+                "created": 1781319207,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "", "partial": false},
-                        "finish_reason": "stop"
+                        "message": {
+                            "role": "assistant",
+                            "content": "#FF0000",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
-                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+                "usage": {
+                    "prompt_tokens": 26,
+                    "total_tokens": 33,
+                    "completion_tokens": 7,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 81.501,
+                    "iter_count": 7,
+                    "prefix_len": 0,
+                    "input_len": 26,
+                    "output_len": 7,
+                    "step_output_len": 7,
+                    "first_token_cost_time": 13.816,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
             },
             "_comment": "Bounded regex hex — re.fullmatch."
         },
@@ -294,16 +641,62 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 0,
+                "created": 1781319208,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "", "partial": false},
-                        "finish_reason": "stop"
+                        "message": {
+                            "role": "assistant",
+                            "content": "60614",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
-                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+                "usage": {
+                    "prompt_tokens": 26,
+                    "total_tokens": 32,
+                    "completion_tokens": 6,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 1105.347,
+                    "iter_count": 6,
+                    "prefix_len": 0,
+                    "input_len": 26,
+                    "output_len": 6,
+                    "step_output_len": 6,
+                    "first_token_cost_time": 1051.975,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
             },
             "_comment": "Bounded regex zip code."
         },
@@ -323,22 +716,42 @@
                         "schema": {
                             "type": "object",
                             "properties": {
-                                "company": {"type": "string", "maxLength": 64},
+                                "company": {
+                                    "type": "string",
+                                    "maxLength": 64
+                                },
                                 "departments": {
                                     "type": "array",
                                     "maxItems": 4,
                                     "items": {
                                         "type": "object",
                                         "properties": {
-                                            "name": {"type": "string", "maxLength": 32},
-                                            "head": {"type": "string", "maxLength": 32},
-                                            "size": {"type": "integer", "minimum": 0, "maximum": 10000}
+                                            "name": {
+                                                "type": "string",
+                                                "maxLength": 32
+                                            },
+                                            "head": {
+                                                "type": "string",
+                                                "maxLength": 32
+                                            },
+                                            "size": {
+                                                "type": "integer",
+                                                "minimum": 0,
+                                                "maximum": 10000
+                                            }
                                         },
-                                        "required": ["name", "head", "size"]
+                                        "required": [
+                                            "name",
+                                            "head",
+                                            "size"
+                                        ]
                                     }
                                 }
                             },
-                            "required": ["company", "departments"]
+                            "required": [
+                                "company",
+                                "departments"
+                            ]
                         }
                     }
                 },
@@ -350,18 +763,63 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 0,
+                "created": 1781319209,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": "", "partial": false},
-                        "finish_reason": "stop"
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\n  \"company\": \"Example Company\",\n  \"departments\": [\n    {\n      \"name\": \"Sales\",\n      \"head\": \"Sales Manager\",\n      \"size\": 50\n    },\n    {\n      \"name\": \"Marketing\",\n      \"head\": \"Marketing Manager\",\n      \"size\": 30\n    },\n    {\n      \"name\": \"Operations\",\n      \"head\": \"Operations Manager\",\n      \"size\": 20\n    },\n    {\n      \"name\": \"Finance\",\n      \"head\": \"Finance Manager\",\n      \"size\": 10\n    }\n  ]\n}",
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
-                "usage": {"prompt_tokens": 0, "total_tokens": 0, "completion_tokens": 0}
+                "usage": {
+                    "prompt_tokens": 26,
+                    "total_tokens": 160,
+                    "completion_tokens": 134,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 1432.72,
+                    "iter_count": 134,
+                    "prefix_len": 0,
+                    "input_len": 26,
+                    "output_len": 134,
+                    "step_output_len": 134,
+                    "first_token_cost_time": 14.255,
+                    "wait_time": 0.0,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "role_addrs": [],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
             },
-            "grammar_constraint_only": true,
             "_comment": "Nested array json_schema — exercises deeper NFA states under concurrent batch."
         }
     ]

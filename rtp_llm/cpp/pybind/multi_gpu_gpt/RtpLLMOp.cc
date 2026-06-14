@@ -14,7 +14,7 @@
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
-#include "rtp_llm/cpp/models/logits_processor/xgrammar/XGrammarBootstrap.h"
+#include "rtp_llm/cpp/pybind/multi_gpu_gpt/XGrammarBootstrap.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 
 using namespace std;
@@ -137,9 +137,7 @@ void RtpLLMOp::init(py::object model,
     }
 }
 
-EngineInitParams RtpLLMOp::initModel(py::object model,
-                                     py::object engine_config,
-                                     py::object vit_config) {
+EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config, py::object vit_config) {
     try {
         // Get model_config from model
         auto model_config = model.attr("model_config").cast<ModelConfig>();
@@ -212,10 +210,8 @@ EngineInitParams RtpLLMOp::initModel(py::object model,
         params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
         params.server_config    = engine_config.attr("server_config");
         params.grammar_config   = engine_config.attr("grammar_config").cast<GrammarConfig>();
-        params.reasoning_config = engine_config.attr("reasoning_config").cast<ReasoningConfig>();
-        bootstrapGrammarConfigFromModel(model, params.grammar_config, params.reasoning_config);
-        engine_config.attr("grammar_config")   = params.grammar_config;
-        engine_config.attr("reasoning_config") = params.reasoning_config;
+        bootstrapGrammarConfigFromModel(model, params.grammar_config);
+        engine_config.attr("grammar_config") = params.grammar_config;
         model_id_++;
         if (parallelism_config.tp_rank == 0) {
             // kmon metric init

@@ -129,8 +129,8 @@ public:
     // Lock-free counterpart of update(), for callers that already hold mutex_
     // (e.g. moveToNext → handleLoading → loadCacheDone → applyP2PSideChannelToStream).
     // Calling update() from such a path would self-deadlock on the non-recursive mutex.
-    void         updateWithoutLock(const StreamUpdateInfo& update_info);
-    void         specUpdate(const StreamSpecUpdateInfo& update_info);
+    void updateWithoutLock(const StreamUpdateInfo& update_info);
+    void specUpdate(const StreamSpecUpdateInfo& update_info);
 
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
@@ -246,22 +246,17 @@ public:
                                 ErrorCode               error_code = ErrorCode::NONE_ERROR,
                                 const std::string&      error_msg  = "");
 
-    void         reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
+    void reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
     // 无锁版本的 reportError，供已持有 mutex_ 的内部路径（dispatch/process/acceptTokens）使用，
     // 避免在非递归 mutex 上自死锁。语义上等价于 reportEventWithoutLock(Error, code, msg)，
     // 提供独立 API 仅为调用方意图更清晰（对应 reportError vs reportEvent 的命名分工）。
-    void         reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg);
-    bool         hasEvent(StreamEvents::EventType event) const;
-    // No-lock variant for callers that already hold mutex_ (e.g. moveToNext →
-    // pollLogitsProcessorPreparationWhileWaiting). hasEvent() locks mutex_
-    // unconditionally, so calling it under the same non-recursive lock would
-    // deadlock.
+    void reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg);
+    bool hasEvent(StreamEvents::EventType event) const;
+    // No-lock variant for callers already holding mutex_.
     bool         hasEventWithoutLock(StreamEvents::EventType event) const;
     virtual bool hasError() const;
-    // See BaseLogitsProcessor.h ("Logits-processor readiness gate").
-    bool         isPreparationPending() const noexcept { return preparation_pending_; }
-    ErrorInfo    statusInfo();
-    std::string  stopReason();
+    ErrorInfo   statusInfo();
+    std::string stopReason();
 
     void        setReserveStep(size_t reserve_step);
     StreamState moveToNext();
@@ -465,26 +460,10 @@ public:
         return logits_processor_list_;
     }
 
-    // THREAD SAFETY: must be called before the stream enters the scheduler
-    // (i.e. during gate hold or stream construction) or after the stream
-    // reaches a terminal state. Concurrent calls with notifyCommit iteration
-    // are NOT safe — the scheduler's single-threaded dispatch guarantees this.
-    void addLogitsProcessor(BaseLogitsProcessorPtr processor) {
-        logits_processor_list_.push_back(std::move(processor));
-        const auto& p = logits_processor_list_.back();
-        if (p && p->needsPreparation()) {
-            preparation_pending_ = true;
-        }
-    }
-
-    // Post-construction init: set stream back-references on processors that
-    // need it (e.g. GrammarLogitsProcessor for PD token replay) and inject the
-    // ErrorReporter callback so processors can report errors without holding a
-    // raw stream pointer. Must be called after make_shared so shared_from_this()
-    // is valid.
+    // Must be called after make_shared so shared_from_this() is valid.
     void initProcessorStreamRefs() {
-        std::weak_ptr<GenerateStream> weak = shared_from_this();
-        auto reporter = [weak](ErrorCode code, const std::string& msg, bool stream_lock_held) {
+        std::weak_ptr<GenerateStream> weak     = shared_from_this();
+        auto                          reporter = [weak](ErrorCode code, const std::string& msg, bool stream_lock_held) {
             if (auto s = weak.lock()) {
                 if (stream_lock_held) {
                     s->reportErrorWithoutLock(code, msg);
@@ -497,46 +476,6 @@ public:
             if (p) {
                 p->setStream(shared_from_this());
                 p->setErrorReporter(reporter);
-            }
-        }
-    }
-
-    // Generic processor lookup by concrete type. Returns the first attached
-    // processor whose dynamic type is T (or a subclass), or nullptr.
-    // Use in lieu of grammar-specific finders so callers depend on the
-    // processor type they actually need, not on grammar-named helpers.
-    template <typename T>
-    T* findProcessor() const noexcept {
-        for (const auto& p : logits_processor_list_) {
-            if (auto* t = dynamic_cast<T*>(p.get())) {
-                return t;
-            }
-        }
-        return nullptr;
-    }
-
-    // Remove all attached processors whose dynamic type is T (or subclass).
-    // Used when a processor's per-stream resource needs to be released early
-    // (e.g. grammar compile failed or stream cancelled).
-    // THREAD SAFETY: same constraints as addLogitsProcessor — must not be
-    // called while notifyCommit is iterating the processor list.
-    template <typename T>
-    void eraseProcessor() noexcept {
-        logits_processor_list_.erase(
-            std::remove_if(logits_processor_list_.begin(),
-                           logits_processor_list_.end(),
-                           [](const BaseLogitsProcessorPtr& p) { return dynamic_cast<T*>(p.get()) != nullptr; }),
-            logits_processor_list_.end());
-        // Keep the readiness gate in sync: if the removed processor was the one
-        // that armed preparation_pending_, re-scan the survivors so moveToNext
-        // does not keep polling prepare() for a processor that no longer exists.
-        if (preparation_pending_) {
-            preparation_pending_ = false;
-            for (const auto& p : logits_processor_list_) {
-                if (p && p->needsPreparation()) {
-                    preparation_pending_ = true;
-                    break;
-                }
             }
         }
     }
@@ -628,29 +567,21 @@ public:
     bool     queryPdSep() const;
 
 protected:
-    // Per-stream commit notifications. notifyCommit fires the universal
-    // "token committed -> processor updateStatus" invariant called from both
-    // update() and specUpdate(). notifyMultiSeqStatus is the multi-seq /
-    // beam-search counterpart (only relevant on the non-spec path; spec paths
-    // don't carry src_batch_indices).
-    //
-    // PRECONDITION: the caller MUST already hold mutex_. Both implementations
-    // report errors through reportErrorWithoutLock and iterate
-    // logits_processor_list_ without taking the lock themselves; the only
-    // callers (update / specUpdate) hold mutex_ for the whole commit. Do not add
-    // a not-locked caller without re-checking this contract.
-    void notifyMultiSeqStatus(const torch::Tensor& src_batch_indices);
-    void notifyCommit(const torch::Tensor& new_tokens, int32_t num_new_tokens);
+    // Caller must already hold mutex_; both implementations use reportErrorWithoutLock.
+    bool hasStatefulLogitsProcessor() const;
+    int64_t processorAcceptedTokenLen() const;
+    void updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
+    void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
+    void updateLogitProcessorStatus(const torch::Tensor& new_tokens,
+                                    int32_t              num_new_tokens,
+                                    const torch::Tensor& src_batch_indices,
+                                    bool                 stateful_only);
+    void validateStatefulLogitsProcessorState();
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 
     void reportStreamMetrics();
     void reportCacheReuseMetrics() const;
-
-    // Readiness gate for async logits-processor preparation. Requires mutex_.
-    // Returns a parked StreamState when the gate handled this tick; nullopt to
-    // fall through to generate_status_->moveToNext(). See BaseLogitsProcessor.h.
-    std::optional<StreamState> pollLogitsProcessorPreparationWhileWaiting();
 
 protected:
     uint64_t                              stream_magic_ = STREAM_MAGIC;
@@ -743,8 +674,6 @@ protected:
 
     std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
     at::Generator                       generator_;
-
-    bool preparation_pending_ = false;
 
     // just for bool test
     bool perf_test_ = false;

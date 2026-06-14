@@ -73,6 +73,19 @@ cc_library(
 )
 
 cc_library(
+    name = "xgrammar_bootstrap",
+    srcs = ["multi_gpu_gpt/XGrammarBootstrap.cc"],
+    hdrs = ["multi_gpu_gpt/XGrammarBootstrap.h"],
+    deps = [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/utils:core_utils",
+        "@xgrammar//:xgrammar",
+    ] + torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "th_transformer_lib",
     srcs = [
         "init.cc",
@@ -89,8 +102,8 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/api_server:http_api_server",
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
-        "//rtp_llm/cpp/models/logits_processor/xgrammar:grammar_cpp_lib",
-        "//rtp_llm/cpp/models/logits_processor/xgrammar:xgrammar_bootstrap",
+        "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
+        ":xgrammar_bootstrap",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/utils:signal_utils",

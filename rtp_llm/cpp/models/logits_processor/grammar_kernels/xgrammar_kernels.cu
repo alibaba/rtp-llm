@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/models/logits_processor/xgrammar/xgrammar_kernels.h"
+#include "rtp_llm/cpp/models/logits_processor/grammar_kernels/xgrammar_kernels.h"
 
 #include <ATen/Dispatch.h>
 #include <c10/cuda/CUDAException.h>

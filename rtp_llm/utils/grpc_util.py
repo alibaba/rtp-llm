@@ -4,10 +4,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import TensorPB
 
 
 def trans_option(pb_object, py_object, name):
-    # is-not-None (not truthiness): a field is forwarded whenever it is set,
-    # including falsy-but-meaningful values (0, "", False). Fields that need
-    # "send only when explicitly set" semantics should use an Optional None
-    # default on the Python side.
+    # is-not-None, not truthiness — preserves 0/""/False.
     value = getattr(py_object, name)
     if value is not None:
         pb_field = getattr(pb_object, name)

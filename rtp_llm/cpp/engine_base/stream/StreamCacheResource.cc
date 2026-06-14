@@ -125,21 +125,19 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         return false;
     }
 
-    // Apply side-channel data to GenerateStream
-    // 1. First token: commit through the universal update() path. updateStatus
-    // on attached processors only advances internal state; stream termination
-    // is delegated to the EOS sampler path.
+    // Apply side-channel data to GenerateStream. Must use updateWithoutLock:
+    // moveToNext already holds mutex_ when it reaches us via handleLoading.
     //
-    // MUST use updateWithoutLock: this function is reached via
-    // GenerateStream::moveToNext (holds mutex_) → GenerateStateMachine::handleLoading
-    // → loadCacheDone → updateReuseLengthsFromContext → applyP2PSideChannelToStream.
-    // Calling update() would re-acquire mutex_ and self-deadlock on the
-    // non-recursive mutex.
-    if (payload->first_token_id > 0) {
+    // first_token_id presence: PrefillRpcServer::remoteGenerate always populates
+    // first_generate_token_id when a payload is produced, so reaching here with a
+    // payload means the field is set. token id 0 is a legitimate model token
+    // (BOS/PAD/byte-fallback collisions in some tokenizers) — using `> 0` as the
+    // existence guard would silently drop it. Accept any non-negative id.
+    if (payload->first_token_id >= 0) {
         stream->setIsContextStream(false);
         stream->step();
         stream->incLastOutputPos();
-        auto bonus_tokens = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
+        auto bonus_tokens                   = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
         bonus_tokens.data_ptr<int32_t>()[0] = static_cast<int32_t>(payload->first_token_id);
         StreamUpdateInfo bonus_info{bonus_tokens,
                                     /*num_new_tokens=*/1,

@@ -11,7 +11,6 @@ from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
 
-
 _GRAMMAR_RESPONSE_FORMAT_TYPES = frozenset(
     {"json_schema", "json_object", "regex", "ebnf", "structural_tag"}
 )
@@ -464,6 +463,9 @@ class GenerateConfig(BaseModel):
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
 
+        self._validate_grammar_constraints()
+
+    def _validate_grammar_constraints(self) -> None:
         parsed_response_format: Optional[Dict[str, Any]] = None
         if self.response_format is not None:
             try:
@@ -481,13 +483,10 @@ class GenerateConfig(BaseModel):
                 "structural_tag / grammar response_format) may be set per request",
             )
 
-        # Grammar-constrained decoding advances the matcher one token at a
-        # time, but NormalOutputDispatcher skips that advance under beam
-        # search (num_beams > 1 / num_return_sequences > 1), so the matcher
-        # never moves and schema-illegal tokens can be emitted. Fail fast.
-        if (self.has_num_beams() or self.num_return_sequences > 1) and self._has_grammar_constraint(
-            parsed_response_format
-        ):
+        # NormalOutputDispatcher skips per-token matcher advance under beam search → schema-illegal tokens.
+        if (
+            self.has_num_beams() or self.num_return_sequences > 1
+        ) and self._has_grammar_constraint(parsed_response_format):
             raise FtRuntimeException(
                 ExceptionType.UNSUPPORTED_OPERATION,
                 "grammar-constrained decoding (json_schema / regex / ebnf / "
@@ -498,8 +497,12 @@ class GenerateConfig(BaseModel):
     def _has_grammar_constraint(
         self, parsed_response_format: Optional[Dict[str, Any]] = None
     ) -> bool:
-        if self.json_schema is not None or self.regex is not None \
-                or self.ebnf is not None or self.structural_tag is not None:
+        if (
+            self.json_schema is not None
+            or self.regex is not None
+            or self.ebnf is not None
+            or self.structural_tag is not None
+        ):
             return True
         return _response_format_is_grammar(self.response_format, parsed_response_format)
 

@@ -57,19 +57,16 @@ void ChatService::generateResponse(const std::shared_ptr<GenerateConfig>&       
     ctx->init(num_return_sequences, body, chat_render);
 
     GenerateOutputs outputs;
-    // NOTE: this C++ HttpApiServer path is outside the xgrammar / grammar refactor scope and
-    // is not the production inference path (production goes Python uvicorn frontend ->
-    // backend gRPC). Collapsing every nextOutput failure into a plain break instead of
-    // mapping ErrorCode -> HttpApiServerException is the known existing behavior; reviewers
-    // need not flag it again.
-    // hasError() check: finished() used to imply success, but FINISHED can now carry an
-    // error — bail out of the consume loop in that case.
+    // FINISHED can now carry an error; bail out instead of treating it as success.
+    //
+    // WONTFIX: this loop swallows the stream error and returns 200 OK with whatever
+    // partial response has accumulated. Owner has decided not to support the C++
+    // HTTP server path (Python frontend is the only supported entry); see also
+    // chatCompletions below where top-level response_format is silently dropped.
+    // Do not patch ChatService — fix Python-side handlers if you hit this in prod.
     while (stream->isActive() || stream->hasOutput()) {
         const auto result = stream->nextOutput();
         if (!result.ok()) {
-            // Intentional break (not throw): keeps the "return whatever was already rendered"
-            // semantics so a mid-generation failure doesn't escalate the entire request to a
-            // 5xx, leaving room for the upstream SSE / aggregator layer to fall back.
             RTP_LLM_LOG_INFO("stream nextOutput failed");
             break;
         }
@@ -139,17 +136,10 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
 
     writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Stream);
     GenerateOutputs outputs;
-    // NOTE: same as generateResponse — this C++ HttpApiServer path is outside the
-    // xgrammar / grammar refactor scope and not the production inference path; collapsing
-    // nextOutput failures into a plain break is the known existing behavior.
-    // hasError() check: finished() used to imply success, but FINISHED can now carry an
-    // error — bail out of the consume loop in that case.
+    // FINISHED can now carry an error; bail out instead of treating it as success.
     while (stream->isActive()) {
         const auto output_status = stream->nextOutput();
         if (!output_status.ok()) {
-            // Same as generateResponse: streaming branch also preserves partial-success
-            // semantics so the client receives whatever SSE chunks were already flushed
-            // and decides next steps based on finish_reason.
             RTP_LLM_LOG_INFO("stream nextOutput failed");
             break;
         }
@@ -196,6 +186,11 @@ void ChatService::chatCompletions(const std::unique_ptr<http_server::HttpRespons
 
     const auto            body = request.GetBody();
     ChatCompletionRequest chat_request;
+    // WONTFIX: top-level `response_format` (OpenAI structured-output / JSON-schema)
+    // is not parsed here, so grammar / schema constraints requested via the C++ HTTP
+    // path are silently dropped. Owner has decided not to support the C++ HTTP
+    // server (Python frontend is the only supported entry). Use the Python frontend
+    // for response_format / structured output; do not patch ChatService.
     FromJsonString(chat_request, body);
 
     AccessLogWrapper::logQueryAccess(body, request_id, chat_request.private_request);
