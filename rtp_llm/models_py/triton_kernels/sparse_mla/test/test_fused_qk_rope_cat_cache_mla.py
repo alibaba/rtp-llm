@@ -169,6 +169,8 @@ def check_precision(name, make_fn, base_fn, fused_fn, cache_cmp_bytes=False):
     for seed in [0, 42, 12345]:
         for T in [1, 4, 32]:
             q1, ck1, kpe1, kvc1, slot, pos = make_fn(T, seed=seed)
+            slot = slot.clone()
+            slot[::3] = -1
             q2, ck2, kpe2, kvc2 = q1.clone(), ck1.clone(), kpe1.clone(), kvc1.clone()
 
             base_fn(q1, ck1, kpe1, kvc1, slot, pos, csc)

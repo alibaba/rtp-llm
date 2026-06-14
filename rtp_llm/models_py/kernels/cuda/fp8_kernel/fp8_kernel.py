@@ -430,15 +430,29 @@ def requant_weight_ue8m0(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     weight_block_size = [128, 128]
 
+    # Match vLLM/DeepGEMM post-load processing: dequantize the serialized
+    # FP8 blocks in FP32, then requantize to UE8M0.  Rounding through BF16
+    # changes a small fraction of FP8 weight bits and is enough to flip GLM5
+    # greedy logits at short precision boundaries.
     weight_dequant = block_quant_dequant(
         weight,
         weight_scale_inv,
         weight_block_size,
-        torch.bfloat16,
+        torch.float32,
     )
-    out_w, out_s = quant_weight_ue8m0(
-        weight_dequant=weight_dequant,
-        weight_block_size=weight_block_size,
+    *batch_dims, n, k = weight_dequant.shape
+    weight_dequant_flat = weight_dequant.view((-1, k))
+    out_w_flat, out_s_flat = per_block_cast_to_fp8(
+        weight_dequant_flat, use_ue8m0=True
+    )
+
+    out_w = out_w_flat.view((*batch_dims, n, k))
+    out_s = out_s_flat.view(
+        (
+            *batch_dims,
+            ceil_div(n, weight_block_size[0]),
+            ceil_div(k, weight_block_size[1]),
+        )
     )
     out_s = _transform_scale_ue8m0(out_s, mn=out_w.shape[-2])
     return out_w, out_s

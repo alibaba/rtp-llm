@@ -14,6 +14,9 @@ Supports both KV cache layouts:
   - "auto":       BF16 cache, kv_cache dtype=bf16
   - "fp8_ds_mla": FP8 cache,  kv_cache dtype=uint8 (656B per slot)
 
+``slot_mapping[t] == -1`` is legal padding. Match the unfused path by still
+applying RoPE to q/k for that token while skipping only the KV-cache write.
+
 Note: q.shape[-1] = nope_head_dim + rope_head_dim (per-head Q dim),
       which differs from kv_lora_rank (compressed KV dim for the cache).
       The kernel uses Q_ROPE_OFFSET (=nope_head_dim) for Q-side indexing,
@@ -117,13 +120,15 @@ def _fused_qk_rope_cat_cache_mla_bf16_kernel(
             tl.store(Q + addrs_o, yo.to(tl.bfloat16), mask=m2d)
     else:
         slot = tl.load(SLOT_MAPPING + t).to(tl.int64)
-        page_idx = slot // BLOCK_SIZE
-        slot_offset = slot % BLOCK_SIZE
+        slot_valid = slot >= 0
+        safe_slot = tl.where(slot_valid, slot, 0)
+        page_idx = safe_slot // BLOCK_SIZE
+        slot_offset = safe_slot % BLOCK_SIZE
         kvc_off = page_idx * stride_kvc_page + slot_offset * stride_kvc_slot
 
         kv_lora_idx = tl.arange(0, KV_LORA)
         ck = tl.load(COMPRESSED_KV + t * stride_ck_t + kv_lora_idx)
-        tl.store(KV_CACHE + kvc_off + kv_lora_idx, ck)
+        tl.store(KV_CACHE + kvc_off + kv_lora_idx, ck, mask=slot_valid)
 
         kpe_off = t * stride_kpe_t
         if IS_NEOX:
@@ -135,8 +140,12 @@ def _fused_qk_rope_cat_cache_mla_bf16_kernel(
             k_y2_bf = k_y2.to(tl.bfloat16)
             tl.store(K_PE + kpe_off + rh, k_y1_bf)
             tl.store(K_PE + kpe_off + HALF_ROPE + rh, k_y2_bf)
-            tl.store(KV_CACHE + kvc_off + KV_LORA + rh, k_y1_bf)
-            tl.store(KV_CACHE + kvc_off + KV_LORA + HALF_ROPE + rh, k_y2_bf)
+            tl.store(KV_CACHE + kvc_off + KV_LORA + rh, k_y1_bf, mask=slot_valid)
+            tl.store(
+                KV_CACHE + kvc_off + KV_LORA + HALF_ROPE + rh,
+                k_y2_bf,
+                mask=slot_valid,
+            )
         else:
             ke = tl.load(K_PE + kpe_off + 2 * rh).to(tl.float32)
             ko = tl.load(K_PE + kpe_off + 2 * rh + 1).to(tl.float32)
@@ -146,8 +155,12 @@ def _fused_qk_rope_cat_cache_mla_bf16_kernel(
             k_yo_bf = k_yo.to(tl.bfloat16)
             tl.store(K_PE + kpe_off + 2 * rh, k_ye_bf)
             tl.store(K_PE + kpe_off + 2 * rh + 1, k_yo_bf)
-            tl.store(KV_CACHE + kvc_off + KV_LORA + 2 * rh, k_ye_bf)
-            tl.store(KV_CACHE + kvc_off + KV_LORA + 2 * rh + 1, k_yo_bf)
+            tl.store(KV_CACHE + kvc_off + KV_LORA + 2 * rh, k_ye_bf, mask=slot_valid)
+            tl.store(
+                KV_CACHE + kvc_off + KV_LORA + 2 * rh + 1,
+                k_yo_bf,
+                mask=slot_valid,
+            )
 
 
 # ---- FP8 KV cache path ("fp8_ds_mla") -------------------------------------
@@ -257,11 +270,10 @@ def _fused_qk_rope_cat_cache_mla_fp8_kernel(
 
     else:
         slot = tl.load(SLOT_MAPPING + t).to(tl.int64)
-        if slot < 0:
-            return
-
-        page_idx = slot // BLOCK_SIZE
-        slot_offset = slot % BLOCK_SIZE
+        slot_valid = slot >= 0
+        safe_slot = tl.where(slot_valid, slot, 0)
+        page_idx = safe_slot // BLOCK_SIZE
+        slot_offset = safe_slot % BLOCK_SIZE
         pos = tl.load(POSITIONS + t).to(tl.int64)
         rh = tl.arange(0, HALF_ROPE)
         c = tl.load(COS_SIN_CACHE + pos * ROPE + rh)
@@ -283,8 +295,12 @@ def _fused_qk_rope_cat_cache_mla_fp8_kernel(
             k_y2_bf = k_y2.to(tl.bfloat16)
             tl.store(K_PE + kpe_off + rh, k_y1_bf)
             tl.store(K_PE + kpe_off + HALF_ROPE + rh, k_y2_bf)
-            tl.store(KV_CACHE_BF16 + rope_bf16_base + rh, k_y1_bf)
-            tl.store(KV_CACHE_BF16 + rope_bf16_base + HALF_ROPE + rh, k_y2_bf)
+            tl.store(KV_CACHE_BF16 + rope_bf16_base + rh, k_y1_bf, mask=slot_valid)
+            tl.store(
+                KV_CACHE_BF16 + rope_bf16_base + HALF_ROPE + rh,
+                k_y2_bf,
+                mask=slot_valid,
+            )
         else:
             ke = tl.load(K_PE + kpe_off + 2 * rh).to(tl.float32)
             ko = tl.load(K_PE + kpe_off + 2 * rh + 1).to(tl.float32)
@@ -294,8 +310,12 @@ def _fused_qk_rope_cat_cache_mla_fp8_kernel(
             k_yo_bf = k_yo.to(tl.bfloat16)
             tl.store(K_PE + kpe_off + 2 * rh, k_ye_bf)
             tl.store(K_PE + kpe_off + 2 * rh + 1, k_yo_bf)
-            tl.store(KV_CACHE_BF16 + rope_bf16_base + 2 * rh, k_ye_bf)
-            tl.store(KV_CACHE_BF16 + rope_bf16_base + 2 * rh + 1, k_yo_bf)
+            tl.store(KV_CACHE_BF16 + rope_bf16_base + 2 * rh, k_ye_bf, mask=slot_valid)
+            tl.store(
+                KV_CACHE_BF16 + rope_bf16_base + 2 * rh + 1,
+                k_yo_bf,
+                mask=slot_valid,
+            )
 
 
 def fused_qk_rope_cat_cache_mla(
@@ -320,7 +340,7 @@ def fused_qk_rope_cat_cache_mla(
         kv_cache:      [num_blocks, block_size, D]
                        - "auto":       dtype=bf16, D = kv_lora_rank + rope_head_dim
                        - "fp8_ds_mla": dtype=uint8, D = 656
-        slot_mapping:  [T]  int64
+        slot_mapping:  [T]  int64, -1 skips KV-cache write for that token
         positions:     [T]  int32
         cos_sin_cache: [max_pos, rope_head_dim]  fp32
         kv_lora_rank:  compressed KV dimension (e.g. 512)
