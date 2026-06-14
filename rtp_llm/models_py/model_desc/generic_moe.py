@@ -597,9 +597,6 @@ class GenericMoeModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
-        self.register_buffer("_mtp_hidden_buffer", None, persistent=False)
-        self._mtp_hidden_valid_tokens = 0
-
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         hidden_states = self.embed_tokens(input_ids)
@@ -643,9 +640,6 @@ class GenericMoeModel(GptModelBase):
                 _rt.record(f"layer{i:02d}_residual", residual)
                 _rt.record(f"layer{i:02d}_combined", hidden_states + residual)
 
-        pre_norm_hidden = hidden_states + residual
-        self._write_mtp_hidden_buffer(pre_norm_hidden)
-
         hidden_states, _ = self.norm(hidden_states, residual)
         if _rt_on:
             _rt.record("final_norm", hidden_states)
@@ -656,24 +650,6 @@ class GenericMoeModel(GptModelBase):
             _rt.dump(step=getattr(self, "_dbg_step", 0), extra=extra)
             self._dbg_step = getattr(self, "_dbg_step", 0) + 1
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
-
-    def _write_mtp_hidden_buffer(self, flat: torch.Tensor) -> None:
-        T, D = flat.size(0), flat.size(1)
-        if self._mtp_hidden_buffer is None or self._mtp_hidden_buffer.size(0) < T:
-            self.register_buffer(
-                "_mtp_hidden_buffer",
-                torch.empty(max(T, 1024), D, dtype=flat.dtype, device=flat.device),
-                persistent=False,
-            )
-        self._mtp_hidden_buffer[:T].copy_(flat)
-        self._mtp_hidden_valid_tokens = int(T)
-
-    def get_mtp_target_hidden_states(self, num_tokens: int):
-        # GLM/DeepSeek-V2 style MTP consumes the target model's final-norm
-        # hidden states on the first draft pass, matching vLLM/SGLang GLM MTP.
-        # Only the draft MTP module itself exposes pre-shared-head-norm hidden
-        # through this accessor for recurrent draft steps.
-        return None
 
 
 __all__ = [
