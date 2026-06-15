@@ -33,7 +33,7 @@ class TestMasterService(unittest.TestCase):
         svc._refresh_route_snapshot(host_health_map)
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
-    @patch("rtp_llm.server.host_service.requests.post")
+    @patch("requests.post")
     def test_refresh_single_host_sets_master_and_queue(
         self, mock_post: MagicMock, _mock_kmonitor: MagicMock
     ):
@@ -53,7 +53,7 @@ class TestMasterService(unittest.TestCase):
         mock_post.assert_called_once()
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
-    @patch("rtp_llm.server.host_service.requests.post")
+    @patch("requests.post")
     def test_refresh_two_hosts_prefers_server_marked_master(
         self, mock_post: MagicMock, _mock_kmonitor: MagicMock
     ):
@@ -85,7 +85,7 @@ class TestMasterService(unittest.TestCase):
         self.assertEqual(mock_post.call_count, 2)
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
-    @patch("rtp_llm.server.host_service.requests.post")
+    @patch("requests.post")
     def test_refresh_no_discovery_hosts_empty_snapshot(
         self, mock_post: MagicMock, _mock_kmonitor: MagicMock
     ):
@@ -101,7 +101,7 @@ class TestMasterService(unittest.TestCase):
         mock_post.assert_not_called()
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
-    @patch("rtp_llm.server.host_service.requests.post")
+    @patch("requests.post")
     def test_refresh_failover_after_previous_master_unhealthy(
         self, mock_post: MagicMock, _mock_kmonitor: MagicMock
     ):
@@ -152,7 +152,7 @@ class TestMasterService(unittest.TestCase):
         self.assertEqual(status["10.0.0.1:8000"]["health"], "unhealthy")
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
-    @patch("rtp_llm.server.host_service.requests.post")
+    @patch("requests.post")
     def test_get_host_health_status_reads_snapshot(
         self, mock_post: MagicMock, _mock_kmonitor: MagicMock
     ):
@@ -172,7 +172,7 @@ class TestMasterService(unittest.TestCase):
         self.assertTrue(status["10.0.0.1:8000"]["is_master"])
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
-    @patch("rtp_llm.server.host_service.requests.post")
+    @patch("requests.post")
     def test_refresh_keeps_previous_master_when_still_healthy(
         self, mock_post: MagicMock, _mock_kmonitor: MagicMock
     ):
@@ -211,7 +211,7 @@ class TestMasterService(unittest.TestCase):
         self.assertEqual(svc.get_slave_addr(), "10.0.0.2:8000")
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
-    @patch("rtp_llm.server.host_service.requests.post")
+    @patch("requests.post")
     def test_collect_hosts_uses_refresh_discovery(
         self, mock_post: MagicMock, _mock_kmonitor: MagicMock
     ):
@@ -229,7 +229,97 @@ class TestMasterService(unittest.TestCase):
         mock_post.assert_called_once()
 
     @patch("rtp_llm.server.host_service.kmonitor.report")
-    @patch("rtp_llm.server.host_service.requests.post")
+    @patch("requests.post")
+    def test_refresh_removes_host_missing_from_discovery(
+        self, mock_post: MagicMock, _mock_kmonitor: MagicMock
+    ):
+        vip = MagicMock()
+        vip.domain = "master.vip"
+        h1 = Host("10.0.0.1", "8000")
+        h2 = Host("10.0.0.2", "8000")
+        vip.get_hosts.return_value = [h1, h2]
+
+        def round1(url, **_kwargs):
+            if "10.0.0.1:8000" in url:
+                return _json_response(
+                    {"real_master_host": "10.0.0.1:8000", "queue_length": 1}
+                )
+            return _json_response(
+                {"real_master_host": "10.0.0.1:8000", "queue_length": 2}
+            )
+
+        mock_post.side_effect = round1
+        svc, host_health_map = self._make_service(vip)
+        self._refresh(svc, host_health_map)
+        self.assertEqual(svc.get_master_addr(), "10.0.0.1:8000")
+
+        vip.get_hosts.return_value = [h2]
+
+        def round2(url, **_kwargs):
+            self.assertNotIn("10.0.0.1:8000", url)
+            return _json_response(
+                {"real_master_host": "10.0.0.2:8000", "queue_length": 3}
+            )
+
+        mock_post.reset_mock()
+        mock_post.side_effect = round2
+        self._refresh(svc, host_health_map)
+
+        self.assertNotIn("10.0.0.1:8000", host_health_map)
+        self.assertEqual(svc.get_master_addr(), "10.0.0.2:8000")
+        self.assertEqual(svc.get_slave_addr(), None)
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch("rtp_llm.server.host_service.kmonitor.report")
+    @patch("requests.post")
+    def test_refresh_keeps_previous_snapshot_when_discovery_transiently_empty(
+        self, mock_post: MagicMock, _mock_kmonitor: MagicMock
+    ):
+        vip = MagicMock()
+        vip.domain = "master.vip"
+        h1 = Host("10.0.0.1", "8000")
+        h2 = Host("10.0.0.2", "8000")
+        vip.get_hosts.return_value = [h1, h2]
+
+        def round1(url, **_kwargs):
+            if "10.0.0.1:8000" in url:
+                return _json_response(
+                    {"real_master_host": "10.0.0.1:8000", "queue_length": 1}
+                )
+            return _json_response(
+                {"real_master_host": "10.0.0.1:8000", "queue_length": 2}
+            )
+
+        mock_post.side_effect = round1
+        svc, host_health_map = self._make_service(vip)
+        self._refresh(svc, host_health_map)
+        self.assertEqual(svc.get_master_addr(), "10.0.0.1:8000")
+        self.assertEqual(svc.get_slave_addr(), "10.0.0.2:8000")
+
+        vip.get_hosts.return_value = []
+        mock_post.reset_mock()
+
+        def empty_discovery_probe(url, **_kwargs):
+            if "10.0.0.1:8000" in url:
+                return _json_response(
+                    {"real_master_host": "10.0.0.1:8000", "queue_length": 3}
+                )
+            return _json_response(
+                {"real_master_host": "10.0.0.1:8000", "queue_length": 4}
+            )
+
+        mock_post.side_effect = empty_discovery_probe
+        self._refresh(svc, host_health_map)
+
+        self.assertEqual(svc.get_master_addr(), "10.0.0.1:8000")
+        self.assertEqual(svc.get_slave_addr(), "10.0.0.2:8000")
+        self.assertEqual(svc.get_queue_length(), 3)
+        self.assertIn("10.0.0.1:8000", host_health_map)
+        self.assertIn("10.0.0.2:8000", host_health_map)
+        self.assertEqual(mock_post.call_count, 2)
+
+    @patch("rtp_llm.server.host_service.kmonitor.report")
+    @patch("requests.post")
     @patch("rtp_llm.server.host_service.time.time")
     def test_cleanup_removes_expired_unhealthy_host(
         self,

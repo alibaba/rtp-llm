@@ -44,6 +44,7 @@ MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
 FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV = "FRONTEND_PRE_STOP_DRAIN_SECONDS"
 DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
+PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
 DEFAULT_PRE_STOP_DRAIN_SECONDS = 120.0
 
 
@@ -66,6 +67,20 @@ def _pre_stop_drain_seconds() -> float:
             )
             return DEFAULT_PRE_STOP_DRAIN_SECONDS
     return DEFAULT_PRE_STOP_DRAIN_SECONDS
+
+
+def _pre_stop_drain_headroom_seconds(shutdown_timeout: float) -> float:
+    raw = os.environ.get(PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV, "")
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            logging.warning(
+                "Invalid %s=%r, using default pre-stop drain headroom",
+                PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV,
+                raw,
+            )
+    return min(60.0, max(1.0, float(shutdown_timeout) * 0.10))
 
 
 class GracefulShutdownServer(Server):
@@ -130,21 +145,49 @@ class GracefulShutdownServer(Server):
         with self._pre_stop_lock:
             self._pre_stop_timer = None
         self.shutdown_manager.start_draining(f"signal {sig_name}")
+        self._limit_graceful_shutdown_to_remaining_budget()
         Server.handle_exit(self, sig, frame)
+
+    def _remaining_shutdown_timeout_after_pre_stop(self) -> Optional[float]:
+        shutdown_timeout = self.config.timeout_graceful_shutdown
+        if shutdown_timeout is None or shutdown_timeout <= 0:
+            return shutdown_timeout
+        elapsed = self.shutdown_manager.drain_elapsed_seconds()
+        return max(0.0, float(shutdown_timeout) - elapsed)
+
+    def _limit_graceful_shutdown_to_remaining_budget(self) -> None:
+        remaining_timeout = self._remaining_shutdown_timeout_after_pre_stop()
+        if remaining_timeout is None:
+            return
+        current_timeout = self.config.timeout_graceful_shutdown
+        if current_timeout is None or current_timeout <= remaining_timeout:
+            return
+        logging.info(
+            "Limit frontend graceful shutdown timeout from %.3fs to remaining "
+            "pre-stop budget %.3fs",
+            float(current_timeout),
+            remaining_timeout,
+        )
+        self.config.timeout_graceful_shutdown = remaining_timeout
 
     def _effective_pre_stop_drain_seconds(self) -> float:
         drain_seconds = _pre_stop_drain_seconds()
         shutdown_timeout = self.config.timeout_graceful_shutdown
         if shutdown_timeout is None or shutdown_timeout <= 0:
             return drain_seconds
-        if drain_seconds <= shutdown_timeout:
+        headroom_seconds = _pre_stop_drain_headroom_seconds(float(shutdown_timeout))
+        max_drain_seconds = max(0.0, float(shutdown_timeout) - headroom_seconds)
+        if drain_seconds <= max_drain_seconds:
             return drain_seconds
         logging.warning(
-            "Clamp frontend pre-stop drain %.3fs to shutdown_timeout=%ss",
+            "Clamp frontend pre-stop drain %.3fs to %.3fs "
+            "(shutdown_timeout=%ss, headroom=%.3fs)",
             drain_seconds,
+            max_drain_seconds,
             shutdown_timeout,
+            headroom_seconds,
         )
-        return float(shutdown_timeout)
+        return max_drain_seconds
 
     @override
     async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:

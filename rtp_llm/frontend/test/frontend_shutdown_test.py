@@ -70,7 +70,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             time.sleep(0.01)
         return predicate()
 
-    def test_draining_keeps_serving_business_but_marks_health_unavailable(self):
+    def test_draining_rejects_new_business_and_marks_health_unavailable(self):
         app_owner = FrontendApp.__new__(FrontendApp)
         app_owner.frontend_server = FakeFrontendServer()
         app_owner.shutdown_manager = FrontendShutdownManager()
@@ -87,12 +87,14 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         self.assertEqual(client.get("/liveness").status_code, 200)
         self.assertEqual(client.get("/health").status_code, 503)
         response = client.post("/", json={"prompt": "hello"})
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers.get("retry-after"), "1")
         chat_response = client.post(
             "/v1/chat/completions",
             json={"messages": [{"role": "user", "content": "hello"}]},
         )
-        self.assertEqual(chat_response.status_code, 200)
+        self.assertEqual(chat_response.status_code, 503)
+        self.assertEqual(chat_response.headers.get("retry-after"), "1")
 
         embedding_app_owner = FrontendApp.__new__(FrontendApp)
         embedding_app_owner.frontend_server = FakeFrontendServer(is_embedding=True)
@@ -104,7 +106,8 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         embedding_client = TestClient(embedding_app)
         embedding_app_owner.shutdown_manager.start_draining("unit test")
         embedding_response = embedding_client.post("/v1/embeddings", json={})
-        self.assertEqual(embedding_response.status_code, 200)
+        self.assertEqual(embedding_response.status_code, 503)
+        self.assertEqual(embedding_response.headers.get("retry-after"), "1")
 
     def test_draining_rejects_admin_backend_requests(self):
         app_owner = FrontendApp.__new__(FrontendApp)
@@ -242,7 +245,30 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         server.set_server(FakeFrontendServer(), manager)
 
         with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "30"}):
-            self.assertEqual(server._effective_pre_stop_drain_seconds(), 10.0)
+            self.assertEqual(server._effective_pre_stop_drain_seconds(), 9.0)
+
+    def test_frontend_pre_stop_reserves_shutdown_headroom(self):
+        manager = FrontendShutdownManager()
+        server = GracefulShutdownServer(
+            Config(lambda scope: None, timeout_graceful_shutdown=600)
+        )
+        server.set_server(FakeFrontendServer(), manager)
+
+        with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "600"}):
+            self.assertEqual(server._effective_pre_stop_drain_seconds(), 540.0)
+
+    def test_frontend_graceful_timeout_uses_remaining_pre_stop_budget(self):
+        manager = FrontendShutdownManager()
+        server = GracefulShutdownServer(
+            Config(lambda scope: None, timeout_graceful_shutdown=10)
+        )
+        server.set_server(FakeFrontendServer(), manager)
+        manager.start_draining("unit test")
+
+        with patch.object(manager, "drain_elapsed_seconds", return_value=7.0):
+            server._limit_graceful_shutdown_to_remaining_budget()
+
+        self.assertEqual(server.config.timeout_graceful_shutdown, 3.0)
 
 
 if __name__ == "__main__":

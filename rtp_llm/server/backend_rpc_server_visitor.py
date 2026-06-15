@@ -142,10 +142,43 @@ class BackendRPCServerVisitor:
 
     @staticmethod
     def _is_retryable_route_rpc_error(e: BaseException) -> bool:
-        exception_type = getattr(e, "exception_type", None)
-        if exception_type is not None:
+        retryable_codes = {
+            int(ExceptionType.GET_HOST_FAILED),
+            int(ExceptionType.GET_CONNECTION_FAILED),
+            int(ExceptionType.CONNECT_FAILED),
+            int(ExceptionType.CONNECT_TIMEOUT),
+            int(ExceptionType.DEADLINE_EXCEEDED),
+            int(ExceptionType.CONNECTION_RESET_BY_PEER),
+            int(ExceptionType.REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED),
+            int(ExceptionType.REMOTE_ALLOCATE_RESOURCE_READ_FAILED),
+            int(ExceptionType.REMOTE_LOAD_KV_CACHE_FAILED),
+            int(ExceptionType.LOAD_KV_CACHE_FAILED),
+            int(ExceptionType.KEEP_ALIVE_TIMEOUT),
+            int(ExceptionType.LOAD_CACHE_TIMEOUT),
+            int(ExceptionType.CACHE_STORE_LOAD_CONNECT_FAILED),
+            int(ExceptionType.CACHE_STORE_LOAD_SEND_REQUEST_FAILED),
+            int(ExceptionType.CACHE_STORE_CALL_PREFILL_TIMEOUT),
+            int(ExceptionType.CACHE_STORE_LOAD_RDMA_CONNECT_FAILED),
+            int(ExceptionType.CACHE_STORE_LOAD_RDMA_WRITE_FAILED),
+            int(ExceptionType.CACHE_STORE_LOAD_BUFFER_TIMEOUT),
+            int(ExceptionType.CACHE_STORE_LOAD_UNKNOWN_ERROR),
+            int(ExceptionType.P2P_CONNECTOR_CALL_PREFILL_FAILED),
+            int(ExceptionType.P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED),
+            int(ExceptionType.P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED),
+            int(ExceptionType.P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED),
+            int(ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT),
+            int(ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED),
+            int(ExceptionType.P2P_CONNECTOR_WORKER_READ_TRANSFER_RDMA_FAILED),
+            int(ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_TIMEOUT),
+            int(ExceptionType.P2P_CONNECTOR_WORKER_READ_FAILED),
+            int(ExceptionType.P2P_CONNECTOR_WORKER_READ_TIMEOUT),
+        }
+        for attr_name in ("rtp_error_code", "exception_type"):
+            code = getattr(e, attr_name, None)
+            if code is None:
+                continue
             try:
-                return int(exception_type) >= 8000
+                return int(code) in retryable_codes
             except (TypeError, ValueError):
                 pass
         text = str(e)

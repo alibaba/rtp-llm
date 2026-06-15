@@ -147,11 +147,43 @@ class PreStopDrainSecondsTest(TestCase):
         with patch.dict(
             os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "30"}, clear=True
         ):
-            self.assertEqual(app._effective_pre_stop_drain_seconds(), 10.0)
+            self.assertEqual(app._effective_pre_stop_drain_seconds(), 9.0)
+
+    def test_effective_pre_stop_drain_reserves_shutdown_headroom(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+
+        class _ServerConfig:
+            shutdown_timeout = 600
+
+        app.server_config = _ServerConfig()
+        with patch.dict(
+            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "600"}, clear=True
+        ):
+            self.assertEqual(app._effective_pre_stop_drain_seconds(), 540.0)
+
+    def test_grpc_stop_grace_uses_remaining_pre_stop_budget(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+
+        class _ServerConfig:
+            shutdown_timeout = 10
+
+        app.server_config = _ServerConfig()
+        app._shutdown_started_at = 100.0
+
+        with patch("rtp_llm.dash_sc.app.time.monotonic", return_value=107.0):
+            self.assertEqual(app._remaining_grpc_stop_grace_seconds(), 3.0)
 
 
 class DashScShutdownManagerTest(TestCase):
-    def test_unary_unary_drain_interceptor_keeps_serving_rpc(self) -> None:
+    class _AbortContext:
+        def __init__(self) -> None:
+            self.abort_args = None
+
+        async def abort(self, *args):
+            self.abort_args = args
+            raise RuntimeError("aborted")
+
+    def test_unary_unary_drain_interceptor_rejects_new_rpc(self) -> None:
         manager = DashScShutdownManager()
         interceptor = DashScGrpcDrainAioInterceptor(manager)
         called = False
@@ -170,13 +202,18 @@ class DashScShutdownManagerTest(TestCase):
             handler = await interceptor.intercept_service(
                 continuation, SimpleNamespace(method="/test.Service/Unary")
             )
-            return await handler.unary_unary(object(), object())
+            context = self._AbortContext()
+            with self.assertRaisesRegex(RuntimeError, "aborted"):
+                await handler.unary_unary(object(), context)
+            return context.abort_args
 
-        self.assertEqual(asyncio.run(run()), "ok")
-        self.assertTrue(called)
+        abort_args = asyncio.run(run())
+        self.assertEqual(abort_args[0], grpc.StatusCode.UNAVAILABLE)
+        self.assertIn("dash_sc is draining", abort_args[1])
+        self.assertFalse(called)
         self.assertEqual(manager.active_request_count(), 0)
 
-    def test_draining_keeps_new_rpc_counted(self) -> None:
+    def test_draining_rejects_new_stream_rpc(self) -> None:
         manager = DashScShutdownManager()
         interceptor = DashScGrpcDrainAioInterceptor(manager)
 
@@ -209,12 +246,17 @@ class DashScShutdownManagerTest(TestCase):
             handler = await interceptor.intercept_service(
                 continuation, SimpleNamespace(method="/test.Service/Stream")
             )
+            context = self._AbortContext()
             responses = []
-            async for resp in handler.stream_stream(request_iter(), object()):
-                responses.append(resp)
-            return responses
+            with self.assertRaisesRegex(RuntimeError, "aborted"):
+                async for resp in handler.stream_stream(request_iter(), context):
+                    responses.append(resp)
+            return responses, context.abort_args
 
-        self.assertEqual(asyncio.run(run_draining()), ["response"])
+        responses, abort_args = asyncio.run(run_draining())
+        self.assertEqual(responses, [])
+        self.assertEqual(abort_args[0], grpc.StatusCode.UNAVAILABLE)
+        self.assertIn("dash_sc is draining", abort_args[1])
         self.assertEqual(manager.active_request_count(), 0)
 
 

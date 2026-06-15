@@ -284,18 +284,18 @@ class MasterService:
         self, host_health_map: Dict[str, FlexlbHeartbeatInfo]
     ) -> List[Host]:
         discovery_hosts = self.master_vip.get_hosts(refresh=True)
+        self._remove_hosts_absent_from_discovery(host_health_map, discovery_hosts)
         if not discovery_hosts:
             route_logger.warning("No hosts available from VIP server")
-
-        healthy_hosts = [
-            info.host
-            for info in host_health_map.values()
-            if info.health_status == HostHealthStatus.HEALTHY
-        ]
+            discovery_hosts = [
+                info.host
+                for info in host_health_map.values()
+                if info.health_status == HostHealthStatus.HEALTHY
+            ]
 
         seen_hosts = set()
         merged_hosts = []
-        for host in discovery_hosts + healthy_hosts:
+        for host in discovery_hosts:
             host_key = self._host_key(host)
             if host_key not in seen_hosts:
                 seen_hosts.add(host_key)
@@ -306,6 +306,27 @@ class MasterService:
             return []
 
         return merged_hosts
+
+    def _remove_hosts_absent_from_discovery(
+        self,
+        host_health_map: Dict[str, FlexlbHeartbeatInfo],
+        discovery_hosts: List[Host],
+    ) -> int:
+        if not discovery_hosts:
+            return 0
+
+        discovery_keys = {self._host_key(host) for host in discovery_hosts}
+        stale_hosts = [
+            host_addr
+            for host_addr in host_health_map
+            if host_addr not in discovery_keys
+        ]
+        for host_addr in stale_hosts:
+            del host_health_map[host_addr]
+            route_logger.info(
+                "Removed host absent from VIP discovery: %s", host_addr
+            )
+        return len(stale_hosts)
 
     def _probe_hosts(self, hosts: List[Host]) -> List[Tuple[Host, Optional[Dict]]]:
         if len(hosts) <= 3:

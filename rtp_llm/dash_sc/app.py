@@ -38,6 +38,7 @@ _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
 _PROXY_SERVICER_STARTUP_TIMEOUT_S = 30.0
 _SERVICER_CLOSE_TIMEOUT_S = 10.0
 _PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
+_PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
 _DEFAULT_PRE_STOP_DRAIN_SECONDS = 120.0
 
 
@@ -50,6 +51,20 @@ def _pre_stop_drain_seconds() -> float:
     except ValueError:
         return _DEFAULT_PRE_STOP_DRAIN_SECONDS
     return max(0.0, seconds)
+
+
+def _pre_stop_drain_headroom_seconds(shutdown_timeout: float) -> float:
+    raw = os.environ.get(_PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV, "")
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            logging.warning(
+                "Invalid %s=%r, using default pre-stop drain headroom",
+                _PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV,
+                raw,
+            )
+    return min(60.0, max(1.0, float(shutdown_timeout) * 0.10))
 
 
 def _is_proxy_mode_enabled() -> bool:
@@ -98,6 +113,8 @@ class DashScShutdownManager:
 
     def try_begin_request(self) -> bool:
         with self._lock:
+            if self._draining:
+                return False
             self._active_requests += 1
             return True
 
@@ -489,8 +506,7 @@ class DashScApp:
 
     def stop(self) -> None:
         self._sleep_before_stop_for_drain()
-        to = self.server_config.shutdown_timeout
-        grace = None if to < 0 else float(to)
+        grace = self._remaining_grpc_stop_grace_seconds()
         logging.info(
             "[DashScApp] stopping gRPC server, active_requests=%s, grace=%s",
             self._shutdown_manager.active_request_count(),
@@ -501,6 +517,15 @@ class DashScApp:
         except Exception as e:
             logging.warning("[DashScApp] grpc_server.stop failed: %s", e)
         self._stop_enqueue_loop()
+
+    def _remaining_grpc_stop_grace_seconds(self) -> Optional[float]:
+        to = self.server_config.shutdown_timeout
+        if to < 0:
+            return None
+        if self._shutdown_started_at is None:
+            return float(to)
+        elapsed = time.monotonic() - self._shutdown_started_at
+        return max(0.0, float(to) - elapsed)
 
     def _sleep_before_stop_for_drain(self) -> None:
         if self._shutdown_started_at is None:
@@ -523,11 +548,16 @@ class DashScApp:
         shutdown_timeout = getattr(self.server_config, "shutdown_timeout", None)
         if shutdown_timeout is None or shutdown_timeout <= 0:
             return drain_seconds
-        if drain_seconds <= shutdown_timeout:
+        headroom_seconds = _pre_stop_drain_headroom_seconds(float(shutdown_timeout))
+        max_drain_seconds = max(0.0, float(shutdown_timeout) - headroom_seconds)
+        if drain_seconds <= max_drain_seconds:
             return drain_seconds
         logging.warning(
-            "[DashScApp] clamp pre-stop drain %.3fs to shutdown_timeout=%ss",
+            "[DashScApp] clamp pre-stop drain %.3fs to %.3fs "
+            "(shutdown_timeout=%ss, headroom=%.3fs)",
             drain_seconds,
+            max_drain_seconds,
             shutdown_timeout,
+            headroom_seconds,
         )
-        return float(shutdown_timeout)
+        return max_drain_seconds

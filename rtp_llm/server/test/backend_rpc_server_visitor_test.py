@@ -98,6 +98,72 @@ class BackendRPCServerVisitorRetryTest(unittest.TestCase):
             0,
         )
 
+    def test_retryable_route_rpc_error_uses_transport_whitelist(self):
+        self.assertTrue(
+            BackendRPCServerVisitor._is_retryable_route_rpc_error(
+                FtRuntimeException(ExceptionType.CONNECT_FAILED, "connect failed")
+            )
+        )
+        self.assertTrue(
+            BackendRPCServerVisitor._is_retryable_route_rpc_error(
+                FtRuntimeException(
+                    ExceptionType.GET_HOST_FAILED,
+                    "decode host disappeared during restart",
+                )
+            )
+        )
+        self.assertTrue(
+            BackendRPCServerVisitor._is_retryable_route_rpc_error(
+                FtRuntimeException(
+                    ExceptionType.REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED,
+                    "stale decode allocate stream",
+                )
+            )
+        )
+        self.assertTrue(
+            BackendRPCServerVisitor._is_retryable_route_rpc_error(
+                FtRuntimeException(
+                    ExceptionType.CACHE_STORE_LOAD_RDMA_WRITE_FAILED,
+                    "stale decode rdma write failed",
+                )
+            )
+        )
+        self.assertTrue(
+            BackendRPCServerVisitor._is_retryable_route_rpc_error(
+                FtRuntimeException(
+                    ExceptionType.P2P_CONNECTOR_WORKER_READ_TIMEOUT,
+                    "stale prefill p2p read timed out",
+                )
+            )
+        )
+
+        for error_type in (
+            ExceptionType.MASTER_NO_AVAILABLE_WORKER,
+            ExceptionType.ROUTE_ERROR,
+            ExceptionType.OUT_OF_VOCAB_RANGE,
+            ExceptionType.REMOTE_GENERATE_FAILED,
+            ExceptionType.CANCELLED,
+            ExceptionType.P2P_CONNECTOR_WORKER_ASYMMETRIC_TP_FAILED,
+            ExceptionType.P2P_CONNECTOR_WORKER_READ_BUFFER_MISMATCH,
+        ):
+            with self.subTest(error_type=error_type):
+                self.assertFalse(
+                    BackendRPCServerVisitor._is_retryable_route_rpc_error(
+                        FtRuntimeException(error_type, "not a stale endpoint error")
+                    )
+                )
+
+    def test_route_error_retry_uses_underlying_error_code_whitelist(self):
+        connection_error = FtRuntimeException(ExceptionType.ROUTE_ERROR, "route failed")
+        connection_error.rtp_error_code = int(ExceptionType.CONNECT_FAILED)
+        self.assertTrue(
+            BackendRPCServerVisitor._is_retryable_route_rpc_error(connection_error)
+        )
+
+        no_worker = FtRuntimeException(ExceptionType.ROUTE_ERROR, "route failed")
+        no_worker.rtp_error_code = int(ExceptionType.MASTER_NO_AVAILABLE_WORKER)
+        self.assertFalse(BackendRPCServerVisitor._is_retryable_route_rpc_error(no_worker))
+
 
 class BackendRPCServerVisitorEnqueueRetryTest(unittest.IsolatedAsyncioTestCase):
     async def test_enqueue_does_not_retry_when_request_disables_pd_route_retry(self):
@@ -126,6 +192,41 @@ class BackendRPCServerVisitorEnqueueRetryTest(unittest.IsolatedAsyncioTestCase):
             async for _ in stream:
                 pass
 
+        self.assertEqual(client.calls, 1)
+
+    async def test_enqueue_does_not_retry_after_stream_yields_output(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.max_seq_len = 10
+        visitor.sp_config = None
+        visitor.pd_route_retry_on_unavailable = 3
+        visitor.host_service = SimpleNamespace(service_available=False)
+        visitor.fill_request_info = lambda _input: None
+
+        class _YieldThenFailModelRpcClient:
+            calls = 0
+
+            def enqueue(self, _input):
+                self.calls += 1
+
+                async def stream():
+                    yield "first"
+                    raise FtRuntimeException(
+                        ExceptionType.CONNECT_FAILED, "stale backend"
+                    )
+
+                return stream()
+
+        client = _YieldThenFailModelRpcClient()
+        visitor.model_rpc_client = client
+
+        outputs = []
+        stream = await visitor.enqueue(_FakeInput())
+        with self.assertRaises(FtRuntimeException) as ctx:
+            async for output in stream:
+                outputs.append(output)
+
+        self.assertEqual(outputs, ["first"])
+        self.assertEqual(ctx.exception.exception_type, ExceptionType.CONNECT_FAILED)
         self.assertEqual(client.calls, 1)
 
     async def test_enqueue_retry_uses_refreshed_domain_route(self):

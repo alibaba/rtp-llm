@@ -317,9 +317,10 @@ class DashScGrpcDrainAioInterceptor(grpc.aio.ServerInterceptor):
     """Track DashSc RPCs during pre-stop drain.
 
     Health/service-discovery should remove the node once drain starts, but
-    upstream clients can still have stale endpoints cached for a short window.
-    Continue serving those RPCs during pre-stop drain and only stop accepting
-    when the gRPC server itself is stopped after the drain window.
+    upstream clients can still have stale endpoints cached for a short window;
+    reject those *new* RPCs before backend enqueue so callers can retry another
+    route.  RPCs that already entered the handler before drain keep their active
+    counter until the handler completes.
     """
 
     def __init__(self, shutdown_manager: Any):
