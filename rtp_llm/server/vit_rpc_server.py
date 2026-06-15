@@ -11,9 +11,12 @@ from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
+    EmptyPB,
     MMPreprocessConfigPB,
+    MMRdmaDescPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
+    ReleaseEmbeddingPB,
     StatusVersionPB,
     WorkerStatusPB,
 )
@@ -24,7 +27,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
-from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.ops import MMPreprocessConfig, MMRdmaEncoderOp, MultimodalInput
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 
@@ -54,13 +57,63 @@ def trans_output(res: MMEmbeddingRes):
 
 
 class MultimodalRpcServer(MultimodalRpcServiceServicer):
-    def __init__(self, mm_process_engine: MMProcessEngine):
+    def __init__(self, mm_process_engine: MMProcessEngine, vit_config=None):
         self.engine = mm_process_engine
+        self._rdma = None
+        self._rdma_min_bytes = 0
+        if vit_config is not None and getattr(vit_config, "mm_rdma_enable", False):
+            try:
+                rdma = MMRdmaEncoderOp(vit_config)
+                if rdma.enabled():
+                    self._rdma = rdma
+                    self._rdma_min_bytes = int(getattr(vit_config, "mm_rdma_min_bytes", 256 * 1024))
+                    logging.info("[VIT] mm rdma encoder enabled, min_bytes=%d", self._rdma_min_bytes)
+                else:
+                    logging.warning("[VIT] mm rdma requested but unavailable, fall back to bytes")
+            except Exception as e:  # noqa: BLE001 - never let rdma init break the bytes path
+                logging.warning("[VIT] init mm rdma encoder failed: %s, fall back to bytes", e)
+
+    def _trans_output_rdma(self, res: MMEmbeddingRes):
+        """Export the concat-ed embedding via RDMA and return a descriptor-bearing
+        MultimodalOutputPB. Returns None to signal fallback to the inline-bytes path."""
+        if self._rdma is None or not res.embeddings:
+            return None
+        emb = torch.concat(res.embeddings)
+        if not emb.is_cuda:
+            return None
+        nbytes = emb.numel() * emb.element_size()
+        if nbytes < self._rdma_min_bytes:
+            return None
+        desc_bytes = self._rdma.export_embedding(emb.contiguous())
+        if not desc_bytes:
+            return None
+        desc = MMRdmaDescPB()
+        desc.ParseFromString(desc_bytes)
+
+        output_pb = MultimodalOutputPB(split_size=[e.shape[0] for e in res.embeddings])
+        output_pb.embedding_rdma.CopyFrom(desc)
+        # small tensors stay inline as bytes
+        if res.position_ids is not None and len(res.position_ids) > 0:
+            output_pb.multimodal_pos_id.CopyFrom(
+                trans_from_tensor(torch.concat(res.position_ids))
+            )
+        if res.extra_input is not None and len(res.extra_input) > 0:
+            for extra in res.extra_input:
+                output_pb.multimodal_extra_input.append(trans_from_tensor(extra))
+        return output_pb
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
-        res = trans_output(res)
-        return res
+        if getattr(multimodal_inputs, "support_rdma", False) and self._rdma is not None:
+            rdma_out = self._trans_output_rdma(res)
+            if rdma_out is not None:
+                return rdma_out
+        return trans_output(res)
+
+    def ReleaseMultimodalEmbedding(self, request: ReleaseEmbeddingPB, context):
+        if self._rdma is not None and len(request.handle) > 0:
+            self._rdma.release(list(request.handle))
+        return EmptyPB()
 
     def GetWorkerStatus(self, request: StatusVersionPB, context):
         worker_status = WorkerStatusPB()

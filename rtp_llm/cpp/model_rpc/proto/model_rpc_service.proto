@@ -128,6 +128,30 @@ message MultimodalInputPB {
 
 message MultimodalInputsPB {
     repeated MultimodalInputPB multimodal_inputs = 1;
+    // LLM consumer declares it can receive the embedding via GPUDirect RDMA.
+    // When false (default) or RDMA unavailable, encoder falls back to inline bytes.
+    bool support_rdma = 2;
+}
+
+// {nicid, rkey} of an MR on the encoder-registered receive/send pool, one per NIC.
+// Mirrors RdmaNicRKey in cache_store_service.proto so the same RDMA stack can consume it.
+message MMRdmaNicRKeyPB {
+    uint32 nicid = 1;
+    uint32 rkey = 2;
+}
+
+// Descriptor for a multimodal embedding that lives in the encoder's RDMA-registered
+// GPU memory pool. The LLM side uses it to issue a one-sided GPUDirect RDMA READ.
+message MMRdmaDescPB {
+    repeated int64 shape = 1;                 // concat-ed [total_tokens, hidden]
+    TensorPB.DataType data_type = 2;
+    reserved 3;                               // (was split_size; redundant with MultimodalOutputPB.split_size)
+    uint64 addr = 4;                          // remote (encoder) virtual address of the slot
+    repeated MMRdmaNicRKeyPB nic_rkeys = 5;   // per-NIC remote keys for the slot
+    string handle = 6;                        // release credential, valid only on the issuing encoder
+    string rdma_ip = 7;                       // encoder RdmaServer listen ip
+    uint32 rdma_port = 8;                     // encoder RdmaServer listen port
+    uint64 nbytes = 9;                        // byte length of the slot payload
 }
 
 message MultimodalOutputPB {
@@ -135,6 +159,14 @@ message MultimodalOutputPB {
     TensorPB multimodal_pos_id = 2;
     repeated TensorPB multimodal_extra_input = 3;
     repeated int32 split_size = 4;
+    // RDMA fast-path: when set, multimodal_embedding (field 1) is left empty and the
+    // large embedding blob must be pulled via RDMA READ using this descriptor.
+    // Small tensors (pos_id / extra_input) stay inline as bytes for simplicity.
+    MMRdmaDescPB embedding_rdma = 5;
+}
+
+message ReleaseEmbeddingPB {
+    repeated string handle = 1;
 }
 
 message GenerateInputPB {
@@ -635,4 +667,8 @@ service MultimodalRpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
+    // RDMA path: LLM notifies encoder it has finished READ-ing so the slot can be
+    // returned to the free list (MR kept registered). Best-effort; encoder also has
+    // a timeout GC as a backstop against LLM crash / READ failure.
+    rpc ReleaseMultimodalEmbedding(ReleaseEmbeddingPB) returns (EmptyPB);
 }

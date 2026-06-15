@@ -292,7 +292,35 @@ struct SpeculativeExecutionConfig {
 
 struct VitConfig {
     VitSeparation vit_separation = VitSeparation::VIT_SEPARATION_LOCAL;
-    std::string   to_string() const;
+
+    // ---- Encoder(ViT) <-> LLM embedding transport over GPUDirect RDMA ----
+    // Master switch for the RDMA data-plane fast path. Control plane (gRPC
+    // RemoteMultimodalEmbedding negotiation) is unchanged. When disabled, or when
+    // any precondition fails, the embedding falls back to inline TensorPB bytes.
+    bool mm_rdma_enable = false;
+    // Encoder-side OOB bind IP for RdmaServer (LLM connects here to exchange QP info).
+    // Empty means auto-detect via getBindIp() (management network IP).
+    std::string mm_rdma_bind_ip;
+    // Encoder-side RdmaServer listen port (the LLM connects here for one-sided READ).
+    int mm_rdma_port = 0;
+    // RDMA connect timeout (mirrors CacheStoreConfig). Thread/QP sizing is fixed inside the
+    // transport impl to keep the config surface small. The min-bytes RDMA/bytes threshold
+    // lives only on the Python encoder side (the C++ side never consults it).
+    int mm_rdma_connect_timeout_ms = 250;
+    // Max wait for a single READ to complete on the LLM side before giving up (fallback).
+    int64_t mm_rdma_read_timeout_ms = 30 * 1000;
+    // Encoder-side slot lifetime: force-reclaim a slot this long after export if no
+    // Release(handle) arrived (backstop against LLM crash / READ failure -> leak).
+    int64_t mm_rdma_slot_gc_timeout_ms = 60 * 1000;
+    // Encoder-side soft cap on the total bytes of live (registered, not-yet-released)
+    // embedding slots. A backstop so the vision RDMA arena cannot grow without bound and
+    // starve the KV cache / activations that share the same process-wide RDMA pool
+    // (plain AllocBuffer is NOT bounded by the pool's gpuMaxTotalBytes). When exceeding
+    // the cap, exportEmbedding fails and the request transparently falls back to bytes.
+    // 0 disables the cap.
+    int64_t mm_rdma_max_inflight_bytes = 8L * 1024 * 1024 * 1024;
+
+    std::string to_string() const;
 };
 
 struct CacheStoreConfig {

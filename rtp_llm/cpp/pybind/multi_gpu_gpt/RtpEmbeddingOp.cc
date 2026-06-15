@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/multimodal_processor/MMRdmaVitConfig.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 
 using namespace std;
@@ -51,6 +52,7 @@ void RtpEmbeddingOp::init(py::object model,
         VitConfig vit_config_cpp;
         if (!vit_config.is_none()) {
             vit_config_cpp.vit_separation = static_cast<VitSeparation>(vit_config.attr("vit_separation").cast<int>());
+            extractMMRdmaVitConfig(vit_config, vit_config_cpp);
         }
 
         py::object py_layers_weights = model.attr("weight").attr("weights");
@@ -102,8 +104,8 @@ void RtpEmbeddingOp::init(py::object model,
             mm_processor_.reset(new LocalMultimodalProcessor(
                 mm_process_engine, params.model_config_.mm_model_config, params.model_config_.max_seq_len));
         } else if (vit_config_cpp.vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
-            mm_processor_.reset(
-                new RemoteMultimodalProcessor(params.model_config_.mm_model_config, params.model_config_.max_seq_len));
+            mm_processor_.reset(new RemoteMultimodalProcessor(
+                params.model_config_.mm_model_config, params.model_config_.max_seq_len, vit_config_cpp));
         } else {
             RTP_LLM_LOG_WARNING("Skip init mm_processor");
         }
