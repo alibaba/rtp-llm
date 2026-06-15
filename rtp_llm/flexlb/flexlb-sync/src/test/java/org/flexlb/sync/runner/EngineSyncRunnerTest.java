@@ -158,6 +158,23 @@ class EngineSyncRunnerTest {
     }
 
     @Test
+    void rejected_status_submit_resets_in_progress_flags() {
+        when(workerAddressService.getEngineWorkerList(modelName, roleType))
+                .thenReturn(List.of(host("10.0.0.1", 23950)));
+        when(statusCheckExecutor.submit(any(Runnable.class)))
+                .thenThrow(new java.util.concurrent.RejectedExecutionException("queue full"));
+
+        newRunner(EngineType.LLM).run();
+
+        WorkerStatus ws = workerStatusMap.get("10.0.0.1:23950");
+        assertNotNull(ws);
+        assertFalse(ws.getStatusCheckInProgress().get(),
+                "a rejected submit must reset the in-progress flag so the worker is retried next round");
+        assertFalse(ws.getCacheCheckInProgress().get(),
+                "a rejected cache-check submit must also reset its flag");
+    }
+
+    @Test
     void embedding_engine_marks_worker_dead_immediately_before_removal_threshold() {
         WorkerStatus stale = new WorkerStatus();
         stale.setIp("10.0.0.9");

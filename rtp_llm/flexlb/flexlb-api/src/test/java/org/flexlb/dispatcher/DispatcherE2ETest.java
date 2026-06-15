@@ -492,7 +492,8 @@ class DispatcherE2ETest {
         List<org.flexlb.dispatcher.BatchEndpointSpec> specs =
                 org.flexlb.dispatcher.BatchEndpointSpec.SPECS;
         DispatchRouter router = new DispatchRouter(
-                batchHandler, passthrough, inspectionHandler, specs);
+                batchHandler, passthrough, inspectionHandler,
+                new org.flexlb.service.grace.ActiveRequestCounter(), specs);
 
         // Bind to a real Reactor Netty server (rather than WebTestClient.bindToRouterFunction's
         // in-memory connector) so the passthrough's raw DataBuffer body actually traverses an HTTP

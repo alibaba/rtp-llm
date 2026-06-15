@@ -18,6 +18,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
 
@@ -96,6 +98,10 @@ public class EngineSyncRunner implements Runnable {
             if (engineType == EngineType.EMBEDDING) {
                 markDeadFromDiscovery(latestValidIpPorts);
             }
+            // Reconcile stale workers before the empty short-circuit, so a genuinely empty fleet
+            // still drops its gone-past-threshold workers (discovery failure throws and is handled
+            // separately, so an empty list here always means an empty fleet).
+            removeStaleWorkers(latestValidIpPorts);
             if (CollectionUtils.isEmpty(latestEngineWorkerList)) {
                 logger.error("get engine worker list is empty, cost={}μs, model={}", System.nanoTime() / 1000 - startTimeInUs, modelName);
                 return;
@@ -104,7 +110,6 @@ public class EngineSyncRunner implements Runnable {
                 logger.info("[update] engine ip changes, model={}, role={}, before={}, after={}",
                         modelName, roleType, workerStatusMap.size(), latestEngineWorkerList.size());
             }
-            removeStaleWorkers(latestValidIpPorts);
 
             logger.info("Submitting status check tasks for {} workers", latestEngineWorkerList.size());
             for (WorkerHost host : latestEngineWorkerList) {
@@ -178,7 +183,7 @@ public class EngineSyncRunner implements Runnable {
                     = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
                     workerStatus, engineHealthReporter, engineGrpcService,
                     syncRequestTimeoutMs);
-            statusCheckExecutor.submit(grpcWorkerStatusRunner);
+            submitOrReset(grpcWorkerStatusRunner, workerStatus.getStatusCheckInProgress(), workerIpPort, "status");
         } else {
             logger.info("Skip status check for worker: {}, previous request in progress", workerIpPort);
         }
@@ -189,9 +194,23 @@ public class EngineSyncRunner implements Runnable {
                     = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
                     workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
                     syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
-            statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
+            submitOrReset(grpcCacheStatusCheckRunner, workerStatus.getCacheCheckInProgress(), workerIpPort, "cache");
         } else {
             logger.info("Skip cache check for worker: {}, previous request in progress", workerIpPort);
+        }
+    }
+
+    /**
+     * Submits a probe and, if the bounded executor rejects it (queue full or shutting down),
+     * resets the in-progress flag the runner would have cleared on completion. Without this the
+     * flag stays set forever and the worker is never probed again.
+     */
+    private void submitOrReset(Runnable runner, AtomicBoolean inProgress, String workerIpPort, String kind) {
+        try {
+            statusCheckExecutor.submit(runner);
+        } catch (RejectedExecutionException e) {
+            inProgress.set(false);
+            logger.warn("status executor rejected {} check for worker: {}, skipping this round", kind, workerIpPort);
         }
     }
 

@@ -4,6 +4,7 @@ import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -97,6 +98,9 @@ public class FeHealthChecker {
                 .flatMap(url -> webClient.get()
                         .uri(url + probePath)
                         .retrieve()
+                        // Only a 2xx means healthy: a 3xx (redirect to a login/gateway page) or any
+                        // non-2xx must count as a failure, not be silently treated as alive.
+                        .onStatus(status -> !status.is2xxSuccessful(), ClientResponse::createException)
                         .toBodilessEntity()
                         .timeout(Duration.ofMillis(PROBE_TIMEOUT_MS))
                         .doOnSuccess(r -> {

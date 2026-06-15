@@ -1,13 +1,16 @@
 package org.flexlb.dispatcher;
 
+import org.flexlb.service.grace.ActiveRequestCounter;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.RequestPredicates;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.RouterFunctions;
 import org.springframework.web.reactive.function.server.ServerResponse;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * Reactive {@code RouterFunction} for {@code /dispatcher/**}. Each registered batch endpoint
@@ -24,26 +27,41 @@ public class DispatchRouter {
     private final BatchHandler batchHandler;
     private final PassthroughClient passthroughClient;
     private final DispatcherInspectionHandler inspectionHandler;
+    private final ActiveRequestCounter activeRequestCounter;
     private final List<BatchEndpointSpec> specs;
 
     public DispatchRouter(BatchHandler batchHandler,
                           PassthroughClient passthroughClient,
                           DispatcherInspectionHandler inspectionHandler,
+                          ActiveRequestCounter activeRequestCounter,
                           List<BatchEndpointSpec> specs) {
         this.batchHandler = batchHandler;
         this.passthroughClient = passthroughClient;
         this.inspectionHandler = inspectionHandler;
+        this.activeRequestCounter = activeRequestCounter;
         this.specs = specs;
     }
 
     public RouterFunction<ServerResponse> routes() {
         RouterFunctions.Builder b = RouterFunctions.route();
         for (BatchEndpointSpec spec : specs) {
-            b.POST("/dispatcher" + spec.getPath(), req -> batchHandler.handle(req, spec));
+            b.POST("/dispatcher" + spec.getPath(), req -> tracked(() -> batchHandler.handle(req, spec)));
         }
+        // Inspection endpoints are read-only diagnostics, not serving traffic — left out of the
+        // graceful-drain count.
         b.GET("/dispatcher/_snapshot", inspectionHandler::snapshot);
         b.POST("/dispatcher/_dryrun/**", inspectionHandler::dryRun);
-        return b.route(RequestPredicates.path("/dispatcher/**"), passthroughClient::forward)
+        return b.route(RequestPredicates.path("/dispatcher/**"), req -> tracked(() -> passthroughClient.forward(req)))
                 .build();
+    }
+
+    /**
+     * Counts the in-flight fanout / passthrough request against graceful-shutdown drain (mirrors
+     * the {@code /schedule} path in {@code HttpLoadBalanceServer}) so a pre-stop drain waits for
+     * it instead of dropping it mid-flight. The token is released on complete, error, and cancel.
+     */
+    private Mono<ServerResponse> tracked(Supplier<Mono<ServerResponse>> handler) {
+        return Mono.using(activeRequestCounter::acquire, ignored -> handler.get(),
+                ActiveRequestCounter.RequestToken::close);
     }
 }

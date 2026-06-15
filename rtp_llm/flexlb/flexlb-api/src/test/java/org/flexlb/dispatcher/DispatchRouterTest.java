@@ -1,13 +1,16 @@
 package org.flexlb.dispatcher;
 
+import org.flexlb.service.grace.ActiveRequestCounter;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerResponse;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 
 import static org.flexlb.dispatcher.BatchEndpointSpec.FailedItemFactory;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -29,7 +32,7 @@ class DispatchRouterTest {
         BatchHandler batch = mock(BatchHandler.class);
         PassthroughClient passthrough = mock(PassthroughClient.class);
         RouterFunction<ServerResponse> routes =
-                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(BATCH_INFER)).routes();
+                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), new ActiveRequestCounter(), List.of(BATCH_INFER)).routes();
         WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
 
         client.post().uri("/batch_infer").bodyValue("{}").exchange().expectStatus().isNotFound();
@@ -46,7 +49,7 @@ class DispatchRouterTest {
         when(passthrough.forward(any()))
                 .thenReturn(ServerResponse.ok().bodyValue("pass"));
         WebTestClient client = WebTestClient.bindToRouterFunction(
-                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), List.of(BATCH_INFER)).routes()).build();
+                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), new ActiveRequestCounter(), List.of(BATCH_INFER)).routes()).build();
 
         client.get().uri("/dispatcher/v1/models").exchange()
                 .expectStatus().isOk()
@@ -68,7 +71,7 @@ class DispatchRouterTest {
 
         List<BatchEndpointSpec> specs = List.of(BATCH_INFER, EMBEDDINGS);
         RouterFunction<ServerResponse> routes =
-                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), specs).routes();
+                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), new ActiveRequestCounter(), specs).routes();
         WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
 
         client.post().uri("/dispatcher/batch_infer").bodyValue("{}").exchange()
@@ -78,5 +81,25 @@ class DispatchRouterTest {
         client.post().uri("/dispatcher/v1/models").bodyValue("{}").exchange()
                 .expectStatus().isOk().expectBody(String.class).isEqualTo("pass");
         client.post().uri("/batch_infer").bodyValue("{}").exchange().expectStatus().isNotFound();
+    }
+
+    @Test
+    void servingRoutesAreCountedForGracefulDrain() {
+        ActiveRequestCounter counter = new ActiveRequestCounter();
+        long[] seenInFlight = {-1};
+        BatchHandler batch = mock(BatchHandler.class);
+        when(batch.handle(any(), eq(BATCH_INFER))).thenReturn(Mono.defer(() -> {
+            seenInFlight[0] = counter.getCount();
+            return ServerResponse.ok().bodyValue("ok");
+        }));
+        PassthroughClient passthrough = mock(PassthroughClient.class);
+        RouterFunction<ServerResponse> routes =
+                new DispatchRouter(batch, passthrough, mock(DispatcherInspectionHandler.class), counter, List.of(BATCH_INFER)).routes();
+        WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
+
+        client.post().uri("/dispatcher/batch_infer").bodyValue("{}").exchange().expectStatus().isOk();
+
+        assertEquals(1, seenInFlight[0], "request must be counted while in flight so graceful drain waits for it");
+        assertEquals(0, counter.getCount(), "token must be released after the response completes");
     }
 }
