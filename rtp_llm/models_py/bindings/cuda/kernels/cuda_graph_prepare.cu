@@ -35,7 +35,8 @@ __global__ void prepareFlashInferDecodeParamsKernel(const int32_t* sequence_leng
                                                     int64_t*       slot_mapping,
                                                     int32_t        batch_size,
                                                     int32_t        max_blocks_per_batch,
-                                                    int32_t        seq_size_per_block) {
+                                                    int32_t        seq_size_per_block,
+                                                    int32_t        captured_batch_capacity) {
     // Replay path is small-batch metadata; one CUDA block avoids any host prefix-sum.
     if (threadIdx.x != 0 || blockIdx.x != 0) {
         return;
@@ -67,6 +68,19 @@ __global__ void prepareFlashInferDecodeParamsKernel(const int32_t* sequence_leng
         page_offset += pages_to_copy;
         decode_page_indptr[batch + 1] = page_offset;
         qo_indptr[batch + 1]          = batch + 1;
+    }
+
+    // Decode CUDA graph replay can use a graph captured for a larger batch
+    // than the current live batch. Clear stale entries so the captured kernels
+    // do not process phantom rows with old kvlen/page metadata and block_id=0.
+    for (int32_t batch = batch_size; batch < captured_batch_capacity; ++batch) {
+        batch_indice[batch]           = 0;
+        positions[batch]              = 0;
+        kvlen[batch]                  = 0;
+        paged_kv_last_page_len[batch] = 0;
+        slot_mapping[batch]           = -1;
+        decode_page_indptr[batch + 1] = page_offset;
+        qo_indptr[batch + 1]          = batch_size;
     }
 }
 
@@ -219,6 +233,7 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                          int32_t        batch_size,
                                          int32_t        max_blocks_per_batch,
                                          int32_t        seq_size_per_block,
+                                         int32_t        captured_batch_capacity,
                                          cudaStream_t   stream) {
     TORCH_CHECK(sequence_lengths_plus_1 != nullptr, "sequence_lengths_plus_1 is null");
     TORCH_CHECK(block_ids != nullptr, "block_ids is null");
@@ -241,7 +256,8 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                                              slot_mapping,
                                                              batch_size,
                                                              max_blocks_per_batch,
-                                                             seq_size_per_block);
+                                                             seq_size_per_block,
+                                                             captured_batch_capacity);
     const auto result = cudaGetLastError();
     TORCH_CHECK(
         result == cudaSuccess, "FlashInfer decode CUDA graph prepare kernel failed: ", cudaGetErrorString(result));
