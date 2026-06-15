@@ -193,13 +193,21 @@ class Mxfp8DeepepExecutor(FusedMoeExpertExecutor):
             )
 
         # --- Expand unique tokens into per-expert contiguous layout ---
-        # Two fused triton kernels replace ~24 PyTorch kernel launches:
-        #   ep_expand:        atomic_add based scatter (hidden + output_index)
-        #   ep_fill_m_indices: per-expert m_indices fill (including padding rows)
+        # Two fused triton kernels (ep_expand + ep_fill_m_indices) replace
+        # ~24 PyTorch kernel launches for token duplication + m_indices fill.
+        #
+        # Build per-expert padded offsets on CPU: padded_counts is a Python
+        # list of E ints, so cumsum on CPU avoids ~5 GPU kernel launches
+        # (zeros + slice + cast + cumsum + copy) for a tiny E-element vector.
+        cpu_cumsum = [0] * (self.E + 1)
+        for i in range(self.E):
+            cpu_cumsum[i + 1] = cpu_cumsum[i] + padded_counts[i]
+        assert cpu_cumsum[self.E] == all_tokens
+
         padded_counts_t = torch.tensor(padded_counts, dtype=torch.int32, device=device)
-        padded_offsets = torch.zeros(self.E, dtype=torch.long, device=device)
-        if self.E > 1:
-            padded_offsets[1:] = torch.cumsum(padded_counts_t[:-1].to(torch.long), 0)
+        padded_offsets = torch.tensor(
+            cpu_cumsum[: self.E], dtype=torch.long, device=device
+        )
 
         expanded_hidden = torch.empty(
             all_tokens, self.K, device=device, dtype=torch.bfloat16
@@ -207,22 +215,17 @@ class Mxfp8DeepepExecutor(FusedMoeExpertExecutor):
         output_index = torch.full((N_recv, top_k), -1, device=device, dtype=torch.int32)
         m_indices = torch.empty(all_tokens, device=device, dtype=torch.int32)
 
-        # ep_expand mutates padded_offsets via atomic_add (advances each
-        # expert's counter past its actual assignments), so clone it first
-        # for ep_fill_m_indices which needs the original block start offsets.
-        padded_offsets_clone = padded_offsets.clone()
+        # ep_fill_m_indices only reads padded_offsets, while ep_expand mutates
+        # them via atomic_add. Running fill first on the same CUDA stream
+        ep_fill_m_indices(padded_counts_t, padded_offsets, m_indices)
         ep_expand(
             hidden,
             topk_ids,
-            padded_offsets_clone,
+            padded_offsets,
             expanded_hidden,
             output_index,
             self.E,
         )
-
-        # ep_fill_m_indices fills each expert's padded block [offset, offset+count)
-        # with the expert ID. Uses the original (un-mutated) padded_offsets.
-        ep_fill_m_indices(padded_counts_t, padded_offsets, m_indices)
 
         # --- Activation function parameters ---
         if is_swiglu_oai(activation):
