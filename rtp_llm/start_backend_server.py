@@ -12,6 +12,8 @@ from multiprocessing import Process
 from typing import List, Optional
 
 import torch
+from rtp_llm.device.device_impl import gpu_is_available, gpu_device_count, get_visible_device_list
+from rtp_llm.ops import VitSeparation
 from setproctitle import setproctitle
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -117,7 +119,7 @@ def local_rank_start(
 def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
     """Calculate local world size based on environment and hardware"""
     world_size = py_env_configs.parallelism_config.world_size
-    local_world_size = min(torch.cuda.device_count(), world_size)
+    local_world_size = min(gpu_device_count(), world_size)
     if "LOCAL_WORLD_SIZE" in os.environ:
         logging.info(
             f"multi rank starts with local world size specified in env: {os.environ['LOCAL_WORLD_SIZE']}"
@@ -126,20 +128,15 @@ def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
     else:
         logging.info(
             f"multi rank starts with default local world size: {local_world_size}, "
-            f"device count = {torch.cuda.device_count()}, world size = {world_size}"
+            f"device count = {gpu_device_count()}, world size = {world_size}"
         )
     os.environ["LOCAL_WORLD_SIZE"] = str(local_world_size)
     return local_world_size
 
 
 def _get_cuda_device_list() -> List[str]:
-    """Get CUDA device list from environment or hardware detection"""
-    cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-    return (
-        cuda_devices.split(",")
-        if cuda_devices is not None
-        else [str(i) for i in range(torch.cuda.device_count())]
-    )
+    """Get GPU device list from environment or hardware detection"""
+    return get_visible_device_list()
 
 
 def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
@@ -425,20 +422,30 @@ def start_backend_server(
 
     clear_jit_filelock()
 
-    if not torch.cuda.is_available():
+    if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
+        from rtp_llm.multimodal.vit_start_server import vit_start_server
+
+        return vit_start_server(
+            server_id=py_env_configs.server_config.vit_server_id,
+            py_env_configs=py_env_configs,
+            grpc_port=py_env_configs.server_config.grpc_port,
+            http_port=py_env_configs.server_config.http_port,
+        )
+
+    if not gpu_is_available():
         return local_rank_start(global_controller, py_env_configs)
 
     pc = py_env_configs.parallelism_config
     if (
-        pc.world_size % torch.cuda.device_count() != 0
-        and pc.world_size > torch.cuda.device_count()
+        pc.world_size % gpu_device_count() != 0
+        and pc.world_size > gpu_device_count()
     ):
         raise Exception(
-            f"result: {pc.world_size % torch.cuda.device_count()} \
-            not support WORLD_SIZE {pc.world_size} for {torch.cuda.device_count()} local gpu"
+            f"result: {pc.world_size % gpu_device_count()} \
+            not support WORLD_SIZE {pc.world_size} for {gpu_device_count()} local gpu"
         )
 
-    if torch.cuda.device_count() > 1 and pc.world_size > 1:
+    if gpu_device_count() > 1 and pc.world_size > 1:
         return multi_rank_start(global_controller, py_env_configs, pipe_writer)
     else:
         return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)

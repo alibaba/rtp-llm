@@ -559,7 +559,10 @@ class ModelLoader:
     def force_clean_cuda_memory():
         """安全清理显存，避免残留引用"""
         gc.collect()
-        if torch.cuda.is_available():
+        if hasattr(torch, 'xpu') and torch.xpu.is_available():
+            torch.xpu.synchronize()
+            torch.xpu.empty_cache()
+        elif torch.cuda.is_available():
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
 

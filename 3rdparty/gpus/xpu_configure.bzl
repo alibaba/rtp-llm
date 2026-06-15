@@ -253,6 +253,10 @@ def _xpu_configure_impl(repository_ctx):
 
     # Use icpx as the host compiler for getting include directories
     host_compiler_includes = get_cxx_inc_directories(repository_ctx, icpx_path)
+    if not host_compiler_includes:
+        auto_configure_fail(
+            "TF_NEED_XPU=1 but failed to detect include directories from " +
+            icpx_path + ". Verify icpx is installed and executes correctly.")
 
     host_compiler_prefix = "/usr/bin"
 

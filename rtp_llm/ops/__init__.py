@@ -7,6 +7,12 @@ from typing import List
 
 import torch
 
+# XPU C++ engine support: detect Intel GPU
+_xpu_mode = hasattr(torch, 'xpu') and torch.xpu.is_available()
+if _xpu_mode:
+    logging.info("XPU mode: using C++ engine with built .so libraries")
+
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 libs_path = os.path.join(parent_dir, "libs")
@@ -101,11 +107,24 @@ try:
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
 
-# frontend cannot load libpython3.10.so, so we need to load it manually
-import sysconfig
-from ctypes import cdll
-
-cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + "/libpython3.10.so")
+# Preload libpython for the current Python version (required by frontend imports).
+# Use sysconfig to resolve the correct library path dynamically.
+try:
+    import sysconfig
+    _libdir = sysconfig.get_config_var("LIBDIR")
+    _ldlibrary = sysconfig.get_config_var("LDLIBRARY")
+    if _libdir and _ldlibrary:
+        _libpython_path = os.path.join(_libdir, _ldlibrary)
+        if os.path.exists(_libpython_path):
+            from ctypes import cdll
+            cdll.LoadLibrary(_libpython_path)
+            logging.info(f"loaded {_ldlibrary} from {_libdir}")
+        else:
+            logging.debug(f"libpython not found at {_libpython_path}, skipping preload")
+    else:
+        logging.debug("sysconfig LIBDIR/LDLIBRARY not available, skipping libpython preload")
+except Exception as e:
+    logging.debug(f"libpython preload skipped: {e}")
 
 try:
     from libth_transformer_config import (

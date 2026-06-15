@@ -265,7 +265,9 @@ def set_parallelism_config(
     world_size = parallelism_config.world_size
     need_local = world_size > 1 and parallelism_config.local_world_size == 1
     if need_local:
-        if torch.cuda.is_available():
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            n = min(torch.xpu.device_count(), world_size)
+        elif torch.cuda.is_available():
             n = min(torch.cuda.device_count(), world_size)
         else:
             n = world_size
@@ -421,7 +423,7 @@ def setup_default_args(py_env_configs):
     # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
     # Frontend doesn't need this setting
     if py_env_configs.role_config.role_type != RoleType.FRONTEND:
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and not (hasattr(torch, "xpu") and torch.xpu.is_available()):
             if (
                 "NCCL_P2P_DISABLE" not in os.environ
                 and "RTX" in torch.cuda.get_device_name(0)
@@ -512,8 +514,10 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
 
 
 def setup_cuda_device_and_accl_env(local_rank: int) -> None:
-    """Apply CUDA device and ACCL env side effects (same as ParallelInfo.from_params)."""
-    if torch.cuda.is_available():
+    """Apply CUDA/XPU device and ACCL env side effects (same as ParallelInfo.from_params)."""
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        torch.xpu.set_device(local_rank)
+    elif torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
 
     if os.environ.get("ACCL_SELECT_PATH") == "1":
