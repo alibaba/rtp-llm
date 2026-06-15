@@ -26,6 +26,7 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
+from rtp_llm.utils.import_util import has_internal_source
 from rtp_llm.utils.process_manager import ProcessManager
 
 setup_logging()
@@ -64,18 +65,14 @@ def _bootstrap_local_jit_cache(py_env_configs: PyEnvConfigs):
     for component, env_name in JIT_CACHE_COMPONENT_ENVS.items():
         component_dir = os.path.join(local_root, component)
         os.makedirs(component_dir, exist_ok=True)
-        os.environ[env_name] = component_dir
+    os.environ[env_name] = component_dir
     os.environ["TRITON_AUTOTUNE_CACHE_MODE"] = "cached"
     os.environ["LOCAL_JIT_CACHE_DIR"] = local_root
-    os.environ.pop("DG_JIT_REMOTE_CACHE_DIR", None)
     logging.info("local JIT cache root: %s", local_root)
 
 
 def _prepare_internal_jit_cache(py_env_configs: PyEnvConfigs):
-    from rtp_llm.utils.import_util import has_internal_source
-
     if not has_internal_source():
-        os.environ["REMOTE_JIT_DIR"] = ""
         return None
     from internal_source.rtp_llm.utils.jit_cache_manager import JitCacheManager
 
