@@ -140,6 +140,56 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_ImmediateReject) {
     EXPECT_EQ(out_ids_h[0][3].item<int>(), -1);
 }
 
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_GreedyRejectUsesTargetTop1NotResidualSample) {
+    const int batch_size    = 1;
+    const int num_spec      = 3;
+    const int vocab_size    = 16;
+    const int target_stride = 1;
+
+    auto draft_probs  = torch::zeros({batch_size, num_spec, vocab_size}, floatCuda());
+    auto target_probs = torch::zeros({batch_size, num_spec + 1, vocab_size}, floatCuda());
+
+    // Position 0: draft picks token 3, target top1 is token 7. If the greedy
+    // mismatch path incorrectly samples relu(target-draft), u=0.9 would pick
+    // token 8 from the residual distribution instead of target top1 token 7.
+    draft_probs.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), 3}, 1.0f);
+    target_probs.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), 7}, 0.6f);
+    target_probs.index_put_({torch::indexing::Slice(), torch::indexing::Slice(), 8}, 0.4f);
+
+    auto draft_token_ids  = torch::full({batch_size, num_spec}, 3, intCuda());
+    auto target_token_ids = torch::full({batch_size, num_spec + 1, target_stride}, 7, intCuda());
+
+    auto uniform_samples     = torch::full({batch_size, num_spec + 1}, 0.9f, floatCuda());
+    auto output_token_ids    = torch::full({batch_size, num_spec + 1}, -1, intCuda());
+    auto output_accepted_num = torch::zeros({batch_size}, intCuda());
+    auto do_sample           = torch::zeros({batch_size}, boolCuda());
+
+    auto status = rtp_llm::invokeRejectionSampling<float, int>(draft_probs.data_ptr<float>(),
+                                                               draft_token_ids.data_ptr<int>(),
+                                                               uniform_samples.data_ptr<float>(),
+                                                               target_probs.data_ptr<float>(),
+                                                               target_token_ids.data_ptr<int>(),
+                                                               target_stride,
+                                                               output_token_ids.data_ptr<int>(),
+                                                               output_accepted_num.data_ptr<int>(),
+                                                               do_sample.data_ptr<bool>(),
+                                                               batch_size,
+                                                               num_spec,
+                                                               vocab_size,
+                                                               stream_);
+    ASSERT_EQ(status, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+
+    auto acc_num_h = output_accepted_num.to(torch::kCPU);
+    auto out_ids_h = output_token_ids.to(torch::kCPU);
+
+    EXPECT_EQ(acc_num_h[0].item<int>(), 1);
+    EXPECT_EQ(out_ids_h[0][0].item<int>(), 7);
+    EXPECT_EQ(out_ids_h[0][1].item<int>(), -1);
+    EXPECT_EQ(out_ids_h[0][2].item<int>(), -1);
+    EXPECT_EQ(out_ids_h[0][3].item<int>(), -1);
+}
+
 TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_PartialAccept) {
     const int batch_size    = 1;
     const int num_spec      = 3;

@@ -26,6 +26,12 @@ cc_library(
     hdrs = [
         "CudaFlashInfer.h",
     ] + select({
+        "@//:using_cuda13_arm": [
+            "CudaXqa.h",
+        ],
+        "@//:using_cuda13_x86": [
+            "CudaXqa.h",
+        ],
         "@//:using_cuda12": [
             "CudaXqa.h"
         ],
@@ -34,6 +40,8 @@ cc_library(
     srcs = [
         "CudaFlashInfer.cc",
     ] + select({
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda13_x86": [],
         "@//:using_cuda12": [
             "CudaXqa.cc"
         ],
@@ -69,6 +77,8 @@ cc_library(
         "//3rdparty/flashinfer:flashinfer",
         ":flashmla",
     ] + select({
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda13_x86": [],
         "@//:using_cuda12": [
             "//3rdparty/xqa:xqa"
         ],

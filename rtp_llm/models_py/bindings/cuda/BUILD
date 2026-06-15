@@ -139,8 +139,13 @@ cc_library(
     name = "cuda",
     srcs = [
     ],
-    deps = [
-        ":cufmha",
+    deps = select({
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": [
+            ":cufmha",
+        ],
+    }) + [
         ":cuda_host_utils",
         "//rtp_llm/cpp/utils:core_utils",
         "@local_config_cuda//cuda:cuda_headers",
@@ -195,6 +200,17 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cuda13_skipped_attn_srcs = [
+    "FlashInferOp.cc",
+    "TRTAttnOp.cc",
+    "XQAAttnOp.cc",
+]
+
+cuda13_skipped_attn_hdrs = [
+    "TRTAttnOp.h",
+    "XQAAttnOp.h",
+]
+
 cc_library(
     name = "cuda_bindings",
     srcs = glob([
@@ -206,7 +222,11 @@ cc_library(
         "NoBlockCopy.cc",
         "cuda_host_utils.cc",
         "launch_utils.cc",
-    ]),
+    ] + cuda13_skipped_attn_srcs) + select({
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": cuda13_skipped_attn_srcs,
+    }),
     hdrs = glob([
         "*.h",
     ], exclude = [
@@ -216,7 +236,11 @@ cc_library(
         "launch_utils.h",
         "cuda_fp8_utils.h",
         "trt_utils.h",
-    ]),
+    ] + cuda13_skipped_attn_hdrs) + select({
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": cuda13_skipped_attn_hdrs,
+    }),
     copts = cuda_copts(),
     deps = torch_deps() + [
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
@@ -277,18 +301,43 @@ cc_library(
     alwayslink = 1,
 )
 
+genrule(
+    name = "register_cuda_ops_cuda13_src",
+    srcs = ["RegisterCudaOps.cc"],
+    outs = ["RegisterCudaOps_cuda13.cc"],
+    cmd = """
+sed \
+  -e '/RegisterAttnOpBindings.hpp/c\\#include "rtp_llm/models_py/bindings/cuda/FlashInferMlaParams.h"\\n#include "rtp_llm/models_py/bindings/cuda/SparseMlaParams.h"' \
+  -e '/registerAttnOpBindings(rtp_ops_m);/c\\    rtp_llm::registerPyFlashInferMlaParams(rtp_ops_m);\\n    rtp_llm::registerPySparseMlaParams(rtp_ops_m);' \
+  $(location RegisterCudaOps.cc) > $@
+""",
+)
+
 cc_library(
     name = "cuda_bindings_register",
-    srcs = [
-        "RegisterCudaOps.cc",
-    ],
+    srcs = select({
+        "@//:using_cuda13_arm": [
+            ":register_cuda_ops_cuda13_src",
+        ],
+        "@//:using_cuda13_x86": [
+            ":register_cuda_ops_cuda13_src",
+        ],
+        "//conditions:default": [
+            "RegisterCudaOps.cc",
+        ],
+    }),
     copts = copts() + ["-fno-strict-aliasing"],
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":bf16_gemm_op",
         ":cuda_bindings_base",
-        ":cuda_attn_bindings_base"
     ] + select({
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": [
+            ":cuda_attn_bindings_base",
+        ],
+    }) + select({
         "@//:using_cuda12_9": [
             "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
         ],
