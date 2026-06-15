@@ -46,6 +46,30 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "flashinfer_minimal_hdrs",
+    hdrs = [
+        "include/flashinfer/activation.cuh",
+        "include/flashinfer/exception.h",
+        "include/flashinfer/math.cuh",
+        "include/flashinfer/norm.cuh",
+        "include/flashinfer/sampling.cuh",
+        "include/flashinfer/utils.cuh",
+        "include/flashinfer/vec_dtypes.cuh",
+    ],
+    deps = [
+        "@cutlass3.6_cu13//:cutlass",
+        "@cutlass3.6_cu13//:cutlass_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "@local_config_cuda//cuda:cublas_headers",
+        "@local_config_cuda//cuda:cublas",
+        "@local_config_cuda//cuda:cublasLt",
+    ] + torch_deps(),
+    strip_include_prefix = "include",
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "aot_build_utils",
     srcs = glob(['aot_build_utils/*.py']),
@@ -230,18 +254,15 @@ cc_library(
 cc_library(
     name = "flashinfer_minimal",
     srcs = [
+        "csrc/pytorch_conversion_utils.h",
+        "csrc/pytorch_extension_utils.h",
         "csrc/sampling.cu",
         "csrc/renorm.cu",
         "csrc/norm.cu",
         "csrc/activation.cu",
-    ] + glob([
-        "csrc/*.h",
-        "csrc/*.inc",
-    ]),
+    ],
     implementation_deps = [
-        ":dispatch",
-        ":flashinfer_hdrs",
-        ":aot_default_additional_params",
+        ":flashinfer_minimal_hdrs",
     ],
     copts = cuda_copts() + common_copts,
     visibility = ["//visibility:public"],
