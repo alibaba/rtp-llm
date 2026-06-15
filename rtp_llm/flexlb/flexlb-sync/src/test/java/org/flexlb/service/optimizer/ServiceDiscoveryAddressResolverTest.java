@@ -10,6 +10,7 @@ import java.util.Collections;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -154,13 +155,15 @@ class ServiceDiscoveryAddressResolverTest {
                 .when(sd).listen(eq(DOMAIN), any(ServiceHostListener.class));
 
         ServiceDiscoveryAddressResolver r = new ServiceDiscoveryAddressResolver(sd, DOMAIN);
-        r.start();
+        // start() returns false on listen failure
+        assertFalse(r.start());
         verify(sd, times(1)).listen(eq(DOMAIN), any(ServiceHostListener.class));
 
         // After fixing listen, start() again should re-invoke getHosts and listen
         reset(sd);
         when(sd.getHosts(DOMAIN)).thenReturn(List.of(WorkerHost.of("4.4.4.4", 7000)));
-        r.start();
+        // start() returns true after recovery
+        assertTrue(r.start());
 
         verify(sd, times(1)).getHosts(DOMAIN);
         verify(sd, times(1)).listen(eq(DOMAIN), any(ServiceHostListener.class));
@@ -178,5 +181,49 @@ class ServiceDiscoveryAddressResolverTest {
         // After shutdown, no service-discovery calls should be issued
         verify(sd, never()).getHosts(any());
         verify(sd, never()).listen(any(), any());
+    }
+
+    // ===== start() return-value contract =====
+
+    @Test
+    void start_should_return_true_on_success() {
+        ServiceDiscovery sd = mock(ServiceDiscovery.class);
+        when(sd.getHosts(DOMAIN)).thenReturn(Collections.emptyList());
+
+        ServiceDiscoveryAddressResolver r = new ServiceDiscoveryAddressResolver(sd, DOMAIN);
+        assertTrue(r.start());
+    }
+
+    @Test
+    void start_should_return_true_when_already_started() {
+        ServiceDiscovery sd = mock(ServiceDiscovery.class);
+        when(sd.getHosts(DOMAIN)).thenReturn(Collections.emptyList());
+
+        ServiceDiscoveryAddressResolver r = new ServiceDiscoveryAddressResolver(sd, DOMAIN);
+        assertTrue(r.start());
+        // Idempotent: subsequent calls also return true without re-issuing IO
+        assertTrue(r.start());
+        verify(sd, times(1)).getHosts(DOMAIN);
+        verify(sd, times(1)).listen(eq(DOMAIN), any(ServiceHostListener.class));
+    }
+
+    @Test
+    void start_should_return_false_when_listen_fails() {
+        ServiceDiscovery sd = mock(ServiceDiscovery.class);
+        when(sd.getHosts(DOMAIN)).thenReturn(Collections.emptyList());
+        doThrow(new RuntimeException("listen boom"))
+                .when(sd).listen(eq(DOMAIN), any(ServiceHostListener.class));
+
+        ServiceDiscoveryAddressResolver r = new ServiceDiscoveryAddressResolver(sd, DOMAIN);
+        assertFalse(r.start());
+    }
+
+    @Test
+    void start_should_return_false_after_shutdown() {
+        ServiceDiscovery sd = mock(ServiceDiscovery.class);
+
+        ServiceDiscoveryAddressResolver r = new ServiceDiscoveryAddressResolver(sd, DOMAIN);
+        r.shutdown();
+        assertFalse(r.start());
     }
 }

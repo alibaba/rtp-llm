@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -135,9 +136,9 @@ class OnlineOptimizerHookerTest {
 
         hooker.afterStartUp();
         assertNotNull(hooker.getClient());
-        // ServiceDiscovery is touched only after afterStartUp
-        verify(serviceDiscovery).getHosts("optimizer.test.domain.com");
-        verify(serviceDiscovery).listen(any(), any());
+        // ServiceDiscovery is touched only after afterStartUp, via async retry
+        verify(serviceDiscovery, timeout(3000)).getHosts("optimizer.test.domain.com");
+        verify(serviceDiscovery, timeout(3000)).listen(any(), any());
     }
 
     @Test

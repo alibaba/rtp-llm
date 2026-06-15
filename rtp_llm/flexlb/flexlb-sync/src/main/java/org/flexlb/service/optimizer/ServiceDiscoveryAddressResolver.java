@@ -12,13 +12,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Optimizer address resolver backed by a shared {@link ServiceDiscovery} bean.
  *
- * <p>Behavior aligned with {@code EngineAddressNameResolver}/{@code WorkerAddressService}:
- * a null or empty host list clears the resolved addresses. Caller decides whether to
- * invoke {@link #start()} synchronously or on a background thread.</p>
- *
- * <p>If {@code listen} fails, {@code started} is rolled back so the next {@link #start()} can retry.
- * {@link #shutdown()} only sets a flag (the underlying {@link ServiceDiscovery} is a shared bean
- * with no {@code unlisten} API), preventing late listener callbacks from mutating state.</p>
+ * <p>Empty/null host list clears resolved addresses. {@link #start()} is idempotent
+ * and rolls back on listen failure so callers can retry. {@link #shutdown()} only
+ * sets a flag (ServiceDiscovery is shared, has no unlisten API) to block late callbacks.</p>
  */
 @Slf4j
 public class ServiceDiscoveryAddressResolver implements OptimizerAddressResolver {
@@ -35,14 +31,15 @@ public class ServiceDiscoveryAddressResolver implements OptimizerAddressResolver
         this.domain = domain;
     }
 
-    public void start() {
+    /** Idempotent + retryable. See {@link OptimizerAddressResolver#start()}. */
+    @Override
+    public boolean start() {
         if (shutdown.get()) {
             log.info("ServiceDiscoveryAddressResolver already shutdown, skip start, domain={}", domain);
-            return;
+            return false;
         }
         if (!started.compareAndSet(false, true)) {
-            log.info("ServiceDiscoveryAddressResolver already started, skip duplicate start, domain={}", domain);
-            return;
+            return true;
         }
         // Initial pull so getAddresses() is non-empty before listener fires
         try {
@@ -50,26 +47,21 @@ public class ServiceDiscoveryAddressResolver implements OptimizerAddressResolver
         } catch (Throwable t) {
             log.warn("ServiceDiscovery.getHosts failed on start, domain={}, msg={}", domain, t.getMessage());
         }
-        // Register push listener; roll back started on failure to allow retry
-        boolean listenOk = false;
         try {
             serviceDiscovery.listen(domain, this::updateFromHosts);
-            listenOk = true;
         } catch (Throwable t) {
-            log.warn("ServiceDiscovery.listen failed, domain={}, msg={}", domain, t.getMessage());
-        }
-        if (!listenOk) {
-            // Roll back so next start() can re-attempt initial pull + listen
+            // Roll back so the next start() can re-attempt
             started.set(false);
-            log.warn("ServiceDiscoveryAddressResolver listen registration failed, started rollback, domain={}", domain);
-            return;
+            log.warn("ServiceDiscovery.listen failed, domain={}, msg={}", domain, t.getMessage());
+            return false;
         }
         log.info("ServiceDiscoveryAddressResolver started: domain={}, initialCount={}",
                 domain, resolvedAddresses.size());
+        return true;
     }
 
     private void updateFromHosts(List<WorkerHost> hosts) {
-        // Ignore callbacks after shutdown to prevent stale listener mutations
+        // Drop callbacks after shutdown to avoid stale mutations
         if (shutdown.get()) {
             return;
         }
@@ -93,8 +85,7 @@ public class ServiceDiscoveryAddressResolver implements OptimizerAddressResolver
 
     @Override
     public void shutdown() {
-        // ServiceDiscovery is a shared Spring bean; only set a flag here
-        // to block subsequent listener callbacks from mutating state.
+        // ServiceDiscovery is a shared bean; only flag here to block late callbacks.
         shutdown.set(true);
     }
 }

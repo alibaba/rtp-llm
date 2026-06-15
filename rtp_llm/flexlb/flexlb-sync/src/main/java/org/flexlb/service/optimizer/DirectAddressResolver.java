@@ -15,6 +15,12 @@ public class DirectAddressResolver implements OptimizerAddressResolver {
         return addresses;
     }
 
+    /** Static address is always available; no initialization needed. */
+    @Override
+    public boolean start() {
+        return true;
+    }
+
     @Override
     public void shutdown() {
     }
