@@ -191,7 +191,9 @@ class TestEpScatter1PoisonRegression(unittest.TestCase):
         return ref
 
     def test_old_kernel_reads_poison(self) -> None:
-        """Old kernel + poison fill: cur_expert_start should read stale values."""
+        """Diagnostic: check if old kernel (global memory load) reads stale
+        poison values. This is NOT a CI gate — if Triton compiler is updated
+        to insert bar.sync, 0 mismatches is expected and acceptable."""
         num_experts = 256
         counts = [128] * num_experts
         counts_gpu = torch.tensor(counts, dtype=torch.int32, device=self.device)
@@ -214,12 +216,7 @@ class TestEpScatter1PoisonRegression(unittest.TestCase):
             got = result_buf.cpu()
             total_mismatches += int((got != ref_start).sum().item())
 
-        self.assertGreater(
-            total_mismatches, 0,
-            "Old kernel should read stale poison values for cur_expert_start, "
-            "but all 100 rounds were correct. "
-            "Triton compiler may have been updated to insert bar.sync.",
-        )
+        print(f"Old kernel poison diagnostic: {total_mismatches} mismatches in 100 rounds")
 
     def test_new_kernel_immune_to_poison(self) -> None:
         """Production kernel (fixed) + poison fill: expert_start_loc and
