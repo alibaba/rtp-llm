@@ -82,6 +82,18 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.head_dim_vo = attn_configs.size_per_head
         self.page_size = attn_configs.kernel_tokens_per_block
         self.datatype = attn_configs.dtype
+        # KV cache may be quantized (fp8/int8) independent of the activation
+        # dtype. The reuse-cache path reads the paged KV cache directly, so the
+        # plan() below must declare the real KV dtype — otherwise flashinfer
+        # raises "dtype of k ... does not match kv_data_type". Mirror the
+        # decode path (PyFlashinferDecodeAttnOp).
+        self.kv_cache_dtype = attn_configs.kv_cache_dtype
+        if self.kv_cache_dtype == KvCacheDataType.INT8:
+            self.kv_datatype = torch.int8
+        elif self.kv_cache_dtype == KvCacheDataType.FP8:
+            self.kv_datatype = torch.float8_e4m3fn
+        else:
+            self.kv_datatype = self.datatype
         self.max_seq_len = attn_configs.max_seq_len
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
@@ -203,7 +215,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.page_size,
             causal=True,
             q_data_type=self.datatype,
-            kv_data_type=self.datatype,
+            kv_data_type=self.kv_datatype,
         )
         return self.fmha_params
 
