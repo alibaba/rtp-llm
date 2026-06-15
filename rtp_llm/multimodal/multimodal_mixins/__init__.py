@@ -11,6 +11,7 @@ from .kimi_k25.kimi_k25_mixin import KimiK25Mixin
 from .llava.llava_mixin import LlavaMixin
 from .qwen2_5_vl.qwen2_5_vl_mixin import Qwen2_5_VLMixin
 from .qwen2_audio.qwen2_audio_mixin import Qwen2_AudioMixin
+from .qwen2_5_omni.qwen2_5_omni_mixin import Qwen2_5OmniMixin
 from .qwen2_vl.qwen2_vl_mixin import Qwen2_VLMixin
 from .qwen3_5_moe.qwen3_5_moe_mixin import Qwen3_5MoeMixin
 from .qwen3_vl_mixin import Qwen3_VLMixin

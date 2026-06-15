@@ -3,41 +3,18 @@ import logging
 import os
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_factory_register import register_model
-from rtp_llm.models.multimodal.multimodal_mixin import (
-    BaseMultiModalWeightInfo,
-    BaseVitWeights,
-    MultiModalMixin,
-)
 from rtp_llm.models.qwen_v2 import QWenV2, QWenV2Weight
-from rtp_llm.omni.models.qwen2_5_omni.audio_processor import Processor
-from rtp_llm.utils.util import get_config_from_path
 
 logger = logging.getLogger(__name__)
 
 
-class Qwen2_5OmniThinkerWeight(QWenV2Weight, BaseMultiModalWeightInfo):
-    def __init__(self, vit_weights=None, **kwargs):
-        QWenV2Weight.__init__(self, prefix="thinker.", **kwargs)
-        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights, **kwargs)
+class Qwen2_5OmniThinkerWeight(QWenV2Weight):
+    def __init__(self, **kwargs):
+        super().__init__(prefix="thinker.", **kwargs)
 
 
-class Qwen2_5OmniThinker(MultiModalMixin, QWenV2):
-    def _init_multimodal(
-        self,
-        mm_model_config,
-        vit_config: VitConfig,
-    ):
-        self.mm_part = Processor(
-            self.model_config.mm_related_params, self.model_config.ckpt_path
-        )
-        self.model_config.mm_related_params.vit_weights = BaseVitWeights(
-            {"audio_tower": self.mm_part.audio_tower},
-            with_prefix=True,
-        )
-        self.model_config.mm_related_params.vit_weights._ckpt_prefix = "thinker."
-
+class Qwen2_5OmniThinker(QWenV2):
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config = ModelConfig()
@@ -49,6 +26,7 @@ class Qwen2_5OmniThinker(MultiModalMixin, QWenV2):
         config.special_tokens.stop_words_id_list = [[151645], [151644]]
 
         cls._from_hf(config, ckpt_path)
+        config.mm_model_config.is_multimodal = True
         return config
 
     @classmethod

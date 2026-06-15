@@ -11,7 +11,7 @@ import librosa
 import torch
 from transformers.models.whisper.feature_extraction_whisper import WhisperFeatureExtractor
 
-from rtp_llm.models.multimodal.multimodal_common import (
+from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     AudioEmbeddingInterface,
     timeout_decorator,
 )
