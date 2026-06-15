@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include <memory>
 using namespace std;
@@ -11,7 +12,7 @@ WeightsConverter::WeightsConverter(bool need_copy, rtp_llm::QuantAlgo quant_alog
 
 torch::Tensor WeightsConverter::CopyTensorToGPU(const torch::Tensor& tensor) {
     if (need_copy_) {
-        auto gpu_tensor = torch::empty_like(tensor, torch::TensorOptions().device(torch::kCUDA));
+        auto gpu_tensor = torch::empty_like(tensor, torch::TensorOptions().device(getTorchDevice()));
         gpu_tensor.copy_(tensor, /*non_blocking=*/true);
         return gpu_tensor;
     } else {

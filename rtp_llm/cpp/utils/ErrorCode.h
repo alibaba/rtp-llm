@@ -1,4 +1,6 @@
 #pragma once
+// XPU toolchain does not transitively include <string>; needed by ErrorInfo/ErrorCodeToString.
+#include <string>
 
 namespace rtp_llm {
 

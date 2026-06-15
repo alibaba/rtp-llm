@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace rtp_llm {
 
@@ -39,7 +40,7 @@ void MultiSeqLogitsProcessor::process(const SamplerInputs& inputs, size_t start_
         }
     }
 
-    auto logit_mask = logit_mask_host_tensor.to(torch::kCUDA);
+    auto logit_mask = logit_mask_host_tensor.to(getTorchDevice());
 
     maskLogits(logits, logit_mask);
 }

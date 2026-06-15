@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace rtp_llm {
 
@@ -172,8 +173,8 @@ void gatherMultimodalFeaturesForContextBatch(const GenerateStreamPtr&    stream,
     }
     for (int i = reuse_mm_count; i < static_cast<int>(mm_features.size()); ++i) {
         auto& mm_feature = mm_features[i];
-        if (!mm_feature.is_cuda()) {
-            gathered_mm_features.emplace_back(mm_feature.to(torch::kCUDA));
+        if (mm_feature.device() != getTorchDevice()) {
+            gathered_mm_features.emplace_back(mm_feature.to(getTorchDevice()));
         } else {
             gathered_mm_features.emplace_back(mm_feature);
         }
@@ -370,7 +371,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                                         stream->multimodalFeatures().size(),
                                         stream->streamId());
                 for (int j = reuse_mm_count; j < static_cast<int>(mm_extra_input.size()); ++j) {
-                    gathered_mm_extra_input.emplace_back(mm_extra_input[j].to(torch::kCUDA));
+                    gathered_mm_extra_input.emplace_back(mm_extra_input[j].to(getTorchDevice()));
                 }
             }
 

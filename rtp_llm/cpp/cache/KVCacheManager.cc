@@ -190,8 +190,8 @@ bool KVCacheManager::setKVBlockValue(int                  block_index,
         }
 
         auto* dst_ptr    = static_cast<char*>(dst_block.addr) + dst_byte_offset;
-        auto  dst_device = dst_block.is_cuda ? torch::kCUDA : torch::kCPU;
-        auto  src_device = src_tensor.is_cuda() ? torch::kCUDA : torch::kCPU;
+        auto  dst_device = dst_block.is_cuda ? getTorchDevice() : torch::kCPU;
+        auto  src_device = (src_tensor.is_cuda() || src_tensor.is_xpu()) ? getTorchDevice() : torch::kCPU;
         auto  dst_t      = torch::from_blob(
             dst_ptr, {(int64_t)src_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(dst_device));
         auto src_t = torch::from_blob(src_tensor.data_ptr(),
