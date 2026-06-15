@@ -4,7 +4,7 @@ from typing import Optional
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
-from rtp_llm.ops import AttentionConfigs, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
     ParamsBase,
@@ -148,6 +148,11 @@ class PCPAllGatherAttnOp:
                 head_dim=self.head_dim,
                 page_size=self.seq_size_per_block,
                 device=self.device,
+                kv_data_type=(
+                    torch.float8_e4m3fn
+                    if self.attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+                    else torch.bfloat16
+                ),
             )
         return params
 

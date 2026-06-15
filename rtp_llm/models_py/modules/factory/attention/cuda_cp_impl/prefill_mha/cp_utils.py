@@ -65,6 +65,7 @@ def plan_prefix_paged_attention(
     head_dim: int,
     page_size: int,
     device,
+    kv_data_type: torch.dtype = torch.bfloat16,
 ) -> None:
     """Plan paged attention for the prefix portion of KV cache.
 
@@ -109,6 +110,7 @@ def plan_prefix_paged_attention(
         page_size=page_size,
         causal=False,
         q_data_type=torch.bfloat16,
+        kv_data_type=kv_data_type,
     )
 
 
