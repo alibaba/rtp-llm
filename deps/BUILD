@@ -79,3 +79,11 @@ compile_pip_requirements(
     requirements_txt = "requirements_lock_rocm.txt",
     tags = ["manual"],
 )
+
+compile_pip_requirements(
+    name = "requirements_xpu",
+    src = "requirements_xpu.txt",
+    extra_args = PIP_EXTRA_ARGS + ["--extra-index-url=https://download.pytorch.org/whl/xpu"],
+    requirements_txt = "requirements_lock_xpu.txt",
+    tags = ["manual"],
+)
