@@ -186,6 +186,78 @@ class TestPrefillCudaGraphKernel(TestCase):
             msg="prefill_ragged_kv_len_indptr_h",
         )
 
+    def test_kernel_clears_padding_slots_for_smaller_replay(self):
+        """Replay may use a graph captured for more tokens than are live."""
+        test_params = self._setup_test_params()
+
+        # First write full-capacity metadata so the later smaller replay has
+        # stale slot_mapping values to clear.
+        test_params.fill_prefill_cuda_graph_params(
+            self.input_lengths,
+            self.prefix_lengths,
+            self.block_table,
+            self.seq_size_per_block,
+            self.total_tokens,
+        )
+        torch.cuda.synchronize()
+
+        live_tokens = self.total_tokens // 2
+        replay_input_lengths = torch.tensor(
+            [self.num_tokens_per_bs, self.num_tokens_per_bs, 0, 0],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        replay_prefix_lengths = torch.tensor(
+            [100, 250, 0, 0],
+            dtype=torch.int32,
+            device=self.device,
+        )
+
+        ref_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        ref_params.fill_params(
+            replay_prefix_lengths,
+            torch.empty(0, dtype=torch.int32, device=self.device),
+            replay_input_lengths,
+            self.block_table.cpu().contiguous(),
+            self.seq_size_per_block,
+            False,
+        )
+
+        test_params.fill_prefill_cuda_graph_params(
+            replay_input_lengths,
+            replay_prefix_lengths,
+            self.block_table,
+            self.seq_size_per_block,
+            self.total_tokens,
+        )
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(
+            test_params.slot_mapping[:live_tokens],
+            ref_params.slot_mapping[:live_tokens],
+            msg="live slot_mapping",
+        )
+        self.assertTrue(
+            torch.all(test_params.slot_mapping[live_tokens : self.total_tokens] == -1)
+            .cpu()
+            .item()
+        )
+        self.assertTrue(
+            torch.all(test_params.batch_indice_d[live_tokens : self.total_tokens] == 0)
+            .cpu()
+            .item()
+        )
+        self.assertTrue(
+            torch.all(test_params.positions_d[live_tokens : self.total_tokens] == 0)
+            .cpu()
+            .item()
+        )
+        torch.testing.assert_close(
+            test_params.qo_indptr_d[: self.batch_size + 1],
+            ref_params.qo_indptr_d[: self.batch_size + 1],
+            msg="qo_indptr smaller replay",
+        )
+
 
 if __name__ == "__main__":
     main()
