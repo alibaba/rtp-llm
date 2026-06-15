@@ -71,7 +71,7 @@ public class RecentCacheKeyTraceReporter {
         CacheHitTheoryStats.Snapshot theorySnapshot = theoryStats.record(
                 hitTokens,
                 inputTokens);
-        logTraceIfEnabled(balanceContext, request, snapshot, config);
+        logTraceIfEnabled(balanceContext, request, snapshot, hitTokens, inputTokens, config);
         logTheoryIfEnabled(balanceContext, request, theorySnapshot, config);
 
         if (cacheMetricsReporter == null || (config != null && !config.isCacheHitMetricReportEnabled())) {
@@ -79,8 +79,8 @@ public class RecentCacheKeyTraceReporter {
         }
 
         cacheMetricsReporter.reportRecentCacheKeyHitMetrics(snapshot.getTimeWindowMs(),
-                snapshot.getRequestHitOccurrences(),
-                snapshot.getRequestOccurrences());
+                hitTokens,
+                inputTokens);
         cacheMetricsReporter.reportTheoryCacheHitMetrics(theorySnapshot);
     }
 
@@ -98,6 +98,8 @@ public class RecentCacheKeyTraceReporter {
     private void logTraceIfEnabled(BalanceContext balanceContext,
                                    Request request,
                                    RecentCacheKeyWindow.Snapshot snapshot,
+                                   long hitTokens,
+                                   long inputTokens,
                                    FlexlbConfig config) {
         if (config == null || !config.isCacheHitTraceLogEnabled()) {
             return;
@@ -105,7 +107,7 @@ public class RecentCacheKeyTraceReporter {
         List<Long> cacheKeys = request.getBlockCacheKeys();
         Logger.info("Master cache-key trace: masterRequestId={}, requestId={}, retryCount={}, "
                         + "seqLen={}, requestTimeMs={}, requestCacheKeys={}, hitCacheKeys={}, hitRatio={}, "
-                        + "cacheKeyDigest={}, selectedServers={}, cacheKeys={}",
+                        + "hitTokens={}, inputTokens={}, tokenHitRatio={}, cacheKeyDigest={}, selectedServers={}, cacheKeys={}",
                 balanceContext.getRequestId(),
                 request.getRequestId(),
                 balanceContext.getRetryCount(),
@@ -114,6 +116,9 @@ public class RecentCacheKeyTraceReporter {
                 snapshot.getRequestOccurrences(),
                 snapshot.getRequestHitOccurrences(),
                 hitRatio(snapshot.getRequestHitOccurrences(), snapshot.getRequestOccurrences()),
+                hitTokens,
+                inputTokens,
+                hitRatio(hitTokens, inputTokens),
                 cacheKeyDigest(cacheKeys),
                 formatServerStatusList(balanceContext.getResponse()),
                 formatCacheKeys(cacheKeys));
