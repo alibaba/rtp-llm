@@ -17,10 +17,11 @@ Two scenarios are tested:
 
 from unittest import TestCase, main, skipIf
 
+import libth_transformer_config  # noqa: F401
+
 # libth_transformer_config must be loaded before librtp_compute_ops to
 # register types referenced by pybind default args. Import torch first so
 # libtorch_nvshmem.so from torch/lib is discoverable by the loader.
-import libth_transformer_config  # noqa: F401
 import torch
 from librtp_compute_ops import PyAttentionInputs
 
@@ -306,6 +307,114 @@ class TestSparseMlaTargetVerifyParams(TestCase):
             test_params.slot_mapping[: self.batch_size],
             ref["slot_mapping"][: self.batch_size],
             msg="slot_mapping",
+        )
+
+    def test_decode_fast_path_clears_stale_tail_after_batch_shrink(self):
+        """Decode CUDA graph replay must invalidate stale rows when the active
+        batch shrinks under a larger captured graph."""
+        test_params = rtp_llm_ops.SparseMlaParams()
+        test_params.fill_params(
+            self._build_decode_inputs(), self.seq_size_per_block, False
+        )
+        torch.cuda.synchronize()
+
+        shrunk_batch = 2
+        shrunk_seq = torch.tensor([512, 640], dtype=torch.int32, device=self.device)
+        shrunk_table = self.block_table[:shrunk_batch].contiguous()
+
+        test_params.fill_sparse_mla_decode_cuda_graph_params(
+            shrunk_seq + 1,
+            shrunk_table,
+            self.seq_size_per_block,
+        )
+        torch.cuda.synchronize()
+
+        self.assertEqual(test_params.kvlen_d.shape[0], shrunk_batch)
+        self.assertEqual(test_params.slot_mapping.shape[0], shrunk_batch)
+        torch.testing.assert_close(
+            test_params.kvlen_d[:shrunk_batch],
+            shrunk_seq + 1,
+            msg="active kvlen",
+        )
+        torch.testing.assert_close(
+            test_params.qo_indptr_d[: shrunk_batch + 1],
+            torch.arange(0, shrunk_batch + 1, dtype=torch.int32, device=self.device),
+            msg="active qo_indptr",
+        )
+
+        # The underlying tensors keep their captured storage after set_sizes.
+        # Temporarily widen the view to inspect the stale tail that captured
+        # graph kernels can still touch.
+        widened_kvlen = torch.as_strided(
+            test_params.kvlen_d,
+            (self.batch_size,),
+            (1,),
+        )
+        widened_last_page = torch.as_strided(
+            test_params.paged_kv_last_page_len_d,
+            (self.batch_size,),
+            (1,),
+        )
+        widened_slot_mapping = torch.as_strided(
+            test_params.slot_mapping,
+            (self.batch_size,),
+            (1,),
+        )
+        widened_decode_indptr = torch.as_strided(
+            test_params.decode_page_indptr_d,
+            (self.batch_size + 1,),
+            (1,),
+        )
+        widened_qo_indptr = torch.as_strided(
+            test_params.qo_indptr_d,
+            (self.batch_size + 1,),
+            (1,),
+        )
+        torch.testing.assert_close(
+            widened_kvlen[shrunk_batch : self.batch_size],
+            torch.zeros(
+                self.batch_size - shrunk_batch,
+                dtype=torch.int32,
+                device=self.device,
+            ),
+            msg="stale kvlen tail",
+        )
+        torch.testing.assert_close(
+            widened_last_page[shrunk_batch : self.batch_size],
+            torch.zeros(
+                self.batch_size - shrunk_batch,
+                dtype=torch.int32,
+                device=self.device,
+            ),
+            msg="stale last-page tail",
+        )
+        torch.testing.assert_close(
+            widened_slot_mapping[shrunk_batch : self.batch_size],
+            torch.full(
+                (self.batch_size - shrunk_batch,),
+                -1,
+                dtype=torch.int64,
+                device=self.device,
+            ),
+            msg="stale slot_mapping tail",
+        )
+        expected_page_tail = widened_decode_indptr[shrunk_batch].expand(
+            self.batch_size - shrunk_batch
+        )
+        torch.testing.assert_close(
+            widened_decode_indptr[shrunk_batch + 1 : self.batch_size + 1],
+            expected_page_tail,
+            msg="stale decode_page_indptr tail",
+        )
+        torch.testing.assert_close(
+            widened_qo_indptr[shrunk_batch + 1 : self.batch_size + 1],
+            torch.full(
+                (self.batch_size - shrunk_batch,),
+                shrunk_batch,
+                dtype=torch.int32,
+                device=self.device,
+            ),
+            msg="stale qo_indptr tail",
         )
 
     def test_kernel_matches_cpu_after_decode_mutation(self):

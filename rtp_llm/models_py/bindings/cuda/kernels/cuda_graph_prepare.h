@@ -33,6 +33,7 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                          int32_t        batch_size,
                                          int32_t        max_blocks_per_batch,
                                          int32_t        seq_size_per_block,
+                                         int32_t        captured_batch_capacity,
                                          cudaStream_t   stream);
 
 void invokePrepareFlashInferPrefillParams(const int32_t* input_lengths,

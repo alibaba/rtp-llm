@@ -577,6 +577,8 @@ void FlashInferMlaAttnParams::fillDecodeCudaGraphParams(torch::Tensor sequence_l
 
     const int page_capacity = batch_size * max_blocks_per_batch;
     ensureTensorSize(batch_size, batch_size, page_capacity, 0, batch_size * 4, true);
+    const int captured_batch_capacity =
+        std::max(batch_size, kvlen_d.defined() ? static_cast<int>(kvlen_d.size(0)) : batch_size);
 
     auto set_i32_shape = [](torch::Tensor& tensor, std::vector<int64_t> shape) {
         if (tensor.defined()) {
@@ -621,6 +623,7 @@ void FlashInferMlaAttnParams::fillDecodeCudaGraphParams(torch::Tensor sequence_l
                                         batch_size,
                                         max_blocks_per_batch,
                                         seq_size_per_block,
+                                        captured_batch_capacity,
                                         stream);
 
     batch_indice                 = batch_indice_d;
