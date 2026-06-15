@@ -1,6 +1,7 @@
 package org.flexlb.service.optimizer;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.dao.optimizer.CommonResponseHeader;
 import org.flexlb.dao.optimizer.OptimizerGetInstanceRequest;
 import org.flexlb.dao.optimizer.OptimizerGetInstanceResponse;
 import org.flexlb.dao.optimizer.OptimizerInstanceParams;
@@ -100,6 +101,12 @@ public class OnlineOptimizerClient {
         if (registered) return;
 
         try {
+            // Defer resolver start to async retry so listen failures do not block startup.
+            if (!addressResolver.start()) {
+                log.info("OnlineOptimizer address resolver not yet started, will retry");
+                scheduleRetry(instanceId, params, currentDelayMs);
+                return;
+            }
             refreshUri();
             if (optimizerUri == null) {
                 log.info("OnlineOptimizer address not yet resolved, will retry");
@@ -163,11 +170,10 @@ public class OnlineOptimizerClient {
             log.warn("OnlineOptimizer getInstance returned null, instanceId={}", instanceId);
             return null;
         }
-        if (resp.getHeader() != null && resp.getHeader().getStatus() != null
-                && resp.getHeader().getStatus().getCode() != 1) {
-            // instance not found or other non-OK status
-            log.info("OnlineOptimizer getInstance returned status={}, instanceId={}",
-                    resp.getHeader().getStatus().getCode(), instanceId);
+        if (!isOkHeader(resp.getHeader())) {
+            // Non-OK or malformed response: treat as not found, register flow will retry on its own check.
+            log.info("OnlineOptimizer getInstance returned non-OK status code={}, instanceId={}",
+                    extractStatusCode(resp.getHeader()), instanceId);
             return null;
         }
         return resp;
@@ -187,11 +193,10 @@ public class OnlineOptimizerClient {
             log.warn("OnlineOptimizer removeInstance returned null, instanceId={}", instanceId);
             return false;
         }
-        if (resp.getHeader() != null && resp.getHeader().getStatus() != null
-                && resp.getHeader().getStatus().getCode() != 1) {
+        if (!isOkHeader(resp.getHeader())) {
             log.warn("OnlineOptimizer removeInstance failed, status={}, message={}, instanceId={}",
-                    resp.getHeader().getStatus().getCode(),
-                    resp.getHeader().getStatus().getMessage(), instanceId);
+                    extractStatusCode(resp.getHeader()),
+                    extractStatusMessage(resp.getHeader()), instanceId);
             return false;
         }
         log.info("OnlineOptimizer removeInstance success, instanceId={}", instanceId);
@@ -218,11 +223,11 @@ public class OnlineOptimizerClient {
             log.warn("OnlineOptimizer registerInstance returned null, instanceId={}", instanceId);
             return false;
         }
-        if (resp.getHeader() != null && resp.getHeader().getStatus() != null
-                && resp.getHeader().getStatus().getCode() != 1) {
+        if (!isOkHeader(resp.getHeader())) {
+            // Strict: only code == 1 means success; malformed counts as failure to keep retrying.
             log.warn("OnlineOptimizer registerInstance failed, status={}, message={}, instanceId={}",
-                    resp.getHeader().getStatus().getCode(),
-                    resp.getHeader().getStatus().getMessage(), instanceId);
+                    extractStatusCode(resp.getHeader()),
+                    extractStatusMessage(resp.getHeader()), instanceId);
             return false;
         }
         log.info("OnlineOptimizer registerInstance success: instanceId={}", instanceId);
@@ -235,7 +240,10 @@ public class OnlineOptimizerClient {
         }
         try {
             refreshUri();
-            if (optimizerUri == null) {
+            // Snapshot to local to avoid TOCTOU: another thread could clear optimizerUri
+            // between the null check and the HTTP call.
+            URI uri = optimizerUri;
+            if (uri == null) {
                 return;
             }
 
@@ -244,7 +252,7 @@ public class OnlineOptimizerClient {
             req.setInstanceId(instanceId);
             req.setBlockKeys(blockCacheKeys);
 
-            httpService.request(req, optimizerUri, basePath + "/traceQuery",
+            httpService.request(req, uri, basePath + "/traceQuery",
                             OptimizerTraceQueryResponse.class)
                     .subscribe(
                             resp -> {},
@@ -271,14 +279,39 @@ public class OnlineOptimizerClient {
         addressResolver.shutdown();
     }
 
-    private void refreshUri() {
+    private synchronized void refreshUri() {
         List<String> addresses = addressResolver.getAddresses();
-        if (addresses.isEmpty()) return;
+        if (addresses.isEmpty()) {
+            // Resolver reports zero hosts: drop cached URI to avoid hitting a dead address.
+            if (optimizerUri != null) {
+                log.info("OnlineOptimizer addresses empty, clearing cached URI: {}", addressSnapshot);
+                this.optimizerUri = null;
+                this.addressSnapshot = "";
+            }
+            return;
+        }
         String first = addresses.get(0);
         if (!first.equals(addressSnapshot)) {
             this.optimizerUri = URI.create("http://" + first);
             this.addressSnapshot = first;
             log.info("OnlineOptimizer address updated: {}", first);
         }
+    }
+
+    private static boolean isOkHeader(CommonResponseHeader header) {
+        return header != null
+                && header.getStatus() != null
+                && header.getStatus().getCode() == 1;
+    }
+
+    private static Integer extractStatusCode(CommonResponseHeader header) {
+        // null means header/status absent; avoids colliding with a real -1 from server.
+        if (header == null || header.getStatus() == null) return null;
+        return header.getStatus().getCode();
+    }
+
+    private static String extractStatusMessage(CommonResponseHeader header) {
+        if (header == null || header.getStatus() == null) return null;
+        return header.getStatus().getMessage();
     }
 }

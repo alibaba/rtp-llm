@@ -151,11 +151,9 @@ public class OnlineOptimizerHooker implements AppOnlineHooker, AppShutDownHooker
 
     private OptimizerAddressResolver createAddressResolver() {
         if (!vipserverDomain.isEmpty()) {
-            ServiceDiscoveryAddressResolver resolver =
-                    new ServiceDiscoveryAddressResolver(serviceDiscovery, vipserverDomain);
-            resolver.start();
+            // Defer start() to client's async retry; never block afterStartUp on listen failure.
             log.info("OnlineOptimizer using ServiceDiscoveryAddressResolver, domain={}", vipserverDomain);
-            return resolver;
+            return new ServiceDiscoveryAddressResolver(serviceDiscovery, vipserverDomain);
         }
         if (!directAddress.isEmpty()) {
             return new DirectAddressResolver(directAddress);
