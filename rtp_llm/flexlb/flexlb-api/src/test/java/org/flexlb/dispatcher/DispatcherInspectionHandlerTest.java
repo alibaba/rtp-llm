@@ -307,6 +307,29 @@ class DispatcherInspectionHandlerTest {
         }
 
         @Test
+        void nonSplittableEmbeddingInputReportsPassthrough() {
+            BatchScheduleClient client = mock(BatchScheduleClient.class);
+            DispatcherInspectionHandler handler = handlerWith(true, client);
+
+            // /v1/embeddings input given as a single multimodal input (array of objects) is ONE
+            // input, not a batch — production passthrough-forwards it whole, so dry-run must
+            // report that disposition instead of fabricating per-element chunks.
+            byte[] body = "{\"input\":[{\"type\":\"text\",\"text\":\"hi\"}]}".getBytes(StandardCharsets.UTF_8);
+            MockServerRequest req = MockServerRequest.builder()
+                    .method(HttpMethod.POST)
+                    .uri(URI.create("http://x/dispatcher/_dryrun/v1/embeddings"))
+                    .queryParam("pre_assign", "true")
+                    .body(Mono.just(body));
+
+            assertResponse(handler.dryRun(req), HttpStatus.OK, out -> {
+                assertEquals("passthrough", out.get("disposition").asText());
+                assertEquals(0, out.get("chunkCount").asInt());
+                assertEquals(1, out.get("totalItems").asInt());
+            });
+            verify(client, never()).requestTargets(anyInt());
+        }
+
+        @Test
         void internalErrorReturns500NotBadRequest() {
             BatchScheduleClient client = mock(BatchScheduleClient.class);
             when(client.requestTargets(anyInt())).thenReturn(

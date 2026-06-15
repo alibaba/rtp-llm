@@ -58,7 +58,7 @@ public class BatchScheduleCoordinator {
             return Mono.error(new BatchScheduleTransportException(
                     "master unreachable", "MASTER_NULL"));
         }
-        Logger.info("[BatchSchedule] Forwarding to master {}: batchCount={}", master, request.getBatchCount());
+        Logger.debug("[BatchSchedule] Forwarding to master {}: batchCount={}", master, request.getBatchCount());
         URI uri = URI.create("http://" + master);
         return httpNettyService.request(request, uri, "/rtp_llm/batch_schedule", BatchScheduleResponse.class)
                 .doOnNext(response -> engineHealthReporter.reportForwardToMasterResult(

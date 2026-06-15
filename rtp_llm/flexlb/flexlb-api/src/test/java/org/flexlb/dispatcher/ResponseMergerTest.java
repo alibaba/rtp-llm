@@ -65,6 +65,34 @@ class ResponseMergerTest {
         assertEquals(2, merged.totalChunks());
         assertEquals(List.of(0, 1, 2, 3, 4), merged.failedIndices());
         assertEquals(List.of("no_route", "no_route"), merged.failedReasons());
+        // No FE HTTP status available (transport-level failures) -> server error.
+        assertEquals(500, merged.errorStatus());
+    }
+
+    @Test
+    void allFailedSurfacesSharedFourxxStatus() {
+        SubBatchResult s0 = SubBatchResult.failed(2, 0, "bad_request", 400);
+        SubBatchResult s1 = SubBatchResult.failed(2, 2, "bad_request", 400);
+        ResponseMerger.MergedResponse merged = ResponseMerger.merge(List.of(s0, s1), BATCH_INFER);
+
+        assertTrue(merged.allFailed());
+        // Every sub-batch failed with the same client error: surface it, don't mask as 500.
+        assertEquals(400, merged.errorStatus());
+    }
+
+    @Test
+    void allFailedWithMixedOrServerStatusFallsTo500() {
+        // Mixed 4xx is ambiguous -> 500.
+        ResponseMerger.MergedResponse mixed = ResponseMerger.merge(
+                List.of(SubBatchResult.failed(1, 0, "bad", 400),
+                        SubBatchResult.failed(1, 1, "conflict", 409)), BATCH_INFER);
+        assertEquals(500, mixed.errorStatus());
+
+        // Any non-4xx (transport failure with no status, or an FE 5xx) -> 500.
+        ResponseMerger.MergedResponse server = ResponseMerger.merge(
+                List.of(SubBatchResult.failed(1, 0, "no_route"),
+                        SubBatchResult.failed(1, 1, "fe_500", 500)), BATCH_INFER);
+        assertEquals(500, server.errorStatus());
     }
 
     @Test

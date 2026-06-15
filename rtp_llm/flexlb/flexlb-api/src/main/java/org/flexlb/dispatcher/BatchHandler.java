@@ -130,7 +130,7 @@ public class BatchHandler {
         JSONArray reasons = new JSONArray();
         merged.failedReasons().stream().distinct().forEach(reasons::add);
         body.put("failed_reasons", reasons);
-        return DispatcherResponses.jsonBytes(500, BatchBodyParser.serialize(body));
+        return DispatcherResponses.jsonBytes(merged.errorStatus(), BatchBodyParser.serialize(body));
     }
 
     private Mono<List<BatchScheduleTarget>> resolvePreAssignedTargets(int chunkCount) {

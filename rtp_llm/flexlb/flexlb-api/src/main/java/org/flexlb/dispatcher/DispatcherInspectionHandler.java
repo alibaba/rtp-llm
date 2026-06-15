@@ -96,6 +96,9 @@ public class DispatcherInspectionHandler {
             if (arr == null) {
                 return badRequest("missing or non-array field: " + spec.getRequestArrayField());
             }
+            if (!spec.canSplit(arr)) {
+                return passthroughDiagnostic(spec, arr);
+            }
             return buildDryRunResponse(spec, body, arr, effectivePreAssign);
         }).onErrorResume(this::handleDryRunException);
     }
@@ -166,6 +169,23 @@ public class DispatcherInspectionHandler {
             out.put("chunks", chunksOut);
             return out;
         }).flatMap(out -> ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(BatchBodyParser.serialize(out)));
+    }
+
+    /**
+     * Mirror the production path's non-splittable disposition: a registered endpoint whose body
+     * is not batch-shaped (e.g. {@code /v1/embeddings} given one multimodal input as
+     * {@code List[ContentPart]}) is passthrough-forwarded whole, not split per element. Report
+     * that here instead of fabricating per-element chunks.
+     */
+    private Mono<ServerResponse> passthroughDiagnostic(BatchEndpointSpec spec, JSONArray arr) {
+        JSONObject out = new JSONObject();
+        out.put("path", spec.getPath());
+        out.put("splitMode", cfg.getSubBatch());
+        out.put("totalItems", arr.size());
+        out.put("chunkCount", 0);
+        out.put("disposition", "passthrough");
+        out.put("reason", "request is not splittable for this endpoint; forwarded whole to a single FE");
+        return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(BatchBodyParser.serialize(out));
     }
 
     private Mono<ServerResponse> badRequest(String message) {

@@ -20,14 +20,16 @@ public final class ResponseMerger {
 
     /**
      * Merge outcome: the client-facing {@code body}, success/total counts, the absolute item
-     * indices that failed, and one reason string per failed chunk (in chunk order). The handler
-     * returns 200 on any success and reserves 500 for the all-failed case.
+     * indices that failed, one reason string per failed chunk (in chunk order), and the HTTP
+     * status to use when {@link #allFailed()} — the shared FE 4xx when every sub-batch failed
+     * with the same client error, otherwise 500. The handler returns 200 on any success.
      */
     public record MergedResponse(JSONObject body,
                                  int succeededChunks,
                                  int totalChunks,
                                  List<Integer> failedIndices,
-                                 List<String> failedReasons) {
+                                 List<String> failedReasons,
+                                 int errorStatus) {
         public boolean allFailed() {
             return totalChunks > 0 && succeededChunks == 0;
         }
@@ -53,7 +55,7 @@ public final class ResponseMerger {
                 reasons.add(reasonFor(s));
             }
             return new MergedResponse(new JSONObject(), 0, subs.size(),
-                    allIndices(totalItems), reasons);
+                    allIndices(totalItems), reasons, commonErrorStatus(subs));
         }
         JSONArray merged = envelope.getJSONArray(spec.getResponseArrayField());
         List<Integer> failedIndices = new ArrayList<>();
@@ -86,7 +88,27 @@ public final class ResponseMerger {
         if (spec.getPostMerger() != null) {
             spec.getPostMerger().apply(envelope, subs, failedIndices);
         }
-        return new MergedResponse(envelope, succeededChunks, subs.size(), failedIndices, failedReasons);
+        return new MergedResponse(envelope, succeededChunks, subs.size(), failedIndices, failedReasons, 500);
+    }
+
+    /**
+     * HTTP status for the all-failed case: the shared FE status when every sub-batch failed with
+     * the same 4xx (so a client error is not masked as a server 500), otherwise 500.
+     */
+    private static int commonErrorStatus(List<SubBatchResult> subs) {
+        int common = -1;
+        for (SubBatchResult s : subs) {
+            int st = s.feStatus();
+            if (st < 400 || st > 499) {
+                return 500;
+            }
+            if (common == -1) {
+                common = st;
+            } else if (common != st) {
+                return 500;
+            }
+        }
+        return common == -1 ? 500 : common;
     }
 
     private static String reasonFor(SubBatchResult s) {

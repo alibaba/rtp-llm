@@ -83,7 +83,8 @@ public class FanoutService {
                             String reason = DispatcherResponses.briefReason(e);
                             warnRateLimited("FE chunk failed: url={}, path={}, size={}, err={}, suppressed={}",
                                     pick.feUrl(), fePath, plan.chunkSize(), reason);
-                            return Mono.just(SubBatchResult.failed(plan.chunkSize(), plan.startIndex(), reason));
+                            return Mono.just(SubBatchResult.failed(plan.chunkSize(), plan.startIndex(),
+                                    reason, DispatcherResponses.httpStatusOf(e)));
                         }))
                 .onErrorResume(e -> {
                     String reason = DispatcherResponses.briefReason(e);
