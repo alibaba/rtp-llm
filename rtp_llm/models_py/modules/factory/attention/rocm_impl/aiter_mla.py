@@ -482,11 +482,12 @@ class RocmMlaPrefillImpl(_RocmMlaTorchBase):
 
 
 class RocmMlaDecodeImpl(_RocmMlaTorchBase):
-    """Decode MLA: torch fallback reading the paged latent cache.
+    """Decode MLA via absorb: project q into latent space, attend over paged
+    latent cache, project output back.
 
-    Provided for completeness so the factory can resolve a decode impl. The
-    primary tbstars_tse scoring workload (max_new_tokens=1) does not exercise
-    decode, so this path is intentionally simple.
+    Single query token per sequence.  Uses the absorb trick (score in latent
+    ``kv_lora_rank`` space rather than decompressing every KV token to
+    per-head dims) which is efficient for the 1-query decode case.
     """
 
     @classmethod
@@ -508,7 +509,72 @@ class RocmMlaDecodeImpl(_RocmMlaTorchBase):
         layer_id: int,
         topk_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        raise NotImplementedError(
-            "RocmMlaDecodeImpl is not implemented; the tbstars_tse scoring "
-            "workload (max_new_tokens=1) runs prefill only."
+        # q: [B, H, nope+rope]; compressed_kv: [B, r]; k_pe: [B, rope]
+        device = q.device
+        H = self.num_heads
+        nope = self.qk_nope_head_dim
+        rope = self.qk_rope_head_dim
+        r = self.kv_lora_rank
+        v_dim = self.v_head_dim
+        q_dtype = q.dtype
+        B = q.shape[0]
+
+        seq_lengths = self.attn_inputs.sequence_lengths.cpu().tolist()
+        input_lengths = self.attn_inputs.input_lengths.cpu().tolist()
+
+        # For decode, the position of each new token is sequence_length - 1
+        # (not prefix-based like prefill).
+        positions = torch.tensor([s - 1 for s in seq_lengths], dtype=torch.long).to(
+            device
         )
+        cos, sin = self._rope_cos_sin(positions)
+        cos = cos.to(q_dtype)
+        sin = sin.to(q_dtype)
+
+        q_nope = q[:, :, :nope]  # [B, H, nope]
+        q_pe = _apply_neox_rope(q[:, :, nope:], cos, sin).float()  # [B, H, rope]
+        k_pe_cur = _apply_neox_rope(k_pe, cos, sin)  # [B, rope]
+
+        base = kv_cache.kv_cache_base
+        ssb = kv_cache.seq_size_per_block
+        block_ids_t = self.attn_inputs.kv_cache_kernel_block_id_host
+
+        # Write current token to the paged cache.
+        block_ids = block_ids_t.to(torch.long).to(device)
+        latent_cur = torch.cat([compressed_kv, k_pe_cur], dim=-1).to(base.dtype)
+        for i in range(B):
+            pos = seq_lengths[i] - 1
+            blk = block_ids[i, pos // ssb]
+            off = pos % ssb
+            base[blk, off, :] = latent_cur[i]
+
+        # Absorb: project q_nope into latent space.
+        kc = self.weights[layer_id].get(W.mla_kc, None)  # [H, nope, r]
+        vc = self.weights[layer_id].get(W.mla_vc, None)  # [H, r, v]
+        q_absorbed = torch.bmm(q_nope.float().transpose(0, 1), kc.float()).transpose(
+            0, 1
+        )  # [B, H, r]
+
+        # Per-sequence attention over the paged latent cache.
+        outputs = torch.zeros(B, H, v_dim, dtype=torch.float32, device=device)
+        for i in range(B):
+            s = seq_lengths[i]
+            pos_all = torch.arange(s, device=device)
+            blk_ids = block_ids[i, pos_all // ssb]
+            blk_off = pos_all % ssb
+            kv_all = base[blk_ids, blk_off, :].float()  # [s, r+rope]
+            ck = kv_all[:, :r]  # [s, r]
+            kpe = kv_all[:, r:]  # [s, rope]
+
+            # score = q_absorbed @ ck^T + q_pe @ kpe^T, per head
+            score_nope = torch.einsum("hd,sd->hs", q_absorbed[i], ck)  # [H, s]
+            score_rope = torch.einsum("hd,sd->hs", q_pe[i], kpe)  # [H, s]
+            score = (score_nope + score_rope) * self.softmax_scale
+            w = torch.softmax(score, dim=-1)  # [H, s]
+
+            # output in latent space, then project via vc
+            out_latent = torch.einsum("hs,sd->hd", w, ck)  # [H, r]
+            out_v = torch.bmm(out_latent.unsqueeze(1), vc.float()).squeeze(1)  # [H, v]
+            outputs[i] = out_v
+
+        return outputs.reshape(B, H * v_dim).to(q_dtype)
