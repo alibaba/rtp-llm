@@ -54,9 +54,9 @@ class RecentCacheKeyTraceReporterTest {
 
         InOrder inOrder = inOrder(cacheMetricsReporter);
         inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 0L, 3L);
+                60_000L, 0L, 300L);
         inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 2L, 3L);
+                60_000L, 200L, 300L);
     }
 
     @Test
@@ -75,7 +75,7 @@ class RecentCacheKeyTraceReporterTest {
         reporter.report(nextContext);
 
         verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 0L, 2L);
+                60_000L, 0L, 1024L);
     }
 
     @Test
@@ -98,7 +98,7 @@ class RecentCacheKeyTraceReporterTest {
         reporter.report(secondContext);
 
         verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 1L, 2L);
+                60_000L, 256L, 1024L);
     }
 
     @Test
@@ -111,8 +111,8 @@ class RecentCacheKeyTraceReporterTest {
         reporter.report(context(config, List.of(), 128L, 64L));
         reporter.report(context(config, List.of(1L), 128L, 64L));
 
-        verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
-                60_000L, 0L, 1L);
+        verify(cacheMetricsReporter, org.mockito.Mockito.times(2)).reportRecentCacheKeyHitMetrics(
+                60_000L, 0L, 128L);
         verify(cacheMetricsReporter, org.mockito.Mockito.times(2)).reportTheoryCacheHitMetrics(
                 org.mockito.Mockito.any(CacheHitTheoryStats.Snapshot.class));
     }
@@ -135,6 +135,23 @@ class RecentCacheKeyTraceReporterTest {
         assertEquals(1024L, second.getRequestTotalCount());
         assertEquals(512L, second.getAllHitCount());
         assertEquals(2048L, second.getAllTotalCount());
+    }
+
+    @Test
+    void should_report_recent_hit_tokens_with_page_rr_cache_key_block_size() throws Exception {
+        RecentCacheKeyTraceReporter reporter = new RecentCacheKeyTraceReporter();
+        inject(reporter, "recentCacheKeyWindow", smallWindow());
+        inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
+
+        FlexlbConfig config = new FlexlbConfig();
+        reporter.report(context(config, List.of(13L, 17L), 2048L, 1024L));
+        reporter.report(context(config, List.of(17L, 21L), 2048L, 1024L));
+
+        InOrder inOrder = inOrder(cacheMetricsReporter);
+        inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
+                60_000L, 0L, 2048L);
+        inOrder.verify(cacheMetricsReporter).reportRecentCacheKeyHitMetrics(
+                60_000L, 1024L, 2048L);
     }
 
     private static void inject(Object target, String fieldName, Object value) throws Exception {
