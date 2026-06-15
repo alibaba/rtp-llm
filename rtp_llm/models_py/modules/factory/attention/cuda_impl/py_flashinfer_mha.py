@@ -1,3 +1,4 @@
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Optional
 
 import torch
@@ -49,6 +50,7 @@ _g_py_flashinfer_cuda_graph_workspace_buffers: dict[
     tuple[str, Optional[int]], torch.Tensor
 ] = {}
 _g_py_flashinfer_pool_lock = __import__("threading").Lock()
+_MISSING = object()
 
 
 def _round_up_power_of_2(value: int) -> int:
@@ -59,8 +61,97 @@ def _align_up(value: int, alignment: int) -> int:
     return ((value + alignment - 1) // alignment) * alignment
 
 
-def _ceil_div(a: int, b: int) -> int:
-    return (a + b - 1) // b
+def _get_flashinfer_version() -> str:
+    for package_name in ("flashinfer-python", "flashinfer_python", "flashinfer"):
+        try:
+            return version(package_name)
+        except PackageNotFoundError:
+            continue
+    return "unknown"
+
+
+def _flashinfer_private_attr_error(wrapper: Any, attr_name: str) -> RuntimeError:
+    return RuntimeError(
+        "Unsupported FlashInfer wrapper layout: "
+        f"version={_get_flashinfer_version()}, wrapper={type(wrapper).__name__}, "
+        f"missing private attribute {attr_name}. "
+        "Update the PyFlashInfer compatibility layer before enabling this backend."
+    )
+
+
+def _get_flashinfer_private_attr(
+    wrapper: Any,
+    attr_name: str,
+    default: Any = _MISSING,
+) -> Any:
+    if hasattr(wrapper, attr_name):
+        return getattr(wrapper, attr_name)
+    if default is not _MISSING:
+        return default
+    raise _flashinfer_private_attr_error(wrapper, attr_name)
+
+
+def _set_flashinfer_private_attr(wrapper: Any, attr_name: str, value: Any) -> None:
+    if not hasattr(wrapper, attr_name):
+        raise _flashinfer_private_attr_error(wrapper, attr_name)
+    setattr(wrapper, attr_name, value)
+
+
+def _get_flashinfer_method(wrapper: Any, method_name: str) -> Any:
+    method = getattr(wrapper, method_name, None)
+    if callable(method):
+        return method
+    raise RuntimeError(
+        "Unsupported FlashInfer wrapper layout: "
+        f"version={_get_flashinfer_version()}, wrapper={type(wrapper).__name__}, "
+        f"missing method {method_name}."
+    )
+
+
+def _validate_py_flashinfer_prefill_wrapper(wrapper: Any) -> None:
+    required_attrs = (
+        "_backend",
+        "_fixed_batch_size",
+        "_int_workspace_buffer",
+        "_max_total_num_rows",
+        "_paged_kv_indices_buf",
+        "_paged_kv_indptr_buf",
+        "_paged_kv_last_page_len_buf",
+        "_qo_indptr_buf",
+        "_use_cuda_graph",
+    )
+    for attr_name in required_attrs:
+        _get_flashinfer_private_attr(wrapper, attr_name)
+    _get_flashinfer_method(wrapper, "reset_workspace_buffer")
+
+
+def _get_prefill_wrapper_backend(wrapper: Any) -> str:
+    return _get_flashinfer_private_attr(wrapper, "_backend")
+
+
+def _get_prefill_wrapper_plan_info(wrapper: Any) -> torch.Tensor:
+    plan_info = _get_flashinfer_private_attr(wrapper, "_plan_info")
+    if plan_info is None:
+        raise RuntimeError("FlashInfer fa2 prefill plan did not produce plan_info")
+    return plan_info
+
+
+def _set_prefill_wrapper_cuda_graph_buffers(
+    wrapper: Any,
+    qo_indptr: torch.Tensor,
+    paged_kv_indptr: torch.Tensor,
+    paged_kv_indices: torch.Tensor,
+    paged_kv_last_page_len: torch.Tensor,
+    fixed_batch_size: int,
+) -> None:
+    _set_flashinfer_private_attr(wrapper, "_use_cuda_graph", True)
+    _set_flashinfer_private_attr(wrapper, "_qo_indptr_buf", qo_indptr)
+    _set_flashinfer_private_attr(wrapper, "_paged_kv_indptr_buf", paged_kv_indptr)
+    _set_flashinfer_private_attr(wrapper, "_paged_kv_indices_buf", paged_kv_indices)
+    _set_flashinfer_private_attr(
+        wrapper, "_paged_kv_last_page_len_buf", paged_kv_last_page_len
+    )
+    _set_flashinfer_private_attr(wrapper, "_fixed_batch_size", fixed_batch_size)
 
 
 def _normalize_device(device: str | torch.device) -> torch.device:
@@ -158,30 +249,6 @@ def release_py_flashinfer_workspace_buffer(buffer: torch.Tensor) -> None:
         _g_py_flashinfer_workspace_pool.append(buffer)
 
 
-def _determine_fa2_cta_tile_q(
-    avg_packed_qo_len: int, head_dim: int, device: torch.device
-) -> int:
-    if avg_packed_qo_len > 64 and head_dim < 256:
-        return 64
-    if device.type == "cuda" and torch.cuda.is_available():
-        compute_capability_major = torch.cuda.get_device_capability(device)[0]
-    else:
-        compute_capability_major = 8
-    if compute_capability_major >= 8:
-        if avg_packed_qo_len > 16:
-            return 64
-        if avg_packed_qo_len > 8:
-            return 16
-        return 8
-    return 64
-
-
-def _get_num_sms(device: torch.device) -> int:
-    if device.type == "cuda" and torch.cuda.is_available():
-        return torch.cuda.get_device_properties(device).multi_processor_count
-    return 108
-
-
 def _resolve_py_flashinfer_prefill_backend(
     configured_backend: str,
     current_backend: str,
@@ -206,123 +273,6 @@ def _resolve_py_flashinfer_prefill_backend(
         )
     except Exception:
         return "fa2"
-
-
-def _prefill_binary_search_kv_chunk_size(
-    enable_cuda_graph: bool,
-    max_batch_size_if_split: int,
-    packed_qo_len_arr: list[int],
-    kv_len_arr: list[int],
-    qo_chunk_size: int,
-    min_kv_chunk_size: int,
-) -> tuple[bool, int]:
-    max_kv_len = max(max(kv_len_arr), 1)
-    low = min_kv_chunk_size
-    high = max_kv_len
-    while low < high:
-        mid = (low + high) // 2
-        new_batch_size = 0
-        for packed_qo_len, kv_len in zip(packed_qo_len_arr, kv_len_arr):
-            new_batch_size += _ceil_div(packed_qo_len, qo_chunk_size) * _ceil_div(
-                max(kv_len, 1), mid
-            )
-        if new_batch_size > max_batch_size_if_split:
-            low = mid + 1
-        else:
-            high = mid
-    return enable_cuda_graph or low < max_kv_len, low
-
-
-def _estimate_py_flashinfer_prefill_workspace_size_bytes(
-    backend: str,
-    qo_indptr: torch.Tensor,
-    kv_indptr: torch.Tensor,
-    num_qo_heads: int,
-    num_kv_heads: int,
-    head_dim_vo: int,
-    page_size: int,
-    enable_cuda_graph: bool,
-    device: torch.device,
-    max_total_num_rows: Optional[int] = None,
-) -> int:
-    if backend != "fa2":
-        return DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_BYTES
-    if num_kv_heads <= 0 or num_qo_heads % num_kv_heads != 0:
-        return DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_BYTES
-    if page_size <= 0:
-        return DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_BYTES
-
-    qo_indptr_host = qo_indptr.detach().to("cpu").tolist()
-    kv_indptr_host = kv_indptr.detach().to("cpu").tolist()
-    batch_size = len(qo_indptr_host) - 1
-    if batch_size <= 0 or len(kv_indptr_host) < batch_size + 1:
-        return DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_BYTES
-
-    gqa_group_size = num_qo_heads // num_kv_heads
-    packed_qo_len_arr: list[int] = []
-    kv_len_arr: list[int] = []
-    # FlashInfer fa2 prefill plan sizes split-k workspace from paged-kv page counts.
-    # Token lengths from last_page_len are used later by the kernel, not for tmp_v/tmp_s.
-    for i in range(batch_size):
-        packed_qo_len = (
-            int(qo_indptr_host[i + 1]) - int(qo_indptr_host[i])
-        ) * gqa_group_size
-        kv_len = int(kv_indptr_host[i + 1]) - int(kv_indptr_host[i])
-        if packed_qo_len < 0 or kv_len < 0:
-            return DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_BYTES
-        packed_qo_len_arr.append(packed_qo_len)
-        kv_len_arr.append(kv_len)
-
-    total_num_rows = int(qo_indptr_host[-1])
-    if max_total_num_rows is not None:
-        total_num_rows = max(total_num_rows, int(max_total_num_rows))
-
-    if enable_cuda_graph:
-        max_seq_len = total_num_rows - batch_size + 1
-        max_qo_len = max_seq_len * gqa_group_size
-        cta_tile_q = _determine_fa2_cta_tile_q(max_qo_len, head_dim_vo, device)
-        total_num_tiles_q = (
-            _ceil_div(total_num_rows * gqa_group_size, cta_tile_q) + batch_size - 1
-        )
-    else:
-        avg_packed_qo_len = sum(packed_qo_len_arr) // batch_size
-        cta_tile_q = _determine_fa2_cta_tile_q(avg_packed_qo_len, head_dim_vo, device)
-        total_num_tiles_q = sum(
-            _ceil_div(packed_qo_len, cta_tile_q) for packed_qo_len in packed_qo_len_arr
-        )
-
-    max_grid_size = 2 * _get_num_sms(device)
-    if cta_tile_q == 8:
-        max_grid_size *= 6
-    max_batch_size_if_split = max(max_grid_size // num_kv_heads, 1)
-    min_kv_chunk_size = max(128 // page_size, 1)
-    split_kv, kv_chunk_size = _prefill_binary_search_kv_chunk_size(
-        enable_cuda_graph,
-        max_batch_size_if_split,
-        packed_qo_len_arr,
-        kv_len_arr,
-        cta_tile_q,
-        min_kv_chunk_size,
-    )
-    if not split_kv:
-        return DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_BYTES
-
-    new_batch_size = 0
-    for packed_qo_len, kv_len in zip(packed_qo_len_arr, kv_len_arr):
-        new_batch_size += _ceil_div(packed_qo_len, cta_tile_q) * _ceil_div(
-            max(kv_len, 1), kv_chunk_size
-        )
-
-    padded_batch_size = (
-        max(max_batch_size_if_split, total_num_tiles_q)
-        if enable_cuda_graph
-        else new_batch_size
-    )
-
-    tmp_v_bytes = num_qo_heads * padded_batch_size * cta_tile_q * head_dim_vo * 4
-    tmp_s_bytes = num_qo_heads * padded_batch_size * cta_tile_q * 4
-    required_bytes = _align_up(tmp_v_bytes, 16) + _align_up(tmp_s_bytes, 16)
-    return max(DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_BYTES, required_bytes)
 
 
 def _get_py_flashinfer_prefill_plan_workspace_size_bytes(
@@ -357,6 +307,20 @@ def _get_py_flashinfer_prefill_plan_workspace_size_bytes(
     return max(v_offset + tmp_v_bytes, s_offset + tmp_s_bytes)
 
 
+def _is_flashinfer_workspace_plan_error(error: Exception) -> bool:
+    message = str(error)
+    return any(
+        pattern in message
+        for pattern in (
+            "Failed to allocate memory",
+            "batch_prefill_tmp_s",
+            "batch_prefill_tmp_v",
+            "float_workspace",
+            "workspace",
+        )
+    )
+
+
 class PyFlashinferPrefillPagedAttnOp(object):
     """FlashInfer Prefill Attention Op with Paged KV Cache support"""
 
@@ -373,6 +337,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             else get_py_flashinfer_workspace_buffer()
         )
         self._owns_workspace_buffer = not self.enable_cuda_graph
+        self._cuda_graph_workspace_size_upper_bound_bytes = 0
         self._last_estimated_workspace_size_bytes = 0
         self._last_plan_workspace_size_bytes = 0
         self.backend = _resolve_py_flashinfer_prefill_backend(
@@ -400,6 +365,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             "HND",
             backend=self.backend,
         )
+        _validate_py_flashinfer_prefill_wrapper(self.prefill_wrapper)
 
     def __del__(self):
         workspace_buffer = getattr(self, "g_workspace_buffer", None)
@@ -412,44 +378,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         """Set the params object to be used by this op."""
         self.fmha_params = params
 
-    def _ensure_workspace_size(
-        self,
-        qo_indptr: torch.Tensor,
-        kv_indptr: torch.Tensor,
-        forbid_realloc: bool,
-    ) -> int:
-        required_bytes = _round_up_power_of_2(
-            _estimate_py_flashinfer_prefill_workspace_size_bytes(
-                _resolve_py_flashinfer_prefill_backend(
-                    self.backend,
-                    getattr(self.prefill_wrapper, "_backend", self.backend),
-                    self.g_workspace_buffer.device,
-                    self.datatype,
-                    self.datatype,
-                ),
-                qo_indptr,
-                kv_indptr,
-                self.local_head_num,
-                self.local_kv_head_num,
-                self.head_dim_vo,
-                self.page_size,
-                self.enable_cuda_graph,
-                self.g_workspace_buffer.device,
-                getattr(self.prefill_wrapper, "_max_total_num_rows", None),
-            )
-        )
-        self._last_estimated_workspace_size_bytes = required_bytes
-        current_bytes = (
-            self.g_workspace_buffer.numel() * self.g_workspace_buffer.element_size()
-        )
-        if current_bytes >= required_bytes:
-            return required_bytes
-        if forbid_realloc:
-            raise RuntimeError(
-                "PyFlashInfer workspace is too small during CUDA graph replay: "
-                f"current={current_bytes}, required={required_bytes}"
-            )
-
+    def _resize_workspace_buffer(self, required_bytes: int) -> None:
         old_workspace_buffer = self.g_workspace_buffer
         self.g_workspace_buffer = (
             get_py_flashinfer_cuda_graph_workspace_buffer(
@@ -462,31 +391,104 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 required_bytes,
             )
         )
-        self.prefill_wrapper.reset_workspace_buffer(
+        reset_workspace_buffer = _get_flashinfer_method(
+            self.prefill_wrapper, "reset_workspace_buffer"
+        )
+        reset_workspace_buffer(
             self.g_workspace_buffer,
-            self.prefill_wrapper._int_workspace_buffer,
+            _get_flashinfer_private_attr(self.prefill_wrapper, "_int_workspace_buffer"),
         )
         if self._owns_workspace_buffer:
             release_py_flashinfer_workspace_buffer(old_workspace_buffer)
+
+    def _check_cuda_graph_replay_workspace_size(self, forbid_realloc: bool) -> int:
+        current_bytes = (
+            self.g_workspace_buffer.numel() * self.g_workspace_buffer.element_size()
+        )
+        if not (forbid_realloc and self.enable_cuda_graph):
+            self._last_estimated_workspace_size_bytes = current_bytes
+            return current_bytes
+
+        required_bytes = self._cuda_graph_workspace_size_upper_bound_bytes
+        if required_bytes <= 0:
+            raise RuntimeError(
+                "PyFlashInfer CUDA graph workspace upper bound is not initialized"
+            )
+        if current_bytes < required_bytes:
+            raise RuntimeError(
+                "PyFlashInfer workspace is too small during CUDA graph replay: "
+                f"current={current_bytes}, required={required_bytes}"
+            )
+        self._last_estimated_workspace_size_bytes = required_bytes
         return required_bytes
 
-    def _check_workspace_size_after_plan(self, estimated_bytes: int) -> None:
+    def _plan_prefill_with_workspace_retry(
+        self,
+        workspace_bytes: int,
+        forbid_realloc: bool,
+        *args,
+        **kwargs,
+    ) -> int:
+        for retry_idx in range(8):
+            try:
+                self.prefill_wrapper.plan(*args, **kwargs)
+                return workspace_bytes
+            except Exception as error:
+                if forbid_realloc or not _is_flashinfer_workspace_plan_error(error):
+                    raise
+
+                current_bytes = (
+                    self.g_workspace_buffer.numel()
+                    * self.g_workspace_buffer.element_size()
+                )
+                next_bytes = _round_up_power_of_2(
+                    max(
+                        DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_BYTES,
+                        current_bytes + 1,
+                        current_bytes * 2,
+                    )
+                )
+                self._resize_workspace_buffer(next_bytes)
+                workspace_bytes = next_bytes
+                self._last_estimated_workspace_size_bytes = next_bytes
+                if self.enable_cuda_graph:
+                    self._cuda_graph_workspace_size_upper_bound_bytes = max(
+                        self._cuda_graph_workspace_size_upper_bound_bytes,
+                        next_bytes,
+                    )
+                if retry_idx == 7:
+                    raise RuntimeError(
+                        "PyFlashInfer fa2 prefill plan still failed after "
+                        f"workspace retries; current={next_bytes}"
+                    ) from error
+
+        return workspace_bytes
+
+    def _check_workspace_size_after_plan(self, forbid_realloc: bool) -> None:
+        if forbid_realloc and self.enable_cuda_graph:
+            return
+
         backend = _resolve_py_flashinfer_prefill_backend(
             self.backend,
-            getattr(self.prefill_wrapper, "_backend", self.backend),
+            _get_prefill_wrapper_backend(self.prefill_wrapper),
             self.g_workspace_buffer.device,
             self.datatype,
             self.datatype,
         )
         if backend != "fa2":
+            if self.enable_cuda_graph:
+                current_bytes = (
+                    self.g_workspace_buffer.numel()
+                    * self.g_workspace_buffer.element_size()
+                )
+                self._cuda_graph_workspace_size_upper_bound_bytes = max(
+                    self._cuda_graph_workspace_size_upper_bound_bytes,
+                    current_bytes,
+                )
             return
 
-        plan_info = getattr(self.prefill_wrapper, "_plan_info", None)
-        if plan_info is None:
-            raise RuntimeError("FlashInfer fa2 prefill plan did not produce plan_info")
-
         actual_bytes = _get_py_flashinfer_prefill_plan_workspace_size_bytes(
-            plan_info,
+            _get_prefill_wrapper_plan_info(self.prefill_wrapper),
             self.local_head_num,
             self.head_dim_vo,
         )
@@ -499,10 +501,18 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 "PyFlashInfer fa2 prefill plan exceeds workspace buffer: "
                 f"actual={actual_bytes}, current={current_bytes}"
             )
-        if self.enable_cuda_graph and actual_bytes > estimated_bytes:
-            raise RuntimeError(
-                "PyFlashInfer fa2 prefill workspace estimator underestimated CUDA graph workspace: "
-                f"estimated={estimated_bytes}, actual={actual_bytes}, current={current_bytes}"
+
+        actual_upper_bound_bytes = _round_up_power_of_2(
+            max(DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_BYTES, actual_bytes)
+        )
+        self._last_estimated_workspace_size_bytes = max(
+            self._last_estimated_workspace_size_bytes,
+            actual_upper_bound_bytes,
+        )
+        if self.enable_cuda_graph:
+            self._cuda_graph_workspace_size_upper_bound_bytes = max(
+                self._cuda_graph_workspace_size_upper_bound_bytes,
+                actual_upper_bound_bytes,
             )
 
     def prepare(
@@ -534,17 +544,19 @@ class PyFlashinferPrefillPagedAttnOp(object):
         else:
             qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
 
-        if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
-            self.prefill_wrapper._use_cuda_graph = True
-            self.prefill_wrapper._qo_indptr_buf = qo_indptr
-            self.prefill_wrapper._paged_kv_indptr_buf = (
-                self.fmha_params.decode_page_indptr_d
+        if (
+            self.enable_cuda_graph
+            and _get_flashinfer_private_attr(self.prefill_wrapper, "_qo_indptr_buf")
+            is None
+        ):
+            _set_prefill_wrapper_cuda_graph_buffers(
+                self.prefill_wrapper,
+                qo_indptr,
+                self.fmha_params.decode_page_indptr_d,
+                self.fmha_params.page_indice_d,
+                self.fmha_params.paged_kv_last_page_len_d,
+                len(attn_inputs.cu_seqlens) - 1,
             )
-            self.prefill_wrapper._paged_kv_last_page_len_buf = (
-                self.fmha_params.paged_kv_last_page_len_d
-            )
-            self.prefill_wrapper._paged_kv_indices_buf = self.fmha_params.page_indice_d
-            self.prefill_wrapper._fixed_batch_size = len(attn_inputs.cu_seqlens) - 1
             if attn_inputs.prefill_cuda_graph_copy_params is not None:
                 self.prefill_cuda_graph_copy_params = (
                     attn_inputs.prefill_cuda_graph_copy_params
@@ -593,13 +605,13 @@ class PyFlashinferPrefillPagedAttnOp(object):
             )
             qo_indptr = self.qo_indptr
 
-        estimated_workspace_bytes = self._ensure_workspace_size(
-            qo_indptr,
-            self.fmha_params.decode_page_indptr_h,
-            forbid_realloc,
+        estimated_workspace_bytes = self._check_cuda_graph_replay_workspace_size(
+            forbid_realloc
         )
 
-        self.prefill_wrapper.plan(
+        estimated_workspace_bytes = self._plan_prefill_with_workspace_retry(
+            estimated_workspace_bytes,
+            forbid_realloc,
             qo_indptr,
             self.fmha_params.decode_page_indptr_d,
             self.fmha_params.page_indice_d,
@@ -612,7 +624,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             q_data_type=self.datatype,
             kv_data_type=self.datatype,
         )
-        self._check_workspace_size_after_plan(estimated_workspace_bytes)
+        self._check_workspace_size_after_plan(forbid_realloc)
         return self.fmha_params
 
     @staticmethod
