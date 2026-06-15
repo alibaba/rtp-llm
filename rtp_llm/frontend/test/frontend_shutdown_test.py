@@ -52,6 +52,15 @@ class FakeFrontendServer:
         self.close_called = True
 
 
+class FakeGrpcClient:
+    def __init__(self):
+        self.calls = []
+
+    async def post_request(self, endpoint, payload):
+        self.calls.append((endpoint, payload))
+        return {"status": "ok"}
+
+
 class FrontendShutdownManagerTest(unittest.TestCase):
     def wait_until(self, predicate, timeout=1.0):
         deadline = time.time() + timeout
@@ -61,7 +70,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             time.sleep(0.01)
         return predicate()
 
-    def test_draining_rejects_new_requests_but_keeps_liveness(self):
+    def test_draining_keeps_serving_business_but_marks_health_unavailable(self):
         app_owner = FrontendApp.__new__(FrontendApp)
         app_owner.frontend_server = FakeFrontendServer()
         app_owner.shutdown_manager = FrontendShutdownManager()
@@ -78,13 +87,12 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         self.assertEqual(client.get("/liveness").status_code, 200)
         self.assertEqual(client.get("/health").status_code, 503)
         response = client.post("/", json={"prompt": "hello"})
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.headers.get("retry-after"), "1")
+        self.assertEqual(response.status_code, 200)
         chat_response = client.post(
             "/v1/chat/completions",
             json={"messages": [{"role": "user", "content": "hello"}]},
         )
-        self.assertEqual(chat_response.status_code, 503)
+        self.assertEqual(chat_response.status_code, 200)
 
         embedding_app_owner = FrontendApp.__new__(FrontendApp)
         embedding_app_owner.frontend_server = FakeFrontendServer(is_embedding=True)
@@ -96,7 +104,37 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         embedding_client = TestClient(embedding_app)
         embedding_app_owner.shutdown_manager.start_draining("unit test")
         embedding_response = embedding_client.post("/v1/embeddings", json={})
-        self.assertEqual(embedding_response.status_code, 503)
+        self.assertEqual(embedding_response.status_code, 200)
+
+    def test_draining_rejects_admin_backend_requests(self):
+        app_owner = FrontendApp.__new__(FrontendApp)
+        app_owner.frontend_server = FakeFrontendServer()
+        app_owner.shutdown_manager = FrontendShutdownManager()
+        app_owner.separated_frontend = True
+        app_owner.server_config = SimpleNamespace(http_port=0)
+        app_owner.grpc_client = FakeGrpcClient()
+
+        app = app_owner.create_app()
+        client = TestClient(app)
+        app_owner.shutdown_manager.start_draining("unit test")
+
+        requests = [
+            ("get", "/cache_status", None),
+            ("get", "/worker_status", None),
+            ("post", "/set_log_level", {"log_level": "DEBUG"}),
+            ("post", "/start_profile", {}),
+            ("post", "/update_eplb_config", {"mode": "NONE"}),
+            ("post", "/update_scheduler_info", {}),
+        ]
+        for method, path, payload in requests:
+            if method == "get":
+                response = client.get(path)
+            else:
+                response = client.post(path, json=payload)
+            self.assertEqual(response.status_code, 503, path)
+            self.assertEqual(response.headers.get("retry-after"), "1", path)
+
+        self.assertEqual(app_owner.grpc_client.calls, [])
 
     def test_streaming_request_is_counted_until_body_iterator_finishes(self):
         manager = FrontendShutdownManager()
@@ -138,28 +176,29 @@ class FrontendShutdownManagerTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "0.01"}):
             server.handle_exit(signal.SIGTERM, None)
-            self.assertFalse(manager.is_draining())
+            self.assertTrue(manager.is_draining())
             self.assertFalse(server.should_exit)
-            self.assertTrue(
-                self.wait_until(lambda: manager.is_draining() and server.should_exit)
-            )
+            self.assertTrue(self.wait_until(lambda: server.should_exit))
 
         self.assertTrue(manager.is_draining())
         self.assertTrue(server.should_exit)
 
-    def test_second_sigterm_skips_pre_stop_drain(self):
+    def test_duplicate_sigterm_keeps_pre_stop_drain(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
         server.set_server(FakeFrontendServer(), manager)
 
         with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "100"}):
             server.handle_exit(signal.SIGTERM, None)
-            self.assertFalse(manager.is_draining())
+            self.assertTrue(manager.is_draining())
             self.assertFalse(server.should_exit)
             server.handle_exit(signal.SIGTERM, None)
 
         self.assertTrue(manager.is_draining())
-        self.assertTrue(server.should_exit)
+        self.assertFalse(server.should_exit)
+        self.assertIsNotNone(server._pre_stop_timer)
+        server._pre_stop_timer.cancel()
+        server._pre_stop_timer = None
 
     def test_sigterm_after_timer_fires_does_not_rearm_pre_stop_drain(self):
         manager = FrontendShutdownManager()

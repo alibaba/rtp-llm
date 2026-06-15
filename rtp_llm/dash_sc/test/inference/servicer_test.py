@@ -104,6 +104,31 @@ class _MultiStreamVisitor:
         return self._streams[self.enqueue_called - 1]
 
 
+class _RecordingAsyncStream(_FakeAsyncStream):
+    def __init__(self, name: str, chunks, events: list[str]):
+        super().__init__(chunks)
+        self._name = name
+        self._events = events
+
+    async def __anext__(self):
+        self._events.append(f"next:{self._name}")
+        return await super().__anext__()
+
+    async def aclose(self):
+        self._events.append(f"close:{self._name}")
+        await super().aclose()
+
+
+class _RecordingMultiStreamVisitor(_MultiStreamVisitor):
+    def __init__(self, streams, events: list[str]):
+        super().__init__(streams)
+        self._events = events
+
+    async def enqueue(self, generate_input):
+        self._events.append(f"enqueue:{self.enqueue_called + 1}")
+        return await super().enqueue(generate_input)
+
+
 class _FakeTokenizer:
     eos_token_id = 2
     vocab_size = 200000
@@ -1039,10 +1064,264 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(visitor.enqueue_called, 2)
+        self.assertTrue(visitor.generate_inputs[0].allow_pd_route_retry)
+        self.assertTrue(visitor.generate_inputs[1].allow_pd_route_retry)
         self.assertEqual(_gen_ids(chunks[0]), [128821, 10, 11])
         self.assertEqual(_gen_ids(chunks[1]), [128822, 271])
         self.assertEqual(_gen_ids(chunks[2]), [20])
         self.assertNotIn(42, visitor.generate_inputs[1].token_ids.cpu().int().tolist())
+
+    async def test_terminate_phase2_prefetched_before_phase1_yield(self) -> None:
+        """When token-terminate enters phase-2 before any upstream response,
+        phase-2 routing and first response prefetch happen before the synthetic
+        phase-1 close is exposed. That keeps PD-route retry legal for stale
+        restart routes."""
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1, 99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        events: list[str] = []
+        visitor = _RecordingMultiStreamVisitor(
+            [
+                _RecordingAsyncStream("phase1", [phase1], events),
+                _RecordingAsyncStream("phase2", [phase2], events),
+            ],
+            events,
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        stream = iter_real_model_stream_infer(
+            req,
+            [7, 8, 128821],
+            SamplingParams(),
+            OtherParams(enable_thinking=True),
+            visitor,
+            rtp_llm_request_id=100,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+            phase2_request_id_factory=lambda: 200,
+        )
+        first = await anext(stream)
+
+        self.assertEqual(_gen_ids(first), [10])
+        self.assertEqual(
+            events,
+            [
+                "enqueue:1",
+                "next:phase1",
+                "close:phase1",
+                "enqueue:2",
+                "next:phase2",
+            ],
+        )
+        self.assertTrue(visitor.generate_inputs[1].allow_pd_route_retry)
+        rest = [chunk async for chunk in stream]
+        self.assertEqual([_gen_ids(chunk) for chunk in rest], [[128822, 271], [20]])
+
+    async def test_prefetched_phase2_closed_when_client_cancels_phase1_yield(
+        self,
+    ) -> None:
+        """If phase-2 has been prefetched but the client cancels while phase-1
+        buffered responses are being yielded, the phase-2 backend stream must be
+        closed explicitly."""
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1, 99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        events: list[str] = []
+        visitor = _RecordingMultiStreamVisitor(
+            [
+                _RecordingAsyncStream("phase1", [phase1], events),
+                _RecordingAsyncStream("phase2", [phase2], events),
+            ],
+            events,
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        stream = iter_real_model_stream_infer(
+            req,
+            [7, 8, 128821],
+            SamplingParams(),
+            OtherParams(enable_thinking=True),
+            visitor,
+            rtp_llm_request_id=100,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+            phase2_request_id_factory=lambda: 200,
+        )
+        first = await anext(stream)
+        self.assertEqual(_gen_ids(first), [10])
+        self.assertNotIn("close:phase2", events)
+
+        await stream.aclose()
+
+        self.assertIn("close:phase2", events)
+        self.assertEqual(events.count("close:phase2"), 1)
+
+    async def test_terminate_phase2_retry_disabled_after_prior_yield(self) -> None:
+        """If phase-1 already emitted a visible chunk, phase-2 cannot safely
+        retry on another route because the upstream stream is no longer
+        replayable."""
+        req = self._minimal_request()
+        phase1_a = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([5], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase1_b = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        visitor = _MultiStreamVisitor(
+            [_FakeAsyncStream([phase1_a, phase1_b]), _FakeAsyncStream([phase2])]
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 2)
+        self.assertFalse(visitor.generate_inputs[1].allow_pd_route_retry)
+        self.assertEqual(
+            [_gen_ids(chunk) for chunk in chunks],
+            [[5], [10], [128822, 271], [20]],
+        )
+
+    async def test_unstarted_phase2_closed_when_client_cancels_buffered_phase1(
+        self,
+    ) -> None:
+        """When prior phase-1 output disables prefetch, cancellation while
+        yielding buffered phase-1 responses must still close the already
+        enqueued but unstarted phase-2 stream."""
+        req = self._minimal_request()
+        phase1_a = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([5], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase1_b = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        events: list[str] = []
+        visitor = _RecordingMultiStreamVisitor(
+            [
+                _RecordingAsyncStream("phase1", [phase1_a, phase1_b], events),
+                _RecordingAsyncStream("phase2", [phase2], events),
+            ],
+            events,
+        )
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        stream = iter_real_model_stream_infer(
+            req,
+            [7, 8, 128821],
+            SamplingParams(),
+            OtherParams(enable_thinking=True),
+            visitor,
+            rtp_llm_request_id=100,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+            phase2_request_id_factory=lambda: 200,
+        )
+
+        first = await anext(stream)
+        self.assertEqual(_gen_ids(first), [5])
+        second = await anext(stream)
+        self.assertEqual(_gen_ids(second), [10])
+        self.assertIn("enqueue:2", events)
+        self.assertNotIn("next:phase2", events)
+        self.assertNotIn("close:phase2", events)
+
+        await stream.aclose()
+
+        self.assertIn("close:phase2", events)
+        self.assertEqual(events.count("close:phase2"), 1)
 
     async def test_natural_finish_without_close_does_not_trigger_phase2(self) -> None:
         """Phase-1 finishes naturally without ``</think>`` or terminate_token —

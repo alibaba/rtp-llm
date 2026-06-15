@@ -103,17 +103,18 @@ class GracefulShutdownServer(Server):
         with self._pre_stop_lock:
             if self._pre_stop_timer is not None:
                 logging.info(
-                    "Frontend received second %s during pre-stop drain; "
-                    "skipping pre-stop drain and entering uvicorn shutdown",
+                    "Frontend received duplicate %s during pre-stop drain; "
+                    "continuing pre-stop drain before uvicorn shutdown",
                     sig_name,
                 )
-                self._pre_stop_timer.cancel()
-                self._pre_stop_timer = None
-                return False
+                return True
 
+            self.shutdown_manager.start_draining(f"signal {sig_name}")
             logging.info(
-                "Frontend pre-stop drain before uvicorn shutdown: remaining=%.3fs",
+                "Frontend entering pre-stop drain before uvicorn shutdown: "
+                "remaining=%.3fs, active_requests=%s",
                 drain_seconds,
+                self.shutdown_manager.active_request_count(),
             )
             timer = threading.Timer(
                 drain_seconds,
@@ -405,6 +406,7 @@ class FrontendApp(object):
         async def cache_status(
             request: Request, data: Optional[Dict[Any, Any]] = Body(None)
         ):
+            check_not_draining(request)
             query_params = (
                 dict(request.query_params) if request.method == "GET" else (data or {})
             )
@@ -430,6 +432,7 @@ class FrontendApp(object):
         async def worker_status(
             request: Request, data: Optional[Dict[Any, Any]] = Body(None)
         ):
+            check_not_draining(request)
             query_params = (
                 dict(request.query_params) if request.method == "GET" else (data or {})
             )
@@ -454,20 +457,25 @@ class FrontendApp(object):
 
         # request format: {"log_level": "DEBUG"}, {"log_level": "info"}
         @app.post("/set_log_level")
-        async def set_log_level(req: Union[str, Dict[Any, Any]]):
+        async def set_log_level(req: Union[str, Dict[Any, Any]], request: Request):
+            check_not_draining(request)
             result = await self.grpc_client.post_request("set_log_level", req)
             return result
 
         # request format: '{"trace_name":"normal_profiler", "start_step": 0, "num_steps": 3, "enable_all_rank": false}'
         @app.post("/rtp_llm/start_profile")
         @app.post("/start_profile")
-        async def start_profile(req: Union[str, Dict[Any, Any]] = Body(default={})):
+        async def start_profile(
+            request: Request, req: Union[str, Dict[Any, Any]] = Body(default={})
+        ):
+            check_not_draining(request)
             result = await self.grpc_client.post_request("start_profile", req)
             return result
 
         # request format: {"mode": "NONE", "update_time": 5000}
         @app.post("/update_eplb_config")
-        async def update_eplb_config(req: Union[str, Dict[Any, Any]]):
+        async def update_eplb_config(req: Union[str, Dict[Any, Any]], request: Request):
+            check_not_draining(request)
             result = await self.grpc_client.post_request("update_eplb_config", req)
             return result
 
@@ -492,7 +500,10 @@ class FrontendApp(object):
             return await track_business_request(call)
 
         @app.post("/update_scheduler_info")
-        async def update_scheduler_info(req: Union[str, Dict[Any, Any]]):
+        async def update_scheduler_info(
+            req: Union[str, Dict[Any, Any]], request: Request
+        ):
+            check_not_draining(request)
             result = await self.grpc_client.post_request("update_scheduler_info", req)
             return result
 

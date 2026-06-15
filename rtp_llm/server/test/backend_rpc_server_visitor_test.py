@@ -1,7 +1,9 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.master_client import FlexlbResponse
@@ -14,6 +16,10 @@ class _FakeTokenIds:
 class _FakeGenerateConfig:
     def __init__(self):
         self.role_addrs = []
+        self.max_new_tokens = 1
+
+    def validate(self):
+        pass
 
 
 class _FakeInput:
@@ -22,6 +28,11 @@ class _FakeInput:
 
     def __init__(self):
         self.generate_config = _FakeGenerateConfig()
+        self.allow_pd_route_retry = True
+
+    @property
+    def prompt_length(self):
+        return 1
 
 
 class _FakeHostService:
@@ -71,6 +82,110 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
             ctx.exception.rtp_error_code,
             int(ExceptionType.MASTER_NO_AVAILABLE_WORKER),
         )
+
+
+class BackendRPCServerVisitorRetryTest(unittest.TestCase):
+    def test_pd_route_retry_can_be_disabled_per_request(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.pd_route_retry_on_unavailable = 3
+
+        self.assertEqual(
+            visitor._pd_route_retry_limit(SimpleNamespace(allow_pd_route_retry=True)),
+            3,
+        )
+        self.assertEqual(
+            visitor._pd_route_retry_limit(SimpleNamespace(allow_pd_route_retry=False)),
+            0,
+        )
+
+
+class BackendRPCServerVisitorEnqueueRetryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_enqueue_does_not_retry_when_request_disables_pd_route_retry(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.max_seq_len = 10
+        visitor.sp_config = None
+        visitor.pd_route_retry_on_unavailable = 3
+        visitor.host_service = SimpleNamespace(service_available=False)
+        visitor.fill_request_info = lambda _input: None
+
+        class _FailingModelRpcClient:
+            calls = 0
+
+            def enqueue(self, _input):
+                self.calls += 1
+                raise RuntimeError("StatusCode.UNAVAILABLE")
+
+        client = _FailingModelRpcClient()
+        visitor.model_rpc_client = client
+
+        input = _FakeInput()
+        input.allow_pd_route_retry = False
+
+        stream = await visitor.enqueue(input)
+        with self.assertRaisesRegex(RuntimeError, "StatusCode.UNAVAILABLE"):
+            async for _ in stream:
+                pass
+
+        self.assertEqual(client.calls, 1)
+
+    async def test_enqueue_retry_uses_refreshed_domain_route(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.max_seq_len = 10
+        visitor.sp_config = None
+        visitor.pd_route_retry_on_unavailable = 1
+        visitor.fill_request_info = lambda _input: None
+        visitor.backend_role_list = [RoleType.PREFILL]
+
+        stale_addr = RoleAddr(
+            role=RoleType.PREFILL, ip="10.0.0.1", http_port=100, grpc_port=101
+        )
+        fresh_addr = RoleAddr(
+            role=RoleType.PREFILL, ip="10.0.0.2", http_port=100, grpc_port=101
+        )
+
+        async def route_ips(input):
+            input.generate_config.role_addrs = [stale_addr]
+
+        visitor.route_ips = route_ips
+
+        class _HostService:
+            service_available = True
+
+            def __init__(self):
+                self.refresh_calls = []
+
+            def get_backend_role_addrs(self, _roles, refresh=False):
+                self.refresh_calls.append(refresh)
+                return [fresh_addr]
+
+        host_service = _HostService()
+        visitor.host_service = host_service
+
+        class _FlakyModelRpcClient:
+            calls = 0
+
+            def enqueue(self, _input):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("StatusCode.UNAVAILABLE")
+
+                async def empty_stream():
+                    if False:
+                        yield None
+
+                return empty_stream()
+
+        client = _FlakyModelRpcClient()
+        visitor.model_rpc_client = client
+
+        input = _FakeInput()
+        stream = await visitor.enqueue(input)
+        async for _ in stream:
+            pass
+
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(host_service.refresh_calls, [True])
+        self.assertEqual(input.generate_config.role_addrs, [fresh_addr])
 
 
 if __name__ == "__main__":

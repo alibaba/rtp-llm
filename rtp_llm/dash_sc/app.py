@@ -58,6 +58,63 @@ def _is_proxy_mode_enabled() -> bool:
     )
 
 
+class DashScShutdownManager:
+    """Tracks DashSc draining state and accepted in-flight RPCs."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._draining = False
+        self._drain_reason = ""
+        self._drain_started_at: Optional[float] = None
+        self._active_requests = 0
+
+    def start_draining(self, reason: str) -> None:
+        with self._lock:
+            if self._draining:
+                return
+            self._draining = True
+            self._drain_reason = reason
+            self._drain_started_at = time.time()
+            active_requests = self._active_requests
+        logging.info(
+            "[DashScApp] entering graceful shutdown drain, reason=%s, active_requests=%s",
+            reason,
+            active_requests,
+        )
+
+    def is_draining(self) -> bool:
+        with self._lock:
+            return self._draining
+
+    def drain_reason(self) -> str:
+        with self._lock:
+            return self._drain_reason
+
+    def drain_elapsed_seconds(self) -> float:
+        with self._lock:
+            if self._drain_started_at is None:
+                return 0.0
+            return time.time() - self._drain_started_at
+
+    def try_begin_request(self) -> bool:
+        with self._lock:
+            self._active_requests += 1
+            return True
+
+    def finish_request(self) -> int:
+        with self._lock:
+            if self._active_requests <= 0:
+                logging.warning("[DashScApp] active RPC counter underflow during drain")
+                self._active_requests = 0
+                return 0
+            self._active_requests -= 1
+            return self._active_requests
+
+    def active_request_count(self) -> int:
+        with self._lock:
+            return self._active_requests
+
+
 async def _create_proxy_servicer_on_loop() -> DashScProxyServicer:
     """Construct proxy servicer inside the running asyncio owner loop.
 
@@ -210,6 +267,7 @@ class DashScApp:
         self._enqueue_loop_thread: Optional[threading.Thread] = None
         self._shutdown_event = threading.Event()
         self._shutdown_started_at: Optional[float] = None
+        self._shutdown_manager = DashScShutdownManager()
         self._grpc_server = DashScGrpcServer(
             dash_sc_grpc_config=self.dash_sc_grpc_config
         )
@@ -254,6 +312,7 @@ class DashScApp:
             logging.info("[DashScApp] received signal %s, shutting down", signum)
             if self._shutdown_started_at is None:
                 self._shutdown_started_at = time.monotonic()
+            self._shutdown_manager.start_draining(f"signal {signum}")
             self._shutdown_event.set()
 
         try:
@@ -375,6 +434,7 @@ class DashScApp:
                 loop,
                 port=port,
                 servicer=servicer,
+                shutdown_manager=self._shutdown_manager,
                 server_id=self.server_config.frontend_server_id,
                 log_path=get_log_path(),
                 backup_count=self.py_env_configs.profiling_debug_logging_config.log_file_backup_count,
@@ -431,6 +491,11 @@ class DashScApp:
         self._sleep_before_stop_for_drain()
         to = self.server_config.shutdown_timeout
         grace = None if to < 0 else float(to)
+        logging.info(
+            "[DashScApp] stopping gRPC server, active_requests=%s, grace=%s",
+            self._shutdown_manager.active_request_count(),
+            grace,
+        )
         try:
             self._grpc_server.stop(grace)
         except Exception as e:

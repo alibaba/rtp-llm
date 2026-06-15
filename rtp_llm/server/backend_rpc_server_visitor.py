@@ -156,6 +156,11 @@ class BackendRPCServerVisitor:
             or "Socket closed" in text
         )
 
+    def _pd_route_retry_limit(self, input: GenerateInput) -> int:
+        if not getattr(input, "allow_pd_route_retry", True):
+            return 0
+        return self.pd_route_retry_on_unavailable
+
     @staticmethod
     def get_backend_role_list(
         pd_sep_config,
@@ -283,13 +288,15 @@ class BackendRPCServerVisitor:
             block_cache_keys, self._page_rr_route_cache_keys, self._page_rr_cp_size
         )
 
-    async def get_domain_route_addrs(self, input: GenerateInput):
+    async def get_domain_route_addrs(
+        self, input: GenerateInput, refresh: bool = False
+    ):
         specified_roles = {addr.role for addr in input.generate_config.role_addrs}
         missing_roles = [
             role for role in self.backend_role_list if role not in specified_roles
         ]
         role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
-            missing_roles
+            missing_roles, refresh=refresh
         )
         if role_addrs:
             input.generate_config.role_addrs.extend(role_addrs)
@@ -494,11 +501,26 @@ class BackendRPCServerVisitor:
             if attempt > 0:
                 input.generate_config.role_addrs = []
             if self.host_service.service_available:
-                await self.route_ips(input)
+                if attempt > 0:
+                    with Timer() as domain_route_timer:
+                        await self.get_domain_route_addrs(input, refresh=True)
+                    kmonitor.report(
+                        GaugeMetrics.DOMAIN_ROUTE_RT_METRIC,
+                        domain_route_timer.cost_ms(),
+                    )
+                    if not input.generate_config.role_addrs:
+                        raise FtRuntimeException(
+                            ExceptionType.ROUTE_ERROR,
+                            "request_id=%s no backend role addresses found after retry domain routing"
+                            % input.request_id,
+                        )
+                else:
+                    await self.route_ips(input)
             return self.model_rpc_client.enqueue(input)
 
         async def stream_with_aux_info():
             attempt = 0
+            retry_limit = self._pd_route_retry_limit(input)
             while True:
                 yielded_output = False
                 try:
@@ -511,7 +533,7 @@ class BackendRPCServerVisitor:
                     set_aux_info(e)
                     if (
                         yielded_output
-                        or attempt >= self.pd_route_retry_on_unavailable
+                        or attempt >= retry_limit
                         or not self._is_retryable_route_rpc_error(e)
                     ):
                         raise
@@ -521,7 +543,7 @@ class BackendRPCServerVisitor:
                         "request_id=%s, attempt=%s/%s, error=%s",
                         input.request_id,
                         attempt,
-                        self.pd_route_retry_on_unavailable,
+                        retry_limit,
                         e,
                     )
                     await asyncio.sleep(min(0.2, 0.05 * attempt))

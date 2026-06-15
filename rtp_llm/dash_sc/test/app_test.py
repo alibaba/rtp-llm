@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import os
+from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import patch
 
+import grpc
+
 from rtp_llm.dash_sc import app as bg_app
 from rtp_llm.dash_sc.app import (
+    DashScShutdownManager,
     _create_proxy_servicer_on_loop,
     _derive_echo_prefix_ids,
     _is_proxy_mode_enabled,
     _pre_stop_drain_seconds,
 )
+from rtp_llm.dash_sc.server import DashScGrpcDrainAioInterceptor
 
 
 class _EnvCfg:
@@ -143,6 +148,74 @@ class PreStopDrainSecondsTest(TestCase):
             os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "30"}, clear=True
         ):
             self.assertEqual(app._effective_pre_stop_drain_seconds(), 10.0)
+
+
+class DashScShutdownManagerTest(TestCase):
+    def test_unary_unary_drain_interceptor_keeps_serving_rpc(self) -> None:
+        manager = DashScShutdownManager()
+        interceptor = DashScGrpcDrainAioInterceptor(manager)
+        called = False
+
+        async def unary_handler(_request, _context):
+            nonlocal called
+            called = True
+            return "ok"
+
+        async def continuation(_details):
+            return grpc.unary_unary_rpc_method_handler(unary_handler)
+
+        manager.start_draining("unit test")
+
+        async def run():
+            handler = await interceptor.intercept_service(
+                continuation, SimpleNamespace(method="/test.Service/Unary")
+            )
+            return await handler.unary_unary(object(), object())
+
+        self.assertEqual(asyncio.run(run()), "ok")
+        self.assertTrue(called)
+        self.assertEqual(manager.active_request_count(), 0)
+
+    def test_draining_keeps_new_rpc_counted(self) -> None:
+        manager = DashScShutdownManager()
+        interceptor = DashScGrpcDrainAioInterceptor(manager)
+
+        async def request_iter():
+            yield object()
+
+        async def stream_stream_handler(requests, _context):
+            async for _ in requests:
+                self.assertEqual(manager.active_request_count(), 1)
+                yield "response"
+
+        async def continuation(_details):
+            return grpc.stream_stream_rpc_method_handler(stream_stream_handler)
+
+        async def run_ok():
+            handler = await interceptor.intercept_service(
+                continuation, SimpleNamespace(method="/test.Service/Stream")
+            )
+            responses = []
+            async for resp in handler.stream_stream(request_iter(), object()):
+                responses.append(resp)
+            return responses
+
+        self.assertEqual(asyncio.run(run_ok()), ["response"])
+        self.assertEqual(manager.active_request_count(), 0)
+
+        manager.start_draining("unit test")
+
+        async def run_draining():
+            handler = await interceptor.intercept_service(
+                continuation, SimpleNamespace(method="/test.Service/Stream")
+            )
+            responses = []
+            async for resp in handler.stream_stream(request_iter(), object()):
+                responses.append(resp)
+            return responses
+
+        self.assertEqual(asyncio.run(run_draining()), ["response"])
+        self.assertEqual(manager.active_request_count(), 0)
 
 
 class CloseServicerOnLoopTest(TestCase):
