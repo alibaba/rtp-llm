@@ -63,6 +63,32 @@ TEST_F(WorkerStatusServiceTest, WorkerStatus_AlreadyStopped) {
     writer_ptr.release();
 }
 
+TEST_F(WorkerStatusServiceTest, WorkerStatus_DoesNotRequestCacheKeys) {
+    auto writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
+    ASSERT_TRUE(writer != nullptr);
+    std::unique_ptr<http_server::HttpResponseWriter> writer_ptr(writer);
+    http_server::HttpRequest                         request;
+
+    KVCacheInfo cache_info;
+    cache_info.available_kv_cache = 123;
+    cache_info.total_kv_cache     = 456;
+    EXPECT_CALL(*mock_engine_base_, getCacheStatusInfo(-1, false)).WillOnce(Return(cache_info));
+    EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([](const std::string& data) {
+        EXPECT_THAT(data, HasSubstr("\"available_kv_cache\":123"));
+        EXPECT_THAT(data, HasSubstr("\"total_kv_cache\":456"));
+        EXPECT_THAT(data, HasSubstr("\"alive\":true"));
+        return true;
+    }));
+
+    worker_status_service_->workerStatus(writer_ptr, request);
+    EXPECT_EQ(writer_ptr->_type, http_server::HttpResponseWriter::WriteType::Normal);
+    EXPECT_EQ(writer_ptr->_headers.count("Content-Type"), 1);
+    EXPECT_EQ(writer_ptr->_headers.at("Content-Type"), "application/json");
+
+    // 需要手动释放 unique_ptr 的所有权, 避免 double free
+    writer_ptr.release();
+}
+
 TEST_F(WorkerStatusServiceTest, Stop) {
     WorkerStatusService worker_status_service(nullptr, nullptr);
     EXPECT_FALSE(worker_status_service.is_stopped_.load());
