@@ -30,6 +30,61 @@ from rtp_llm.utils.process_manager import ProcessManager
 
 setup_logging()
 
+JIT_CACHE_RUN_ID_ENV = "RTP_JIT_CACHE_RUN_ID"
+DEFAULT_LOCAL_JIT_CACHE_DIR = "~/.cache/rtp_llm/jit"
+JIT_CACHE_COMPONENT_ENVS = {
+    "flashinfer": "FLASHINFER_WORKSPACE_BASE",
+    "triton": "TRITON_CACHE_DIR",
+    "triton_autotune": "TRITON_AUTOTUNE_CONFIG_DIR",
+    "deep_gemm": "DG_JIT_CACHE_DIR",
+    "torch_extensions": "TORCH_EXTENSIONS_DIR",
+}
+
+
+def _ensure_internal_jit_cache_run_id():
+    os.environ[JIT_CACHE_RUN_ID_ENV] = f"{int(time.time() * 1000)}-{os.getpid()}"
+
+
+def _config_value(config, attr: str, env_name: str, default: str):
+    value = getattr(config, attr, None) if config is not None else None
+    return value if value not in (None, "") else os.environ.get(env_name, default)
+
+
+def _bootstrap_local_jit_cache(py_env_configs: PyEnvConfigs):
+    jit_config = getattr(py_env_configs, "jit_config", None)
+    local_root = os.path.expanduser(
+        _config_value(
+            jit_config,
+            "local_jit_cache_dir",
+            "LOCAL_JIT_CACHE_DIR",
+            DEFAULT_LOCAL_JIT_CACHE_DIR,
+        )
+    )
+    os.makedirs(local_root, exist_ok=True)
+    for component, env_name in JIT_CACHE_COMPONENT_ENVS.items():
+        component_dir = os.path.join(local_root, component)
+        os.makedirs(component_dir, exist_ok=True)
+        os.environ[env_name] = component_dir
+    os.environ["TRITON_AUTOTUNE_CACHE_MODE"] = "cached"
+    os.environ["LOCAL_JIT_CACHE_DIR"] = local_root
+    os.environ.pop("DG_JIT_REMOTE_CACHE_DIR", None)
+    logging.info("local JIT cache root: %s", local_root)
+
+
+def _prepare_internal_jit_cache(py_env_configs: PyEnvConfigs):
+    from rtp_llm.utils.import_util import has_internal_source
+
+    if not has_internal_source():
+        os.environ["REMOTE_JIT_DIR"] = ""
+        return None
+    from internal_source.rtp_llm.utils.jit_cache_manager import JitCacheManager
+
+    manager = JitCacheManager(py_env_configs.jit_config)
+    manager.bootstrap_env()
+    manager.prepare()
+    manager.start_background_sync()
+    return manager
+
 
 def local_rank_start(
     global_controller: ConcurrencyController,
@@ -39,12 +94,22 @@ def local_rank_start(
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     backend_manager = None
+    jit_cache_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
-    start_time = time.time()
-    from rtp_llm.server.backend_manager import BackendManager
     from rtp_llm.utils.util import copy_gemm_config
 
-    logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
+    def stop_jit_cache_manager():
+        nonlocal jit_cache_manager
+        manager = jit_cache_manager
+        if manager is None:
+            return
+        jit_cache_manager = None
+        try:
+            logging.info("Stopping JIT cache manager")
+            manager.stop()
+            logging.info("Stopped JIT cache manager")
+        except Exception as e:
+            logging.error(f"Error during JIT cache manager shutdown: {e}")
 
     def signal_handler(signum, frame):
         logging.info(
@@ -55,10 +120,14 @@ def local_rank_start(
                 backend_manager.request_shutdown()
             except Exception as e:
                 logging.error(f"Error during backend manager shutdown: {e}")
+        stop_jit_cache_manager()
+
+    def install_signal_handlers():
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
 
     # Setup signal handlers for graceful shutdown
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
+    install_signal_handlers()
 
     copy_gemm_config()
 
@@ -76,8 +145,17 @@ def local_rank_start(
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
+        _bootstrap_local_jit_cache(py_env_configs)
+        jit_cache_manager = _prepare_internal_jit_cache(py_env_configs)
+        start_time = time.time()
+        from rtp_llm.server.backend_manager import BackendManager
+
+        logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
+        # Engine startup installs native signal handlers; restore the Python
+        # shutdown path so runtime JIT files are synced before process exit.
+        install_signal_handlers()
         logging.info("Backend server initialized successfully, sending ready status")
 
         # Send startup success message
@@ -112,6 +190,8 @@ def local_rank_start(
             except Exception as pipe_error:
                 logging.warning(f"Failed to send error status via pipe: {pipe_error}")
         raise e
+    finally:
+        stop_jit_cache_manager()
 
 
 def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
@@ -422,6 +502,7 @@ def start_backend_server(
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
+    _ensure_internal_jit_cache_run_id()
 
     clear_jit_filelock()
 
