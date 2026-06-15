@@ -82,6 +82,16 @@ py_test(
 )
 
 py_test(
+    name = "request_smoke_test",
+    srcs = ["test/inference/request_smoke_test.py"],
+    data = ["test/data/dash_sc_request_smoke_cases.json"],
+    main = "test/inference/request_smoke_test.py",
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "A10"},
+)
+
+py_test(
     name = "proxy_servicer_test",
     srcs = ["test/proxy/servicer_test.py"],
     main = "test/proxy/servicer_test.py",

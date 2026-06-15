@@ -1,0 +1,145 @@
+[
+  {
+    "name": "realistic_dashscope_no_thinking_json_object",
+    "description": "Full dashscope request: ds_header_attributes (timeout/priority/identity, thinking off), response_format=json_object, max_completion_tokens, invocation_metadata. Single-chunk finished stream.",
+    "request": {
+      "id": "smoke-realistic",
+      "model_name": "default",
+      "input_ids": [1, 2],
+      "parameters": {
+        "max_completion_tokens": 64,
+        "response_format": "{\"type\":\"json_object\"}",
+        "ds_header_attributes": {
+          "x-dashscope-inner-timeout": 1800,
+          "x-ds-request-priority": "10",
+          "x-ds-llm-thinking": false,
+          "user_id": "u1",
+          "x-dashscope-apikeyid": "ak1"
+        }
+      },
+      "invocation_metadata": [
+        ["User_ID", "u1"],
+        ["x-dashscope-apikeyid", "ak1"],
+        ["authorization", "secret"]
+      ]
+    },
+    "fake_stream": [
+      {"output_ids": [10, 11, 12], "finished": true, "input_len": 2}
+    ],
+    "tokenizer": "dsv4",
+    "model_type": "deepseek_v4",
+    "expected_enqueue_called": 1,
+    "expected_generate_config": {
+      "max_new_tokens": 64,
+      "timeout_ms": 1795000,
+      "ttft_timeout_ms": 1795000,
+      "traffic_reject_priority": 10,
+      "in_think_mode": false,
+      "max_thinking_tokens": 0,
+      "response_format_json": {"type": "json_object"}
+    },
+    "expected_headers": {
+      "user_id": "u1",
+      "x-dashscope-apikeyid": "ak1"
+    },
+    "expected_responses": [
+      {
+        "generated_ids": [10, 11, 12],
+        "finished": true,
+        "finish_reason_in": [0, 1, 2]
+      }
+    ]
+  },
+  {
+    "name": "guided_json_no_thinking_normalizes_to_json_schema",
+    "description": "guided_json (dashllm wire shape) is normalised to response_format={type:json_schema,...} even when thinking stays off. Empty stream — only GenerateConfig matters here.",
+    "request": {
+      "id": "smoke-guided",
+      "model_name": "default",
+      "input_ids": [42],
+      "parameters": {
+        "guided_json": "[{\"type\":\"object\",\"properties\":{\"color\":{\"type\":\"string\"}},\"required\":[\"color\"]}]"
+      }
+    },
+    "fake_stream": [],
+    "expected_enqueue_called": 1,
+    "expected_generate_config": {
+      "response_format_json": {
+        "type": "json_schema",
+        "json_schema": {
+          "schema": {
+            "type": "object",
+            "properties": {"color": {"type": "string"}},
+            "required": ["color"]
+          }
+        }
+      },
+      "json_schema_is_none": true
+    },
+    "expected_responses": []
+  },
+  {
+    "name": "json_object_with_enable_thinking_keeps_both_constraints",
+    "description": "When enable_thinking=true AND response_format=json_object, GenerateConfig must carry both: in_think_mode=true with the deepseek_v4 close-think token ids, AND the JSON response_format.",
+    "request": {
+      "id": "smoke-json-thinking",
+      "model_name": "default",
+      "input_ids": [1, 2],
+      "parameters": {
+        "enable_thinking": true,
+        "response_format": "{\"type\":\"json_object\"}"
+      }
+    },
+    "fake_stream": [],
+    "tokenizer": "dsv4",
+    "model_type": "deepseek_v4",
+    "expected_enqueue_called": 1,
+    "expected_generate_config": {
+      "in_think_mode": true,
+      "end_think_token_ids": [128822, 271],
+      "response_format_json": {"type": "json_object"}
+    },
+    "expected_responses": []
+  },
+  {
+    "name": "multi_chunk_stream_only_final_frame_finished",
+    "description": "Three-chunk streamed response: only the last frame flips finished=true and stamps finish_reason; non-final frames carry generated_ids with finished=false. This is the wire contract dashscope-serving forwards as SSE.",
+    "request": {
+      "id": "smoke-stream",
+      "model_name": "default",
+      "input_ids": [1, 2]
+    },
+    "fake_stream": [
+      {"output_ids": [10, 11], "finished": false, "input_len": 2},
+      {"output_ids": [12], "finished": false, "input_len": 2},
+      {"output_ids": [13, 14], "finished": true, "input_len": 2}
+    ],
+    "expected_enqueue_called": 1,
+    "expected_responses": [
+      {"generated_ids": [10, 11], "finished": false},
+      {"generated_ids": [12], "finished": false},
+      {"generated_ids": [13, 14], "finished": true, "finish_reason_in": [0, 1, 2]}
+    ]
+  },
+  {
+    "name": "max_completion_tokens_zero_rejected_before_enqueue",
+    "description": "max_completion_tokens<=0 must short-circuit to a 400 InvalidParameter response without ever calling enqueue, so dash_sc returns a structured business error (not a backend abort).",
+    "request": {
+      "id": "smoke-bad-mc-tokens",
+      "model_name": "default",
+      "input_ids": [42],
+      "parameters": {
+        "max_completion_tokens": 0
+      }
+    },
+    "fake_stream": [],
+    "expected_enqueue_called": 0,
+    "expected_responses": [
+      {
+        "status_code": 400,
+        "status_name": "InvalidParameter",
+        "status_message_contains": "max_completion_tokens"
+      }
+    ]
+  }
+]
