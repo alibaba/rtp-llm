@@ -200,13 +200,15 @@ std::string cacheKeyDigest(const std::vector<CacheKeyType>& keys) {
 }
 
 void fillPrefillRecentCacheKeyMetricsCollector(PrefillRecentCacheKeyMetricsCollector& collector,
-                                               const RecentCacheKeyWindow::Snapshot&  snapshot) {
+                                               const RecentCacheKeyWindow::Snapshot&  snapshot,
+                                               int64_t                                hit_token_count,
+                                               int64_t                                input_token_count) {
     collector.has_value                  = true;
     collector.request_count              = true;
     collector.empty_request_count        = snapshot.request_occurrences == 0;
-    collector.hit_count                  = snapshot.request_hit_occurrences;
-    collector.total_count                = snapshot.request_occurrences;
-    collector.hit_ratio                  = snapshot.request_hit_ratio;
+    collector.hit_count                  = hit_token_count;
+    collector.total_count                = input_token_count;
+    collector.hit_ratio                  = theoryHitRatio(hit_token_count, input_token_count);
     collector.retained_occurrences       = snapshot.retained_occurrences;
     collector.retained_unique_cache_keys = static_cast<int64_t>(snapshot.retained_unique_cache_keys);
     collector.time_window_ms             = snapshot.time_window_ms;
@@ -316,7 +318,7 @@ void PrefillCacheHitMetricsReporter::record(const BatchKVCacheResource&         
 
     if (metrics_reporter_) {
         PrefillRecentCacheKeyMetricsCollector collector;
-        fillPrefillRecentCacheKeyMetricsCollector(collector, snapshot);
+        fillPrefillRecentCacheKeyMetricsCollector(collector, snapshot, hit_token_count, input_token_count);
         fillPrefillTheoryHitMetricsCollector(collector, theory_snapshot);
         metrics_reporter_->report<PrefillRecentCacheKeyMetrics, PrefillRecentCacheKeyMetricsCollector>(nullptr,
                                                                                                        &collector);
@@ -326,7 +328,8 @@ void PrefillCacheHitMetricsReporter::record(const BatchKVCacheResource&         
         auto key_digest = cacheKeyDigest(cache_keys);
         auto key_text   = cacheKeysToString(cache_keys);
         RTP_LLM_LOG_INFO("Prefill cache-key trace: request_id=%ld token_num=%ld seq_size_per_block=%d "
-                         "key_count=%zu hit_count=%ld total_count=%ld hit_ratio=%.6f cache_key_digest=%s "
+                         "key_count=%zu hit_key_count=%ld total_key_count=%ld key_hit_ratio=%.6f "
+                         "hit_tokens=%ld input_tokens=%ld token_hit_ratio=%.6f cache_key_digest=%s "
                          "retained_occurrences=%ld retained_unique_cache_keys=%zu window_ms=%ld cache_keys=%s",
                          request_id,
                          token_num,
@@ -335,6 +338,9 @@ void PrefillCacheHitMetricsReporter::record(const BatchKVCacheResource&         
                          snapshot.request_hit_occurrences,
                          snapshot.request_occurrences,
                          snapshot.request_hit_ratio,
+                         hit_token_count,
+                         input_token_count,
+                         theoryHitRatio(hit_token_count, input_token_count),
                          key_digest.c_str(),
                          snapshot.retained_occurrences,
                          snapshot.retained_unique_cache_keys,

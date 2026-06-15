@@ -162,12 +162,12 @@ public class CacheMetricsReporter {
     }
 
     /**
-     * Report cache-key hits for the current request against the recent cache-key pool.
+     * Report token hits for the current request against the recent cache-key pool.
      */
     public void reportRecentCacheKeyHitMetrics(long timeWindowMs,
-                                               long hitOccurrences,
-                                               long totalOccurrences) {
-        if (totalOccurrences <= 0L) {
+                                               long hitTokens,
+                                               long inputTokens) {
+        if (inputTokens <= 0L) {
             return;
         }
 
@@ -175,8 +175,8 @@ public class CacheMetricsReporter {
                 "timeWindowMs", String.valueOf(timeWindowMs)
         );
 
-        monitor.report(CACHE_RECENT_KEY_HIT_COUNT, tags, hitOccurrences);
-        monitor.report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, totalOccurrences);
+        monitor.report(CACHE_RECENT_KEY_HIT_COUNT, tags, hitTokens);
+        monitor.report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, inputTokens);
     }
 
     /**
