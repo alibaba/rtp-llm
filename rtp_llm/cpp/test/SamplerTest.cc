@@ -85,6 +85,7 @@ TEST_F(SamplerTest, testGeneralSampling) {
         torch::Tensor(),  // no_repeat_ngram_size
         torch::Tensor(),  // do_sample
         torch::Tensor(),  // finished_mask
+        false,  // return_original_all_probs
         cum_log_probs.clone(),
         torch::Tensor(),  // all_probs
         generator,

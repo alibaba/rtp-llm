@@ -9,6 +9,7 @@
 #include <memory>
 #include <unistd.h>
 #include <limits.h>
+#include <c10/core/InferenceMode.h>
 
 using namespace std;
 using namespace autil::legacy;
@@ -76,11 +77,11 @@ namespace rtp_llm {
     }
 
 grpc::Status PrefillRpcServer::init(const EngineInitParams&                                maga_init_params,
-                                    py::object                                             mm_process_engine,
-                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
+                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
+                                    py::object                                             mm_process_engine) {
     RTP_LLM_CHECK_WITH_INFO(maga_init_params.pd_sep_config.role_type == RoleType::PREFILL,
                             "prefill's role_type must be PREFILL");
-    auto ret = RemoteRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
+    auto ret = RemoteRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
     if (!ret.ok()) {
         return ret;
     }
@@ -402,6 +403,7 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start generate stream call", request->request_id());
+    c10::InferenceMode inference_guard(true);
     auto pd_separation = request->generate_config().max_new_tokens() > 1 && request->generate_config().num_beams() <= 1
                          && request->generate_config().variable_num_beams().size() == 0
                          && request->generate_config().num_return_sequences() <= 1

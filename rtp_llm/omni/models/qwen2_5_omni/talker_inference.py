@@ -276,6 +276,12 @@ class TalkerModel(nn.Module):
         device = thinker_hidden_states[0].device
         dtype = thinker_hidden_states[0].dtype
 
+        if len(thinker_hidden_states) < 2 or len(thinker_token_embeds) < 2:
+            logger.warning(
+                "No generated reply tokens for talker; returning empty codec output"
+            )
+            return torch.zeros((1, 0), dtype=torch.long, device=device)
+
         # Build thinker_reply_part: cat of (hidden_states[i] + token_embeds[i]) for generated tokens
         # thinker_hidden_states[0] is the prompt's hidden state, [1:] are generated tokens
         thinker_reply_part = torch.cat(
@@ -315,15 +321,8 @@ class TalkerModel(nn.Module):
             torch.tensor([[self.codec_pad_token, self.codec_bos_token]], dtype=torch.long, device=device),
         ], dim=1)
 
-        # Add codec BOS and PAD embeddings to last two positions (HF logic)
-        codec_bos_embed = self.embed_tokens(
-            torch.tensor([self.codec_bos_token], dtype=torch.long, device=device)
-        )
-        codec_pad_embed = self.embed_tokens(
-            torch.tensor([self.codec_pad_token], dtype=torch.long, device=device)
-        )
-        talker_inputs_embeds[:, -1, :] += codec_bos_embed
-        talker_inputs_embeds[:, -2, :] += codec_pad_embed
+        codec_embeds = self.embed_tokens(codec_input_ids)
+        talker_inputs_embeds = talker_inputs_embeds + codec_embeds
 
         # Project to talker hidden size
         projected = self.thinker_to_talker_proj(talker_inputs_embeds)  # [1, seq_len, 896]

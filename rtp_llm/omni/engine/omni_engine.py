@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import threading
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -61,6 +62,7 @@ class OmniEngine:
         self._talker_wrapper = None
         self._token2wav = None
         self._speaker_data: Dict[str, Any] = {}
+        self._talker_generate_lock = threading.Lock()
 
         logger.info(
             f"OmniEngine created for {pipeline_config.model_type} "
@@ -211,11 +213,12 @@ class OmniEngine:
 
                 alog_conf_path = engine_config.profiling_debug_logging_config.ft_alog_conf_path
                 from rtp_llm.async_decoder_engine.engine_creator import create_engine
+                is_primary_stage = self._primary_engine is None
                 sub_engine = create_engine(
                     model=stage_model,
                     engine_config=engine_config,
                     alog_conf_path=alog_conf_path,
-                    world_info=world_info,
+                    world_info=world_info if is_primary_stage else None,
                 )
                 self.stage_engines[stage.name] = sub_engine
 
@@ -358,20 +361,22 @@ class OmniEngine:
         )
 
         py_model = self._get_talker_py_model()
-        if py_model is not None and hasattr(py_model, 'set_thinker_hidden_states'):
-            py_model.set_thinker_hidden_states(thinker_hs)
-
         initial_tokens = torch.tensor(
             [spk["bos_token"]], dtype=torch.int32
         )
         eos_token_id = self._talker_engine.config.special_tokens.eos_token_id
 
-        codec_tokens, _ = self._talker_engine.rtp_llm_op_.generate(
-            initial_tokens, max_talker_tokens, eos_token_id
-        )
+        with self._talker_generate_lock:
+            try:
+                if py_model is not None and hasattr(py_model, 'set_thinker_hidden_states'):
+                    py_model.set_thinker_hidden_states(thinker_hs)
 
-        if py_model is not None and hasattr(py_model, 'clear_thinker_hidden_states'):
-            py_model.clear_thinker_hidden_states()
+                codec_tokens, _ = self._talker_engine.rtp_llm_op_.generate(
+                    initial_tokens, max_talker_tokens, eos_token_id
+                )
+            finally:
+                if py_model is not None and hasattr(py_model, 'clear_thinker_hidden_states'):
+                    py_model.clear_thinker_hidden_states()
 
         mask = codec_tokens[0] < 8292
         codec_filtered = codec_tokens[0][mask].unsqueeze(0)

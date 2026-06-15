@@ -38,7 +38,7 @@ QWEN2_5_OMNI_PIPELINE = OmniPipelineConfig(
             model_stage="talker",
             input_sources=(0,),
             engine_output_type="latent",
-            stage_processor="qwen2_5_omni.thinker2talker",
+            stage_processor="rtp_llm.omni.models.qwen2_5_omni.stage_processors.thinker2talker",
         ),
         OmniStageConfig(
             name="token2wav",
@@ -52,7 +52,7 @@ QWEN2_5_OMNI_PIPELINE = OmniPipelineConfig(
             input_sources=(1,),
             final_output=True,
             final_output_type="audio",
-            stage_processor="qwen2_5_omni.talker2token2wav",
+            stage_processor="rtp_llm.omni.models.qwen2_5_omni.stage_processors.talker2code2wav",
         ),
     ),
 )

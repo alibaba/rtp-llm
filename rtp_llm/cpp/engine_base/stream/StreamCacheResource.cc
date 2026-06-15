@@ -367,13 +367,13 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     }
 
     MallocInfo malloc_info;
-    malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
-    malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
-    malloc_info.request_id              = stream_->streamId();
-    malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
-    malloc_info.reuse_cache             = reuseCache();
-    malloc_info.enable_device_cache     = reuseCache() && enableDeviceCache();
-    malloc_info.enable_remove_skipped_blocks   = true;
+    malloc_info.batch_kv_cache_resource      = batch_kv_cache_resource_;
+    malloc_info.complete_token_ids           = stream_->completeTokenIdsPtr();
+    malloc_info.request_id                   = stream_->streamId();
+    malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+    malloc_info.reuse_cache                  = reuseCache();
+    malloc_info.enable_device_cache          = reuseCache() && enableDeviceCache();
+    malloc_info.enable_remove_skipped_blocks = true;
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);

@@ -1,6 +1,5 @@
 import unittest
 import threading
-import time
 
 from rtp_llm.omni.engine.stream_channel import StreamChannel
 
@@ -53,19 +52,37 @@ class TestStreamChannel(unittest.TestCase):
         ch = StreamChannel(maxsize=2)
         ch.emit("a")
         ch.emit("b")
-        blocked = [False]
+        producer_ready = threading.Event()
+        producer_done = threading.Event()
 
         def producer():
+            producer_ready.set()
             ch.emit("c")
-            blocked[0] = True
+            producer_done.set()
 
         t = threading.Thread(target=producer)
         t.start()
-        time.sleep(0.1)
-        self.assertFalse(blocked[0])
+        producer_ready.wait(timeout=2.0)
+        self.assertFalse(producer_done.wait(timeout=0.05))
         ch.recv(timeout=1.0)
         t.join(timeout=2.0)
-        self.assertTrue(blocked[0])
+        self.assertTrue(producer_done.is_set())
+
+    def test_close_when_queue_full_does_not_block(self):
+        ch = StreamChannel(maxsize=2)
+        ch.emit("a")
+        ch.emit("b")
+        done = threading.Event()
+
+        def closer():
+            ch.close()
+            done.set()
+
+        t = threading.Thread(target=closer)
+        t.start()
+        t.join(timeout=2.0)
+        self.assertTrue(done.is_set())
+        self.assertTrue(ch.closed)
 
     def test_pending_count(self):
         ch = StreamChannel(maxsize=10)

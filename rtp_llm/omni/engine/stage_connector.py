@@ -68,11 +68,14 @@ class SharedMemoryConnector(StageConnector):
             return self._streams[key]
 
     def cleanup(self, request_id: str) -> None:
+        streams_to_close = []
         with self._lock:
             keys_to_remove = [k for k in self._store if k[0] == request_id]
             for k in keys_to_remove:
                 del self._store[k]
             stream_keys = [k for k in self._streams if k[0] == request_id]
             for k in stream_keys:
-                self._streams[k].close()
+                streams_to_close.append(self._streams[k])
                 del self._streams[k]
+        for stream in streams_to_close:
+            stream.close()

@@ -561,10 +561,10 @@ class DiTModel(nn.Module):
         self.proj_out = nn.Linear(hidden_size, self.mel_dim)
 
     def _create_block_diff(self, x):
-        B, seq_len = x.shape[0], x.shape[1]
+        seq_len = x.shape[1]
         idx = torch.arange(seq_len, device=x.device) // self.block_size
         diff = idx.unsqueeze(0) - idx.unsqueeze(1)
-        return diff.expand(B, self.num_heads, seq_len, seq_len)
+        return diff.unsqueeze(0).unsqueeze(0)
 
     def forward(self, hidden_states, condition_vector, speaker_embedding,
                 quantized_code, time_step, drop_audio_conditioning=False,
@@ -673,6 +673,11 @@ class Token2WavModel(nn.Module):
             if name.startswith("token2wav."):
                 t2w_files.add(shard)
 
+        if not t2w_files:
+            raise FileNotFoundError(
+                f"No token2wav weight shards found in {ckpt_path}"
+            )
+
         from safetensors.torch import load_file
         state_dict = {}
         for shard_file in t2w_files:
@@ -683,7 +688,28 @@ class Token2WavModel(nn.Module):
                     new_key = k[len("token2wav."):]
                     state_dict[new_key] = v
 
-        model.load_state_dict(state_dict, strict=False)
+        if not state_dict:
+            raise ValueError(
+                f"No token2wav weights loaded from prefix 'token2wav.' in {ckpt_path}"
+            )
+
+        required_components = (
+            "code2wav_dit_model.input_embed",
+            "code2wav_dit_model.transformer_blocks",
+            "code2wav_bigvgan_model",
+        )
+        loaded_keys = set(state_dict.keys())
+        for component in required_components:
+            if not any(k.startswith(component) for k in loaded_keys):
+                raise RuntimeError(
+                    f"Token2Wav missing required component '{component}' in {ckpt_path}"
+                )
+
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing:
+            raise RuntimeError(
+                f"Token2Wav failed to load weights, missing keys: {missing[:20]}"
+            )
         model = model.to(device).float()
         model.eval()
         logger.info(f"Token2WavModel loaded from {ckpt_path} on {device}")

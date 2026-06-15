@@ -101,12 +101,12 @@
                             "step_output_len": 10,
                             "iter_count": 10,
                             "cum_log_probs": [
-                                -7.120981693267822
+                                -7.121210098266602
                             ],
                             "beam_responses": [
                                 "\n\nThe error message you're encountering, `Name",
-                                "\n\nThe error message you're encountering, \"Name",
                                 "\n\nThe error you're encountering, `NameError",
+                                "\n\nThe error message you're encountering, \"Name",
                                 "\n\nThe error you're encountering is due to a",
                                 "\n\nThe error you're encountering, `TypeError:"
                             ],

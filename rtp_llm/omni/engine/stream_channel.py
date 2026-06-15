@@ -14,15 +14,17 @@ class StreamChannel:
 
     @property
     def closed(self) -> bool:
-        return self._closed
+        with self._lock:
+            return self._closed
 
     @property
     def pending(self) -> int:
         return self._queue.qsize()
 
     def emit(self, chunk: Any) -> None:
-        if self._closed:
-            raise RuntimeError("Cannot emit to a closed StreamChannel")
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Cannot emit to a closed StreamChannel")
         self._queue.put(chunk)
 
     def recv(self, timeout: Optional[float] = None) -> Optional[Any]:
@@ -34,16 +36,30 @@ class StreamChannel:
         except queue.Empty:
             return None
 
+    def _enqueue_sentinel(self) -> None:
+        try:
+            self._queue.put_nowait(_SENTINEL)
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait(_SENTINEL)
+            except queue.Full:
+                pass
+
     def close(self) -> None:
         with self._lock:
-            if not self._closed:
-                self._closed = True
-                self._queue.put(_SENTINEL)
+            if self._closed:
+                return
+            self._closed = True
+        self._enqueue_sentinel()
 
     def __iter__(self) -> Iterator[Any]:
         while True:
             item = self.recv(timeout=1.0)
-            if item is None and self._closed:
+            if item is None and self.closed:
                 break
             if item is not None:
                 yield item

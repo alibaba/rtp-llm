@@ -8,7 +8,8 @@ from rtp_llm.omni.models.qwen2_5_omni.talker import Qwen2_5OmniTalker
 
 class TestQwen25OmniTalker(unittest.TestCase):
     def _make_config_dir(self):
-        tmpdir = tempfile.mkdtemp()
+        self._tmpdir = tempfile.TemporaryDirectory()
+        tmpdir = self._tmpdir.name
         config = {
             "architectures": ["Qwen2_5OmniModel"],
             "model_type": "qwen2_5_omni",

@@ -3,10 +3,9 @@
 Covers two pieces of behavior that previously had silent breakage:
 
 1. ``KimiK25ImageEmbedding.image_embedding`` must return a per-image
-   ``List[Tensor]`` so the inherited
-   ``ImageEmbeddingInterface.mm_process`` (``image_embedding([img])[0]``)
-   yields the full ``(num_tokens, hidden)`` projected sequence rather
-   than a single row.
+   ``List[Tensor]`` shaped ``(num_tokens, hidden)``, so callers that
+   index ``image_embedding([img])[0]`` get the full projected sequence
+   for that image rather than a single row of a concatenated tensor.
 
 2. ``KimiK25Renderer`` must reject ``video_url`` content parts up front:
    the in-tree image processor is image-only and the ckpt-side processor
@@ -16,15 +15,18 @@ These tests stub the heavy ViT + projector + processor so they run
 without checkpoint weights or a GPU.
 """
 
-from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import MagicMock
 
 import torch
 from PIL import Image
 
-from rtp_llm.models.kimi_k25.kimi_k25_image_processor import KimiK25VisionProcessor
-from rtp_llm.models.kimi_k25.kimi_k25_vit import KimiK25ImageEmbedding
+from rtp_llm.multimodal.multimodal_mixins.kimi_k25.kimi_k25_image_processor import (
+    KimiK25VisionProcessor,
+)
+from rtp_llm.multimodal.multimodal_mixins.kimi_k25.kimi_k25_vit import (
+    KimiK25ImageEmbedding,
+)
 from rtp_llm.openai.api_datatype import (
     ChatMessage,
     ContentPart,
@@ -34,18 +36,21 @@ from rtp_llm.openai.api_datatype import (
 )
 from rtp_llm.openai.renderers.kimi_k25_renderer import KimiK25Renderer
 
-
 _HIDDEN = 8
 _TOKENS_PER_IMAGE = 5
 
 
 class _StubKimiK25ImageEmbedding(KimiK25ImageEmbedding):
-    """Subclass that overrides `_device` so we don't have to plumb a real
-    `vision_tower.patch_embed.proj.weight` to satisfy the property."""
+    """Subclass that overrides `_device` / `_data_type` so we don't need a
+    real `vision_tower.patch_embed.proj.weight` to satisfy the properties."""
 
     @property
     def _device(self):
         return torch.device("cpu")
+
+    @property
+    def _data_type(self):
+        return torch.float32
 
 
 def _build_stub_embedding() -> KimiK25ImageEmbedding:
@@ -53,8 +58,6 @@ def _build_stub_embedding() -> KimiK25ImageEmbedding:
     image_processor stubbed out. Avoids loading any HF weights."""
 
     obj = _StubKimiK25ImageEmbedding.__new__(_StubKimiK25ImageEmbedding)
-    obj.config = SimpleNamespace(compute_dtype=torch.float32)
-    obj.ignore_id = -100
     obj.media_token_id = 163605
 
     # vision_tower is invoked as `self.vision_tower(pixel_values, grid_thws)`
@@ -107,14 +110,14 @@ class KimiK25ImageEmbeddingShapeTest(TestCase):
         for t in out:
             self.assertEqual(t.shape, (_TOKENS_PER_IMAGE, _HIDDEN))
 
-    def test_mm_process_returns_full_token_sequence(self):
-        # Regression for the original bug: base mm_process did
-        # `image_embedding([img])[0]`, which on a concatenated tensor
-        # would return a single (hidden,) row instead of the full image.
+    def test_image_embedding_first_index_is_full_sequence(self):
+        # Regression for the original bug where image_embedding returned
+        # a single concatenated tensor; callers indexing `[0]` then got
+        # one row instead of the per-image (tokens, hidden) block.
         img = Image.new("RGB", (14, 14))
-        feats = self.emb.mm_process(img)
-        self.assertEqual(feats.dim(), 2)
-        self.assertEqual(feats.shape, (_TOKENS_PER_IMAGE, _HIDDEN))
+        first = self.emb.image_embedding([img])[0]
+        self.assertEqual(first.dim(), 2)
+        self.assertEqual(first.shape, (_TOKENS_PER_IMAGE, _HIDDEN))
 
 
 class KimiK25RendererVideoGuardTest(TestCase):

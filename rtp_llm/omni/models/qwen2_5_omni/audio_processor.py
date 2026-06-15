@@ -34,6 +34,10 @@ class Processor(AudioEmbeddingInterface):
         self.audio_tower = Qwen2_5OmniAudioEncoder(config)
 
     @property
+    def _data_type(self):
+        return self.audio_tower.conv1.weight.dtype
+
+    @property
     def _device(self):
         return self.audio_tower.conv1.weight.device
 

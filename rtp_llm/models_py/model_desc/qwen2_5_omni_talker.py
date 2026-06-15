@@ -7,6 +7,7 @@ The C++ engine handles the autoregressive loop, KV cache, and FMHA attention.
 This Python model is called by the engine at each step via forward().
 """
 
+import threading
 from typing import Any, Dict, Optional
 
 import torch
@@ -72,6 +73,7 @@ class Qwen2_5OmniTalkerModel(GptModelBase):
 
         self._thinker_hidden_states: Optional[torch.Tensor] = None
         self._step: int = 0
+        self._thinker_state_lock = threading.Lock()
 
     def set_thinker_hidden_states(self, hidden_states: torch.Tensor) -> None:
         """Store thinker hidden states before starting generation.
@@ -79,14 +81,16 @@ class Qwen2_5OmniTalkerModel(GptModelBase):
         Args:
             hidden_states: [num_thinker_tokens, embedding_size] tensor
         """
-        self._thinker_hidden_states = hidden_states.to(
-            device=self.proj_weight.device, dtype=self.proj_weight.dtype
-        )
-        self._step = 0
+        with self._thinker_state_lock:
+            self._thinker_hidden_states = hidden_states.to(
+                device=self.proj_weight.device, dtype=self.proj_weight.dtype
+            )
+            self._step = 0
 
     def clear_thinker_hidden_states(self) -> None:
-        self._thinker_hidden_states = None
-        self._step = 0
+        with self._thinker_state_lock:
+            self._thinker_hidden_states = None
+            self._step = 0
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -94,19 +98,20 @@ class Qwen2_5OmniTalkerModel(GptModelBase):
 
         inputs_embeds = self.embed_tokens(input_ids)
 
-        if self._thinker_hidden_states is not None:
-            max_idx = self._thinker_hidden_states.shape[0]
-            start = min(self._step, max_idx - 1)
-            end = min(self._step + num_tokens, max_idx)
-            thinker_hs = self._thinker_hidden_states[start:end]
+        with self._thinker_state_lock:
+            if self._thinker_hidden_states is not None:
+                max_idx = self._thinker_hidden_states.shape[0]
+                start = min(self._step, max_idx - 1)
+                end = min(self._step + num_tokens, max_idx)
+                thinker_hs = self._thinker_hidden_states[start:end]
 
-            if thinker_hs.shape[0] < num_tokens:
-                pad_count = num_tokens - thinker_hs.shape[0]
-                last_hs = self._thinker_hidden_states[-1:].expand(pad_count, -1)
-                thinker_hs = torch.cat([thinker_hs, last_hs], dim=0)
+                if thinker_hs.shape[0] < num_tokens:
+                    pad_count = num_tokens - thinker_hs.shape[0]
+                    last_hs = self._thinker_hidden_states[-1:].expand(pad_count, -1)
+                    thinker_hs = torch.cat([thinker_hs, last_hs], dim=0)
 
-            inputs_embeds = inputs_embeds + thinker_hs
-            self._step += num_tokens
+                inputs_embeds = inputs_embeds + thinker_hs
+                self._step += num_tokens
 
         hidden_states = F.linear(inputs_embeds, self.proj_weight, self.proj_bias)
 

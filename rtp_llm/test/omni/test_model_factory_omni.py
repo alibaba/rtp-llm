@@ -11,8 +11,16 @@ from rtp_llm.omni.engine.omni_engine import OmniEngine
 
 class TestModelFactoryOmniDetection(unittest.TestCase):
     def setUp(self):
+        self._saved_registry = dict(OmniPipelineRegistry._registry)
+        self._saved_arch_registry = dict(OmniPipelineRegistry._arch_registry)
         OmniPipelineRegistry._registry.clear()
         OmniPipelineRegistry._arch_registry.clear()
+
+    def tearDown(self):
+        OmniPipelineRegistry._registry.clear()
+        OmniPipelineRegistry._arch_registry.clear()
+        OmniPipelineRegistry._registry.update(self._saved_registry)
+        OmniPipelineRegistry._arch_registry.update(self._saved_arch_registry)
 
     def test_registry_lookup_for_omni_model(self):
         pipeline = OmniPipelineConfig(
