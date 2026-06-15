@@ -945,12 +945,18 @@ class IndexerOp(nn.Module):
             precomputed_topk_off: ``fmha_params.topk_indices_offset[total_global_ids]``, precomputed in plan().
 
         Returns:
-            TopK indices for the CP chunks, shape [len(total_local_ids), index_topk].
+            TopK indices for this CP rank, shape [len(total_local_ids), index_topk].
+            Ranks with no local query tokens return an empty tensor instead of
+            ``None`` so shared DSA layers can keep propagating the last full
+            layer's top-k object.
         """
+        device = q_fp8.device
+        if total_local_ids is None or int(total_local_ids.numel()) == 0:
+            return torch.empty((0, self.index_topk), dtype=torch.int32, device=device)
+
         total_kv_tokens = num_kv_tokens
         assert total_kv_tokens > 0, "num_kv_tokens must be positive"
 
-        device = q_fp8.device
         weights_sq = weights.squeeze(-1)
 
         q0 = q_fp8[total_local_ids].contiguous()
@@ -1067,14 +1073,10 @@ class IndexerOp(nn.Module):
                 row_start = row_end
             return topk_result
 
-        if total_local_ids.size(0) > 0:
-            topk = run_part_logits_topk(
-                q0,
-                weights_sq0,
-                precomputed_ks,
-                precomputed_ke,
-                precomputed_topk_off,
-            )
-        else:
-            topk = None
-        return topk
+        return run_part_logits_topk(
+            q0,
+            weights_sq0,
+            precomputed_ks,
+            precomputed_ke,
+            precomputed_topk_off,
+        )

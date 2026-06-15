@@ -457,7 +457,12 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
-        if topk is None:
+        if (
+            topk is None
+            or topk.numel() == 0
+            or self.total_local_ids is None
+            or self.total_local_ids.numel() == 0
+        ):
             return None
         assert q is not None and q.size(0) > 0
 

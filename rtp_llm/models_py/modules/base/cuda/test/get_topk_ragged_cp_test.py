@@ -6,6 +6,7 @@ single rank with one chunk so that generate_q_indices yields valid indices
 for index_select on local q_fp8.
 """
 
+from types import SimpleNamespace
 from unittest import SkipTest, TestCase, main
 
 import torch
@@ -35,6 +36,45 @@ def _check_cuda_deep_gemm():
 
 CUDA_DEEPGEMM_OK = _check_cuda_deep_gemm()
 SKIP_REASON = "CUDA and deep_gemm required for IndexerOp._get_topk_ragged_cp"
+
+
+class GetTopkRaggedCPZeroLocalTest(TestCase):
+    def test_zero_local_ids_returns_empty_tensor(self):
+        index_topk = 2048
+        op = IndexerOp(
+            index_n_heads=32,
+            index_head_dim=128,
+            index_topk=index_topk,
+            rope_head_dim=64,
+            cos_sin_cache=None,
+            blocksize=64,
+            block_size=128,
+        )
+
+        q_fp8 = torch.empty((0, 32, 128), dtype=torch.float32)
+        weights = torch.empty((0, 32, 1), dtype=torch.float32)
+        empty_i32 = torch.empty((0,), dtype=torch.int32)
+        empty_long = torch.empty((0,), dtype=torch.long)
+
+        topk_result = op._get_topk_ragged_cp(
+            q_fp8,
+            weights,
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            empty_long,
+            empty_i32,
+            0,
+            empty_i32,
+            empty_i32,
+            empty_i32,
+            empty_i32,
+        )
+
+        self.assertIsInstance(topk_result, torch.Tensor)
+        self.assertEqual(topk_result.dtype, torch.int32)
+        self.assertEqual(topk_result.device, q_fp8.device)
+        self.assertEqual(tuple(topk_result.shape), (0, index_topk))
 
 
 class GetTopkRaggedCPTest(TestCase):
