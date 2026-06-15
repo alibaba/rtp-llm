@@ -10,8 +10,10 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 namespace rtp_llm {
 namespace test {
@@ -19,14 +21,18 @@ namespace test {
 class BlockPoolTest: public ::testing::Test {
 protected:
     void SetUp() override {
+        old_core_dump_on_exception_                  = StaticConfig::user_ft_core_dump_on_exception;
+        StaticConfig::user_ft_core_dump_on_exception = false;
         createDevice();
     }
 
     void TearDown() override {
+        StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception_;
         block_pool_.reset();
     }
 
     std::shared_ptr<BlockPool> block_pool_;
+    bool                       old_core_dump_on_exception_{false};
 };
 
 namespace {
@@ -46,7 +52,7 @@ static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
     m.attn_config.kv_lora_rank     = 0;
     m.attn_config.rope_head_dim    = 0;
     m.attn_config.head_num         = 2;
-    // keep other fields default
+    setDefaultKvCacheSpec(m);
     return m;
 }
 

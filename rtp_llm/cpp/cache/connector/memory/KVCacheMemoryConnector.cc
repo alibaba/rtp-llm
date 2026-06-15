@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -24,6 +25,14 @@ static void applySplitKvMultiCopyFieldsIfEligible(bool enable_sm_copy, const Cac
     out.split_kv_cache_stride_bytes = cfg.kv_block_stride_bytes;
     out.split_kv_scale_stride_bytes = cfg.kv_scale_stride_bytes;
 }
+
+KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
+                                               const KVCacheConfig&                     kv_cache_config,
+                                               const ParallelismConfig&                 /*parallelism_config*/,
+                                               const std::shared_ptr<KVCacheAllocator>& allocator,
+                                               const std::vector<std::string>&          tp_addrs,
+                                               const kmonitor::MetricsReporterPtr&      metrics_reporter):
+    KVCacheMemoryConnector(cache_config, kv_cache_config, allocator, tp_addrs, metrics_reporter) {}
 
 KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
                                                const KVCacheConfig&                     kv_cache_config,

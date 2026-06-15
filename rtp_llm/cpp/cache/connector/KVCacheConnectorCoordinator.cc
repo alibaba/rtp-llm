@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 
 #include <utility>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -193,8 +194,12 @@ KVCacheConnectorCoordinator::asyncWriteByLayer(int                              
 }
 
 std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
-    auto memory_connector = std::make_shared<KVCacheMemoryConnector>(
-        cache_config_, kv_cache_config_, allocator_, runtime_config_.worker_grpc_addrs, metrics_reporter_);
+    auto memory_connector = std::make_shared<KVCacheMemoryConnector>(cache_config_,
+                                                                     kv_cache_config_,
+                                                                     parallelism_config_,
+                                                                     allocator_,
+                                                                     runtime_config_.worker_grpc_addrs,
+                                                                     metrics_reporter_);
     RTP_LLM_CHECK_WITH_INFO(memory_connector->init(), "memory connector init failed");
     return memory_connector;
 }
@@ -218,6 +223,21 @@ std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnecto
     RTP_LLM_LOG_ERROR("not RemoteConnector");
     return nullptr;
 #endif
+}
+
+int KVCacheConnectorCoordinator::cpSize() const {
+    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
+    if (!cp_cfg.kv_cache_sharded) {
+        return 1;
+    }
+    if (parallelism_config_.tp_size > 1) {
+        return static_cast<int>(parallelism_config_.tp_size);
+    }
+    if (parallelism_config_.role_type == RoleType::DECODE && cp_cfg.is_prefill_enabled()
+        && cp_cfg.prefill_cp_size > 1) {
+        return static_cast<int>(cp_cfg.prefill_cp_size);
+    }
+    return 1;
 }
 
 void KVCacheConnectorCoordinator::updateOnce() {

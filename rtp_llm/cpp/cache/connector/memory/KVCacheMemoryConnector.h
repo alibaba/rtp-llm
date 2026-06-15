@@ -29,6 +29,13 @@ class KVCacheMemoryConnector: public KVCacheConnector {
 public:
     KVCacheMemoryConnector(const CacheConfig&                       cache_config,
                            const KVCacheConfig&                     kv_cache_config,
+                           const ParallelismConfig&                 parallelism_config,
+                           const std::shared_ptr<KVCacheAllocator>& allocator,
+                           const std::vector<std::string>&          tp_addrs,
+                           const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);
+    // Legacy constructor without ParallelismConfig (CP sharding not available).
+    KVCacheMemoryConnector(const CacheConfig&                       cache_config,
+                           const KVCacheConfig&                     kv_cache_config,
                            const std::shared_ptr<KVCacheAllocator>& allocator,
                            const std::vector<std::string>&          tp_addrs,
                            const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);

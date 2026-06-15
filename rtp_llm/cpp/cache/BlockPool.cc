@@ -1,16 +1,121 @@
 #include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
-#include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+
+#include <cstdlib>
+#include <cerrno>
+#include <cstdint>
+#include <cstring>
+#include <exception>
+#include <string>
+#include <utility>
+
+#include <sys/mman.h>
+#include <unistd.h>
+
+#if USING_CUDA
+#include <cuda_runtime.h>
+#endif
 
 namespace rtp_llm {
 
-BlockPool::BlockPool(const BlockPoolConfig& config, AllocationType allocation_type):
-    config_(config), allocation_type_(allocation_type) {}
+namespace {
+
+bool shouldPinHostBlockPool();
+
+const char* allocationTypeName(AllocationType allocation_type) {
+    switch (allocation_type) {
+        case AllocationType::HOST:
+            return "HOST";
+        case AllocationType::DEVICE:
+            return "DEVICE";
+    }
+    return "UNKNOWN";
+}
+
+const char* memoryTypeName(MemoryType memory_type) {
+    switch (memory_type) {
+        case MemoryType::MEMORY_CPU:
+            return "CPU";
+        case MemoryType::MEMORY_CPU_PINNED:
+            return "CPU_PINNED";
+        case MemoryType::MEMORY_GPU:
+            return "GPU";
+    }
+    return "UNKNOWN";
+}
+
+const char*
+requestedBackingName(AllocationType allocation_type, bool use_pinned_cpu_backing, bool use_cuda_malloc_backing) {
+    if (allocation_type == AllocationType::HOST) {
+        return shouldPinHostBlockPool() ? "CPU_PINNED_OR_CPU_FALLBACK" : "CPU";
+    }
+    if (use_cuda_malloc_backing) {
+        return "GPU_CUDA_MALLOC";
+    }
+    return use_pinned_cpu_backing ? "CPU_PINNED" : "GPU";
+}
+
+bool shouldPinHostBlockPool() {
+    const char* value = std::getenv("RTP_LLM_PIN_HOST_BLOCK_POOL");
+    if (value == nullptr) {
+        return true;
+    }
+    const std::string flag(value);
+    return flag != "0" && flag != "false" && flag != "FALSE" && flag != "off" && flag != "OFF";
+}
+
+void markHostBlockPoolDontDump(void* ptr, size_t size) {
+#ifdef MADV_DONTDUMP
+    if (ptr == nullptr || size == 0) {
+        return;
+    }
+
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) {
+        page_size = 4096;
+    }
+
+    const auto begin         = reinterpret_cast<uintptr_t>(ptr);
+    const auto page_mask     = static_cast<uintptr_t>(page_size - 1);
+    const auto aligned_begin = begin & ~page_mask;
+    const auto aligned_end   = (begin + size + page_mask) & ~page_mask;
+    const auto aligned_size  = static_cast<size_t>(aligned_end - aligned_begin);
+
+    if (madvise(reinterpret_cast<void*>(aligned_begin), aligned_size, MADV_DONTDUMP) != 0) {
+        RTP_LLM_LOG_WARNING("madvise MADV_DONTDUMP failed for host block pool, ptr=%p, size=%zu, error=%s",
+                            ptr,
+                            size,
+                            std::strerror(errno));
+    } else {
+        RTP_LLM_LOG_INFO("madvise MADV_DONTDUMP success for host block pool, ptr=%p, size=%zu, aligned_ptr=%p, "
+                         "aligned_size=%zu",
+                         ptr,
+                         size,
+                         reinterpret_cast<void*>(aligned_begin),
+                         aligned_size);
+    }
+#else
+    RTP_LLM_LOG_WARNING(
+        "MADV_DONTDUMP is not defined, host block pool may be included in coredump, ptr=%p, size=%zu", ptr, size);
+#endif
+}
+
+}  // namespace
+
+BlockPool::BlockPool(const BlockPoolConfig& config,
+                     AllocationType         allocation_type,
+                     bool                   use_pinned_cpu_backing,
+                     bool                   use_cuda_malloc_backing):
+    config_(config),
+    allocation_type_(allocation_type),
+    use_pinned_cpu_backing_(use_pinned_cpu_backing),
+    use_cuda_malloc_backing_(use_cuda_malloc_backing) {}
 
 BlockPool::~BlockPool() {
     cache_aligned_buffer_ = torch::Tensor();
@@ -38,15 +143,114 @@ void BlockPool::validateConfig() const {
 
 void BlockPool::initializeCacheBuffer() {
     if (allocation_type_ == AllocationType::HOST) {
-        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU))
-                                    .pin_memory();
+        auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
+                                       torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+        if (shouldPinHostBlockPool()) {
+            try {
+                cache_aligned_buffer_ = cpu_buffer.pin_memory();
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_WARNING(
+                    "pin host block pool failed, fallback to pageable CPU memory, total_size=%zu bytes, error=%s",
+                    config_.total_size_bytes,
+                    e.what());
+                cache_aligned_buffer_ = std::move(cpu_buffer);
+            }
+        } else {
+            RTP_LLM_LOG_INFO("host block pool uses pageable CPU memory, total_size=%zu bytes",
+                             config_.total_size_bytes);
+            cache_aligned_buffer_ = std::move(cpu_buffer);
+        }
+        RTP_LLM_LOG_INFO("mark host block pool dont dump, ptr=%p, size=%zu",
+                         cache_aligned_buffer_.data_ptr(),
+                         config_.total_size_bytes);
+        markHostBlockPoolDontDump(cache_aligned_buffer_.data_ptr(), config_.total_size_bytes);
+    } else if (use_pinned_cpu_backing_) {
+        initializePinnedCpuBuffer("device block pool pinned CPU backing");
+    } else if (use_cuda_malloc_backing_) {
+        initializeCudaMallocBuffer();
     } else {
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
+    const bool is_cuda   = cache_aligned_buffer_.is_cuda();
+    const bool is_pinned = !is_cuda && cache_aligned_buffer_.is_pinned();
+    static constexpr double kBytesPerMB = 1024.0 * 1024.0;
+    RTP_LLM_LOG_INFO("BlockPool backing selected: pool_name=%s allocation_type=%s requested_backing=%s "
+                     "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes total_size_mb=%.2f "
+                     "block_num=%u memory_layouts=%zu",
+                     config_.pool_name.c_str(),
+                     allocationTypeName(allocation_type_),
+                     requestedBackingName(allocation_type_, use_pinned_cpu_backing_, use_cuda_malloc_backing_),
+                     memoryTypeName(where()),
+                     is_cuda,
+                     is_pinned,
+                     cache_base_ptr_,
+                     config_.total_size_bytes,
+                     static_cast<double>(config_.total_size_bytes) / kBytesPerMB,
+                     config_.block_num,
+                     config_.memory_layouts.size());
+}
+
+void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
+    RTP_LLM_LOG_WARNING(
+        "%s, pool_name=%s, total_size=%zu bytes", log_context, config_.pool_name.c_str(), config_.total_size_bytes);
+    auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
+                                   torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+    try {
+        cache_aligned_buffer_ = cpu_buffer.pin_memory();
+    } catch (const std::exception& e) {
+        RTP_LLM_FAIL("%s pin failed, total_size=%zu bytes, error=%s", log_context, config_.total_size_bytes, e.what());
+    }
+}
+
+void BlockPool::initializeCudaMallocBuffer() {
+#if USING_CUDA
+    RTP_LLM_CHECK_WITH_INFO(allocation_type_ == AllocationType::DEVICE,
+                            "cudaMalloc block pool backing requires DEVICE allocation");
+    RTP_LLM_CHECK_WITH_INFO(config_.total_size_bytes > 0, "cudaMalloc block pool total_size_bytes must be > 0");
+
+    int  device_id  = -1;
+    auto device_err = cudaGetDevice(&device_id);
+    RTP_LLM_CHECK_WITH_INFO(device_err == cudaSuccess,
+                            "cudaGetDevice failed before cudaMalloc block pool allocation, error=%s",
+                            cudaGetErrorString(device_err));
+
+    void*      ptr = nullptr;
+    const auto err = cudaMalloc(&ptr, config_.total_size_bytes);
+    RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess,
+                            "cudaMalloc block pool failed, pool_name=%s, total_size=%zu bytes, error=%s",
+                            config_.pool_name.c_str(),
+                            config_.total_size_bytes,
+                            cudaGetErrorString(err));
+
+    auto deleter = [device_id](void* p) {
+        if (p == nullptr) {
+            return;
+        }
+        int current_device = -1;
+        if (cudaGetDevice(&current_device) == cudaSuccess && current_device != device_id) {
+            (void)cudaSetDevice(device_id);
+            (void)cudaFree(p);
+            (void)cudaSetDevice(current_device);
+            return;
+        }
+        (void)cudaFree(p);
+    };
+    cache_aligned_buffer_ =
+        torch::from_blob(ptr,
+                         {static_cast<int64_t>(config_.total_size_bytes)},
+                         std::move(deleter),
+                         torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id)));
+    RTP_LLM_LOG_INFO("cudaMalloc block pool backing allocated, pool_name=%s, ptr=%p, total_size=%zu bytes, device=%d",
+                     config_.pool_name.c_str(),
+                     ptr,
+                     config_.total_size_bytes,
+                     device_id);
+#else
+    RTP_LLM_FAIL("cudaMalloc block pool backing requested but this binary was not built with CUDA");
+#endif
 }
 
 void BlockPool::initializeLayerMappings() {
@@ -187,10 +391,6 @@ bool BlockPool::init() {
     return true;
 }
 
-BlockCachePtr BlockPool::blockCache() {
-    return block_cache_;
-}
-
 void BlockPool::initFreeBlocks() {
     // block 0 is reserved
     for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
@@ -201,7 +401,6 @@ void BlockPool::initFreeBlocks() {
     req_con_ref_counter_.init(config_.block_num);
     block_cache_ref_counter_.init(config_.block_num);
     req_cache_ref_counter_.init(config_.block_num);
-    block_cache_ = std::make_shared<BlockCache>();
 }
 
 std::vector<torch::Tensor> BlockPool::allLayerCacheBase() const {
@@ -342,7 +541,8 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
     }
     if (cache_store_ && !kvcache_reg_mr_) {
         RTP_LLM_LOG_INFO("start to register user mr");
-        auto memory_util = std::static_pointer_cast<NormalCacheStore>(cache_store_)->getMemoryUtil();
+        auto       memory_util = cache_store_->getMemoryUtil();
+        const bool gpu         = where() == MemoryType::MEMORY_GPU;
 
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
@@ -353,6 +553,7 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
                                     layout_cfg.kv_cache_offset_bytes,
                                     layout_cfg.kv_block_pool_size_bytes,
                                     layout_cfg.kv_block_stride_bytes,
+                                    gpu,
                                     "kv");
 
             // Register scale buffer if present
@@ -362,6 +563,7 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
                                         layout_cfg.kv_scale_offset_bytes,
                                         layout_cfg.kv_scale_pool_size_bytes,
                                         layout_cfg.kv_scale_stride_bytes,
+                                        gpu,
                                         "scale");
             }
         }
@@ -373,17 +575,18 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
 void BlockPool::deregUserMr() {
     if (kvcache_reg_mr_ && cache_store_) {
         RTP_LLM_LOG_INFO("start to deregister user mr");
-        auto memory_util = std::static_pointer_cast<NormalCacheStore>(cache_store_)->getMemoryUtil();
+        auto       memory_util = cache_store_->getMemoryUtil();
+        const bool gpu         = where() == MemoryType::MEMORY_GPU;
 
         for (size_t layout_idx = 0; layout_idx < config_.memory_layouts.size(); ++layout_idx) {
             const auto& layout_cfg = config_.memory_layouts[layout_idx];
 
             // Deregister KV buffer
-            deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_cache_offset_bytes, "kv");
+            deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_cache_offset_bytes, gpu, "kv");
 
             // Deregister scale buffer if present
             if (layout_cfg.hasScale()) {
-                deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_scale_offset_bytes, "scale");
+                deregisterUserMrForBuffer(memory_util, layout_idx, layout_cfg.kv_scale_offset_bytes, gpu, "scale");
             }
         }
 
@@ -397,11 +600,12 @@ void BlockPool::registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> mem
                                         size_t                               offset_bytes,
                                         size_t                               bytes,
                                         size_t                               stride_bytes,
+                                        bool                                 gpu,
                                         const std::string&                   buffer_type) {
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
     auto  start_us = currentTimeUs();
 
-    if (!memory_util->regUserMr(base_ptr, bytes, true, stride_bytes)) {
+    if (!memory_util->regUserMr(base_ptr, bytes, gpu, stride_bytes)) {
         RTP_LLM_FAIL("register user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
     }
 
@@ -420,10 +624,11 @@ void BlockPool::registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> mem
 void BlockPool::deregisterUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> memory_util,
                                           size_t                               layout_idx,
                                           size_t                               offset_bytes,
+                                          bool                                 gpu,
                                           const std::string&                   buffer_type) {
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
 
-    if (!memory_util->deregUserMr(base_ptr, true)) {
+    if (!memory_util->deregUserMr(base_ptr, gpu)) {
         RTP_LLM_FAIL("deregister user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
     }
 }
@@ -500,7 +705,10 @@ BlockPool::convertIndexToBuffer(int layer_id, int block_id, int partition_count,
 }
 
 MemoryType BlockPool::where() const {
-    return cache_aligned_buffer_.is_cuda() ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
+    if (cache_aligned_buffer_.is_cuda()) {
+        return MemoryType::MEMORY_GPU;
+    }
+    return cache_aligned_buffer_.is_pinned() ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_CPU;
 }
 
 void BlockPool::checkLayoutValidity(int layout_id) const {

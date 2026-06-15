@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 
+#include <algorithm>
+
 namespace rtp_llm {
 
 size_t BlockIds::blocksNum() const {
@@ -44,8 +46,18 @@ void BlockIds::remove(const std::vector<size_t>& indices) {
 }
 
 void BlockIds::swap(size_t pos_a, size_t pos_b) {
-    RTP_LLM_CHECK(pos_a < block_indices.size());
-    RTP_LLM_CHECK(pos_b < block_indices.size());
+    if (pos_a >= block_indices.size() || pos_b >= block_indices.size()) {
+        RTP_LLM_LOG_ERROR("BlockIds::swap: pos_a=%d or pos_b=%d is out of range, block_indices.size()=%d",
+                          pos_a,
+                          pos_b,
+                          block_indices.size());
+        RTP_LLM_CHECK_WITH_INFO(false,
+                                "BlockIds::swap: pos_a=%d or pos_b=%d is out of range, block_indices.size()=%d",
+                                pos_a,
+                                pos_b,
+                                block_indices.size());
+    }
+
     if (pos_a == pos_b) {
         return;
     }
@@ -109,19 +121,28 @@ void BlockIds::syncKernelBlocks() {
     }
 }
 
-void KVCacheResource::initGroups(int                                group_num,
-                                 int                                layer_num,
-                                 const std::vector<int>&            layer_to_group_id,
-                                 size_t                             kernel_blocks_per_kv_block,
-                                 const std::vector<CacheGroupType>& group_types) {
+void KVCacheResource::initGroups(int                                  group_num,
+                                 int                                  layer_num,
+                                 const std::vector<int>&              layer_to_group_id,
+                                 size_t                               kernel_blocks_per_kv_block,
+                                 const std::vector<CacheGroupType>&   group_types,
+                                 const std::vector<std::vector<int>>& layer_region_to_group_id) {
     group_block_ids.clear();
     layer_block_ids.clear();
+    layer_region_block_ids.clear();
+
+    if (!group_types.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(group_types.size() >= static_cast<size_t>(group_num),
+                                "KVCacheResource::initGroups: group_types size %zu < group_num %d",
+                                group_types.size(),
+                                group_num);
+    }
 
     group_block_ids.reserve(static_cast<size_t>(group_num));
     for (int i = 0; i < group_num; i++) {
-        const bool   is_full = group_types.empty() || group_types[static_cast<size_t>(i)] == CacheGroupType::FULL;
-        const size_t group_kernel_blocks_per_kv_block = is_full ? kernel_blocks_per_kv_block : 1;
-        auto         bid                              = std::make_shared<BlockIds>(group_kernel_blocks_per_kv_block);
+        const bool   is_full_group = group_types.empty() || group_types[static_cast<size_t>(i)] == CacheGroupType::FULL;
+        const size_t bpk           = is_full_group ? std::max<size_t>(1, kernel_blocks_per_kv_block) : 1;
+        auto         bid           = std::make_shared<BlockIds>(bpk);
         group_block_ids.push_back(std::move(bid));
     }
 
@@ -139,6 +160,39 @@ void KVCacheResource::initGroups(int                                group_num,
                                     i,
                                     group_num);
             layer_block_ids[i] = group_block_ids[gid];
+        }
+
+        const size_t region_name_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
+        layer_region_block_ids.resize(static_cast<size_t>(layer_num));
+        for (int layer = 0; layer < layer_num; ++layer) {
+            auto& attn_blocks = layer_region_block_ids[static_cast<size_t>(layer)];
+            attn_blocks.assign(region_name_count, nullptr);
+
+            if (!layer_region_to_group_id.empty()) {
+                RTP_LLM_CHECK_WITH_INFO(layer_region_to_group_id.size() >= static_cast<size_t>(layer_num),
+                                        "KVCacheResource::initGroups: layer_region_to_group_id size %zu < layer_num %d",
+                                        layer_region_to_group_id.size(),
+                                        layer_num);
+                const auto&  dense_groups = layer_region_to_group_id[static_cast<size_t>(layer)];
+                const size_t n            = std::min(region_name_count, dense_groups.size());
+                for (size_t attn = 0; attn < n; ++attn) {
+                    const int gid = dense_groups[attn];
+                    if (gid < 0) {
+                        continue;
+                    }
+                    RTP_LLM_CHECK_WITH_INFO(
+                        gid < group_num,
+                        "KVCacheResource::initGroups: invalid group id %d for layer %d region_name %zu (group_num=%d)",
+                        gid,
+                        layer,
+                        attn,
+                        group_num);
+                    attn_blocks[attn] = group_block_ids[static_cast<size_t>(gid)];
+                }
+            } else {
+                attn_blocks[static_cast<size_t>(KVCacheRegionName::DEFAULT)] =
+                    layer_block_ids[static_cast<size_t>(layer)];
+            }
         }
     }
 }
@@ -159,14 +213,32 @@ const BlockIndicesType& KVCacheResource::blocks(int group_id) const {
     return group_block_ids[group_id]->blocks();
 }
 
+const BlockIndicesType& KVCacheResource::blocks(int layer_id, KVCacheRegionName region_name) const {
+    return mutableBlockIds(layer_id, region_name).blocks();
+}
+
 const BlockIndicesType& KVCacheResource::kernelBlocks(int group_id) const {
     RTP_LLM_CHECK(group_block_ids.size() > static_cast<size_t>(group_id));
     return group_block_ids[group_id]->kernelBlocks();
 }
 
+const BlockIndicesType& KVCacheResource::kernelBlocks(int layer_id, KVCacheRegionName region_name) const {
+    return mutableBlockIds(layer_id, region_name).kernelBlocks();
+}
+
 BlockIds& KVCacheResource::mutableBlockIds(int group_id) const {
     RTP_LLM_CHECK(group_block_ids.size() > static_cast<size_t>(group_id));
     return *group_block_ids[group_id];
+}
+
+BlockIds& KVCacheResource::mutableBlockIds(int layer_id, KVCacheRegionName region_name) const {
+    const auto attn_id = static_cast<size_t>(region_name);
+    RTP_LLM_CHECK(static_cast<size_t>(layer_id) < layer_region_block_ids.size());
+    RTP_LLM_CHECK(attn_id < layer_region_block_ids[static_cast<size_t>(layer_id)].size());
+    auto block_ids = layer_region_block_ids[static_cast<size_t>(layer_id)][attn_id];
+    RTP_LLM_CHECK_WITH_INFO(
+        block_ids != nullptr, "KVCacheResource: missing block ids for layer %d region_name %zu", layer_id, attn_id);
+    return *block_ids;
 }
 
 int KVCacheResource::groupNums() const {
@@ -185,12 +257,88 @@ const LayerBlockIds& KVCacheResource::layerBlocks() const {
     return layer_block_ids;
 }
 
+const LayerAttnBlockIds& KVCacheResource::layerAttnBlocks() const {
+    return layer_region_block_ids;
+}
+
+int KVCacheResource::groupId(int layer_id, KVCacheRegionName region_name) const {
+    const auto attn_id = static_cast<size_t>(region_name);
+    RTP_LLM_CHECK(static_cast<size_t>(layer_id) < layer_region_block_ids.size());
+    RTP_LLM_CHECK(attn_id < layer_region_block_ids[static_cast<size_t>(layer_id)].size());
+    const auto& block_ids = layer_region_block_ids[static_cast<size_t>(layer_id)][attn_id];
+    if (!block_ids) {
+        return -1;
+    }
+    for (size_t gid = 0; gid < group_block_ids.size(); ++gid) {
+        if (group_block_ids[gid] == block_ids) {
+            return static_cast<int>(gid);
+        }
+    }
+    return -1;
+}
+
 CacheKeysType& KVCacheResource::cacheKeys() {
     return cache_keys;
 }
 
 const CacheKeysType& KVCacheResource::cacheKeys() const {
     return cache_keys;
+}
+
+void KVCacheResource::setCacheKeys(const CacheKeysType& keys) {
+    cache_keys = keys;
+    cache_keys_are_cp_canonical_ = false;
+    rebuildLinearBlockDependencies();
+}
+
+void KVCacheResource::setCacheKeys(CacheKeysType&& keys) {
+    cache_keys = std::move(keys);
+    cache_keys_are_cp_canonical_ = false;
+    rebuildLinearBlockDependencies();
+}
+
+bool KVCacheResource::cacheKeysAreCpCanonical() const {
+    return cache_keys_are_cp_canonical_;
+}
+
+void KVCacheResource::setCacheKeysAreCpCanonical(bool cache_keys_are_cp_canonical) {
+    cache_keys_are_cp_canonical_ = cache_keys_are_cp_canonical;
+}
+
+BlockDependenciesType& KVCacheResource::blockDependencies() {
+    return block_dependencies;
+}
+
+const BlockDependenciesType& KVCacheResource::blockDependencies() const {
+    return block_dependencies;
+}
+
+void KVCacheResource::setBlockDependencies(const BlockDependenciesType& dependencies) {
+    block_dependencies = dependencies;
+}
+
+void KVCacheResource::setBlockDependencies(BlockDependenciesType&& dependencies) {
+    block_dependencies = std::move(dependencies);
+}
+
+void KVCacheResource::rebuildLinearBlockDependencies() {
+    block_dependencies.clear();
+    block_dependencies.reserve(cache_keys.size());
+    for (size_t i = 0; i < cache_keys.size(); ++i) {
+        BlockDependency dependency;
+        dependency.ordinal = static_cast<uint32_t>(i);
+        if (i > 0) {
+            dependency.has_parent = true;
+            dependency.parent_key = cache_keys[i - 1];
+        }
+        block_dependencies.push_back(dependency);
+    }
+}
+
+void KVCacheResource::ensureLinearBlockDependencies() {
+    if (block_dependencies.size() != cache_keys.size()) {
+        rebuildLinearBlockDependencies();
+    }
 }
 
 size_t KVCacheResource::reuseBlockNum() const {

@@ -42,6 +42,7 @@ private:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;
     int          getNeedBlocks(const MallocInfo& malloc_info) const override;
+    void         checkCPShardedMallocResult(const MallocInfo& malloc_info) const override;
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
 
 private:

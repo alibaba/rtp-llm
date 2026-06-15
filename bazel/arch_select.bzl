@@ -1,0 +1,1 @@
+../stub_source/bazel/arch_select.bzl

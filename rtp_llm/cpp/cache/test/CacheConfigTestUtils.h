@@ -4,11 +4,143 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::test {
+
+
+inline KVCacheSpecPtr makeDsv4Spec(const std::string& tag,
+                                    const std::string& kind,
+                                    uint32_t           entry_elems,
+                                    DataType           dtype,
+                                    uint32_t           compression_ratio = 1) {
+    KVCacheSpecPtr spec;
+    if (kind == "compressed_kv") {
+        auto kv_spec               = std::make_shared<DSV4KVSpec>();
+        kv_spec->entry_elems       = entry_elems;
+        kv_spec->compression_ratio = compression_ratio;
+        kv_spec->store_dtype       = dtype;
+        spec                       = kv_spec;
+    } else {
+        auto state_spec        = std::make_shared<DSV4StateSpec>();
+        state_spec->state_dim  = entry_elems;
+        state_spec->store_dtype = dtype;
+        spec                   = state_spec;
+    }
+    spec->tag                = tag;
+    spec->dtype              = dtype;
+    return spec;
+}
+
+inline void setDefaultKvCacheSpec(ModelConfig& model_config) {
+    std::vector<int> layers;
+    layers.reserve(static_cast<size_t>(model_config.num_layers));
+    for (int i = 0; i < static_cast<int>(model_config.num_layers); ++i) {
+        layers.push_back(i);
+    }
+
+    KVCacheSpecPtr spec;
+    if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
+        auto mla_spec           = std::make_shared<MLAKVCacheSpec>();
+        mla_spec->type          = KVCacheSpecType::MultiHeadLatentAttention;
+        mla_spec->kv_lora_rank  = static_cast<uint32_t>(model_config.attn_config.kv_lora_rank);
+        mla_spec->rope_head_dim = static_cast<uint32_t>(model_config.attn_config.rope_head_dim);
+        spec                    = mla_spec;
+    } else {
+        auto mha_spec            = std::make_shared<MHAKVCacheSpec>();
+        mha_spec->type           = KVCacheSpecType::MultiHeadAttention;
+        mha_spec->size_per_head  = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+        spec                     = mha_spec;
+    }
+    spec->tag                = "default";
+    spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    model_config.kv_cache_specs.clear();
+    for (int layer_id : layers) {
+        model_config.kv_cache_specs[static_cast<int64_t>(layer_id)] = {spec};
+    }
+}
+
+inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
+    std::vector<int> full_layers;
+    std::vector<int> linear_layers;
+    const auto&      types = model_config.hybrid_attention_config.hybrid_attention_types;
+    RTP_LLM_CHECK_WITH_INFO(types.size() == static_cast<size_t>(model_config.num_layers),
+                            "hybrid_attention_types size %zu != num_layers %ld",
+                            types.size(),
+                            model_config.num_layers);
+    for (int i = 0; i < static_cast<int>(model_config.num_layers); ++i) {
+        if (types[static_cast<size_t>(i)] == HybridAttentionType::LINEAR) {
+            linear_layers.push_back(i);
+        } else {
+            full_layers.push_back(i);
+        }
+    }
+
+    auto full_spec                = std::make_shared<MHAKVCacheSpec>();
+    full_spec->tag                = "full";
+    full_spec->type               = KVCacheSpecType::MultiHeadAttention;
+    full_spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    full_spec->size_per_head      = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+
+    const auto& linear_config           = model_config.linear_attention_config;
+    auto        linear_spec             = std::make_shared<LinearKVCacheSpec>();
+    linear_spec->tag                    = "linear";
+    linear_spec->type                   = KVCacheSpecType::LinearAttention;
+    linear_spec->seq_size_per_block     = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    linear_spec->head_k_dim             = static_cast<uint32_t>(linear_config.linear_key_head_dim);
+    linear_spec->head_v_dim             = static_cast<uint32_t>(linear_config.linear_value_head_dim);
+    linear_spec->conv_kernel_dim        = static_cast<uint32_t>(linear_config.linear_conv_kernel_dim);
+    linear_spec->ssm_state_dtype        = linear_config.ssm_state_dtype;
+    linear_spec->conv_state_dtype       = linear_config.conv_state_dtype;
+    model_config.kv_cache_specs.clear();
+    for (int layer_id : full_layers) {
+        model_config.kv_cache_specs[static_cast<int64_t>(layer_id)] = {full_spec};
+    }
+    for (int layer_id : linear_layers) {
+        model_config.kv_cache_specs[static_cast<int64_t>(layer_id)] = {linear_spec};
+    }
+}
+
+inline void setDsv4KvCacheSpecs(ModelConfig& model_config) {
+    const int layer_num = static_cast<int>(model_config.num_layers);
+
+    const bool     fp8_kv              = model_config.attn_config.kv_cache_dtype == KvCacheDataType::FP8;
+    const uint32_t kv_entry_elems      = fp8_kv ? 584 : static_cast<uint32_t>(model_config.attn_config.size_per_head) * 2;
+    const uint32_t indexer_entry_elems = fp8_kv ? 132 : static_cast<uint32_t>(model_config.attn_config.indexer_head_dim) * 2;
+    const uint32_t head_dim            = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+    const uint32_t indexer_head_dim    = static_cast<uint32_t>(model_config.attn_config.indexer_head_dim);
+
+    auto csa_kv = makeDsv4Spec("csa_kv", "compressed_kv", kv_entry_elems, DataType::TYPE_UINT8, 4);
+    auto hca_kv = makeDsv4Spec("hca_kv", "compressed_kv", kv_entry_elems, DataType::TYPE_UINT8, 128);
+    auto indexer_kv = makeDsv4Spec("indexer_kv", "compressed_kv", indexer_entry_elems, DataType::TYPE_UINT8, 4);
+    auto indexer_state = makeDsv4Spec("indexer_state", "fixed_state", 4 * indexer_head_dim, DataType::TYPE_FP32);
+    auto csa_state = makeDsv4Spec("csa_state", "fixed_state", 4 * head_dim, DataType::TYPE_FP32);
+    auto hca_state = makeDsv4Spec("hca_state", "fixed_state", 2 * head_dim, DataType::TYPE_FP32);
+    auto swa_kv = makeDsv4Spec("swa_kv", "sliding_window_kv", kv_entry_elems, DataType::TYPE_UINT8);
+
+    model_config.kv_cache_specs.clear();
+    for (int i = 0; i < layer_num; ++i) {
+        const int ratio = i < static_cast<int>(model_config.attn_config.layer_compress_ratios.size()) ?
+                              model_config.attn_config.layer_compress_ratios[static_cast<size_t>(i)] :
+                              0;
+        if (ratio == 4) {
+            model_config.kv_cache_specs[i] = {csa_kv, indexer_kv, indexer_state, csa_state, swa_kv};
+        } else if (ratio == 128) {
+            model_config.kv_cache_specs[i] = {hca_kv, hca_state, swa_kv};
+        } else {
+            model_config.kv_cache_specs[i] = {swa_kv};
+        }
+    }
+}
 
 // A tiny helper for unit tests to construct a minimal MultiHeadAttention KV cache config.
 //
@@ -33,7 +165,6 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     spec->type               = KVCacheSpecType::MultiHeadAttention;
     spec->dtype              = dtype;
     spec->seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
-    spec->layer_num          = static_cast<uint32_t>(layer_num);
     spec->local_head_num_kv  = local_head_num_kv;
     spec->size_per_head      = size_per_head;
     config.cache_specs.push_back(spec);
@@ -45,10 +176,17 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     config.layer_ids.push_back(layer_ids);
     config.global_layer_ids.push_back(layer_ids);
     config.layer_to_group_id.assign(layer_num, 0);
-    config.layer_attn_types.assign(layer_num, CacheGroupType::FULL);
+    config.layer_to_group_ids.assign(static_cast<size_t>(layer_num), std::vector<int>{0});
+    config.layer_region_to_group_id.assign(
+        static_cast<size_t>(layer_num), std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
+    for (int i = 0; i < layer_num; ++i) {
+        config.layer_region_to_group_id[static_cast<size_t>(i)][static_cast<size_t>(KVCacheRegionName::DEFAULT)] = 0;
+    }
+    config.group_region_names.push_back(KVCacheRegionName::DEFAULT);
+    config.layer_group_types.assign(layer_num, CacheGroupType::FULL);
 
     config.kv_block_stride_bytes = spec->block_size_bytes();
-    config.kv_block_size_bytes   = static_cast<size_t>(spec->block_size_bytes() * spec->layer_num);
+    config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * spec->block_size_bytes();
 
     if (dtype == rtp_llm::TYPE_INT8 || dtype == rtp_llm::TYPE_FP8_E4M3) {
         const size_t kv_scale_kv_stride       = static_cast<size_t>(spec->local_head_num_kv) * tokens_per_block;
@@ -107,7 +245,6 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     auto linear_spec                = std::make_shared<LinearKVCacheSpec>();
     linear_spec->type               = KVCacheSpecType::LinearAttention;
     linear_spec->dtype              = dtype;
-    linear_spec->layer_num          = static_cast<uint32_t>(config.group_layer_num);
     linear_spec->local_num_k_heads  = 1;
     linear_spec->local_num_v_heads  = 1;
     linear_spec->head_k_dim         = 1;
@@ -120,7 +257,6 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     full_spec->type               = KVCacheSpecType::MultiHeadAttention;
     full_spec->dtype              = dtype;
     full_spec->seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
-    full_spec->layer_num          = static_cast<uint32_t>(config.group_layer_num);
     full_spec->local_head_num_kv  = local_head_num_kv;
     full_spec->size_per_head      = size_per_head;
 
@@ -132,7 +268,10 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     config.group_types.clear();
 
     config.layer_to_group_id.assign(static_cast<size_t>(layer_num), 0);
-    config.layer_attn_types.assign(static_cast<size_t>(layer_num), CacheGroupType::FULL);
+    config.layer_to_group_ids.assign(static_cast<size_t>(layer_num), {});
+    config.layer_region_to_group_id.assign(
+        static_cast<size_t>(layer_num), std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1));
+    config.layer_group_types.assign(static_cast<size_t>(layer_num), CacheGroupType::FULL);
 
     // Build groups: gid=0 linear, gid>=1 full.
     for (int gid = 0; gid < group_cnt; ++gid) {
@@ -142,7 +281,10 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
             const int layer_id = gid * config.group_layer_num + local;
             group_layers.push_back(layer_id);
             config.layer_to_group_id[static_cast<size_t>(layer_id)] = gid;
-            config.layer_attn_types[static_cast<size_t>(layer_id)] =
+            config.layer_to_group_ids[static_cast<size_t>(layer_id)] = {gid};
+            config.layer_region_to_group_id[static_cast<size_t>(layer_id)]
+                                         [static_cast<size_t>(KVCacheRegionName::DEFAULT)] = gid;
+            config.layer_group_types[static_cast<size_t>(layer_id)] =
                 (gid == 0) ? CacheGroupType::LINEAR : CacheGroupType::FULL;
         }
         config.layer_ids.push_back(group_layers);
@@ -151,10 +293,12 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
         if (gid == 0) {
             config.cache_specs.push_back(linear_spec);
             config.group_types.push_back(CacheGroupType::LINEAR);
+            config.group_region_names.push_back(KVCacheRegionName::DEFAULT);
             config.linear_groups.push_back(group_layers);
         } else {
             config.cache_specs.push_back(full_spec);
             config.group_types.push_back(CacheGroupType::FULL);
+            config.group_region_names.push_back(KVCacheRegionName::DEFAULT);
             config.full_groups.push_back(group_layers);
         }
     }

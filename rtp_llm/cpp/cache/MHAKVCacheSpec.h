@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <numeric>
 #include <sstream>
 #include <string>
 
@@ -18,7 +19,6 @@ struct MHAKVCacheSpec: public KVCacheSpec {
 
     MHAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config) {
         type              = KVCacheSpecType::MultiHeadAttention;
-        layer_num         = 1;  // Will be set by caller
 
         // TODO(xinfei.sxf): 这里的head_num_kv分配逻辑需要和ModelConfig::getAttentionConfigs里保持一致，目前这里还是单独计算的
         local_head_num_kv = static_cast<uint32_t>(
@@ -124,6 +124,10 @@ struct MHAKVCacheSpec: public KVCacheSpec {
         const size_t k_partition_sz  = static_cast<size_t>(head_cnt) * k_partition_bytes_per_head;
         const size_t v_partition_sz  = static_cast<size_t>(head_cnt) * v_partition_bytes_per_head;
         return {k_partition_off, k_partition_sz, v_partition_off, v_partition_sz};
+    }
+
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<MHAKVCacheSpec>(*this);
     }
 
     std::string debugString(size_t indent = 0) const override {
