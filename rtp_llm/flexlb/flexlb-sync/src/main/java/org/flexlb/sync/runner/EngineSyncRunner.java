@@ -87,87 +87,28 @@ public class EngineSyncRunner implements Runnable {
             Set<String> latestValidIpPorts = latestEngineWorkerList.stream()
                     .map(WorkerHost::getIpPort)
                     .collect(Collectors.toSet());
+            // Discovery presence is the only liveness signal for embedding engines (no gRPC
+            // probe), so a worker missing from the list stops being routable immediately. This
+            // runs before the empty-list short-circuit below: an empty list is exactly the case
+            // where every previously-alive embedding worker has to be marked dead. The contract
+            // holds because getEngineWorkerList throws on discovery failure, so an empty list
+            // here always means a genuinely empty fleet.
             if (engineType == EngineType.EMBEDDING) {
-                // Discovery presence is the only liveness signal for embedding engines
-                // (no gRPC probe): a worker missing from the list stops being routable
-                // immediately, while physical removal below stays thresholded. Trusting
-                // the list like this requires getEngineWorkerList to throw on discovery
-                // failure — an empty list here always means a genuinely empty fleet.
-                for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
-                    if (!latestValidIpPorts.contains(entry.getKey()) && entry.getValue().isAlive()) {
-                        entry.getValue().setAlive(false);
-                        logger.info("[dead] embedding worker dropped by discovery, model={}, role={}, ipPort={}",
-                                modelName, roleType, entry.getKey());
-                    }
-                }
+                markDeadFromDiscovery(latestValidIpPorts);
             }
             if (CollectionUtils.isEmpty(latestEngineWorkerList)) {
                 logger.error("get engine worker list is empty, cost={}μs, model={}", System.nanoTime() / 1000 - startTimeInUs, modelName);
                 return;
             }
-            Map<String/*ip*/, WorkerStatus> cachedWorkerStatuses = workerStatusMap;
-            // Log if latest worker count differs from cached worker count
-            if (cachedWorkerStatuses.size() != latestEngineWorkerList.size()) {
+            if (workerStatusMap.size() != latestEngineWorkerList.size()) {
                 logger.info("[update] engine ip changes, model={}, role={}, before={}, after={}",
-                        modelName, roleType, cachedWorkerStatuses.size(), latestEngineWorkerList.size());
+                        modelName, roleType, workerStatusMap.size(), latestEngineWorkerList.size());
             }
-
-            // Remove if not in latest engine list
-            logger.info("Current cached worker size: {}, latest worker list size: {}", cachedWorkerStatuses.size(), latestEngineWorkerList.size());
-            for (Map.Entry<String, WorkerStatus> entry: cachedWorkerStatuses.entrySet()) {
-                WorkerStatus workerStatus = entry.getValue();
-                String ipPort = entry.getKey();
-                if (!latestValidIpPorts.contains(ipPort)) {
-                    long lastTime = workerStatus.getStatusLastUpdateTime().get();
-                    long actualIntervalUs = workerStatus.getStatusUpdateIntervalUs().get();
-                    // Use max(3 * actual sync interval, 1s) as removal threshold to tolerate transient service discovery flaps
-                    long removalThresholdUs = Math.max(3 * actualIntervalUs, 1_000_000L);
-                    if (System.nanoTime() / 1000 - lastTime > removalThresholdUs) {
-                        cachedWorkerStatuses.remove(ipPort);
-                        logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
-                    }
-                }
-            }
-            if (latestEngineWorkerList.isEmpty()) {
-                logger.warn("latestEngineWorkerList is empty, role: {}", roleType);
-                return;
-            } else {
-                logger.info("latestEngineWorkerList for role: {}, workers:{}", roleType, latestEngineWorkerList.size());
-            }
+            removeStaleWorkers(latestValidIpPorts);
 
             logger.info("Submitting status check tasks for {} workers", latestEngineWorkerList.size());
             for (WorkerHost host : latestEngineWorkerList) {
-                String workerIpPort = host.getIpPort();
-                String site = host.getSite();
-
-                WorkerStatus workerStatus = getOrCreateWorkerStatus(cachedWorkerStatuses, workerIpPort);
-
-                if (engineType == EngineType.EMBEDDING) {
-                    markAliveFromDiscovery(workerStatus, host);
-                    continue;
-                }
-
-                if (workerStatus.getStatusCheckInProgress().compareAndSet(false, true)) {
-                    logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
-                    GrpcWorkerStatusRunner grpcWorkerStatusRunner
-                            = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
-                            workerStatus, engineHealthReporter, engineGrpcService,
-                            syncRequestTimeoutMs);
-                    statusCheckExecutor.submit(grpcWorkerStatusRunner);
-                } else {
-                    logger.info("Skip status check for worker: {}, previous request in progress", workerIpPort);
-                }
-
-                if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
-                    logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
-                    GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
-                            = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
-                            workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
-                            syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
-                    statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
-                } else {
-                    logger.info("Skip cache check for worker: {}, previous request in progress", workerIpPort);
-                }
+                submitStatusChecks(host);
             }
             logger.info("Finished submitting status check tasks for model: {}, role: {}, worker count: {}", modelName,
                     roleType, latestEngineWorkerList.size());
@@ -181,38 +122,108 @@ public class EngineSyncRunner implements Runnable {
             logger.error("sync engine workers status exception, modelName:{}, error:{}", modelName, e.getMessage(), e);
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, null, null);
         } finally {
-            logger.debug("Entering finally block for model: {}", modelName);
-            int size = workerStatusMap.size();
-            logger.debug("Worker status map size: {}", size);
+            reportLatencyVariance();
+        }
+    }
 
-            if (size >= 2 && engineType != EngineType.EMBEDDING) {
-                double sumStepLatency = 0.0;
-                double sumRunningQueryTime = 0.0;
-                for (WorkerStatus workerStatus : workerStatusMap.values()) {
-                    sumStepLatency += workerStatus.getStepLatencyMs();
-                    sumRunningQueryTime += workerStatus.getRunningQueueTime().get();
-                }
-                double meanStepLatency = sumStepLatency / size;
-                double meanRunningQueryLen = sumRunningQueryTime / size;
-
-                // Calculate variance (sample variance using Bessel correction)
-                double sumStepLatencyOfSquaredDiffs = 0.0;
-                double sumRunningQueryLenOfSquaredDiffs = 0.0;
-                for (WorkerStatus workerStatus : workerStatusMap.values()) {
-                    double diff = workerStatus.getStepLatencyMs() - meanStepLatency;
-                    double diff2 = workerStatus.getRunningQueueTime().get() - meanRunningQueryLen;
-                    sumStepLatencyOfSquaredDiffs += diff * diff;
-                    sumRunningQueryLenOfSquaredDiffs += diff2 * diff2;
-                }
-                double variance = sumStepLatencyOfSquaredDiffs / (size - 1); // Sample variance
-                double variance2 = sumRunningQueryLenOfSquaredDiffs / (size - 1);
-
-                engineHealthReporter.reportLatencyMetric(modelName, this.roleType.toString(), variance, variance2);
-                logger.info("EngineSyncRunner finished for model: {}, role: {}", modelName, roleType);
-            } else {
-                logger.debug("Less than 2 workers, skipping variance calculation for model: {}", modelName);
+    /**
+     * Mark workers that vanished from the latest discovery list as not-routable. For embedding
+     * engines discovery presence is the only liveness signal, so this is how a dropped worker
+     * stops receiving traffic; physical removal is handled separately by {@link #removeStaleWorkers}.
+     */
+    private void markDeadFromDiscovery(Set<String> latestValidIpPorts) {
+        for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
+            if (!latestValidIpPorts.contains(entry.getKey()) && entry.getValue().isAlive()) {
+                entry.getValue().setAlive(false);
+                logger.info("[dead] embedding worker dropped by discovery, model={}, role={}, ipPort={}",
+                        modelName, roleType, entry.getKey());
             }
         }
+    }
+
+    /**
+     * Drop workers no longer in the discovery list once they have been gone past the removal
+     * threshold (max(3 * actual sync interval, 1s)), tolerating transient discovery flaps.
+     */
+    private void removeStaleWorkers(Set<String> latestValidIpPorts) {
+        for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
+            String ipPort = entry.getKey();
+            if (latestValidIpPorts.contains(ipPort)) {
+                continue;
+            }
+            WorkerStatus workerStatus = entry.getValue();
+            long lastTime = workerStatus.getStatusLastUpdateTime().get();
+            long actualIntervalUs = workerStatus.getStatusUpdateIntervalUs().get();
+            long removalThresholdUs = Math.max(3 * actualIntervalUs, 1_000_000L);
+            if (System.nanoTime() / 1000 - lastTime > removalThresholdUs) {
+                workerStatusMap.remove(ipPort);
+                logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
+            }
+        }
+    }
+
+    private void submitStatusChecks(WorkerHost host) {
+        String workerIpPort = host.getIpPort();
+        String site = host.getSite();
+        WorkerStatus workerStatus = getOrCreateWorkerStatus(workerStatusMap, workerIpPort);
+
+        if (engineType == EngineType.EMBEDDING) {
+            markAliveFromDiscovery(workerStatus, host);
+            return;
+        }
+
+        if (workerStatus.getStatusCheckInProgress().compareAndSet(false, true)) {
+            logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
+            GrpcWorkerStatusRunner grpcWorkerStatusRunner
+                    = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
+                    workerStatus, engineHealthReporter, engineGrpcService,
+                    syncRequestTimeoutMs);
+            statusCheckExecutor.submit(grpcWorkerStatusRunner);
+        } else {
+            logger.info("Skip status check for worker: {}, previous request in progress", workerIpPort);
+        }
+
+        if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
+            logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
+            GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
+                    = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
+                    workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
+                    syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
+            statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
+        } else {
+            logger.info("Skip cache check for worker: {}, previous request in progress", workerIpPort);
+        }
+    }
+
+    private void reportLatencyVariance() {
+        int size = workerStatusMap.size();
+        if (size < 2 || engineType == EngineType.EMBEDDING) {
+            logger.debug("Less than 2 workers, skipping variance calculation for model: {}", modelName);
+            return;
+        }
+        double sumStepLatency = 0.0;
+        double sumRunningQueryTime = 0.0;
+        for (WorkerStatus workerStatus : workerStatusMap.values()) {
+            sumStepLatency += workerStatus.getStepLatencyMs();
+            sumRunningQueryTime += workerStatus.getRunningQueueTime().get();
+        }
+        double meanStepLatency = sumStepLatency / size;
+        double meanRunningQueryLen = sumRunningQueryTime / size;
+
+        // Sample variance (Bessel correction)
+        double sumStepLatencyOfSquaredDiffs = 0.0;
+        double sumRunningQueryLenOfSquaredDiffs = 0.0;
+        for (WorkerStatus workerStatus : workerStatusMap.values()) {
+            double diff = workerStatus.getStepLatencyMs() - meanStepLatency;
+            double diff2 = workerStatus.getRunningQueueTime().get() - meanRunningQueryLen;
+            sumStepLatencyOfSquaredDiffs += diff * diff;
+            sumRunningQueryLenOfSquaredDiffs += diff2 * diff2;
+        }
+        double variance = sumStepLatencyOfSquaredDiffs / (size - 1);
+        double variance2 = sumRunningQueryLenOfSquaredDiffs / (size - 1);
+
+        engineHealthReporter.reportLatencyMetric(modelName, this.roleType.toString(), variance, variance2);
+        logger.info("EngineSyncRunner finished for model: {}, role: {}", modelName, roleType);
     }
 
     /**

@@ -48,6 +48,6 @@ public class BatchScheduleResponse {
     }
 
     public static BatchScheduleResponse error(StrategyErrorType errorType) {
-        return error(errorType, errorType.getErrorMsg());
+        return error(errorType, null);
     }
 }

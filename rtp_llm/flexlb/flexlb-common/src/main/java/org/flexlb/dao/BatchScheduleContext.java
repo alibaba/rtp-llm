@@ -1,7 +1,6 @@
 package org.flexlb.dao;
 
 import lombok.Data;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 
@@ -19,8 +18,6 @@ import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 public class BatchScheduleContext {
 
     //======================== Basic =======================//
-
-    private FlexlbConfig config;
 
     private BatchScheduleRequest batchRequest;
 

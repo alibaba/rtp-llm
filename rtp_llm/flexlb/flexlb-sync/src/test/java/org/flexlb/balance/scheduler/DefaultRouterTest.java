@@ -128,6 +128,10 @@ class DefaultRouterTest {
 
     @org.junit.jupiter.api.AfterEach
     void tearDown() {
+        // Drop this class's mock strategy registrations so they don't leak into later test
+        // classes sharing the process-wide LoadBalanceStrategyFactory (mirrors setUp and
+        // RoundRobinLoadBalancerTest).
+        LoadBalanceStrategyFactory.resetForTesting();
         // Clear all status maps after each test
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();

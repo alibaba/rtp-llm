@@ -145,10 +145,7 @@ public class DefaultRouter implements Router {
         //     make a multi-role deployment look single-role and get a partial pre-assignment.
         List<RoleType> configuredRoles = modelMetaConfig.getConfiguredRoleTypes();
         if (configuredRoles.size() > 1) {
-            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
-                    "batch_schedule only supports single-role deployments; "
-                    + "multi-stage deployments (disaggregated PD / VL) should use /schedule per request. "
-                    + "Configured roles: " + configuredRoles);
+            return rejectMultiRole("Configured", configuredRoles);
         }
 
         // Role inference: reuse the same data source /schedule uses
@@ -158,10 +155,7 @@ public class DefaultRouter implements Router {
                     "master not ready or MODEL_SERVICE_CONFIG missing");
         }
         if (roleTypes.size() > 1) {
-            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
-                    "batch_schedule only supports single-role deployments; "
-                    + "multi-stage deployments (disaggregated PD / VL) should use /schedule per request. "
-                    + "Detected roles: " + roleTypes);
+            return rejectMultiRole("Detected", roleTypes);
         }
         RoleType roleType = roleTypes.get(0);
 
@@ -180,6 +174,13 @@ public class DefaultRouter implements Router {
         }
 
         return BatchScheduleResponse.success(targets);
+    }
+
+    private static BatchScheduleResponse rejectMultiRole(String kind, List<RoleType> roles) {
+        return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                "batch_schedule only supports single-role deployments; "
+                + "multi-stage deployments (disaggregated PD / VL) should use /schedule per request. "
+                + kind + " roles: " + roles);
     }
 
     /**

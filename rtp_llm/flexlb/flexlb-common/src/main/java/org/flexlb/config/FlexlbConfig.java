@@ -183,10 +183,7 @@ public class FlexlbConfig {
      */
     public LoadBalanceStrategyEnum getStrategyForRoleType(RoleType roleType) {
         switch (roleType) {
-            case PDFUSION -> {
-                return this.loadBalanceStrategy != null ? loadBalanceStrategy : defaultPrimaryStrategy();
-            }
-            case PREFILL -> {
+            case PDFUSION, PREFILL -> {
                 return this.loadBalanceStrategy != null ? loadBalanceStrategy : defaultPrimaryStrategy();
             }
             case DECODE -> {
