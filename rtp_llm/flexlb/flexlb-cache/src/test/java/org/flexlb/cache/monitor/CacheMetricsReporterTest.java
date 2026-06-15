@@ -52,16 +52,16 @@ class CacheMetricsReporterTest {
     }
 
     @Test
-    void should_report_zero_hit_request_as_visible_data_point() {
-        reporter.reportRecentCacheKeyHitMetrics(1800000L, 0L, 3L);
+    void should_report_zero_hit_token_request_as_visible_data_point() {
+        reporter.reportRecentCacheKeyHitMetrics(1800000L, 0L, 300L);
 
         FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", "1800000");
         verify(monitor).report(CACHE_RECENT_KEY_HIT_COUNT, tags, 0L);
-        verify(monitor).report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, 3L);
+        verify(monitor).report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, 300L);
     }
 
     @Test
-    void should_skip_empty_cache_key_request() {
+    void should_skip_empty_token_request() {
         reporter.reportRecentCacheKeyHitMetrics(1800000L, 0L, 0L);
 
         FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", "1800000");
