@@ -482,12 +482,11 @@ class RocmMlaPrefillImpl(_RocmMlaTorchBase):
 
 
 class RocmMlaDecodeImpl(_RocmMlaTorchBase):
-    """Decode MLA via absorb: project q into latent space, attend over paged
-    latent cache, project output back.
+    """Decode MLA via absorb + ``aiter.mla.mla_decode_fwd`` fused kernel.
 
     Single query token per sequence.  Uses the absorb trick (score in latent
-    ``kv_lora_rank`` space rather than decompressing every KV token to
-    per-head dims) which is efficient for the 1-query decode case.
+    ``kv_lora_rank`` space) then delegates the batched paged attention to the
+    aiter ASM kernel — no Python per-sequence loop.
     """
 
     @classmethod
@@ -500,6 +499,75 @@ class RocmMlaDecodeImpl(_RocmMlaTorchBase):
             and not attn_configs.is_sparse
         )
 
+    def _get_decode_plan(
+        self, device: torch.device, dtype: torch.dtype, kv_cache: Optional[LayerKVCache]
+    ) -> Dict[str, object]:
+        block_ids_t = self.attn_inputs.kv_cache_kernel_block_id_host
+        key = ("decode", id(block_ids_t), str(dtype))
+        plan = self._plan_cache.get(key)
+        if plan is None:
+            plan = self._compute_decode_plan(device, dtype, kv_cache, block_ids_t)
+            self._plan_cache[key] = plan
+        return plan
+
+    def _compute_decode_plan(
+        self,
+        device: torch.device,
+        dtype: torch.dtype,
+        kv_cache: Optional[LayerKVCache],
+        block_ids_t: Optional[torch.Tensor],
+    ) -> Dict[str, object]:
+        seq_lengths = self.attn_inputs.sequence_lengths.cpu().tolist()
+        B = len(seq_lengths)
+        ssb = kv_cache.seq_size_per_block
+
+        positions = torch.tensor([s - 1 for s in seq_lengths], dtype=torch.long).to(
+            device
+        )
+        cos, sin = self._rope_cos_sin(positions)
+        cos = cos.to(dtype)
+        sin = sin.to(dtype)
+
+        # Vectorized cache-write indices (no Python loop).
+        pos_t = torch.tensor(seq_lengths, dtype=torch.long, device=device) - 1
+        block_ids = block_ids_t.to(torch.long).to(device)
+        write_blk = block_ids[torch.arange(B, device=device), pos_t // ssb]
+        write_off = pos_t % ssb
+
+        # Page-table metadata for aiter.mla.mla_decode_fwd.
+        qo_indptr = torch.arange(0, B + 1, dtype=torch.int32, device=device)
+
+        num_pages_list: List[int] = []
+        kv_indices_list: List[torch.Tensor] = []
+        kv_last_page_lens_list: List[int] = []
+        for i in range(B):
+            s = seq_lengths[i]
+            n_pages = (s + ssb - 1) // ssb
+            num_pages_list.append(n_pages)
+            kv_indices_list.append(block_ids[i, :n_pages])
+            last_len = s % ssb
+            kv_last_page_lens_list.append(last_len if last_len > 0 else ssb)
+
+        kv_indptr = torch.zeros(B + 1, dtype=torch.int32, device=device)
+        kv_indptr[1:] = torch.tensor(
+            num_pages_list, dtype=torch.int32, device=device
+        ).cumsum(0)
+        kv_indices = torch.cat(kv_indices_list).to(torch.int32)
+        kv_last_page_lens = torch.tensor(
+            kv_last_page_lens_list, dtype=torch.int32, device=device
+        )
+
+        return {
+            "cos": cos,
+            "sin": sin,
+            "write_blk": write_blk,
+            "write_off": write_off,
+            "qo_indptr": qo_indptr,
+            "kv_indptr": kv_indptr,
+            "kv_indices": kv_indices,
+            "kv_last_page_lens": kv_last_page_lens,
+        }
+
     def forward(
         self,
         q: torch.Tensor,
@@ -509,72 +577,54 @@ class RocmMlaDecodeImpl(_RocmMlaTorchBase):
         layer_id: int,
         topk_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # q: [B, H, nope+rope]; compressed_kv: [B, r]; k_pe: [B, rope]
         device = q.device
         H = self.num_heads
         nope = self.qk_nope_head_dim
-        rope = self.qk_rope_head_dim
         r = self.kv_lora_rank
         v_dim = self.v_head_dim
         q_dtype = q.dtype
         B = q.shape[0]
-
-        seq_lengths = self.attn_inputs.sequence_lengths.cpu().tolist()
-        input_lengths = self.attn_inputs.input_lengths.cpu().tolist()
-
-        # For decode, the position of each new token is sequence_length - 1
-        # (not prefix-based like prefill).
-        positions = torch.tensor([s - 1 for s in seq_lengths], dtype=torch.long).to(
-            device
-        )
-        cos, sin = self._rope_cos_sin(positions)
-        cos = cos.to(q_dtype)
-        sin = sin.to(q_dtype)
-
-        q_nope = q[:, :, :nope]  # [B, H, nope]
-        q_pe = _apply_neox_rope(q[:, :, nope:], cos, sin).float()  # [B, H, rope]
-        k_pe_cur = _apply_neox_rope(k_pe, cos, sin)  # [B, rope]
-
-        base = kv_cache.kv_cache_base
         ssb = kv_cache.seq_size_per_block
-        block_ids_t = self.attn_inputs.kv_cache_kernel_block_id_host
 
-        # Write current token to the paged cache.
-        block_ids = block_ids_t.to(torch.long).to(device)
+        plan = self._get_decode_plan(device, q_dtype, kv_cache)
+
+        q_nope = q[:, :, :nope]
+        q_pe = _apply_neox_rope(q[:, :, nope:], plan["cos"], plan["sin"])
+        k_pe_cur = _apply_neox_rope(k_pe, plan["cos"], plan["sin"])
+
+        # Vectorized cache write.
+        base = kv_cache.kv_cache_base
         latent_cur = torch.cat([compressed_kv, k_pe_cur], dim=-1).to(base.dtype)
-        for i in range(B):
-            pos = seq_lengths[i] - 1
-            blk = block_ids[i, pos // ssb]
-            off = pos % ssb
-            base[blk, off, :] = latent_cur[i]
+        base[plan["write_blk"], plan["write_off"], :] = latent_cur
 
         # Absorb: project q_nope into latent space.
-        kc = self.weights[layer_id].get(W.mla_kc, None)  # [H, nope, r]
-        vc = self.weights[layer_id].get(W.mla_vc, None)  # [H, r, v]
-        q_absorbed = torch.bmm(q_nope.float().transpose(0, 1), kc.float()).transpose(
-            0, 1
-        )  # [B, H, r]
+        kc = self.weights[layer_id].get(W.mla_kc, None)
+        vc = self.weights[layer_id].get(W.mla_vc, None)
+        q_absorbed = torch.bmm(q_nope.to(kc.dtype).transpose(0, 1), kc).transpose(0, 1)
 
-        # Per-sequence attention over the paged latent cache.
-        outputs = torch.zeros(B, H, v_dim, dtype=torch.float32, device=device)
-        for i in range(B):
-            s = seq_lengths[i]
-            pos_all = torch.arange(s, device=device)
-            blk_ids = block_ids[i, pos_all // ssb]
-            blk_off = pos_all % ssb
-            kv_all = base[blk_ids, blk_off, :].float()  # [s, r+rope]
-            ck = kv_all[:, :r]  # [s, r]
-            kpe = kv_all[:, r:]  # [s, rope]
+        # Concatenate absorbed q and roped q_pe for the fused kernel.
+        q_fused = torch.cat([q_absorbed, q_pe.to(q_absorbed.dtype)], dim=-1)
+        o = torch.empty(B, H, r, dtype=q_fused.dtype, device=device)
 
-            # score = q_absorbed @ ck^T + q_pe @ kpe^T, per head
-            score_nope = torch.einsum("hd,sd->hs", q_absorbed[i], ck)  # [H, s]
-            score_rope = torch.einsum("hd,sd->hs", q_pe[i], kpe)  # [H, s]
-            score = (score_nope + score_rope) * self.softmax_scale
-            w = torch.softmax(score, dim=-1)  # [H, s]
+        # Reshape kv_cache_base to [num_blocks, page_size, 1, head_dim] for aiter.
+        kv_head_dim = r + self.qk_rope_head_dim
+        kv_buffer = base.view(-1, ssb, 1, kv_head_dim)
 
-            # output in latent space, then project via vc
-            out_latent = torch.einsum("hs,sd->hd", w, ck)  # [H, r]
-            out_v = torch.bmm(out_latent.unsqueeze(1), vc.float()).squeeze(1)  # [H, v]
-            outputs[i] = out_v
+        aiter.mla.mla_decode_fwd(
+            q_fused,
+            kv_buffer,
+            o,
+            plan["qo_indptr"],
+            plan["kv_indptr"],
+            plan["kv_indices"],
+            plan["kv_last_page_lens"],
+            max_seqlen_q=1,
+            page_size=ssb,
+            nhead_kv=1,
+            sm_scale=self.softmax_scale,
+        )
 
-        return outputs.reshape(B, H * v_dim).to(q_dtype)
+        # Project from latent space to value space.
+        attn_bmm_output = torch.bmm(o.transpose(0, 1), vc).transpose(0, 1)
+
+        return attn_bmm_output.reshape(B, H * v_dim).to(q_dtype)
