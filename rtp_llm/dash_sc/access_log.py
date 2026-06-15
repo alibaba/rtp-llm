@@ -46,6 +46,7 @@ from rtp_llm.dash_sc.proxy.access_record import (
     rpc_code,
     rpc_details,
 )
+from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 from rtp_llm.dash_sc.structural_tag import maybe_force_at_least_one_on_request_proto
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 
@@ -281,12 +282,16 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         rank_id: Optional[int] = None,
         server_id: Optional[int] = None,
         raw_mode: bool = False,
+        repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
     ) -> None:
         self._logger = logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME)
         self._query_logger = logging.getLogger(DASH_SC_GRPC_QUERY_LOGGER_NAME)
         self._rank_id = rank_id
         self._server_id = server_id
         self._raw_mode = raw_mode
+        self._repetition_monitor_config = (
+            repetition_monitor_config or RequestRepetitionMonitorConfig()
+        )
         self._base_tags: dict[str, str] = {
             "protocol": _PROTOCOL_TAG,
             "rank_id": str(rank_id) if rank_id is not None else "",
@@ -356,6 +361,28 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         kmonitor.report(
             GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC, access_record.output_len, tags
         )
+        access_record.check_repetition()
+        monitor = access_record.repetition_monitor
+        if monitor.tool_call_loop_check_ms is not None:
+            kmonitor.report(
+                GaugeMetrics.TOOL_CALL_LOOP_CHECK_RT_METRIC,
+                monitor.tool_call_loop_check_ms,
+                tags,
+            )
+        loop = monitor.tool_call_loop_result
+        if loop is not None and loop.hit:
+            loop_tags = self._tags(access_record.method, action="metric")
+            kmonitor.report(AccMetrics.TOOL_CALL_LOOP_QPS_METRIC, 1, loop_tags)
+            kmonitor.report(
+                GaugeMetrics.TOOL_CALL_LOOP_REPEAT_COUNT_METRIC,
+                loop.repeat_count,
+                loop_tags,
+            )
+            kmonitor.report(
+                GaugeMetrics.TOOL_CALL_LOOP_CURRENT_SPAN_TOKENS_METRIC,
+                loop.current_span_tokens,
+                loop_tags,
+            )
         if status == "OK":
             kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1, tags)
         elif status == "CANCELLED":
@@ -418,6 +445,7 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
             raw_mode=self._raw_mode,
             upstream_request_id=up_val,
             upstream_request_id_key=up_key,
+            repetition_monitor_config=self._repetition_monitor_config,
         )
         access_record.attach_to_context(context)
         # Emit arrival QPS at RPC entry — once per RPC, symmetric with
@@ -516,6 +544,25 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         record = access_record.build_record(
             self._server_id, self._rank_id, end_ts=end_ts
         )
+        if record.get("repetition_alert"):
+            logging.warning(
+                "[DashScGrpc] repetition detected request_id=%s status=%s "
+                "output_len=%s reason=%s repetition_token_len=%s "
+                "tool_call_loop_token_len=%s primary_source=%s "
+                "repetition_monitor_impl=%s repetition_monitor_available=%s "
+                "repetition_monitor_unavailable_reason=%s tool_call_loop_error=%s",
+                record.get("request_id"),
+                record.get("status"),
+                record.get("output_token_len"),
+                record.get("repetition_reason"),
+                record.get("repetition_token_len"),
+                record.get("tool_call_loop_token_len"),
+                record.get("repetition_primary_source"),
+                record.get("repetition_monitor_impl"),
+                record.get("repetition_monitor_available"),
+                record.get("repetition_monitor_unavailable_reason"),
+                record.get("tool_call_loop_error"),
+            )
         try:
             # orjson emits bytes — decode once for the logging framework.
             self._logger.info(orjson.dumps(record).decode("utf-8"))

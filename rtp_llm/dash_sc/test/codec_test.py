@@ -926,7 +926,9 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         }
         generated = next(out for out in infer.outputs if out.name == "generated_ids")
         self.assertEqual(list(generated.shape), [1, 0])
-        self.assertEqual(by_name["generated_ids"], struct.pack("<i", 0))
+        # Empty INT32 tensors carry one filler element to keep raw_output_contents
+        # aligned; consumers must trust the declared shape.
+        self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [0])
         self.assertEqual(
             _unpack_int64_le(by_name["finish_reason"]),
             [FINISH_REASON_USE_PARAMETER_STATUS],

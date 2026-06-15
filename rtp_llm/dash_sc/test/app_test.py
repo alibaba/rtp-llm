@@ -23,8 +23,9 @@ class _EnvCfg:
 
 
 class _FakeTokenizer:
-    def __init__(self, *, ids=None, raise_exc: bool = False):
+    def __init__(self, *, ids=None, id_map=None, raise_exc: bool = False):
         self._ids = ids or []
+        self._id_map = id_map or {}
         self._raise = raise_exc
         self.encode_calls: list[tuple[str, bool]] = []
 
@@ -32,6 +33,8 @@ class _FakeTokenizer:
         if self._raise:
             raise RuntimeError("tokenizer.encode failed")
         self.encode_calls.append((text, add_special_tokens))
+        if text in self._id_map:
+            return list(self._id_map[text])
         return list(self._ids)
 
 
@@ -91,11 +94,7 @@ class ProxyModeEnvTest(TestCase):
     def test_service_route_alone_does_not_enable_proxy_mode(self) -> None:
         with patch.dict(
             os.environ,
-            {
-                "SERVICE_ROUTE": (
-                    '{"type": "ip_port_list", "address": "127.0.0.1:1"}'
-                )
-            },
+            {"SERVICE_ROUTE": ('{"type": "ip_port_list", "address": "127.0.0.1:1"}')},
             clear=True,
         ):
             self.assertFalse(_is_proxy_mode_enabled())
