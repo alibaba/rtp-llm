@@ -101,3 +101,21 @@ py_test(
     ],
     tags = ["manual"],
 )
+
+# Generic argless perf bench (used by the model-perf-bench skill): every arg is
+# passed at runtime via --test_arg, so a single target serves any model/dtype/bs.
+# main = test_entry.py (NOT batch_decode_test.py) so --test_env=K=V is consumed
+# and applied as an env var before the engine server is spawned.
+py_test(
+    name = "model_perf_bench",
+    main = "test_entry.py",
+    srcs = ["test_entry.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    tags = ["manual"],
+)
