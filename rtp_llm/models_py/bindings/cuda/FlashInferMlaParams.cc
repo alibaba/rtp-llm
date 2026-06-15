@@ -688,6 +688,7 @@ void FlashInferMlaAttnParams::fillPrefillCudaGraphParams(torch::Tensor input_len
                                          batch_size,
                                          max_blocks_per_batch,
                                          seq_size_per_block,
+                                         total_tokens,
                                          stream);
 
     // Update tensor shapes (host metadata, no GPU op).

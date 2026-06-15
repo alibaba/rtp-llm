@@ -279,6 +279,7 @@ void invokePrepareFlashInferPrefillParams(const int32_t* input_lengths,
                                           int32_t        batch_size,
                                           int32_t        max_blocks_per_batch,
                                           int32_t        seq_size_per_block,
+                                          int32_t        captured_total_tokens,
                                           cudaStream_t   stream) {
     TORCH_CHECK(input_lengths != nullptr, "input_lengths is null");
     TORCH_CHECK(prefix_lengths != nullptr, "prefix_lengths is null");
@@ -307,7 +308,7 @@ void invokePrepareFlashInferPrefillParams(const int32_t* input_lengths,
                                                                   max_blocks_per_batch,
                                                                   seq_size_per_block,
                                                                   batch_size,
-                                                                  0);
+                                                                  captured_total_tokens);
     const auto result = cudaGetLastError();
     TORCH_CHECK(
         result == cudaSuccess, "FlashInfer prefill CUDA graph prepare kernel failed: ", cudaGetErrorString(result));
