@@ -28,6 +28,10 @@ from rtp_llm.dash_sc.codec import (
     parse_sampling_params,
     unpack_int_tensor_flat,
 )
+from rtp_llm.dash_sc.repetition_monitor import (
+    RequestRepetitionMonitor,
+    RequestRepetitionMonitorConfig,
+)
 
 DASH_SC_GRPC_PROTOCOL = "grpc"
 
@@ -238,6 +242,53 @@ class ForwardAccessRecord:
     backend_resp_count: int = 0
     buffered_stage: Optional[str] = None
     _pending_backend_stats: list = dataclasses.field(default_factory=list)
+    # Tool-call loop observability. The monitor owns detection and the flat
+    # access-log fields; this record only feeds it request markers + the
+    # generated token stream and reads back the result.
+    repetition_monitor_config: RequestRepetitionMonitorConfig = dataclasses.field(
+        default_factory=RequestRepetitionMonitorConfig, repr=False
+    )
+    _repetition_monitor: RequestRepetitionMonitor = dataclasses.field(
+        init=False, repr=False
+    )
+    # Transient per-RPC ``generated_ids`` byte buffer, populated only when a
+    # request declares tool-call markers. Frames carry token deltas, so raw bytes
+    # are concatenated here (a C-level memcpy) and decoded exactly once at
+    # end-of-RPC — never a per-frame Python unpack on the streaming hot path.
+    # Marker-less requests stay ``None``, keeping the no-raw-payload contract.
+    _tool_loop_raw: Optional[bytearray] = dataclasses.field(default=None, repr=False)
+    _tool_loop_datatype: Optional[str] = dataclasses.field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        self._repetition_monitor = RequestRepetitionMonitor(
+            raw_mode=self.raw_mode,
+            monitor_config=self.repetition_monitor_config,
+        )
+        # Markers are a service-level constant, so whether we collect the token
+        # stream is known at construction time. Only allocate the buffer when
+        # detection will actually run, keeping the marker-less path zero-cost.
+        if self._repetition_monitor.is_active():
+            self._tool_loop_raw = bytearray()
+
+    def check_repetition(self) -> None:
+        ids = ()
+        if self._tool_loop_raw:
+            ids = unpack_int_tensor_flat(
+                self._tool_loop_datatype, bytes(self._tool_loop_raw)
+            )
+        self._repetition_monitor.check_generated_ids(ids)
+
+    @property
+    def repetition_monitor(self) -> RequestRepetitionMonitor:
+        """The request-scoped monitor — the single source of truth for tool-call
+        loop detection results, log fields, and kmonitor reports.
+
+        Exposed read-only so the interceptor can ask the monitor for its metric
+        report plan directly instead of routing through a passthrough here. This
+        record stays free of any kmonitor dependency: it only hands out the
+        collaborator it already owns; the monitor does the metric work.
+        """
+        return self._repetition_monitor
 
     def capture_request(self, request) -> None:
         """Capture stable request statistics without retaining raw payloads."""
@@ -251,13 +302,19 @@ class ForwardAccessRecord:
         model_name = getattr(request, "model_name", None)
         if model_name and self.model_name is None:
             self.model_name = str(model_name)
+        parsed_ids = None
         if self.input_len is None:
             try:
-                ids = parse_input_ids_from_request(request)
+                parsed_ids = parse_input_ids_from_request(request)
             except Exception:
-                ids = None
-            if ids is not None:
-                self.input_len = len(ids)
+                parsed_ids = None
+            if parsed_ids is not None:
+                self.input_len = len(parsed_ids)
+                # Feed the request input to the monitor (not the log) so the
+                # detector can anchor tool-call spans; honors the no-raw-payload
+                # contract because these ids never reach the access record.
+                if self._tool_loop_raw is not None:
+                    self._repetition_monitor.set_input_ids(parsed_ids)
         if self.generate_config is None:
             try:
                 ds_attrs = parse_ds_header_attributes(request)
@@ -330,6 +387,28 @@ class ForwardAccessRecord:
                 self.terminal_seen = True
                 self.terminal_ts = now
 
+    def _accumulate_tool_loop_tokens(self, resp) -> None:
+        """Concatenate this frame's ``generated_ids`` bytes into the buffer.
+
+        Frames carry token deltas; raw bytes are appended (a cheap memcpy) and
+        decoded once at end-of-RPC, never per frame. Only invoked when a request
+        declared tool-call markers, so nothing is retained otherwise.
+        """
+        infer = getattr(resp, "infer_response", None)
+        if infer is None:
+            return
+        raw_contents = infer.raw_output_contents
+        for i, out in enumerate(infer.outputs):
+            if out.name != "generated_ids":
+                continue
+            if i < len(raw_contents):
+                raw = raw_contents[i]
+                if raw and _declared_element_count(out.shape) != 0:
+                    self._tool_loop_raw += raw
+                    if self._tool_loop_datatype is None:
+                        self._tool_loop_datatype = out.datatype
+            break
+
     def capture_response_chunk(self, resp, *, now: Optional[float] = None) -> None:
         """Extract per-chunk content from one streamed response message.
 
@@ -341,6 +420,8 @@ class ForwardAccessRecord:
         if now is None:
             now = time.time()
         self._capture_error_message(resp, now)
+        if self._tool_loop_raw is not None:
+            self._accumulate_tool_loop_tokens(resp)
         if self._pending_backend_stats:
             stats = self._pending_backend_stats.pop(0)
             self._accumulate_client_frame(stats, now)
@@ -418,7 +499,8 @@ class ForwardAccessRecord:
             self.backend_first_resp_ts, self.first_resp_ts
         )
         finish_to_close_ms = duration_ms(self.terminal_ts, end_ts)
-        return {
+        self.check_repetition()
+        record = {
             "schema_version": 1,
             "log_type": "access",
             "event": "rpc_completed",
@@ -486,6 +568,8 @@ class ForwardAccessRecord:
             "max_tokens_per_frame": self.max_tokens_per_frame,
             "generate_config": self.generate_config,
         }
+        record.update(self._repetition_monitor.record_fields())
+        return record
 
     def attach_to_context(self, context) -> bool:
         try:
