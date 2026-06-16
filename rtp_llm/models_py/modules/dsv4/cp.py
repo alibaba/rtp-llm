@@ -49,12 +49,12 @@ _DEFAULT_CP_PROFILE_NAME = "dsv4.cp.all_gather"
 # roles are workspace-backed (sub-region per role; sizes pre-computed from
 # ``V4Args`` so no fresh allocation is needed in the hot path):
 #   * ``main``        — the CSA/HCA compressor's fused ``[kv|score]`` gather.
-#                       fp32, on the compressor side stream.
+#                       fp32, on the serialized CP communication stream.
 #   * ``indexer``     — the nested indexer compressor's gather (distinct buffer
 #                       so it can be in flight alongside ``main`` under overlap).
-#                       fp32, same side stream as ``main``.
-#   * ``swa_kv_full`` — the SWA ``kv_full`` gather. bf16, on its own side
-#                       stream (overlaps ``compute_qr``). Width is fixed at
+#                       fp32, same serialized CP stream as ``main``.
+#   * ``swa_kv_full`` — the SWA ``kv_full`` gather. bf16, on its own stream so
+#                       it can overlap q-side compute. Width is fixed at
 #                       ``args.head_dim``; rows == ``seq_len_full`` like the
 #                       others.
 _CP_ROLE_MAIN = "main"
@@ -229,9 +229,8 @@ class CudaAsyncCPGatherImpl:
         gather_rows = world_size * local_2d.size(0)
         # All three roles draw from the per-forward workspace (a dedicated pair
         # each, reused across layers). Main / indexer share the compressor side
-        # stream and may be in flight back-to-back under the overlap
-        # orchestrator; SWA runs on its own side stream and can be in flight
-        # alongside both. Distinct sub-regions guarantee they never alias.
+        # stream; SWA kv_full uses its own early stream. Distinct sub-regions
+        # guarantee the roles never alias.
         with record_function_range(f"{profile_name}.alloc"):
             if cp_role == _CP_ROLE_MAIN:
                 gathered = workspace.cp_gather_main(
@@ -247,8 +246,9 @@ class CudaAsyncCPGatherImpl:
                 )
 
         current_stream = torch.cuda.current_stream(local_2d.device)
-        gather_stream = stream or torch.cuda.Stream(device=local_2d.device)
-        gather_stream.wait_stream(current_stream)
+        gather_stream = stream if stream is not None else current_stream
+        if stream is not None:
+            gather_stream.wait_stream(current_stream)
         # ``local_2d`` is allocated on ``current_stream`` but read by the NCCL
         # kernel on ``gather_stream``. Without ``record_stream`` the caching
         # allocator can reuse its storage before NCCL finishes, corrupting the
@@ -624,9 +624,9 @@ def cp_all_gather_full_async(
 ) -> Any:
     """Start CP gather for flattened ``[T_local, H]`` input.
 
-    The production implementation is CUDA/NCCL async and has no implicit
-    fallback. CPU/reference tests can instantiate ``SyncCPGatherImpl``
-    directly.
+    The production implementation is CUDA/NCCL async. Callers that want side
+    stream overlap must pass an explicit stream; otherwise the current stream is
+    used so helper fallback paths do not allocate profiler-visible streams.
 
     ``workspace`` is the per-forward :class:`PrefillWorkspace` (required, never
     None) that backs the gather AND restore scratch for every role.
@@ -1134,7 +1134,8 @@ def cp_gather_request_pool_blocks(
 
     # NCCL all_gather. Each rank contributes [L, *block_shape] -> output is
     # [cp_size * L, *block_shape] rank-major.
-    gathered = all_gather(local_owned, group=Group.TP)
+    with record_function_range("dsv4.cp.all_gather.pool_blocks.launch"):
+        gathered = all_gather(local_owned, group=Group.TP)
 
     return cp_interleave_gathered_pool_blocks(gathered, cp_size, total_logical_blocks)
 

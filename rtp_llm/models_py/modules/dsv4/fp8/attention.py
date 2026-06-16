@@ -14,6 +14,7 @@ slow but correct. M6 will swap in FlashMLA sparse impl.
 
 import json
 import os
+import threading
 from contextlib import suppress
 from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
@@ -160,6 +161,54 @@ from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
 # in which case the baseline path runs even with the env on.
 def _prefill_cp_overlap_enabled() -> bool:
     return os.environ.get("DSV4_PREFILL_CP_OVERLAP", "0") == "1"
+
+
+def _prefill_cp_state_read_prefetch_enabled() -> bool:
+    return os.environ.get("DSV4_PREFILL_CP_STATE_READ_PREFETCH", "1") == "1"
+
+
+_CP_POST_GATHER_STREAMS: Dict[int, torch.cuda.Stream] = {}
+_CP_GATHER_STREAMS: Dict[int, torch.cuda.Stream] = {}
+_SWA_CP_GATHER_STREAMS: Dict[int, torch.cuda.Stream] = {}
+_CP_STREAM_CACHE_LOCK = threading.Lock()
+
+
+def _cuda_device_index(device: torch.device) -> int:
+    device = torch.device(device)
+    if device.type != "cuda":
+        raise ValueError(f"expected a CUDA device, got {device}")
+    return device.index if device.index is not None else torch.cuda.current_device()
+
+
+def _get_process_cuda_stream(
+    cache: Dict[int, torch.cuda.Stream],
+    device: torch.device,
+) -> torch.cuda.Stream:
+    """Return one process-local CUDA stream per role and device."""
+    device_index = _cuda_device_index(device)
+    with _CP_STREAM_CACHE_LOCK:
+        stream = cache.get(device_index)
+        if stream is None or stream.device.index != device_index:
+            stream = torch.cuda.Stream(device=torch.device("cuda", device_index))
+            cache[device_index] = stream
+        return stream
+
+
+def _get_cp_comm_stream(device: torch.device) -> torch.cuda.Stream:
+    """Serialized CP communication stream shared by all layers on one device."""
+    return _get_process_cuda_stream(_CP_GATHER_STREAMS, device)
+
+
+def _get_swa_cp_comm_stream(device: torch.device) -> torch.cuda.Stream:
+    """SWA kv_full CP stream shared by all layers on one device."""
+    return _get_process_cuda_stream(_SWA_CP_GATHER_STREAMS, device)
+
+
+def _get_cp_post_gather_stream(
+    device: torch.device,
+) -> torch.cuda.Stream:
+    """Post-NCCL local work stream shared by CP prefetch helpers."""
+    return _get_process_cuda_stream(_CP_POST_GATHER_STREAMS, device)
 
 
 def _flat_1d(t: torch.Tensor) -> torch.Tensor:
@@ -2477,8 +2526,9 @@ class AttentionFP8(nn.Module):
 
         This shares the same production feature gate as compressor gather
         overlap so a single opt-in flag enables the whole prefill CP overlap
-        orchestration. The SWA gather uses its own side stream; compressor
-        nested/main gathers keep their dedicated FIFO stream.
+        orchestration. SWA kv_full keeps its own stream because it is launched
+        early from qkv compute and otherwise sits in front of compressor
+        collectives; delayed cache-prefix gathers use the serialized CP stream.
         """
         if not _prefill_cp_overlap_enabled():
             return False
@@ -2491,54 +2541,17 @@ class AttentionFP8(nn.Module):
         return True
 
     def _get_cp_gather_stream(self, device: torch.device) -> torch.cuda.Stream:
-        """Lazily allocate and cache one CP gather stream per layer instance.
+        """Return the process-local serialized CP communication stream.
 
-        The same stream is reused across the layer's compressor calls (HCA:
-        main only; CSA: nested-indexer + main) so their NCCL collectives
-        share FIFO ordering on the side stream — required for rank-
-        consistent execution within a single ``ProcessGroup``.
+        Compressor, state-read prefetch, and delayed SWA-prefix gathers share
+        this one stream on each CUDA device. That keeps NCCL launch ordering
+        explicit and avoids a per-layer stream fan-out in profiler traces.
         """
-        device = torch.device(device)
-        if device.type != "cuda":
-            raise ValueError(
-                f"CP-overlap gather stream requires a CUDA device, got {device}"
-            )
-
-        stream = getattr(self, "_cp_gather_stream_cached", None)
-        # ``stream.device`` is always indexed (``cuda:N``); ``device`` may
-        # come in either form. Compare by ``index`` (resolving ``None`` to
-        # the current device) instead of full ``torch.device`` equality.
-        want_index = (
-            device.index if device.index is not None else torch.cuda.current_device()
-        )
-        if stream is None or stream.device.index != want_index:
-            stream = torch.cuda.Stream(device=torch.device("cuda", want_index))
-            self._cp_gather_stream_cached = stream
-        return stream
+        return _get_cp_comm_stream(device)
 
     def _get_swa_cp_gather_stream(self, device: torch.device) -> torch.cuda.Stream:
-        """Lazily allocate a separate stream for the SWA ``kv_full`` gather.
-
-        The compressor stream above intentionally preserves FIFO ordering for
-        nested-indexer + main compressor collectives. SWA ``kv_full`` is an
-        independent input gather started from ``_prefill_compute_qkv``; keeping it
-        on a separate stream prevents it from sitting in front of compressor
-        collectives in the compressor FIFO.
-        """
-        device = torch.device(device)
-        if device.type != "cuda":
-            raise ValueError(
-                f"SWA CP gather stream requires a CUDA device, got {device}"
-            )
-
-        stream = getattr(self, "_swa_cp_gather_stream_cached", None)
-        want_index = (
-            device.index if device.index is not None else torch.cuda.current_device()
-        )
-        if stream is None or stream.device.index != want_index:
-            stream = torch.cuda.Stream(device=torch.device("cuda", want_index))
-            self._swa_cp_gather_stream_cached = stream
-        return stream
+        """Return the SWA ``kv_full`` CP communication stream."""
+        return _get_swa_cp_comm_stream(device)
 
     def _cleanup_pending_prefill_gather(
         self, compressor: Any, pending: Optional[Any]
@@ -2570,7 +2583,7 @@ class AttentionFP8(nn.Module):
         Under ``DSV4_PREFILL_CP_OVERLAP=1`` + CP-active, CSA/HCA layers
         instead dispatch to the overlap orchestrators (which hoist the
         compressor's CP all-gather ahead of the SWA write so they can
-        overlap on default vs side stream). The baseline sequential path
+        overlap on the default stream vs the CP communication stream). The baseline sequential path
         below stays byte-equal otherwise.
 
         FP8 KV-cache is asserted at the public ``forward()`` entry; this
@@ -3574,12 +3587,18 @@ class AttentionFP8(nn.Module):
             attn_sink=None,
             topk_length=combined_lens,
         )
-        gathered_o = all_gather(local_o.contiguous(), group=Group.TP).view(
-            cp_ctx.cp_size, int(q_full.shape[0]), self.n_heads, D
-        )
-        gathered_lse = all_gather(local_lse.contiguous(), group=Group.TP).view(
-            cp_ctx.cp_size, int(q_full.shape[0]), self.n_heads
-        )
+        with record_function_range(
+            f"dsv4.cp.all_gather.L{self.layer_id:02d}.workspace_attn.o.launch"
+        ):
+            gathered_o = all_gather(local_o.contiguous(), group=Group.TP).view(
+                cp_ctx.cp_size, int(q_full.shape[0]), self.n_heads, D
+            )
+        with record_function_range(
+            f"dsv4.cp.all_gather.L{self.layer_id:02d}.workspace_attn.lse.launch"
+        ):
+            gathered_lse = all_gather(local_lse.contiguous(), group=Group.TP).view(
+                cp_ctx.cp_size, int(q_full.shape[0]), self.n_heads
+            )
         merged_o, merged_lse = merge_lse_output(gathered_o, gathered_lse, dim=0)
         merged_o = self._raw_q_merge_apply_sink(merged_o, merged_lse)
         local_rows = self._cp_local_full_row_indices(common)

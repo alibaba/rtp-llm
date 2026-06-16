@@ -8,8 +8,7 @@ getter contracts the prefill path relies on: eager union allocation sized to
 ``max(q_bytes, 2*main + 2*idx + 2*swa)``, fit-asserts (no silent growth / no
 fallback alloc), stable storage across repeated gets, the ``reserve_cp=False``
 guard on the CP region, the SEPARATE main / indexer / swa byte sub-regions (so
-all three gathers can be concurrently in flight within one layer — main+idx on
-the compressor side stream, swa on its own side stream), and the dtype
+all three gather lifetimes can be concurrently live within one layer), and the dtype
 reinterpretation that lets one byte region back both an fp32 and a bf16 gather.
 
 NOTE: Q (``[0, q_bytes)``) INTENTIONALLY overlaps the front of the compressor
@@ -120,9 +119,8 @@ def test_cp_main_idx_swa_are_separately_sized_and_distinct():
     assert tuple(gi.shape) == (4, 3) and gi.dtype == torch.float32
     assert tuple(gs.shape) == (4, 5) and gs.dtype == torch.bfloat16
     # All six CP role buffers occupy distinct byte offsets within the union (no
-    # mutual aliasing — required because main+indexer (compressor side stream)
-    # and swa (its own side stream) can all be concurrently live within one
-    # layer).
+    # mutual aliasing — required because main, indexer, and swa can all be
+    # concurrently live within one layer.
     ptrs = {
         gm.data_ptr(),
         rm.data_ptr(),

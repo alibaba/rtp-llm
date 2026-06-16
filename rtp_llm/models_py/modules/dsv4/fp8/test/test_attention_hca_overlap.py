@@ -21,10 +21,8 @@ without spinning up a real DSV4 layer (no DeepGEMM / no real KV pool):
   * ``_forward_prefill_compressed(_skip_compressor_write=True)`` does NOT
     invoke ``self.compressor`` — the orchestrator already drained it.
 
-  * Per-instance compressor cp_gather_stream is cached + reused (FIFO ordering
-    contract for layers that issue >1 compressor NCCL collective inside one
-    step, e.g. CSA nested-indexer + main compressor). SWA kv_full uses a
-    separate cached stream so it does not sit in front of compressor gathers.
+  * Process-wide CP streams are cached + reused: serialized compressor/cache
+    communication, SWA kv_full communication, and post-gather local work.
 """
 
 from __future__ import annotations
@@ -201,7 +199,21 @@ class HCAOverlapGateTest(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "stream allocation requires CUDA")
 class HCAOverlapStreamCacheTest(unittest.TestCase):
-    """Per-instance stream reuse and SWA/compressor stream separation."""
+    """Process-wide stream reuse and SWA/compressor stream separation."""
+
+    def setUp(self) -> None:
+        self._cp_streams_patch = patch.object(attention_mod, "_CP_GATHER_STREAMS", {})
+        self._swa_streams_patch = patch.object(
+            attention_mod,
+            "_SWA_CP_GATHER_STREAMS",
+            {},
+        )
+        self._cp_streams_patch.start()
+        self._swa_streams_patch.start()
+
+    def tearDown(self) -> None:
+        self._swa_streams_patch.stop()
+        self._cp_streams_patch.stop()
 
     def test_returns_same_stream_on_repeated_calls(self) -> None:
         layer = _make_attention_stub(compress_ratio=128)
@@ -211,14 +223,26 @@ class HCAOverlapStreamCacheTest(unittest.TestCase):
         self.assertIs(s1, s2)
         self.assertIsInstance(s1, torch.cuda.Stream)
 
-    def test_swa_stream_is_cached_but_separate_from_compressor_stream(self) -> None:
+    def test_cp_stream_is_shared_across_layer_instances(self) -> None:
+        layer1 = _make_attention_stub(compress_ratio=128)
+        layer2 = _make_attention_stub(compress_ratio=4)
+        device = torch.device("cuda")
+
+        self.assertIs(
+            layer1._get_cp_gather_stream(device),
+            layer2._get_cp_gather_stream(device),
+        )
+
+    def test_swa_stream_is_shared_but_separate_from_compressor_stream(self) -> None:
         layer = _make_attention_stub(compress_ratio=128)
+        other_layer = _make_attention_stub(compress_ratio=4)
         device = torch.device("cuda")
         compressor_stream = layer._get_cp_gather_stream(device)
         swa_stream_1 = layer._get_swa_cp_gather_stream(device)
         swa_stream_2 = layer._get_swa_cp_gather_stream(device)
 
         self.assertIs(swa_stream_1, swa_stream_2)
+        self.assertIs(swa_stream_1, other_layer._get_swa_cp_gather_stream(device))
         self.assertIsInstance(swa_stream_1, torch.cuda.Stream)
         self.assertIsNot(swa_stream_1, compressor_stream)
 

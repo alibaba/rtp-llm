@@ -14,14 +14,12 @@ MAXIMUM (derived from ``max_seq_len + cp_size + max_context_batch_size``),
 identical on every forward, so a freed block is exactly reusable by the next
 forward — no fragmentation. Getters take the live token count and assert it fits.
 
-The CP region is split per gather ROLE, because three concurrent gathers can
-be in flight within a single layer:
-  * ``main`` — the CSA/HCA compressor gather (compressor side stream)
-  * ``indexer`` — the nested indexer compressor gather (same side stream as
-    main; the overlap orchestrator ``DSV4_PREFILL_CP_OVERLAP=1`` queues both
-    NCCLs back-to-back before either is consumed)
-  * ``swa_kv_full`` — the SWA KV gather (a SEPARATE side stream so it can
-    overlap ``compute_qr`` in ``_prefill_compute_qkv``)
+The CP region is split per gather ROLE, because three concurrent gather
+lifetimes can be in flight within a single layer:
+  * ``main`` — the CSA/HCA compressor gather
+  * ``indexer`` — the nested indexer compressor gather; the overlap
+    orchestrator queues it back-to-back with ``main`` before either is consumed
+  * ``swa_kv_full`` — the SWA KV gather
 All three may be alive simultaneously, so each owns a DEDICATED
 ``cp_gather``/``cp_restore`` sub-region; sharing storage would let an in-flight
 NCCL overwrite another role's result. Overlap is strictly within-layer (layer
@@ -58,8 +56,7 @@ class PrefillWorkspace:
     within a layer with respect to Q: every gather is fully consumed *before* Q
     is materialized (Q's ``q_lora_b`` + RoPE are deferred to just before
     ``flash_mla_sparse_fwd``; see ``attention._materialize_prefill_q``). The
-    three CP roles, however, OVERLAP each other in time (main + indexer on the
-    compressor side stream, swa on its own side stream), so they get DISTINCT
+    three CP roles can overlap each other in lifetime, so they get DISTINCT
     sub-regions and Q time-multiplexes with the WHOLE CP region:
 
         prefill_q       : [0,                                      q_bytes)
