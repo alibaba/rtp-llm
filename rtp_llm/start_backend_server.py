@@ -65,7 +65,7 @@ def _bootstrap_local_jit_cache(py_env_configs: PyEnvConfigs):
     for component, env_name in JIT_CACHE_COMPONENT_ENVS.items():
         component_dir = os.path.join(local_root, component)
         os.makedirs(component_dir, exist_ok=True)
-    os.environ[env_name] = component_dir
+        os.environ[env_name] = component_dir
     os.environ["TRITON_AUTOTUNE_CACHE_MODE"] = "cached"
     os.environ["LOCAL_JIT_CACHE_DIR"] = local_root
     logging.info("local JIT cache root: %s", local_root)
@@ -117,7 +117,6 @@ def local_rank_start(
                 backend_manager.request_shutdown()
             except Exception as e:
                 logging.error(f"Error during backend manager shutdown: {e}")
-        stop_jit_cache_manager()
 
     def install_signal_handlers():
         signal.signal(signal.SIGTERM, signal_handler)
