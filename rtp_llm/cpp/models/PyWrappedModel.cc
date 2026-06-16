@@ -576,8 +576,24 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
     // FP8 + CUDA graph (after warmup): prepare_cuda_graph paths work entirely
     // on device; skip the D2H sync that .cpu() causes. During warmup (capture),
     // fillParams still needs the host block table, so skip only post-warmup.
+    //
+    // BUT: when this forward will not actually go through cuda graph (e.g.
+    // draft_model_ used by MtpExecutor for prefill-shaped input when
+    // sp_prefill_draft_model_ is absent), the eager path still calls
+    // SparseMlaParams::fillParams which reads host block table.  Skipping
+    // host materialization here makes that path read stale/recycled pinned
+    // memory (slot_mapping overflow / SEGV).  Restrict skip to the cases
+    // where the forward actually replays a graph:
+    //   - decode cudagraph: !is_prefill (uses graph)
+    //   - prefill cudagraph: is_prefill_cuda_graph_mode_ (uses graph)
+    // target-verify is prefill-shaped but does use cudagraph (graph runner's
+    // is_target_verify_=true accepts it); detect via inputs.is_target_verify.
+    const bool input_is_prefill = inputs.input_lengths.defined() && inputs.input_lengths.size(0) > 0
+                                  && (!inputs.sequence_lengths.defined() || inputs.sequence_lengths.size(0) == 0);
+    const bool forward_uses_cuda_graph =
+        enable_cuda_graph_ && (!input_is_prefill || is_prefill_cuda_graph_mode_ || inputs.is_target_verify);
     const bool skip_host_kv =
-        enable_cuda_graph_ && !inputs.warmup && description_.attention_conf.kv_cache_dtype == KvCacheDataType::FP8;
+        forward_uses_cuda_graph && !inputs.warmup && description_.attention_conf.kv_cache_dtype == KvCacheDataType::FP8;
     if (description_.attention_conf.use_mla && !skip_host_kv) {
         torch::Tensor group0 = inputs.kv_cache_kernel_block_id[0];
         if (group0.device().is_cuda()) {

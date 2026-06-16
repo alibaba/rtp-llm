@@ -118,17 +118,20 @@ def _tensor_summary(t: Optional[torch.Tensor]) -> str:
 
 
 def _physical_block_table(attention_inputs: Any) -> torch.Tensor:
-    """Return the physical paged-cache block table.
+    """Return the paged-cache block table for indexer KV reads.
 
-    Indexer cache reads use ``kv_cache`` as physical pages
-    ``[num_blocks, block_size, ...]``.  The kernel-granularity table can be
-    token-level when ``kernel_seq_size_per_block == 1``; using it here reads
-    unrelated cache pages and corrupts sparse MLA top-k.
+    Prefer ``kv_cache_kernel_block_id_device`` (published by the input gatherer
+    via publishInt32ToCuda — stable device pointer).  ``kv_cache_block_id_device``
+    is an ad-hoc per-step copy whose host counterpart can be reclaimed when
+    buffer_holder_ is released, leading to slot_mapping / page_indice
+    corruption.  When ``kernel_seq_size_per_block == seq_size_per_block`` the
+    two tables have identical shape and values, so preferring kernel_block_id
+    is safe; the legacy physical_block_id stays as fallback.
     """
-    physical = getattr(attention_inputs, "kv_cache_block_id_device", None)
-    if isinstance(physical, torch.Tensor) and physical.numel() > 0:
-        return physical
-    return attention_inputs.kv_cache_kernel_block_id_device
+    kernel = getattr(attention_inputs, "kv_cache_kernel_block_id_device", None)
+    if isinstance(kernel, torch.Tensor) and kernel.numel() > 0:
+        return kernel
+    return attention_inputs.kv_cache_block_id_device
 
 
 def _prefill_physical_block_table(attention_inputs: Any) -> torch.Tensor:

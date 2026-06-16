@@ -425,11 +425,17 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
     auto prefix_lengths_host   = toHostContiguousI32(attn_inputs.prefix_lengths);
     auto sequence_lengths_host = toHostContiguousI32(attn_inputs.sequence_lengths);
 
-    // Step 1: Call base class fillParams to fill shared parameters
+    // Step 1: Call base class fillParams to fill shared parameters.
+    // Prefer kv_cache_kernel_block_id_host (published by NormalModelInputGatherer
+    // via publishInt32ToCuda, stable host pinned tensor) over kv_cache_block_id_host
+    // (an ad-hoc .cpu().pin_memory() copy in PyWrappedModel::setupKVCacheForAttentionInputs
+    // that can be reclaimed and overwritten when buffer_holder_ is released, causing
+    // slot_mapping overflow).  Under kernel_seq_size_per_block == seq_size_per_block
+    // the two tables have identical shape and values.
     auto block_table_host =
-        attn_inputs.kv_cache_block_id_host.defined() && attn_inputs.kv_cache_block_id_host.numel() > 0 ?
-            attn_inputs.kv_cache_block_id_host :
-            attn_inputs.kv_cache_kernel_block_id_host;
+        attn_inputs.kv_cache_kernel_block_id_host.defined() && attn_inputs.kv_cache_kernel_block_id_host.numel() > 0 ?
+            attn_inputs.kv_cache_kernel_block_id_host :
+            attn_inputs.kv_cache_block_id_host;
     FlashInferMlaAttnParams::fillParams(prefix_lengths_host,
                                         sequence_lengths_host,
                                         input_lengths_host,
