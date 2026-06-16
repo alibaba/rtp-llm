@@ -309,6 +309,10 @@ struct VitConfig {
     int mm_rdma_connect_timeout_ms = 250;
     // Max wait for a single READ to complete on the LLM side before giving up (fallback).
     int64_t mm_rdma_read_timeout_ms = 30 * 1000;
+    // Deadline for the best-effort ReleaseMultimodalEmbedding RPC. This runs on the
+    // inference path, so it must stay short: a slow/hung encoder must never stall the
+    // request. On timeout the slot is reclaimed by the encoder's slot-GC backstop.
+    int64_t mm_rdma_release_timeout_ms = 1000;
     // Encoder-side slot lifetime: force-reclaim a slot this long after export if no
     // Release(handle) arrived (backstop against LLM crash / READ failure -> leak).
     int64_t mm_rdma_slot_gc_timeout_ms = 60 * 1000;

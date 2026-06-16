@@ -1549,6 +1549,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("mm_rdma_port", &VitConfig::mm_rdma_port)
         .def_readwrite("mm_rdma_connect_timeout_ms", &VitConfig::mm_rdma_connect_timeout_ms)
         .def_readwrite("mm_rdma_read_timeout_ms", &VitConfig::mm_rdma_read_timeout_ms)
+        .def_readwrite("mm_rdma_release_timeout_ms", &VitConfig::mm_rdma_release_timeout_ms)
         .def_readwrite("mm_rdma_slot_gc_timeout_ms", &VitConfig::mm_rdma_slot_gc_timeout_ms)
         .def_readwrite("mm_rdma_max_inflight_bytes", &VitConfig::mm_rdma_max_inflight_bytes)
         .def("to_string", &VitConfig::to_string)
@@ -1561,10 +1562,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.mm_rdma_connect_timeout_ms,
                                       self.mm_rdma_read_timeout_ms,
                                       self.mm_rdma_slot_gc_timeout_ms,
-                                      self.mm_rdma_max_inflight_bytes);
+                                      self.mm_rdma_max_inflight_bytes,
+                                      self.mm_rdma_release_timeout_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 8)
+                if (t.size() != 9)
                     throw std::runtime_error("Invalid state!");
                 VitConfig c;
                 try {
@@ -1576,6 +1578,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.mm_rdma_read_timeout_ms    = t[5].cast<int64_t>();
                     c.mm_rdma_slot_gc_timeout_ms = t[6].cast<int64_t>();
                     c.mm_rdma_max_inflight_bytes = t[7].cast<int64_t>();
+                    c.mm_rdma_release_timeout_ms = t[8].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("VitConfig unpickle error: ") + e.what());
                 }

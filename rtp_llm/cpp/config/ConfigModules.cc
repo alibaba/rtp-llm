@@ -305,6 +305,7 @@ std::string VitConfig::to_string() const {
         << ", mm_rdma_bind_ip: " << mm_rdma_bind_ip << ", mm_rdma_port: " << mm_rdma_port
         << ", mm_rdma_connect_timeout_ms: " << mm_rdma_connect_timeout_ms
         << ", mm_rdma_read_timeout_ms: " << mm_rdma_read_timeout_ms
+        << ", mm_rdma_release_timeout_ms: " << mm_rdma_release_timeout_ms
         << ", mm_rdma_slot_gc_timeout_ms: " << mm_rdma_slot_gc_timeout_ms
         << ", mm_rdma_max_inflight_bytes: " << mm_rdma_max_inflight_bytes;
     return oss.str();

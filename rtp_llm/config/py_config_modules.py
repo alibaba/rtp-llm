@@ -258,6 +258,7 @@ class VitConfig:
         self.mm_rdma_min_bytes: int = 256 * 1024  # encoder-side RDMA/bytes threshold (Python only)
         self.mm_rdma_connect_timeout_ms: int = 250
         self.mm_rdma_read_timeout_ms: int = 30 * 1000
+        self.mm_rdma_release_timeout_ms: int = 1000
         self.mm_rdma_slot_gc_timeout_ms: int = 60 * 1000
         self.mm_rdma_max_inflight_bytes: int = 8 * 1024 * 1024 * 1024
 
@@ -290,6 +291,7 @@ class VitConfig:
             f"mm_rdma_min_bytes: {self.mm_rdma_min_bytes}\n"
             f"mm_rdma_connect_timeout_ms: {self.mm_rdma_connect_timeout_ms}\n"
             f"mm_rdma_read_timeout_ms: {self.mm_rdma_read_timeout_ms}\n"
+            f"mm_rdma_release_timeout_ms: {self.mm_rdma_release_timeout_ms}\n"
             f"mm_rdma_slot_gc_timeout_ms: {self.mm_rdma_slot_gc_timeout_ms}\n"
             f"mm_rdma_max_inflight_bytes: {self.mm_rdma_max_inflight_bytes}"
         )

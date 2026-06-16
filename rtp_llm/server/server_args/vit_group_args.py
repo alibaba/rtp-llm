@@ -265,6 +265,14 @@ def init_vit_group_args(parser, vit_config):
         help="LLM 侧单次 RDMA READ 完成的最大等待时间（毫秒）",
     )
     vit_group.add_argument(
+        "--mm_rdma_release_timeout_ms",
+        env_name="MM_RDMA_RELEASE_TIMEOUT_MS",
+        bind_to=(vit_config, "mm_rdma_release_timeout_ms"),
+        type=int,
+        default=1000,
+        help="LLM 侧 ReleaseMultimodalEmbedding RPC 的 deadline（毫秒），位于推理路径上需保持较短，超时由 encoder 侧 slot GC 兜底",
+    )
+    vit_group.add_argument(
         "--mm_rdma_slot_gc_timeout_ms",
         env_name="MM_RDMA_SLOT_GC_TIMEOUT_MS",
         bind_to=(vit_config, "mm_rdma_slot_gc_timeout_ms"),

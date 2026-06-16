@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <numeric>
 #include <string>
@@ -31,19 +32,27 @@ public:
         MultimodalProcessor(py::none(), mm_model_config, max_seq_len) {
         // LLM consumer side of the encoder<->LLM RDMA fast path. nullptr when disabled /
         // unavailable, in which case every request transparently uses the inline-bytes path.
-        rdma_transport_ = createMMRdmaTransport(vit_config, MMRdmaRole::LLM_CLIENT);
+        rdma_transport_         = createMMRdmaTransport(vit_config, MMRdmaRole::LLM_CLIENT);
+        rdma_release_timeout_ms_ = vit_config.mm_rdma_release_timeout_ms;
     }
 
 private:
     MultimodalRpcPool                pool_;
     std::string                      vit_cluster_name_;
     std::shared_ptr<MMRdmaTransport> rdma_transport_;
+    // Deadline (ms) for the best-effort slot-release RPC; keeps it off the critical path.
+    int64_t                          rdma_release_timeout_ms_ = 1000;
 
     // Best-effort: tell the encoder it can return the slot to its free list.
+    // This runs on the inference path, so the RPC is bounded by a short deadline: a slow
+    // or hung encoder must never stall the request. Failure is logged only — the encoder's
+    // slot-GC timeout (mm_rdma_slot_gc_timeout_ms) reclaims the slot as a backstop.
     template<typename Stub>
     void releaseRemoteSlot(Stub& stub, const std::string& handle) {
         grpc::ClientContext rel_ctx;
-        ReleaseEmbeddingPB  rel;
+        rel_ctx.set_deadline(std::chrono::system_clock::now()
+                             + std::chrono::milliseconds(rdma_release_timeout_ms_));
+        ReleaseEmbeddingPB rel;
         rel.add_handle(handle);
         EmptyPB empty;
         auto    rel_status = stub->ReleaseMultimodalEmbedding(&rel_ctx, rel, &empty);
@@ -134,8 +143,30 @@ private:
                 }
                 return assembleRdmaOutput(mm_embedding, &output_pb);
             }
-            // No inline fallback exists for a descriptor-only response.
-            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "rdma read of multimodal embedding failed");
+            // RDMA read failed. As agreed, fall back to the inline-bytes path: re-issue the
+            // request with support_rdma=false so the encoder returns the embedding as bytes
+            // instead of a descriptor. The slot from the failed attempt was already released
+            // above (and is GC-backed regardless).
+            RTP_LLM_LOG_WARNING("rdma read of multimodal embedding failed (handle=%s), "
+                                "falling back to inline bytes",
+                                desc.handle().c_str());
+            request.set_support_rdma(false);
+            MultimodalOutputPB  fallback_pb;
+            grpc::ClientContext fallback_context;
+            auto fallback_status = stub->RemoteMultimodalEmbedding(&fallback_context, request, &fallback_pb);
+            if (!fallback_status.ok()) {
+                return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
+                                 "rdma read failed and inline-bytes fallback also failed: "
+                                     + fallback_status.error_message());
+            }
+            // With support_rdma=false the encoder must answer with inline bytes; a descriptor
+            // here would mean a protocol violation we cannot consume.
+            if (fallback_pb.has_embedding_rdma()) {
+                return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
+                                 "rdma read failed and fallback response unexpectedly carried "
+                                 "an rdma descriptor");
+            }
+            return QueryConverter::transMMOutput(&fallback_pb);
         }
 
         return QueryConverter::transMMOutput(&output_pb);
