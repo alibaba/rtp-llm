@@ -817,6 +817,7 @@ public:
     int64_t request_ref_blocks   = 0;
     int64_t connector_ref_blocks = 0;
     int64_t total_blocks         = 0;
+    int64_t reserve_blocks       = 0;
     float   used_ratio           = 0;
 };
 
@@ -831,6 +832,7 @@ public:
     kmonitor::MutableMetric* request_ref_blocks_metric   = nullptr;
     kmonitor::MutableMetric* connector_ref_blocks_metric = nullptr;
     kmonitor::MutableMetric* total_blocks_metric         = nullptr;
+    kmonitor::MutableMetric* reserve_blocks_metric       = nullptr;
     kmonitor::MutableMetric* used_ratio_metric           = nullptr;
 
 private:

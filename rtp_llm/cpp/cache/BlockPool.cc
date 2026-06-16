@@ -70,7 +70,7 @@ bool shouldPinHostBlockPool() {
     return flag != "0" && flag != "false" && flag != "FALSE" && flag != "off" && flag != "OFF";
 }
 
-void markHostBlockPoolDontDump(void* ptr, size_t size) {
+void markHostBlockPoolDontDump(const char* pool_name, void* ptr, size_t size) {
 #ifdef MADV_DONTDUMP
     if (ptr == nullptr || size == 0) {
         return;
@@ -88,13 +88,16 @@ void markHostBlockPoolDontDump(void* ptr, size_t size) {
     const auto aligned_size  = static_cast<size_t>(aligned_end - aligned_begin);
 
     if (madvise(reinterpret_cast<void*>(aligned_begin), aligned_size, MADV_DONTDUMP) != 0) {
-        RTP_LLM_LOG_WARNING("madvise MADV_DONTDUMP failed for host block pool, ptr=%p, size=%zu, error=%s",
+        RTP_LLM_LOG_WARNING("madvise MADV_DONTDUMP failed for host block pool, pool_name=%s ptr=%p, size=%zu, "
+                            "error=%s",
+                            pool_name,
                             ptr,
                             size,
                             std::strerror(errno));
     } else {
-        RTP_LLM_LOG_INFO("madvise MADV_DONTDUMP success for host block pool, ptr=%p, size=%zu, aligned_ptr=%p, "
-                         "aligned_size=%zu",
+        RTP_LLM_LOG_INFO("madvise MADV_DONTDUMP success for host block pool, pool_name=%s ptr=%p, size=%zu, "
+                         "aligned_ptr=%p, aligned_size=%zu",
+                         pool_name,
                          ptr,
                          size,
                          reinterpret_cast<void*>(aligned_begin),
@@ -102,7 +105,10 @@ void markHostBlockPoolDontDump(void* ptr, size_t size) {
     }
 #else
     RTP_LLM_LOG_WARNING(
-        "MADV_DONTDUMP is not defined, host block pool may be included in coredump, ptr=%p, size=%zu", ptr, size);
+        "MADV_DONTDUMP is not defined, host block pool may be included in coredump, pool_name=%s ptr=%p, size=%zu",
+        pool_name,
+        ptr,
+        size);
 #endif
 }
 
@@ -149,21 +155,25 @@ void BlockPool::initializeCacheBuffer() {
             try {
                 cache_aligned_buffer_ = cpu_buffer.pin_memory();
             } catch (const std::exception& e) {
-                RTP_LLM_LOG_WARNING(
-                    "pin host block pool failed, fallback to pageable CPU memory, total_size=%zu bytes, error=%s",
-                    config_.total_size_bytes,
-                    e.what());
+                RTP_LLM_LOG_WARNING("pin host block pool failed, fallback to pageable CPU memory, pool_name=%s "
+                                    "total_size=%zu bytes, error=%s",
+                                    config_.pool_name.c_str(),
+                                    config_.total_size_bytes,
+                                    e.what());
                 cache_aligned_buffer_ = std::move(cpu_buffer);
             }
         } else {
-            RTP_LLM_LOG_INFO("host block pool uses pageable CPU memory, total_size=%zu bytes",
+            RTP_LLM_LOG_INFO("host block pool uses pageable CPU memory, pool_name=%s total_size=%zu bytes",
+                             config_.pool_name.c_str(),
                              config_.total_size_bytes);
             cache_aligned_buffer_ = std::move(cpu_buffer);
         }
-        RTP_LLM_LOG_INFO("mark host block pool dont dump, ptr=%p, size=%zu",
+        RTP_LLM_LOG_INFO("mark host block pool dont dump, pool_name=%s ptr=%p, size=%zu",
+                         config_.pool_name.c_str(),
                          cache_aligned_buffer_.data_ptr(),
                          config_.total_size_bytes);
-        markHostBlockPoolDontDump(cache_aligned_buffer_.data_ptr(), config_.total_size_bytes);
+        markHostBlockPoolDontDump(
+            config_.pool_name.c_str(), cache_aligned_buffer_.data_ptr(), config_.total_size_bytes);
     } else if (use_pinned_cpu_backing_) {
         initializePinnedCpuBuffer("device block pool pinned CPU backing");
     } else if (use_cuda_malloc_backing_) {
@@ -201,7 +211,11 @@ void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
     try {
         cache_aligned_buffer_ = cpu_buffer.pin_memory();
     } catch (const std::exception& e) {
-        RTP_LLM_FAIL("%s pin failed, total_size=%zu bytes, error=%s", log_context, config_.total_size_bytes, e.what());
+        RTP_LLM_FAIL("%s pin failed, pool_name=%s total_size=%zu bytes, error=%s",
+                     log_context,
+                     config_.pool_name.c_str(),
+                     config_.total_size_bytes,
+                     e.what());
     }
 }
 
@@ -249,7 +263,8 @@ void BlockPool::initializeCudaMallocBuffer() {
                      config_.total_size_bytes,
                      device_id);
 #else
-    RTP_LLM_FAIL("cudaMalloc block pool backing requested but this binary was not built with CUDA");
+    RTP_LLM_FAIL("cudaMalloc block pool backing requested but this binary was not built with CUDA, pool_name=%s",
+                 config_.pool_name.c_str());
 #endif
 }
 
@@ -302,15 +317,16 @@ void BlockPool::processMemoryLayout(size_t layout_idx, const torch::Tensor& full
     processLayerTensors(layout_idx, layout_cfg, global_layer_begin);
 
     // 记录初始化信息
-    RTP_LLM_LOG_INFO(
-        "MemoryLayout[%zu] initialized: layer_num=%u block_num=%u kv_off=%zu kv_bytes=%zu scale_off=%zu scale_bytes=%zu",
-        layout_idx,
-        layout_cfg.layer_num,
-        layout_cfg.block_num,
-        layout_cfg.kv_cache_offset_bytes,
-        layout_cfg.kv_block_pool_size_bytes,
-        layout_cfg.kv_scale_offset_bytes,
-        layout_cfg.kv_scale_pool_size_bytes);
+    RTP_LLM_LOG_INFO("MemoryLayout[%zu] initialized: pool_name=%s layer_num=%u block_num=%u kv_off=%zu kv_bytes=%zu "
+                     "scale_off=%zu scale_bytes=%zu",
+                     layout_idx,
+                     config_.pool_name.c_str(),
+                     layout_cfg.layer_num,
+                     layout_cfg.block_num,
+                     layout_cfg.kv_cache_offset_bytes,
+                     layout_cfg.kv_block_pool_size_bytes,
+                     layout_cfg.kv_scale_offset_bytes,
+                     layout_cfg.kv_scale_pool_size_bytes);
 }
 
 torch::Tensor BlockPool::createTensor(
@@ -384,7 +400,8 @@ bool BlockPool::init() {
     initializeLayoutStrategies();
     initFreeBlocks();
 
-    RTP_LLM_LOG_INFO("BlockPool init success: memory_layouts=%zu, total_layers=%zu, total_size=%zu bytes",
+    RTP_LLM_LOG_INFO("BlockPool init success: pool_name=%s memory_layouts=%zu, total_layers=%zu, total_size=%zu bytes",
+                     config_.pool_name.c_str(),
                      config_.memory_layouts.size(),
                      global_layer_to_local_.size(),
                      config_.total_size_bytes);
@@ -422,8 +439,10 @@ BlockIndicesType BlockPool::malloc(int num_blocks) {
     {
         std::scoped_lock lock(ref_mu_, free_mu_);
         if (free_block_ids_.size() < static_cast<size_t>(num_blocks)) {
-            RTP_LLM_LOG_WARNING(
-                "Block pool only has %zu free blocks, cannot allocate %d blocks", free_block_ids_.size(), num_blocks);
+            RTP_LLM_LOG_WARNING("Block pool only has %zu free blocks, cannot allocate %d blocks, pool_name=%s",
+                                free_block_ids_.size(),
+                                num_blocks,
+                                config_.pool_name.c_str());
             return {};
         }
         auto first = free_block_ids_.begin();
@@ -540,7 +559,7 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
         cache_store_ = std::move(cache_store);
     }
     if (cache_store_ && !kvcache_reg_mr_) {
-        RTP_LLM_LOG_INFO("start to register user mr");
+        RTP_LLM_LOG_INFO("start to register user mr, pool_name=%s", config_.pool_name.c_str());
         auto       memory_util = cache_store_->getMemoryUtil();
         const bool gpu         = where() == MemoryType::MEMORY_GPU;
 
@@ -574,7 +593,7 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
 
 void BlockPool::deregUserMr() {
     if (kvcache_reg_mr_ && cache_store_) {
-        RTP_LLM_LOG_INFO("start to deregister user mr");
+        RTP_LLM_LOG_INFO("start to deregister user mr, pool_name=%s", config_.pool_name.c_str());
         auto       memory_util = cache_store_->getMemoryUtil();
         const bool gpu         = where() == MemoryType::MEMORY_GPU;
 
@@ -590,7 +609,7 @@ void BlockPool::deregUserMr() {
             }
         }
 
-        RTP_LLM_LOG_INFO("deregister user mr for block pool success");
+        RTP_LLM_LOG_INFO("deregister user mr for block pool success, pool_name=%s", config_.pool_name.c_str());
         kvcache_reg_mr_ = false;
     }
 }
@@ -606,13 +625,17 @@ void BlockPool::registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> mem
     auto  start_us = currentTimeUs();
 
     if (!memory_util->regUserMr(base_ptr, bytes, gpu, stride_bytes)) {
-        RTP_LLM_FAIL("register user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
+        RTP_LLM_FAIL("register user mr for block pool layout[%zu] %s buffer failed, pool_name=%s",
+                     layout_idx,
+                     buffer_type.c_str(),
+                     config_.pool_name.c_str());
     }
 
     auto cost_ms = (currentTimeUs() - start_us) / 1000;
     mr_cost_time_ms_ += cost_ms;
 
-    RTP_LLM_LOG_INFO("register user mr success: layout[%zu] %s base=%p len=%zu aligned=%zu cost=%ld ms",
+    RTP_LLM_LOG_INFO("register user mr success: pool_name=%s layout[%zu] %s base=%p len=%zu aligned=%zu cost=%ld ms",
+                     config_.pool_name.c_str(),
                      layout_idx,
                      buffer_type.c_str(),
                      base_ptr,
@@ -629,7 +652,10 @@ void BlockPool::deregisterUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> m
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
 
     if (!memory_util->deregUserMr(base_ptr, gpu)) {
-        RTP_LLM_FAIL("deregister user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
+        RTP_LLM_FAIL("deregister user mr for block pool layout[%zu] %s buffer failed, pool_name=%s",
+                     layout_idx,
+                     buffer_type.c_str(),
+                     config_.pool_name.c_str());
     }
 }
 
@@ -675,8 +701,10 @@ size_t BlockPool::notInUseBlocksNum() const {
 // Returns {layout_index, local_layer_id}. layout_index is the index in BlockPoolConfig.memory_layouts.
 std::pair<int, int> BlockPool::mapGlobalLayerIdToLocal(int global_layer_id) const {
     if (global_layer_id < 0 || static_cast<size_t>(global_layer_id) >= global_layer_to_local_.size()) {
-        RTP_LLM_LOG_ERROR(
-            "Global layer_id %d out of range (total layers: %zu)", global_layer_id, global_layer_to_local_.size());
+        RTP_LLM_LOG_ERROR("Global layer_id %d out of range (total layers: %zu), pool_name=%s",
+                          global_layer_id,
+                          global_layer_to_local_.size(),
+                          config_.pool_name.c_str());
         return {-1, -1};
     }
 
