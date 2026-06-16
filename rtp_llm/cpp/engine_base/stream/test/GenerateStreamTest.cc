@@ -1,4 +1,9 @@
 
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <thread>
+
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -107,6 +112,55 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     // flip back to true and verify
     stream->generate_input_->generate_config->reuse_cache = true;
     ASSERT_TRUE(stream->reuseCache());
+}
+
+// 回归测试：消费者阻塞在 nextOutput()（队列空、流未结束）时，reportError() 必须立即唤醒它，
+// 而不是让它白等 SynchronizedQueue 的 1s 超时。覆盖 Error 事件唤醒输出消费者的路径。
+TEST_F(GenerateStreamTest, testReportErrorWakesBlockedNextOutput) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3, 4, 5});
+
+    std::atomic<bool>  returned{false};
+    std::atomic<bool>  ok{true};
+    std::atomic<int>   code{-1};
+    std::promise<void> started_promise;
+    auto               started_future = started_promise.get_future();
+
+    const auto  start = std::chrono::steady_clock::now();
+    std::thread consumer([&]() {
+        started_promise.set_value();         // 通知主线程：消费者已启动，即将进入 nextOutput 阻塞
+        auto result = stream->nextOutput();  // 队列空且流未结束 → 阻塞在 waitNotEmpty()
+        ok          = result.ok();
+        code        = static_cast<int>(result.status().code());
+        returned    = true;
+    });
+    // RAII 守卫：无论后续断言是否提前返回或抛异常，都确保线程被 join，
+    // 避免 joinable 线程析构触发 std::terminate。
+    struct ThreadGuard {
+        std::thread& t;
+        ~ThreadGuard() {
+            if (t.joinable()) {
+                t.join();
+            }
+        }
+    } guard{consumer};
+
+    // 先确认消费者线程已启动，再留出时间让它进入 waitNotEmpty() 阻塞。
+    started_future.wait();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_FALSE(returned.load());
+
+    // 报错应立即唤醒阻塞的消费者。
+    stream->reportError(ErrorCode::CANCELLED, "cancelled by test");
+    consumer.join();
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+
+    EXPECT_TRUE(returned.load());
+    EXPECT_FALSE(ok.load());
+    EXPECT_EQ(code.load(), static_cast<int>(ErrorCode::CANCELLED));
+    // 必须远早于 SynchronizedQueue 的 1s(1,000,000us) 超时被唤醒。
+    EXPECT_LT(elapsed_ms, 800);
 }
 
 }  // namespace rtp_llm

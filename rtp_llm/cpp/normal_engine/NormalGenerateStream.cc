@@ -3,7 +3,6 @@
 namespace rtp_llm {
 
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
-    // TODO(xinfei.sxf) 某些case下会出现1s的等待
     while ((!hasError()) && getStatus() != StreamState::FINISHED && generate_outputs_queue_.isEmpty()) {
         checkTimeout();
         generate_outputs_queue_.waitNotEmpty();

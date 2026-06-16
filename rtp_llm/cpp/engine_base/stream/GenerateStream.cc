@@ -494,19 +494,24 @@ void GenerateStream::checkTimeout() {
 // 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
 void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*mutex_);
-    generate_status_->reportEvent(event, error_code, error_msg);
+    reportEventWithoutLock(event, error_code, error_msg);
 }
 
 // 无锁版本，供已持有 mutex_ 的内部调用路径使用（如 update/specUpdate/moveToNext 链路）。
+// 所有 Error 事件入口（reportError / reportEvent / 内部 reportEventWithoutLock）都收敛到这里，
+// Error 一旦记录 hasError() 即为真，必须唤醒可能阻塞在输出队列的消费者，避免白等 SynchronizedQueue 的 1s 超时。
 void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
                                             ErrorCode               error_code,
                                             const std::string&      error_msg) {
     generate_status_->reportEvent(event, error_code, error_msg);
+    if (event == StreamEvents::Error) {
+        wakeupOutputQueue();
+    }
 }
 
 void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*mutex_);
-    generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
+    reportEventWithoutLock(StreamEvents::Error, error_code, error_msg);
 }
 
 bool GenerateStream::hasEvent(StreamEvents::EventType event) const {
@@ -545,6 +550,7 @@ StreamState GenerateStream::moveToNext() {
     // notify one thread waiting for stream completion
     if (new_status == StreamState::FINISHED) {
         cv_->notify_one();
+        wakeupOutputQueue();
     }
     return state;
 }
