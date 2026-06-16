@@ -50,9 +50,6 @@ size_t steppedBytes(size_t bytes, int step) {
 }
 
 size_t fallbackFixedPoolHbmBytes(const CacheConfig& config) {
-    if (config.fixed_pool_uses_pinned_cpu) {
-        return 0u;
-    }
     if (config.use_typed_cache_regions && !config.group_region_names.empty()
         && config.group_region_names.size() == config.group_block_size_bytes.size()) {
         size_t bytes = 0;
@@ -74,10 +71,6 @@ size_t fallbackFixedPoolHbmBytes(const CacheConfig& config) {
 
 size_t effectivePagedBlockBytes(const CacheConfig& config, int step) {
     return config.block_size_bytes + steppedBytes(fallbackFixedPoolHbmBytes(config), step);
-}
-
-bool hasDsv4FixedPoolBytes(const CacheConfig& config) {
-    return config.state_block_size_bytes > 0 || config.swa_block_size_bytes > 0;
 }
 
 void validateDsv4KernelSeqSize(size_t seq_size_per_block, size_t kernel_seq_size_per_block, const char* config_name) {
@@ -143,10 +136,6 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         // kernel_seq_size_per_block = 256 even when physical seq_size > 256).
         config.kernel_seq_size_per_block = config.seq_size_per_block;
     }
-
-    // DSV4 fixed-pool residency toggle must be set before the pre-pass
-    // finalizeBlockNums so CPU-backed STATE/SWA_KV bytes are excluded from HBM.
-    config.fixed_pool_uses_pinned_cpu = kv_cache_config.dsv4_fixed_pool_use_memory && hasDsv4FixedPoolBytes(config);
 
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
@@ -255,13 +244,6 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
             num_mtp_modules = 1;
         }
     }
-
-    // DSV4 fixed-pool residency toggle (mirror createConfig) must precede
-    // pre-pass so fixed_pool_reserve_bytes accounts for CPU-backed regions.
-    score_config.fixed_pool_uses_pinned_cpu =
-        kv_cache_config.dsv4_fixed_pool_use_memory && hasDsv4FixedPoolBytes(score_config);
-    propose_config.fixed_pool_uses_pinned_cpu =
-        kv_cache_config.dsv4_fixed_pool_use_memory && hasDsv4FixedPoolBytes(propose_config);
 
     // Fixed-pool block counts depend on runtime scheduler limits. Finalize the
     // score and propose configs before sizing the shared paged budget so DSV4

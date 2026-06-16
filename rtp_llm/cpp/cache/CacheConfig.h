@@ -72,14 +72,8 @@ struct CacheConfig {
     size_t block_size_bytes     = 0;  // (kv + scales together)
     size_t swa_block_size_bytes = 0;  // SWA groups (joint allocation with full groups)
 
-    // Per-block bytes of all DSV4 STATE pools (INDEXER_STATE, CSA_STATE,
-    // HCA_STATE). Excluded from the HBM fixed-pool reservation only when
-    // fixed_pool_uses_pinned_cpu is true.
+    // Per-block bytes of all DSV4 STATE pools (INDEXER_STATE, CSA_STATE, HCA_STATE).
     size_t state_block_size_bytes = 0;
-
-    // True when DSV4 fixed pools (STATE pools and SWA_KV) should be allocated
-    // on pinned CPU memory and excluded from HBM fixed-pool reservation.
-    bool fixed_pool_uses_pinned_cpu = false;
 
     // ---- Per-block strides (one layer) ----
     size_t kv_block_stride_bytes = 0;
@@ -406,8 +400,7 @@ struct CacheConfig {
             // Explicit DSV4 fixed pools are allocated outside the paged FULL
             // pool budget. The linear-step fallback is accounted by the
             // effective block-size formula instead, so no reserve is needed.
-            const bool exclude_from_reserve = is_dsv4_fixed_region && fixed_pool_uses_pinned_cpu;
-            if (use_explicit_dsv4_blocks && gid < group_block_size_bytes.size() && !exclude_from_reserve) {
+            if (use_explicit_dsv4_blocks && gid < group_block_size_bytes.size()) {
                 reserve += static_cast<size_t>(rule_blocks) * group_block_size_bytes[gid];
             }
         }

@@ -196,10 +196,6 @@ struct KVCacheConfig {
     // follows dsv4_fixed_pool_blocks or the normal linear-step-derived count.
     uint32_t dsv4_hca_state_pool_blocks = 0;
 
-    // DSV4 fixed-pool residency switch. false = GPU BlockPool; true = pinned
-    // CPU BlockPool for INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV.
-    bool dsv4_fixed_pool_use_memory = false;
-
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
     std::string reco_vipserver_domain                = "";

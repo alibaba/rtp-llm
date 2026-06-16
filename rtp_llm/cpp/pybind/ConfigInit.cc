@@ -384,7 +384,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
         .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
-        .def_readwrite("dsv4_fixed_pool_use_memory", &KVCacheConfig::dsv4_fixed_pool_use_memory)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
         .def_readwrite("reco_vipserver_domain", &KVCacheConfig::reco_vipserver_domain)
@@ -460,7 +459,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reco_client_config,
                                       self.ssm_state_dtype,
                                       self.dsv4_fixed_pool_blocks,
-                                      self.dsv4_fixed_pool_use_memory,
+                                      false,
                                       self.dsv4_hca_state_pool_blocks,
                                       self.enable_gpu_prefix_tree,
                                       self.enable_prefix_tree_memory_cache,
@@ -530,10 +529,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.reco_client_config                   = t[42 + offset].cast<std::string>();
                     c.ssm_state_dtype                      = t[43 + offset].cast<std::string>();
                     c.dsv4_fixed_pool_blocks               = t[44 + offset].cast<uint32_t>();
-                    const size_t expected_with_fixed_pool_memory = (has_disk_fields ? 51u : 46u);
-                    if (t.size() >= expected_with_fixed_pool_memory) {
-                        c.dsv4_fixed_pool_use_memory = t[45 + offset].cast<bool>();
-                    }
+                    // Tuple slot 45 used to carry the removed DSV4 fixed-pool memory flag. Keep it
+                    // reserved for pickle compatibility, but ignore it because fixed/state pools no
+                    // longer support pinned CPU backing.
                     const size_t extra_start = 46 + offset;
                     if (t.size() > extra_start) {
                         const size_t extra_count = t.size() - extra_start;

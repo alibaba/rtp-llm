@@ -2199,7 +2199,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_DoesNotRemoveUpgradedBlock)
     const int read_num  = static_cast<int>(match_ctx->matchedBlockCount()) - reuse_num;
     ASSERT_GT(read_num, 0);
 
-    // asyncMatch captured old block indices in the pinned copy plan; asyncRead consumes that plan.
+    // asyncMatch captured old block indices in the read copy plan; asyncRead consumes that plan.
     auto ctx = connector_->asyncRead(res, meta, match_ctx, reuse_num, read_num);
     ASSERT_NE(ctx, nullptr);
 
