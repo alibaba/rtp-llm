@@ -113,9 +113,9 @@ class GracefulShutdownServer(Server):
             sig_name = signal.Signals(sig).name
         except ValueError:
             sig_name = str(sig)
-        self.shutdown_manager.start_draining(f"signal {sig_name}")
+        self.shutdown_manager.start_unavailable(f"signal {sig_name}")
         logging.info(
-            "Frontend entering pre-stop drain without uvicorn shutdown: "
+            "Frontend entering pre-stop unavailable state without uvicorn shutdown: "
             "signal=%s, active_requests=%s",
             sig_name,
             self.shutdown_manager.active_request_count(),
@@ -424,7 +424,7 @@ class FrontendApp(object):
         @app.post("/frontend_health")
         @app.get("/frontend_health")
         async def frontend_health():
-            if self.shutdown_manager.is_draining():
+            if self.shutdown_manager.is_unavailable():
                 return draining_response()
             return "ok"
 
@@ -444,6 +444,8 @@ class FrontendApp(object):
             check_startup_warmup_ready(request)
             if request.url.path == "/liveness":
                 return "ok"
+            if self.shutdown_manager.is_unavailable():
+                return draining_response()
             if self.separated_frontend:
                 await check_all_health()
                 return "ok"
@@ -462,6 +464,8 @@ class FrontendApp(object):
         @app.get("/")
         async def health(request: Request):
             check_not_draining(request)
+            if self.shutdown_manager.is_unavailable():
+                return draining_response()
             if self.separated_frontend:
                 await check_all_health()
                 return {"status": "home"}

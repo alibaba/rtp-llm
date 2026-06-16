@@ -78,18 +78,35 @@ class DashScShutdownManager:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._unavailable = False
         self._draining = False
         self._drain_reason = ""
         self._drain_started_at: Optional[float] = None
         self._active_requests = 0
 
+    def start_unavailable(self, reason: str) -> None:
+        with self._lock:
+            if self._unavailable:
+                return
+            self._unavailable = True
+            self._drain_reason = reason
+            self._drain_started_at = time.time()
+            active_requests = self._active_requests
+        logging.info(
+            "[DashScApp] entering pre-stop unavailable state, reason=%s, active_requests=%s",
+            reason,
+            active_requests,
+        )
+
     def start_draining(self, reason: str) -> None:
         with self._lock:
             if self._draining:
                 return
+            self._unavailable = True
             self._draining = True
             self._drain_reason = reason
-            self._drain_started_at = time.time()
+            if self._drain_started_at is None:
+                self._drain_started_at = time.time()
             active_requests = self._active_requests
         logging.info(
             "[DashScApp] entering graceful shutdown drain, reason=%s, active_requests=%s",
@@ -327,7 +344,7 @@ class DashScApp:
     def _install_signal_handlers(self) -> None:
         def _drain_only_handler(signum, frame):
             logging.info("[DashScApp] received pre-stop drain signal %s", signum)
-            self._shutdown_manager.start_draining(f"signal {signum}")
+            self._shutdown_manager.start_unavailable(f"signal {signum}")
 
         def _handler(signum, frame):
             logging.info("[DashScApp] received signal %s, shutting down", signum)

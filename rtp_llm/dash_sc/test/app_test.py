@@ -212,7 +212,7 @@ class PreStopDrainSecondsTest(TestCase):
 
         sleep.assert_called_once_with(1.0)
 
-    def test_pre_stop_signal_drains_without_shutdown_event(self) -> None:
+    def test_pre_stop_signal_marks_unavailable_without_shutdown_event(self) -> None:
         app = bg_app.DashScApp.__new__(bg_app.DashScApp)
         app._shutdown_started_at = None
         app._shutdown_manager = DashScShutdownManager()
@@ -227,7 +227,7 @@ class PreStopDrainSecondsTest(TestCase):
 
         handlers[signal.SIGUSR1](signal.SIGUSR1, None)
 
-        self.assertTrue(app._shutdown_manager.is_draining())
+        self.assertFalse(app._shutdown_manager.is_draining())
         self.assertIsNone(app._shutdown_started_at)
         app._shutdown_event.set.assert_not_called()
 
@@ -269,6 +269,31 @@ class DashScShutdownManagerTest(TestCase):
         self.assertEqual(abort_args[0], grpc.StatusCode.UNAVAILABLE)
         self.assertIn("dash_sc is draining", abort_args[1])
         self.assertFalse(called)
+        self.assertEqual(manager.active_request_count(), 0)
+
+    def test_pre_stop_unavailable_interceptor_still_admits_rpc(self) -> None:
+        manager = DashScShutdownManager()
+        interceptor = DashScGrpcDrainAioInterceptor(manager)
+        called = False
+
+        async def unary_handler(_request, _context):
+            nonlocal called
+            called = True
+            return "ok"
+
+        async def continuation(_details):
+            return grpc.unary_unary_rpc_method_handler(unary_handler)
+
+        manager.start_unavailable("unit test")
+
+        async def run():
+            handler = await interceptor.intercept_service(
+                continuation, SimpleNamespace(method="/test.Service/Unary")
+            )
+            return await handler.unary_unary(object(), self._AbortContext())
+
+        self.assertEqual(asyncio.run(run()), "ok")
+        self.assertTrue(called)
         self.assertEqual(manager.active_request_count(), 0)
 
     def test_draining_rejects_new_stream_rpc(self) -> None:

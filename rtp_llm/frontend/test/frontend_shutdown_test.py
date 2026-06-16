@@ -109,6 +109,26 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         self.assertEqual(embedding_response.status_code, 503)
         self.assertEqual(embedding_response.headers.get("retry-after"), "1")
 
+    def test_pre_stop_unavailable_marks_health_but_serves_stale_business(self):
+        app_owner = FrontendApp.__new__(FrontendApp)
+        app_owner.frontend_server = FakeFrontendServer()
+        app_owner.shutdown_manager = FrontendShutdownManager()
+        app_owner.separated_frontend = True
+        app_owner.server_config = SimpleNamespace(http_port=0)
+        app_owner.grpc_client = None
+
+        app = app_owner.create_app()
+        client = TestClient(app)
+        app_owner.shutdown_manager.start_unavailable("unit test")
+
+        self.assertEqual(client.get("/liveness").status_code, 200)
+        self.assertEqual(client.get("/health").status_code, 503)
+        chat_response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hello"}]},
+        )
+        self.assertEqual(chat_response.status_code, 200)
+
     def test_draining_rejects_admin_backend_requests(self):
         app_owner = FrontendApp.__new__(FrontendApp)
         app_owner.frontend_server = FakeFrontendServer()
@@ -172,14 +192,15 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         self.assertTrue(manager.is_draining())
         self.assertTrue(server.should_exit)
 
-    def test_pre_stop_signal_marks_draining_without_uvicorn_shutdown(self):
+    def test_pre_stop_signal_marks_unavailable_without_uvicorn_shutdown(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
         server.set_server(FakeFrontendServer(), manager)
 
         server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
 
-        self.assertTrue(manager.is_draining())
+        self.assertTrue(manager.is_unavailable())
+        self.assertFalse(manager.is_draining())
         self.assertFalse(server.should_exit)
 
     def test_sigterm_after_pre_stop_signal_waits_only_remaining_drain(self):
@@ -192,6 +213,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             with patch.object(manager, "drain_elapsed_seconds", return_value=7.0):
                 server.handle_exit(signal.SIGTERM, None)
 
+        self.assertTrue(manager.is_unavailable())
         self.assertTrue(manager.is_draining())
         self.assertFalse(server.should_exit)
         self.assertIsNotNone(server._pre_stop_timer)
@@ -209,6 +231,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             with patch.object(manager, "drain_elapsed_seconds", return_value=10.0):
                 server.handle_exit(signal.SIGTERM, None)
 
+        self.assertTrue(manager.is_unavailable())
         self.assertTrue(manager.is_draining())
         self.assertTrue(server.should_exit)
         self.assertIsNone(server._pre_stop_timer)
