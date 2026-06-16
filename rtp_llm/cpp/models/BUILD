@@ -167,12 +167,24 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
-        "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        # cuda_graph_base is platform-agnostic struct definitions used by
+        # PyWrappedModel.h (GraphParams/CudaGraphState); safe on all platforms.
+        # cuda_graph_impl/cuda_graph_hdrs_lib pull in the device-specific
+        # runner srcs/headers and only link on CUDA/ROCm.
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
-        "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
-    ],
+    ] + select({
+        "//:using_cuda": [
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
+        ],
+        "@//:using_rocm": [
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 
