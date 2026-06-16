@@ -640,7 +640,7 @@ ExecStatus getGpuExecStatus() {
 }
 
 torch::Device getTorchCudaDevice() {
-    return torch::Device(torch::kCUDA);
+    return torch::Device(torch::kCUDA, static_cast<c10::DeviceIndex>(getDeviceId()));
 }
 
 namespace {

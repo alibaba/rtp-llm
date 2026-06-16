@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/models_py/bindings/core/RuntimeDevice.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -28,8 +29,6 @@ class CacheStore;
 MlaOpsType initRuntime(size_t device_id, bool trace_memory, bool enable_comm_overlap, MlaOpsType mla_ops_type);
 
 bool isRuntimeInitialized();
-
-int64_t getDeviceId();
 
 // ===================================================================
 // Sync / error-check
@@ -69,9 +68,8 @@ void cudaProfilerEnd();
 // Status queries
 // ===================================================================
 
-ExecStatus    getGpuExecStatus();
-torch::Device getTorchCudaDevice();
-void          setTraceMemory(bool trace_memory);
+ExecStatus getGpuExecStatus();
+void       setTraceMemory(bool trace_memory);
 
 // ===================================================================
 // Copy ops

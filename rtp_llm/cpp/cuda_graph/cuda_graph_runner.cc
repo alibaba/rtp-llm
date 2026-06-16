@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <c10/core/DeviceGuard.h>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
@@ -291,7 +292,8 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
 
 void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputData");
-    const size_t graph_idx =
+    c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
+    const size_t     graph_idx =
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
     auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     int   token_num        = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
@@ -349,6 +351,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                              CudaGraphState&      state,
                                              bool                 skip_forward_event_sync) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs");
+    c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
 
     // AsyncRunner calls need this cross-stream sync; inline forward() calls are
     // already ordered on the same stream and can skip the CPU-blocking wait.
@@ -624,7 +627,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 
 void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.updateKVCacheKernelBlockId");
-    const size_t graph_idx =
+    c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
+    const size_t     graph_idx =
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
     auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     auto  attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
@@ -662,7 +666,8 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
 }
 
 PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphState& state) {
-    PyModelOutputs outputs;
+    c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
+    PyModelOutputs   outputs;
 
     // RAII guard: ensure prepared_attention_inputs_ is always reset to false on scope exit,
     // even if forward() throws after async prepareAttentionInputs set it to true.
@@ -842,7 +847,8 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
 }
 
 void CudaGraphRunner::initKernelInternalMemory() {
-    torch::Tensor cu_seqlens =
+    c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
+    torch::Tensor    cu_seqlens =
         torch::zeros({int(max_bs_ + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU)).pin_memory();
     torch::Tensor cu_kv_seqlens =
         torch::zeros({int(max_bs_ + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
@@ -866,6 +872,7 @@ int CudaGraphRunner::getCurrentRealGraphBs(const CudaGraphState& state) const {
 }
 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
+    c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
     inputs.attention_inputs.is_target_verify = is_target_verify_;
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
 
@@ -928,8 +935,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.dtype                     = model_data_type_;
     inputs.attention_inputs.is_s_padded               = true;
     inputs.attention_inputs.sequence_lengths_plus_1_d = torch::zeros({int(max_bs_)}, options_cuda_int32_);
-    inputs.attention_inputs.decode_cu_seqlens_d =
-        torch::arange(0, max_bs_ + 1, 1, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+    inputs.attention_inputs.decode_cu_seqlens_d       = torch::arange(0, max_bs_ + 1, 1, options_cuda_int32_);
 }
 
 void CudaGraphRunner::initCaptureAttentionInputsPost() {
@@ -963,7 +969,8 @@ void CudaGraphRunner::setInputEmbeddingScalar(float input_embedding_scalar) {
 }
 
 void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token) {
-    auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+    c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
+    auto             options_cuda_int32 = options_cuda_int32_;
     // Initialize BertEmbeddingInputs for capture
     // combo_position_ids: empty tensor for capture (will be filled during actual forward)
     inputs.bert_embedding_inputs.combo_position_ids = torch::zeros({max_seq_len_ * max_bs}, options_cuda_int32);
@@ -982,8 +989,9 @@ void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int 
 }
 
 void CudaGraphRunner::logCudaGraphPoolMemory(const char* phase) {
-    size_t free_bytes  = 0;
-    size_t total_bytes = 0;
+    c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
+    size_t           free_bytes  = 0;
+    size_t           total_bytes = 0;
     cuda_graph::graphMemGetInfo(&free_bytes, &total_bytes);
     const size_t used_bytes        = total_bytes - free_bytes;
     const size_t pytorch_allocated = cuda_graph::graphAllocatedBytes();
@@ -1002,6 +1010,7 @@ void CudaGraphRunner::logCudaGraphPoolMemory(const char* phase) {
 }
 
 void CudaGraphRunner::initCapture() {
+    c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
     if (enable_cuda_graph_) {
         RTP_LLM_LOG_INFO("CUDA graph capture is enabled");
         shared_graph_pool_ = cuda_graph::graphPoolHandle();
@@ -1105,11 +1114,13 @@ void CudaGraphRunner::initCapture() {
 }
 
 void CudaGraphRunner::replayGraph(int key) {
+    c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
     graph_instances_[key].graph_.replay();
 }
 
 void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
-    auto inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
+    c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
+    auto             inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
 
     size_t pre_capture_reserved = cuda_graph::graphReservedBytes();
 
@@ -1181,6 +1192,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
 }
 
 void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
+    c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
     RTP_LLM_LOG_INFO("replay start check for %s %d", key_type, key);
     replayGraph(key);
     cuda_graph::graphDeviceSynchronize();
@@ -1188,6 +1200,7 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
 }
 
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
+    c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
     inputs.attention_inputs.is_target_verify = is_target_verify_;

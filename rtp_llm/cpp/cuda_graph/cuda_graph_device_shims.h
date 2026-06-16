@@ -77,6 +77,18 @@ inline void setDevice(int rank) {
 #endif
 }
 
+inline int graphCurrentDeviceIndex() {
+#if USING_ROCM
+    return at::hip::current_device();
+#else
+    return at::cuda::current_device();
+#endif
+}
+
+inline c10::Device graphDevice(int device_index) {
+    return c10::Device(GRAPH_DEVICE_TYPE, static_cast<c10::DeviceIndex>(device_index));
+}
+
 inline void* getGraphCaptureTpNcclComm() {
 #if USING_ROCM
     return rocm::getHipGraphTpNcclComm();

@@ -74,6 +74,7 @@ cc_library(
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/models_py/bindings/core:runtime_device_hdr",
     ],
 )
 

@@ -61,6 +61,7 @@ cc_library(
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/utils:linear_blocks_util",
         "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
+        "//rtp_llm/models_py/bindings/core:runtime_device_hdr",
     ],
     visibility = ["//visibility:public"],
 )
