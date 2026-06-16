@@ -7,6 +7,8 @@ import org.flexlb.dao.optimizer.OptimizerRegisterRequest;
 import org.flexlb.dao.optimizer.OptimizerRegisterResponse;
 import org.flexlb.dao.optimizer.OptimizerRemoveInstanceResponse;
 import org.flexlb.dao.optimizer.OptimizerTraceQueryResponse;
+import org.flexlb.enums.StatusEnum;
+import org.flexlb.exception.FlexLBException;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -120,8 +122,7 @@ class OnlineOptimizerClientTest {
         verify(httpService, timeout(3000)).request(any(), any(URI.class),
                 eq("/api/optimizer/registerInstance"), eq(OptimizerRegisterResponse.class));
 
-        Thread.sleep(100);
-        assertTrue(client.isRegistered());
+        awaitRegistered(3000);
     }
 
     @Test
@@ -146,8 +147,7 @@ class OnlineOptimizerClientTest {
                 .build();
         client.startRegistrationAsync("test-instance", params);
 
-        Thread.sleep(500);
-        assertTrue(client.isRegistered());
+        awaitRegistered(3000);
         verify(httpService, never()).request(any(), any(URI.class),
                 eq("/api/optimizer/registerInstance"), eq(OptimizerRegisterResponse.class));
     }
@@ -189,8 +189,7 @@ class OnlineOptimizerClientTest {
         verify(httpService, timeout(3000)).request(any(), any(URI.class),
                 eq("/api/optimizer/registerInstance"), eq(OptimizerRegisterResponse.class));
 
-        Thread.sleep(100);
-        assertTrue(client.isRegistered());
+        awaitRegistered(3000);
     }
 
     @Test
@@ -222,8 +221,7 @@ class OnlineOptimizerClientTest {
         verify(httpService, timeout(10000)).request(any(), any(URI.class),
                 eq("/api/optimizer/registerInstance"), eq(OptimizerRegisterResponse.class));
 
-        Thread.sleep(100);
-        assertTrue(client.isRegistered());
+        awaitRegistered(3000);
     }
 
     @Test
@@ -238,7 +236,7 @@ class OnlineOptimizerClientTest {
         getResp.setHeader(notFoundHeader);
         when(httpService.request(any(), any(URI.class), eq("/api/optimizer/getInstance"),
                 eq(OptimizerGetInstanceResponse.class)))
-                .thenReturn(Mono.error(new RuntimeException("connection refused")))
+                .thenReturn(Mono.error(StatusEnum.INTERNAL_ERROR.toException("connection refused")))
                 .thenReturn(Mono.just(getResp));
 
         OptimizerRegisterResponse registerResp = new OptimizerRegisterResponse();
@@ -253,8 +251,32 @@ class OnlineOptimizerClientTest {
         verify(httpService, timeout(10000)).request(any(), any(URI.class),
                 eq("/api/optimizer/registerInstance"), eq(OptimizerRegisterResponse.class));
 
-        Thread.sleep(100);
-        assertTrue(client.isRegistered());
+        awaitRegistered(3000);
+    }
+
+    @Test
+    void should_treat_http_error_as_not_found_and_proceed_to_register() throws Exception {
+        when(addressResolver.getAddresses()).thenReturn(List.of("10.0.0.1:8082"));
+
+        // Plain RuntimeException (HTTP non-200) should be treated as "instance not found"
+        when(httpService.request(any(), any(URI.class), eq("/api/optimizer/getInstance"),
+                eq(OptimizerGetInstanceResponse.class)))
+                .thenReturn(Mono.error(new RuntimeException("http error, httpStatusCode=404, body=not found")));
+
+        OptimizerRegisterResponse registerResp = new OptimizerRegisterResponse();
+        registerResp.setHeader(okHeader());
+        when(httpService.request(any(), any(URI.class), eq("/api/optimizer/registerInstance"),
+                eq(OptimizerRegisterResponse.class)))
+                .thenReturn(Mono.just(registerResp));
+
+        OptimizerInstanceParams params = OptimizerInstanceParams.builder().blockSize(64).build();
+        client.startRegistrationAsync("test-instance", params);
+
+        // Should proceed directly to registration without retry
+        verify(httpService, timeout(3000)).request(any(), any(URI.class),
+                eq("/api/optimizer/registerInstance"), eq(OptimizerRegisterResponse.class));
+
+        awaitRegistered(3000);
     }
 
     @Test
@@ -279,8 +301,7 @@ class OnlineOptimizerClientTest {
 
         OptimizerInstanceParams params = OptimizerInstanceParams.builder().blockSize(64).build();
         client.startRegistrationAsync("test-instance", params);
-        Thread.sleep(500);
-        assertTrue(client.isRegistered());
+        awaitRegistered(3000);
 
         OptimizerTraceQueryResponse traceResp = new OptimizerTraceQueryResponse();
         when(httpService.request(any(), any(URI.class), eq("/api/optimizer/traceQuery"),
@@ -339,11 +360,11 @@ class OnlineOptimizerClientTest {
         client.startRegistrationAsync("test-instance", params);
         verify(httpService, timeout(3000)).request(any(), any(URI.class),
                 eq("/api/optimizer/registerInstance"), eq(OptimizerRegisterResponse.class));
-        Thread.sleep(100);
+        awaitRegistered(3000);
 
         // Duplicate call must be blocked by AtomicBoolean started; no extra register request.
         client.startRegistrationAsync("test-instance", params);
-        Thread.sleep(200);
+        // startRegistrationAsync rejects synchronously via AtomicBoolean; no async delay needed.
         verify(httpService, times(1)).request(any(), any(URI.class),
                 eq("/api/optimizer/registerInstance"), eq(OptimizerRegisterResponse.class));
     }
@@ -403,8 +424,7 @@ class OnlineOptimizerClientTest {
 
         client.startRegistrationAsync("test-instance",
                 OptimizerInstanceParams.builder().blockSize(64).build());
-        Thread.sleep(500);
-        assertTrue(client.isRegistered());
+        awaitRegistered(3000);
 
         // httpService.request throws synchronously (not Mono.error); traceQuery must swallow it.
         when(httpService.request(any(), any(URI.class), eq("/api/optimizer/traceQuery"),
@@ -430,7 +450,8 @@ class OnlineOptimizerClientTest {
         OptimizerInstanceParams params = OptimizerInstanceParams.builder().blockSize(64).build();
         // RejectedExecutionException should be swallowed by safeSubmit and not propagate.
         client.startRegistrationAsync("test-instance", params);
-        Thread.sleep(200);
+
+        // RejectedExecutionException is swallowed synchronously by safeSubmit; no async delay.
         assertFalse(client.isRegistered());
     }
 
@@ -467,8 +488,7 @@ class OnlineOptimizerClientTest {
                 .build();
         client.startRegistrationAsync("test-instance", params);
 
-        Thread.sleep(500);
-        assertTrue(client.isRegistered());
+        awaitRegistered(3000);
         // Should NOT re-register since params match (order-independent)
         verify(httpService, never()).request(any(), any(URI.class),
                 eq("/api/optimizer/registerInstance"), eq(OptimizerRegisterResponse.class));
@@ -497,7 +517,6 @@ class OnlineOptimizerClientTest {
 
         verify(httpService, timeout(3000).atLeastOnce()).request(any(), any(URI.class),
                 eq("/api/optimizer/registerInstance"), eq(OptimizerRegisterResponse.class));
-        Thread.sleep(200);
 
         // Strict isOkHeader: missing header must NOT be treated as success
         assertFalse(client.isRegistered());
@@ -525,7 +544,6 @@ class OnlineOptimizerClientTest {
 
         verify(httpService, timeout(3000).atLeastOnce()).request(any(), any(URI.class),
                 eq("/api/optimizer/registerInstance"), eq(OptimizerRegisterResponse.class));
-        Thread.sleep(200);
 
         assertFalse(client.isRegistered());
     }
@@ -558,11 +576,9 @@ class OnlineOptimizerClientTest {
         // Now resolver reports zero hosts (e.g. all instances down).
         when(addressResolver.getAddresses()).thenReturn(List.of());
 
+        // traceQuery is synchronous; refreshUri clears optimizerUri so the call short-circuits.
         client.traceQuery(999L, List.of(10L, 20L));
-        Thread.sleep(100);
 
-        // refreshUri must clear optimizerUri so traceQuery short-circuits and never
-        // hits the dead address.
         verify(httpService, never()).request(any(), any(URI.class),
                 eq("/api/optimizer/traceQuery"), eq(OptimizerTraceQueryResponse.class));
     }

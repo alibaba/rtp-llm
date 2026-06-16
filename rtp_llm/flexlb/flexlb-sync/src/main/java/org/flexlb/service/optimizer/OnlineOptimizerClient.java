@@ -11,6 +11,7 @@ import org.flexlb.dao.optimizer.OptimizerRemoveInstanceRequest;
 import org.flexlb.dao.optimizer.OptimizerRemoveInstanceResponse;
 import org.flexlb.dao.optimizer.OptimizerTraceQueryRequest;
 import org.flexlb.dao.optimizer.OptimizerTraceQueryResponse;
+import org.flexlb.exception.FlexLBException;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.IdUtils;
 
@@ -50,6 +51,11 @@ public class OnlineOptimizerClient {
     private static final long MAX_RETRY_DELAY_MS = 30_000;
     private static final double BACKOFF_MULTIPLIER = 2.0;
     private static final long JITTER_BOUND_MS = 2000;
+
+    private static final String PATH_GET_INSTANCE = "/getInstance";
+    private static final String PATH_REGISTER_INSTANCE = "/registerInstance";
+    private static final String PATH_REMOVE_INSTANCE = "/removeInstance";
+    private static final String PATH_TRACE_QUERY = "/traceQuery";
 
     public OnlineOptimizerClient(GeneralHttpNettyService httpService,
                                  OptimizerAddressResolver addressResolver,
@@ -161,17 +167,31 @@ public class OnlineOptimizerClient {
         req.setTraceId(IdUtils.fastUuid());
         req.setInstanceId(instanceId);
 
-        OptimizerGetInstanceResponse resp = httpService.request(
-                req, optimizerUri, basePath + "/getInstance",
-                OptimizerGetInstanceResponse.class
-        ).block(Duration.ofMillis(registerTimeoutMs));
+        OptimizerGetInstanceResponse resp;
+        try {
+            resp = httpService.request(
+                    req, optimizerUri, basePath + PATH_GET_INSTANCE,
+                    OptimizerGetInstanceResponse.class
+            ).block(Duration.ofMillis(registerTimeoutMs));
+        } catch (FlexLBException e) {
+            // Transport/infrastructure failure (connection error, read timeout, netty error).
+            // Instance may still exist; propagate to trigger retry.
+            throw e;
+        } catch (IllegalStateException e) {
+            // Reactor block() timeout — request did not complete in time, trigger retry.
+            throw e;
+        } catch (Exception e) {
+            // HTTP non-200 response (e.g. 404 instance not found) from server.
+            // Treat as "instance does not exist" so registration can proceed.
+            log.info("OnlineOptimizer getInstance returned HTTP error (treat as not found): {}", e.getMessage());
+            return null;
+        }
 
         if (resp == null) {
             log.warn("OnlineOptimizer getInstance returned null, instanceId={}", instanceId);
             return null;
         }
         if (!isOkHeader(resp.getHeader())) {
-            // Non-OK or malformed response: treat as not found, register flow will retry on its own check.
             log.info("OnlineOptimizer getInstance returned non-OK status code={}, instanceId={}",
                     extractStatusCode(resp.getHeader()), instanceId);
             return null;
@@ -185,7 +205,7 @@ public class OnlineOptimizerClient {
         req.setInstanceId(instanceId);
 
         OptimizerRemoveInstanceResponse resp = httpService.request(
-                req, optimizerUri, basePath + "/removeInstance",
+                req, optimizerUri, basePath + PATH_REMOVE_INSTANCE,
                 OptimizerRemoveInstanceResponse.class
         ).block(Duration.ofMillis(registerTimeoutMs));
 
@@ -215,7 +235,7 @@ public class OnlineOptimizerClient {
         req.setFullGroupName(params.getFullGroupName());
 
         OptimizerRegisterResponse resp = httpService.request(
-                req, optimizerUri, basePath + "/registerInstance",
+                req, optimizerUri, basePath + PATH_REGISTER_INSTANCE,
                 OptimizerRegisterResponse.class
         ).block(Duration.ofMillis(registerTimeoutMs));
 
@@ -252,7 +272,7 @@ public class OnlineOptimizerClient {
             req.setInstanceId(instanceId);
             req.setBlockKeys(blockCacheKeys);
 
-            httpService.request(req, uri, basePath + "/traceQuery",
+            httpService.request(req, uri, basePath + PATH_TRACE_QUERY,
                             OptimizerTraceQueryResponse.class)
                     .subscribe(
                             resp -> {},
@@ -267,6 +287,10 @@ public class OnlineOptimizerClient {
     }
 
     public void shutdown() {
+        // Intentionally NOT calling removeInstance: keep the registration alive on the
+        // optimizer server so that a restarted instance can reuse the same slot without
+        // re-registration overhead (the server will match by instanceId on next startup).
+        registered = false;
         retryScheduler.shutdown();
         try {
             if (!retryScheduler.awaitTermination(2, TimeUnit.SECONDS)) {
@@ -279,7 +303,10 @@ public class OnlineOptimizerClient {
         addressResolver.shutdown();
     }
 
-    private synchronized void refreshUri() {
+    // No synchronization needed: both optimizerUri and addressSnapshot are volatile,
+    // and all updates are idempotent. Concurrent callers may redundantly compute the
+    // same URI, which is harmless.
+    private void refreshUri() {
         List<String> addresses = addressResolver.getAddresses();
         if (addresses.isEmpty()) {
             // Resolver reports zero hosts: drop cached URI to avoid hitting a dead address.
@@ -290,6 +317,9 @@ public class OnlineOptimizerClient {
             }
             return;
         }
+        // Only use the first address: optimizer is stateful, cross-replica failover may
+        // cause inconsistent registration. Host failures are handled by ServiceDiscovery
+        // removing dead hosts, so the next retry naturally picks the new first address.
         String first = addresses.get(0);
         if (!first.equals(addressSnapshot)) {
             this.optimizerUri = URI.create("http://" + first);
@@ -301,11 +331,10 @@ public class OnlineOptimizerClient {
     private static boolean isOkHeader(CommonResponseHeader header) {
         return header != null
                 && header.getStatus() != null
-                && header.getStatus().getCode() == 1;
+                && header.getStatus().isOk();
     }
 
-    private static Integer extractStatusCode(CommonResponseHeader header) {
-        // null means header/status absent; avoids colliding with a real -1 from server.
+    private static Object extractStatusCode(CommonResponseHeader header) {
         if (header == null || header.getStatus() == null) return null;
         return header.getStatus().getCode();
     }

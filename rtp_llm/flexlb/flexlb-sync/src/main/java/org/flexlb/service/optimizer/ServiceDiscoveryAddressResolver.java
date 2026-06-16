@@ -74,7 +74,7 @@ public class ServiceDiscoveryAddressResolver implements OptimizerAddressResolver
         for (WorkerHost host : hosts) {
             addresses.add(host.getIp() + ":" + host.getPort());
         }
-        this.resolvedAddresses = addresses;
+        this.resolvedAddresses = Collections.unmodifiableList(addresses);
         log.info("ServiceDiscoveryAddressResolver updated, domain={}, count={}", domain, addresses.size());
     }
 
