@@ -680,9 +680,9 @@ class SparseMlaImpl(MlaImplBase):
             attn_inputs, self.seq_size_per_block, forbid_realloc
         )
         self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc)
-        block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
+        block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
         if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
-            block_table = attn_inputs.kv_cache_kernel_block_id_device
+            block_table = attn_inputs.kv_cache_block_id_device
         self.fmha_impl.plan(
             self.fmha_params,
             block_table,
@@ -696,9 +696,9 @@ class SparseMlaImpl(MlaImplBase):
             and attn_inputs.kv_cache_kernel_block_id_device is not None
             and self.fmha_params.target_verify_total_tokens > 0
         ):
-            block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
+            block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
             if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
-                block_table = attn_inputs.kv_cache_kernel_block_id_device
+                block_table = attn_inputs.kv_cache_block_id_device
             self.fmha_params.fill_target_verify_cuda_graph_params(
                 attn_inputs.input_lengths,
                 attn_inputs.prefix_lengths,
@@ -718,9 +718,9 @@ class SparseMlaImpl(MlaImplBase):
             and attn_inputs.sequence_lengths_plus_1_d is not None
             and attn_inputs.kv_cache_kernel_block_id_device is not None
         ):
-            block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
+            block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
             if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
-                block_table = attn_inputs.kv_cache_kernel_block_id_device
+                block_table = attn_inputs.kv_cache_block_id_device
             self.fmha_params.fill_sparse_mla_decode_cuda_graph_params(
                 attn_inputs.sequence_lengths_plus_1_d,
                 block_table,
@@ -736,9 +736,9 @@ class SparseMlaImpl(MlaImplBase):
             and attn_inputs.kv_cache_kernel_block_id_device is not None
             and self.fmha_params.prefill_tokens_per_batch > 0
         ):
-            block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
+            block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
             if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
-                block_table = attn_inputs.kv_cache_kernel_block_id_device
+                block_table = attn_inputs.kv_cache_block_id_device
             self.fmha_params.fill_target_verify_cuda_graph_params(
                 attn_inputs.input_lengths,
                 attn_inputs.prefix_lengths,
