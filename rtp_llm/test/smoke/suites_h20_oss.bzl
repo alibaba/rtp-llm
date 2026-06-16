@@ -240,31 +240,7 @@ def h20_oss_suites():
         ],
     )
 
-    # # H20 Grammar light suite (qwen2 1.5B). Heavy 35B cases live in :smoke_h20_grammar_heavy.
-    # native.test_suite(
-    #     name = "smoke_h20_grammar",
-    #     tests = [
-    #         # Streaming SSE + EBNF + invalid_schema + regex sanity in one server.
-    #         smoke_test(
-    #             name = "qwen2_1_5b_grammar_misc",
-    #             task_info = "data/model/qwen2/q_r_grammar_misc.json",
-    #             smoke_args = "--act_type BF16 --warm_up 0 --seq_size_per_block 8 --load_method scratch",
-    #             gpu_type = ["H20"],
-    #             envs = ["PYTHONUNBUFFERED=TRUE", "VISIT_RETRY_TIME=1"],
-    #         ),
-    #         # TP2 × DP2 + concurrent + mixed batch — ready/failed bitmap fold across both layers.
-    #         smoke_test(
-    #             name = "qwen2_1_5b_grammar_tp2_dp2",
-    #             task_info = "data/model/qwen2/q_r_grammar_mixed.json",
-    #             smoke_args = "--act_type BF16 --warm_up 0 --seq_size_per_block 8 --tp_size 2 --dp_size 2 --world_size 4 --load_method scratch",
-    #             gpu_type = ["H20"],
-    #             envs = ["PYTHONUNBUFFERED=TRUE"],
-    #             concurrency_test = True,
-    #         ),
-    #     ],
-    # )
-
-    # H20 Grammar heavy suite — 35B-MoE MTP/PD/reasoning. Sibling of :smoke_h20_grammar.
+    # H20 Grammar heavy suite — 35B-MoE MTP/PD/reasoning.
     native.test_suite(
         name = "smoke_h20_grammar_heavy",
         tests = [
