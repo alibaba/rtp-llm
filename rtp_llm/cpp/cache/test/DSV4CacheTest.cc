@@ -32,7 +32,6 @@ constexpr uint32_t kDsv4TokensPerBlock    = 128;
 constexpr uint32_t kDsv4KvEntryBytes      = 1024;
 constexpr uint32_t kDsv4IndexerEntryBytes = 256;
 constexpr uint32_t kDsv4Fp8KvEntryBytes   = 584;
-constexpr uint32_t kDsv4FixedPoolBlocks   = 256;
 
 class DSV4CacheTestEnvironment: public ::testing::Environment {
 public:
@@ -54,10 +53,9 @@ private:
 
 }  // namespace
 
-static KVCacheConfig makeDsv4KvCacheConfig(uint32_t fixed_pool_blocks = kDsv4FixedPoolBlocks) {
+static KVCacheConfig makeDsv4KvCacheConfig() {
     KVCacheConfig config;
-    config.seq_size_per_block     = 128;
-    config.dsv4_fixed_pool_blocks = fixed_pool_blocks;
+    config.seq_size_per_block = 128;
     return config;
 }
 
@@ -808,34 +806,24 @@ TEST(HybridPoolConfigCreatorTest, AllPagedPoolsShareBlockNum) {
     }
 }
 
-TEST(HybridPoolConfigCreatorTest, DSV4FixedPoolBlocksAppliedToFixedGroups) {
+TEST(HybridPoolConfigCreatorTest, DSV4StateSwaPoolsFollowGlobalBlocks) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     RuntimeConfig     runtime_config;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block                          = 128;
     kv_cache_config.test_block_num                              = 100;
-    kv_cache_config.dsv4_fixed_pool_blocks                      = kDsv4FixedPoolBlocks;
+    kv_cache_config.dsv4_hca_state_pool_blocks                  = 0;
     runtime_config.max_generate_batch_size                      = 5;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 3;
 
     auto config = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
 
     ASSERT_EQ(config.group_block_nums.size(), static_cast<size_t>(kDsv4PoolNum));
-    // FULL groups get global_block_num as-is
-    EXPECT_EQ(config.group_block_nums[0], 100u);
-    EXPECT_EQ(config.group_block_nums[1], 100u);
-    EXPECT_EQ(config.group_block_nums[2], 100u);
-    // Fixed groups use DSV4_FIXED_POOL_BLOCKS.
-    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(config.group_block_nums[gid], kDsv4FixedPoolBlocks) << "gid=" << gid;
+    for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
+        EXPECT_EQ(config.group_block_nums[gid], 100u) << "gid=" << gid;
     }
-
-    size_t expected_reserve = 0;
-    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        expected_reserve += static_cast<size_t>(kDsv4FixedPoolBlocks) * config.group_block_size_bytes[gid];
-    }
-    EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_reserve);
+    EXPECT_EQ(config.fixed_pool_reserve_bytes, 0u);
 }
 
 TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksOverridesOnlyHcaState) {
@@ -845,7 +833,6 @@ TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksOverridesOnlyHcaState) {
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block                          = 128;
     kv_cache_config.test_block_num                              = 100;
-    kv_cache_config.dsv4_fixed_pool_blocks                      = 512;
     kv_cache_config.dsv4_hca_state_pool_blocks                  = 350;
     runtime_config.max_generate_batch_size                      = 5;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 3;
@@ -856,16 +843,12 @@ TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksOverridesOnlyHcaState) {
     EXPECT_EQ(config.group_block_nums[0], 100u);
     EXPECT_EQ(config.group_block_nums[1], 100u);
     EXPECT_EQ(config.group_block_nums[2], 100u);
-    EXPECT_EQ(config.group_block_nums[3], 512u);
-    EXPECT_EQ(config.group_block_nums[4], 512u);
+    EXPECT_EQ(config.group_block_nums[3], 100u);
+    EXPECT_EQ(config.group_block_nums[4], 100u);
     EXPECT_EQ(config.group_block_nums[5], 350u);
-    EXPECT_EQ(config.group_block_nums[6], 512u);
+    EXPECT_EQ(config.group_block_nums[6], 100u);
 
-    size_t expected_reserve = 0;
-    expected_reserve += 512u * config.group_block_size_bytes[3];
-    expected_reserve += 512u * config.group_block_size_bytes[4];
-    expected_reserve += 350u * config.group_block_size_bytes[5];
-    expected_reserve += 512u * config.group_block_size_bytes[6];
+    const size_t expected_reserve = 350u * config.group_block_size_bytes[5];
     EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_reserve);
 }
 
@@ -881,7 +864,6 @@ TEST(CacheConfigTest, DSV4KernelSeqSizeAllowsDecoupledPhysicalBlocks) {
         kv_cache_config.seq_size_per_block        = seq_size_per_block;
         kv_cache_config.kernel_seq_size_per_block = kernel_seq_size_per_block;
         kv_cache_config.test_block_num            = 100;
-        kv_cache_config.dsv4_fixed_pool_blocks    = kDsv4FixedPoolBlocks;
         return CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
     };
 
@@ -908,7 +890,6 @@ TEST(CacheConfigTest, DSV4KernelSeqSizeRejectsInvalidPhysicalKernelShape) {
         kv_cache_config.seq_size_per_block        = seq_size_per_block;
         kv_cache_config.kernel_seq_size_per_block = kernel_seq_size_per_block;
         kv_cache_config.test_block_num            = 100;
-        kv_cache_config.dsv4_fixed_pool_blocks    = kDsv4FixedPoolBlocks;
         return CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
     };
 
@@ -916,7 +897,7 @@ TEST(CacheConfigTest, DSV4KernelSeqSizeRejectsInvalidPhysicalKernelShape) {
     EXPECT_THROW((void)create_config(16384, 384), std::exception);
 }
 
-TEST(HybridPoolConfigCreatorTest, DSV4FixedPoolBlocksIndependentOfMaxConcurrency) {
+TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksIndependentOfMaxConcurrency) {
     for (uint32_t max_concurrency : {1u, 2u, 8u}) {
         auto              mc = makeProModelConfig();
         ParallelismConfig pc;
@@ -924,28 +905,29 @@ TEST(HybridPoolConfigCreatorTest, DSV4FixedPoolBlocksIndependentOfMaxConcurrency
         KVCacheConfig     kv_cache_config;
         kv_cache_config.seq_size_per_block                          = 128;
         kv_cache_config.test_block_num                              = 100;
-        kv_cache_config.dsv4_fixed_pool_blocks                      = kDsv4FixedPoolBlocks;
+        kv_cache_config.dsv4_hca_state_pool_blocks                  = 256;
         runtime_config.max_generate_batch_size                      = max_concurrency;
         runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
 
         auto config = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
 
         ASSERT_EQ(config.group_block_nums.size(), static_cast<size_t>(kDsv4PoolNum));
-        for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-            EXPECT_EQ(config.group_block_nums[gid], kDsv4FixedPoolBlocks)
+        for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
+            const uint32_t expected = gid == 5 ? 256u : 100u;
+            EXPECT_EQ(config.group_block_nums[gid], expected)
                 << "gid=" << gid << " max_concurrency=" << max_concurrency;
         }
     }
 }
 
-TEST(HybridPoolConfigCreatorTest, DSV4FixedPoolBlocksCanBeOverriddenByConfig) {
+TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksCanBeOverriddenByConfig) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     RuntimeConfig     runtime_config;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block                          = 128;
     kv_cache_config.test_block_num                              = 100;
-    kv_cache_config.dsv4_fixed_pool_blocks                      = 6;
+    kv_cache_config.dsv4_hca_state_pool_blocks                  = 6;
     runtime_config.max_generate_batch_size                      = 2;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
 
@@ -956,9 +938,9 @@ TEST(HybridPoolConfigCreatorTest, DSV4FixedPoolBlocksCanBeOverriddenByConfig) {
     for (int gid = 0; gid < 3; ++gid) {
         EXPECT_EQ(config.group_block_nums[gid], 100u) << "gid=" << gid;
     }
-    // Fixed groups: exactly the configured fixed pool count.
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(config.group_block_nums[gid], 6u) << "gid=" << gid;
+        const uint32_t expected = gid == 5 ? 6u : 100u;
+        EXPECT_EQ(config.group_block_nums[gid], expected) << "gid=" << gid;
     }
 }
 
@@ -1023,63 +1005,55 @@ TEST(CacheConfigTest, FinalizeBlockNumsAppliesToIndependentPools) {
     config.finalizeBlockNums(100, runtime_config);
 
     ASSERT_EQ(config.group_block_nums.size(), static_cast<size_t>(kDsv4PoolNum));
-    EXPECT_EQ(config.group_block_nums[0], 100u);
-    EXPECT_EQ(config.group_block_nums[1], 100u);
-    EXPECT_EQ(config.group_block_nums[2], 100u);
-    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(config.group_block_nums[gid], kDsv4FixedPoolBlocks) << "gid=" << gid;
+    for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
+        const uint32_t expected = gid == 5 ? 256u : 100u;
+        EXPECT_EQ(config.group_block_nums[gid], expected) << "gid=" << gid;
     }
-    EXPECT_GT(config.fixed_pool_reserve_bytes, 0u);
+    EXPECT_EQ(config.fixed_pool_reserve_bytes, 256u * config.group_block_size_bytes[5]);
 }
 
-TEST(CacheConfigTest, FixedPoolReserveDeductedFromPagedBudget) {
+TEST(CacheConfigTest, HcaStateReserveDeductedFromPagedBudget) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     RuntimeConfig     runtime_config;
     runtime_config.max_generate_batch_size                      = 4;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
 
-    const uint32_t small_fixed_pool = 32;
+    const uint32_t small_hca_state_pool = 32;
+    const uint32_t large_hca_state_pool = 256;
 
-    // Config with fewer fixed-pool blocks.
     KVCacheConfig kv_cache_config_with;
-    kv_cache_config_with.seq_size_per_block     = 128;
-    kv_cache_config_with.kv_cache_mem_mb        = 65536;
-    kv_cache_config_with.dsv4_fixed_pool_blocks = small_fixed_pool;
+    kv_cache_config_with.seq_size_per_block         = 128;
+    kv_cache_config_with.kv_cache_mem_mb            = 65536;
+    kv_cache_config_with.dsv4_hca_state_pool_blocks = small_hca_state_pool;
     auto config_with = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config_with);
 
-    // Config with more fixed-pool blocks.
     KVCacheConfig kv_cache_config_without;
-    kv_cache_config_without.seq_size_per_block     = 128;
-    kv_cache_config_without.kv_cache_mem_mb        = 65536;
-    kv_cache_config_without.dsv4_fixed_pool_blocks = kDsv4FixedPoolBlocks;
+    kv_cache_config_without.seq_size_per_block         = 128;
+    kv_cache_config_without.kv_cache_mem_mb            = 65536;
+    kv_cache_config_without.dsv4_hca_state_pool_blocks = large_hca_state_pool;
     auto config_without = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config_without);
 
-    // More fixed blocks reserve more HBM and leave fewer blocks for FULL pools.
+    // More HCA_STATE blocks reserve more HBM and leave fewer blocks for the global pools.
     EXPECT_GT(config_with.block_num, config_without.block_num);
-    // FULL group block_nums reflect the reduced block_num
     EXPECT_EQ(config_with.group_block_nums[0], static_cast<uint32_t>(config_with.block_num));
     EXPECT_EQ(config_without.group_block_nums[0], static_cast<uint32_t>(config_without.block_num));
-    // Fixed groups use the configured fixed-pool counts.
-    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(config_with.group_block_nums[gid], small_fixed_pool) << "gid=" << gid;
-        EXPECT_EQ(config_without.group_block_nums[gid], kDsv4FixedPoolBlocks) << "gid=" << gid;
-    }
-    // Reserve bytes = fixed blocks × sum(fixed group block sizes).
-    size_t expected_reserve = 0;
-    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        expected_reserve += static_cast<size_t>(small_fixed_pool) * config_with.group_block_size_bytes[gid];
-    }
+    EXPECT_EQ(config_with.group_block_nums[5], small_hca_state_pool);
+    EXPECT_EQ(config_without.group_block_nums[5], large_hca_state_pool);
+    const size_t expected_reserve =
+        static_cast<size_t>(small_hca_state_pool) * config_with.group_block_size_bytes[5];
     EXPECT_EQ(config_with.fixed_pool_reserve_bytes, expected_reserve);
 }
 
-TEST(CacheConfigTest, DSV4ExplicitFixedPoolBlocksIgnoreLinearStep) {
+TEST(CacheConfigTest, DSV4ExplicitHcaStatePoolBlocksIgnoreLinearStep) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                      = 4;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
 
     ParallelismConfig pc;
-    auto config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
+    KVCacheConfig     kv_cache_config = makeDsv4KvCacheConfig();
+    kv_cache_config.dsv4_hca_state_pool_blocks = 256;
+    auto config = HybridPoolConfigCreator::createConfig(makeProModelConfig(), pc, kv_cache_config, false, 0);
     config.linear_step = 4;
     config.finalizeBlockNums(100, runtime_config);
 
@@ -1087,18 +1061,15 @@ TEST(CacheConfigTest, DSV4ExplicitFixedPoolBlocksIgnoreLinearStep) {
     EXPECT_EQ(config.group_block_nums[0], 100u);
     EXPECT_EQ(config.group_block_nums[1], 100u);
     EXPECT_EQ(config.group_block_nums[2], 100u);
-    // DSV4 fixed groups ignore linear_step and use DSV4_FIXED_POOL_BLOCKS.
-    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(config.group_block_nums[gid], kDsv4FixedPoolBlocks) << "gid=" << gid;
-    }
-    size_t expected_reserve = 0;
-    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        expected_reserve += static_cast<size_t>(kDsv4FixedPoolBlocks) * config.group_block_size_bytes[gid];
-    }
+    EXPECT_EQ(config.group_block_nums[3], 25u);
+    EXPECT_EQ(config.group_block_nums[4], 25u);
+    EXPECT_EQ(config.group_block_nums[5], 256u);
+    EXPECT_EQ(config.group_block_nums[6], 25u);
+    const size_t expected_reserve = 256u * config.group_block_size_bytes[5];
     EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_reserve);
 }
 
-TEST(CacheConfigTest, DSV4FixedPoolBlocksFallbackFollowsLinearStep) {
+TEST(CacheConfigTest, DSV4StateSwaPoolsFallbackFollowsLinearStep) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                      = 4;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
@@ -1108,6 +1079,7 @@ TEST(CacheConfigTest, DSV4FixedPoolBlocksFallbackFollowsLinearStep) {
     kv_cache_config.seq_size_per_block = 128;
     kv_cache_config.test_block_num     = 100;
     kv_cache_config.linear_step        = 4;
+    kv_cache_config.dsv4_hca_state_pool_blocks = 0;
 
     auto config = CacheConfigCreator::createConfig(makeProModelConfig(), pc, runtime_config, kv_cache_config);
 
@@ -1136,7 +1108,6 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     kv_cache_config.seq_size_per_block        = 16384;
     kv_cache_config.kernel_seq_size_per_block = 128;
     kv_cache_config.test_block_num            = 100;
-    kv_cache_config.dsv4_fixed_pool_blocks    = kDsv4FixedPoolBlocks;
 
     SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_MTP;
@@ -1174,11 +1145,7 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     EXPECT_EQ(config.mtp_sub_configs[0]->seq_size_per_block, 16384u);
     EXPECT_EQ(config.mtp_sub_configs[0]->kernel_seq_size_per_block, 128u);
 
-    const size_t fixed_blocks = config.dsv4_fixed_pool_blocks;
-    const size_t expected_fixed_reserve =
-        fixed_blocks * config.group_block_size_bytes[3] + fixed_blocks * config.group_block_size_bytes[4]
-        + fixed_blocks * config.group_block_size_bytes[5] + fixed_blocks * config.group_block_size_bytes[6];
-    EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_fixed_reserve);
+    EXPECT_EQ(config.fixed_pool_reserve_bytes, 256u * config.group_block_size_bytes[5]);
 }
 
 TEST(HybridPoolConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
@@ -2164,15 +2131,16 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksAreDistributedAcrossGroups) {
     allocator->free(free_info);
 }
 
-TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitFixedPoolCapacity) {
+TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitHcaStateCapacity) {
     auto              mc = makeFlashModelConfig();
     ParallelismConfig pc;
-    auto              kv_config = makeDsv4KvCacheConfig(/*fixed_pool_blocks=*/11);
+    auto              kv_config = makeDsv4KvCacheConfig();
+    kv_config.dsv4_hca_state_pool_blocks = 11;
     auto              config    = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
     config.block_num            = 40;
     config.group_block_nums.assign(config.groupNums(), config.block_num);
     for (size_t gid = 0; gid < config.group_region_names.size(); ++gid) {
-        if (isDsv4FixedRegion(config.group_region_names[gid])) {
+        if (config.group_region_names[gid] == KVCacheRegionName::HCA_STATE) {
             config.group_block_nums[gid] = 11;
         }
     }

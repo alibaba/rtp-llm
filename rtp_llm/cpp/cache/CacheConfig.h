@@ -38,8 +38,7 @@ struct CacheConfig {
     std::vector<size_t>            group_kv_scale_stride_bytes;
     std::vector<size_t>            group_block_size_bytes;
     std::vector<uint32_t>          group_block_nums;
-    uint32_t                       dsv4_fixed_pool_blocks                  = 0;
-    uint32_t                       dsv4_hca_state_pool_blocks              = 0;
+    uint32_t                       dsv4_hca_state_pool_blocks              = 256;
     bool                           use_independent_block_pools              = false;
     bool                           use_typed_cache_regions                  = false;
     bool                           use_opaque_kv_cache_store                = false;
@@ -100,6 +99,21 @@ struct CacheConfig {
 
     int groupNums() const {
         return std::max<int>(1, static_cast<int>(cache_specs.size()));
+    }
+
+    uint32_t explicitIndependentBlocks(size_t gid) const {
+        if (gid >= group_region_names.size()) {
+            return 0;
+        }
+        const auto region = group_region_names[gid];
+        if (region == KVCacheRegionName::HCA_STATE && dsv4_hca_state_pool_blocks > 0) {
+            return dsv4_hca_state_pool_blocks;
+        }
+        return 0;
+    }
+
+    bool usesExplicitIndependentBlocks(size_t gid) const {
+        return explicitIndependentBlocks(gid) > 0;
     }
 
     int groupIdForLayerTag(int layer_id, const std::string& tag) const {
@@ -381,15 +395,10 @@ struct CacheConfig {
             const bool is_swa = gid < group_types.size() && group_types[gid] == CacheGroupType::SWA;
             const auto region = gid < group_region_names.size() ? group_region_names[gid] : KVCacheRegionName::DEFAULT;
             const bool is_dsv4_fixed_region       = isDsv4FixedRegion(region);
-            const bool use_explicit_hca_blocks    = region == KVCacheRegionName::HCA_STATE
-                                                 && dsv4_hca_state_pool_blocks > 0;
-            const bool use_explicit_fixed_blocks  = is_dsv4_fixed_region && dsv4_fixed_pool_blocks > 0;
-            const bool use_explicit_dsv4_blocks   = use_explicit_hca_blocks || use_explicit_fixed_blocks;
+            const auto explicit_independent_blocks = explicitIndependentBlocks(gid);
             uint32_t   rule_blocks;
-            if (use_explicit_hca_blocks) {
-                rule_blocks = dsv4_hca_state_pool_blocks;
-            } else if (use_explicit_fixed_blocks) {
-                rule_blocks = dsv4_fixed_pool_blocks;
+            if (explicit_independent_blocks > 0) {
+                rule_blocks = explicit_independent_blocks;
             } else if ((is_swa || is_dsv4_fixed_region) && step > 1 && global_block_num > 0) {
                 rule_blocks = std::max(1u, global_block_num / static_cast<uint32_t>(step));
             } else {
@@ -400,7 +409,7 @@ struct CacheConfig {
             // Explicit DSV4 fixed pools are allocated outside the paged FULL
             // pool budget. The linear-step fallback is accounted by the
             // effective block-size formula instead, so no reserve is needed.
-            if (use_explicit_dsv4_blocks && gid < group_block_size_bytes.size()) {
+            if (explicit_independent_blocks > 0 && gid < group_block_size_bytes.size()) {
                 reserve += static_cast<size_t>(rule_blocks) * group_block_size_bytes[gid];
             }
         }
@@ -454,7 +463,6 @@ struct CacheConfig {
         OUTPUT_FIELD(linear_group_num);
         OUTPUT_FIELD(swa_group_num);
         OUTPUT_FIELD(full_group_num);
-        OUTPUT_FIELD(dsv4_fixed_pool_blocks);
         OUTPUT_FIELD(dsv4_hca_state_pool_blocks);
         OUTPUT_FIELD(use_independent_block_pools);
         OUTPUT_FIELD(use_typed_cache_regions);

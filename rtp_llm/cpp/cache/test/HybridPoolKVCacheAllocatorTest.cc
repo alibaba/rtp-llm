@@ -169,10 +169,9 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
-    kv_cache_config.seq_size_per_block     = 128;
-    kv_cache_config.dsv4_fixed_pool_blocks = block_num;
-    auto config                            = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
-    config.block_num                       = block_num;
+    kv_cache_config.seq_size_per_block = 128;
+    auto config                        = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+    config.block_num                   = block_num;
     return config;
 }
 
@@ -1018,9 +1017,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumul
     auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
-    kv_cache_config.seq_size_per_block     = 128;
-    kv_cache_config.dsv4_fixed_pool_blocks = 200;
-    auto config                            = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+    kv_cache_config.seq_size_per_block = 128;
+    auto config                        = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
 
     ASSERT_EQ(config.groupNums(), 7);
     ASSERT_EQ(config.group_region_names.size(), 7u);
@@ -1050,68 +1048,57 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumul
     EXPECT_EQ(config.block_size_bytes, expected_full_bytes);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesFixedPoolBlocks) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesHcaStatePoolBlocks) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
+    config.dsv4_hca_state_pool_blocks = 50;
 
     RuntimeConfig rt;  // unused inside finalizeBlockNums today
     config.finalizeBlockNums(/*global_block_num=*/200, rt);
 
     ASSERT_EQ(config.group_block_nums.size(), config.group_region_names.size());
     for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
-        const auto type = config.group_types[gid];
-        if (type == CacheGroupType::FULL) {
-            EXPECT_EQ(config.group_block_nums[gid], 200u) << "gid=" << gid;  // no addition for FULL
-        } else {
-            EXPECT_EQ(config.group_block_nums[gid], 50u) << "gid=" << gid;
-        }
+        const uint32_t expected = config.group_region_names[gid] == KVCacheRegionName::HCA_STATE ? 50u : 200u;
+        EXPECT_EQ(config.group_block_nums[gid], expected) << "gid=" << gid;
     }
 
-    size_t expected_reserve = 0;
-    for (size_t gid = 0; gid < config.group_block_size_bytes.size(); ++gid) {
-        if (config.group_types[gid] != CacheGroupType::FULL) {
-            expected_reserve += static_cast<size_t>(config.dsv4_fixed_pool_blocks) * config.group_block_size_bytes[gid];
-        }
-    }
+    const size_t expected_reserve = 50u * config.group_block_size_bytes[5];
     EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_reserve);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesConfiguredFixedBlocks) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesGlobalBlocksWhenHcaStateBlocksDisabled) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/123);
+    config.dsv4_hca_state_pool_blocks = 0;
 
     RuntimeConfig rt;
     config.finalizeBlockNums(/*global_block_num=*/123, rt);
 
     for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
-        const auto type = config.group_types[gid];
-        if (type == CacheGroupType::FULL) {
-            EXPECT_EQ(config.group_block_nums[gid], 123u);
-        } else {
-            EXPECT_EQ(config.group_block_nums[gid], 123u);
-        }
+        EXPECT_EQ(config.group_block_nums[gid], 123u);
     }
+    EXPECT_EQ(config.fixed_pool_reserve_bytes, 0u);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuFixedPoolIncludesFixedReserve) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuHcaStatePoolIncludesFixedReserve) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
+    config.dsv4_hca_state_pool_blocks = 50;
 
     RuntimeConfig rt;
     config.finalizeBlockNums(/*global_block_num=*/200, rt);
 
-    size_t expected_reserve = 0;
     for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
-        if (config.group_types[gid] != CacheGroupType::FULL) {
-            EXPECT_EQ(config.group_block_nums[gid], 50u) << "gid=" << gid;
-            expected_reserve += static_cast<size_t>(config.dsv4_fixed_pool_blocks) * config.group_block_size_bytes[gid];
-        }
+        const uint32_t expected = config.group_region_names[gid] == KVCacheRegionName::HCA_STATE ? 50u : 200u;
+        EXPECT_EQ(config.group_block_nums[gid], expected) << "gid=" << gid;
     }
+    const size_t expected_reserve = 50u * config.group_block_size_bytes[5];
     EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_reserve);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedPoolBlocksFallbackFollowsLinearStep) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsFallbackFollowsLinearStep) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
     kv_cache_config.seq_size_per_block = 128;
+    kv_cache_config.dsv4_hca_state_pool_blocks = 0;
     auto config                        = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
     config.linear_step                 = 4;
 

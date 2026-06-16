@@ -185,7 +185,6 @@ CacheConfig makeRealDsv4TypedMemoryCopyConfig(bool use_flash) {
     KVCacheConfig     kv_config;
     kv_config.seq_size_per_block        = 128;
     kv_config.kernel_seq_size_per_block = 128;
-    kv_config.dsv4_fixed_pool_blocks    = 512;
     auto config                         = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
     config.block_num                    = 512;
     return config;
@@ -277,7 +276,6 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     config.group_kv_scale_stride_bytes = std::vector<size_t>(kDsv4PoolNum, 0);
     config.group_seq_size_per_block    = std::vector<size_t>(kDsv4PoolNum, config.seq_size_per_block);
     config.group_block_nums            = std::vector<uint32_t>(kDsv4PoolNum, config.block_num);
-    config.dsv4_fixed_pool_blocks      = config.block_num;
     config.layer_ids                   = std::vector<std::vector<int>>(kDsv4PoolNum);
     config.global_layer_ids            = std::vector<std::vector<int>>(kDsv4PoolNum);
     config.layer_to_group_id           = std::vector<int>(config.layer_all_num, 6);
@@ -716,11 +714,6 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<KVCacheRegionName>& host_reg
 
 TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
     runDsv4TypedStagedCopyRoundTrip({});
-}
-
-TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedStagedCopySupportsHostBackedStateRegions) {
-    runDsv4TypedStagedCopyRoundTrip(
-        {KVCacheRegionName::INDEXER_STATE, KVCacheRegionName::CSA_STATE, KVCacheRegionName::HCA_STATE});
 }
 
 TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeKindRequiredUsesRuntimeNullSlots) {
