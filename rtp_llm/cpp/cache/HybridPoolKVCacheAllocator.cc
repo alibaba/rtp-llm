@@ -1,9 +1,10 @@
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 
 #include <algorithm>
-#include <array>
+#include <iomanip>
 #include <limits>
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -29,6 +30,21 @@ cpEffectiveSeqLenForReserve(const std::shared_ptr<CPSlotMapper>& mapper, CacheGr
     return cpShardThisGroupForReserve(mapper, group_type) ? mapper->effectiveSeqLenForAlloc(seq_len) : seq_len;
 }
 
+void appendPoolSummary(
+    std::ostringstream& os, bool& has_any, int gid, KVCacheRegionName region_name, CacheGroupType group_type,
+    const BlockPoolConfig& pool_config) {
+    static constexpr double kBytesPerMB = 1024.0 * 1024.0;
+    if (has_any) {
+        os << "; ";
+    }
+    has_any = true;
+    os << "gid=" << gid << ", region=" << cacheRegionName(region_name)
+       << ", type=" << cacheGroupTypeName(group_type) << ", size=" << pool_config.total_size_bytes << " bytes("
+       << std::fixed << std::setprecision(2) << static_cast<double>(pool_config.total_size_bytes) / kBytesPerMB
+       << " MB)"
+       << ", blocks=" << pool_config.block_num;
+}
+
 }  // namespace
 
 HybridPoolKVCacheAllocator::HybridPoolKVCacheAllocator(const CacheConfig&                 config,
@@ -50,75 +66,36 @@ bool HybridPoolKVCacheAllocator::doInit() {
     kv_cache_groups_.reserve(static_cast<size_t>(group_nums));
 
     SharedBlockCache*       shared_cache_raw = shared_block_cache_ ? shared_block_cache_.get() : nullptr;
-    static constexpr double kBytesPerMB      = 1024.0 * 1024.0;
-    std::array<size_t, 3>   dsv4_paged_pool_group_bytes{0, 0, 0};
-    std::array<uint32_t, 3> dsv4_paged_pool_group_blocks{0, 0, 0};
-    size_t                  dsv4_paged_pool_total_bytes = 0;
-    bool                    has_dsv4_paged_pool         = false;
-    std::array<size_t, 4>   dsv4_fixed_pool_group_bytes{0, 0, 0, 0};
-    std::array<uint32_t, 4> dsv4_fixed_pool_group_blocks{0, 0, 0, 0};
-    size_t                  dsv4_fixed_pool_total_bytes = 0;
-    bool                    has_dsv4_fixed_pool         = false;
+    static constexpr double kBytesPerMB = 1024.0 * 1024.0;
+    std::ostringstream      pool_summary;
+    size_t                  pool_total_bytes  = 0;
+    size_t                  pool_total_blocks = 0;
+    bool                    has_pool          = false;
 
     std::vector<BlockPoolConfig> group_pool_configs;
     group_pool_configs.reserve(static_cast<size_t>(group_nums));
     for (int gid = 0; gid < group_nums; ++gid) {
         auto pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(gid));
-        if (gid >= 0 && gid <= 2) {
-            const size_t paged_idx                  = static_cast<size_t>(gid);
-            has_dsv4_paged_pool                     = true;
-            dsv4_paged_pool_group_bytes[paged_idx]  = pool_config.total_size_bytes;
-            dsv4_paged_pool_group_blocks[paged_idx] = pool_config.block_num;
-            dsv4_paged_pool_total_bytes += pool_config.total_size_bytes;
-        }
-        if (static_cast<size_t>(gid) < config_.group_region_names.size()
-            && isDsv4FixedRegion(config_.group_region_names[static_cast<size_t>(gid)])) {
-            has_dsv4_fixed_pool = true;
-            dsv4_fixed_pool_total_bytes += pool_config.total_size_bytes;
-            if (gid >= 3 && gid <= 6) {
-                const size_t fixed_idx                  = static_cast<size_t>(gid - 3);
-                dsv4_fixed_pool_group_bytes[fixed_idx]  = pool_config.total_size_bytes;
-                dsv4_fixed_pool_group_blocks[fixed_idx] = pool_config.block_num;
-            }
-        }
+        const auto region_name = static_cast<size_t>(gid) < config_.group_region_names.size() ?
+                                     config_.group_region_names[static_cast<size_t>(gid)] :
+                                     KVCacheRegionName::DEFAULT;
+        const auto group_type = static_cast<size_t>(gid) < config_.group_types.size() ?
+                                    config_.group_types[static_cast<size_t>(gid)] :
+                                    CacheGroupType::FULL;
+        appendPoolSummary(pool_summary, has_pool, gid, region_name, group_type, pool_config);
+        pool_total_bytes += pool_config.total_size_bytes;
+        pool_total_blocks += pool_config.block_num;
         group_pool_configs.push_back(std::move(pool_config));
     }
 
-    if (has_dsv4_paged_pool) {
-        RTP_LLM_LOG_INFO("DSV4 paged pool summary: group_0=%zu bytes(%.2f MB, blocks=%u), "
-                         "group_1=%zu bytes(%.2f MB, blocks=%u), group_2=%zu bytes(%.2f MB, blocks=%u), "
-                         "total_size=%zu bytes total_size_mb=%.2f",
-                         dsv4_paged_pool_group_bytes[0],
-                         static_cast<double>(dsv4_paged_pool_group_bytes[0]) / kBytesPerMB,
-                         dsv4_paged_pool_group_blocks[0],
-                         dsv4_paged_pool_group_bytes[1],
-                         static_cast<double>(dsv4_paged_pool_group_bytes[1]) / kBytesPerMB,
-                         dsv4_paged_pool_group_blocks[1],
-                         dsv4_paged_pool_group_bytes[2],
-                         static_cast<double>(dsv4_paged_pool_group_bytes[2]) / kBytesPerMB,
-                         dsv4_paged_pool_group_blocks[2],
-                         dsv4_paged_pool_total_bytes,
-                         static_cast<double>(dsv4_paged_pool_total_bytes) / kBytesPerMB);
-    }
-
-    if (has_dsv4_fixed_pool) {
-        RTP_LLM_LOG_INFO("DSV4 fixed pool summary: group_3=%zu bytes(%.2f MB, blocks=%u), "
-                         "group_4=%zu bytes(%.2f MB, blocks=%u), group_5=%zu bytes(%.2f MB, blocks=%u), "
-                         "group_6=%zu bytes(%.2f MB, blocks=%u), total_size=%zu bytes total_size_mb=%.2f",
-                         dsv4_fixed_pool_group_bytes[0],
-                         static_cast<double>(dsv4_fixed_pool_group_bytes[0]) / kBytesPerMB,
-                         dsv4_fixed_pool_group_blocks[0],
-                         dsv4_fixed_pool_group_bytes[1],
-                         static_cast<double>(dsv4_fixed_pool_group_bytes[1]) / kBytesPerMB,
-                         dsv4_fixed_pool_group_blocks[1],
-                         dsv4_fixed_pool_group_bytes[2],
-                         static_cast<double>(dsv4_fixed_pool_group_bytes[2]) / kBytesPerMB,
-                         dsv4_fixed_pool_group_blocks[2],
-                         dsv4_fixed_pool_group_bytes[3],
-                         static_cast<double>(dsv4_fixed_pool_group_bytes[3]) / kBytesPerMB,
-                         dsv4_fixed_pool_group_blocks[3],
-                         dsv4_fixed_pool_total_bytes,
-                         static_cast<double>(dsv4_fixed_pool_total_bytes) / kBytesPerMB);
+    if (has_pool) {
+        const auto summary = pool_summary.str();
+        RTP_LLM_LOG_INFO("HybridPool pool summary: pools=[%s], total_size=%zu bytes total_size_mb=%.2f "
+                         "total_blocks=%zu",
+                         summary.c_str(),
+                         pool_total_bytes,
+                         static_cast<double>(pool_total_bytes) / kBytesPerMB,
+                         pool_total_blocks);
     }
 
     for (int gid = 0; gid < group_nums; ++gid) {
@@ -159,9 +136,6 @@ bool HybridPoolKVCacheAllocator::doInit() {
         group_block_pools_.push_back(group_pool);
         kv_cache_groups_.push_back(group);
     }
-
-    // HybridPool owns one BlockPool per group; do not read pool stats from block_pool_ in HybridPool mode.
-    block_pool_ = group_block_pools_.empty() ? nullptr : group_block_pools_[0];
 
     if (shared_block_cache_) {
         shared_block_cache_->init(group_nums, group_block_pools_);

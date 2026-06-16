@@ -14,6 +14,18 @@ enum class CacheGroupType : int8_t {
     SWA    = 2,
 };
 
+inline const char* cacheGroupTypeName(CacheGroupType group_type) {
+    switch (group_type) {
+        case CacheGroupType::LINEAR:
+            return "LINEAR";
+        case CacheGroupType::FULL:
+            return "FULL";
+        case CacheGroupType::SWA:
+            return "SWA";
+    }
+    return "UNKNOWN";
+}
+
 // Cache identity for models where one logical layer owns multiple cache entries.
 // CacheGroupType describes allocation/reuse policy, while KVCacheRegionName
 // describes which cache object a layer wants to access.
@@ -28,6 +40,30 @@ enum class KVCacheRegionName : int8_t {
     SWA_KV        = 7,
     REGION_COUNT  = 8,
 };
+
+inline const char* cacheRegionName(KVCacheRegionName region_name) {
+    switch (region_name) {
+        case KVCacheRegionName::DEFAULT:
+            return "DEFAULT";
+        case KVCacheRegionName::CSA_KV:
+            return "CSA_KV";
+        case KVCacheRegionName::HCA_KV:
+            return "HCA_KV";
+        case KVCacheRegionName::INDEXER_KV:
+            return "INDEXER_KV";
+        case KVCacheRegionName::INDEXER_STATE:
+            return "INDEXER_STATE";
+        case KVCacheRegionName::CSA_STATE:
+            return "CSA_STATE";
+        case KVCacheRegionName::HCA_STATE:
+            return "HCA_STATE";
+        case KVCacheRegionName::SWA_KV:
+            return "SWA_KV";
+        case KVCacheRegionName::REGION_COUNT:
+            return "REGION_COUNT";
+    }
+    return "UNKNOWN";
+}
 
 inline bool isStateRegion(KVCacheRegionName region_name) {
     return region_name == KVCacheRegionName::INDEXER_STATE || region_name == KVCacheRegionName::CSA_STATE
