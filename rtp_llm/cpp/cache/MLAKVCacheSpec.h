@@ -15,10 +15,13 @@ struct MLAKVCacheSpec: public KVCacheSpec {
     uint32_t kv_lora_rank;
     uint32_t rope_head_dim;
 
-    MLAKVCacheSpec() = default;
+    MLAKVCacheSpec() {
+        type      = KVCacheSpecType::MultiHeadLatentAttention;
+        lifecycle = CacheGroupType::FULL;
+    }
 
-    MLAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config) {
-        type               = KVCacheSpecType::MultiHeadLatentAttention;
+    MLAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config)
+        : MLAKVCacheSpec() {
         local_head_num_kv  = 1;  // mla set local_head_num_kv to 1
         seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
         kv_lora_rank       = static_cast<uint32_t>(attn_config.kv_lora_rank);
