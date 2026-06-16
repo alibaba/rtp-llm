@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 from types import SimpleNamespace
 from unittest import TestCase, main
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import grpc
 
@@ -168,10 +169,67 @@ class PreStopDrainSecondsTest(TestCase):
             shutdown_timeout = 10
 
         app.server_config = _ServerConfig()
+        app._shutdown_manager = DashScShutdownManager()
         app._shutdown_started_at = 100.0
 
         with patch("rtp_llm.dash_sc.app.time.monotonic", return_value=107.0):
             self.assertEqual(app._remaining_grpc_stop_grace_seconds(), 3.0)
+
+    def test_grpc_stop_grace_counts_prior_drain_signal_time(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+
+        class _ServerConfig:
+            shutdown_timeout = 10
+
+        app.server_config = _ServerConfig()
+        app._shutdown_manager = DashScShutdownManager()
+        app._shutdown_started_at = 100.0
+
+        with patch.object(
+            app._shutdown_manager, "drain_elapsed_seconds", return_value=7.0
+        ), patch("rtp_llm.dash_sc.app.time.monotonic", return_value=101.0):
+            self.assertEqual(app._remaining_grpc_stop_grace_seconds(), 3.0)
+
+    def test_sleep_before_stop_counts_prior_drain_signal_time(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app._shutdown_started_at = 100.0
+        app._shutdown_manager = DashScShutdownManager()
+        app._shutdown_manager.start_draining("unit test")
+
+        class _ServerConfig:
+            shutdown_timeout = 30
+
+        app.server_config = _ServerConfig()
+
+        with patch.dict(
+            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "10"}, clear=True
+        ), patch.object(
+            app._shutdown_manager, "drain_elapsed_seconds", return_value=9.0
+        ), patch(
+            "rtp_llm.dash_sc.app.time.sleep"
+        ) as sleep:
+            app._sleep_before_stop_for_drain()
+
+        sleep.assert_called_once_with(1.0)
+
+    def test_pre_stop_signal_drains_without_shutdown_event(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app._shutdown_started_at = None
+        app._shutdown_manager = DashScShutdownManager()
+        app._shutdown_event = Mock()
+        handlers = {}
+
+        def capture_signal(sig, handler):
+            handlers[sig] = handler
+
+        with patch("rtp_llm.dash_sc.app.signal.signal", side_effect=capture_signal):
+            app._install_signal_handlers()
+
+        handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+
+        self.assertTrue(app._shutdown_manager.is_draining())
+        self.assertIsNone(app._shutdown_started_at)
+        app._shutdown_event.set.assert_not_called()
 
 
 class DashScShutdownManagerTest(TestCase):

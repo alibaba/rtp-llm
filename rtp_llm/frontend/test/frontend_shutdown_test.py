@@ -172,6 +172,47 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         self.assertTrue(manager.is_draining())
         self.assertTrue(server.should_exit)
 
+    def test_pre_stop_signal_marks_draining_without_uvicorn_shutdown(self):
+        manager = FrontendShutdownManager()
+        server = GracefulShutdownServer(Config(lambda scope: None))
+        server.set_server(FakeFrontendServer(), manager)
+
+        server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
+
+        self.assertTrue(manager.is_draining())
+        self.assertFalse(server.should_exit)
+
+    def test_sigterm_after_pre_stop_signal_waits_only_remaining_drain(self):
+        manager = FrontendShutdownManager()
+        server = GracefulShutdownServer(Config(lambda scope: None))
+        server.set_server(FakeFrontendServer(), manager)
+        server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
+
+        with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "10"}):
+            with patch.object(manager, "drain_elapsed_seconds", return_value=7.0):
+                server.handle_exit(signal.SIGTERM, None)
+
+        self.assertTrue(manager.is_draining())
+        self.assertFalse(server.should_exit)
+        self.assertIsNotNone(server._pre_stop_timer)
+        self.assertAlmostEqual(server._pre_stop_timer.interval, 3.0)
+        server._pre_stop_timer.cancel()
+        server._pre_stop_timer = None
+
+    def test_sigterm_after_elapsed_pre_stop_signal_starts_shutdown(self):
+        manager = FrontendShutdownManager()
+        server = GracefulShutdownServer(Config(lambda scope: None))
+        server.set_server(FakeFrontendServer(), manager)
+        server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
+
+        with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "10"}):
+            with patch.object(manager, "drain_elapsed_seconds", return_value=10.0):
+                server.handle_exit(signal.SIGTERM, None)
+
+        self.assertTrue(manager.is_draining())
+        self.assertTrue(server.should_exit)
+        self.assertIsNone(server._pre_stop_timer)
+
     def test_sigterm_waits_for_pre_stop_drain_before_uvicorn_shutdown(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))

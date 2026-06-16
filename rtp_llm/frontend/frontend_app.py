@@ -96,6 +96,31 @@ class GracefulShutdownServer(Server):
         self._pre_stop_lock = threading.RLock()
         self._pre_stop_timer: Optional[threading.Timer] = None
 
+    def install_pre_stop_drain_signal_handler(self) -> None:
+        pre_stop_signal = getattr(signal, "SIGUSR1", None)
+        if pre_stop_signal is None:
+            return
+        try:
+            signal.signal(pre_stop_signal, self.handle_pre_stop_drain_signal)
+        except ValueError:
+            logging.warning(
+                "Frontend pre-stop drain signal handler not installed "
+                "(not on main thread)"
+            )
+
+    def handle_pre_stop_drain_signal(self, sig: int, frame) -> None:
+        try:
+            sig_name = signal.Signals(sig).name
+        except ValueError:
+            sig_name = str(sig)
+        self.shutdown_manager.start_draining(f"signal {sig_name}")
+        logging.info(
+            "Frontend entering pre-stop drain without uvicorn shutdown: "
+            "signal=%s, active_requests=%s",
+            sig_name,
+            self.shutdown_manager.active_request_count(),
+        )
+
     @override
     def handle_exit(self, sig: int, frame) -> None:
         try:
@@ -114,6 +139,10 @@ class GracefulShutdownServer(Server):
         drain_seconds = self._effective_pre_stop_drain_seconds()
         if drain_seconds <= 0:
             return False
+        elapsed = self.shutdown_manager.drain_elapsed_seconds()
+        remaining = max(0.0, drain_seconds - elapsed)
+        if remaining <= 0:
+            return False
 
         with self._pre_stop_lock:
             if self._pre_stop_timer is not None:
@@ -127,12 +156,13 @@ class GracefulShutdownServer(Server):
             self.shutdown_manager.start_draining(f"signal {sig_name}")
             logging.info(
                 "Frontend entering pre-stop drain before uvicorn shutdown: "
-                "remaining=%.3fs, active_requests=%s",
-                drain_seconds,
+                "remaining=%.3fs, elapsed=%.3fs, active_requests=%s",
+                remaining,
+                elapsed,
                 self.shutdown_manager.active_request_count(),
             )
             timer = threading.Timer(
-                drain_seconds,
+                remaining,
                 self._begin_shutdown,
                 args=(sig, frame, sig_name),
             )
@@ -306,6 +336,7 @@ class FrontendApp(object):
             server.set_server(
                 self.frontend_server, self.shutdown_manager, self.grpc_client
             )
+            server.install_pre_stop_drain_signal_handler()
             # freeze all current tracked objects to reduce gc cost
             gc.collect()
             gc.freeze()

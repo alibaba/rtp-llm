@@ -325,6 +325,10 @@ class DashScApp:
         self._enqueue_loop_thread = None
 
     def _install_signal_handlers(self) -> None:
+        def _drain_only_handler(signum, frame):
+            logging.info("[DashScApp] received pre-stop drain signal %s", signum)
+            self._shutdown_manager.start_draining(f"signal {signum}")
+
         def _handler(signum, frame):
             logging.info("[DashScApp] received signal %s, shutting down", signum)
             if self._shutdown_started_at is None:
@@ -333,6 +337,9 @@ class DashScApp:
             self._shutdown_event.set()
 
         try:
+            pre_stop_signal = getattr(signal, "SIGUSR1", None)
+            if pre_stop_signal is not None:
+                signal.signal(pre_stop_signal, _drain_only_handler)
             signal.signal(signal.SIGTERM, _handler)
             signal.signal(signal.SIGINT, _handler)
         except ValueError:
@@ -522,9 +529,9 @@ class DashScApp:
         to = self.server_config.shutdown_timeout
         if to < 0:
             return None
-        if self._shutdown_started_at is None:
-            return float(to)
-        elapsed = time.monotonic() - self._shutdown_started_at
+        elapsed = self._shutdown_manager.drain_elapsed_seconds()
+        if self._shutdown_started_at is not None:
+            elapsed = max(elapsed, time.monotonic() - self._shutdown_started_at)
         return max(0.0, float(to) - elapsed)
 
     def _sleep_before_stop_for_drain(self) -> None:
@@ -533,7 +540,7 @@ class DashScApp:
         drain_seconds = self._effective_pre_stop_drain_seconds()
         if drain_seconds <= 0:
             return
-        elapsed = time.monotonic() - self._shutdown_started_at
+        elapsed = self._shutdown_manager.drain_elapsed_seconds()
         remaining = drain_seconds - elapsed
         if remaining <= 0:
             return
