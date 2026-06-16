@@ -156,4 +156,17 @@ TEST_F(GenerateStreamTest, testNonStreamingFinalOutputReturnsCachedAllHiddenStat
     ASSERT_TRUE(torch::equal(generate_output.all_hidden_states.value(), first_all_hidden_states));
 }
 
+TEST_F(GenerateStreamTest, testInputEmbeddingsDisableTokenOnlyReuseCache) {
+    auto builder                                   = GenerateStreamBuilder();
+    auto stream                                    = builder.createContextStream({1, 2, 3, 4, 5, 6});
+    stream->generate_input_->input_embeddings      = std::vector<torch::Tensor>{torch::rand({1, 8}, torch::kFloat32)};
+    stream->generate_input_->input_embeddings_locs = std::vector<int32_t>{2};
+
+    ASSERT_TRUE(stream->hasInputEmbeddings());
+    ASSERT_FALSE(stream->reuseCache());
+    ASSERT_FALSE(stream->enableDeviceCache());
+    ASSERT_FALSE(stream->enableMemoryCache());
+    ASSERT_FALSE(stream->enableRemoteCache());
+}
+
 }  // namespace rtp_llm
