@@ -105,6 +105,10 @@ public class RandomStrategy implements LoadBalancer {
     private ServerStatus buildServerStatus(WorkerStatus worker, RoleType roleType, long requestId, Request request) {
         ServerStatus result = new ServerStatus();
         try {
+            if (worker == null || !worker.isAlive()) {
+                Logger.warn("selected {} worker became unavailable before route response", roleType);
+                return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+            }
             if (RoleType.DECODE == roleType) {
                 TaskInfo taskInfo = new TaskInfo();
                 taskInfo.setRequestId(requestId);

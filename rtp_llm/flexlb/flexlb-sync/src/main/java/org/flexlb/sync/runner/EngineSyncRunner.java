@@ -6,11 +6,11 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.address.WorkerAddressService;
+import org.flexlb.service.address.WorkerAddressService.WorkerDiscoveryResult;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.util.CollectionUtils;
 
 import java.util.List;
 import java.util.Map;
@@ -75,44 +75,44 @@ public class EngineSyncRunner implements Runnable {
         logger.info("EngineSyncRunner start for model: {}, role: {}", modelName, roleType.toString());
         try {
             long startTimeInUs = System.nanoTime() / 1000;
-            List<WorkerHost> latestEngineWorkerList = workerAddressService.getEngineWorkerList(modelName, roleType);
-            logger.info("workerAddressService getEngineWorkerList, model: {}, role: {}, size: {}", modelName, roleType, latestEngineWorkerList.size());
-            engineHealthReporter.reportServiceDiscoveryResult(modelName, latestEngineWorkerList.size(), roleType.toString());
-            if (CollectionUtils.isEmpty(latestEngineWorkerList)) {
-                logger.error("get engine worker list is empty, cost={}μs, model={}", System.nanoTime() / 1000 - startTimeInUs, modelName);
-                return;
+            WorkerDiscoveryResult discoveryResult = workerAddressService.getEngineWorkerDiscoveryResult(modelName, roleType);
+            if (discoveryResult == null) {
+                discoveryResult = WorkerDiscoveryResult.failure();
+            }
+            List<WorkerHost> latestEngineWorkerList = discoveryResult.hosts();
+            int latestWorkerSize = latestEngineWorkerList == null ? 0 : latestEngineWorkerList.size();
+            logger.info("workerAddressService getEngineWorkerList, model: {}, role: {}, size: {}", modelName, roleType, latestWorkerSize);
+            engineHealthReporter.reportServiceDiscoveryResult(modelName, latestWorkerSize, roleType.toString());
+            if (latestEngineWorkerList == null) {
+                latestEngineWorkerList = List.of();
             }
             Map<String/*ip*/, WorkerStatus> cachedWorkerStatuses = workerStatusMap;
             // Log if latest worker count differs from cached worker count
-            if (cachedWorkerStatuses.size() != latestEngineWorkerList.size()) {
+            if (cachedWorkerStatuses.size() != latestWorkerSize) {
                 logger.info("[update] engine ip changes, model={}, role={}, before={}, after={}",
-                        modelName, roleType, cachedWorkerStatuses.size(), latestEngineWorkerList.size());
+                        modelName, roleType, cachedWorkerStatuses.size(), latestWorkerSize);
             }
 
-            // Remove if not in latest engine list
-            Set<String> latestValidIpPorts = latestEngineWorkerList.stream()
-                    .map(WorkerHost::getIpPort)
-                    .collect(Collectors.toSet());
-            logger.info("Current cached worker size: {}, latest worker list size: {}", cachedWorkerStatuses.size(), latestEngineWorkerList.size());
-            for (Map.Entry<String, WorkerStatus> entry: cachedWorkerStatuses.entrySet()) {
-                WorkerStatus workerStatus = entry.getValue();
-                String ipPort = entry.getKey();
-                if (!latestValidIpPorts.contains(ipPort)) {
-                    long lastTime = workerStatus.getStatusLastUpdateTime().get();
-                    long actualIntervalUs = workerStatus.getStatusUpdateIntervalUs().get();
-                    // Use max(3 * actual sync interval, 1s) as removal threshold to tolerate transient service discovery flaps
-                    long removalThresholdUs = Math.max(3 * actualIntervalUs, 1_000_000L);
-                    if (System.nanoTime() / 1000 - lastTime > removalThresholdUs) {
-                        cachedWorkerStatuses.remove(ipPort);
-                        logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
-                    }
-                }
-            }
             if (latestEngineWorkerList.isEmpty()) {
+                logger.error("get engine worker list is empty, cost={}μs, model={}", System.nanoTime() / 1000 - startTimeInUs, modelName);
                 logger.warn("latestEngineWorkerList is empty, role: {}", roleType);
+                if (discoveryResult.reliable()) {
+                    markMissingWorkersUnavailable(cachedWorkerStatuses, Set.of());
+                } else {
+                    logger.warn("keep cached workers because service discovery result is unreliable, role: {}", roleType);
+                }
                 return;
             } else {
                 logger.info("latestEngineWorkerList for role: {}, workers:{}", roleType, latestEngineWorkerList.size());
+            }
+
+            if (discoveryResult.reliable()) {
+                Set<String> latestValidIpPorts = latestEngineWorkerList.stream()
+                        .map(WorkerHost::getIpPort)
+                        .collect(Collectors.toSet());
+                markMissingWorkersUnavailable(cachedWorkerStatuses, latestValidIpPorts);
+            } else {
+                logger.warn("skip missing worker mark because service discovery result is unreliable, role: {}", roleType);
             }
 
             logger.info("Submitting status check tasks for {} workers", latestEngineWorkerList.size());
@@ -181,6 +181,25 @@ public class EngineSyncRunner implements Runnable {
                 logger.info("EngineSyncRunner finished for model: {}, role: {}", modelName, roleType);
             } else {
                 logger.debug("Less than 2 workers, skipping variance calculation for model: {}", modelName);
+            }
+        }
+    }
+
+    private void markMissingWorkersUnavailable(Map<String, WorkerStatus> cachedWorkerStatuses, Set<String> latestValidIpPorts) {
+        logger.info("Current cached worker size: {}, latest worker list size: {}", cachedWorkerStatuses.size(), latestValidIpPorts.size());
+        for (Map.Entry<String, WorkerStatus> entry: cachedWorkerStatuses.entrySet()) {
+            WorkerStatus workerStatus = entry.getValue();
+            String ipPort = entry.getKey();
+            if (!latestValidIpPorts.contains(ipPort)) {
+                workerStatus.setAlive(false);
+                long lastTime = workerStatus.getStatusLastUpdateTime().get();
+                long actualIntervalUs = workerStatus.getStatusUpdateIntervalUs().get();
+                // Use max(3 * actual sync interval, 1s) as removal threshold to tolerate transient service discovery flaps
+                long removalThresholdUs = Math.max(3 * actualIntervalUs, 1_000_000L);
+                if (System.nanoTime() / 1000 - lastTime > removalThresholdUs) {
+                    cachedWorkerStatuses.remove(ipPort);
+                    logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}", modelName, roleType, ipPort);
+                }
             }
         }
     }

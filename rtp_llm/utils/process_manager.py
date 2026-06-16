@@ -19,6 +19,7 @@ FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV = "FRONTEND_PRE_STOP_DRAIN_SECONDS"
 DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
 PRE_STOP_DRAIN_SIGNAL_ENV = "RTP_LLM_PRE_STOP_DRAIN_SIGNAL"
 PRE_STOP_DRAIN_SIGNAL_DISABLED_VALUE = "0"
+PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 600
 DEFAULT_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS = 60.0
 DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS = 120.0
@@ -540,12 +541,7 @@ class ProcessManager:
     def _wait_pre_stop_drain_signal_window(
         self, group_names: List[str], drain_deadline: Optional[float]
     ) -> bool:
-        window_s = self._backend_post_frontend_drain_seconds()
-        if window_s <= 0:
-            return False
-        remaining = self._remaining_timeout(drain_deadline)
-        if remaining is not None:
-            window_s = min(window_s, remaining)
+        window_s = self._pre_stop_drain_signal_window_seconds(drain_deadline)
         if window_s <= 0:
             return False
 
@@ -579,6 +575,44 @@ class ProcessManager:
                 return True
             time.sleep(min(self.monitor_interval, max(0.0, deadline - time.time())))
         return False
+
+    def _pre_stop_drain_signal_window_seconds(
+        self, drain_deadline: Optional[float]
+    ) -> float:
+        window_s = self._backend_post_frontend_drain_seconds()
+        if window_s <= 0:
+            return 0.0
+        remaining = self._remaining_timeout(drain_deadline)
+        if remaining is None:
+            return window_s
+
+        headroom_s = self._pre_stop_drain_headroom_seconds(remaining)
+        max_window_s = max(0.0, remaining - headroom_s)
+        clamped_window_s = min(window_s, max_window_s)
+        if clamped_window_s < window_s:
+            logging.info(
+                "Clamp pre-stop drain signal window from %.3fs to %.3fs "
+                "(remaining_shutdown_budget=%.3fs, headroom=%.3fs)",
+                window_s,
+                clamped_window_s,
+                remaining,
+                headroom_s,
+            )
+        return clamped_window_s
+
+    @staticmethod
+    def _pre_stop_drain_headroom_seconds(shutdown_timeout: float) -> float:
+        raw = os.environ.get(PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV, "")
+        if raw:
+            try:
+                return max(0.0, float(raw))
+            except ValueError:
+                logging.warning(
+                    "Invalid %s=%r, using default pre-stop drain headroom",
+                    PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV,
+                    raw,
+                )
+        return min(60.0, max(1.0, float(shutdown_timeout) * 0.10))
 
     def _sigterm_deferred_groups(self):
         """Signal deferred groups (backend); outer monitor loop polls.

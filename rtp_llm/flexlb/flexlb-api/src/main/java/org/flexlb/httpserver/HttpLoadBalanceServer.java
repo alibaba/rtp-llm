@@ -19,6 +19,7 @@ import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
+import org.flexlb.service.grace.strategy.HealthCheckHooker;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.JsonUtils;
@@ -98,6 +99,14 @@ public class HttpLoadBalanceServer {
      * @return a reactive response containing the load balancing result
      */
     public Mono<ServerResponse> scheduleRequest(ServerRequest request) {
+        if (HealthCheckHooker.isShutDownSignalReceived) {
+            Logger.warn("Reject schedule request because shutdown signal has been received");
+            Response response = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
+            response.setErrorMessage("flexlb is shutting down");
+            return ServerResponse.status(503)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(Mono.just(response), Response.class);
+        }
         BalanceContext ctx = new BalanceContext();
         return request.bodyToMono(Request.class)
                 .flatMap(req -> {

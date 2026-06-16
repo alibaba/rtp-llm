@@ -65,7 +65,7 @@ class FrontendShutdownManager:
 
     def try_begin_request(self) -> bool:
         with self._lock:
-            if self._draining:
+            if self._unavailable:
                 return False
             self._active_requests += 1
             return True

@@ -118,6 +118,10 @@ class DashScShutdownManager:
         with self._lock:
             return self._draining
 
+    def is_unavailable(self) -> bool:
+        with self._lock:
+            return self._unavailable
+
     def drain_reason(self) -> str:
         with self._lock:
             return self._drain_reason
@@ -130,7 +134,7 @@ class DashScShutdownManager:
 
     def try_begin_request(self) -> bool:
         with self._lock:
-            if self._draining:
+            if self._unavailable:
                 return False
             self._active_requests += 1
             return True

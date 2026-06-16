@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -61,12 +62,17 @@ public class WorkerAddressService {
     }
 
     public List<WorkerHost> getEngineWorkerList(String modelName, RoleType modelEndpointType) {
+        return getEngineWorkerDiscoveryResult(modelName, modelEndpointType).hosts();
+    }
+
+    public WorkerDiscoveryResult getEngineWorkerDiscoveryResult(String modelName, RoleType modelEndpointType) {
         ServiceRoute serviceRoute = modelMetaConfig.getServiceRoute(IdUtils.getServiceIdByModelName(modelName));
         if (serviceRoute == null) {
             logger.info("modelName={} service route not found", modelName);
-            return new ArrayList<>();
+            return WorkerDiscoveryResult.success(new ArrayList<>());
         }
         List<WorkerHost> workerHosts = new ArrayList<>();
+        boolean reliable = true;
         List<Pair<String, Endpoint>> endpoints = serviceRoute.getAllEndpointsWithGroup(modelEndpointType);
         for (Pair<String, Endpoint> endpointTuple : endpoints) {
             String groupName = endpointTuple.getLeft();
@@ -76,28 +82,37 @@ public class WorkerAddressService {
                 continue;
             }
             String address = endpoint.getAddress();
-            workerHosts.addAll(convertServiceDiscoveryHosts(getServiceHosts(modelName, address), endpoint.getProtocol(), groupName));
+            WorkerDiscoveryResult discoveryResult = getServiceHostsResult(modelName, address);
+            reliable = reliable && discoveryResult.reliable();
+            workerHosts.addAll(convertServiceDiscoveryHosts(discoveryResult.hosts(), endpoint.getProtocol(), groupName));
         }
-        return workerHosts;
+        return new WorkerDiscoveryResult(workerHosts, reliable);
     }
 
     public List<WorkerHost> getServiceHosts(String modelName, String address) {
+        return getServiceHostsResult(modelName, address).hosts();
+    }
+
+    public WorkerDiscoveryResult getServiceHostsResult(String modelName, String address) {
         // Use all machines mounted on the first service discovery address in ServiceRoute
         ServiceDiscoveryRunner serviceDiscoveryRunner = new ServiceDiscoveryRunner(modelName, address, engineHealthReporter, serviceDiscovery);
         Future<List<WorkerHost>> future = serviceDiscoveryExecutor.submit(serviceDiscoveryRunner);
         try {
             // Set timeout to prevent blocking threads when service discovery has no machines and takes long to return
-            return future.get(500, TimeUnit.MILLISECONDS);
+            return WorkerDiscoveryResult.success(future.get(500, TimeUnit.MILLISECONDS));
         } catch (Exception e) {
             if (e instanceof TimeoutException) {
                 logger.error("query service discovery timeout, model={}, address={}, msg:{}", modelName, address, "timeout");
                 engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null, null);
+            } else if (e instanceof ExecutionException) {
+                logger.error("query service discovery error, model={}, address={}, msg:{}", modelName, address,
+                        e.getCause() == null ? e.getMessage() : e.getCause().getMessage());
             } else {
                 logger.error("query service discovery error, model={}, address={}, msg:{}", modelName, address, e.getMessage());
                 engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null, null);
             }
             future.cancel(true);
-            return new ArrayList<>();
+            return WorkerDiscoveryResult.failure();
         }
     }
 
@@ -144,8 +159,18 @@ public class WorkerAddressService {
                 logger.error("query service discovery exception, cost={}ms, model={}, address={}, msg:{}",
                         System.nanoTime() / 1000 - start, modelName, address, e.getMessage());
                 engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null, null);
-                return new ArrayList<>();
+                throw new RuntimeException(e);
             }
+        }
+    }
+
+    public record WorkerDiscoveryResult(List<WorkerHost> hosts, boolean reliable) {
+        public static WorkerDiscoveryResult success(List<WorkerHost> hosts) {
+            return new WorkerDiscoveryResult(hosts == null ? new ArrayList<>() : hosts, true);
+        }
+
+        public static WorkerDiscoveryResult failure() {
+            return new WorkerDiscoveryResult(new ArrayList<>(), false);
         }
     }
 }

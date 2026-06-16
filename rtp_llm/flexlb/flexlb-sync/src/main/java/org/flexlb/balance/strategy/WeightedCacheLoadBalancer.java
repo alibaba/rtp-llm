@@ -211,6 +211,10 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
     private ServerStatus buildServerStatus(WorkerStatus optimalWorker, long seqLen, long prefixLength, RoleType roleType, long requestId) {
         ServerStatus result = new ServerStatus();
         try {
+            if (optimalWorker == null || !optimalWorker.isAlive()) {
+                Logger.warn("Selected {} worker became unavailable before route response", roleType);
+                return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+            }
             TaskInfo taskInfo = new TaskInfo();
             taskInfo.setPrefillTime(0);
             taskInfo.setWaitingTime(0);

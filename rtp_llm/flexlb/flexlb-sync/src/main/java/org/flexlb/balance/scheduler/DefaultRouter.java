@@ -8,6 +8,7 @@ import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.RoutingResult;
@@ -34,9 +35,11 @@ public class DefaultRouter implements Router {
 
     private final Map<RoleType, LoadBalancer> loadBalancerMap;
     private final GroupRoutingPolicy groupRoutingPolicy;
+    private final ModelMetaConfig modelMetaConfig;
 
-    public DefaultRouter(ConfigService configService, GroupRoutingPolicy groupRoutingPolicy) {
+    public DefaultRouter(ConfigService configService, GroupRoutingPolicy groupRoutingPolicy, ModelMetaConfig modelMetaConfig) {
         this.groupRoutingPolicy = groupRoutingPolicy;
+        this.modelMetaConfig = modelMetaConfig;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.loadBalancerMap = new EnumMap<>(RoleType.class);
 
@@ -67,7 +70,10 @@ public class DefaultRouter implements Router {
         // 2. Get routing configuration
         long requestId = balanceContext.getRequestId();
         ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
-        List<RoleType> roleTypeList = workerStatus.getRoleTypeList();
+        List<RoleType> roleTypeList = modelMetaConfig.getConfiguredRoleTypes();
+        if (CollectionUtils.isEmpty(roleTypeList)) {
+            roleTypeList = workerStatus.getRoleTypeList();
+        }
         if (CollectionUtils.isEmpty(roleTypeList)) {
             return Response.error(NO_AVAILABLE_WORKER);
         }

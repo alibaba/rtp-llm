@@ -123,4 +123,31 @@ class TrafficPolicyConfigTest {
 
         assertEquals("default-b", config.resolveTargetGroup(request).orElseThrow());
     }
+
+    @Test
+    void should_report_only_target_group_as_positive_group_when_target_group_overrides_weighted_groups() {
+        TrafficPolicyConfig config = JsonUtils.toObject("""
+                {
+                  "default_group": "default-fixed",
+                  "default_target_groups": [
+                    {"group": "default-weighted", "weight": 100}
+                  ],
+                  "rules": [
+                    {
+                      "name": "split",
+                      "min_seq_len": 1,
+                      "target_group": "rule-fixed",
+                      "target_groups": [
+                        {"group": "rule-weighted", "weight": 100}
+                      ]
+                    }
+                  ]
+                }
+                """, TrafficPolicyConfig.class);
+
+        assertEquals(
+                java.util.Set.of("default-fixed", "rule-fixed"),
+                config.positiveWeightTargetGroups()
+        );
+    }
 }

@@ -368,10 +368,15 @@ class FrontendApp(object):
             )
 
         def draining_response():
+            reason = (
+                "frontend is draining"
+                if self.shutdown_manager.is_draining()
+                else "frontend is unavailable"
+            )
             return ORJSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 content={
-                    "error": "frontend is draining",
+                    "error": reason,
                     "reason": self.shutdown_manager.drain_reason(),
                     "active_requests": self.shutdown_manager.active_request_count(),
                 },
@@ -397,10 +402,15 @@ class FrontendApp(object):
         def check_not_draining(request: Request):
             if request.url.path == "/liveness":
                 return
-            if self.shutdown_manager.is_draining():
+            if self.shutdown_manager.is_unavailable():
+                detail = (
+                    "frontend is draining"
+                    if self.shutdown_manager.is_draining()
+                    else "frontend is unavailable"
+                )
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="frontend is draining",
+                    detail=detail,
                     headers={"Retry-After": "1"},
                 )
 
@@ -529,7 +539,8 @@ class FrontendApp(object):
             return response
 
         @app.get("/v1/models")
-        async def list_models():
+        async def list_models(request: Request):
+            check_not_draining(request)
             assert self.frontend_server._openai_endpoint != None
             return await self.frontend_server._openai_endpoint.list_models()
 
@@ -595,13 +606,15 @@ class FrontendApp(object):
 
         # example {"prompt": "abcde"}
         @app.post("/tokenizer/encode")
-        async def tokenizer_encode(req: Union[str, Dict[Any, Any]]):
+        async def tokenizer_encode(req: Union[str, Dict[Any, Any]], request: Request):
+            check_not_draining(request)
             return self.frontend_server.tokenizer_encode(req)
 
         # example {"prompt": "abcde"}
         # example openai_request
         @app.post("/tokenize")
-        async def encode(req: Union[str, Dict[Any, Any]]):
+        async def encode(req: Union[str, Dict[Any, Any]], request: Request):
+            check_not_draining(request)
             return self.frontend_server.tokenize(req)
 
         if self.frontend_server.is_embedding:

@@ -371,6 +371,113 @@ class BackendRPCServerVisitorEnqueueRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host_service.refresh_calls, [True])
         self.assertEqual(input.generate_config.role_addrs, [fresh_addr])
 
+    async def test_enqueue_retry_filters_failed_domain_route_addr(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.max_seq_len = 10
+        visitor.sp_config = None
+        visitor.pd_route_retry_on_unavailable = 1
+        visitor.fill_request_info = lambda _input: None
+        visitor.backend_role_list = [RoleType.PREFILL]
+
+        stale_addr = RoleAddr(
+            role=RoleType.PREFILL, ip="10.0.0.1", http_port=100, grpc_port=101
+        )
+        fresh_addr = RoleAddr(
+            role=RoleType.PREFILL, ip="10.0.0.2", http_port=100, grpc_port=101
+        )
+
+        async def route_ips(input):
+            input.generate_config.role_addrs = [stale_addr]
+
+        visitor.route_ips = route_ips
+
+        class _HostService:
+            service_available = True
+
+            def get_backend_role_addrs(self, _roles, refresh=False):
+                return [stale_addr, fresh_addr]
+
+        visitor.host_service = _HostService()
+
+        class _FlakyModelRpcClient:
+            def __init__(self):
+                self.calls = 0
+                self.seen_role_addrs = []
+
+            def enqueue(self, input):
+                self.calls += 1
+                self.seen_role_addrs.append(list(input.generate_config.role_addrs))
+                if self.calls == 1:
+                    raise RuntimeError("StatusCode.UNAVAILABLE")
+
+                async def empty_stream():
+                    if False:
+                        yield None
+
+                return empty_stream()
+
+        client = _FlakyModelRpcClient()
+        visitor.model_rpc_client = client
+
+        input = _FakeInput()
+        stream = await visitor.enqueue(input)
+        async for _ in stream:
+            pass
+
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(client.seen_role_addrs, [[stale_addr], [fresh_addr]])
+        self.assertEqual(input.generate_config.role_addrs, [fresh_addr])
+
+    async def test_enqueue_retry_rejects_incomplete_filtered_domain_route(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.max_seq_len = 10
+        visitor.sp_config = None
+        visitor.pd_route_retry_on_unavailable = 1
+        visitor.fill_request_info = lambda _input: None
+        visitor.backend_role_list = [RoleType.PREFILL, RoleType.DECODE]
+
+        stale_prefill = RoleAddr(
+            role=RoleType.PREFILL, ip="10.0.0.1", http_port=100, grpc_port=101
+        )
+        stale_decode = RoleAddr(
+            role=RoleType.DECODE, ip="10.0.0.3", http_port=300, grpc_port=301
+        )
+        fresh_decode = RoleAddr(
+            role=RoleType.DECODE, ip="10.0.0.4", http_port=400, grpc_port=401
+        )
+
+        async def route_ips(input):
+            input.generate_config.role_addrs = [stale_prefill, stale_decode]
+
+        visitor.route_ips = route_ips
+
+        class _HostService:
+            service_available = True
+
+            def get_backend_role_addrs(self, _roles, refresh=False):
+                return [stale_prefill, fresh_decode]
+
+        visitor.host_service = _HostService()
+
+        class _FailOnceModelRpcClient:
+            calls = 0
+
+            def enqueue(self, _input):
+                self.calls += 1
+                raise RuntimeError("StatusCode.UNAVAILABLE")
+
+        client = _FailOnceModelRpcClient()
+        visitor.model_rpc_client = client
+
+        stream = await visitor.enqueue(_FakeInput())
+        with self.assertRaises(FtRuntimeException) as ctx:
+            async for _ in stream:
+                pass
+
+        self.assertEqual(ctx.exception.exception_type, ExceptionType.ROUTE_ERROR)
+        self.assertIn("missing backend role addresses", str(ctx.exception))
+        self.assertEqual(client.calls, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

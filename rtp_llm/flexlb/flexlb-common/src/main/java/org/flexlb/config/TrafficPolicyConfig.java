@@ -8,8 +8,10 @@ import org.flexlb.dao.loadbalance.Request;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.zip.CRC32;
 
 @Data
@@ -46,6 +48,23 @@ public class TrafficPolicyConfig {
         }
 
         return resolveGroup(defaultGroup, defaultTargetGroups, request, "default");
+    }
+
+    public Set<String> positiveWeightTargetGroups() {
+        Set<String> groups = new LinkedHashSet<>();
+        if (!enabled) {
+            return groups;
+        }
+        addTargetGroups(groups, defaultGroup, defaultTargetGroups);
+        if (rules != null) {
+            for (TrafficPolicyRule rule : rules) {
+                if (rule == null) {
+                    continue;
+                }
+                addTargetGroups(groups, rule.getTargetGroup(), rule.getTargetGroups());
+            }
+        }
+        return groups;
     }
 
     @Data
@@ -148,6 +167,23 @@ public class TrafficPolicyConfig {
         }
 
         return Optional.empty();
+    }
+
+    private static void addTargetGroups(Set<String> groups,
+                                        String targetGroup,
+                                        List<TrafficTargetGroup> targetGroups) {
+        if (StringUtils.isNotBlank(targetGroup)) {
+            groups.add(targetGroup);
+            return;
+        }
+        if (targetGroups == null) {
+            return;
+        }
+        for (TrafficTargetGroup group : targetGroups) {
+            if (group != null && StringUtils.isNotBlank(group.getGroup()) && group.getWeight() > 0) {
+                groups.add(group.getGroup());
+            }
+        }
     }
 
     private static long hashRequest(Request request, String salt) {

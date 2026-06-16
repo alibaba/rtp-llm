@@ -227,6 +227,10 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                                                  long requestId,
                                                  long seqLen) {
         WorkerStatus workerStatus = selectedWorker.worker();
+        if (workerStatus == null || !workerStatus.isAlive()) {
+            Logger.warn("Selected {} worker became unavailable before route response", roleType);
+            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+        }
 
         logWorkerSelection(selectedWorker, roleType);
         reportCacheHitMetrics(roleType, workerStatus.getIp(), selectedWorker.hitCacheTokens(), seqLen);

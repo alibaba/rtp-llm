@@ -6,6 +6,7 @@ import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -48,6 +49,9 @@ class DefaultRouterTest {
 
     @Mock
     private GroupRoutingPolicy groupRoutingPolicy;
+
+    @Mock
+    private ModelMetaConfig modelMetaConfig;
 
     @Mock
     private LoadBalancer prefillLoadBalancer;
@@ -98,7 +102,8 @@ class DefaultRouterTest {
 
         // Create scheduler instance
         lenient().when(groupRoutingPolicy.route(any(BalanceContext.class))).thenReturn(GroupRoutingDecision.none());
-        defaultRouter = new DefaultRouter(configService, groupRoutingPolicy);
+        lenient().when(modelMetaConfig.getConfiguredRoleTypes()).thenReturn(List.of());
+        defaultRouter = new DefaultRouter(configService, groupRoutingPolicy, modelMetaConfig);
 
         // Mock LoadBalanceStrategyFactory to return our mock load balancers
         mockStaticLoadBalanceStrategyFactory();
@@ -372,6 +377,29 @@ class DefaultRouterTest {
 
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
+        assertEquals(StrategyErrorType.NO_DECODE_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_DECODE_WORKER");
+    }
+
+    @Test
+    void should_fail_configured_decode_role_when_decode_status_map_is_empty() {
+        // Setup - route config requires both roles, but only prefill has synced.
+        when(modelMetaConfig.getConfiguredRoleTypes()).thenReturn(List.of(RoleType.DECODE, RoleType.PREFILL));
+
+        org.flexlb.dao.master.WorkerStatus dummyPrefillWorker = new org.flexlb.dao.master.WorkerStatus();
+        dummyPrefillWorker.setIp("192.168.1.1");
+        dummyPrefillWorker.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
+
+        ServerStatus decodeServerStatus = new ServerStatus();
+        decodeServerStatus.setSuccess(false);
+        decodeServerStatus.setMessage("No decode worker available");
+        when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), isNull())).thenReturn(decodeServerStatus);
+
+        // Execute
+        Response response = defaultRouter.route(balanceContext);
+
+        // Verify
+        assertFalse(response.isSuccess(), "Response should fail instead of returning a partial route");
         assertEquals(StrategyErrorType.NO_DECODE_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_DECODE_WORKER");
     }
 

@@ -109,7 +109,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         self.assertEqual(embedding_response.status_code, 503)
         self.assertEqual(embedding_response.headers.get("retry-after"), "1")
 
-    def test_pre_stop_unavailable_marks_health_but_serves_stale_business(self):
+    def test_pre_stop_unavailable_rejects_new_business(self):
         app_owner = FrontendApp.__new__(FrontendApp)
         app_owner.frontend_server = FakeFrontendServer()
         app_owner.shutdown_manager = FrontendShutdownManager()
@@ -127,7 +127,8 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             "/v1/chat/completions",
             json={"messages": [{"role": "user", "content": "hello"}]},
         )
-        self.assertEqual(chat_response.status_code, 200)
+        self.assertEqual(chat_response.status_code, 503)
+        self.assertEqual(chat_response.headers.get("retry-after"), "1")
 
     def test_draining_rejects_admin_backend_requests(self):
         app_owner = FrontendApp.__new__(FrontendApp)
@@ -142,12 +143,48 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         app_owner.shutdown_manager.start_draining("unit test")
 
         requests = [
+            ("get", "/v1/models", None),
             ("get", "/cache_status", None),
             ("get", "/worker_status", None),
             ("post", "/set_log_level", {"log_level": "DEBUG"}),
             ("post", "/start_profile", {}),
             ("post", "/update_eplb_config", {"mode": "NONE"}),
             ("post", "/update_scheduler_info", {}),
+            ("post", "/tokenizer/encode", {"prompt": "hello"}),
+            ("post", "/tokenize", {"prompt": "hello"}),
+        ]
+        for method, path, payload in requests:
+            if method == "get":
+                response = client.get(path)
+            else:
+                response = client.post(path, json=payload)
+            self.assertEqual(response.status_code, 503, path)
+            self.assertEqual(response.headers.get("retry-after"), "1", path)
+
+        self.assertEqual(app_owner.grpc_client.calls, [])
+
+    def test_pre_stop_unavailable_rejects_admin_backend_requests(self):
+        app_owner = FrontendApp.__new__(FrontendApp)
+        app_owner.frontend_server = FakeFrontendServer()
+        app_owner.shutdown_manager = FrontendShutdownManager()
+        app_owner.separated_frontend = True
+        app_owner.server_config = SimpleNamespace(http_port=0)
+        app_owner.grpc_client = FakeGrpcClient()
+
+        app = app_owner.create_app()
+        client = TestClient(app)
+        app_owner.shutdown_manager.start_unavailable("unit test")
+
+        requests = [
+            ("get", "/v1/models", None),
+            ("get", "/cache_status", None),
+            ("get", "/worker_status", None),
+            ("post", "/set_log_level", {"log_level": "DEBUG"}),
+            ("post", "/start_profile", {}),
+            ("post", "/update_eplb_config", {"mode": "NONE"}),
+            ("post", "/update_scheduler_info", {}),
+            ("post", "/tokenizer/encode", {"prompt": "hello"}),
+            ("post", "/tokenize", {"prompt": "hello"}),
         ]
         for method, path, payload in requests:
             if method == "get":
@@ -218,8 +255,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         self.assertFalse(server.should_exit)
         self.assertIsNotNone(server._pre_stop_timer)
         self.assertAlmostEqual(server._pre_stop_timer.interval, 3.0)
-        self.assertTrue(manager.try_begin_request())
-        manager.finish_request()
+        self.assertFalse(manager.try_begin_request())
         server._pre_stop_timer.cancel()
         server._pre_stop_timer = None
 
@@ -247,8 +283,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             server.handle_exit(signal.SIGTERM, None)
             self.assertTrue(manager.is_unavailable())
             self.assertFalse(manager.is_draining())
-            self.assertTrue(manager.try_begin_request())
-            manager.finish_request()
+            self.assertFalse(manager.try_begin_request())
             self.assertFalse(server.should_exit)
             self.assertTrue(self.wait_until(lambda: server.should_exit))
 
@@ -270,8 +305,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         self.assertFalse(manager.is_draining())
         self.assertFalse(server.should_exit)
         self.assertIsNotNone(server._pre_stop_timer)
-        self.assertTrue(manager.try_begin_request())
-        manager.finish_request()
+        self.assertFalse(manager.try_begin_request())
         server._pre_stop_timer.cancel()
         server._pre_stop_timer = None
 

@@ -2,7 +2,7 @@ import logging
 import os
 import time
 import asyncio
-from typing import TYPE_CHECKING, AsyncGenerator, List, Optional
+from typing import TYPE_CHECKING, AsyncGenerator, List, Optional, Set, Tuple
 
 import torch
 
@@ -322,8 +322,21 @@ class BackendRPCServerVisitor:
             block_cache_keys, self._page_rr_route_cache_keys, self._page_rr_cp_size
         )
 
+    @staticmethod
+    def _role_addr_key(role_addr: RoleAddr) -> Tuple[str, str, int, int]:
+        role_name = getattr(role_addr.role, "name", str(role_addr.role))
+        return (
+            role_name,
+            role_addr.ip,
+            int(role_addr.grpc_port),
+            int(role_addr.http_port),
+        )
+
     async def get_domain_route_addrs(
-        self, input: GenerateInput, refresh: bool = False
+        self,
+        input: GenerateInput,
+        refresh: bool = False,
+        excluded_role_addrs: Optional[Set[Tuple[str, str, int, int]]] = None,
     ):
         specified_roles = {addr.role for addr in input.generate_config.role_addrs}
         missing_roles = [
@@ -332,6 +345,12 @@ class BackendRPCServerVisitor:
         role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             missing_roles, refresh=refresh
         )
+        if excluded_role_addrs:
+            role_addrs = [
+                role_addr
+                for role_addr in role_addrs
+                if self._role_addr_key(role_addr) not in excluded_role_addrs
+            ]
         if role_addrs:
             input.generate_config.role_addrs.extend(role_addrs)
             route_logger.warning(
@@ -349,6 +368,10 @@ class BackendRPCServerVisitor:
                 input.request_id,
                 missing_roles,
             )
+
+    def _missing_backend_roles(self, input: GenerateInput) -> List[RoleType]:
+        specified_roles = {addr.role for addr in input.generate_config.role_addrs}
+        return [role for role in self.backend_role_list if role not in specified_roles]
 
     async def route_ips(self, input: GenerateInput):
         # proactive rejection: check cached queue length before making request to master
@@ -419,6 +442,13 @@ class BackendRPCServerVisitor:
             ):
                 route_error.rtp_error_code = master_route_result.error_code
             raise route_error
+        missing_roles = self._missing_backend_roles(input)
+        if missing_roles:
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR,
+                "request_id=%s missing backend role addresses after routing: %s"
+                % (input.request_id, missing_roles),
+            )
 
     def check_sp_supported(self, input: GenerateInput):
         if not self.sp_config or not self.sp_config.model_type:
@@ -531,13 +561,19 @@ class BackendRPCServerVisitor:
             set_aux_info(e)
             raise
 
+        excluded_retry_role_addrs: Set[Tuple[str, str, int, int]] = set()
+
         async def route_and_enqueue(attempt: int):
             if attempt > 0:
                 input.generate_config.role_addrs = []
             if self.host_service.service_available:
                 if attempt > 0:
                     with Timer() as domain_route_timer:
-                        await self.get_domain_route_addrs(input, refresh=True)
+                        await self.get_domain_route_addrs(
+                            input,
+                            refresh=True,
+                            excluded_role_addrs=excluded_retry_role_addrs,
+                        )
                     kmonitor.report(
                         GaugeMetrics.DOMAIN_ROUTE_RT_METRIC,
                         domain_route_timer.cost_ms(),
@@ -547,6 +583,13 @@ class BackendRPCServerVisitor:
                             ExceptionType.ROUTE_ERROR,
                             "request_id=%s no backend role addresses found after retry domain routing"
                             % input.request_id,
+                        )
+                    missing_roles = self._missing_backend_roles(input)
+                    if missing_roles:
+                        raise FtRuntimeException(
+                            ExceptionType.ROUTE_ERROR,
+                            "request_id=%s missing backend role addresses after retry domain routing: %s"
+                            % (input.request_id, missing_roles),
                         )
                 else:
                     await self.route_ips(input)
@@ -584,6 +627,8 @@ class BackendRPCServerVisitor:
                         or not self._is_retryable_route_rpc_error(e)
                     ):
                         raise
+                    for role_addr in input.generate_config.role_addrs or []:
+                        excluded_retry_role_addrs.add(self._role_addr_key(role_addr))
                     attempt += 1
                     route_logger.warning(
                         "retrying PD route after retryable RPC error, "

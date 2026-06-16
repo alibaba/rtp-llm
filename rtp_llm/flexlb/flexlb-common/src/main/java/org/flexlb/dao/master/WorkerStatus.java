@@ -27,7 +27,7 @@ public class WorkerStatus {
     private int port;
     private String site;
     private Long availableConcurrency;
-    private boolean alive;
+    private volatile boolean alive;
     private AtomicLong availableKvCacheTokens = new AtomicLong();
     private AtomicLong usedKvCacheTokens = new AtomicLong();
     private CacheStatus cacheStatus;

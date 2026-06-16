@@ -359,14 +359,20 @@ class DashScGrpcDrainAioInterceptor(grpc.aio.ServerInterceptor):
     async def _begin_or_abort(self, context, method: str) -> bool:
         if self._shutdown_manager.try_begin_request():
             return True
+        state = (
+            "draining"
+            if self._shutdown_manager.is_draining()
+            else "unavailable"
+        )
         detail = (
-            "dash_sc is draining: reason=%s active_requests=%s"
+            "dash_sc is %s: reason=%s active_requests=%s"
             % (
+                state,
                 self._shutdown_manager.drain_reason(),
                 self._shutdown_manager.active_request_count(),
             )
         )
-        logging.info("[DashScGrpc] rejecting new RPC during drain: %s %s", method, detail)
+        logging.info("[DashScGrpc] rejecting new RPC during %s: %s %s", state, method, detail)
         await context.abort(grpc.StatusCode.UNAVAILABLE, detail)
         return False
 
