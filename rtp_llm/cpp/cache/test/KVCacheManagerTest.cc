@@ -117,6 +117,8 @@ static ModelConfig makeDSV4ManagerFlashModelConfig() {
     }
     ratios.push_back(0);
     mc.attn_config.layer_compress_ratios = ratios;
+    mc.hybrid_attention_config.enable_hybrid_attention           = true;
+    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
     setDsv4KvCacheSpecs(mc);
     return mc;
 }

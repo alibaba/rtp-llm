@@ -80,6 +80,8 @@ static ModelConfig makeProModelConfig() {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
     mc.attn_config.layer_compress_ratios = ratios;
+    mc.hybrid_attention_config.enable_hybrid_attention           = true;
+    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
     setDsv4KvCacheSpecs(mc);
     return mc;
 }
@@ -102,7 +104,9 @@ static ModelConfig makeFlashModelConfig() {
     for (int i = 2; i < 43; i++) {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
-    mc.attn_config.layer_compress_ratios = ratios;
+    mc.attn_config.layer_compress_ratios                         = ratios;
+    mc.hybrid_attention_config.enable_hybrid_attention           = true;
+    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
     setDsv4KvCacheSpecs(mc);
     return mc;
 }
