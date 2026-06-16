@@ -12,7 +12,9 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.enums.ScheduleModeEnum;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
@@ -28,7 +30,7 @@ public class RouteService {
     public RouteService(ConfigService configService,
                         DefaultRouter defaultScheduler,
                         QueueManager queueManager,
-                        @Autowired(required = false) FlexlbBatchScheduler flexlbBatchScheduler,
+                        @Lazy @Autowired(required = false) FlexlbBatchScheduler flexlbBatchScheduler,
                         RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
         this.configService = configService;
         this.router = defaultScheduler;
@@ -92,7 +94,18 @@ public class RouteService {
     }
 
     boolean shouldUseFlexlbBatch(BalanceContext ctx, FlexlbConfig config) {
-        if (flexlbBatchScheduler == null || config == null || !config.isFlexlbBatchEnabled()) {
+        if (flexlbBatchScheduler == null || config == null) {
+            return false;
+        }
+        ScheduleModeEnum mode = ctx.getScheduleMode();
+        if (mode == ScheduleModeEnum.BATCH) {
+            return true;
+        }
+        if (mode == ScheduleModeEnum.DIRECT) {
+            return false;
+        }
+        // AUTO: use batch when config enables it and request characteristics match
+        if (!config.isFlexlbBatchEnabled()) {
             return false;
         }
         Request request = ctx.getRequest();
@@ -100,7 +113,7 @@ public class RouteService {
                 && request.getMaxNewTokens() > 1
                 && request.getNumBeams() <= 1
                 && !request.isForceDisableSpRun()
-                && request.getGenerateInputPbB64() != null
-                && !request.getGenerateInputPbB64().isEmpty();
+                && ctx.getGenerateInputPbBytes() != null
+                && ctx.getGenerateInputPbBytes().length > 0;
     }
 }

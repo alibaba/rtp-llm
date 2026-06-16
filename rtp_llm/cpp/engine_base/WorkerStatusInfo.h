@@ -8,11 +8,12 @@
 #include <random>
 #include <chrono>
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
+#include "rtp_llm/cpp/config/RoleTypes.h"
 
 namespace rtp_llm {
 
 struct WorkerStatusInfo {
-    std::string        role;
+    RoleType           role;
     EngineScheduleInfo engine_schedule_info;
     int64_t            status_version;
     int64_t            latest_finished_version;

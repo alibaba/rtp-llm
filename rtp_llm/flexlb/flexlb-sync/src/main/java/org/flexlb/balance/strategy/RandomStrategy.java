@@ -2,6 +2,8 @@ package org.flexlb.balance.strategy;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
@@ -10,8 +12,6 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.master.TaskInfo;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
@@ -33,23 +33,21 @@ public class RandomStrategy implements LoadBalancer {
     private final EngineWorkerStatus engineWorkerStatus;
     private final ConfigService configService;
     private final ResourceMeasureFactory resourceMeasureFactory;
+    private final EndpointRegistry endpointRegistry;
 
     public RandomStrategy(EngineWorkerStatus engineWorkerStatus,
                           ConfigService configService,
-                          ResourceMeasureFactory resourceMeasureFactory) {
+                          ResourceMeasureFactory resourceMeasureFactory,
+                          EndpointRegistry endpointRegistry) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.configService = configService;
         this.resourceMeasureFactory = resourceMeasureFactory;
+        this.endpointRegistry = endpointRegistry;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, this);
     }
 
     @Override
     public void rollBack(String ipPort, long requestId) {
-        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, null);
-        WorkerStatus workerStatus = workerStatusMap.get(ipPort);
-        if (workerStatus != null) {
-            workerStatus.removeLocalTask(requestId);
-        }
     }
 
     @Override
@@ -57,26 +55,26 @@ public class RandomStrategy implements LoadBalancer {
         Request request = balanceContext.getRequest();
         logger.debug("Selecting worker for , role: {}, group: {}", roleType, group);
 
-        Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
+        Map<String, WorkerEndpoint> workerEndpointMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
 
-        if (MapUtils.isEmpty(workerStatusMap)) {
+        if (MapUtils.isEmpty(workerEndpointMap)) {
             logger.warn("No worker status map found");
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
-        List<WorkerStatus> workerStatuses = new ArrayList<>(workerStatusMap.values());
-        if (CollectionUtils.isEmpty(workerStatuses)) {
+        List<WorkerEndpoint> endpoints = new ArrayList<>(workerEndpointMap.values());
+        if (CollectionUtils.isEmpty(endpoints)) {
             logger.warn("No available workers");
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
         // Random select with wrap-around to skip dead workers, no extra allocation
-        int size = workerStatuses.size();
+        int size = endpoints.size();
         int startIndex = ThreadLocalRandom.current().nextInt(size);
-        WorkerStatus selectedWorker = null;
+        WorkerEndpoint selectedWorker = null;
         for (int i = 0; i < size; i++) {
-            WorkerStatus ws = workerStatuses.get((startIndex + i) % size);
-            if (isWorkerAvailable(balanceContext, roleType, ws)) {
-                selectedWorker = ws;
+            WorkerEndpoint ep = endpoints.get((startIndex + i) % size);
+            if (isWorkerAvailable(balanceContext, roleType, ep)) {
+                selectedWorker = ep;
                 break;
             }
         }
@@ -85,12 +83,12 @@ public class RandomStrategy implements LoadBalancer {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        logger.debug("Selected worker ip: {}, httpPort: {}", selectedWorker.getIp(), selectedWorker.getPort());
+        logger.debug("Selected worker ip: {}, httpPort: {}", selectedWorker.getIp(), selectedWorker.getHttpPort());
         return buildServerStatus(selectedWorker, roleType, balanceContext.getRequestId(), request);
     }
 
-    private boolean isWorkerAvailable(BalanceContext balanceContext, RoleType roleType, WorkerStatus workerStatus) {
-        if (workerStatus == null || !workerStatus.isAlive()) {
+    private boolean isWorkerAvailable(BalanceContext balanceContext, RoleType roleType, WorkerEndpoint ep) {
+        if (ep == null || !ep.getStatus().isAlive()) {
             return false;
         }
 
@@ -99,25 +97,19 @@ public class RandomStrategy implements LoadBalancer {
                 : configService.loadBalanceConfig();
         ResourceMeasureIndicatorEnum indicator = config.getResourceMeasureIndicator(roleType);
         ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);
-        return resourceMeasure == null || resourceMeasure.isResourceAvailable(workerStatus);
+        return resourceMeasure == null || resourceMeasure.isResourceAvailable(ep);
     }
 
-    private ServerStatus buildServerStatus(WorkerStatus worker, RoleType roleType, long requestId, Request request) {
+    private ServerStatus buildServerStatus(WorkerEndpoint ep, RoleType roleType, long requestId, Request request) {
         ServerStatus result = new ServerStatus();
         try {
-            if (RoleType.DECODE == roleType) {
-                TaskInfo taskInfo = new TaskInfo();
-                taskInfo.setRequestId(requestId);
-                taskInfo.setInputLength(request == null ? 0 : request.getSeqLen());
-                taskInfo.setPrefixLength(0);
-                worker.putLocalTask(requestId, taskInfo);
-            }
             result.setSuccess(true);
-            result.setServerIp(worker.getIp());
-            result.setHttpPort(worker.getPort());
-            result.setGrpcPort(CommonUtils.toGrpcPort(worker.getPort()));
+            result.setServerIp(ep.getIp());
+            result.setHttpPort(ep.getHttpPort());
+            result.setGrpcPort(CommonUtils.toGrpcPort(ep.getHttpPort()));
+            result.setDpRank(ep.getStatus().getDpRank());
             result.setRole(roleType);
-            result.setGroup(worker.getGroup());
+            result.setGroup(ep.getStatus().getGroup());
             result.setRequestId(requestId);
         } catch (Exception e) {
             Logger.error("buildServerStatus error", e);

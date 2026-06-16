@@ -1,78 +1,81 @@
 package org.flexlb.balance.scheduler;
 
-import com.google.protobuf.Int32Value;
-import com.google.protobuf.Int64Value;
-import com.google.protobuf.InvalidProtocolBufferException;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
-import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.Logger;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.ArrayList;
-import java.util.Base64;
-import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * Coordinates batch scheduling for FlexLB disaggregated inference.
+ *
+ * <p>Responsibilities:
+ * <ul>
+ *   <li>Request admission and routing (submit, cancel)</li>
+ *   <li>Inflight lifecycle management (inflight map, TTL cleanup)</li>
+ *   <li>Batch assembly coordination — commits to PrefillEndpoint,
+ *       filters cancelled items, delegates gRPC dispatch to {@link BatchDispatcher}</li>
+ *   <li>Resource rollback on failure or completion</li>
+ * </ul>
+ *
+ * <p>The actual gRPC dispatch (build protobuf, send, parse response) is
+ * delegated to {@link BatchDispatcher}. Per-item results come back through
+ * {@link DispatchCallback} which this class implements.
+ */
 @Component
-public class FlexlbBatchScheduler {
+public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallback {
 
-    private final ConfigService configService;
+    public final ConfigService configService;
     private final Router router;
-    private final EngineGrpcClient grpcClient;
-    private final EngineWorkerStatus engineWorkerStatus;
-    private final ScheduledExecutorService timerExecutor;
-    private final ExecutorService dispatchExecutor;
-    private final Map<String, WorkerBatcher> batchers = new ConcurrentHashMap<>();
-    private final Map<Long, InflightEntry> inflight = new ConcurrentHashMap<>();
-    private final AtomicLong batchIdGenerator = new AtomicLong(0);
+    final EngineGrpcClient grpcClient;
+    final EngineWorkerStatus engineWorkerStatus;
+    final EndpointRegistry endpointRegistry;
+    final BatchDispatcher dispatcher;
+    final Map<Long, InflightEntry> inflight = new ConcurrentHashMap<>();
+    final AtomicLong batchIdGenerator = new AtomicLong(0);
+    private final InflightEvictor<Long, InflightEntry> inflightEvictor
+            = new InflightEvictor<>(inflight, null);
 
     public FlexlbBatchScheduler(ConfigService configService,
-                                Router router,
+                                @Lazy Router router,
                                 EngineGrpcClient grpcClient,
-                                EngineWorkerStatus engineWorkerStatus) {
+                                EngineWorkerStatus engineWorkerStatus,
+                                EndpointRegistry endpointRegistry,
+                                BatchDispatcher dispatcher) {
         this.configService = configService;
         this.router = router;
         this.grpcClient = grpcClient;
         this.engineWorkerStatus = engineWorkerStatus;
-        this.timerExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "flexlb-batch-timer");
-            t.setDaemon(true);
-            return t;
-        });
-        this.dispatchExecutor = Executors.newFixedThreadPool(
-                Math.max(1, configService.loadBalanceConfig().getScheduleWorkerSize()),
-                r -> {
-                    Thread t = new Thread(r, "flexlb-batch-dispatcher");
-                    t.setDaemon(true);
-                    return t;
-                });
+        this.endpointRegistry = endpointRegistry;
+        this.dispatcher = dispatcher;
     }
+
+    // ==================== Request submission ====================
 
     public CompletableFuture<Response> submit(BalanceContext ctx) {
         CompletableFuture<Response> future = new CompletableFuture<>();
@@ -82,9 +85,18 @@ public class FlexlbBatchScheduler {
                 return future;
             }
 
+            int maxInflight = configService.loadBalanceConfig().getFlexlbBatchMaxInflight();
+            if (maxInflight > 0 && inflight.size() >= maxInflight) {
+                Response resp = Response.error(StrategyErrorType.QUEUE_FULL);
+                future.complete(resp);
+                return future;
+            }
+
             Response routeResponse = router.route(ctx);
             if (routeResponse == null || !routeResponse.isSuccess()) {
-                future.complete(routeResponse != null ? routeResponse : Response.error(StrategyErrorType.NO_AVAILABLE_WORKER));
+                future.complete(routeResponse != null
+                        ? routeResponse
+                        : Response.error(StrategyErrorType.NO_AVAILABLE_WORKER));
                 return future;
             }
 
@@ -92,187 +104,199 @@ public class FlexlbBatchScheduler {
             ServerStatus decode = findServer(routeResponse, RoleType.DECODE);
             if (prefill == null) {
                 rollback(routeResponse);
-                future.complete(Response.error(StrategyErrorType.NO_PREFILL_WORKER));
+                Response resp = Response.error(StrategyErrorType.NO_PREFILL_WORKER);
+                future.complete(resp);
                 return future;
             }
 
-            BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode));
-            String batcherKey = batcherKey(ctx.getRequest(), prefill);
-            batchers.computeIfAbsent(batcherKey, ignored -> new WorkerBatcher(batcherKey, copyOf(prefill))).offer(item);
+            String prefillIpPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
+            PrefillEndpoint prefillEp = endpointRegistry.getPrefill(prefillIpPort);
+            if (prefillEp == null) {
+                rollback(routeResponse);
+                Response resp = Response.error(StrategyErrorType.NO_PREFILL_WORKER);
+                future.complete(resp);
+                return future;
+            }
+
+            DecodeEndpoint decodeEp = null;
+            if (decode != null) {
+                String decodeIpPort = decode.getServerIp() + ":" + decode.getHttpPort();
+                decodeEp = endpointRegistry.getDecode(decodeIpPort);
+            }
+
+            BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode),
+                    prefillEp, decodeEp, /* sortKey set by batcher */ 0, System.currentTimeMillis());
+            inflight.put(ctx.getRequestId(), new InflightEntry(item));
+            WorkerBatcher batcher = prefillEp.getBatcher();
+            batcher.offer(item);
         } catch (Throwable t) {
+            if (ctx != null) {
+                inflight.remove(ctx.getRequestId());
+            }
             Logger.error("FlexlbBatchScheduler submit failed for request id: {}",
                     ctx == null ? null : ctx.getRequestId(), t);
-            future.completeExceptionally(t);
+            Response errorResp = new Response();
+            errorResp.setSuccess(false);
+            errorResp.setCode(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode());
+            errorResp.setErrorMessage("Submit failed: " + t.getMessage());
+            future.complete(errorResp);
         }
         return future;
     }
 
-    public void cancel(long requestId) {
-        for (WorkerBatcher batcher : batchers.values()) {
-            if (batcher.cancelQueued(requestId)) {
-                return;
-            }
-        }
+    // ==================== Cancellation ====================
 
-        InflightEntry entry = inflight.get(requestId);
+    public void cancel(long requestId) {
+        InflightEntry entry = inflight.remove(requestId);
         if (entry == null) {
-            Logger.debug("flexlb batch cancel ignored; request {} not found", requestId);
+            Logger.debug("flexlb batch cancel ignored; request {} not found in inflight", requestId);
             return;
         }
 
-        boolean removeNow;
         synchronized (entry) {
             entry.cancelled.set(true);
             if (!entry.ackFinished) {
                 completeCancelled(entry);
-                removeNow = false;
             } else {
                 rollbackOnce(entry);
-                removeNow = true;
             }
         }
         cancelPrefill(entry);
-        if (removeNow) {
-            inflight.remove(requestId);
+    }
+
+    // ==================== Completion from worker status ====================
+
+    public void onWorkerStatusUpdate(WorkerStatus ws, WorkerStatusResponse response) {
+        if (response == null) {
+            return;
+        }
+        Map<String, TaskInfo> finishedTaskInfo = response.getFinishedTaskInfo();
+        if (finishedTaskInfo == null || finishedTaskInfo.isEmpty()) {
+            return;
+        }
+
+        boolean isPrefill = response.getRole() == RoleType.PREFILL;
+
+        for (TaskInfo task : finishedTaskInfo.values()) {
+            long requestId = task.getRequestId();
+
+            // Prefill success: decode is still running, keep scheduler inflight entry
+            if (isPrefill && task.getErrorCode() == 0) {
+                continue;
+            }
+
+            // Remove from scheduler inflight (prefill error, or any decode completion)
+            InflightEntry entry = inflight.remove(requestId);
+
+            // Prefill error: rollback decode KV reservation since decode will never run
+            if (isPrefill && entry != null) {
+                rollbackOnce(entry);
+            }
+            // Decode completion (success or error): scheduler only cleans its own map.
+            // DecodeEndpoint.calibrate() independently handles its own inflightRequests cleanup.
         }
     }
+
+    public void removeInflight(long requestId) {
+        inflight.remove(requestId);
+    }
+
+    // ==================== Inflight TTL cleanup ====================
 
     @Scheduled(fixedRate = 60000L)
     public void cleanupInflight() {
-        long now = System.currentTimeMillis();
-        long ttlMs = Math.max(1000L, configService.loadBalanceConfig().getFlexlbBatchInflightTtlMs());
-        Iterator<Map.Entry<Long, InflightEntry>> iterator = inflight.entrySet().iterator();
-        while (iterator.hasNext()) {
-            Map.Entry<Long, InflightEntry> entry = iterator.next();
-            if (now - entry.getValue().createdAtMs > ttlMs) {
-                iterator.remove();
-            }
+        long ttlMs = configService.loadBalanceConfig().getFlexlbBatchInflightTtlMs();
+        inflightEvictor.evictExpired(ttlMs);
+        endpointRegistry.evictExpiredAll(ttlMs);
+    }
+
+    // ==================== BatchDecisionHandler callbacks (from WorkerBatcher) ====================
+
+    @Override
+    public void onExpired(BatchItem head) {
+        removeInflight(head.requestId());
+        rollback(head);
+        if (!head.future().isDone()) {
+            Response errorResp = new Response();
+            errorResp.setSuccess(false);
+            errorResp.setCode(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode());
+            errorResp.setErrorMessage("FlexLB request deadline expired — cannot meet TTFT SLO");
+            head.future().complete(errorResp);
         }
     }
 
-    private void dispatch(List<BatchItem> items, ServerStatus prefill) {
-        List<BatchItem> activeItems = items.stream()
-                .filter(item -> !isCancelled(item) && !item.future.isDone())
+    @Override
+    public void onUrgent(BatchItem head, DispatchMeta meta) {
+        flushItems(List.of(head), meta.reason());
+    }
+
+    @Override
+    public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {
+        flushItems(items, meta.reason());
+    }
+
+    @Override
+    public void onOfferFailure(BatchItem item, Throwable error) {
+        removeInflight(item.requestId());
+        rollback(item);
+        if (!item.future().isDone()) {
+            Response errorResp = new Response();
+            errorResp.setSuccess(false);
+            errorResp.setCode(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode());
+            errorResp.setErrorMessage("Batcher offer failed: " + error.getMessage());
+            item.future().complete(errorResp);
+        }
+    }
+
+    // ==================== Dispatch pipeline ====================
+
+    /**
+     * Commit batch to PrefillEndpoint, filter cancelled items, then delegate
+     * to {@link BatchDispatcher} for asynchronous gRPC dispatch.
+     * <p>
+     * Filtering is done synchronously — it only reads inflight (ConcurrentHashMap)
+     * and performs fast in-memory operations. The heavy gRPC I/O is handled
+     * asynchronously by the dispatcher's own thread pool.
+     */
+    private void flushItems(List<BatchItem> items, String reason) {
+        PrefillEndpoint prefillEp = items.get(0).prefillEp();
+
+        // [SYNC] Filter cancelled/done items first — avoid committing them to the endpoint
+        List<BatchItem> active = items.stream()
+                .filter(item -> !isCancelled(item) && !item.future().isDone())
                 .toList();
+
+        // Complete items that were cancelled before dispatch
         for (BatchItem item : items) {
-            if (!activeItems.contains(item)) {
+            if (!active.contains(item)) {
                 completeCancelled(item);
             }
         }
-        if (activeItems.isEmpty()) {
+
+        if (active.isEmpty()) {
             return;
         }
 
+        // [SYNC] Compute prediction and commit only active items to endpoint
+        long predMs = 0;
         long batchId = batchIdGenerator.incrementAndGet();
-        EngineRpcService.BatchEnqueueRequestPB request;
-        try {
-            request = buildBatchRequest(batchId, activeItems);
-        } catch (Exception e) {
-            Logger.error("Failed to build FlexLB batch request batchId: {}", batchId, e);
-            for (BatchItem item : activeItems) {
-                failAck(item, e);
-            }
-            return;
+        if (prefillEp != null) {
+            PrefillTimePredictor predictor = prefillEp.getPredictor();
+            predMs = predictor.predictBatchMs(active);
+            prefillEp.commitBatch(batchId, predMs, active);
         }
 
-        try {
-            long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
-            EngineRpcService.BatchEnqueueResponsePB response =
-                    grpcClient.batchEnqueue(prefill.getServerIp(), prefill.getGrpcPort(), request, deadlineMs);
-            handleAck(batchId, activeItems, response);
-        } catch (Throwable t) {
-            Logger.warn("BatchEnqueue failed batchId: {}, prefill: {}:{}, err: {}",
-                    batchId, prefill.getServerIp(), prefill.getGrpcPort(), t.getMessage());
-            for (BatchItem item : activeItems) {
-                failAck(item, t);
-            }
-        }
+        // [ASYNC] Delegate gRPC dispatch — dispatcher owns its own thread pool
+        dispatcher.dispatch(active, prefillEp, batchId, predMs, reason, this);
     }
 
-    private EngineRpcService.BatchEnqueueRequestPB buildBatchRequest(long batchId, List<BatchItem> items)
-            throws InvalidProtocolBufferException {
-        EngineRpcService.BatchEnqueueRequestPB.Builder builder = EngineRpcService.BatchEnqueueRequestPB.newBuilder()
-                .setBatchId(batchId);
-        int groupSize = items.size();
-        for (BatchItem item : items) {
-            builder.addInputs(buildInput(batchId, groupSize, item));
-        }
-        return builder.build();
-    }
+    // ==================== DispatchCallback implementation ====================
 
-    private EngineRpcService.GenerateInputPB buildInput(long batchId, int groupSize, BatchItem item)
-            throws InvalidProtocolBufferException {
-        Request dto = item.ctx.getRequest();
-        byte[] bytes = Base64.getDecoder().decode(dto.getGenerateInputPbB64());
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.parseFrom(bytes).toBuilder();
-        if (input.getRequestId() != item.requestId()) {
-            throw new IllegalArgumentException("request_id mismatch between schedule request and GenerateInputPB");
-        }
-        input.setBatchGroupId(Int64Value.of(batchId));
-        input.setBatchGroupSize(groupSize);
-
-        EngineRpcService.GenerateConfigPB.Builder config = input.getGenerateConfigBuilder();
-        config.setForceBatch(Int32Value.of(1));
-        config.clearRoleAddrs();
-        addRoleAddr(config, item.prefill);
-        addRoleAddr(config, item.decode);
-        return input.build();
-    }
-
-    private void addRoleAddr(EngineRpcService.GenerateConfigPB.Builder config, ServerStatus serverStatus) {
-        if (serverStatus == null) {
-            return;
-        }
-        EngineRpcService.RoleAddrPB.RoleType role = switch (serverStatus.getRole()) {
-            case PREFILL -> EngineRpcService.RoleAddrPB.RoleType.PREFILL;
-            case DECODE -> EngineRpcService.RoleAddrPB.RoleType.DECODE;
-            case PDFUSION -> EngineRpcService.RoleAddrPB.RoleType.PDFUSION;
-            case VIT -> EngineRpcService.RoleAddrPB.RoleType.VIT;
-        };
-        config.addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
-                .setRole(role)
-                .setIp(serverStatus.getServerIp())
-                .setHttpPort(serverStatus.getHttpPort())
-                .setGrpcPort(serverStatus.getGrpcPort())
-                .build());
-    }
-
-    private void handleAck(long batchId, List<BatchItem> items, EngineRpcService.BatchEnqueueResponsePB response) {
-        if (response == null) {
-            RuntimeException error = new RuntimeException("BatchEnqueue returned null response");
-            for (BatchItem item : items) {
-                failAck(item, error);
-            }
-            return;
-        }
-
-        Map<Long, EngineRpcService.BatchEnqueueAckPB> ackByRequestId = new HashMap<>(response.getAcksCount() * 2);
-        for (EngineRpcService.BatchEnqueueAckPB ack : response.getAcksList()) {
-            ackByRequestId.put(ack.getRequestId(), ack);
-        }
-
-        for (BatchItem item : items) {
-            InflightEntry entry = inflight.get(item.requestId());
-            EngineRpcService.BatchEnqueueAckPB ack = ackByRequestId.get(item.requestId());
-            if (ack == null) {
-                failAck(item, new RuntimeException("BatchEnqueue missing ack for request " + item.requestId()));
-                continue;
-            }
-            if (ack.hasErrorInfo() && ack.getErrorInfo().getErrorCode() != 0L) {
-                failAck(item, new RuntimeException("BatchEnqueue rejected request "
-                        + item.requestId() + ": " + ack.getErrorInfo().getErrorMessage()));
-                continue;
-            }
-
-            completeAckSuccess(batchId, item, entry);
-        }
-    }
-
-    private void completeAckSuccess(long batchId, BatchItem item, InflightEntry entry) {
+    @Override
+    public void onSuccess(BatchItem item, long batchId) {
+        InflightEntry entry = inflight.get(item.requestId());
         if (entry == null) {
-            if (!item.future.isDone()) {
-                item.future.completeExceptionally(new RuntimeException("BatchEnqueue inflight entry missing"));
-            }
+            // cancel() already removed entry and handled cleanup
             return;
         }
 
@@ -281,38 +305,54 @@ public class FlexlbBatchScheduler {
             entry.ackFinished = true;
             if (entry.cancelled.get()) {
                 cancelAfterAck = true;
-            } else if (!item.future.isDone()) {
-                Response success = copyResponse(item.routeResponse);
+            } else if (!item.future().isDone()) {
+                Response success = copyResponse(item.routeResponse());
                 success.setSuccess(true);
                 success.setCode(200);
                 success.setEnqueuedByMaster(true);
-                item.future.complete(success);
+                success.setQueueLength(inflight.size());
+                item.future().complete(success);
                 Logger.debug("FlexLB batch enqueued request {} in batch {}", item.requestId(), batchId);
             }
         }
 
         if (cancelAfterAck) {
-            cancelPrefill(entry);
             inflight.remove(item.requestId());
+            cancelPrefill(entry);
             completeCancelled(entry);
         }
     }
 
-    private void failAck(BatchItem item, Throwable error) {
+    @Override
+    public void onFailure(BatchItem item, Throwable error) {
+        failAck(item, error);
+    }
+
+    // ==================== Internal: inflight state management ====================
+
+    void failAck(BatchItem item, Throwable error) {
         InflightEntry entry = inflight.remove(item.requestId());
         if (entry != null) {
             synchronized (entry) {
                 entry.ackFinished = true;
                 rollbackOnce(entry);
-                if (!item.future.isDone()) {
-                    item.future.completeExceptionally(error);
+                if (!item.future().isDone()) {
+                    Response errorResp = new Response();
+                    errorResp.setSuccess(false);
+                    errorResp.setCode(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode());
+                    errorResp.setErrorMessage(error.getMessage());
+                    item.future().complete(errorResp);
                 }
             }
             return;
         }
-        rollback(item.routeResponse);
-        if (!item.future.isDone()) {
-            item.future.completeExceptionally(error);
+        rollback(item);
+        if (!item.future().isDone()) {
+            Response errorResp = new Response();
+            errorResp.setSuccess(false);
+            errorResp.setCode(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode());
+            errorResp.setErrorMessage(error.getMessage());
+            item.future().complete(errorResp);
         }
     }
 
@@ -324,40 +364,105 @@ public class FlexlbBatchScheduler {
             }
             return;
         }
-        item.ctx.cancel();
-        rollback(item.routeResponse);
-        if (!item.future.isDone()) {
-            item.future.completeExceptionally(new CancellationException("Request cancelled by client"));
+        item.ctx().cancel();
+        rollback(item);
+        if (!item.future().isDone()) {
+            Response errorResp = new Response();
+            errorResp.setSuccess(false);
+            errorResp.setCode(StrategyErrorType.REQUEST_CANCELLED.getErrorCode());
+            errorResp.setErrorMessage("Request cancelled by client");
+            item.future().complete(errorResp);
         }
     }
 
     private void completeCancelled(InflightEntry entry) {
-        entry.item.ctx.cancel();
+        entry.item.ctx().cancel();
         rollbackOnce(entry);
-        if (!entry.item.future.isDone()) {
-            entry.item.future.completeExceptionally(new CancellationException("Request cancelled by client"));
+        if (!entry.item.future().isDone()) {
+            Response errorResp = new Response();
+            errorResp.setSuccess(false);
+            errorResp.setCode(StrategyErrorType.REQUEST_CANCELLED.getErrorCode());
+            errorResp.setErrorMessage("Request cancelled by client");
+            entry.item.future().complete(errorResp);
         }
     }
+
+    // ==================== Internal: resource rollback ====================
 
     private void rollbackOnce(InflightEntry entry) {
         if (entry.rolledBack.compareAndSet(false, true)) {
-            rollback(entry.item.routeResponse);
+            rollback(entry.item);
         }
     }
 
-    private boolean isCancelled(BatchItem item) {
-        InflightEntry entry = inflight.get(item.requestId());
-        return item.ctx.isCancelled() || (entry != null && entry.cancelled.get());
+    /** Rollback using endpoint references already held by the item (no registry lookup). */
+    private void rollback(BatchItem item) {
+        DecodeEndpoint decodeEp = item.decodeEp();
+        if (decodeEp != null && item.decode() != null) {
+            decodeEp.release(item.decode().getRequestId());
+        }
     }
 
+    /**
+     * Rollback using route response — used only in submit() early-return paths
+     * where BatchItem has not been created yet.
+     */
+    private void rollback(Response routeResponse) {
+        if (routeResponse == null || routeResponse.getServerStatus() == null) {
+            return;
+        }
+        for (ServerStatus serverStatus : routeResponse.getServerStatus()) {
+            rollback(serverStatus);
+        }
+    }
+
+    private void rollback(ServerStatus serverStatus) {
+        if (serverStatus == null) {
+            return;
+        }
+        if (serverStatus.getRole() == RoleType.DECODE) {
+            String ipPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
+            DecodeEndpoint ep = endpointRegistry.getDecode(ipPort);
+            if (ep != null) {
+                ep.release(serverStatus.getRequestId());
+            }
+        }
+    }
+
+    // ==================== Internal: inflight queries ====================
+
+    private boolean isCancelled(BatchItem item) {
+        InflightEntry entry = inflight.get(item.requestId());
+        return item.ctx().isCancelled() || (entry != null && entry.cancelled.get());
+    }
+
+    // ==================== Internal: engine cancel ====================
+
+    /**
+     * Cancel request on the prefill engine via gRPC.
+     * <p>
+     * Only prefill needs an explicit cancel — there is no symmetric {@code cancelDecode()}.
+     * The prefill engine owns the full request lifecycle in PD-separated architecture:
+     * {@code PrefillRpcServer::Cancel()} cancels the response entry, which cascades
+     * internally to interrupt the prefill→decode flow.
+     */
     private void cancelPrefill(InflightEntry entry) {
+        PrefillEndpoint prefillEp = entry.item.prefillEp();
+        if (prefillEp == null) {
+            return;
+        }
         try {
             long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
-            grpcClient.cancel(entry.prefill.getServerIp(), entry.prefill.getGrpcPort(), entry.item.requestId(), deadlineMs);
+            grpcClient.cancel(prefillEp.getIp(),
+                    prefillEp.getGrpcPort(),
+                    entry.item.requestId(),
+                    deadlineMs);
         } catch (RuntimeException e) {
             Logger.warn("FlexLB batch cancel failed for request {}", entry.item.requestId(), e);
         }
     }
+
+    // ==================== Internal: static utilities ====================
 
     private static ServerStatus findServer(Response response, RoleType roleType) {
         if (response.getServerStatus() == null) {
@@ -369,35 +474,6 @@ public class FlexlbBatchScheduler {
             }
         }
         return null;
-    }
-
-    private String batcherKey(Request request, ServerStatus prefill) {
-        String model = request.getModel() == null ? "" : request.getModel();
-        return model + "|" + prefill.getServerIp() + ":" + prefill.getGrpcPort();
-    }
-
-    private void rollback(Response routeResponse) {
-        if (routeResponse == null || routeResponse.getServerStatus() == null) {
-            return;
-        }
-        for (ServerStatus serverStatus : routeResponse.getServerStatus()) {
-            rollback(serverStatus);
-        }
-    }
-
-    private void rollback(ServerStatus serverStatus) {
-        if (serverStatus == null || serverStatus.getRole() == null) {
-            return;
-        }
-        Map<String, WorkerStatus> workerStatusMap =
-                engineWorkerStatus.selectModelWorkerStatus(serverStatus.getRole(), serverStatus.getGroup());
-        WorkerStatus workerStatus = null;
-        if (workerStatusMap != null) {
-            workerStatus = workerStatusMap.get(serverStatus.getServerIp() + ":" + serverStatus.getHttpPort());
-        }
-        if (workerStatus != null) {
-            workerStatus.removeLocalTask(serverStatus.getRequestId());
-        }
     }
 
     private static Response copyResponse(Response src) {
@@ -432,6 +508,7 @@ public class FlexlbBatchScheduler {
         status.setServerIp(src.getServerIp());
         status.setHttpPort(src.getHttpPort());
         status.setGrpcPort(src.getGrpcPort());
+        status.setDpRank(src.getDpRank());
         status.setPrefillTime(src.getPrefillTime());
         status.setGroup(src.getGroup());
         status.setDebugInfo(copyOf(src.getDebugInfo()));
@@ -457,119 +534,30 @@ public class FlexlbBatchScheduler {
         return info;
     }
 
+    // ==================== Lifecycle ====================
+
     @PreDestroy
     public void shutdown() {
-        for (WorkerBatcher batcher : batchers.values()) {
-            batcher.shutdown();
-        }
-        timerExecutor.shutdownNow();
-        dispatchExecutor.shutdownNow();
+        endpointRegistry.close();
     }
 
-    private final class WorkerBatcher {
-        private final String key;
-        private final ServerStatus prefill;
-        private final List<BatchItem> queue = new ArrayList<>();
-        private ScheduledFuture<?> flushFuture;
-        private boolean stopped;
+    // ==================== Inflight entry ====================
 
-        private WorkerBatcher(String key, ServerStatus prefill) {
-            this.key = key;
-            this.prefill = prefill;
-        }
-
-        synchronized void offer(BatchItem item) {
-            if (stopped) {
-                rollback(item.routeResponse);
-                item.future.completeExceptionally(new IllegalStateException("FlexLB batcher stopped"));
-                return;
-            }
-            queue.add(item);
-            if (queue.size() == 1) {
-                scheduleFlush();
-            }
-            if (queue.size() >= Math.max(1, configService.loadBalanceConfig().getFlexlbBatchSizeMax())) {
-                flushLocked();
-            }
-        }
-
-        synchronized boolean cancelQueued(long requestId) {
-            Iterator<BatchItem> iterator = queue.iterator();
-            while (iterator.hasNext()) {
-                BatchItem item = iterator.next();
-                if (item.requestId() == requestId) {
-                    iterator.remove();
-                    completeCancelled(item);
-                    if (queue.isEmpty()) {
-                        cancelFlushTimer();
-                    }
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        private synchronized void flushFromTimer() {
-            flushLocked();
-        }
-
-        private void scheduleFlush() {
-            long delayMs = Math.max(1L, configService.loadBalanceConfig().getFlexlbBatchWindowMs());
-            flushFuture = timerExecutor.schedule(this::flushFromTimer, delayMs, TimeUnit.MILLISECONDS);
-        }
-
-        private void flushLocked() {
-            if (queue.isEmpty()) {
-                cancelFlushTimer();
-                return;
-            }
-            List<BatchItem> items = new ArrayList<>(queue);
-            for (BatchItem item : items) {
-                inflight.put(item.requestId(), new InflightEntry(item, prefill));
-            }
-            queue.clear();
-            cancelFlushTimer();
-            dispatchExecutor.execute(() -> dispatch(items, prefill));
-        }
-
-        private void cancelFlushTimer() {
-            if (flushFuture != null) {
-                flushFuture.cancel(false);
-                flushFuture = null;
-            }
-        }
-
-        synchronized void shutdown() {
-            stopped = true;
-            cancelFlushTimer();
-            for (BatchItem item : queue) {
-                item.future.completeExceptionally(new CancellationException("FlexLB batcher stopped: " + key));
-            }
-            queue.clear();
-        }
-    }
-
-    private record BatchItem(BalanceContext ctx,
-                             CompletableFuture<Response> future,
-                             Response routeResponse,
-                             ServerStatus prefill,
-                             ServerStatus decode) {
-        long requestId() {
-            return ctx.getRequestId();
-        }
-    }
-
-    private static final class InflightEntry {
-        private final BatchItem item;
-        private final ServerStatus prefill;
+    static final class InflightEntry implements InflightEvictor.TtlTracked {
+        final BatchItem item;
         private final long createdAtMs = System.currentTimeMillis();
-        private final AtomicBoolean cancelled = new AtomicBoolean(false);
-        private final AtomicBoolean rolledBack = new AtomicBoolean(false);
-        private boolean ackFinished;
+        final AtomicBoolean cancelled = new AtomicBoolean(false);
+        final AtomicBoolean rolledBack = new AtomicBoolean(false);
+        boolean ackFinished;
 
-        private InflightEntry(BatchItem item, ServerStatus prefill) {
+        InflightEntry(BatchItem item) {
             this.item = Objects.requireNonNull(item);
-            this.prefill = Objects.requireNonNull(prefill);
+            Objects.requireNonNull(item.prefill(), "BatchItem.prefill must not be null");
+        }
+
+        @Override
+        public long createdAtMs() {
+            return createdAtMs;
         }
     }
 }

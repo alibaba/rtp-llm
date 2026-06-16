@@ -1,4 +1,5 @@
 #pragma once
+#include <unordered_set>
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 
 namespace rtp_llm {
@@ -48,61 +49,116 @@ public:
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
         cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-            return waiting_streams_.size() >= static_cast<size_t>(gather_batch_size_) || running_streams_.size() > 0
-                   || !loading_cache_streams_.empty();
+            return gatherCountStreams(waiting_) >= static_cast<size_t>(gather_batch_size_) || !running_.empty()
+                   || !loading_.empty();
         });
 
-        // LOADING_CACHE -> DONE/WAITING: error / load cache done
-        evaluateAndUpdateStreams(loading_cache_streams_);
-        // RUNNING -> DONE: error / finished
-        evaluateAndUpdateStreams(running_streams_);
+        // running: advance + cleanup
+        for (auto it = running_.begin(); it != running_.end();) {
+            it->advance();
+            if (!it->alive()) {
+                it = running_.erase(it);
+            } else {
+                ++it;
+            }
+        }
 
-        // PyWrappedModel currently does not support a mixed prefill+decode batch (see
-        // PyWrappedModel::buildPyAttentionInputs cu_seqlens slicing). Defer the gather
-        // until running streams drain so the next batch is pure prefill.
-        // NOTE: the `load_python_model` flag was removed upstream in commit 901d077f1;
-        // we now always assume a python model and gate solely on running-stream count.
-        const bool python_model_busy = !running_streams_.empty();
-        if (waiting_streams_.size() >= static_cast<size_t>(gather_batch_size_) && !python_model_busy) {
-            // Gather exactly gather_batch_size_ streams
+        // loading: check ready -> activate -> move to running
+        for (auto it = loading_.begin(); it != loading_.end();) {
+            if (it->isReady()) {
+                it->activate();
+                if (it->alive()) {
+                    running_.splice(running_.end(), loading_, it++);
+                } else {
+                    it = loading_.erase(it);
+                }
+            } else {
+                ++it;
+            }
+        }
+
+        const bool python_model_busy = !running_.empty();
+        if (gatherCountStreams(waiting_) >= static_cast<size_t>(gather_batch_size_) && !python_model_busy) {
             std::list<GenerateStreamPtr> new_streams;
-            for (auto it = waiting_streams_.begin(); it != waiting_streams_.end(); it++) {
-                if (!(*it)->hasError()) {
-                    new_streams.push_back(*it);
+            for (auto& unit : waiting_) {
+                for (auto& s : unit.streams) {
+                    if (!s->hasError()) {
+                        new_streams.push_back(s);
+                    }
+                    if (new_streams.size() >= static_cast<size_t>(gather_batch_size_)) {
+                        break;
+                    }
                 }
                 if (new_streams.size() >= static_cast<size_t>(gather_batch_size_)) {
                     break;
                 }
             }
-            // Only schedule when we have enough streams
             if (new_streams.size() >= static_cast<size_t>(gather_batch_size_)) {
+                std::unordered_set<int64_t> scheduled_ids;
                 for (auto& stream : new_streams) {
-                    stream->reportEvent(StreamEvents::CanRun);
-                    // busy wait for loading cache done, equivalent to to original logic.
-                    while (stream->getStatus() != StreamState::FINISHED
-                           && stream->moveToNext() != StreamState::RUNNING) {
+                    stream->prepare();
+                    while (stream->alive() && !stream->isReady()) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     }
+                    if (stream->alive()) {
+                        stream->activate();
+                    }
                 }
-                // 过滤 FINISHED stream，仅将 RUNNING stream 加入 running_streams_
-                new_streams.remove_if([](const auto& s) { return s->getStatus() == StreamState::FINISHED; });
-                // 按 streamId 排序以保证 CI 确定性结果
+                new_streams.remove_if([](const auto& s) { return !s->alive(); });
                 new_streams.sort([](const GenerateStreamPtr& a, const GenerateStreamPtr& b) {
                     return a->streamId() < b->streamId();
                 });
-                running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
-                // Remove scheduled streams from waiting_streams_
-                for (auto& stream : new_streams) {
-                    waiting_streams_.remove(stream);
+                for (auto& s : new_streams) {
+                    scheduled_ids.insert(s->streamId());
+                }
+                // Move scheduled streams into a running unit
+                ScheduleUnit run_unit;
+                run_unit.group_id = -1;
+                for (auto& s : new_streams) {
+                    run_unit.streams.push_back(s);
+                }
+                running_.push_back(std::move(run_unit));
+                // Remove scheduled streams from waiting_
+                for (auto it = waiting_.begin(); it != waiting_.end();) {
+                    for (auto sit = it->streams.begin(); sit != it->streams.end();) {
+                        if (scheduled_ids.count((*sit)->streamId())) {
+                            sit = it->streams.erase(sit);
+                        } else {
+                            ++sit;
+                        }
+                    }
+                    if (it->streams.empty()) {
+                        it = waiting_.erase(it);
+                    } else {
+                        ++it;
+                    }
                 }
             }
             gather_batch_size_ = 1;
         }
 
-        return running_streams_;
+        return gatherFlattenRunning();
     }
 
 protected:
+    size_t gatherCountStreams(const std::list<ScheduleUnit>& queue) const {
+        size_t total = 0;
+        for (const auto& unit : queue) {
+            total += unit.size();
+        }
+        return total;
+    }
+
+    std::list<GenerateStreamPtr> gatherFlattenRunning() const {
+        std::list<GenerateStreamPtr> result;
+        for (const auto& unit : running_) {
+            for (const auto& stream : unit.streams) {
+                result.push_back(stream);
+            }
+        }
+        return result;
+    }
+
     int gather_batch_size_;
 };
 

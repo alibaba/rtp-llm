@@ -180,7 +180,7 @@ TEST_F(FIFOSchedulerTest, testRejectInputWithoutSpeculativeReserveSpace) {
 
     auto valid_stream    = make_stream(16);
     auto invalid_stream2 = make_stream(17);
-    auto enqueued        = scheduler.batchEnqueue({invalid_stream2, valid_stream});
+    auto enqueued        = scheduler.enqueueGroup({invalid_stream2, valid_stream});
     ASSERT_EQ(enqueued.size(), 1);
     ASSERT_EQ(enqueued[0], valid_stream);
     ASSERT_TRUE(invalid_stream2->hasError());
@@ -495,7 +495,7 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
     }
 }
 
-TEST_F(FIFOSchedulerTest, testBatchEnqueue) {
+TEST_F(FIFOSchedulerTest, testEnqueueGroup) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
@@ -530,7 +530,7 @@ TEST_F(FIFOSchedulerTest, testBatchEnqueue) {
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         streams.push_back(stream);
     }
-    auto enqueued = scheduler.batchEnqueue(streams);
+    auto enqueued = scheduler.enqueueGroup(streams);
     ASSERT_EQ(enqueued.size(), streams.size());
 
     // Single schedule: both streams transition to RUNNING (no cache loading needed)
@@ -572,7 +572,8 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunStillRespectsMaxGenerateBatchSize
 
         // DecodeRpcServer pre-sets CanRun to drive pre-enqueue KV allocation.
         stream->reportEvent(StreamEvents::CanRun);
-        EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
+        stream->prepare();
+        EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
         EXPECT_TRUE(stream->hasEvent(StreamEvents::CanRun));
         EXPECT_TRUE(stream->hasEvent(StreamEvents::LoadInitiated));
         stream->setIsContextStream(false);
@@ -627,7 +628,8 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunCanTopUpToMaxGenerateBatchSize) {
 
         // DecodeRpcServer pre-sets CanRun to drive pre-enqueue KV allocation.
         stream->reportEvent(StreamEvents::CanRun);
-        EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
+        stream->prepare();
+        EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
         EXPECT_TRUE(stream->hasEvent(StreamEvents::CanRun));
         EXPECT_TRUE(stream->hasEvent(StreamEvents::LoadInitiated));
         stream->setIsContextStream(false);
@@ -691,7 +693,8 @@ TEST_F(FIFOSchedulerTest, testMaxInitedKVCacheStreamsAllowsAlreadyInitedStreams)
         auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
 
         stream->reportEvent(StreamEvents::CanRun);
-        EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
+        stream->prepare();
+        EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
         EXPECT_GT(stream->curBlocksNum(), 0);
         stream->setIsContextStream(false);
         return stream;
@@ -738,7 +741,8 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunWithPendingAsyncStillCountsRunnin
 
         // DecodeRpcServer pre-sets CanRun to drive pre-enqueue KV allocation.
         stream->reportEvent(StreamEvents::CanRun);
-        EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
+        stream->prepare();
+        EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
         EXPECT_TRUE(stream->hasEvent(StreamEvents::CanRun));
         EXPECT_TRUE(stream->hasEvent(StreamEvents::LoadInitiated));
         stream->setIsContextStream(false);
@@ -792,9 +796,9 @@ TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
-        runtime_config.max_generate_batch_size                         = 100;
-        runtime_config.fifo_scheduler_config.max_batch_tokens_size     = 8192;
-        runtime_config.fifo_scheduler_config.cp_force_single_prefill   = cp_force_single_prefill;
+        runtime_config.max_generate_batch_size                       = 100;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
+        runtime_config.fifo_scheduler_config.cp_force_single_prefill = cp_force_single_prefill;
         PDSepConfig         pd_sep_config;
         ParallelismConfig   parallelism_config;
         ModelSpecificConfig model_specific_config;
@@ -810,7 +814,7 @@ TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
             streams.push_back(
                 make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr));
         }
-        scheduler.batchEnqueue(streams);
+        scheduler.enqueueGroup(streams);
         auto streams_status = scheduler.schedule();
         EXPECT_TRUE(streams_status.ok());
         return streams_status.value().size();
@@ -843,27 +847,25 @@ TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
 
     // Enqueue only 2 of 3 — group incomplete, should not be scheduled
     {
-        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = torch::tensor({1}, torch::kInt32);
-        query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_batch         = true;
-        query->generate_config->batch_group_timeout = 10;
-        query->batch_group_id                       = group_id;
-        query->batch_group_size                     = group_size;
-        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
+        std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
+        query->input_ids                      = torch::tensor({1}, torch::kInt32);
+        query->generate_config                = make_shared<GenerateConfig>();
+        query->generate_config->group_timeout = 10;
+        query->group_id                       = group_id;
+        query->group_size                     = group_size;
+        query->begin_time_us                  = autil::TimeUtility::currentTimeInMicroSeconds();
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
     }
     {
-        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = torch::tensor({1}, torch::kInt32);
-        query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_batch         = true;
-        query->generate_config->batch_group_timeout = 10;
-        query->batch_group_id                       = group_id;
-        query->batch_group_size                     = group_size;
-        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
+        std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
+        query->input_ids                      = torch::tensor({1}, torch::kInt32);
+        query->generate_config                = make_shared<GenerateConfig>();
+        query->generate_config->group_timeout = 10;
+        query->group_id                       = group_id;
+        query->group_size                     = group_size;
+        query->begin_time_us                  = autil::TimeUtility::currentTimeInMicroSeconds();
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
@@ -877,14 +879,13 @@ TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
 
     // Enqueue the 3rd — group complete, all 3 should be scheduled together
     {
-        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = torch::tensor({1}, torch::kInt32);
-        query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_batch         = true;
-        query->generate_config->batch_group_timeout = 10;
-        query->batch_group_id                       = group_id;
-        query->batch_group_size                     = group_size;
-        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
+        std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
+        query->input_ids                      = torch::tensor({1}, torch::kInt32);
+        query->generate_config                = make_shared<GenerateConfig>();
+        query->generate_config->group_timeout = 10;
+        query->group_id                       = group_id;
+        query->group_size                     = group_size;
+        query->begin_time_us                  = autil::TimeUtility::currentTimeInMicroSeconds();
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
@@ -922,14 +923,13 @@ TEST_F(FIFOSchedulerTest, testForceBatchCompleteGroupSkipsTokenCapAfterTimeout) 
     int64_t past_time  = autil::TimeUtility::currentTimeInMicroSeconds() - (timeout_ms + 100) * 1000;
 
     for (int i = 0; i < group_size; ++i) {
-        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = torch::tensor({1}, torch::kInt32);
-        query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_batch         = true;
-        query->generate_config->batch_group_timeout = timeout_ms;
-        query->batch_group_id                       = group_id;
-        query->batch_group_size                     = group_size;
-        query->begin_time_us                        = past_time;
+        std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
+        query->input_ids                      = torch::tensor({1}, torch::kInt32);
+        query->generate_config                = make_shared<GenerateConfig>();
+        query->generate_config->group_timeout = timeout_ms;
+        query->group_id                       = group_id;
+        query->group_size                     = group_size;
+        query->begin_time_us                  = past_time;
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
@@ -967,27 +967,25 @@ TEST_F(FIFOSchedulerTest, testForceBatchTimeout) {
 
     // Enqueue only 2 of 3 with begin_time far in the past so timeout has expired
     {
-        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = torch::tensor({1}, torch::kInt32);
-        query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_batch         = true;
-        query->generate_config->batch_group_timeout = timeout_ms;
-        query->batch_group_id                       = group_id;
-        query->batch_group_size                     = group_size;
-        query->begin_time_us                        = past_time;
+        std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
+        query->input_ids                      = torch::tensor({1}, torch::kInt32);
+        query->generate_config                = make_shared<GenerateConfig>();
+        query->generate_config->group_timeout = timeout_ms;
+        query->group_id                       = group_id;
+        query->group_size                     = group_size;
+        query->begin_time_us                  = past_time;
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
     }
     {
-        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = torch::tensor({1}, torch::kInt32);
-        query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_batch         = true;
-        query->generate_config->batch_group_timeout = timeout_ms;
-        query->batch_group_id                       = group_id;
-        query->batch_group_size                     = group_size;
-        query->begin_time_us                        = past_time;
+        std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
+        query->input_ids                      = torch::tensor({1}, torch::kInt32);
+        query->generate_config                = make_shared<GenerateConfig>();
+        query->generate_config->group_timeout = timeout_ms;
+        query->group_id                       = group_id;
+        query->group_size                     = group_size;
+        query->begin_time_us                  = past_time;
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
@@ -1024,14 +1022,13 @@ TEST_F(FIFOSchedulerTest, testIncompleteForceBatchTimeoutUsesNormalTokenCap) {
     int64_t past_time  = autil::TimeUtility::currentTimeInMicroSeconds() - (timeout_ms + 100) * 1000;
 
     for (int i = 0; i < 2; ++i) {
-        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = torch::tensor({1}, torch::kInt32);
-        query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_batch         = true;
-        query->generate_config->batch_group_timeout = timeout_ms;
-        query->batch_group_id                       = group_id;
-        query->batch_group_size                     = group_size;
-        query->begin_time_us                        = past_time;
+        std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
+        query->input_ids                      = torch::tensor({1}, torch::kInt32);
+        query->generate_config                = make_shared<GenerateConfig>();
+        query->generate_config->group_timeout = timeout_ms;
+        query->group_id                       = group_id;
+        query->group_size                     = group_size;
+        query->begin_time_us                  = past_time;
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
@@ -1077,27 +1074,25 @@ TEST_F(FIFOSchedulerTest, testForceBatchIsolation) {
         ASSERT_TRUE(scheduler.enqueue(normal_stream).ok());
     }
     {
-        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = torch::tensor({1}, torch::kInt32);
-        query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_batch         = true;
-        query->generate_config->batch_group_timeout = 10;
-        query->batch_group_id                       = group_id;
-        query->batch_group_size                     = group_size;
-        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
+        std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
+        query->input_ids                      = torch::tensor({1}, torch::kInt32);
+        query->generate_config                = make_shared<GenerateConfig>();
+        query->generate_config->group_timeout = 10;
+        query->group_id                       = group_id;
+        query->group_size                     = group_size;
+        query->begin_time_us                  = autil::TimeUtility::currentTimeInMicroSeconds();
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
     }
     {
-        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = torch::tensor({1}, torch::kInt32);
-        query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_batch         = true;
-        query->generate_config->batch_group_timeout = 10;
-        query->batch_group_id                       = group_id;
-        query->batch_group_size                     = group_size;
-        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
+        std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
+        query->input_ids                      = torch::tensor({1}, torch::kInt32);
+        query->generate_config                = make_shared<GenerateConfig>();
+        query->generate_config->group_timeout = 10;
+        query->group_id                       = group_id;
+        query->group_size                     = group_size;
+        query->begin_time_us                  = autil::TimeUtility::currentTimeInMicroSeconds();
         shared_ptr<GenerateStream> stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
@@ -1147,27 +1142,25 @@ TEST_F(FIFOSchedulerTest, testTwoForceBatchGroupsIsolation) {
     // Enqueue group A (2 streams), then group B (2 streams), both complete
     vector<shared_ptr<GenerateStream>> group_a_streams;
     for (int i = 0; i < group_size; i++) {
-        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = torch::tensor({1}, torch::kInt32);
-        query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_batch         = true;
-        query->generate_config->batch_group_timeout = 10;
-        query->batch_group_id                       = group_id_a;
-        query->batch_group_size                     = group_size;
-        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
+        std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
+        query->input_ids                      = torch::tensor({1}, torch::kInt32);
+        query->generate_config                = make_shared<GenerateConfig>();
+        query->generate_config->group_timeout = 10;
+        query->group_id                       = group_id_a;
+        query->group_size                     = group_size;
+        query->begin_time_us                  = autil::TimeUtility::currentTimeInMicroSeconds();
         auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         group_a_streams.push_back(stream);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
     }
     for (int i = 0; i < group_size; i++) {
-        std::shared_ptr<GenerateInput> query        = make_shared<GenerateInput>();
-        query->input_ids                            = torch::tensor({1}, torch::kInt32);
-        query->generate_config                      = make_shared<GenerateConfig>();
-        query->generate_config->force_batch         = true;
-        query->generate_config->batch_group_timeout = 10;
-        query->batch_group_id                       = group_id_b;
-        query->batch_group_size                     = group_size;
-        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
+        std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
+        query->input_ids                      = torch::tensor({1}, torch::kInt32);
+        query->generate_config                = make_shared<GenerateConfig>();
+        query->generate_config->group_timeout = 10;
+        query->group_id                       = group_id_b;
+        query->group_size                     = group_size;
+        query->begin_time_us                  = autil::TimeUtility::currentTimeInMicroSeconds();
         auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
     }

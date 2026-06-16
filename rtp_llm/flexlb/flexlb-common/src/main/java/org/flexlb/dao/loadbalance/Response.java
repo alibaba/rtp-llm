@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 
 import java.util.List;
+import java.util.Map;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
@@ -31,11 +32,21 @@ public class Response {
     @JsonProperty("enqueued_by_master")
     private boolean enqueuedByMaster = false;
 
+    @JsonProperty("worker_summary")
+    private Map<String, WorkerRoleSummary> workerSummary;
+
     public static Response error(StrategyErrorType strategyErrorType) {
         Response result = new Response();
         result.setSuccess(false);
         result.setCode(strategyErrorType.getErrorCode());
         result.setErrorMessage(strategyErrorType.getErrorMsg());
         return result;
+    }
+
+    @Data
+    public static class WorkerRoleSummary {
+        private int discovered;
+        private int alive;
+        private long maxQueueTokens;
     }
 }

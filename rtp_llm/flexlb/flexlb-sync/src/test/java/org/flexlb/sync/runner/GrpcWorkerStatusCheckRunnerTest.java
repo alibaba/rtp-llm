@@ -35,7 +35,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         workerStatus.setPort(8080);
 
         EngineRpcService.WorkerStatusPB workerStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
-                .setRole("test-role")
+                .setRole(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
                 .setAvailableConcurrency(10)
                 .setRunningQueryLen(5)
                 .setWaitingQueryLen(3)
@@ -53,7 +53,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 modelName, ipPort, site,
                 RoleType.PREFILL,
-                group, workerStatus, engineHealthReporter, engineGrpcService, 20);
+                group, workerStatus, engineHealthReporter, engineGrpcService, 20, null, null);
         runner.run();
 
         // Assert

@@ -36,15 +36,26 @@ public:
         return prefill_server_->RemoteFinish(context, request, response);
     }
 
-    grpc::Status BatchEnqueue(grpc::ServerContext*         context,
-                              const BatchEnqueueRequestPB* request,
-                              BatchEnqueueResponsePB*      response) override {
+    grpc::Status EnqueueBatch(grpc::ServerContext*         context,
+                              const EnqueueBatchRequestPB* request,
+                              EnqueueBatchResponsePB*      response) override {
         if (!prefill_server_) {
-            auto error_msg = "server not implement BatchEnqueue";
+            auto error_msg = "server not implement EnqueueBatch";
             RTP_LLM_LOG_ERROR(error_msg);
             return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
         }
-        return prefill_server_->BatchEnqueue(context, request, response);
+        return prefill_server_->EnqueueBatch(context, request, response);
+    }
+
+    grpc::Status EnqueueGroup(grpc::ServerContext*         context,
+                              const EnqueueGroupRequestPB* request,
+                              EnqueueBatchResponsePB*      response) override {
+        if (!prefill_server_) {
+            auto error_msg = "server not implement EnqueueGroup";
+            RTP_LLM_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
+        }
+        return prefill_server_->EnqueueGroup(context, request, response);
     }
 
     grpc::Status FetchResponse(grpc::ServerContext*                   context,

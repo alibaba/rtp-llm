@@ -49,8 +49,4 @@ public class Request {
 
     @JsonProperty("model")
     private String model = "";
-
-    @ToString.Exclude
-    @JsonProperty("generate_input_pb_b64")
-    private String generateInputPbB64 = "";
 }

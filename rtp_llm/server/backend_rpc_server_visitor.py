@@ -1,7 +1,7 @@
+import asyncio
 import logging
 import os
 import time
-import asyncio
 from typing import TYPE_CHECKING, AsyncGenerator, List, Optional
 
 import torch
@@ -216,7 +216,7 @@ class BackendRPCServerVisitor:
         full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
-        input_pb_bytes = trans_input(input).SerializeToString()
+        input_pb = trans_input(input)
 
         try:
             route_result = await self.master_client.get_backend_role_addrs(
@@ -224,7 +224,7 @@ class BackendRPCServerVisitor:
                 cache_key_block_size=self._cache_key_block_size(),
                 input=input,
                 request_id=input.request_id,
-                input_pb_bytes=input_pb_bytes,
+                input_pb=input_pb,
             )
         except BaseException as e:
             exception_json = format_exception(e)
@@ -297,26 +297,27 @@ class BackendRPCServerVisitor:
         missing_roles = [
             role for role in self.backend_role_list if role not in specified_roles
         ]
-        role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
-            missing_roles
-        )
-        if role_addrs:
-            input.generate_config.role_addrs.extend(role_addrs)
-            route_logger.warning(
-                "fallback to host service, request_id=%s, addrs=%s",
-                input.request_id,
-                role_addrs,
-            )
-            kmonitor.report(
-                AccMetrics.DOMAIN_ROUTE_QPS_METRIC,
-                1,
-            )
-        else:
-            route_logger.error(
-                "host service failed, request_id=%s, missing_roles=%s",
-                input.request_id,
-                missing_roles,
-            )
+        # COMMENTED OUT: Direct connection to prefill/decode bypasses FlexLB
+        # role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
+        #     missing_roles
+        # )
+        # if role_addrs:
+        #     input.generate_config.role_addrs.extend(role_addrs)
+        #     route_logger.warning(
+        #         "fallback to host service, request_id=%s, addrs=%s",
+        #         input.request_id,
+        #         role_addrs,
+        #     )
+        #     kmonitor.report(
+        #         AccMetrics.DOMAIN_ROUTE_QPS_METRIC,
+        #         1,
+        #     )
+        # else:
+        #     route_logger.error(
+        #         "host service failed, request_id=%s, missing_roles=%s",
+        #         input.request_id,
+        #         missing_roles,
+        #     )
 
     async def route_ips(self, input: GenerateInput):
         # proactive rejection: check cached queue length before making request to master
@@ -547,15 +548,18 @@ class BackendRPCServerVisitor:
         return stream_with_aux_info()
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
-        roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
-            self.backend_role_list, refresh
-        )
-        if not roles:
-            return False
-        for role in self.backend_role_list:
-            if role not in [r.role for r in roles]:
-                logging.warning(f"role {role} not in available roles {roles}")
-                return False
+        # COMMENTED OUT: Direct connection to prefill/decode bypasses FlexLB
+        # roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
+        #     self.backend_role_list, refresh
+        # )
+        # if not roles:
+        #     return False
+        # for role in self.backend_role_list:
+        #     if role not in [r.role for r in roles]:
+        #         logging.warning(f"role {role} not in available roles {roles}")
+        #         return False
+        # return True
+        # Always return True to force routing through FlexLB
         return True
 
 

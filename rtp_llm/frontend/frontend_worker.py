@@ -169,9 +169,9 @@ class FrontendWorker:
             num_return_sequences = request.generate_configs[0].num_return_sequences
             generators: List[AsyncGenerator[Dict[str, Any], None]] = []
             # TODO temp fix sp with batch infer, will change request_id to str later
-            batch_group_size = len(request.input_texts)
-            # Use request.request_id as batch_group_id for all streams in the same batch
-            batch_group_id = request.request_id
+            group_size = len(request.input_texts)
+            # Use request.request_id as group_id for all streams in the same batch
+            group_id = request.request_id
             for i, (text, urls, generate_config) in enumerate(
                 zip(request.input_texts, request.input_urls, request.generate_configs)
             ):
@@ -181,8 +181,8 @@ class FrontendWorker:
                         text,
                         urls,
                         generate_config=generate_config,
-                        batch_group_size=batch_group_size,
-                        batch_group_id=batch_group_id,
+                        group_size=group_size,
+                        group_id=group_id,
                         **kwargs,
                     )
                 )
@@ -279,8 +279,8 @@ class FrontendWorker:
         text: str,
         urls: List[str],
         generate_config: GenerateConfig,
-        batch_group_size: int = 1,
-        batch_group_id: int = -1,
+        group_size: int = 1,
+        group_id: int = -1,
         **kwargs: Any,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         stream = self.pipeline.pipeline_async(
@@ -289,8 +289,8 @@ class FrontendWorker:
             urls=urls,
             generate_config=generate_config,
             generate_env_config=self.generate_env_config,
-            batch_group_size=batch_group_size,
-            batch_group_id=batch_group_id,
+            group_size=group_size,
+            group_id=group_id,
             **kwargs,
         )
         async for generate_response in stream:

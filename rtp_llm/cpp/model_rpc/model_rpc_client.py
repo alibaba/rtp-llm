@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import os
 from typing import AsyncGenerator
 
 import grpc
@@ -16,6 +17,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateOutputsPB,
     MultimodalInputPB,
     RoleAddrPB,
+    RoleTypePB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 from rtp_llm.server.request_headers import (
@@ -43,17 +45,8 @@ def _is_finished_response(outputs_pb: GenerateOutputsPB) -> bool:
     return bool(finished) and all(finished)
 
 
-def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
-    if role_type == RoleType.PDFUSION:
-        return RoleAddrPB.RoleType.PDFUSION
-    elif role_type == RoleType.PREFILL:
-        return RoleAddrPB.RoleType.PREFILL
-    elif role_type == RoleType.DECODE:
-        return RoleAddrPB.RoleType.DECODE
-    elif role_type == RoleType.VIT:
-        return RoleAddrPB.RoleType.VIT
-    elif role_type == RoleType.FRONTEND:
-        return RoleAddrPB.RoleType.FRONTEND
+def trans_role_type(role_type: RoleType) -> int:
+    return role_type.value
 
 
 def _trans_jsonable_option(config_pb, config, field_name):
@@ -71,9 +64,9 @@ def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
-    input_pb.batch_group_size = input_py.batch_group_size
-    if hasattr(input_py, "batch_group_id") and input_py.batch_group_id != -1:
-        input_pb.batch_group_id.value = input_py.batch_group_id
+    input_pb.group_size = input_py.group_size
+    if hasattr(input_py, "group_id") and input_py.group_id != -1:
+        input_pb.group_id.value = input_py.group_id
 
     request_info = getattr(input_py, "request_info", None)
     if request_info is not None:
@@ -206,8 +199,7 @@ def trans_input(input_py: GenerateInput):
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "trace_id", functools.partial(str)
     )
-    trans_option(generate_config_pb, input_py.generate_config, "batch_group_timeout")
-    trans_option(generate_config_pb, input_py.generate_config, "force_batch")
+    trans_option(generate_config_pb, input_py.generate_config, "group_timeout")
 
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()
@@ -460,6 +452,11 @@ class ModelRpcClient(object):
                 for role_addr in input_py.generate_config.role_addrs
                 if role_addr.role == RoleType.PREFILL and role_addr.ip
             ]
+            if os.environ.get("FLEXLB_EXPECT_FETCH_RESPONSE") == "1":
+                logging.info(
+                    "FLEXLB_EXPECT_FETCH_RESPONSE request_id=%s using FetchResponse",
+                    input_pb.request_id,
+                )
         else:
             address_list = self._addresses
             for role_addr in input_py.generate_config.role_addrs:
@@ -467,8 +464,7 @@ class ModelRpcClient(object):
                     (self._decode_entrance and role_addr.role == RoleType.DECODE)
                     or role_addr.role == RoleType.PDFUSION
                     or (
-                        not self._decode_entrance
-                        and role_addr.role == RoleType.PREFILL
+                        not self._decode_entrance and role_addr.role == RoleType.PREFILL
                     )
                 ):
                     if role_addr.ip != "":

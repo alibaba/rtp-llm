@@ -1,9 +1,12 @@
 package org.flexlb.sync.runner;
 
-import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.domain.worker.WorkerStatusResponse;
+import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
@@ -16,7 +19,6 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicLong;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
@@ -32,17 +34,21 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final WorkerStatus workerStatus;
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
+    private final FlexlbBatchScheduler batchScheduler;
     private final String ip;
     private final int grpcPort;
     private final long createTimeUs = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
+    private final EndpointRegistry endpointRegistry;
 
     public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
                                   WorkerStatus workerStatus,
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
-                                  long syncRequestTimeoutMs) {
+                                  long syncRequestTimeoutMs,
+                                  FlexlbBatchScheduler batchScheduler,
+                                  EndpointRegistry endpointRegistry) {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
         this.ip = split[0];
@@ -55,6 +61,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
+        this.batchScheduler = batchScheduler;
+        this.endpointRegistry = endpointRegistry;
     }
 
     @Override
@@ -78,9 +86,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
             return EngineStatusConverter.convertToWorkerStatusResponse(workerStatusPB);
         } catch (Throwable throwable) {
             handleException(throwable);
-            WorkerStatusResponse errorResponse = new WorkerStatusResponse();
-            errorResponse.setMessage("Worker status gRPC call failed: " + throwable.getMessage());
-            return errorResponse;
+            workerStatus.setAlive(false);
+            return null;
         }
     }
 
@@ -92,14 +99,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 return;
             }
 
-            if (newWorkerStatus.getMessage() != null) {
-                workerStatus.setAlive(false);
-                logger.error("query engine worker status via gRPC, msg={}", newWorkerStatus.getMessage());
-                return;
-            }
-
-            // Only report success worker status check info
-            engineHealthReporter.reportStatusCheckRemoteInfo(modelName, ipPort, newWorkerStatus.getRole(), startTime);
+            engineHealthReporter.reportStatusCheckRemoteInfo(modelName, ipPort, newWorkerStatus.getRole().name(), startTime);
 
             Long responseVersion = newWorkerStatus.getStatusVersion();
             if (responseVersion == 0L) {
@@ -109,76 +109,55 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             workerStatus.setSite(site);
             workerStatus.setGroup(group);
-            workerStatus.setRole(newWorkerStatus.getRole());
+
+            // Debug: log received finished tasks details
+            Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
+            if (finishedTaskInfo != null && !finishedTaskInfo.isEmpty()) {
+                StringBuilder taskDetails = new StringBuilder();
+                for (TaskInfo task : finishedTaskInfo.values()) {
+                    taskDetails.append("  req_id=").append(task.getRequestId())
+                             .append(" batch_id=").append(task.getBatchId())
+                             .append(" error_code=").append(task.getErrorCode())
+                             .append("\n");
+                }
+                logger.info("GetWorkerStatus received: latestFinishedVersion={}, finishedTasksCount={}\n{}",
+                        newWorkerStatus.getLatestFinishedVersion(),
+                        finishedTaskInfo.size(),
+                        taskDetails);
+            }
 
             long currentVersion = workerStatus.getStatusVersion().get();
-            if (currentVersion >= responseVersion) {
-                logger.info("query engine worker status via gRPC, version is not updated, currentVersion: {}, responseVersion: {}",
-                        currentVersion, responseVersion);
-                // Update basic worker status even when version is not updated
-                workerStatus.setAlive(newWorkerStatus.isAlive());
-                workerStatus.setDpSize(newWorkerStatus.getDpSize());
-                workerStatus.setTpSize(newWorkerStatus.getTpSize());
+            WorkerEndpoint ep = endpointRegistry != null ? endpointRegistry.get(ipPort) : null;
+            if (currentVersion < responseVersion) {
+                // 1. WorkerStatusResponse directly updates WorkerStatus
+                workerStatus.updateFromResponse(newWorkerStatus);
 
-                // Update status timestamp and record actual sync interval
-                long nowUs = System.nanoTime() / 1000;
-                long prevUpdateTime = workerStatus.getStatusLastUpdateTime().get();
-                if (prevUpdateTime > 0) {
-                    workerStatus.getStatusUpdateIntervalUs().set(nowUs - prevUpdateTime);
+                // 2. Notify EP (calibration) — passes both updated status and raw response
+                if (ep != null) {
+                    ep.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
                 }
-                workerStatus.getStatusLastUpdateTime().set(nowUs);
 
-                // Update task state
-                Map<String, TaskInfo> waitingTaskInfo = newWorkerStatus.getWaitingTaskInfo();
-                Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
-                Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
-                workerStatus.setWaitingTaskList(waitingTaskInfo);
-                workerStatus.setRunningTaskList(runningTaskInfo);
-                workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
-                workerStatus.updateRunningQueueTime();
-
-                // Report success even when version is not updated
-                engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
-                    Optional.ofNullable(runningTaskInfo).map(Map::size).orElse(0),
-                    Optional.ofNullable(finishedTaskInfo).map(Map::size).orElse(0));
-
-                logWorkerStatusUpdate(startTime, workerStatus);
-                return;
+                // 3. Notify scheduler (cleanup finished requests)
+                if (batchScheduler != null) {
+                    batchScheduler.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
+                }
+            } else {
+                logger.info("query engine worker status via gRPC, version is not updated, "
+                                + "currentVersion: {}, responseVersion: {}",
+                        currentVersion, responseVersion);
             }
 
-            // Update worker status from gRPC response
-            workerStatus.setAvailableConcurrency(newWorkerStatus.getAvailableConcurrency());
-            workerStatus.setStepLatencyMs(newWorkerStatus.getStepLatencyMs());
-            workerStatus.setIterateCount(newWorkerStatus.getIterateCount());
-            workerStatus.setDpSize(newWorkerStatus.getDpSize());
-            workerStatus.setTpSize(newWorkerStatus.getTpSize());
-            workerStatus.setAlive(newWorkerStatus.isAlive());
-            workerStatus.getStatusVersion().set(responseVersion != null ? responseVersion : -1L);
-            workerStatus.getLatestFinishedTaskVersion().set(newWorkerStatus.getLatestFinishedVersion() != null ? newWorkerStatus.getLatestFinishedVersion() : -1L);
-
-            Map<String, TaskInfo> waitingTaskInfo = newWorkerStatus.getWaitingTaskInfo();
-            Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
-            Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
-            workerStatus.setWaitingTaskList(waitingTaskInfo);
-            workerStatus.setRunningTaskList(runningTaskInfo);
-
-            // Update local task state (including checking lost, updating running, and cleaning completed)
-            workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
-
-            // Correct running queue total wait time
-            workerStatus.updateRunningQueueTime();
-
-            engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
-                    Optional.ofNullable(runningTaskInfo).map(Map::size).orElse(0),
-                    Optional.ofNullable(finishedTaskInfo).map(Map::size).orElse(0));
-
-            // Update status timestamp and record actual sync interval
-            long nowUs = System.nanoTime() / 1000;
-            long prevUpdateTime = workerStatus.getStatusLastUpdateTime().get();
-            if (prevUpdateTime > 0) {
-                workerStatus.getStatusUpdateIntervalUs().set(nowUs - prevUpdateTime);
+            // 4. Update latestFinishedVersion if remote is ahead (always, regardless of status version)
+            Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();
+            if (latestFinishedVersion != null
+                    && latestFinishedVersion > workerStatus.getLatestFinishedTaskVersion().get()) {
+                workerStatus.getLatestFinishedTaskVersion().set(latestFinishedVersion);
             }
-            workerStatus.getStatusLastUpdateTime().set(nowUs);
+
+            engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus, ep,
+                    Optional.ofNullable(newWorkerStatus.getRunningTaskInfo()).map(Map::size).orElse(0),
+                    Optional.ofNullable(newWorkerStatus.getFinishedTaskInfo()).map(Map::size).orElse(0));
+
             logWorkerStatusUpdate(startTime, workerStatus);
 
         } catch (Throwable e) {
@@ -188,10 +167,26 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void logWorkerStatusUpdate(long startTime, WorkerStatus workerStatus) {
-        logger.info("gRPC Worker Status - {}, role:{}, running_queue_tokens:{}, cost:{}",
+        logger.info("gRPC Worker Status - {}, role:{}, alive:{}, concurrency:{}, "
+                        + "step_latency_ms:{}, iterate_count:{}, "
+                        + "dp_rank:{}, dp_size:{}, tp_size:{}, "
+                        + "avail_kv_tokens:{}, used_kv_tokens:{}, "
+                        + "waiting_tasks:{}, running_tasks:{}, "
+                        + "version:{}, sync_cost_us:{}",
                 ipPort,
                 workerStatus.getRole(),
-                workerStatus.getRunningQueueTime(),
+                workerStatus.isAlive(),
+                workerStatus.getAvailableConcurrency(),
+                workerStatus.getStepLatencyMs(),
+                workerStatus.getIterateCount(),
+                workerStatus.getDpRank(),
+                workerStatus.getDpSize(),
+                workerStatus.getTpSize(),
+                workerStatus.getAvailableKvCacheTokens(),
+                workerStatus.getTotalKvCacheTokens().get() - workerStatus.getAvailableKvCacheTokens().get(),
+                workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().values().stream().filter(t -> t.getPhase() != org.flexlb.enums.TaskPhase.RUNNING).count() : 0,
+                workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().size() : 0,
+                workerStatus.getStatusVersion(),
                 System.nanoTime() / 1000 - startTime);
     }
 

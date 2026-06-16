@@ -5,6 +5,7 @@
 #include "grpc++/grpc++.h"
 #include <mutex>
 #include <thread>
+#include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
@@ -12,6 +13,15 @@
 #include "rtp_llm/cpp/model_rpc/ResponseBuffer.h"
 
 namespace rtp_llm {
+
+// Pool-level health metrics, reported periodically
+struct PoolMetrics {
+    std::atomic<size_t> active    = 0;  // currently executing tasks
+    std::atomic<size_t> queued    = 0;  // tasks waiting in queue
+    std::atomic<size_t> completed = 0;  // total finished since creation
+    std::atomic<size_t> rejected  = 0;  // pushTask refused (pool full)
+    std::atomic<size_t> fallback  = 0;  // fallback to detached thread
+};
 
 class PrefillRpcServer: public RemoteRpcServer {
 public:
@@ -28,7 +38,10 @@ public:
     grpc::Status RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response);
 
     grpc::Status
-    BatchEnqueue(grpc::ServerContext* context, const BatchEnqueueRequestPB* request, BatchEnqueueResponsePB* response);
+    EnqueueBatch(grpc::ServerContext* context, const EnqueueBatchRequestPB* request, EnqueueBatchResponsePB* response);
+
+    grpc::Status
+    EnqueueGroup(grpc::ServerContext* context, const EnqueueGroupRequestPB* request, EnqueueBatchResponsePB* response);
 
     grpc::Status FetchResponse(grpc::ServerContext*                   context,
                                const FetchRequestPB*                  request,
@@ -56,6 +69,9 @@ private:
     bool         tryStartAsyncResponseWorker();
     void         finishAsyncResponseWorker();
     void         stopAsyncResponseWorkers();
+    void         initThreadPools();
+    void         reportPoolMetrics();
+    std::string  batchTargetAddrForDpRank(int dp_rank) const;
 
 private:
     std::string                           decode_cluster_name_;
@@ -69,6 +85,12 @@ private:
     std::mutex                            response_worker_mu_;
     std::condition_variable               response_worker_cv_;
     size_t                                response_worker_count_{0};
+
+    // Thread pools replacing std::async / std::thread::detach
+    autil::ThreadPoolBasePtr enqueue_worker_pool_;  // Worker + L1 DP dispatch
+    autil::ThreadPoolBasePtr slot_worker_pool_;     // L2 Prep + L3 Load + L4 Finish
+    PoolMetrics              enqueue_pool_metrics_;
+    PoolMetrics              slot_pool_metrics_;
 };
 
 }  // namespace rtp_llm
