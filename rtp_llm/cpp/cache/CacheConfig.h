@@ -85,8 +85,6 @@ struct CacheConfig {
 
     // Attention-specific configuration
     int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
-    int linear_fixed_cap =
-        0;  // >0 = ring buffer of this many blocks per LINEAR group (per request); 0 = legacy unbounded
     int group_layer_num  = 1;  // Number of layers per group for hybrid attention
     int linear_group_num = 0;  // Number of linear attention groups
     int swa_group_num    = 0;  // Number of sliding-window attention groups
@@ -458,7 +456,6 @@ struct CacheConfig {
         // Attention-specific configuration section
         os << indent1 << "# Attention Configuration:\n";
         OUTPUT_FIELD(linear_step);
-        OUTPUT_FIELD(linear_fixed_cap);
         OUTPUT_FIELD(group_layer_num);
         OUTPUT_FIELD(linear_group_num);
         OUTPUT_FIELD(swa_group_num);

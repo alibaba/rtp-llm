@@ -293,7 +293,6 @@ void setupGroupCounts(CacheConfig& config) {
     config.full_group_num   = 0;
     config.swa_group_num    = 0;
     config.linear_group_num = 0;
-    config.linear_fixed_cap = 0;
     for (auto group_type : config.group_types) {
         if (group_type == CacheGroupType::FULL) {
             ++config.full_group_num;
