@@ -105,12 +105,12 @@ def concat_and_cast_mha_k_kernel(
     nope_dim: tl.constexpr,
     rope_dim: tl.constexpr,
 ):
-    pid_loc = tl.program_id(0)
-    head_range = tl.arange(0, head_cnt)
+    pid_loc = tl.program_id(0).to(tl.int64)
+    head_range = tl.arange(0, head_cnt).to(tl.int64)
 
     k_head_ptr = k_ptr + pid_loc * k_stride0 + head_range[:, None] * k_stride1
 
-    nope_offs = tl.arange(0, nope_dim)
+    nope_offs = tl.arange(0, nope_dim).to(tl.int64)
 
     src_nope_ptr = (
         k_nope_ptr
@@ -123,7 +123,7 @@ def concat_and_cast_mha_k_kernel(
     src_nope = tl.load(src_nope_ptr)
     tl.store(dst_nope_ptr, src_nope)
 
-    rope_offs = tl.arange(0, rope_dim)
+    rope_offs = tl.arange(0, rope_dim).to(tl.int64)
     src_rope_ptr = k_rope_ptr + pid_loc * rope_stride0 + rope_offs[None, :]
     dst_rope_ptr = k_head_ptr + nope_dim + rope_offs[None, :]
     src_rope = tl.load(src_rope_ptr)

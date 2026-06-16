@@ -34,22 +34,28 @@ def _strided_slice_copy_kernel(
     Both src and dst can have arbitrary row strides (last dim must be contig).
     Used to copy a strided slice from one interleaved buffer to another.
     """
-    pid = tl.program_id(0)
+    # Long prefill can make row * stride exceed int32 range (for GLM5,
+    # T~112K,H=64,D=576 is >4B elements). Keep address arithmetic in int64.
+    pid = tl.program_id(0).to(tl.int64)
     row_start = pid * BLOCK_ROWS
-    row_offs = row_start + tl.arange(0, BLOCK_ROWS)
+    row_offs = row_start + tl.arange(0, BLOCK_ROWS).to(tl.int64)
     row_mask = row_offs < n_rows
 
     col_offs = tl.arange(0, BLOCK_R)
     col_mask = col_offs < R
+    col_offs_i64 = col_offs.to(tl.int64)
+    src_stride_row_i64 = src_stride_row.to(tl.int64)
+    dst_stride_row_i64 = dst_stride_row.to(tl.int64)
+    dst_col_offset_i64 = dst_col_offset.to(tl.int64)
 
     # 2D load: [BLOCK_ROWS, BLOCK_R]
-    src_addrs = src_ptr + row_offs[:, None] * src_stride_row + col_offs[None, :]
+    src_addrs = src_ptr + row_offs[:, None] * src_stride_row_i64 + col_offs_i64[None, :]
     src_data = tl.load(src_addrs, mask=row_mask[:, None] & col_mask[None, :], other=0.0)
     dst_addrs = (
         dst_ptr
-        + row_offs[:, None] * dst_stride_row
-        + dst_col_offset
-        + col_offs[None, :]
+        + row_offs[:, None] * dst_stride_row_i64
+        + dst_col_offset_i64
+        + col_offs_i64[None, :]
     )
     tl.store(dst_addrs, src_data, mask=row_mask[:, None] & col_mask[None, :])
 

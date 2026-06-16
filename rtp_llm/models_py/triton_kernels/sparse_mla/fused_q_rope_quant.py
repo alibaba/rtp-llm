@@ -48,7 +48,9 @@ def _fused_q_rope_hadamard_quant_kernel(
     NOPE_DIM: tl.constexpr = HEAD_DIM - ROT_DIM
     tl.static_assert(NOPE_DIM >= 0)
 
-    tok_idx = tl.program_id(0)
+    # Long prefill can push token-row offsets beyond int32 when T * H * D is
+    # near 2^31. Keep token-derived pointer math in int64.
+    tok_idx = tl.program_id(0).to(tl.int64)
     head_idx = tl.program_id(1)
     num_heads = tl.num_programs(1)
 
@@ -237,7 +239,9 @@ def _fused_qk_rope_hadamard_quant_kernel(
     NOPE_DIM: tl.constexpr = HEAD_DIM - ROT_DIM
     tl.static_assert(NOPE_DIM >= 0)
 
-    tok_idx = tl.program_id(0)
+    # Long prefill can push token-row offsets beyond int32 when T * H * D is
+    # near 2^31. Keep token-derived pointer math in int64.
+    tok_idx = tl.program_id(0).to(tl.int64)
     head_idx = tl.program_id(1)
     num_heads = tl.num_programs(1)
 

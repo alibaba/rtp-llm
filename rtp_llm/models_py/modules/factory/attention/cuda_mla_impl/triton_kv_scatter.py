@@ -17,6 +17,7 @@ Algorithm:
   per-call generation counter; stale entries from older calls fail the tag
   check and fall into the zero-write branch.
 """
+
 import torch
 import triton
 import triton.language as tl
@@ -24,8 +25,8 @@ import triton.language as tl
 
 @triton.jit
 def _populate_rev_kernel(ids_ptr, rev_ptr, gen, N, BLOCK: tl.constexpr):
-    pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    pid = tl.program_id(0).to(tl.int64)
+    offs = pid * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
     mask = offs < N
     n_vals = offs.to(tl.int32)
     ids_vals = tl.load(ids_ptr + offs, mask=mask)
@@ -38,17 +39,22 @@ def _populate_rev_kernel(ids_ptr, rev_ptr, gen, N, BLOCK: tl.constexpr):
 
 @triton.jit
 def _fused_scatter_kernel(
-    out_ptr, src_ptr, rev_ptr, total_q, gen,
-    HD: tl.constexpr, BLOCK_HD: tl.constexpr,
+    out_ptr,
+    src_ptr,
+    rev_ptr,
+    total_q,
+    gen,
+    HD: tl.constexpr,
+    BLOCK_HD: tl.constexpr,
 ):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     pid_blk = tl.program_id(1)
     offs = pid_blk * BLOCK_HD + tl.arange(0, BLOCK_HD)
     mask = offs < HD
-    # Cast row to int64 before multiplying by HD: with HD=16384 and
+    # Keep row in int64 before multiplying by HD: with HD=16384 and
     # total_q approaching 131k (e.g. long-prefill / large CP shards), the
     # int32 product overflows silently and writes to garbage addresses.
-    row_off = row.to(tl.int64) * HD
+    row_off = row * HD
     tagged = tl.load(rev_ptr + row)
     if ((tagged >> 24) & 0xFF) == gen:
         src_idx = tagged & 0xFFFFFF
@@ -78,14 +84,14 @@ def _next_gen(total_q: int, device: torch.device):
 
 
 def triton_kv_scatter(
-    src: torch.Tensor,           # [N, H, D]
-    ids: torch.Tensor,           # [N], indices into [0, total_q)
+    src: torch.Tensor,  # [N, H, D]
+    ids: torch.Tensor,  # [N], indices into [0, total_q)
     total_q: int,
 ) -> torch.Tensor:
     """Equivalent to:
-        out = torch.zeros(total_q, *src.shape[1:], dtype=src.dtype, device=src.device)
-        out[ids] = src
-        return out
+    out = torch.zeros(total_q, *src.shape[1:], dtype=src.dtype, device=src.device)
+    out[ids] = src
+    return out
     """
     assert src.is_cuda and ids.is_cuda
     assert src.dim() == 3
@@ -99,7 +105,12 @@ def triton_kv_scatter(
     gen, rev = _next_gen(total_q, src.device)
 
     _populate_rev_kernel[(triton.cdiv(N, 1024),)](
-        ids_i64, rev, gen, N, BLOCK=1024, num_warps=4,
+        ids_i64,
+        rev,
+        gen,
+        N,
+        BLOCK=1024,
+        num_warps=4,
     )
 
     BLOCK_HD = triton.next_power_of_2(HD)
@@ -109,7 +120,13 @@ def triton_kv_scatter(
     n_hd = triton.cdiv(HD, BLOCK_HD)
 
     _fused_scatter_kernel[(total_q, n_hd)](
-        out.view(total_q, HD), src_c.view(N, HD), rev, total_q, gen,
-        HD=HD, BLOCK_HD=BLOCK_HD, num_warps=num_warps,
+        out.view(total_q, HD),
+        src_c.view(N, HD),
+        rev,
+        total_q,
+        gen,
+        HD=HD,
+        BLOCK_HD=BLOCK_HD,
+        num_warps=num_warps,
     )
     return out
