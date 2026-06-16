@@ -149,6 +149,19 @@ protected:
     }
 
 public:
+    // Override physicalSignature() to capture the dual-dtype layout.
+    // LinearKVCacheSpec uses ssm_state_dtype for the K (SSM) segment and
+    // conv_state_dtype for the V (conv) segment. Since block_size_bytes() already
+    // encodes their combined element count, we also expose k_block_size_bytes()
+    // (= SSM segment bytes) via scale_block_size_bytes to distinguish specs that
+    // share total block bytes but have a different K/V dtype split.
+    SpecPhysicalSignature physicalSignature() const override {
+        return {block_size_bytes(),
+                k_block_size_bytes(),  // K segment bytes as secondary discriminator
+                lifecycle,             // always LINEAR; use field for consistency with base class
+                ssm_state_dtype};      // primary dtype for the K (SSM) segment
+    }
+
     std::string debugString(size_t indent = 0) const override {
         const std::string indent_str = std::string(indent, ' ');
         const std::string indent1    = indent_str + "  ";

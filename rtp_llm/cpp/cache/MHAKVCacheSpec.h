@@ -15,11 +15,13 @@ namespace rtp_llm {
 struct MHAKVCacheSpec: public KVCacheSpec {
     uint32_t size_per_head;
 
-    MHAKVCacheSpec() = default;
+    MHAKVCacheSpec() {
+        type      = KVCacheSpecType::MultiHeadAttention;
+        lifecycle = CacheGroupType::FULL;
+    }
 
-    MHAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config) {
-        type              = KVCacheSpecType::MultiHeadAttention;
-
+    MHAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config)
+        : MHAKVCacheSpec() {
         // TODO(xinfei.sxf): 这里的head_num_kv分配逻辑需要和ModelConfig::getAttentionConfigs里保持一致，目前这里还是单独计算的
         local_head_num_kv = static_cast<uint32_t>(
             (attn_config.kv_head_num % parallelism_config.get_attn_tp_size() == 0) ?

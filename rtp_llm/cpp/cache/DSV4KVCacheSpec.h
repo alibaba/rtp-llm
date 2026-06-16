@@ -40,7 +40,10 @@ struct DSV4KVSpec: public KVCacheSpec {
     DataType          store_dtype                 = DataType::TYPE_INVALID;
     size_t            block_size_bytes_alignment = 0;
 
-    DSV4KVSpec() = default;
+    DSV4KVSpec() {
+        type      = KVCacheSpecType::CompressedKV;
+        lifecycle = CacheGroupType::FULL;
+    }
 
     DSV4KVSpec(KVCacheRegionName cache_region,
                uint32_t          entry_elements,
@@ -48,7 +51,8 @@ struct DSV4KVSpec: public KVCacheSpec {
                DataType          storage_dtype,
                uint32_t          seq_size_per_blk,
                uint32_t          cache_compression_ratio = 1,
-               size_t            block_size_alignment    = 0) {
+               size_t            block_size_alignment    = 0)
+        : DSV4KVSpec() {
         cache_type        = cache_region;
         entry_elems       = entry_elements;
         entries_per_block = block_entries;
@@ -59,7 +63,6 @@ struct DSV4KVSpec: public KVCacheSpec {
         // KVCacheSpec base fields
         local_head_num_kv  = 1;  // DSV4 is MQA (1 KV head)
         seq_size_per_block = seq_size_per_blk;
-        type               = KVCacheSpecType::MultiHeadAttention;
         dtype              = store_dtype;
     }
 
@@ -140,7 +143,10 @@ struct DSV4StateSpec: public KVCacheSpec {
     size_t            block_size_bytes_alignment        = 0;
     uint32_t          block_size_alignment_min_entries = 0;
 
-    DSV4StateSpec() = default;
+    DSV4StateSpec() {
+        type      = KVCacheSpecType::FixedState;
+        lifecycle = CacheGroupType::SWA;
+    }
 
     DSV4StateSpec(KVCacheRegionName cache_region,
                   uint32_t          state_elements,
@@ -149,7 +155,10 @@ struct DSV4StateSpec: public KVCacheSpec {
                   uint32_t          seq_size_per_blk,
                   size_t            block_size_bytes_override_value = 0,
                   size_t            block_size_alignment            = 0,
-                  uint32_t          block_alignment_min_entries     = 0) {
+                  uint32_t          block_alignment_min_entries     = 0,
+                  bool              state_cache                    = true,
+                  bool              skip_reuse                     = false)
+        : DSV4StateSpec() {
         cache_type        = cache_region;
         state_dim         = state_elements;
         entries_per_block = block_entries;
@@ -161,8 +170,9 @@ struct DSV4StateSpec: public KVCacheSpec {
         // KVCacheSpec base fields
         local_head_num_kv  = 1;
         seq_size_per_block = seq_size_per_blk;
-        type               = KVCacheSpecType::MultiHeadAttention;
         dtype              = store_dtype;
+        is_state_cache     = state_cache;
+        skip_prefix_reuse  = skip_reuse;
     }
 
     size_t block_size() const override {

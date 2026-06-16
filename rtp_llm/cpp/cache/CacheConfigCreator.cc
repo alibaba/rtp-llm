@@ -39,12 +39,6 @@ bool hasTypedHybridPoolLayout(const ModelConfig& model_config) {
     return hasDsv4KvCacheSpecs(model_config);
 }
 
-bool shouldUseHybridPoolLayout(const ModelConfig& model_config) {
-    return hasTypedHybridPoolLayout(model_config)
-           || (model_config.hybrid_attention_config.enable_hybrid_attention
-               && model_config.hybrid_attention_config.enable_independent_kv_cache_pools);
-}
-
 size_t steppedBytes(size_t bytes, int step) {
     return (bytes > 0 && step > 1) ? bytes / static_cast<size_t>(step) : bytes;
 }
@@ -96,7 +90,18 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   const KVCacheConfig&     kv_cache_config,
                                                   bool                     is_mtp,
                                                   int                      gen_num_per_cycle) {
-    if (shouldUseHybridPoolLayout(model_config)) {
+    // Routing priority:
+    //   1. enable_independent_kv_cache_pools=true  → HybridPool (independent BlockPool per group)
+    //   2. enable_hybrid_attention=true             → HybridType  (shared BlockPool across groups)
+    //   3. else                                     → Single       (standard MHA/MLA path)
+    //
+    // enable_independent_kv_cache_pools is the model-declared flag that replaces
+    // the old shouldUseHybridPoolLayout() which inferred pool strategy indirectly
+    // by inspecting layer_compress_ratios / kv_cache_specs tags.
+    if (model_config.hybrid_attention_config.enable_independent_kv_cache_pools) {
+        RTP_LLM_CHECK_WITH_INFO(!model_config.kv_cache_specs.empty(),
+                                "enable_independent_kv_cache_pools=true requires model_config.kv_cache_specs "
+                                "to be populated; call build_kv_cache_specs() before initializing cache");
         return HybridPoolConfigCreator::createConfig(
             model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle);
     } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {

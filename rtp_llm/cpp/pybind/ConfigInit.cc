@@ -46,7 +46,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::enum_<KVCacheSpecType>(m, "KVCacheSpecType")
         .value("MultiHeadAttention", KVCacheSpecType::MultiHeadAttention)
         .value("MultiHeadLatentAttention", KVCacheSpecType::MultiHeadLatentAttention)
-        .value("LinearAttention", KVCacheSpecType::LinearAttention);
+        .value("LinearAttention", KVCacheSpecType::LinearAttention)
+        .value("CompressedKV", KVCacheSpecType::CompressedKV)
+        .value("FixedState", KVCacheSpecType::FixedState);
 
     py::enum_<CPRotateMethod>(m, "CPRotateMethod")
         .value("DISABLED", CPRotateMethod::DISABLED)
@@ -1550,7 +1552,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("local_head_num_kv", &KVCacheSpec::local_head_num_kv)
         .def_readwrite("seq_size_per_block", &KVCacheSpec::seq_size_per_block)
         .def_readwrite("type", &KVCacheSpec::type)
-        .def_readwrite("dtype", &KVCacheSpec::dtype);
+        .def_readwrite("dtype", &KVCacheSpec::dtype)
+        .def_readwrite("lifecycle", &KVCacheSpec::lifecycle);
 
     py::class_<MHAKVCacheSpec, KVCacheSpec, std::shared_ptr<MHAKVCacheSpec>>(m, "MHAKVCacheSpec")
         .def(py::init<>())
