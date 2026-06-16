@@ -31,8 +31,6 @@ from rtp_llm.utils.process_manager import ProcessManager
 
 setup_logging()
 
-JIT_CACHE_RUN_ID_ENV = "RTP_JIT_CACHE_RUN_ID"
-DEFAULT_LOCAL_JIT_CACHE_DIR = "~/.cache/rtp_llm/jit"
 JIT_CACHE_COMPONENT_ENVS = {
     "flashinfer": "FLASHINFER_WORKSPACE_BASE",
     "triton": "TRITON_CACHE_DIR",
@@ -42,25 +40,8 @@ JIT_CACHE_COMPONENT_ENVS = {
 }
 
 
-def _ensure_internal_jit_cache_run_id():
-    os.environ[JIT_CACHE_RUN_ID_ENV] = f"{int(time.time() * 1000)}-{os.getpid()}"
-
-
-def _config_value(config, attr: str, env_name: str, default: str):
-    value = getattr(config, attr, None) if config is not None else None
-    return value if value not in (None, "") else os.environ.get(env_name, default)
-
-
-def _bootstrap_local_jit_cache(py_env_configs: PyEnvConfigs):
-    jit_config = getattr(py_env_configs, "jit_config", None)
-    local_root = os.path.expanduser(
-        _config_value(
-            jit_config,
-            "local_jit_cache_dir",
-            "LOCAL_JIT_CACHE_DIR",
-            DEFAULT_LOCAL_JIT_CACHE_DIR,
-        )
-    )
+def bootstrap_local_jit_cache(py_env_configs: PyEnvConfigs):
+    local_root = os.path.expanduser(py_env_configs.jit_config.local_jit_cache_dir)
     os.makedirs(local_root, exist_ok=True)
     for component, env_name in JIT_CACHE_COMPONENT_ENVS.items():
         component_dir = os.path.join(local_root, component)
@@ -71,7 +52,7 @@ def _bootstrap_local_jit_cache(py_env_configs: PyEnvConfigs):
     logging.info("local JIT cache root: %s", local_root)
 
 
-def _prepare_internal_jit_cache(py_env_configs: PyEnvConfigs):
+def prepare_jit_cache(py_env_configs: PyEnvConfigs):
     if not has_internal_source():
         return None
     from internal_source.rtp_llm.utils.jit_cache_manager import JitCacheManager
@@ -102,9 +83,7 @@ def local_rank_start(
             return
         jit_cache_manager = None
         try:
-            logging.info("Stopping JIT cache manager")
             manager.stop()
-            logging.info("Stopped JIT cache manager")
         except Exception as e:
             logging.error(f"Error during JIT cache manager shutdown: {e}")
 
@@ -141,8 +120,9 @@ def local_rank_start(
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
-        _bootstrap_local_jit_cache(py_env_configs)
-        jit_cache_manager = _prepare_internal_jit_cache(py_env_configs)
+        jit_cache_manager = prepare_jit_cache(py_env_configs)
+        if jit_cache_manager is None:
+            bootstrap_local_jit_cache(py_env_configs)
         start_time = time.time()
         from rtp_llm.server.backend_manager import BackendManager
 
@@ -498,7 +478,12 @@ def start_backend_server(
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
-    _ensure_internal_jit_cache_run_id()
+    if has_internal_source():
+        from internal_source.rtp_llm.utils.jit_cache_manager import (
+            ensure_jit_cache_run_id,
+        )
+
+        ensure_jit_cache_run_id()
 
     clear_jit_filelock()
 
