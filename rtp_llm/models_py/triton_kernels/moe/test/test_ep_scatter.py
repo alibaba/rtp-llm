@@ -64,7 +64,8 @@ def _old_kernel_output_start(
     offset = tl.arange(0, BLOCK_EXPERT_NUM)
     tokens = tl.load(
         num_recv_tokens_per_expert + offset,
-        mask=offset < num_experts, other=0,
+        mask=offset < num_experts,
+        other=0,
     )
     cumsum = tl.cumsum(tokens) - tokens
     tl.store(expert_start_loc + offset, cumsum, mask=offset < num_experts)
@@ -88,9 +89,7 @@ class TestEpScatter1Correctness(unittest.TestCase):
         expert_start_loc = torch.empty(
             num_experts, dtype=torch.int32, device=self.device
         )
-        m_indices = torch.full(
-            (all_tokens,), -1, dtype=torch.int32, device=self.device
-        )
+        m_indices = torch.full((all_tokens,), -1, dtype=torch.int32, device=self.device)
         BLOCK_E = 128
         _fwd_kernel_ep_scatter_1[(num_experts,)](
             num_recv_tokens_per_expert,
@@ -110,20 +109,27 @@ class TestEpScatter1Correctness(unittest.TestCase):
         token_counts: list[int],
         label: str = "",
     ) -> None:
-        counts_gpu = torch.tensor(
-            token_counts, dtype=torch.int32, device=self.device
-        )
+        counts_gpu = torch.tensor(token_counts, dtype=torch.int32, device=self.device)
         ref_start, ref_m = reference_scatter_1(counts_gpu)
 
         got_start, got_m = self._run_kernel(counts_gpu)
 
+        got_start_cpu = got_start.cpu()
         self.assertTrue(
-            torch.equal(got_start.cpu(), ref_start),
-            f"[{label}] expert_start_loc mismatch:\n  got={got_start.cpu().tolist()[:16]}...\n  ref={ref_start.tolist()[:16]}...",
+            torch.equal(got_start_cpu, ref_start),
+            f"[{label}] expert_start_loc mismatch:\n"
+            f"  got={got_start_cpu.tolist()[:16]}...\n"
+            f"  ref={ref_start.tolist()[:16]}...",
         )
+        got_m_cpu = got_m.cpu()
+        m_equal = torch.equal(got_m_cpu, ref_m)
+        if not m_equal:
+            diff_idx = (got_m_cpu != ref_m).nonzero(as_tuple=True)[0][0].item()
+        else:
+            diff_idx = "N/A"
         self.assertTrue(
-            torch.equal(got_m.cpu(), ref_m),
-            f"[{label}] m_indices mismatch (first diff at {(got_m.cpu() != ref_m).nonzero(as_tuple=True)[0][0].item() if not torch.equal(got_m.cpu(), ref_m) else 'N/A'})",
+            m_equal,
+            f"[{label}] m_indices mismatch (first diff at {diff_idx})",
         )
 
     def test_small_4_experts(self) -> None:
@@ -152,17 +158,13 @@ class TestEpScatter1Correctness(unittest.TestCase):
 
     def test_256_experts_stress(self) -> None:
         """Repeat 256-expert scatter 200 times to probe race window."""
-        counts_gpu = torch.tensor(
-            [128] * 256, dtype=torch.int32, device=self.device
-        )
+        counts_gpu = torch.tensor([128] * 256, dtype=torch.int32, device=self.device)
         ref_start, ref_m = reference_scatter_1(counts_gpu)
 
         for iteration in range(200):
             got_start, got_m = self._run_kernel(counts_gpu)
             if not torch.equal(got_start.cpu(), ref_start):
-                self.fail(
-                    f"expert_start_loc mismatch at iteration {iteration}"
-                )
+                self.fail(f"expert_start_loc mismatch at iteration {iteration}")
             if not torch.equal(got_m.cpu(), ref_m):
                 self.fail(f"m_indices mismatch at iteration {iteration}")
 
@@ -208,15 +210,20 @@ class TestEpScatter1PoisonRegression(unittest.TestCase):
                 (num_experts,), -1, dtype=torch.int32, device=self.device
             )
             _old_kernel_output_start[(num_experts,)](
-                counts_gpu, expert_start_loc, result_buf,
-                num_experts=num_experts, num_warps=8,
+                counts_gpu,
+                expert_start_loc,
+                result_buf,
+                num_experts=num_experts,
+                num_warps=8,
                 BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
             )
             torch.cuda.synchronize()
             got = result_buf.cpu()
             total_mismatches += int((got != ref_start).sum().item())
 
-        print(f"Old kernel poison diagnostic: {total_mismatches} mismatches in 100 rounds")
+        print(
+            f"Old kernel poison diagnostic: {total_mismatches} mismatches in 100 rounds"
+        )
 
     def test_new_kernel_immune_to_poison(self) -> None:
         """Production kernel (fixed) + poison fill: expert_start_loc and
@@ -235,8 +242,11 @@ class TestEpScatter1PoisonRegression(unittest.TestCase):
                 (all_tokens,), -1, dtype=torch.int32, device=self.device
             )
             _fwd_kernel_ep_scatter_1[(num_experts,)](
-                counts_gpu, expert_start_loc, m_indices,
-                num_experts=num_experts, num_warps=8,
+                counts_gpu,
+                expert_start_loc,
+                m_indices,
+                num_experts=num_experts,
+                num_warps=8,
                 BLOCK_E=128,
                 BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
             )
