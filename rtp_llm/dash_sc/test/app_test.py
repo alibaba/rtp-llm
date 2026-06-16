@@ -194,7 +194,7 @@ class PreStopDrainSecondsTest(TestCase):
         app = bg_app.DashScApp.__new__(bg_app.DashScApp)
         app._shutdown_started_at = 100.0
         app._shutdown_manager = DashScShutdownManager()
-        app._shutdown_manager.start_draining("unit test")
+        app._shutdown_manager.start_unavailable("unit test")
 
         class _ServerConfig:
             shutdown_timeout = 30
@@ -211,6 +211,24 @@ class PreStopDrainSecondsTest(TestCase):
             app._sleep_before_stop_for_drain()
 
         sleep.assert_called_once_with(1.0)
+
+    def test_sleep_before_stop_skips_when_already_draining(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app._shutdown_started_at = 100.0
+        app._shutdown_manager = DashScShutdownManager()
+        app._shutdown_manager.start_draining("signal 2")
+
+        class _ServerConfig:
+            shutdown_timeout = 30
+
+        app.server_config = _ServerConfig()
+
+        with patch.dict(
+            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "10"}, clear=True
+        ), patch("rtp_llm.dash_sc.app.time.sleep") as sleep:
+            app._sleep_before_stop_for_drain()
+
+        sleep.assert_not_called()
 
     def test_pre_stop_signal_marks_unavailable_without_shutdown_event(self) -> None:
         app = bg_app.DashScApp.__new__(bg_app.DashScApp)

@@ -561,6 +561,8 @@ class DashScApp:
     def _sleep_before_stop_for_drain(self) -> None:
         if self._shutdown_started_at is None:
             return
+        if self._shutdown_manager.is_draining():
+            return
         drain_seconds = self._effective_pre_stop_drain_seconds()
         if drain_seconds <= 0:
             return
