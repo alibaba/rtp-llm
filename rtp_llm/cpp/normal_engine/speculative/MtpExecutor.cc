@@ -1242,7 +1242,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                                                                -1,
                                     model_input.combo_tokens.size(0));
         }
-        draft_model_output = std::move(draft_model_->forward(model_input));
+        draft_model_output             = std::move(draft_model_->forward(model_input));
         model_input.mtp_iteration_step = -1;
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
@@ -1575,19 +1575,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     auto draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     draft_tokens_ready_event->record(cuda_graph::graphGetCurrentStream());
 
-    // REBASE CONFLICT CONTEXT(518707c73): new base overlaps draft-prefill
-    // prepare with target verify; source branch's sync removal is retained by
-    // the waitPreviousBookkeepingAndKvSwaps helper above.
-    // Launch draft-prefill prepare BEFORE target verify forward so it overlaps
-    // with target verify GPU work instead of running serially after it. Sync
-    // on this prepare happens just before draft_model_forward below.
-    launchDraftPrefillPrepareAsync(model_input);
-
     {
         if (shouldSkipFakeStreamForStop(model_input, "target verify forward")) {
-            if (useAsyncPrepare()) {
-                draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
-            }
             releaseAllModelBuffers();
             return absl::OkStatus();
         }
@@ -1738,6 +1727,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     broadcastPostRejectionInputs(model_input, stream_groups);
+    // Draft-prefill inputs are finalized only after rejection sampling updates
+    // combo_tokens/last_hidden_states/lm_output_indexes and the TP broadcast
+    // propagates them. Preparing before this point can leave the CUDA graph
+    // attention/KV buffers stale while forward() uses the post-rejection token
+    // and hidden tensors.
+    launchDraftPrefillPrepareAsync(model_input);
 
     {
         if (useAsyncPrepare()) {
@@ -1889,6 +1884,9 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     if (!useAsyncPrepare()) {
         return;
     }
+    if (shouldSkipFakeStreamForStop(model_input, "draft prefill async prepare")) {
+        return;
+    }
     if (isCpContextRequest(parallelism_config_, model_input)) {
         // REBASE CONFLICT CONTEXT(async-prepare-cp): draft prefill uses the
         // same CP input rewrite in PyWrappedModel::forward as target verify.
@@ -1911,6 +1909,9 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
         [this, prefill_model, input_ready_event, model_input_copy = std::move(model_input_copy)]() mutable {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_draft_prefill_input)");
             input_ready_event->block(cuda_graph::graphGetCurrentStream());
+            if (shouldSkipFakeStreamForStop(model_input_copy, "draft prefill async prepare")) {
+                return;
+            }
             checkModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare.forwarded");
             prefill_model->prepareAttentionInputs(model_input_copy);
         });
