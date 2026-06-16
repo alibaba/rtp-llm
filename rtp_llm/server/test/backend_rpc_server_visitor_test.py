@@ -17,6 +17,7 @@ class _FakeGenerateConfig:
     def __init__(self):
         self.role_addrs = []
         self.max_new_tokens = 1
+        self.is_streaming = True
 
     def validate(self):
         pass
@@ -235,6 +236,43 @@ class BackendRPCServerVisitorEnqueueRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outputs, ["first"])
         self.assertEqual(ctx.exception.exception_type, ExceptionType.CONNECT_FAILED)
         self.assertEqual(client.calls, 1)
+
+    async def test_enqueue_retries_non_streaming_after_buffered_backend_output(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.max_seq_len = 10
+        visitor.sp_config = None
+        visitor.pd_route_retry_on_unavailable = 1
+        visitor.host_service = SimpleNamespace(service_available=False)
+        visitor.fill_request_info = lambda _input: None
+
+        class _YieldThenFailOnceModelRpcClient:
+            calls = 0
+
+            def enqueue(self, _input):
+                self.calls += 1
+
+                async def stream():
+                    if self.calls == 1:
+                        yield "partial-from-failed-attempt"
+                        raise FtRuntimeException(
+                            ExceptionType.CONNECT_FAILED, "stale backend"
+                        )
+                    yield "final-from-retry"
+
+                return stream()
+
+        client = _YieldThenFailOnceModelRpcClient()
+        visitor.model_rpc_client = client
+
+        input = _FakeInput()
+        input.generate_config.is_streaming = False
+        stream = await visitor.enqueue(input)
+        outputs = []
+        async for output in stream:
+            outputs.append(output)
+
+        self.assertEqual(outputs, ["final-from-retry"])
+        self.assertEqual(client.calls, 2)
 
     async def test_enqueue_retry_uses_refreshed_domain_route(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)

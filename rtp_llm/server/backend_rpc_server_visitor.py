@@ -555,18 +555,26 @@ class BackendRPCServerVisitor:
         async def stream_with_aux_info():
             attempt = 0
             retry_limit = self._pd_route_retry_limit(input)
+            is_client_streaming = input.generate_config.is_streaming
             while True:
                 yielded_output = False
+                buffered_outputs = []
                 try:
                     stream = await route_and_enqueue(attempt)
                     async for output in stream:
                         yielded_output = True
-                        yield output
+                        if is_client_streaming:
+                            yield output
+                        else:
+                            buffered_outputs.append(output)
+                    if not is_client_streaming:
+                        for output in buffered_outputs:
+                            yield output
                     return
                 except BaseException as e:
                     set_aux_info(e)
                     if (
-                        yielded_output
+                        (yielded_output and is_client_streaming)
                         or attempt >= retry_limit
                         or not self._is_retryable_route_rpc_error(e)
                     ):
