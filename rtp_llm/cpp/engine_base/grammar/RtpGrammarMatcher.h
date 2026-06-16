@@ -45,7 +45,27 @@ public:
     }
 
     bool isTerminated() const;
+    // Rolls back xgrammar by the count of xgrammar-accepted tokens within the
+    // last n accepts (passthrough tokens are absorbed by the reasoner only).
+    // Reasoner KMP state is NOT touched here — callers that need to undo the
+    // reasoner transitions must take a snapshot via reasonerSnapshot() before
+    // accepting and pass it to restoreReasoner() after rollback().
     void rollback(int n);
+
+    struct ReasonerSnapshot {
+        int    tokens_after_think_end = 0;
+        size_t think_end_match_pos    = 0;
+    };
+
+    ReasonerSnapshot reasonerSnapshot() const noexcept {
+        return {tokens_after_think_end_, think_end_match_pos_};
+    }
+    void restoreReasoner(const ReasonerSnapshot& snap) noexcept {
+        if (require_reasoning_) {
+            tokens_after_think_end_ = snap.tokens_after_think_end;
+            think_end_match_pos_    = snap.think_end_match_pos;
+        }
+    }
 
     int64_t numAcceptedTokens() const noexcept {
         return num_accepted_;
@@ -63,13 +83,7 @@ public:
 
 private:
     void   transferReasonerState(int32_t token_id) noexcept;
-    void   rollbackReasonerState() noexcept;
     size_t nextThinkEndMatchPos(int32_t token_id) const noexcept;
-
-    struct ReasonerState {
-        int    tokens_after_think_end;
-        size_t think_end_match_pos;
-    };
 
     std::shared_ptr<xgrammar::CompiledGrammar> compiled_;
     std::unique_ptr<xgrammar::GrammarMatcher>  matcher_;
@@ -79,11 +93,10 @@ private:
     std::vector<size_t>    think_end_lps_;
 
     // < 0: inside thinking body, parser frozen. >= 0: grammar is active.
-    int                        tokens_after_think_end_ = 0;
-    size_t                     think_end_match_pos_    = 0;
-    std::vector<ReasonerState> reasoner_state_history_;
-    int64_t                    num_accepted_ = 0;
-    bool                       finished_     = false;
+    int     tokens_after_think_end_ = 0;
+    size_t  think_end_match_pos_    = 0;
+    int64_t num_accepted_           = 0;
+    bool    finished_               = false;
 };
 
 }  // namespace rtp_llm

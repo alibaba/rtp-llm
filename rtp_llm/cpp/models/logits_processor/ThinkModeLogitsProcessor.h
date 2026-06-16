@@ -111,6 +111,12 @@ private:
     bool                                          spec_eligible_ = false;
     std::shared_ptr<const ThinkModeSpecSnapshot>  spec_snapshot_;
     uint64_t                                      spec_snapshot_version_ = 0;
+    // Lifetime-scoped dedup for forced-end-token out-of-vocab WARN.
+    // Spec path runs per propose step (high-frequency); without dedup a
+    // misconfigured request would flood logs. process() path warns once
+    // per sampler tick which is already low-frequency, but uses the same
+    // flag so the union is "warn at most once per processor lifetime".
+    std::atomic<bool>                             warned_force_oob_{false};
 };
 
 using ThinkModeLogitsProcessorPtr = std::shared_ptr<ThinkModeLogitsProcessor>;

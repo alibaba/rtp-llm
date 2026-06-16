@@ -22,18 +22,3 @@ cc_library(
     copts = copts(),
 )
 
-cc_library(
-    name = "grammar_schema_validator",
-    hdrs = [
-        "GrammarSchemaValidator.h",
-    ],
-    srcs = [
-        "GrammarSchemaValidator.cc",
-    ],
-    deps = [
-        ":grammar_cpp_lib",
-        "//rtp_llm/cpp/utils:core_utils",
-        "@havenask//aios/autil:json",
-    ],
-    copts = copts(),
-)

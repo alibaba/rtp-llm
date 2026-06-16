@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include <thread>
 #include <torch/extension.h>
 
@@ -435,7 +436,8 @@ bool StreamCacheResource::loadCacheDone() {
         return false;  // coordinator 后台线程尚未处理完
     }
     // 加载完成（无论成功失败），更新 reuse lengths
-    waitLoadCacheDone(load_cache_context_);
+    // 调用栈：GenerateStream::moveToNext (持 mutex_) → handleLoading → loadCacheDone
+    waitLoadCacheDone(load_cache_context_, /*stream_lock_held=*/true);
     if (!load_cache_context_->success()) {
         // 区分匹配失败和传输失败
         auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
@@ -604,7 +606,7 @@ void StreamCacheResource::loadCacheSync() {
     // TODO: scheduler will call incrkvblock after load cache, or may lack block on p2p connector
 }
 
-void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context) {
+void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context, bool stream_lock_held) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!load_context) {
         return;
@@ -615,7 +617,13 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
         RTP_LLM_LOG_WARNING(
             "load cache done but not success, stream: [%ld], error: %s", stream_->streamId(), error.ToString().c_str());
         if (error.hasError()) {
-            stream_->reportError(error.code(), error.ToString());
+            // moveToNext → handleLoading → loadCacheDone path holds mutex_; reportError
+            // would re-lock the non-recursive mutex and self-deadlock.
+            if (stream_lock_held) {
+                stream_->reportErrorWithoutLock(error.code(), error.ToString());
+            } else {
+                stream_->reportError(error.code(), error.ToString());
+            }
         }
         return;
     }

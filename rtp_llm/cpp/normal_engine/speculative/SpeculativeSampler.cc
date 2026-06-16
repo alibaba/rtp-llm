@@ -8,6 +8,9 @@
 namespace rtp_llm {
 namespace speculative {
 
+SpeculativeSamplerOutput::SpeculativeSamplerOutput():
+    transfer_done_event(std::make_shared<torch::Event>(cuda_graph::makeGraphEvent())) {}
+
 FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
     FastTopKSamplerOutput output;
     output.all_probs = torch::softmax(logits, -1);

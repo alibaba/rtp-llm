@@ -17,11 +17,6 @@ struct SpecLogitsProcessorRequest {
     int32_t* bitmask_cpu_out    = nullptr;
     size_t   bitmask_size_int32 = 0;
     size_t   vocab_size         = 0;
-
-    uint64_t stream_id       = 0;
-    uint64_t mtp_round_id    = 0;
-    int64_t  base_seq_len    = 0;
-    int64_t  base_output_len = 0;
 };
 
 class SpecLogitsProcessor {

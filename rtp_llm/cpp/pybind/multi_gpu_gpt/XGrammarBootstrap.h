@@ -15,7 +15,6 @@ namespace rtp_llm {
 // vocab dict + backend tokenizer.to_str() + the union of stop token ids.
 std::string buildXGrammarTokenizerInfoJson(const std::unordered_map<std::string, int32_t>& vocab,
                                            const std::string&                              backend_tokenizer_str,
-                                           int64_t                                         vocab_size,
                                            const std::vector<int32_t>&                     stop_token_ids);
 
 // Called from RtpLLMOp::initModel only: read tokenizer + special_tokens from

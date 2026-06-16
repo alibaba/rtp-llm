@@ -132,6 +132,15 @@ bool bitmaskAllows(const int32_t* row, size_t words, int32_t token_id) {
     return (static_cast<uint32_t>(row[token_id / 32]) & (1u << (token_id % 32))) != 0u;
 }
 
+// Shared by process() and the spec path: a forced end-think token is only
+// safe if it lies inside the runtime vocab. Both paths downgrade to
+// MASK_BOUNDARIES on failure so a misconfigured per-request override never
+// turns into an all-masked row (which would zero-out the entire spec window
+// or, on the sampler path, mask the full logits to -inf).
+bool forcedTokenInVocab(int32_t fid, size_t vocab_size) {
+    return fid >= 0 && static_cast<size_t>(fid) < vocab_size;
+}
+
 }  // namespace
 
 ThinkModeLogitsProcessor::ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> think_infos):
@@ -175,13 +184,15 @@ void ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start
 
         // FORCE_END_TOKEN may downgrade to MASK_BOUNDARIES if the chosen token id
         // would be out-of-vocab (defensive: misconfigured per-request override).
-        if (decision.action == MaskAction::FORCE_END_TOKEN) {
-            if (decision.forced_token < 0 || static_cast<size_t>(decision.forced_token) >= inputs.vocab_size) {
-                RTP_LLM_LOG_WARNING("forceThinkEndToken: end_think_token_id=%d out of vocab_size=%zu; skip force",
+        if (decision.action == MaskAction::FORCE_END_TOKEN
+            && !forcedTokenInVocab(decision.forced_token, inputs.vocab_size)) {
+            if (!warned_force_oob_.exchange(true, std::memory_order_relaxed)) {
+                RTP_LLM_LOG_WARNING("forceThinkEndToken: end_think_token_id=%d out of vocab_size=%zu; "
+                                    "downgrade to MASK_BOUNDARIES",
                                     decision.forced_token,
                                     inputs.vocab_size);
-                decision.action = MaskAction::MASK_BOUNDARIES;
             }
+            decision.action = MaskAction::MASK_BOUNDARIES;
         }
 
         switch (decision.action) {
@@ -301,6 +312,23 @@ int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorR
 
         const auto   bounds   = BoundaryTokens::of(state);
         MaskDecision decision = decideMask(state, state.current_output_length);
+
+        // Mirror process(): a forced token outside vocab would make
+        // bitmaskForceOnly clear the whole row (all-zero = nothing allowed),
+        // which collapses the spec accept window to cap=offset and silently
+        // bypasses the budget. Downgrade to MASK_BOUNDARIES, same as the
+        // sampler path.
+        if (decision.action == MaskAction::FORCE_END_TOKEN
+            && !forcedTokenInVocab(decision.forced_token, request.vocab_size)) {
+            if (!warned_force_oob_.exchange(true, std::memory_order_relaxed)) {
+                RTP_LLM_LOG_WARNING("forceThinkEndToken[spec]: end_think_token_id=%d out of vocab_size=%zu; "
+                                    "downgrade to MASK_BOUNDARIES",
+                                    decision.forced_token,
+                                    request.vocab_size);
+            }
+            decision.action = MaskAction::MASK_BOUNDARIES;
+        }
+
         switch (decision.action) {
             case MaskAction::ALLOW_ALL:
                 break;

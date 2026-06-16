@@ -1047,9 +1047,7 @@ MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& str
                 task.active.push_back({spec_processor,
                                        stream_idx,
                                        processor_idx,
-                                       static_cast<uint64_t>(stream->streamId()),
-                                       static_cast<int64_t>(stream->seqLength()),
-                                       static_cast<int64_t>(stream->outputTokenLen())});
+                                       static_cast<uint64_t>(stream->streamId())});
             }
             ++processor_idx;
         }

@@ -3,13 +3,11 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <future>
 #include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -53,12 +51,11 @@ struct GrammarKeyCpp {
     mutable std::string cached_id_;
 };
 
-// (compiled != null) ok; is_invalid → cacheable; timed_out → request-side abort
-// (not cached, compile keeps running in background); else system error (not cached).
+// (compiled != null) ok; is_invalid → cacheable schema rejection; else system
+// error (not cached).
 struct CompileResult {
     std::shared_ptr<xgrammar::CompiledGrammar> compiled;
     bool                                       is_invalid = false;
-    bool                                       timed_out  = false;
     std::string                                error_message;
 };
 
@@ -68,12 +65,6 @@ struct XGrammarBackendOptions {
     int                                 max_compiler_threads  = 8;
     bool                                enable_compiler_cache = true;
     int64_t                             compiler_cache_bytes  = -1;  // unlimited
-    // Request-side wait cap. 0 (default) = wait indefinitely (legacy behavior).
-    // When >0 and the wait elapses, getOrCompile returns CompileResult{timed_out=true}
-    // while the actual compile keeps running in a detached background thread and will
-    // populate the cache once it finishes — so the next request for the same key
-    // either subscribes to the in-flight future or reads from cache.
-    int64_t                             compile_timeout_ms    = 0;
     std::optional<std::vector<int32_t>> override_stop_tokens;
 };
 
@@ -101,12 +92,11 @@ public:
     // Fills missing json_schema/schema defaults; returns input unchanged on parse failure.
     static std::string sanitizeStructuralTag(const std::string& tag_json);
 
-    // Cache hit returns instantly. On miss the compile runs on a detached background
-    // thread (singleflight: concurrent requests for the same key share one future) and
-    // the request thread waits on the shared_future for up to compile_timeout_ms.
-    // Returns CompileResult{timed_out=true} if the wait elapses; the background compile
-    // keeps running and the next request for the same key sees it in cache or in_flight_.
-    // Populates the success cache on completion and the invalid-cache on schema rejection.
+    // Cache hit returns instantly. On miss the compile runs synchronously on the
+    // calling thread; concurrent requests for the same key may each compile (the
+    // underlying xgrammar::GrammarCompiler caches identical grammars internally,
+    // so the duplicate work is bounded). Populates the success cache on completion
+    // and the invalid-cache on schema rejection.
     CompileResult getOrCompile(const GrammarKeyCpp& key);
 
     std::shared_ptr<xgrammar::CompiledGrammar> getCached(const GrammarKeyCpp& key) const;
@@ -133,6 +123,19 @@ private:
     // LRU-bounded caches; front = MRU, evict from back on overflow.
     static constexpr size_t kMaxCompiledCacheEntries = 1024;
     static constexpr size_t kMaxInvalidCacheEntries  = 4096;
+    // Per-request schema/regex/EBNF/structural-tag size cap, enforced at the
+    // getOrCompile entry. Real schemas in practice are a few KB; this leaves
+    // ~10x headroom while preventing a caller from amplifying the cache to
+    // GB-scale by submitting MB-scale payloads.
+    static constexpr size_t kMaxKeyStringBytes = 64 * 1024;
+    // Hard byte budget for invalid_cache_ payload (kid copies + error_message).
+    // Pins worst-case memory regardless of how the entry-count and per-key caps
+    // multiply out: with 4096 entries × 64 KB keys × 2 copies (map key + LRU
+    // node) the entry-count cap alone admits ~512 MB; this caps it at 32 MB.
+    static constexpr size_t kMaxInvalidCacheBytes = 32 * 1024 * 1024;
+    // Truncate xgrammar error strings before they enter invalid_cache_; the
+    // useful prefix (rule name, position) fits well under 1 KB.
+    static constexpr size_t kMaxErrorMessageBytes = 1024;
 
     struct CompiledEntry {
         std::shared_ptr<xgrammar::CompiledGrammar> compiled;
@@ -148,11 +151,9 @@ private:
     std::unordered_map<std::string, CompiledEntry> cache_;
     mutable std::list<std::string>                 invalid_lru_;  // keys, front = MRU
     std::unordered_map<std::string, InvalidEntry>  invalid_cache_;
-
-    // Singleflight: a key being compiled has a shared_future here; concurrent
-    // requesters block on it instead of starting a duplicate compile.
-    // Slot is erased once the cache is populated and the future has been published.
-    std::unordered_map<std::string, std::shared_future<CompileResult>> in_flight_;
+    // Live byte total for invalid_cache_; counts kid (×2: map key + LRU node)
+    // and error_message. Maintained under cache_mutex_.
+    size_t invalid_cache_bytes_ = 0;
 };
 
 }  // namespace rtp_llm

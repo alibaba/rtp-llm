@@ -23,10 +23,6 @@ class RtpGrammarMatcher;
 class GenerateInput;
 struct SamplerInputs;
 
-// Helper reused by the factory.
-void reportInvalidParams(const LogitsProcessorFactory::ErrorReporter& reporter, const std::string& msg);
-void reportGenerateTimeout(const LogitsProcessorFactory::ErrorReporter& reporter, const std::string& msg);
-
 class GrammarLogitsProcessor: public BaseLogitsProcessor, public SpecLogitsProcessor {
 public:
     explicit GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher>    matcher,
@@ -51,18 +47,18 @@ public:
     }
 
 private:
+    // Skip:     no-op (matcher absent / finished / vocab=0 — caller leaves logits untouched).
+    // ForceEOS: matcher terminated; force EOS in logits.
+    // Mask:     real bitmask present; apply to logits.
     enum class DeviceMaskMode {
-        UNSET,
-        NOOP,
-        MASK,
-        TERMINATED,
-        FINISHED,
+        Skip,
+        ForceEOS,
+        Mask,
     };
 
     struct DeviceMaskState {
-        DeviceMaskMode                mode      = DeviceMaskMode::UNSET;
+        DeviceMaskMode                mode      = DeviceMaskMode::Skip;
         int64_t                       token_len = -1;
-        c10::Device                   device    = c10::Device(c10::DeviceType::CPU);
         torch::Tensor                 vocab_mask;
         torch::Tensor                 packed_bitmask;
         int32_t                       grammar_vocab_size = 0;
@@ -78,10 +74,6 @@ private:
     void            publishMaskToDevice(DeviceMaskState& state, torch::Tensor vocab_mask, const c10::Device& device);
     void            applyDeviceMaskState(const torch::Tensor& logits, const DeviceMaskState& state);
     void            forceToken(const torch::Tensor& logits, int64_t token_id);
-    void            syncAcceptedTokenLenLocked();
-    void            rebuildDeviceMaskStateLocked(bool stream_lock_held);
-
-    bool advanceMatcher(const std::vector<int32_t>& tokens);
 
     std::shared_ptr<RtpGrammarMatcher> matcher_;
 
@@ -89,14 +81,13 @@ private:
     std::atomic_bool              reported_error_{false};
     int64_t                       eos_token_id_       = 0;
     int64_t                       accepted_token_len_ = 0;
-    std::optional<c10::Device>    last_mask_device_;
-    DeviceMaskState               device_mask_state_;
+    std::optional<c10::Device>     last_mask_device_;
+    std::optional<DeviceMaskState> device_mask_state_;
     torch::Tensor                 reusable_bitmask_cpu_;
     torch::Tensor                 reusable_bitmask_gpu_;
     torch::Tensor                 reusable_vocab_mask_cpu_;
     int32_t                       reusable_mask_words_ = 0;
     std::shared_ptr<torch::Event> reusable_ready_event_;
-    bool                          warned_multi_seq_unsupported_ = false;
 };
 
 }  // namespace rtp_llm

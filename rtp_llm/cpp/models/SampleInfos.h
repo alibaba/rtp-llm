@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -68,6 +69,12 @@ public:
     torch::Tensor                      spec_cap_gpu;
     std::vector<SpecLogitsProcessorId> spec_applied_processors;
     int                                spec_propose_step = 0;
+
+    bool hasAppliedSpecProcessor(const SpecLogitsProcessorId& id) const {
+        return id.valid()
+               && std::find(spec_applied_processors.begin(), spec_applied_processors.end(), id)
+                      != spec_applied_processors.end();
+    }
 };
 
 struct SamplerOutput {

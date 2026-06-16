@@ -1,19 +1,20 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/models/SampleInfos.h"
-#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorErrorReporter.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 
 namespace rtp_llm {
 
-class GenerateStream;
+// stream_lock_held picks reportError vs reportErrorWithoutLock at the call site.
+using LogitsProcessorErrorReporter = std::function<void(ErrorCode, const std::string&, bool stream_lock_held)>;
 
 class BaseLogitsProcessor {
 public:
@@ -28,18 +29,9 @@ public:
     virtual bool isStateful() const {
         return false;
     }
-    virtual bool supportsNormalAsyncDeviceState() const {
-        return false;
-    }
-    virtual void prepareNormalAsyncUpdate(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
-        (void)new_tokens;
-        (void)num_new_tokens;
-    }
     virtual int64_t acceptedTokenLen() const {
         return 0;
     }
-
-    virtual void setStream(const std::shared_ptr<GenerateStream>& /*stream*/) {}
 
     void setErrorReporter(LogitsProcessorErrorReporter cb) {
         error_reporter_ = std::move(cb);

@@ -52,7 +52,6 @@ void RtpGrammarMatcher::initReasoning(bool in_think_body) {
     if (require_reasoning_) {
         tokens_after_think_end_ = in_think_body ? -1 : 0;
         think_end_match_pos_    = 0;
-        reasoner_state_history_.clear();
     }
 }
 
@@ -103,14 +102,13 @@ void RtpGrammarMatcher::rollback(int n) {
         return;
     }
 
-    // Only the post-think-end portion of the history corresponds to xgrammar accepts;
-    // pre-think-end tokens are absorbed by the reasoner state alone.
+    // Only the post-think-end portion of the count corresponds to xgrammar accepts;
+    // pre-think-end tokens are absorbed by the reasoner state alone. Reasoner state
+    // is NOT touched — callers that need to undo reasoner transitions snapshot/restore
+    // via reasonerSnapshot() / restoreReasoner().
     const int active_steps = require_reasoning_ ? std::min<int>(n, std::max<int>(0, tokens_after_think_end_)) : n;
     if (active_steps > 0) {
         matcher_->Rollback(active_steps);
-    }
-    for (int i = 0; i < n; ++i) {
-        rollbackReasonerState();
     }
     num_accepted_ = std::max<int64_t>(0, num_accepted_ - n);
 }
@@ -119,7 +117,6 @@ void RtpGrammarMatcher::transferReasonerState(int32_t token_id) noexcept {
     if (!require_reasoning_) {
         return;
     }
-    reasoner_state_history_.push_back({tokens_after_think_end_, think_end_match_pos_});
     if (tokens_after_think_end_ < 0) {
         think_end_match_pos_ = nextThinkEndMatchPos(token_id);
         if (think_end_match_pos_ == think_end_token_ids_.size()) {
@@ -129,16 +126,6 @@ void RtpGrammarMatcher::transferReasonerState(int32_t token_id) noexcept {
     } else {
         ++tokens_after_think_end_;
     }
-}
-
-void RtpGrammarMatcher::rollbackReasonerState() noexcept {
-    if (!require_reasoning_ || reasoner_state_history_.empty()) {
-        return;
-    }
-    auto prev = reasoner_state_history_.back();
-    reasoner_state_history_.pop_back();
-    tokens_after_think_end_ = prev.tokens_after_think_end;
-    think_end_match_pos_    = prev.think_end_match_pos;
 }
 
 size_t RtpGrammarMatcher::nextThinkEndMatchPos(int32_t token_id) const noexcept {

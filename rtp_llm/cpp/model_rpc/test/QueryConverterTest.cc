@@ -201,121 +201,52 @@ TEST_F(QueryConverterTest, TransTensorPB_UnsupportedType) {
     EXPECT_THROW(QueryConverter::transTensorPB(&tensor_pb, tensor), std::runtime_error);
 }
 
-// -- response_format normalization (server-side fallback for non-Python clients) --
+// proto field 65 (response_format) is a deprecated wire slot. The Python
+// frontend projects the envelope to typed grammar fields in
+// GenerateConfig.validate() before gRPC, so the wire field stays empty on
+// that path. A non-empty wire field at the C++ server means a non-Python
+// client sent a raw envelope without projecting — silently accepting would
+// drop the constraint and return free-form output to a caller that believed
+// the schema was enforced. QueryConverter must reject so the failure is loud.
+TEST_F(QueryConverterTest, ResponseFormat_RawWireEnvelopeIsRejected) {
+    const std::vector<std::string> envelopes = {
+        R"({"type":"json_schema","json_schema":{"schema":{"type":"object"}}})",
+        R"({"type":"json_schema","json_schema":{}})",
+        R"({"type":"regex","pattern":"#[0-9A-Fa-f]{6}"})",
+        "this is not json {{{",
+    };
+    for (const auto& env : envelopes) {
+        GenerateInputPB input;
+        input.add_token_ids(0);
+        input.mutable_generate_config()->mutable_response_format()->set_value(env);
+        EXPECT_THROW(QueryConverter::transQuery(&input), std::invalid_argument)
+            << "envelope: " << env;
+    }
+}
 
-namespace {
-GenerateInputPB makeInputWithResponseFormat(const std::string& response_format_json) {
+// If the client did its job and projected the envelope to typed fields, the
+// wire response_format field stays empty (matching the Python frontend's
+// behavior). QueryConverter accepts and the typed fields reach the engine.
+TEST_F(QueryConverterTest, ResponseFormat_ProjectedTypedFieldsAreAccepted) {
     GenerateInputPB input;
     input.add_token_ids(0);
-    auto* config = input.mutable_generate_config();
-    config->mutable_response_format()->set_value(response_format_json);
-    return input;
-}
-}  // namespace
-
-TEST_F(QueryConverterTest, ResponseFormat_JsonSchemaNested) {
-    auto input = makeInputWithResponseFormat(
-        R"({"type":"json_schema","json_schema":{"name":"person","schema":{"type":"object","properties":{"age":{"type":"integer"}}}}})");
+    input.mutable_generate_config()->mutable_json_schema()->set_value(R"({"type":"object"})");
     auto cfg = QueryConverter::transQuery(&input)->generate_config;
-    ASSERT_TRUE(cfg->json_schema.has_value());
-    // Inner schema surfaced, NOT the {name, schema} wrapper.
-    EXPECT_NE(cfg->json_schema->find("\"properties\""), std::string::npos);
-    EXPECT_EQ(cfg->json_schema->find("\"name\""), std::string::npos);
-    EXPECT_FALSE(cfg->regex.has_value());
-    EXPECT_FALSE(cfg->ebnf.has_value());
-    EXPECT_FALSE(cfg->structural_tag.has_value());
-}
-
-TEST_F(QueryConverterTest, ResponseFormat_JsonObjectShorthand) {
-    // json_object → literal "object" schema so xgrammar can compile it.
-    auto input = makeInputWithResponseFormat(R"({"type":"json_object"})");
-    auto cfg   = QueryConverter::transQuery(&input)->generate_config;
     ASSERT_TRUE(cfg->json_schema.has_value());
     EXPECT_EQ(cfg->json_schema.value(), R"({"type":"object"})");
 }
 
-TEST_F(QueryConverterTest, ResponseFormat_Regex) {
-    auto input = makeInputWithResponseFormat(R"({"type":"regex","pattern":"#[0-9A-Fa-f]{6}"})");
-    auto cfg   = QueryConverter::transQuery(&input)->generate_config;
-    ASSERT_TRUE(cfg->regex.has_value());
-    EXPECT_EQ(cfg->regex.value(), "#[0-9A-Fa-f]{6}");
-    EXPECT_FALSE(cfg->json_schema.has_value());
-    EXPECT_FALSE(cfg->ebnf.has_value());
-    EXPECT_FALSE(cfg->structural_tag.has_value());
-}
-
-TEST_F(QueryConverterTest, ResponseFormat_Ebnf) {
-    auto input = makeInputWithResponseFormat(R"({"type":"ebnf","grammar":"root ::= \"hi\""})");
-    auto cfg   = QueryConverter::transQuery(&input)->generate_config;
-    ASSERT_TRUE(cfg->ebnf.has_value());
-    EXPECT_EQ(cfg->ebnf.value(), "root ::= \"hi\"");
-    EXPECT_FALSE(cfg->json_schema.has_value());
-    EXPECT_FALSE(cfg->regex.has_value());
-    EXPECT_FALSE(cfg->structural_tag.has_value());
-}
-
-TEST_F(QueryConverterTest, ResponseFormat_StructuralTag) {
-    auto input = makeInputWithResponseFormat(
-        R"({"type":"structural_tag","structural_tag":{"format":{"type":"sequence","elements":[]}}})");
-    auto cfg = QueryConverter::transQuery(&input)->generate_config;
-    ASSERT_TRUE(cfg->structural_tag.has_value());
-    EXPECT_NE(cfg->structural_tag->find("\"sequence\""), std::string::npos);
-    EXPECT_FALSE(cfg->json_schema.has_value());
-}
-
-TEST_F(QueryConverterTest, ResponseFormat_ExplicitFieldWinsOverResponseFormat) {
-    // Explicit grammar field wins; response_format is not re-parsed.
+// Belt-and-suspenders: if a client both projected to typed fields AND left
+// the wire envelope set, accept — the engine consumes the typed fields and
+// the envelope is just redundant baggage, not a missed constraint.
+TEST_F(QueryConverterTest, ResponseFormat_WireEnvelopeWithTypedFieldIsAccepted) {
     GenerateInputPB input;
     input.add_token_ids(0);
-    auto* config = input.mutable_generate_config();
-    config->mutable_regex()->set_value("^[0-9]+$");
-    config->mutable_response_format()->set_value(R"({"type":"json_object"})");
-
+    input.mutable_generate_config()->mutable_json_schema()->set_value(R"({"type":"object"})");
+    input.mutable_generate_config()->mutable_response_format()->set_value(
+        R"({"type":"json_schema","json_schema":{"schema":{"type":"object"}}})");
     auto cfg = QueryConverter::transQuery(&input)->generate_config;
-    ASSERT_TRUE(cfg->regex.has_value());
-    EXPECT_EQ(cfg->regex.value(), "^[0-9]+$");
-    // json_object fallback must NOT fire because regex was already set.
-    EXPECT_FALSE(cfg->json_schema.has_value());
-}
-
-TEST_F(QueryConverterTest, ResponseFormat_TextTypeIsNoOp) {
-    auto input = makeInputWithResponseFormat(R"({"type":"text"})");
-    auto cfg   = QueryConverter::transQuery(&input)->generate_config;
-    EXPECT_FALSE(cfg->json_schema.has_value());
-    EXPECT_FALSE(cfg->regex.has_value());
-    EXPECT_FALSE(cfg->ebnf.has_value());
-    EXPECT_FALSE(cfg->structural_tag.has_value());
-}
-
-TEST_F(QueryConverterTest, ResponseFormat_EmptyStringIsNoOp) {
-    // Empty string = "absent response_format"; distinct from {} which is rejected below.
-    GenerateInputPB input;
-    input.add_token_ids(0);
-    input.mutable_generate_config()->mutable_response_format()->set_value("");
-    auto cfg = QueryConverter::transQuery(&input)->generate_config;
-    EXPECT_FALSE(cfg->json_schema.has_value());
-    EXPECT_FALSE(cfg->regex.has_value());
-    EXPECT_FALSE(cfg->ebnf.has_value());
-    EXPECT_FALSE(cfg->structural_tag.has_value());
-}
-
-TEST_F(QueryConverterTest, ResponseFormat_InvalidEnvelopesAreRejected) {
-    // All bad envelopes must throw → INVALID_PARAMS at gRPC layer, never silently unconstrained.
-    const std::vector<std::pair<const char*, std::string>> bad = {
-        {"malformed_json", "this is not json {{{"},
-        {"empty_object", "{}"},
-        {"json_schema_empty_body", R"({"type":"json_schema","json_schema":{}})"},
-        {"unknown_type", R"({"type":"not_a_real_type"})"},
-        {"missing_type", R"({"json_schema":{"schema":{"type":"object"}}})"},
-        {"json_schema_no_payload", R"({"type":"json_schema"})"},
-        {"regex_no_pattern", R"({"type":"regex"})"},
-        {"ebnf_no_grammar", R"({"type":"ebnf"})"},
-        {"structural_tag_no_body", R"({"type":"structural_tag"})"},
-    };
-    for (const auto& [label, env] : bad) {
-        auto input = makeInputWithResponseFormat(env);
-        EXPECT_THROW(QueryConverter::transQuery(&input), std::invalid_argument) << "case: " << label;
-    }
+    ASSERT_TRUE(cfg->json_schema.has_value());
 }
 
 }  // namespace rtp_llm

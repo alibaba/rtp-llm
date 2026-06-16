@@ -167,42 +167,15 @@ class OpenaiEndpoint(object):
 
     @staticmethod
     def _apply_response_format(rf: "ResponseFormat", config: GenerateConfig) -> None:
-        """Project a validated ResponseFormat onto GenerateConfig grammar fields.
+        """Stage rf onto config and let GenerateConfig's projection do the work.
 
-        Shape and required-payload checks live in ResponseFormat._check_payload
-        (pydantic model_validator), which always runs before this projection on
-        every request reaching the OpenAI endpoint; unknown `type` is rejected
-        by the pydantic Literal at the same layer. We translate only here and
-        do not re-validate.
-
-        The top-level OpenAI ResponseFormat is the single source of truth for a
-        request's grammar. Clear every grammar-bearing field on the merged
-        config first (json_schema / regex / ebnf / structural_tag *and*
-        config.response_format) so a stale constraint left over in
-        extra_configs cannot survive — e.g. extra_configs.response_format =
-        json_schema while the top-level rf.type == "text" must end up
-        unconstrained, not still json-schema-locked.
+        Shape/required-payload validation lives in ResponseFormat._check_payload
+        (pydantic). Projection to typed grammar fields + clearing of stale
+        extra_configs constraints lives in
+        GenerateConfig._project_response_format_to_grammar_fields, called from
+        validate(). This wrapper just ensures rf wins over extra_configs.
         """
-        config.json_schema = None
-        config.regex = None
-        config.ebnf = None
-        config.structural_tag = None
-        config.response_format = None
-        if rf.type == "json_schema":
-            config.json_schema = json.dumps(
-                rf.json_schema.schema, ensure_ascii=False, separators=(",", ":")
-            )
-        elif rf.type == "json_object":
-            config.json_schema = json.dumps({"type": "object"})
-        elif rf.type == "regex":
-            config.regex = rf.pattern
-        elif rf.type == "ebnf":
-            config.ebnf = rf.grammar
-        elif rf.type == "structural_tag":
-            config.structural_tag = json.dumps(
-                rf.structural_tag, ensure_ascii=False, separators=(",", ":")
-            )
-        # rf.type == "text" falls through with all four fields cleared above.
+        config.response_format = rf
 
     def _extract_generation_config(
         self, request: ChatCompletionRequest

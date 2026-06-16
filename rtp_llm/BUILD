@@ -249,7 +249,6 @@ py_library(
         ":tiktoken",
         ":protobuf",
         ":torch",
-        ":triton",
         ":einops",
         ":utils",
         ":ops",

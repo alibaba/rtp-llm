@@ -796,6 +796,22 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
             "[stream %d (%d -> %d)] no swap cache blocks", streamId(), cur_cached_len + 1, nxt_cached_len + 1);
     }
 
+    // Spec path must also notify processors so e.g. the grammar matcher sees
+    // MTP prefill T0 before step 2 builds the verify mask.  Drive stateful
+    // processors using the actual committed delta computed from seqLength()
+    // (matches the non-spec update() path), and skip when nothing committed.
+    // Validate BEFORE publishing the output buffer so a stateful-processor
+    // mismatch surfaces as hasError() and the broken tokens never reach the
+    // streaming consumer.
+    const int committed_num_new_tokens = std::max(0, seqLength() - old_seq_length);
+    if (committed_num_new_tokens > 0) {
+        updateLogitProcessorStatus(new_tokens, committed_num_new_tokens, torch::Tensor(), /*stateful_only=*/true);
+    }
+    validateStatefulLogitsProcessorState();
+    if (hasError()) {
+        return;
+    }
+
     // update normal output buffer
     updateOutput({new_tokens,
                   num_new_tokens,
@@ -809,16 +825,6 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   torch::Tensor(),
                   update_info.update_remote_generate,
                   update_info.force_update_info});
-
-    // Spec path must also notify processors so e.g. the grammar matcher sees
-    // MTP prefill T0 before step 2 builds the verify mask.  Drive stateful
-    // processors using the actual committed delta computed from seqLength()
-    // (matches the non-spec update() path), and skip when nothing committed.
-    const int committed_num_new_tokens = std::max(0, seqLength() - old_seq_length);
-    if (committed_num_new_tokens > 0) {
-        updateLogitProcessorStatus(new_tokens, committed_num_new_tokens, torch::Tensor(), /*stateful_only=*/true);
-    }
-    validateStatefulLogitsProcessorState();
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
@@ -862,24 +868,29 @@ void GenerateStream::updateWithoutLock(const StreamUpdateInfo& update_info) {
 
     resizeSubGenerateStatus(update_info.new_tokens.size(0));
 
+    const bool was_done                 = getStatus() == StreamState::FINISHED;
+    const int  committed_num_new_tokens = std::max(0, seqLength() - old_seq_length);
+
+    // Validate stateful logits processors BEFORE publishing the output buffer
+    // so a mismatch surfaces as hasError() and the broken tokens never reach
+    // the streaming consumer.
+    if (committed_num_new_tokens > 0) {
+        updateLogitProcessorStatus(update_info.new_tokens,
+                                   committed_num_new_tokens,
+                                   update_info.src_batch_indices,
+                                   /*stateful_only=*/was_done);
+        validateStatefulLogitsProcessorState();
+        if (hasError()) {
+            return;
+        }
+    }
+
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
 
     // checkFinished() 已将本轮 updateOutput 中上报的 GenerateDone/Error 事件应用到状态上，
     // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。
     bool is_done = generate_status_->checkFinished();
-    const int  committed_num_new_tokens = std::max(0, seqLength() - old_seq_length);
-
-    if (committed_num_new_tokens > 0) {
-        updateLogitProcessorStatus(update_info.new_tokens,
-                                   committed_num_new_tokens,
-                                   update_info.src_batch_indices,
-                                   /*stateful_only=*/is_done);
-        validateStatefulLogitsProcessorState();
-        if (hasError()) {
-            return;
-        }
-    }
 
     if (!is_done || stream_cache_resource_->reuseCache()) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done

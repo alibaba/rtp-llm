@@ -5,10 +5,7 @@
 #include <optional>
 #include <vector>
 
-#include "autil/legacy/any.h"
-#include "autil/legacy/json.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/engine_base/grammar/GrammarSchemaValidator.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
@@ -20,128 +17,31 @@
 #include "rtp_llm/cpp/models/logits_processor/RecommendationLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
 namespace {
 
-using JsonMap   = autil::legacy::json::JsonMap;
-using JsonArray = autil::legacy::json::JsonArray;
-
 std::mutex                       g_grammar_backend_mutex;
 std::shared_ptr<XGrammarBackend> g_grammar_backend;
 
-std::string anyToString(const autil::legacy::Any& any) {
-    if (auto str = autil::legacy::AnyCast<std::string>(&any)) {
-        return *str;
+void reportError(const LogitsProcessorFactory::ErrorReporter& reporter, ErrorCode code, const std::string& msg) {
+    if (reporter) {
+        reporter(code, msg, /*stream_lock_held=*/false);
     }
-    return autil::legacy::json::ToString(any, true);
-}
-
-std::optional<std::string> getFieldAsString(const JsonMap& map, const std::string& name) {
-    auto it = map.find(name);
-    if (it == map.end()) {
-        return std::nullopt;
-    }
-    return anyToString(it->second);
-}
-
-std::optional<std::string> getType(const JsonMap& map) {
-    auto it = map.find("type");
-    if (it == map.end()) {
-        return std::nullopt;
-    }
-    auto str = autil::legacy::AnyCast<std::string>(&it->second);
-    if (!str) {
-        return std::nullopt;
-    }
-    return *str;
-}
-
-std::optional<std::string> extractJsonSchemaFromEnvelope(const JsonMap& response_map) {
-    auto schema_it = response_map.find("json_schema");
-    if (schema_it == response_map.end()) {
-        return std::nullopt;
-    }
-    if (auto schema_str = autil::legacy::AnyCast<std::string>(&schema_it->second)) {
-        return *schema_str;
-    }
-    auto schema_map = autil::legacy::AnyCast<JsonMap>(&schema_it->second);
-    if (!schema_map) {
-        return anyToString(schema_it->second);
-    }
-    auto schema = getFieldAsString(*schema_map, "schema");
-    return schema.has_value() ? schema : std::make_optional(anyToString(schema_it->second));
-}
-
-GrammarKeyCpp keyFromResponseFormat(const std::string& response_format) {
-    if (response_format.empty()) {
-        return {};
-    }
-    autil::legacy::Any any;
-    autil::legacy::json::ParseJson(response_format, any);
-    auto* response_map = autil::legacy::AnyCast<JsonMap>(&any);
-    if (!response_map) {
-        auto* response_array = autil::legacy::AnyCast<JsonArray>(&any);
-        if (response_array) {
-            if (response_array->empty()) {
-                return {};
-            }
-            if (response_array->size() != 1) {
-                throw std::invalid_argument("response_format array must contain exactly one JSON object");
-            }
-            response_map = autil::legacy::AnyCast<JsonMap>(&(*response_array)[0]);
-        }
-    }
-    if (!response_map) {
-        throw std::invalid_argument("response_format must be a JSON object");
-    }
-
-    auto type = getType(*response_map);
-    if (!type.has_value() || *type == "text") {
-        return {};
-    }
-    if (*type == "json_object") {
-        return {"json", R"({"type":"object"})"};
-    }
-    if (*type == "json_schema") {
-        auto schema = extractJsonSchemaFromEnvelope(*response_map);
-        return schema.has_value() ? GrammarKeyCpp{"json", *schema} : GrammarKeyCpp{};
-    }
-    if (*type == "regex") {
-        auto pattern = getFieldAsString(*response_map, "pattern");
-        return pattern.has_value() ? GrammarKeyCpp{"regex", *pattern} : GrammarKeyCpp{};
-    }
-    if (*type == "ebnf") {
-        auto grammar = getFieldAsString(*response_map, "grammar");
-        return grammar.has_value() ? GrammarKeyCpp{"ebnf", *grammar} : GrammarKeyCpp{};
-    }
-    if (*type == "structural_tag") {
-        auto tag = getFieldAsString(*response_map, "structural_tag");
-        return tag.has_value() ? GrammarKeyCpp{"structural_tag", *tag} : GrammarKeyCpp{};
-    }
-    throw std::invalid_argument("unknown response_format.type: " + *type);
 }
 
 GrammarKeyCpp keyFromGenerateConfig(const GenerateConfig& config) {
     // Fixed priority json_schema > regex > ebnf > structural_tag silently drops the
-    // others when a caller sets multiple. Warn loudly so we can audit the line and
-    // eventually harden to invalid_argument once no live caller relies on this.
-    const int grammar_field_count = static_cast<int>(config.json_schema.has_value())
-                                    + static_cast<int>(config.regex.has_value())
-                                    + static_cast<int>(config.ebnf.has_value())
-                                    + static_cast<int>(config.structural_tag.has_value());
-    if (grammar_field_count > 1) {
-        RTP_LLM_LOG_WARNING(
-            "GenerateConfig sets %d grammar constraints simultaneously "
-            "(json_schema=%d, regex=%d, ebnf=%d, structural_tag=%d); only the highest-priority "
-            "one (json_schema>regex>ebnf>structural_tag) is applied — drop the rest at the client",
-            grammar_field_count,
-            static_cast<int>(config.json_schema.has_value()),
-            static_cast<int>(config.regex.has_value()),
-            static_cast<int>(config.ebnf.has_value()),
-            static_cast<int>(config.structural_tag.has_value()));
+    // others when a caller sets multiple. Warn so we can audit the call site.
+    const bool multi_grammar = (config.json_schema.has_value() + config.regex.has_value() + config.ebnf.has_value()
+                                + config.structural_tag.has_value())
+                               > 1;
+    if (multi_grammar) {
+        RTP_LLM_LOG_WARNING("GenerateConfig sets multiple grammar fields simultaneously; "
+                            "applying priority json_schema>regex>ebnf>structural_tag");
     }
     if (config.json_schema.has_value()) {
         return {"json", config.json_schema.value()};
@@ -155,25 +55,32 @@ GrammarKeyCpp keyFromGenerateConfig(const GenerateConfig& config) {
     if (config.structural_tag.has_value()) {
         return {"structural_tag", config.structural_tag.value()};
     }
-    if (config.response_format.has_value()) {
-        return keyFromResponseFormat(config.response_format.value());
-    }
+    // response_format envelope is projected to typed fields above in
+    // GenerateConfig.validate (Python). The C++ engine only consumes typed fields.
     return {};
 }
 
 // Compile + matcher creation, given an already-resolved GrammarKeyCpp. Works
 // off the pre-parsed key so the factory can validate response_format once for
 // both the in-think and plain-grammar paths.
-std::shared_ptr<RtpGrammarMatcher>
-compileMatcherFromKey(XGrammarBackend&                            backend,
-                      const GrammarKeyCpp&                        key,
-                      bool                                        require_reasoning,
-                      std::optional<std::vector<int>>             think_end_token_ids,
-                      const LogitsProcessorFactory::ErrorReporter& error_reporter) {
-    auto validate = validateGrammarKey(key);
-    if (validate.status != GrammarValidateStatus::Ok) {
-        backend.setCacheInvalid(key, validate.detail);
-        reportInvalidParams(error_reporter, "Failed to compile " + key.key_type + " grammar: " + validate.detail);
+std::shared_ptr<RtpGrammarMatcher> compileMatcherFromKey(XGrammarBackend&                backend,
+                                                         const GrammarKeyCpp&            key,
+                                                         bool                            require_reasoning,
+                                                         std::optional<std::vector<int>> think_end_token_ids,
+                                                         const LogitsProcessorFactory::ErrorReporter& error_reporter) {
+    // Lightweight size caps (xgrammar already validates schema/regex content).
+    constexpr size_t kMaxJsonSchemaSize = 1024 * 1024;  // 1 MiB
+    constexpr size_t kMaxRegexEbnfSize  = 64 * 1024;    // 64 KiB
+    const size_t     limit              = (key.key_type == "json") ? kMaxJsonSchemaSize : kMaxRegexEbnfSize;
+    if (key.key_string.size() > limit) {
+        const std::string detail =
+            key.key_type + " grammar exceeds maximum size limit (" + std::to_string(limit) + " bytes)";
+        // Don't push oversize keys into invalid_cache_ — backend.getOrCompile
+        // rejects them too, and caching the rejection per-key would let N distinct
+        // huge blobs inflate memory before LRU evicts them. The user already gets
+        // INVALID_PARAMS; on retry this size check rejects in O(1) without cache.
+        reportError(
+            error_reporter, ErrorCode::INVALID_PARAMS, "Failed to compile " + key.key_type + " grammar: " + detail);
         return nullptr;
     }
 
@@ -181,19 +88,13 @@ compileMatcherFromKey(XGrammarBackend&                            backend,
     try {
         result = backend.getOrCompile(key);
     } catch (const std::exception& e) {
-        reportInvalidParams(error_reporter, std::string("grammar compile error: ") + e.what());
-        return nullptr;
-    }
-    if (result.timed_out) {
-        // Request-side gave up waiting; the background compile keeps running and
-        // the next request for this key may benefit. Surface as GENERATE_TIMEOUT
-        // (not INVALID_PARAMS) since the schema may be valid — we just refused to wait.
-        reportGenerateTimeout(error_reporter, "grammar compile timeout: " + result.error_message);
+        reportError(error_reporter, ErrorCode::INVALID_PARAMS, std::string("grammar compile error: ") + e.what());
         return nullptr;
     }
     if (!result.compiled) {
         const std::string err = result.error_message.empty() ? "unknown compile error" : result.error_message;
-        reportInvalidParams(error_reporter, "Failed to compile " + key.key_type + " grammar: " + err);
+        reportError(
+            error_reporter, ErrorCode::INVALID_PARAMS, "Failed to compile " + key.key_type + " grammar: " + err);
         return nullptr;
     }
 
@@ -201,42 +102,48 @@ compileMatcherFromKey(XGrammarBackend&                            backend,
     std::shared_ptr<RtpGrammarMatcher> matcher                      = backend.createMatcher(
         result.compiled, require_reasoning, std::move(think_end_token_ids), terminate_without_stop_token);
     if (!matcher) {
-        reportInvalidParams(error_reporter, "grammar matcher install failed");
+        reportError(error_reporter, ErrorCode::INVALID_PARAMS, "grammar matcher install failed");
         return nullptr;
     }
     return matcher;
 }
 
-BaseLogitsProcessorPtr createGrammarProcessor(const std::shared_ptr<XGrammarBackend>&     backend,
-                                              const std::shared_ptr<GenerateInput>&       input,
-                                              const GrammarKeyCpp&                        key,
-                                              int64_t                                     eos_token_id,
+BaseLogitsProcessorPtr createGrammarProcessor(const std::shared_ptr<XGrammarBackend>&      backend,
+                                              const std::shared_ptr<GenerateInput>&        input,
+                                              const GrammarKeyCpp&                         key,
+                                              int64_t                                      eos_token_id,
                                               const LogitsProcessorFactory::ErrorReporter& error_reporter) {
     if (!input || !input->generate_config || key.empty()) {
         return nullptr;
     }
     auto& config = *input->generate_config;
     if (!backend) {
-        reportInvalidParams(error_reporter,
-                            "structured output requested but constraint backend is disabled "
-                            "(check engine startup logs: tokenizer info empty or backend init failed).");
+        reportError(error_reporter,
+                    ErrorCode::INVALID_PARAMS,
+                    "structured output requested but constraint backend is disabled "
+                    "(check engine startup logs: tokenizer info empty or backend init failed).");
         return nullptr;
     }
 
-    if (config.in_think_mode) {
+    const bool                      require_reasoning = config.in_think_mode;
+    std::optional<std::vector<int>> think_end_token_ids;
+    if (require_reasoning) {
         if (config.end_think_token_ids.empty()) {
-            reportInvalidParams(error_reporter,
-                                "structured output with in_think_mode requires non-empty end_think_token_ids");
+            reportError(error_reporter,
+                        ErrorCode::INVALID_PARAMS,
+                        "structured output with in_think_mode requires non-empty end_think_token_ids");
             return nullptr;
         }
-        auto matcher = compileMatcherFromKey(*backend,
-                                             key,
-                                             /*require_reasoning=*/true,
-                                             std::optional<std::vector<int>>(config.end_think_token_ids),
-                                             error_reporter);
-        if (!matcher) {
-            return nullptr;
-        }
+        think_end_token_ids = config.end_think_token_ids;
+    }
+
+    auto matcher =
+        compileMatcherFromKey(*backend, key, require_reasoning, std::move(think_end_token_ids), error_reporter);
+    if (!matcher) {
+        return nullptr;
+    }
+
+    if (require_reasoning) {
         return std::make_shared<ReasoningGrammarLogitsProcessor>(std::move(matcher),
                                                                  eos_token_id,
                                                                  config.max_thinking_tokens,
@@ -245,28 +152,13 @@ BaseLogitsProcessorPtr createGrammarProcessor(const std::shared_ptr<XGrammarBack
                                                                  input->inputLength(),
                                                                  error_reporter);
     }
-
-    auto matcher = compileMatcherFromKey(*backend,
-                                         key,
-                                         /*require_reasoning=*/false,
-                                         /*think_end_token_ids=*/std::nullopt,
-                                         error_reporter);
-    if (!matcher) {
-        return nullptr;
-    }
     return std::make_shared<GrammarLogitsProcessor>(std::move(matcher), eos_token_id, error_reporter);
 }
 
 }  // namespace
 
 bool LogitsProcessorFactory::hasGrammarConstraint(const GenerateConfig& config) {
-    try {
-        return !keyFromGenerateConfig(config).empty();
-    } catch (const std::exception&) {
-        // Malformed response_format counts as a grammar request — defer to the
-        // createLogitsProcessors path which surfaces the parse error properly.
-        return true;
-    }
+    return !keyFromGenerateConfig(config).empty();
 }
 
 void LogitsProcessorFactory::init(const std::string&   ckpt_path,
@@ -289,25 +181,19 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
 
     auto& config = *generate_input->generate_config;
 
-    GrammarKeyCpp grammar_key;
-    bool          grammar_key_invalid = false;
-    try {
-        grammar_key = keyFromGenerateConfig(config);
-    } catch (const std::exception& e) {
-        reportInvalidParams(error_reporter, std::string("invalid grammar response_format: ") + e.what());
-        grammar_key_invalid = true;
-    }
+    GrammarKeyCpp grammar_key = keyFromGenerateConfig(config);
 
     auto think_processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, max_batch_size);
     if (think_processor != nullptr && grammar_key.empty()) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(think_processor));
     }
 
-    if (!grammar_key.empty() && !grammar_key_invalid) {
+    if (!grammar_key.empty()) {
         if (config.hasNumBeams() || config.num_return_sequences > 1) {
-            reportInvalidParams(error_reporter,
-                                "grammar-constrained decoding does not support beam search or "
-                                "num_return_sequences > 1");
+            reportError(error_reporter,
+                        ErrorCode::INVALID_PARAMS,
+                        "grammar-constrained decoding does not support beam search or "
+                        "num_return_sequences > 1");
         } else {
             std::shared_ptr<XGrammarBackend> backend;
             {

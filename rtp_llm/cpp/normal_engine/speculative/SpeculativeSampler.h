@@ -5,7 +5,6 @@
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
-#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 
 namespace rtp_llm {
@@ -22,7 +21,10 @@ public:
 
     std::shared_ptr<torch::Event> transfer_done_event;
 
-    SpeculativeSamplerOutput(): transfer_done_event(std::make_shared<torch::Event>(cuda_graph::makeGraphEvent())) {}
+    // Defined in SpeculativeSampler.cc — keeps the cuda_graph shim include out of this
+    // header so CPU/ARM build targets that transitively include SpeculativeSampler.h
+    // don't trip the shim's USING_CUDA/USING_ROCM #error.
+    SpeculativeSamplerOutput();
 };
 
 struct FastTopKSamplerOutput {

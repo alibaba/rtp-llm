@@ -66,6 +66,12 @@ class Qwen3CoderRenderer(ReasoningToolBaseRenderer):
     ) -> Optional[ReasoningParser]:
         if not self.in_think_mode(request):
             return None
+        # When the chat template pre-opens the thinking block in the PROMPT
+        # (Qwen3.5 with enable_thinking), the generated text contains only the
+        # closing </think> tag, never <think>. A non-forced Qwen3Detector then
+        # never enters reasoning mode (it keys on <think> appearing in the
+        # output), so </think> leaks into `content` instead of being split into
+        # reasoning_content. Force reasoning when the prompt pre-opens think.
         if self.prompt_preopens_think(request):
             return ReasoningParser(model_type="qwen3-thinking")
         return ReasoningParser(model_type="qwen3")

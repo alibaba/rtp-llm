@@ -474,7 +474,6 @@ public:
         };
         for (auto& p : logits_processor_list_) {
             if (p) {
-                p->setStream(shared_from_this());
                 p->setErrorReporter(reporter);
             }
         }

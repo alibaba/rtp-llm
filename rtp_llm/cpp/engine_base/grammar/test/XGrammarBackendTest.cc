@@ -76,6 +76,22 @@ TEST(XGrammarBackendTest, CompileMalformedJsonSchemaIsInvalid) {
     EXPECT_FALSE(result.error_message.empty());
 }
 
+TEST(XGrammarBackendTest, OversizeKeyStringRejectedAtEntry) {
+    // Caller-controlled payload above kMaxKeyStringBytes must be rejected as
+    // is_invalid without entering either cache, so an adversary cannot amplify
+    // memory by submitting many distinct large blobs.
+    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
+    std::string     huge(64 * 1024 + 1, 'x');
+    GrammarKeyCpp   key{"json", huge};
+
+    auto result = backend.getOrCompile(key);
+    EXPECT_FALSE(result.compiled);
+    EXPECT_TRUE(result.is_invalid);
+    EXPECT_NE(result.error_message.find("too large"), std::string::npos);
+    EXPECT_TRUE(backend.getCachedInvalid(key).empty()) << "oversize keys must not populate invalid_cache_";
+    EXPECT_FALSE(backend.getCached(key)) << "oversize keys must not populate cache_";
+}
+
 TEST(XGrammarBackendTest, CacheGetAndSet) {
     XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
     GrammarKeyCpp   key{"json", R"({"type":"integer"})"};
@@ -123,6 +139,59 @@ TEST(XGrammarBackendTest, CompiledCacheLruKeepsRecentlyUsed) {
     EXPECT_TRUE(backend.getCached({"json", "k_extra"}));
 }
 
+// Invalid-cache byte budget pins worst-case memory below kMaxInvalidCacheBytes
+// even when the entry-count cap alone would admit much more.
+TEST(XGrammarBackendTest, InvalidCacheRespectsByteBudget) {
+    XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
+
+    // Each kid contributes ~kMaxKeyStringBytes; flooding well past the byte
+    // budget must be absorbed by LRU eviction, not by unbounded growth.
+    const size_t      payload_size = XGrammarBackend::kMaxKeyStringBytes - 64;
+    const std::string err          = "boom";
+    const size_t      n_writes     = (XGrammarBackend::kMaxInvalidCacheBytes / payload_size) * 4 + 16;
+
+    for (size_t i = 0; i < n_writes; ++i) {
+        std::string body(payload_size, 'a');
+        // Make every key distinct so no in-place update path is taken.
+        std::string suffix = std::to_string(i);
+        std::copy(suffix.begin(), suffix.end(), body.begin());
+        backend.setCacheInvalid({"json", body}, err);
+    }
+
+    // Exercise the most-recently-written key still being a hit.
+    std::string last_body(payload_size, 'a');
+    std::string last_suffix = std::to_string(n_writes - 1);
+    std::copy(last_suffix.begin(), last_suffix.end(), last_body.begin());
+    EXPECT_FALSE(backend.getCachedInvalid({"json", last_body}).empty()) << "MRU entry must survive eviction";
+
+    // Oldest key must have been evicted under the byte budget.
+    std::string first_body(payload_size, 'a');
+    first_body[0] = '0';
+    EXPECT_TRUE(backend.getCachedInvalid({"json", first_body}).empty()) << "oldest entry must be evicted";
+}
+
+// Oversize keys must be rejected at setCacheInvalid entry — mirrors getOrCompile
+// so callers (e.g. LogitsProcessorFactory) can't punch through the size guard
+// and inflate per-entry bytes past 2*kMaxKeyStringBytes before LRU eviction.
+TEST(XGrammarBackendTest, InvalidCacheRejectsOversizeKey) {
+    XGrammarBackend   backend(makeTokenizerInfoJson(), defaultOptions());
+    const std::string huge_key(XGrammarBackend::kMaxKeyStringBytes + 1, 'k');
+    backend.setCacheInvalid({"json", huge_key}, "boom");
+    EXPECT_TRUE(backend.getCachedInvalid({"json", huge_key}).empty())
+        << "oversize key must not enter invalid_cache_";
+}
+
+// Oversize error_messages get truncated before they enter invalid_cache_, so
+// they cannot inflate per-entry bytes past kMaxErrorMessageBytes.
+TEST(XGrammarBackendTest, InvalidCacheErrorMessageTruncated) {
+    XGrammarBackend   backend(makeTokenizerInfoJson(), defaultOptions());
+    const std::string huge_err(8 * 1024, 'E');
+    backend.setCacheInvalid({"json", "k_trunc"}, huge_err);
+    const std::string stored = backend.getCachedInvalid({"json", "k_trunc"});
+    EXPECT_LE(stored.size(), XGrammarBackend::kMaxErrorMessageBytes + 32);
+    EXPECT_NE(stored.find("...[truncated]"), std::string::npos);
+}
+
 TEST(XGrammarBackendTest, CreateMatcherProducesUsableObject) {
     XGrammarBackend backend(makeTokenizerInfoJson(), defaultOptions());
     auto            compiled = backend.compileNow({"json", "$$ANY$$"}).compiled;
@@ -162,8 +231,7 @@ TEST(RtpGrammarMatcherTest, RollbackRestoresAcceptedCount) {
     auto            compiled = backend.compileNow({"regex", "a"}).compiled;
     ASSERT_TRUE(compiled);
 
-    auto          matcher =
-        backend.createMatcher(compiled, /*require_reasoning=*/false, /*think_end_token_ids=*/std::nullopt);
+    auto matcher = backend.createMatcher(compiled, /*require_reasoning=*/false, /*think_end_token_ids=*/std::nullopt);
     constexpr int kA = 'a';
     EXPECT_TRUE(matcher->acceptToken(kA));
     EXPECT_EQ(matcher->numAcceptedTokens(), 1);

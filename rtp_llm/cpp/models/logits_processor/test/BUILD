@@ -77,4 +77,8 @@ cc_test(
         "@local_config_cuda//cuda:cudart",
         "@xgrammar//:xgrammar",
     ] + torch_deps(),
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
 )

@@ -54,11 +54,6 @@ public:
         if (!checkInputLength(stream)) {
             return absl::InvalidArgumentError("Check input length failed");
         }
-        if (stream->generateConfig()->hasStructuredOutputRequest()) {
-            stream->reportError(ErrorCode::INVALID_PARAMS,
-                                "structured output is not supported with BatchDecodeScheduler");
-            return absl::InvalidArgumentError("structured output not supported in batch decode scheduler");
-        }
         {
             std::lock_guard<std::mutex> lock(lock_);
             waiting_streams_.emplace_back(stream);
@@ -78,15 +73,9 @@ public:
         std::vector<GenerateStreamPtr> stream_enqueued;
         stream_enqueued.reserve(streams.size());
         for (const auto& stream : streams) {
-            if (!checkInputLength(stream)) {
-                continue;
+            if (checkInputLength(stream)) {
+                stream_enqueued.emplace_back(stream);
             }
-            if (stream->generateConfig()->hasStructuredOutputRequest()) {
-                stream->reportError(ErrorCode::INVALID_PARAMS,
-                                    "structured output is not supported with BatchDecodeScheduler");
-                continue;
-            }
-            stream_enqueued.emplace_back(stream);
         }
         {
             std::lock_guard<std::mutex> lock(lock_);
@@ -210,8 +199,8 @@ public:
             evaluateWaitingStreams();
             if (!running_streams_.empty()) {
                 initRunningStreams();
-                RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run",
-                                  running_streams_.size());
+                RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run",
+                                 running_streams_.size());
             }
         }
 
@@ -247,10 +236,10 @@ private:
     bool                         reorder_request_;
     uint32_t                     current_step_ = 0;
 
-    std::shared_ptr<KVCacheManager>     cache_manager_;
-    kmonitor::MetricsReporterPtr        metrics_reporter_;
-    SchedulerType                       scheduler_type_;
-    int                                 dp_rank_ = 0;
+    std::shared_ptr<KVCacheManager> cache_manager_;
+    kmonitor::MetricsReporterPtr    metrics_reporter_;
+    SchedulerType                   scheduler_type_;
+    int                             dp_rank_ = 0;
 };
 
 }  // namespace rtp_llm

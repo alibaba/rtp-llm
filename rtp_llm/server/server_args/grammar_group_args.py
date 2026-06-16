@@ -21,19 +21,6 @@ def init_grammar_group_args(parser, grammar_config):
         help="Disable any-whitespace mode for constrained JSON decoding",
     )
     grammar_group.add_argument(
-        "--grammar_compile_timeout_ms",
-        env_name="GRAMMAR_COMPILE_TIMEOUT_MS",
-        bind_to=(grammar_config, "compile_timeout_ms"),
-        type=_positive_int,
-        default=60000,
-        help=(
-            "Wall-clock timeout (ms) a single grammar-compile request may sit "
-            "in the GrammarCompiler queue before being force-failed with "
-            "GENERATE_TIMEOUT. Raise under sustained queue pressure, lower "
-            "to fail fast on large schemas."
-        ),
-    )
-    grammar_group.add_argument(
         "--grammar_num_workers",
         env_name="GRAMMAR_NUM_WORKERS",
         bind_to=(grammar_config, "num_workers"),

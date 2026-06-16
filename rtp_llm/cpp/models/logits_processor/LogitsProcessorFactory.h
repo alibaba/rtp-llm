@@ -1,7 +1,6 @@
 #pragma once
 
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
-#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorErrorReporter.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <memory>
 #include <string>
@@ -17,13 +16,13 @@ class LogitsProcessorFactory {
 public:
     using ErrorReporter = LogitsProcessorErrorReporter;
 
-    static void init(const std::string&   ckpt_path,
-                     const std::string&   tree_decode_config,
-                     const GrammarConfig& grammar_config);
+    static void
+    init(const std::string& ckpt_path, const std::string& tree_decode_config, const GrammarConfig& grammar_config);
 
-    // True iff `config` carries any structured-output request (direct field or
-    // OpenAI response_format envelope). Malformed envelopes report true so the
-    // createLogitsProcessors path can surface the parse error.
+    // True iff `config` carries any structured-output request. Only typed
+    // grammar fields (json_schema/regex/ebnf/structural_tag) are inspected;
+    // OpenAI response_format envelopes are projected to typed fields by
+    // GenerateConfig.validate (Python) before reaching the engine.
     static bool hasGrammarConstraint(const GenerateConfig& config);
 
     static std::vector<BaseLogitsProcessorPtr> createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,

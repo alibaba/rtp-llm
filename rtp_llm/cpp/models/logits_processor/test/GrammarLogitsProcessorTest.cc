@@ -57,11 +57,17 @@ struct ProcessorBundle {
 
 // Build a GrammarLogitsProcessor over a regex matcher. The stream is null —
 // tryAcceptAndFillBitmask only touches the matcher, never the stream.
+// terminate_without_stop_token=true so the matcher transitions to terminated
+// the instant the regex completes — without it, xgrammar waits for a stop
+// token before flipping IsTerminated() and the verify loop happily accepts
+// trailing draft tokens past the grammar's natural end.
 ProcessorBundle makeProcessor(XGrammarBackend& backend, const std::string& regex) {
     auto compiled = backend.compileNow({"regex", regex}).compiled;
     EXPECT_TRUE(compiled);
-    std::shared_ptr<RtpGrammarMatcher> matcher =
-        backend.createMatcher(compiled, /*require_reasoning=*/false, /*think_end_token_ids=*/std::nullopt);
+    std::shared_ptr<RtpGrammarMatcher> matcher = backend.createMatcher(compiled,
+                                                                      /*require_reasoning=*/false,
+                                                                      /*think_end_token_ids=*/std::nullopt,
+                                                                      /*terminate_without_stop_token=*/true);
     auto proc = std::make_shared<GrammarLogitsProcessor>(matcher);
     return {std::move(proc), std::move(matcher)};
 }

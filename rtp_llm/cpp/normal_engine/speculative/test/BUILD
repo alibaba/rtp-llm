@@ -16,14 +16,12 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/normal_engine:normal_engine",
-        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
-        "//rtp_llm/cpp/testing:device_test_utils",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ],
+    ] + torch_deps(),
+    # FastTopKSampler logic is CPU-only, but linking //rtp_llm/cpp/normal_engine:normal_engine
+    # pulls in libtorch_cuda → libcuda.so.1; without a GPU host the binary fails to load
+    # before any test runs. Schedule on H20 so the loader resolves cleanly.
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

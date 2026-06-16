@@ -1165,7 +1165,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("constrained_json_disable_any_whitespace",
                        &GrammarConfig::constrained_json_disable_any_whitespace)
-        .def_readwrite("compile_timeout_ms", &GrammarConfig::compile_timeout_ms)
         .def_readwrite("num_workers", &GrammarConfig::num_workers)
         .def_readwrite("compiler_cache_bytes", &GrammarConfig::compiler_cache_bytes)
         .def_readwrite("tokenizer_info_json", &GrammarConfig::tokenizer_info_json)
@@ -1174,7 +1173,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
              [](const GrammarConfig& c) {
                  std::ostringstream oss;
                  oss << "GrammarConfig(constrained_json_disable_any_whitespace="
-                     << c.constrained_json_disable_any_whitespace << ", compile_timeout_ms=" << c.compile_timeout_ms
+                     << c.constrained_json_disable_any_whitespace
                      << ", num_workers=" << c.num_workers << ", compiler_cache_bytes=" << c.compiler_cache_bytes
                      << ", tokenizer_info_json_size=" << c.tokenizer_info_json.size() << ", override_stop_tokens=[";
                  for (size_t i = 0; i < c.override_stop_tokens.size(); ++i) {
@@ -1188,25 +1187,21 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const GrammarConfig& self) {
                 return py::make_tuple(self.constrained_json_disable_any_whitespace,
-                                      self.compile_timeout_ms,
                                       self.num_workers,
                                       self.tokenizer_info_json,
                                       self.override_stop_tokens,
                                       self.compiler_cache_bytes);
             },
             [](py::tuple t) {
-                if (t.size() != 5 && t.size() != 6)
+                if (t.size() != 5)
                     throw std::runtime_error("Invalid state!");
                 GrammarConfig c;
                 try {
                     c.constrained_json_disable_any_whitespace = t[0].cast<bool>();
-                    c.compile_timeout_ms                      = t[1].cast<int64_t>();
-                    c.num_workers                             = t[2].cast<int>();
-                    c.tokenizer_info_json                     = t[3].cast<std::string>();
-                    c.override_stop_tokens                    = t[4].cast<std::vector<int32_t>>();
-                    if (t.size() >= 6) {
-                        c.compiler_cache_bytes = t[5].cast<int64_t>();
-                    }
+                    c.num_workers                             = t[1].cast<int>();
+                    c.tokenizer_info_json                     = t[2].cast<std::string>();
+                    c.override_stop_tokens                    = t[3].cast<std::vector<int32_t>>();
+                    c.compiler_cache_bytes                    = t[4].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("GrammarConfig unpickle error: ") + e.what());
                 }

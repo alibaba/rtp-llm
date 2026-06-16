@@ -25,11 +25,9 @@ public:
     // inside the runner.
     struct ActiveProcessor {
         SpecLogitsProcessorPtr processor;
-        size_t                 stream_idx      = 0;
-        size_t                 processor_idx   = 0;
-        uint64_t               stream_id       = 0;
-        int64_t                base_seq_len    = 0;
-        int64_t                base_output_len = 0;
+        size_t                 stream_idx    = 0;
+        size_t                 processor_idx = 0;
+        uint64_t               stream_id     = 0;
     };
 
     struct LaunchTask {

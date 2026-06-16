@@ -18,37 +18,26 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
 )
 
-# Mirror of cpp/model_rpc/RpcErrorCode.h::transRPCErrorCode — kept in lock-step with the proto.
+# Mirror of cpp/model_rpc/RpcErrorCode.h::transRPCErrorCode for codes plumbed
+# through the batch_enqueue result table — i.e. ErrorCodes that
+# LocalRpcServer::BatchGenerateCall can write into BatchGenerateResultPB.
+# Sources:
+#   - prepareInput failure: INVALID_PARAMS, ERROR_GENERATE_CONFIG_FORMAT,
+#     plus CANCELLED stamped on sibling rows in the batch.
+#   - collectStreamOutput surfacing reportError() from engine_base/normal_engine:
+#     GENERATE_TIMEOUT, MALLOC_FAILED, DECODE_MALLOC_FAILED, OUT_OF_VOCAB_RANGE,
+#     LONG_PROMPT_ERROR, EXCEEDS_KV_CACHE_MAX_LEN, OUTPUT_QUEUE_FULL,
+#     WAIT_TO_RUN_TIMEOUT, EXECUTION_EXCEPTION.
+# P2P/CACHE_STORE codes travel via RpcErrorPB on RemoteGenerate/BroadcastLoad/
+# StartLoad — not this dict. FINISHED / OUTPUT_QUEUE_IS_EMPTY are control-flow
+# markers, never reported as errors. Unmapped codes fall through to
+# UNKNOWN_ERROR via the .get() default at the call site.
 _RPC_TO_EXCEPTION_TYPE: dict[int, "ExceptionType"] = {
-    ErrorCodePB.NONE_ERROR: ExceptionType.UNKNOWN_ERROR,  # treated as "no info"
-    ErrorCodePB.UNKNOWN_ERROR: ExceptionType.UNKNOWN_ERROR,
     ErrorCodePB.CANCELLED: ExceptionType.CANCELLED,
-    ErrorCodePB.LOAD_CACHE_TIMEOUT: ExceptionType.LOAD_CACHE_TIMEOUT,
-    ErrorCodePB.CACHE_STORE_LOAD_CONNECT_FAILED: ExceptionType.CACHE_STORE_LOAD_CONNECT_FAILED,
-    ErrorCodePB.CACHE_STORE_LOAD_SEND_REQUEST_FAILED: ExceptionType.CACHE_STORE_LOAD_SEND_REQUEST_FAILED,
-    ErrorCodePB.CACHE_STORE_CALL_PREFILL_TIMEOUT: ExceptionType.CACHE_STORE_CALL_PREFILL_TIMEOUT,
-    ErrorCodePB.CACHE_STORE_LOAD_RDMA_CONNECT_FAILED: ExceptionType.CACHE_STORE_LOAD_RDMA_CONNECT_FAILED,
-    ErrorCodePB.CACHE_STORE_LOAD_RDMA_WRITE_FAILED: ExceptionType.CACHE_STORE_LOAD_RDMA_WRITE_FAILED,
-    ErrorCodePB.CACHE_STORE_LOAD_BUFFER_TIMEOUT: ExceptionType.CACHE_STORE_LOAD_BUFFER_TIMEOUT,
-    ErrorCodePB.P2P_CONNECTOR_CALL_PREFILL_FAILED: ExceptionType.P2P_CONNECTOR_CALL_PREFILL_FAILED,
-    ErrorCodePB.P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED: ExceptionType.P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
-    ErrorCodePB.P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED: ExceptionType.P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
-    ErrorCodePB.P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED: ExceptionType.P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
-    ErrorCodePB.P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED: ExceptionType.P2P_CONNECTOR_SCHEDULER_FILL_RESPONSE_FAILED,
-    ErrorCodePB.P2P_CONNECTOR_WORKER_ASYMMETRIC_TP_FAILED: ExceptionType.P2P_CONNECTOR_WORKER_ASYMMETRIC_TP_FAILED,
-    ErrorCodePB.P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT: ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT,
-    ErrorCodePB.P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED: ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_CANCELLED,
-    ErrorCodePB.P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED: ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED,
-    ErrorCodePB.P2P_CONNECTOR_WORKER_READ_TRANSFER_RDMA_FAILED: ExceptionType.P2P_CONNECTOR_WORKER_READ_TRANSFER_RDMA_FAILED,
-    ErrorCodePB.P2P_CONNECTOR_WORKER_READ_BUFFER_MISMATCH: ExceptionType.P2P_CONNECTOR_WORKER_READ_BUFFER_MISMATCH,
-    ErrorCodePB.P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_TIMEOUT: ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_TIMEOUT,
-    ErrorCodePB.P2P_CONNECTOR_WORKER_READ_FAILED: ExceptionType.P2P_CONNECTOR_WORKER_READ_FAILED,
-    ErrorCodePB.P2P_CONNECTOR_WORKER_READ_CANCELED: ExceptionType.P2P_CONNECTOR_WORKER_READ_CANCELLED,
-    ErrorCodePB.P2P_CONNECTOR_WORKER_READ_TIMEOUT: ExceptionType.P2P_CONNECTOR_WORKER_READ_TIMEOUT,
-    ErrorCodePB.P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE: ExceptionType.P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
     ErrorCodePB.INVALID_PARAMS: ExceptionType.INVALID_PARAMS,
     ErrorCodePB.ERROR_GENERATE_CONFIG_FORMAT: ExceptionType.ERROR_GENERATE_CONFIG_FORMAT,
     ErrorCodePB.GENERATE_TIMEOUT: ExceptionType.GENERATE_TIMEOUT,
+    # ExceptionType keeps the legacy MALLOC_ERROR name for MALLOC_FAILED.
     ErrorCodePB.MALLOC_FAILED: ExceptionType.MALLOC_ERROR,
     ErrorCodePB.DECODE_MALLOC_FAILED: ExceptionType.DECODE_MALLOC_FAILED,
     ErrorCodePB.WAIT_TO_RUN_TIMEOUT: ExceptionType.WAIT_TO_RUN_TIMEOUT,
@@ -57,8 +46,6 @@ _RPC_TO_EXCEPTION_TYPE: dict[int, "ExceptionType"] = {
     ErrorCodePB.EXCEEDS_KV_CACHE_MAX_LEN: ExceptionType.EXCEEDS_KV_CACHE_MAX_LEN,
     ErrorCodePB.EXECUTION_EXCEPTION: ExceptionType.EXECUTION_EXCEPTION,
     ErrorCodePB.OUTPUT_QUEUE_FULL: ExceptionType.OUTPUT_QUEUE_FULL,
-    ErrorCodePB.OUTPUT_QUEUE_IS_EMPTY: ExceptionType.OUTPUT_QUEUE_IS_EMPTY,
-    ErrorCodePB.FINISHED: ExceptionType.FINISHED,
 }
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 from rtp_llm.utils.base_model_datatypes import (
@@ -166,16 +153,11 @@ def trans_input(input_py: GenerateInput):
         generate_config_pb.structural_tag.value = _pb_string_value_for_json_field(
             input_py.generate_config.structural_tag
         )
-    # Envelope validation lives in C++ QueryConverter::normalizeResponseFormat — pass through raw.
-    if input_py.generate_config.response_format is not None:
-        rf = input_py.generate_config.response_format
-        skip_empty = (isinstance(rf, str) and not rf.strip()) or (
-            isinstance(rf, dict) and not rf
-        )
-        if not skip_empty:
-            generate_config_pb.response_format.value = _pb_string_value_for_json_field(
-                rf
-            )
+    # response_format envelope must already be projected to typed grammar fields
+    # by GenerateConfig.validate() before reaching here; the proto.response_format
+    # wire field is deprecated and the C++ server (QueryConverter) rejects raw
+    # envelopes with INVALID_PARAMS to surface non-Python clients that forgot to
+    # project.
     trans_option(generate_config_pb, input_py.generate_config, "adapter_name")
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "task_id", functools.partial(str)

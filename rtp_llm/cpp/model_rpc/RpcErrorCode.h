@@ -18,6 +18,9 @@ inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
         {ErrorCode::ERROR_GENERATE_CONFIG_FORMAT, grpc::StatusCode::INVALID_ARGUMENT},
         {ErrorCode::OUT_OF_VOCAB_RANGE, grpc::StatusCode::OUT_OF_RANGE},
         {ErrorCode::LONG_PROMPT_ERROR, grpc::StatusCode::OUT_OF_RANGE},
+        {ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN, grpc::StatusCode::OUT_OF_RANGE},
+        {ErrorCode::OUTPUT_QUEUE_FULL, grpc::StatusCode::RESOURCE_EXHAUSTED},
+        {ErrorCode::EXECUTION_EXCEPTION, grpc::StatusCode::INTERNAL},
     };
     auto it = error_code_map.find(error_code);
     if (it != error_code_map.end()) {
@@ -64,19 +67,19 @@ inline ErrorCode transRPCErrorCode(ErrorCodePB error_code) {
         {ErrorCodePB::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
          ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE},
         // Admission / runtime errors plumbed through batch_enqueue result table.
+        // OUTPUT_QUEUE_IS_EMPTY / FINISHED are reserved in the proto for forward
+        // compatibility but never reported as errors — see LocalRpcServer.cc.
         {ErrorCodePB::INVALID_PARAMS, ErrorCode::INVALID_PARAMS},
         {ErrorCodePB::ERROR_GENERATE_CONFIG_FORMAT, ErrorCode::ERROR_GENERATE_CONFIG_FORMAT},
+        {ErrorCodePB::WAIT_TO_RUN_TIMEOUT, ErrorCode::WAIT_TO_RUN_TIMEOUT},
+        {ErrorCodePB::EXECUTION_EXCEPTION, ErrorCode::EXECUTION_EXCEPTION},
         {ErrorCodePB::GENERATE_TIMEOUT, ErrorCode::GENERATE_TIMEOUT},
         {ErrorCodePB::MALLOC_FAILED, ErrorCode::MALLOC_FAILED},
         {ErrorCodePB::DECODE_MALLOC_FAILED, ErrorCode::DECODE_MALLOC_FAILED},
-        {ErrorCodePB::WAIT_TO_RUN_TIMEOUT, ErrorCode::WAIT_TO_RUN_TIMEOUT},
         {ErrorCodePB::OUT_OF_VOCAB_RANGE, ErrorCode::OUT_OF_VOCAB_RANGE},
         {ErrorCodePB::LONG_PROMPT_ERROR, ErrorCode::LONG_PROMPT_ERROR},
         {ErrorCodePB::EXCEEDS_KV_CACHE_MAX_LEN, ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN},
-        {ErrorCodePB::EXECUTION_EXCEPTION, ErrorCode::EXECUTION_EXCEPTION},
         {ErrorCodePB::OUTPUT_QUEUE_FULL, ErrorCode::OUTPUT_QUEUE_FULL},
-        {ErrorCodePB::OUTPUT_QUEUE_IS_EMPTY, ErrorCode::OUTPUT_QUEUE_IS_EMPTY},
-        {ErrorCodePB::FINISHED, ErrorCode::FINISHED},
     };
     auto it = error_code_map.find(error_code);
     if (it != error_code_map.end()) {
@@ -125,17 +128,15 @@ inline ErrorCodePB transErrorCodeToRPC(ErrorCode error_code) {
         // Admission / runtime errors plumbed through batch_enqueue result table.
         {ErrorCode::INVALID_PARAMS, ErrorCodePB::INVALID_PARAMS},
         {ErrorCode::ERROR_GENERATE_CONFIG_FORMAT, ErrorCodePB::ERROR_GENERATE_CONFIG_FORMAT},
+        {ErrorCode::WAIT_TO_RUN_TIMEOUT, ErrorCodePB::WAIT_TO_RUN_TIMEOUT},
+        {ErrorCode::EXECUTION_EXCEPTION, ErrorCodePB::EXECUTION_EXCEPTION},
         {ErrorCode::GENERATE_TIMEOUT, ErrorCodePB::GENERATE_TIMEOUT},
         {ErrorCode::MALLOC_FAILED, ErrorCodePB::MALLOC_FAILED},
         {ErrorCode::DECODE_MALLOC_FAILED, ErrorCodePB::DECODE_MALLOC_FAILED},
-        {ErrorCode::WAIT_TO_RUN_TIMEOUT, ErrorCodePB::WAIT_TO_RUN_TIMEOUT},
         {ErrorCode::OUT_OF_VOCAB_RANGE, ErrorCodePB::OUT_OF_VOCAB_RANGE},
         {ErrorCode::LONG_PROMPT_ERROR, ErrorCodePB::LONG_PROMPT_ERROR},
         {ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN, ErrorCodePB::EXCEEDS_KV_CACHE_MAX_LEN},
-        {ErrorCode::EXECUTION_EXCEPTION, ErrorCodePB::EXECUTION_EXCEPTION},
         {ErrorCode::OUTPUT_QUEUE_FULL, ErrorCodePB::OUTPUT_QUEUE_FULL},
-        {ErrorCode::OUTPUT_QUEUE_IS_EMPTY, ErrorCodePB::OUTPUT_QUEUE_IS_EMPTY},
-        {ErrorCode::FINISHED, ErrorCodePB::FINISHED},
     };
     auto it = error_code_map.find(error_code);
     if (it != error_code_map.end()) {

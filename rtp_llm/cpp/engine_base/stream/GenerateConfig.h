@@ -53,7 +53,11 @@ public:
     std::optional<std::string> regex;
     std::optional<std::string> ebnf;
     std::optional<std::string> structural_tag;
-    std::optional<std::string> response_format;
+    // The OpenAI response_format envelope is intentionally absent here: the
+    // Python frontend projects it to the four typed fields above in
+    // GenerateConfig.validate(), and the gRPC wire field of the same name is
+    // rejected by QueryConverter when it arrives non-empty. Internal code must
+    // only read the typed fields.
     std::string                adapter_name = "";
     std::vector<std::string>   adapter_names;
 
@@ -129,8 +133,10 @@ public:
     }
 
     bool hasStructuredOutputRequest() const noexcept {
-        return json_schema.has_value() || regex.has_value() || ebnf.has_value() || structural_tag.has_value()
-               || response_format.has_value();
+        // Only typed fields carry grammar in C++; the response_format envelope
+        // is projected to these by Python GenerateConfig.validate before the
+        // request reaches the engine.
+        return json_schema.has_value() || regex.has_value() || ebnf.has_value() || structural_tag.has_value();
     }
 
     void addSpecialTokens(const rtp_llm::SpecialTokens& special_tokens) {
@@ -164,7 +170,6 @@ public:
                      << ", json_schema: " << summarizeOptionalString(json_schema)
                      << ", regex: " << summarizeOptionalString(regex) << ", ebnf: " << summarizeOptionalString(ebnf)
                      << ", structural_tag: " << summarizeOptionalString(structural_tag)
-                     << ", response_format: " << summarizeOptionalString(response_format)
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
                      << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
@@ -214,7 +219,6 @@ public:
         JSONIZE_OPTIONAL(regex);
         JSONIZE_OPTIONAL(ebnf);
         JSONIZE_OPTIONAL(structural_tag);
-        JSONIZE_OPTIONAL(response_format);
         try {
             std::string adapter_name_;
             json.Jsonize("adapter_name", adapter_name_);

@@ -12,13 +12,15 @@
 #include <c10/hip/HIPGuard.h>
 #include <hip/hip_runtime.h>
 #define GRAPH_DEVICE_TYPE c10::DeviceType::HIP
-#else
+#elif USING_CUDA
 #include <ATen/cuda/CUDAGraph.h>
 #include <ATen/cuda/CUDAContext.h>
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #define GRAPH_DEVICE_TYPE c10::DeviceType::CUDA
+#else
+#error "cuda_graph_device_shims.h requires USING_CUDA or USING_ROCM"
 #endif
 
 namespace py = pybind11;

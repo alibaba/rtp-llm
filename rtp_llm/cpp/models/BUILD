@@ -53,7 +53,6 @@ cc_library(
     name = "logits_processor",
     hdrs = [
         "logits_processor/BaseLogitsProcessor.h",
-        "logits_processor/LogitsProcessorErrorReporter.h",
         "logits_processor/SpecLogitsProcessor.h",
         "logits_processor/MultiSeqLogitsProcessor.h",
         "logits_processor/LogitsProcessorStates.h",
@@ -64,6 +63,7 @@ cc_library(
         "logits_processor/GrammarLogitsProcessor.h",
         "logits_processor/ReasoningGrammarLogitsProcessor.h",
         "logits_processor/SpecLogitsVerifyRunner.h",
+        "logits_processor/grammar/BitmaskUtils.h",
     ],
     srcs = [
         "logits_processor/BaseLogitsProcessor.cc",
@@ -81,7 +81,6 @@ cc_library(
         ":sample_infos",
         ":dfa_utils",
         "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
-        "//rtp_llm/cpp/engine_base/grammar:grammar_schema_validator",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/config:config_modules",
@@ -90,12 +89,16 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/utils:profiling_scope",
-        "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
-        "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
     ] + select({
         "//:using_cuda": [
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
             "//rtp_llm/cpp/models/logits_processor/grammar_kernels:xgrammar_kernels",
+        ],
+        "@//:using_rocm": [
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
+            "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         ],
         "//conditions:default": [],
     }),

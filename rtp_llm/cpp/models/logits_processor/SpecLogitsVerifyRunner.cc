@@ -53,8 +53,13 @@ void SpecLogitsVerifyRunner::ensureBuffersFit(size_t total_streams,
     if (!spec_cap_cpu_.defined() || spec_cap_cpu_.numel() < B) {
         spec_cap_cpu_ = torch::empty({B}, pinned_i32);
     }
-#if USING_CUDA
+    // torch::kCUDA aliases the HIP device on ROCm builds, so the same code
+    // path allocates correctly on both platforms; only the apply-side differs
+    // (CUDA kernel vs ROCm torch-op fallback).
     auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    if (!spec_cap_gpu_.defined() || spec_cap_gpu_.numel() < B) {
+        spec_cap_gpu_ = torch::empty({B}, cuda_i32);
+    }
     if (!merged_bitmask_gpu_.defined() || merged_bitmask_gpu_.numel() < rows * W) {
         merged_bitmask_gpu_ = torch::empty({rows, W}, cuda_i32);
         // Mirror the CPU-realloc branch above: post-realloc invariant is
@@ -67,12 +72,6 @@ void SpecLogitsVerifyRunner::ensureBuffersFit(size_t total_streams,
         merged_bitmask_gpu_.copy_(merged_bitmask_cpu_.narrow(0, 0, rows).narrow(1, 0, W));
         last_active_stream_rows_.clear();
     }
-    if (!spec_cap_gpu_.defined() || spec_cap_gpu_.numel() < B) {
-        spec_cap_gpu_ = torch::empty({B}, cuda_i32);
-    }
-#else
-    (void)rows;
-#endif
 }
 
 void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task) {
@@ -152,9 +151,6 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
         request.bitmask_cpu_out    = proc_mask.data_ptr<int32_t>();
         request.bitmask_size_int32 = W;
         request.vocab_size         = V;
-        request.stream_id          = item.stream_id;
-        request.base_seq_len       = item.base_seq_len;
-        request.base_output_len    = item.base_output_len;
 
         int cap = item.processor->tryAcceptAndFillBitmask(request);
         cap     = std::max(0, std::min(cap, P));
@@ -170,7 +166,6 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
     if (!applied_processor) {
         // Sync prev-call rows back to GPU allow-all before bailing.
         last_active_stream_rows_.clear();
-#if USING_CUDA
         if (!rows_to_reset.empty()) {
             for (size_t row : rows_to_reset) {
                 auto cpu_slice = merged_bitmask_cpu_.narrow(0, row * (P + 1), P + 1).narrow(1, 0, W);
@@ -178,16 +173,17 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
                 gpu_slice.copy_(cpu_slice, /*non_blocking=*/true);
             }
         }
-#endif
         return {};
     }
 
-    auto cap_cpu = spec_cap_cpu_.narrow(0, 0, static_cast<int64_t>(B));
-#if USING_CUDA
+    auto cap_cpu  = spec_cap_cpu_.narrow(0, 0, static_cast<int64_t>(B));
     auto mask_gpu = merged_bitmask_gpu_.narrow(0, 0, static_cast<int64_t>(rows)).narrow(1, 0, static_cast<int64_t>(W));
     auto cap_gpu  = spec_cap_gpu_.narrow(0, 0, static_cast<int64_t>(B));
 
     // Upload only changed rows; H2D stays O(active streams), not O(B*(P+1)).
+    // torch::kCUDA aliases the HIP device on ROCm so this works on both
+    // platforms; consumers (CUDA kernel vs ROCm torch-op fallback) decide how
+    // to apply the packed bitmask.
     auto upload_row = [&](size_t row) {
         auto cpu_slice = merged_bitmask_cpu_.narrow(0, row * (P + 1), P + 1).narrow(1, 0, W);
         auto gpu_slice = merged_bitmask_gpu_.narrow(0, row * (P + 1), P + 1).narrow(1, 0, W);
@@ -208,10 +204,6 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
     result.has_active_processor      = true;
     result.spec_vocab_mask_cpu_owner = merged;
     result.spec_cap_cpu_owner        = cap_cpu;
-#else
-    (void)cap_cpu;
-    return {};
-#endif
     return result;
 }
 

@@ -4,7 +4,6 @@
 #include <cassert>
 #include <chrono>
 #include <functional>
-#include <future>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -131,11 +130,7 @@ XGrammarBackendOptions backendOptionsFromConfig(const GrammarConfig& cfg) {
     // <=0 = unlimited (passes -1 through to xgrammar). Bounding the byte cap
     // keeps adversarial unique-schema streams from pinning GBs in xgrammar's
     // internal compiler cache — the outer LRU only bounds entry count.
-    opts.compiler_cache_bytes  = cfg.compiler_cache_bytes > 0 ? cfg.compiler_cache_bytes : -1;
-    // Wire request-side wait cap from GrammarConfig. Without this, the field on
-    // GenerateConfig (set by --grammar_compile_timeout_ms) is silently dropped
-    // and complex schemas can pin the request thread indefinitely.
-    opts.compile_timeout_ms    = std::max<int64_t>(0, cfg.compile_timeout_ms);
+    opts.compiler_cache_bytes = cfg.compiler_cache_bytes > 0 ? cfg.compiler_cache_bytes : -1;
     if (!cfg.override_stop_tokens.empty()) {
         opts.override_stop_tokens = cfg.override_stop_tokens;
     }
@@ -177,14 +172,13 @@ XGrammarBackend::XGrammarBackend(const std::string& tokenizer_info_json, const X
               options.enable_compiler_cache,
               options.compiler_cache_bytes) {
     RTP_LLM_LOG_INFO("XGrammarBackend init: vocab_size=%d, any_whitespace=%d, strict_mode=%d, "
-                     "compiler_threads=%d, compiler_cache=%d, compiler_cache_bytes=%lld, compile_timeout_ms=%lld",
+                     "compiler_threads=%d, compiler_cache=%d, compiler_cache_bytes=%lld",
                      tokenizer_info_.GetVocabSize(),
                      static_cast<int>(options_.any_whitespace),
                      static_cast<int>(options_.strict_mode),
                      std::max(1, options_.max_compiler_threads),
                      static_cast<int>(options_.enable_compiler_cache),
-                     static_cast<long long>(options_.compiler_cache_bytes),
-                     static_cast<long long>(options_.compile_timeout_ms));
+                     static_cast<long long>(options_.compiler_cache_bytes));
 }
 
 XGrammarBackend::~XGrammarBackend() = default;
@@ -245,7 +239,22 @@ void XGrammarBackend::setCache(const GrammarKeyCpp& key, std::shared_ptr<xgramma
 }
 
 void XGrammarBackend::setCacheInvalid(const GrammarKeyCpp& key, const std::string& error_message) {
-    const std::string           kid = key.id();
+    // Mirror getOrCompile: oversize keys MUST NOT enter invalid_cache_. Otherwise N
+    // distinct >kMaxKeyStringBytes blobs would each cost ~2*key_size in the LRU
+    // before the byte cap evicts them, letting an attacker briefly inflate memory
+    // far above kMaxInvalidCacheBytes. This is the load-bearing invariant; guard
+    // here so callers can't violate it.
+    if (key.key_string.size() > kMaxKeyStringBytes) {
+        return;
+    }
+    const std::string kid = key.id();
+    std::string       err = error_message.size() > kMaxErrorMessageBytes ?
+                                error_message.substr(0, kMaxErrorMessageBytes) + "...[truncated]" :
+                                error_message;
+
+    // Each entry contributes one kid copy in the map key and one in the LRU node.
+    auto entry_bytes = [](size_t kid_size, size_t msg_size) { return 2 * kid_size + msg_size; };
+
     std::lock_guard<std::mutex> lock(cache_mutex_);
 
     // Drop any compiled entry for this key (now known invalid).
@@ -255,60 +264,66 @@ void XGrammarBackend::setCacheInvalid(const GrammarKeyCpp& key, const std::strin
     }
 
     if (auto it = invalid_cache_.find(kid); it != invalid_cache_.end()) {
-        it->second.error_message = error_message;
+        invalid_cache_bytes_ -= entry_bytes(kid.size(), it->second.error_message.size());
+        it->second.error_message = std::move(err);
+        invalid_cache_bytes_ += entry_bytes(kid.size(), it->second.error_message.size());
         invalid_lru_.splice(invalid_lru_.begin(), invalid_lru_, it->second.lru_it);
     } else {
         invalid_lru_.push_front(kid);
-        invalid_cache_[kid] = InvalidEntry{error_message, invalid_lru_.begin()};
+        invalid_cache_bytes_ += entry_bytes(kid.size(), err.size());
+        invalid_cache_[kid] = InvalidEntry{std::move(err), invalid_lru_.begin()};
     }
 
-    while (invalid_cache_.size() > kMaxInvalidCacheEntries) {
-        const std::string victim = invalid_lru_.back();
+    // Evict on EITHER cap; bytes is the load-bearing one for memory safety.
+    while (invalid_cache_.size() > kMaxInvalidCacheEntries || invalid_cache_bytes_ > kMaxInvalidCacheBytes) {
+        const std::string victim = std::move(invalid_lru_.back());
         invalid_lru_.pop_back();
-        invalid_cache_.erase(victim);
+        auto vit = invalid_cache_.find(victim);
+        invalid_cache_bytes_ -= entry_bytes(victim.size(), vit->second.error_message.size());
+        invalid_cache_.erase(vit);
     }
 }
 
 // Thread-safe via xgrammar::GrammarCompiler's internal cache.
 CompileResult XGrammarBackend::compileNow(const GrammarKeyCpp& key) {
-    const auto t_start = std::chrono::steady_clock::now();
-
-    // Schema rejection → is_invalid=true (cacheable); system errors retain retry semantics.
-    auto compileWith = [](auto&& fn) -> CompileResult {
-        CompileResult out;
-        try {
-            out.compiled = std::make_shared<xgrammar::CompiledGrammar>(fn());
-        } catch (const std::bad_alloc& e) {
-            out.is_invalid    = false;
-            out.error_message = std::string("system error (retryable): ") + e.what();
-        } catch (const std::runtime_error& e) {
-            out.is_invalid    = true;
-            out.error_message = e.what();
-        } catch (const std::exception& e) {
-            out.is_invalid    = false;
-            out.error_message = std::string("unexpected error (retryable): ") + e.what();
-        }
-        return out;
-    };
-
+    const auto    t_start = std::chrono::steady_clock::now();
+    const auto&   s       = key.key_string;
     CompileResult result;
-    const auto&   s = key.key_string;
+
+    // Pick the underlying xgrammar call once; one try/catch covers all four key_types.
+    // Schema rejection → is_invalid=true (cacheable); system errors retain retry semantics.
+    std::function<xgrammar::CompiledGrammar()> do_compile;
     if (key.key_type == "json") {
         // "$$ANY$$" → any JSON value (response_format=json_object).
-        result = compileWith([&] {
+        do_compile = [&] {
             return s == "$$ANY$$" ? compiler_.CompileBuiltinJSONGrammar() :
                                     compiler_.CompileJSONSchema(
                                         s, options_.any_whitespace, std::nullopt, std::nullopt, options_.strict_mode);
-        });
+        };
     } else if (key.key_type == "regex") {
-        result = compileWith([&] { return compiler_.CompileRegex(s); });
+        do_compile = [&] { return compiler_.CompileRegex(s); };
     } else if (key.key_type == "ebnf") {
-        result = compileWith([&] { return compiler_.CompileGrammar(s); });
+        do_compile = [&] { return compiler_.CompileGrammar(s); };
     } else if (key.key_type == "structural_tag") {
-        result = compileWith([&] { return compiler_.CompileStructuralTag(sanitizeStructuralTag(s)); });
+        do_compile = [&] { return compiler_.CompileStructuralTag(sanitizeStructuralTag(s)); };
     } else {
         result.is_invalid    = true;
         result.error_message = "Unknown grammar key_type: " + key.key_type;
+    }
+
+    if (do_compile) {
+        try {
+            result.compiled = std::make_shared<xgrammar::CompiledGrammar>(do_compile());
+        } catch (const std::bad_alloc& e) {
+            result.is_invalid    = false;
+            result.error_message = std::string("system error (retryable): ") + e.what();
+        } catch (const std::runtime_error& e) {
+            result.is_invalid    = true;
+            result.error_message = e.what();
+        } catch (const std::exception& e) {
+            result.is_invalid    = false;
+            result.error_message = std::string("unexpected error (retryable): ") + e.what();
+        }
     }
 
     const auto elapsed_ms =
@@ -330,18 +345,26 @@ CompileResult XGrammarBackend::compileNow(const GrammarKeyCpp& key) {
     return result;
 }
 
-// Singleflight: cache hit returns instantly; misses dedup onto an in-flight compile.
-// The compile always runs in a detached background thread; the request thread waits
-// on the shared_future for up to compile_timeout_ms (0 = wait forever, legacy).
-// On request-side timeout, the background compile keeps running and eventually
-// populates the cache; the next request for this key sees it cached or in-flight.
+// Synchronous: cache hit returns instantly; misses compile inline on the calling
+// thread, then publish to the LRU caches. Two callers racing on the same fresh
+// key may each compile, but xgrammar::GrammarCompiler dedups identical grammars
+// in its own cache so the duplicate work is bounded; both observe consistent
+// compiled artifacts afterwards via setCache's last-writer-wins semantics.
 CompileResult XGrammarBackend::getOrCompile(const GrammarKeyCpp& key) {
-    const std::string kid = key.id();
+    // Reject oversize payloads before they touch the cache or compiler. Treat
+    // as is_invalid (request-level error) but do NOT enter invalid_cache_,
+    // otherwise an attacker could fill the cache with N distinct >64KB blobs.
+    if (key.key_string.size() > kMaxKeyStringBytes) {
+        CompileResult result;
+        result.is_invalid    = true;
+        result.error_message = "grammar key_string too large: " + std::to_string(key.key_string.size())
+                               + " bytes (limit " + std::to_string(kMaxKeyStringBytes) + ")";
+        return result;
+    }
 
-    std::shared_future<CompileResult> wait_on;
+    const std::string kid = key.id();
     {
         std::lock_guard<std::mutex> lock(cache_mutex_);
-
         // Cache hit (touch LRU).
         if (auto it = cache_.find(kid); it != cache_.end()) {
             cache_lru_.splice(cache_lru_.begin(), cache_lru_, it->second.lru_it);
@@ -357,108 +380,35 @@ CompileResult XGrammarBackend::getOrCompile(const GrammarKeyCpp& key) {
             result.error_message = it->second.error_message;
             return result;
         }
-        // Singleflight subscribe.
-        if (auto it = in_flight_.find(kid); it != in_flight_.end() && it->second.valid()) {
-            wait_on = it->second;
-        } else {
-            auto promise = std::make_shared<std::promise<CompileResult>>();
-            wait_on      = promise->get_future().share();
-            in_flight_.emplace(kid, wait_on);
-
-            // Detach: caller must not block on this thread, only on `wait_on`. The
-            // compile is short-lived on legitimate inputs; on adversarial schemas it
-            // outlives the originating request but is bounded by xgrammar's own
-            // worker pool. Capture `this` — backend is a long-lived engine singleton.
-            try {
-                std::thread([this, key, kid, promise]() mutable {
-                    CompileResult result;
-                    try {
-                        result = compileNow(key);
-                    } catch (const std::exception& e) {
-                        result.compiled      = nullptr;
-                        result.is_invalid    = false;
-                        result.error_message = std::string("getOrCompile: unexpected throw: ") + e.what();
-                    } catch (...) {
-                        result.compiled      = nullptr;
-                        result.is_invalid    = false;
-                        result.error_message = "getOrCompile: unknown throw";
-                    }
-
-                    {
-                        std::lock_guard<std::mutex> lock(cache_mutex_);
-                        if (result.compiled) {
-                            if (auto iit = invalid_cache_.find(kid); iit != invalid_cache_.end()) {
-                                invalid_lru_.erase(iit->second.lru_it);
-                                invalid_cache_.erase(iit);
-                            }
-                            cache_lru_.push_front(kid);
-                            cache_[kid] = CompiledEntry{result.compiled, cache_lru_.begin()};
-                            while (cache_.size() > kMaxCompiledCacheEntries) {
-                                const std::string victim = cache_lru_.back();
-                                cache_lru_.pop_back();
-                                cache_.erase(victim);
-                            }
-                        } else if (result.is_invalid) {
-                            if (auto cit = cache_.find(kid); cit != cache_.end()) {
-                                cache_lru_.erase(cit->second.lru_it);
-                                cache_.erase(cit);
-                            }
-                            invalid_lru_.push_front(kid);
-                            invalid_cache_[kid] = InvalidEntry{result.error_message, invalid_lru_.begin()};
-                            while (invalid_cache_.size() > kMaxInvalidCacheEntries) {
-                                const std::string victim = invalid_lru_.back();
-                                invalid_lru_.pop_back();
-                                invalid_cache_.erase(victim);
-                            }
-                        }
-                    }
-
-                    // Publish result before erasing in_flight: late subscribers either
-                    // find the cache populated above or block briefly on the future.
-                    try {
-                        promise->set_value(result);
-                    } catch (const std::future_error&) {
-                        // already-satisfied — ignore.
-                    }
-                    {
-                        std::lock_guard<std::mutex> lock(cache_mutex_);
-                        in_flight_.erase(kid);
-                    }
-                }).detach();
-            } catch (const std::exception& e) {
-                // singleflight invariant: a registered in_flight entry must end with
-                // set_value/set_exception + erase. Thread ctor throw (EAGAIN/NPROC)
-                // breaks both — without this, the slot poisons future callers for
-                // the same kid until process restart.
-                in_flight_.erase(kid);
-                try {
-                    promise->set_exception(std::make_exception_ptr(std::runtime_error(
-                        std::string("XGrammarBackend: failed to dispatch compile thread: ") + e.what())));
-                } catch (const std::future_error&) {}
-                RTP_LLM_LOG_ERROR("XGrammarBackend: thread dispatch failed for key=%s: %s",
-                                  key.brief().c_str(),
-                                  e.what());
-            }
-        }
     }
 
-    if (options_.compile_timeout_ms > 0) {
-        const auto status = wait_on.wait_for(std::chrono::milliseconds(options_.compile_timeout_ms));
-        if (status != std::future_status::ready) {
-            CompileResult tmo;
-            tmo.timed_out     = true;
-            tmo.error_message = "grammar compile exceeded compile_timeout_ms="
-                                + std::to_string(options_.compile_timeout_ms) + " (key=" + key.brief() + ")";
-            RTP_LLM_LOG_WARNING("XGrammarBackend getOrCompile timeout: %s", tmo.error_message.c_str());
-            return tmo;
-        }
+    // Compile outside cache_mutex_ — xgrammar takes its own internal locks and
+    // can be slow on adversarial schemas; holding cache_mutex_ across it would
+    // block every other reader, including cache hits.
+    CompileResult result;
+    try {
+        result = compileNow(key);
+    } catch (const std::exception& e) {
+        result.compiled      = nullptr;
+        result.is_invalid    = false;
+        result.error_message = std::string("getOrCompile: unexpected throw: ") + e.what();
+    } catch (...) {
+        result.compiled      = nullptr;
+        result.is_invalid    = false;
+        result.error_message = "getOrCompile: unknown throw";
     }
-    return wait_on.get();
+
+    if (result.compiled) {
+        setCache(key, result.compiled);
+    } else if (result.is_invalid) {
+        setCacheInvalid(key, result.error_message);
+    }
+    return result;
 }
 
 std::shared_ptr<RtpGrammarMatcher> XGrammarBackend::createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
-                                                                  bool                                       require_reasoning,
-                                                                  std::optional<std::vector<int>>            think_end_token_ids,
+                                                                  bool                            require_reasoning,
+                                                                  std::optional<std::vector<int>> think_end_token_ids,
                                                                   bool terminate_without_stop_token) {
     assert(compiled && "createMatcher requires a non-null CompiledGrammar");
     return std::make_shared<RtpGrammarMatcher>(std::move(compiled),
@@ -475,8 +425,7 @@ void XGrammarBackend::clear() {
         invalid_cache_.clear();
         cache_lru_.clear();
         invalid_lru_.clear();
-        // in_flight_ left untouched: stomping it would orphan waiters; entries
-        // self-erase as their compiles complete.
+        invalid_cache_bytes_ = 0;
     }
     compiler_.ClearCache();
     RTP_LLM_LOG_INFO("XGrammarBackend clear: caches dropped");
