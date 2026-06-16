@@ -459,7 +459,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reco_client_config,
                                       self.ssm_state_dtype,
                                       self.dsv4_fixed_pool_blocks,
-                                      false,
                                       self.dsv4_hca_state_pool_blocks,
                                       self.enable_gpu_prefix_tree,
                                       self.enable_prefix_tree_memory_cache,
@@ -470,9 +469,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             [](py::tuple t) {
                 const bool has_disk_fields =
                     t.size() >= 50 && py::isinstance<py::str>(t[9]);
-                const size_t min_size = has_disk_fields ? 50u : 45u;
-                if (t.size() < min_size)
+                const size_t expected_size = has_disk_fields ? 56u : 51u;
+                if (t.size() != expected_size) {
                     throw std::runtime_error("Invalid state!");
+                }
                 KVCacheConfig c;
                 try {
                     c.reuse_cache                  = t[0].cast<bool>();
@@ -529,30 +529,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.reco_client_config                   = t[42 + offset].cast<std::string>();
                     c.ssm_state_dtype                      = t[43 + offset].cast<std::string>();
                     c.dsv4_fixed_pool_blocks               = t[44 + offset].cast<uint32_t>();
-                    // Tuple slot 45 used to carry the removed DSV4 fixed-pool memory flag. Keep it
-                    // reserved for pickle compatibility, but ignore it because fixed/state pools no
-                    // longer support pinned CPU backing.
-                    const size_t extra_start = 46 + offset;
-                    if (t.size() > extra_start) {
-                        const size_t extra_count = t.size() - extra_start;
-                        if (extra_count == 1 || extra_count >= 4) {
-                            c.dsv4_hca_state_pool_blocks = t[extra_start].cast<uint32_t>();
-                        }
-                        if (extra_count == 3) {
-                            c.enable_gpu_prefix_tree                  = t[extra_start].cast<bool>();
-                            c.enable_prefix_tree_memory_cache         = t[extra_start + 1].cast<bool>();
-                            c.enable_legacy_memory_connector_fallback = t[extra_start + 2].cast<bool>();
-                        } else if (extra_count >= 4) {
-                            c.enable_gpu_prefix_tree                  = t[extra_start + 1].cast<bool>();
-                            c.enable_prefix_tree_memory_cache         = t[extra_start + 2].cast<bool>();
-                            c.enable_legacy_memory_connector_fallback = t[extra_start + 3].cast<bool>();
-                            if (extra_count >= 6) {
-                                c.prefix_tree_memory_state_swa_pool_ratio = t[extra_start + 4].cast<int64_t>();
-                                c.enable_dsv4_state_block_independent_eviction =
-                                    t[extra_start + 5].cast<bool>();
-                            }
-                        }
-                    }
+                    const size_t extra_start                  = 45 + offset;
+                    c.dsv4_hca_state_pool_blocks              = t[extra_start].cast<uint32_t>();
+                    c.enable_gpu_prefix_tree                  = t[extra_start + 1].cast<bool>();
+                    c.enable_prefix_tree_memory_cache         = t[extra_start + 2].cast<bool>();
+                    c.enable_legacy_memory_connector_fallback = t[extra_start + 3].cast<bool>();
+                    c.prefix_tree_memory_state_swa_pool_ratio = t[extra_start + 4].cast<int64_t>();
+                    c.enable_dsv4_state_block_independent_eviction =
+                        t[extra_start + 5].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }
