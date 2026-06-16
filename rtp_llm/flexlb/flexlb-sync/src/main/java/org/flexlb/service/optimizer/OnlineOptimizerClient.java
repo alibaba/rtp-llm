@@ -51,6 +51,11 @@ public class OnlineOptimizerClient {
     private static final double BACKOFF_MULTIPLIER = 2.0;
     private static final long JITTER_BOUND_MS = 2000;
 
+    private static final String PATH_GET_INSTANCE = "/getInstance";
+    private static final String PATH_REGISTER_INSTANCE = "/registerInstance";
+    private static final String PATH_REMOVE_INSTANCE = "/removeInstance";
+    private static final String PATH_TRACE_QUERY = "/traceQuery";
+
     public OnlineOptimizerClient(GeneralHttpNettyService httpService,
                                  OptimizerAddressResolver addressResolver,
                                  String instanceGroup,
@@ -161,17 +166,24 @@ public class OnlineOptimizerClient {
         req.setTraceId(IdUtils.fastUuid());
         req.setInstanceId(instanceId);
 
-        OptimizerGetInstanceResponse resp = httpService.request(
-                req, optimizerUri, basePath + "/getInstance",
-                OptimizerGetInstanceResponse.class
-        ).block(Duration.ofMillis(registerTimeoutMs));
+        OptimizerGetInstanceResponse resp;
+        try {
+            resp = httpService.request(
+                    req, optimizerUri, basePath + PATH_GET_INSTANCE,
+                    OptimizerGetInstanceResponse.class
+            ).block(Duration.ofMillis(registerTimeoutMs));
+        } catch (Exception e) {
+            // HTTP non-200 (e.g. 404 instance not found) throws RuntimeException from GeneralHttpNettyService.
+            // Treat as "instance does not exist" so registration can proceed.
+            log.info("OnlineOptimizer getInstance request failed (treat as not found): {}", e.getMessage());
+            return null;
+        }
 
         if (resp == null) {
             log.warn("OnlineOptimizer getInstance returned null, instanceId={}", instanceId);
             return null;
         }
         if (!isOkHeader(resp.getHeader())) {
-            // Non-OK or malformed response: treat as not found, register flow will retry on its own check.
             log.info("OnlineOptimizer getInstance returned non-OK status code={}, instanceId={}",
                     extractStatusCode(resp.getHeader()), instanceId);
             return null;
@@ -185,7 +197,7 @@ public class OnlineOptimizerClient {
         req.setInstanceId(instanceId);
 
         OptimizerRemoveInstanceResponse resp = httpService.request(
-                req, optimizerUri, basePath + "/removeInstance",
+                req, optimizerUri, basePath + PATH_REMOVE_INSTANCE,
                 OptimizerRemoveInstanceResponse.class
         ).block(Duration.ofMillis(registerTimeoutMs));
 
@@ -215,7 +227,7 @@ public class OnlineOptimizerClient {
         req.setFullGroupName(params.getFullGroupName());
 
         OptimizerRegisterResponse resp = httpService.request(
-                req, optimizerUri, basePath + "/registerInstance",
+                req, optimizerUri, basePath + PATH_REGISTER_INSTANCE,
                 OptimizerRegisterResponse.class
         ).block(Duration.ofMillis(registerTimeoutMs));
 
@@ -252,7 +264,7 @@ public class OnlineOptimizerClient {
             req.setInstanceId(instanceId);
             req.setBlockKeys(blockCacheKeys);
 
-            httpService.request(req, uri, basePath + "/traceQuery",
+            httpService.request(req, uri, basePath + PATH_TRACE_QUERY,
                             OptimizerTraceQueryResponse.class)
                     .subscribe(
                             resp -> {},
@@ -301,11 +313,10 @@ public class OnlineOptimizerClient {
     private static boolean isOkHeader(CommonResponseHeader header) {
         return header != null
                 && header.getStatus() != null
-                && header.getStatus().getCode() == 1;
+                && header.getStatus().isOk();
     }
 
-    private static Integer extractStatusCode(CommonResponseHeader header) {
-        // null means header/status absent; avoids colliding with a real -1 from server.
+    private static Object extractStatusCode(CommonResponseHeader header) {
         if (header == null || header.getStatus() == null) return null;
         return header.getStatus().getCode();
     }
