@@ -124,8 +124,16 @@ public class EngineSyncRunner implements Runnable {
                     roleType, latestEngineWorkerList.size());
 
         } catch (ServiceDiscoveryException e) {
-            // Already reported by WorkerAddressService; skip the round and keep the
-            // previous worker state until discovery recovers.
+            // Already reported by WorkerAddressService; skip the round and keep the previous worker
+            // state until discovery recovers. A failed round can neither enumerate nor probe
+            // workers, so refresh the staleness clock of the ones already known — otherwise the
+            // independent ExpirationCleaner (and the stale-worker sweep above) would evict a healthy
+            // fleet within one worker-timeout window just because discovery briefly hiccuped. Aging
+            // resumes from the next successful round.
+            long nowUs = System.nanoTime() / 1000;
+            for (WorkerStatus workerStatus : workerStatusMap.values()) {
+                workerStatus.getStatusLastUpdateTime().set(nowUs);
+            }
             logger.error("service discovery failed, keeping previous worker state, model={}, role={}, error:{}",
                     modelName, roleType, e.getMessage());
         } catch (Exception e) {

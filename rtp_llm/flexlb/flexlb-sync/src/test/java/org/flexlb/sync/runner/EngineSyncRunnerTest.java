@@ -219,6 +219,28 @@ class EngineSyncRunnerTest {
     }
 
     @Test
+    void discovery_failure_refreshes_staleness_clock_so_workers_survive_expiration() {
+        WorkerStatus alive = new WorkerStatus();
+        alive.setIp("10.0.0.9");
+        alive.setPort(23950);
+        alive.setAlive(true);
+        alive.getStatusLastUpdateTime().set(1L);
+        workerStatusMap.put("10.0.0.9:23950", alive);
+
+        when(workerAddressService.getEngineWorkerList(modelName, roleType))
+                .thenThrow(new ServiceDiscoveryException(
+                        BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, "vipserver down", null));
+
+        long beforeUs = System.nanoTime() / 1000;
+        engineSyncRunner.run();
+
+        assertTrue(workerStatusMap.containsKey("10.0.0.9:23950"));
+        assertTrue(alive.getStatusLastUpdateTime().get() >= beforeUs,
+                "a failed discovery round must refresh the retained workers' staleness clock so the "
+                        + "independent ExpirationCleaner does not evict a healthy fleet during a discovery outage");
+    }
+
+    @Test
     void embedding_engine_skips_variance_reporting() {
         // Embedding workers are never probed, so stepLatency/runningQueueTime stay 0 and
         // the variance is identically 0 — reporting it would only pollute monitoring.
