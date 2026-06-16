@@ -6,7 +6,10 @@ import unittest
 from typing import Dict
 from unittest.mock import MagicMock, patch
 
+from rtp_llm.config.generate_config import RoleType
 from rtp_llm.server.host_service import FlexlbHeartbeatInfo
+from rtp_llm.server.host_service import HostService
+from rtp_llm.server.host_service import HostServiceArgs
 from rtp_llm.server.host_service import MasterService
 from rtp_llm.vipserver.host import Host
 
@@ -350,6 +353,28 @@ class TestMasterService(unittest.TestCase):
 
         self.assertNotIn("10.0.0.1:8000", svc.get_host_health_status())
         self.assertIsNone(svc.get_master_addr())
+
+
+class TestHostService(unittest.TestCase):
+    def test_backend_role_candidates_rotate_from_rr_cursor(self):
+        with patch("rtp_llm.server.host_service.threading.Thread") as mock_thread_cls:
+            mock_thread_cls.return_value.start = MagicMock()
+            svc = HostService(
+                HostServiceArgs(
+                    prefill_domain="10.0.0.1:8000,10.0.0.2:8000,10.0.0.3:8000",
+                    use_local=True,
+                )
+            )
+
+        first = svc.get_backend_role_addr_candidates(RoleType.PREFILL)
+        second = svc.get_backend_role_addr_candidates(RoleType.PREFILL)
+
+        self.assertEqual(
+            [addr.ip for addr in first], ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+        )
+        self.assertEqual(
+            [addr.ip for addr in second], ["10.0.0.2", "10.0.0.3", "10.0.0.1"]
+        )
 
 
 if __name__ == "__main__":

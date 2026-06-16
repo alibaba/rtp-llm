@@ -149,6 +149,14 @@ class VipServerWrapper:
             hosts = get_hosts(self.domain)
         return hosts if hosts else []
 
+    def get_host_candidates(self, refresh: bool = False) -> List[Host]:
+        hosts = self.get_hosts(refresh)
+        if not hosts:
+            return []
+        cur_idx = self.cnt % len(hosts)
+        self.cnt += 1
+        return hosts[cur_idx:] + hosts[:cur_idx]
+
 
 class EndPoint(BaseModel):
     type: str
@@ -627,3 +635,19 @@ class HostService:
             if role_addr:
                 role_addrs.append(role_addr)
         return role_addrs
+
+    def get_backend_role_addr_candidates(
+        self, role: RoleType, refresh: bool = False
+    ) -> List[RoleAddr]:
+        vip = self.role_vip_map.get(role)
+        if vip is None:
+            return []
+        return [
+            RoleAddr(
+                role=role,
+                ip=host.ip,
+                grpc_port=int(host.port) + 1,
+                http_port=int(host.port),
+            )
+            for host in vip.get_host_candidates(refresh)
+        ]

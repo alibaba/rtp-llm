@@ -172,6 +172,98 @@ class BackendRPCServerVisitorRetryTest(unittest.TestCase):
         no_worker.rtp_error_code = int(ExceptionType.MASTER_NO_AVAILABLE_WORKER)
         self.assertTrue(BackendRPCServerVisitor._is_retryable_route_rpc_error(no_worker))
 
+    def test_backend_service_ready_requires_configured_master(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.backend_role_list = [RoleType.PREFILL]
+        ready_addr = RoleAddr(
+            role=RoleType.PREFILL, ip="10.0.0.1", http_port=100, grpc_port=101
+        )
+
+        class _HostService:
+            master_vip = SimpleNamespace(domain="master.vip")
+
+            def get_master_addr(self):
+                return None
+
+            def get_backend_role_addrs(self, _roles, refresh=False):
+                return [ready_addr]
+
+        visitor.host_service = _HostService()
+
+        self.assertFalse(visitor.is_backend_service_ready(refresh=True))
+
+    def test_backend_service_ready_tolerates_master_flap_after_first_ready(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.backend_role_list = [RoleType.PREFILL]
+        ready_addr = RoleAddr(
+            role=RoleType.PREFILL, ip="10.0.0.1", http_port=100, grpc_port=101
+        )
+
+        class _HostService:
+            master_vip = SimpleNamespace(domain="master.vip")
+
+            def __init__(self):
+                self.master_addr = "10.0.0.9:7001"
+
+            def get_master_addr(self):
+                return self.master_addr
+
+            def get_backend_role_addrs(self, _roles, refresh=False):
+                return [ready_addr]
+
+        host_service = _HostService()
+        visitor.host_service = host_service
+
+        self.assertTrue(visitor.is_backend_service_ready(refresh=False))
+        host_service.master_addr = None
+        self.assertTrue(visitor.is_backend_service_ready(refresh=False))
+
+    def test_backend_service_ready_allows_deployment_without_master_domain(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.backend_role_list = [RoleType.PREFILL]
+        ready_addr = RoleAddr(
+            role=RoleType.PREFILL, ip="10.0.0.1", http_port=100, grpc_port=101
+        )
+
+        class _HostService:
+            master_vip = SimpleNamespace(domain="")
+
+            def get_master_addr(self):
+                return None
+
+            def get_backend_role_addrs(self, _roles, refresh=False):
+                return [ready_addr]
+
+        visitor.host_service = _HostService()
+
+        self.assertTrue(visitor.is_backend_service_ready(refresh=False))
+
+    def test_backend_service_ready_uses_refreshed_role_discovery(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.backend_role_list = [RoleType.PREFILL]
+        ready_addr = RoleAddr(
+            role=RoleType.PREFILL, ip="10.0.0.1", http_port=100, grpc_port=101
+        )
+
+        class _HostService:
+            master_vip = SimpleNamespace(domain="master.vip")
+
+            def __init__(self):
+                self.refresh_calls = []
+
+            def get_master_addr(self):
+                return "10.0.0.9:7001"
+
+            def get_backend_role_addrs(self, _roles, refresh=False):
+                self.refresh_calls.append(refresh)
+                return [ready_addr]
+
+        host_service = _HostService()
+        visitor.host_service = host_service
+
+        self.assertTrue(visitor.is_backend_service_ready(refresh=True))
+        self.assertEqual(host_service.refresh_calls, [True])
+
 
 class BackendRPCServerVisitorEnqueueRetryTest(unittest.IsolatedAsyncioTestCase):
     async def test_enqueue_does_not_retry_when_request_disables_pd_route_retry(self):
@@ -427,6 +519,194 @@ class BackendRPCServerVisitorEnqueueRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.calls, 2)
         self.assertEqual(client.seen_role_addrs, [[stale_addr], [fresh_addr]])
         self.assertEqual(input.generate_config.role_addrs, [fresh_addr])
+
+    async def test_enqueue_retry_searches_candidates_for_each_pd_role(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.max_seq_len = 10
+        visitor.sp_config = None
+        visitor.pd_route_retry_on_unavailable = 1
+        visitor.fill_request_info = lambda _input: None
+        visitor.backend_role_list = [RoleType.PREFILL, RoleType.DECODE]
+
+        stale_prefill = RoleAddr(
+            role=RoleType.PREFILL, ip="10.0.0.1", http_port=100, grpc_port=101
+        )
+        fresh_prefill = RoleAddr(
+            role=RoleType.PREFILL, ip="10.0.0.2", http_port=100, grpc_port=101
+        )
+        stale_decode = RoleAddr(
+            role=RoleType.DECODE, ip="10.0.0.3", http_port=300, grpc_port=301
+        )
+        fresh_decode = RoleAddr(
+            role=RoleType.DECODE, ip="10.0.0.4", http_port=300, grpc_port=301
+        )
+
+        async def route_ips(input):
+            input.generate_config.role_addrs = [stale_prefill, stale_decode]
+
+        visitor.route_ips = route_ips
+
+        class _HostService:
+            service_available = True
+
+            def get_backend_role_addrs(self, _roles, refresh=False):
+                return []
+
+            def get_backend_role_addr_candidates(self, role, refresh=False):
+                if role == RoleType.PREFILL:
+                    return [stale_prefill, fresh_prefill]
+                if role == RoleType.DECODE:
+                    return [stale_decode, fresh_decode]
+                return []
+
+        visitor.host_service = _HostService()
+
+        class _FlakyModelRpcClient:
+            def __init__(self):
+                self.calls = 0
+                self.seen_role_addrs = []
+
+            def enqueue(self, input):
+                self.calls += 1
+                self.seen_role_addrs.append(list(input.generate_config.role_addrs))
+                if self.calls == 1:
+                    raise RuntimeError("StatusCode.UNAVAILABLE")
+
+                async def empty_stream():
+                    if False:
+                        yield None
+
+                return empty_stream()
+
+        client = _FlakyModelRpcClient()
+        visitor.model_rpc_client = client
+
+        input = _FakeInput()
+        stream = await visitor.enqueue(input)
+        async for _ in stream:
+            pass
+
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(
+            client.seen_role_addrs,
+            [[stale_prefill, stale_decode], [fresh_prefill, fresh_decode]],
+        )
+        self.assertEqual(
+            input.generate_config.role_addrs, [fresh_prefill, fresh_decode]
+        )
+
+    async def test_enqueue_retry_searches_role_candidates_after_failed_addr(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.max_seq_len = 10
+        visitor.sp_config = None
+        visitor.pd_route_retry_on_unavailable = 1
+        visitor.fill_request_info = lambda _input: None
+        visitor.backend_role_list = [RoleType.PREFILL]
+
+        stale_addr = RoleAddr(
+            role=RoleType.PREFILL, ip="10.0.0.1", http_port=100, grpc_port=101
+        )
+        fresh_addr = RoleAddr(
+            role=RoleType.PREFILL, ip="10.0.0.2", http_port=100, grpc_port=101
+        )
+
+        async def route_ips(input):
+            input.generate_config.role_addrs = [stale_addr]
+
+        visitor.route_ips = route_ips
+
+        class _HostService:
+            service_available = True
+
+            def __init__(self):
+                self.refresh_calls = []
+
+            def get_backend_role_addrs(self, _roles, refresh=False):
+                return [stale_addr]
+
+            def get_backend_role_addr_candidates(self, _role, refresh=False):
+                self.refresh_calls.append(refresh)
+                return [stale_addr, fresh_addr]
+
+        host_service = _HostService()
+        visitor.host_service = host_service
+
+        class _FlakyModelRpcClient:
+            def __init__(self):
+                self.calls = 0
+                self.seen_role_addrs = []
+
+            def enqueue(self, input):
+                self.calls += 1
+                self.seen_role_addrs.append(list(input.generate_config.role_addrs))
+                if self.calls == 1:
+                    raise RuntimeError("StatusCode.UNAVAILABLE")
+
+                async def empty_stream():
+                    if False:
+                        yield None
+
+                return empty_stream()
+
+        client = _FlakyModelRpcClient()
+        visitor.model_rpc_client = client
+
+        input = _FakeInput()
+        stream = await visitor.enqueue(input)
+        async for _ in stream:
+            pass
+
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(client.seen_role_addrs, [[stale_addr], [fresh_addr]])
+        self.assertEqual(host_service.refresh_calls, [True])
+        self.assertEqual(input.generate_config.role_addrs, [fresh_addr])
+
+    async def test_enqueue_retry_rejects_when_all_candidates_were_failed(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.max_seq_len = 10
+        visitor.sp_config = None
+        visitor.pd_route_retry_on_unavailable = 1
+        visitor.fill_request_info = lambda _input: None
+        visitor.backend_role_list = [RoleType.PREFILL]
+
+        stale_addr = RoleAddr(
+            role=RoleType.PREFILL, ip="10.0.0.1", http_port=100, grpc_port=101
+        )
+
+        async def route_ips(input):
+            input.generate_config.role_addrs = [stale_addr]
+
+        visitor.route_ips = route_ips
+
+        class _HostService:
+            service_available = True
+
+            def get_backend_role_addrs(self, _roles, refresh=False):
+                return [stale_addr]
+
+            def get_backend_role_addr_candidates(self, _role, refresh=False):
+                return [stale_addr]
+
+        visitor.host_service = _HostService()
+
+        class _FailOnceModelRpcClient:
+            calls = 0
+
+            def enqueue(self, _input):
+                self.calls += 1
+                raise RuntimeError("StatusCode.UNAVAILABLE")
+
+        client = _FailOnceModelRpcClient()
+        visitor.model_rpc_client = client
+
+        stream = await visitor.enqueue(_FakeInput())
+        with self.assertRaises(FtRuntimeException) as ctx:
+            async for _ in stream:
+                pass
+
+        self.assertEqual(ctx.exception.exception_type, ExceptionType.ROUTE_ERROR)
+        self.assertIn("no backend role addresses", str(ctx.exception))
+        self.assertEqual(client.calls, 1)
 
     async def test_enqueue_retry_rejects_incomplete_filtered_domain_route(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)

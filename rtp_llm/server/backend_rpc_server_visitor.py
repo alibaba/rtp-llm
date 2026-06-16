@@ -117,6 +117,7 @@ class BackendRPCServerVisitor:
             server_config=server_config,
             master_config=master_config,
         )
+        self._master_route_seen_ready = False
         self.recent_cache_key_window = RecentCacheKeyWindow()
         self.pd_route_retry_on_unavailable = self._pd_route_retry_on_unavailable()
 
@@ -342,15 +343,28 @@ class BackendRPCServerVisitor:
         missing_roles = [
             role for role in self.backend_role_list if role not in specified_roles
         ]
-        role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
-            missing_roles, refresh=refresh
-        )
-        if excluded_role_addrs:
-            role_addrs = [
-                role_addr
-                for role_addr in role_addrs
-                if self._role_addr_key(role_addr) not in excluded_role_addrs
-            ]
+        if excluded_role_addrs and hasattr(
+            self.host_service, "get_backend_role_addr_candidates"
+        ):
+            role_addrs: List[RoleAddr] = []
+            for role in missing_roles:
+                role_candidates = self.host_service.get_backend_role_addr_candidates(
+                    role, refresh=refresh
+                )
+                for role_addr in role_candidates:
+                    if self._role_addr_key(role_addr) not in excluded_role_addrs:
+                        role_addrs.append(role_addr)
+                        break
+        else:
+            role_addrs = self.host_service.get_backend_role_addrs(
+                missing_roles, refresh=refresh
+            )
+            if excluded_role_addrs:
+                role_addrs = [
+                    role_addr
+                    for role_addr in role_addrs
+                    if self._role_addr_key(role_addr) not in excluded_role_addrs
+                ]
         if role_addrs:
             input.generate_config.role_addrs.extend(role_addrs)
             route_logger.warning(
@@ -643,6 +657,13 @@ class BackendRPCServerVisitor:
         return stream_with_aux_info()
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
+        master_vip = getattr(self.host_service, "master_vip", None)
+        if getattr(master_vip, "domain", ""):
+            if self.host_service.get_master_addr():
+                self._master_route_seen_ready = True
+            elif not getattr(self, "_master_route_seen_ready", False):
+                logging.debug("master route service has not become ready yet")
+                return False
         roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             self.backend_role_list, refresh
         )
