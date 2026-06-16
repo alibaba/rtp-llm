@@ -115,22 +115,22 @@ void HybridConfigCreator::prepareFullAttentionSpec(KVCacheSpecPtr            spe
         auto* mla_spec = dynamic_cast<MLAKVCacheSpec*>(spec.get());
         RTP_LLM_CHECK_WITH_INFO(mla_spec != nullptr && spec->type == KVCacheSpecType::MultiHeadLatentAttention,
                                 "full kv_cache spec must be MLAKVCacheSpec for MLA model");
-        spec->local_head_num_kv = 1;
-        mla_spec->kv_lora_rank  = static_cast<uint32_t>(model_config.attn_config.kv_lora_rank);
-        mla_spec->rope_head_dim = static_cast<uint32_t>(model_config.attn_config.rope_head_dim);
+        // local_head_num_kv is already set to 1 by Python-side MLAKVCacheSpec default.
+        // kv_lora_rank, rope_head_dim, seq_size_per_block are already populated by Python.
     } else {
         auto* mha_spec = dynamic_cast<MHAKVCacheSpec*>(spec.get());
         RTP_LLM_CHECK_WITH_INFO(mha_spec != nullptr && spec->type == KVCacheSpecType::MultiHeadAttention,
                                 "full kv_cache spec must be MHAKVCacheSpec for MHA/GQA model");
+        // local_head_num_kv depends on TP and cannot be provided by Python-side spec.
         spec->local_head_num_kv = static_cast<uint32_t>(
             (model_config.attn_config.kv_head_num % parallelism_config.get_attn_tp_size() == 0) ?
                 model_config.attn_config.kv_head_num / parallelism_config.get_attn_tp_size() :
                 model_config.attn_config.kv_head_num
                     / std::gcd(model_config.attn_config.kv_head_num, parallelism_config.get_attn_tp_size()));
-        mha_spec->size_per_head = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+        // size_per_head, seq_size_per_block are already populated by Python.
     }
-    spec->dtype              = dtype;
-    spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    // dtype depends on runtime quantization config and cannot be provided by Python-side spec.
+    spec->dtype = dtype;
 }
 
 void HybridConfigCreator::prepareLinearAttentionSpec(KVCacheSpecPtr            spec,
@@ -155,6 +155,8 @@ void HybridConfigCreator::prepareLinearAttentionSpec(KVCacheSpecPtr            s
                             linear_config.linear_key_head_dim,
                             linear_config.linear_value_head_dim);
 
+    // local_num_k_heads, local_num_v_heads, and local_head_num_kv depend on TP
+    // and cannot be provided by Python-side spec.
     const int tp = std::max(1, static_cast<int>(parallelism_config.get_attn_tp_size()));
     linear_spec->local_num_k_heads = static_cast<uint32_t>(linear_config.linear_num_key_heads / tp);
     linear_spec->local_num_v_heads = static_cast<uint32_t>(linear_config.linear_num_value_heads / tp);
@@ -168,13 +170,10 @@ void HybridConfigCreator::prepareLinearAttentionSpec(KVCacheSpecPtr            s
         (linear_config.linear_num_value_heads > 1) ?
             static_cast<int>(linear_config.linear_num_value_heads / parallelism_config.get_attn_tp_size()) :
             static_cast<int>(linear_config.linear_num_value_heads)));
-    spec->dtype                   = dtype;
-    spec->seq_size_per_block      = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    linear_spec->head_k_dim       = static_cast<uint32_t>(linear_config.linear_key_head_dim);
-    linear_spec->head_v_dim       = static_cast<uint32_t>(linear_config.linear_value_head_dim);
-    linear_spec->conv_kernel_dim  = static_cast<uint32_t>(linear_config.linear_conv_kernel_dim);
-    linear_spec->ssm_state_dtype  = linear_config.ssm_state_dtype;
-    linear_spec->conv_state_dtype = linear_config.conv_state_dtype;
+    // dtype depends on runtime quantization config and cannot be provided by Python-side spec.
+    spec->dtype = dtype;
+    // seq_size_per_block, head_k_dim, head_v_dim, conv_kernel_dim,
+    // ssm_state_dtype, conv_state_dtype are already populated by Python.
 }
 
 std::pair<std::vector<std::vector<int>>, std::vector<std::vector<int>>> HybridConfigCreator::createLayerGroups(
