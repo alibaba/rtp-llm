@@ -136,9 +136,16 @@ class BackendRPCServerVisitorRetryTest(unittest.TestCase):
                 )
             )
         )
+        self.assertTrue(
+            BackendRPCServerVisitor._is_retryable_route_rpc_error(
+                FtRuntimeException(
+                    ExceptionType.MASTER_NO_AVAILABLE_WORKER,
+                    "master has no healthy worker during restart",
+                )
+            )
+        )
 
         for error_type in (
-            ExceptionType.MASTER_NO_AVAILABLE_WORKER,
             ExceptionType.ROUTE_ERROR,
             ExceptionType.OUT_OF_VOCAB_RANGE,
             ExceptionType.REMOTE_GENERATE_FAILED,
@@ -162,7 +169,7 @@ class BackendRPCServerVisitorRetryTest(unittest.TestCase):
 
         no_worker = FtRuntimeException(ExceptionType.ROUTE_ERROR, "route failed")
         no_worker.rtp_error_code = int(ExceptionType.MASTER_NO_AVAILABLE_WORKER)
-        self.assertFalse(BackendRPCServerVisitor._is_retryable_route_rpc_error(no_worker))
+        self.assertTrue(BackendRPCServerVisitor._is_retryable_route_rpc_error(no_worker))
 
 
 class BackendRPCServerVisitorEnqueueRetryTest(unittest.IsolatedAsyncioTestCase):

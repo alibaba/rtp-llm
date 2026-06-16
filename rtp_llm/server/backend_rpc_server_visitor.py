@@ -172,6 +172,7 @@ class BackendRPCServerVisitor:
             int(ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_TIMEOUT),
             int(ExceptionType.P2P_CONNECTOR_WORKER_READ_FAILED),
             int(ExceptionType.P2P_CONNECTOR_WORKER_READ_TIMEOUT),
+            int(ExceptionType.MASTER_NO_AVAILABLE_WORKER),
         }
         for attr_name in ("rtp_error_code", "exception_type"):
             code = getattr(e, attr_name, None)
