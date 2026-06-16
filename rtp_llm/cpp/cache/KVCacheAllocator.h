@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
@@ -22,6 +23,7 @@ struct KVCacheTokenCapacity {
 
 struct KVCachePoolMetricsSnapshot {
     size_t pool_index           = 0;
+    std::string pool_name       = "unnamed";
     size_t free_blocks          = 0;
     size_t available_blocks     = 0;
     size_t request_ref_blocks   = 0;

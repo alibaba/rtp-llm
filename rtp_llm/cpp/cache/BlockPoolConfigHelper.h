@@ -96,6 +96,12 @@ public:
 
         BlockPoolConfig config;
         config.pool_name = "group_" + std::to_string(group_id);
+        if (group_id < cache_config.group_region_names.size()) {
+            const auto region_name = cache_config.group_region_names[group_id];
+            if (region_name != KVCacheRegionName::DEFAULT) {
+                config.pool_name = cacheRegionName(region_name);
+            }
+        }
         const bool has_group_blocks =
             group_id < cache_config.group_block_nums.size() && cache_config.group_block_nums[group_id] > 0;
         config.block_num = has_group_blocks ? cache_config.group_block_nums[group_id] : cache_config.block_num;
