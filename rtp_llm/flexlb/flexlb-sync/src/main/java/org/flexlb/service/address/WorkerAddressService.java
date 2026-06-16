@@ -14,6 +14,7 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PreDestroy;
@@ -24,6 +25,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -35,6 +37,7 @@ public class WorkerAddressService {
     private final EngineHealthReporter engineHealthReporter;
     private final ModelMetaConfig modelMetaConfig;
     private final ServiceDiscovery serviceDiscovery;
+    private final ExecutorService serviceDiscoveryExecutorRef;
     /**
      * Service discovery request thread pool
      */
@@ -44,21 +47,29 @@ public class WorkerAddressService {
             60L,
             TimeUnit.SECONDS, new LinkedBlockingQueue<>(1000),
             new NamedThreadFactory("service-discovery-executor"),
-            new ThreadPoolExecutor.CallerRunsPolicy()
+            new ThreadPoolExecutor.AbortPolicy()
     );
 
+    @Autowired
     public WorkerAddressService(EngineHealthReporter engineHealthReporter,
                                 ModelMetaConfig modelMetaConfig,
                                 ServiceDiscovery serviceDiscovery) {
+        this(engineHealthReporter, modelMetaConfig, serviceDiscovery, serviceDiscoveryExecutor);
+    }
 
+    public WorkerAddressService(EngineHealthReporter engineHealthReporter,
+                                ModelMetaConfig modelMetaConfig,
+                                ServiceDiscovery serviceDiscovery,
+                                ExecutorService serviceDiscoveryExecutorRef) {
         this.engineHealthReporter = engineHealthReporter;
         this.modelMetaConfig = modelMetaConfig;
         this.serviceDiscovery = serviceDiscovery;
+        this.serviceDiscoveryExecutorRef = serviceDiscoveryExecutorRef;
     }
 
     @PreDestroy
     public void destroy() {
-        serviceDiscoveryExecutor.shutdown();
+        serviceDiscoveryExecutorRef.shutdown();
     }
 
     public List<WorkerHost> getEngineWorkerList(String modelName, RoleType modelEndpointType) {
@@ -96,7 +107,14 @@ public class WorkerAddressService {
     public WorkerDiscoveryResult getServiceHostsResult(String modelName, String address) {
         // Use all machines mounted on the first service discovery address in ServiceRoute
         ServiceDiscoveryRunner serviceDiscoveryRunner = new ServiceDiscoveryRunner(modelName, address, engineHealthReporter, serviceDiscovery);
-        Future<List<WorkerHost>> future = serviceDiscoveryExecutor.submit(serviceDiscoveryRunner);
+        Future<List<WorkerHost>> future;
+        try {
+            future = serviceDiscoveryExecutorRef.submit(serviceDiscoveryRunner);
+        } catch (RejectedExecutionException e) {
+            logger.error("query service discovery rejected, model={}, address={}, msg:{}", modelName, address, e.getMessage());
+            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null, null);
+            return WorkerDiscoveryResult.failure();
+        }
         try {
             // Set timeout to prevent blocking threads when service discovery has no machines and takes long to return
             return WorkerDiscoveryResult.success(future.get(500, TimeUnit.MILLISECONDS));
@@ -111,7 +129,9 @@ public class WorkerAddressService {
                 logger.error("query service discovery error, model={}, address={}, msg:{}", modelName, address, e.getMessage());
                 engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null, null);
             }
-            future.cancel(true);
+            if (future != null) {
+                future.cancel(true);
+            }
             return WorkerDiscoveryResult.failure();
         }
     }

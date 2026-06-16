@@ -1,7 +1,6 @@
 package org.flexlb.service.grace.strategy;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
@@ -34,7 +33,6 @@ public class QueryWarmerHooker implements AppOnlineHooker {
     private final GracefulLifecycleReporter lifecycleReporter;
     private final ModelMetaConfig modelMetaConfig;
     private final ConfigService configService;
-    private final ResourceMeasureFactory resourceMeasureFactory;
     private final long maxWaitMs;
     private final long checkIntervalMs;
     private final long workerStatusFreshMs;
@@ -45,13 +43,11 @@ public class QueryWarmerHooker implements AppOnlineHooker {
     public QueryWarmerHooker(
             GracefulLifecycleReporter lifecycleReporter,
             ModelMetaConfig modelMetaConfig,
-            ConfigService configService,
-            ResourceMeasureFactory resourceMeasureFactory) {
+            ConfigService configService) {
         this(
                 lifecycleReporter,
                 modelMetaConfig,
                 configService,
-                resourceMeasureFactory,
                 readLongEnv("FLEXLB_ONLINE_WARMUP_MAX_WAIT_MS", DEFAULT_MAX_WAIT_MS),
                 readLongEnv("FLEXLB_ONLINE_WARMUP_CHECK_INTERVAL_MS", DEFAULT_CHECK_INTERVAL_MS),
                 readLongEnv("FLEXLB_ONLINE_WARMUP_WORKER_STATUS_FRESH_MS", DEFAULT_WORKER_STATUS_FRESH_MS),
@@ -63,7 +59,6 @@ public class QueryWarmerHooker implements AppOnlineHooker {
             GracefulLifecycleReporter lifecycleReporter,
             ModelMetaConfig modelMetaConfig,
             ConfigService configService,
-            ResourceMeasureFactory resourceMeasureFactory,
             long maxWaitMs,
             long checkIntervalMs,
             long workerStatusFreshMs,
@@ -71,7 +66,6 @@ public class QueryWarmerHooker implements AppOnlineHooker {
         this.lifecycleReporter = lifecycleReporter;
         this.modelMetaConfig = modelMetaConfig;
         this.configService = configService;
-        this.resourceMeasureFactory = resourceMeasureFactory;
         this.maxWaitMs = Math.max(0, maxWaitMs);
         this.checkIntervalMs = Math.max(1, checkIntervalMs);
         this.workerStatusFreshMs = Math.max(0, workerStatusFreshMs);
