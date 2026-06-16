@@ -214,10 +214,12 @@ class FrontendShutdownManagerTest(unittest.TestCase):
                 server.handle_exit(signal.SIGTERM, None)
 
         self.assertTrue(manager.is_unavailable())
-        self.assertTrue(manager.is_draining())
+        self.assertFalse(manager.is_draining())
         self.assertFalse(server.should_exit)
         self.assertIsNotNone(server._pre_stop_timer)
         self.assertAlmostEqual(server._pre_stop_timer.interval, 3.0)
+        self.assertTrue(manager.try_begin_request())
+        manager.finish_request()
         server._pre_stop_timer.cancel()
         server._pre_stop_timer = None
 
@@ -243,7 +245,10 @@ class FrontendShutdownManagerTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "0.01"}):
             server.handle_exit(signal.SIGTERM, None)
-            self.assertTrue(manager.is_draining())
+            self.assertTrue(manager.is_unavailable())
+            self.assertFalse(manager.is_draining())
+            self.assertTrue(manager.try_begin_request())
+            manager.finish_request()
             self.assertFalse(server.should_exit)
             self.assertTrue(self.wait_until(lambda: server.should_exit))
 
@@ -257,13 +262,16 @@ class FrontendShutdownManagerTest(unittest.TestCase):
 
         with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "100"}):
             server.handle_exit(signal.SIGTERM, None)
-            self.assertTrue(manager.is_draining())
+            self.assertTrue(manager.is_unavailable())
+            self.assertFalse(manager.is_draining())
             self.assertFalse(server.should_exit)
             server.handle_exit(signal.SIGTERM, None)
 
-        self.assertTrue(manager.is_draining())
+        self.assertFalse(manager.is_draining())
         self.assertFalse(server.should_exit)
         self.assertIsNotNone(server._pre_stop_timer)
+        self.assertTrue(manager.try_begin_request())
+        manager.finish_request()
         server._pre_stop_timer.cancel()
         server._pre_stop_timer = None
 

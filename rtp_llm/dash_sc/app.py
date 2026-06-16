@@ -350,7 +350,13 @@ class DashScApp:
             logging.info("[DashScApp] received signal %s, shutting down", signum)
             if self._shutdown_started_at is None:
                 self._shutdown_started_at = time.monotonic()
-            self._shutdown_manager.start_draining(f"signal {signum}")
+            if (
+                signum == signal.SIGTERM
+                and self._effective_pre_stop_drain_seconds() > 0
+            ):
+                self._shutdown_manager.start_unavailable(f"signal {signum}")
+            else:
+                self._shutdown_manager.start_draining(f"signal {signum}")
             self._shutdown_event.set()
 
         try:
@@ -530,6 +536,7 @@ class DashScApp:
 
     def stop(self) -> None:
         self._sleep_before_stop_for_drain()
+        self._shutdown_manager.start_draining("grpc stop")
         grace = self._remaining_grpc_stop_grace_seconds()
         logging.info(
             "[DashScApp] stopping gRPC server, active_requests=%s, grace=%s",

@@ -153,9 +153,9 @@ class GracefulShutdownServer(Server):
                 )
                 return True
 
-            self.shutdown_manager.start_draining(f"signal {sig_name}")
+            self.shutdown_manager.start_unavailable(f"signal {sig_name}")
             logging.info(
-                "Frontend entering pre-stop drain before uvicorn shutdown: "
+                "Frontend entering pre-stop unavailable window before uvicorn shutdown: "
                 "remaining=%.3fs, elapsed=%.3fs, active_requests=%s",
                 remaining,
                 elapsed,

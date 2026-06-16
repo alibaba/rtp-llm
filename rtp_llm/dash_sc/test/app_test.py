@@ -231,6 +231,57 @@ class PreStopDrainSecondsTest(TestCase):
         self.assertIsNone(app._shutdown_started_at)
         app._shutdown_event.set.assert_not_called()
 
+    def test_sigterm_marks_unavailable_until_grpc_stop(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app._shutdown_started_at = None
+        app._shutdown_manager = DashScShutdownManager()
+        app._shutdown_event = Mock()
+        handlers = {}
+
+        class _ServerConfig:
+            shutdown_timeout = 30
+
+        app.server_config = _ServerConfig()
+
+        def capture_signal(sig, handler):
+            handlers[sig] = handler
+
+        with patch("rtp_llm.dash_sc.app.signal.signal", side_effect=capture_signal):
+            app._install_signal_handlers()
+
+        with patch.dict(
+            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "10"}, clear=True
+        ):
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+        self.assertTrue(app._shutdown_manager.try_begin_request())
+        app._shutdown_manager.finish_request()
+        self.assertFalse(app._shutdown_manager.is_draining())
+        self.assertIsNotNone(app._shutdown_started_at)
+        app._shutdown_event.set.assert_called_once()
+
+    def test_grpc_stop_marks_draining_after_pre_stop_window(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app._shutdown_started_at = 100.0
+        app._shutdown_manager = DashScShutdownManager()
+        app._shutdown_manager.start_unavailable("signal 15")
+        app._grpc_server = Mock()
+        app._stop_enqueue_loop = Mock()
+
+        class _ServerConfig:
+            shutdown_timeout = 30
+
+        app.server_config = _ServerConfig()
+
+        with patch.object(app, "_sleep_before_stop_for_drain"), patch.object(
+            app, "_remaining_grpc_stop_grace_seconds", return_value=5.0
+        ):
+            app.stop()
+
+        self.assertTrue(app._shutdown_manager.is_draining())
+        app._grpc_server.stop.assert_called_once_with(5.0)
+        app._stop_enqueue_loop.assert_called_once()
+
 
 class DashScShutdownManagerTest(TestCase):
     class _AbortContext:
