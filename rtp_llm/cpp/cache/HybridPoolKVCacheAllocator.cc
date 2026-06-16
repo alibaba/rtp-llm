@@ -638,9 +638,7 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
 
     size_t total_reservable_available_blocks = 0;
     for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
-        const auto region =
-            gid < config_.group_region_names.size() ? config_.group_region_names[gid] : KVCacheRegionName::DEFAULT;
-        if (isDsv4FixedRegion(region)) {
+        if (config_.usesExplicitIndependentBlocks(gid)) {
             continue;
         }
         total_reservable_available_blocks += group_block_pools_[gid]->availableBlocksNum();
@@ -660,10 +658,8 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
             continue;
         }
         const size_t available_blocks     = group_block_pools_[static_cast<size_t>(gid)]->availableBlocksNum();
-        const auto   region               = static_cast<size_t>(gid) < config_.group_region_names.size() ?
-                                                config_.group_region_names[static_cast<size_t>(gid)] :
-                                                KVCacheRegionName::DEFAULT;
-        const size_t group_reserve_blocks = isDsv4FixedRegion(region) || total_reservable_available_blocks == 0 ?
+        const bool   uses_explicit_blocks = config_.usesExplicitIndependentBlocks(static_cast<size_t>(gid));
+        const size_t group_reserve_blocks = uses_explicit_blocks || total_reservable_available_blocks == 0 ?
                                                 0 :
                                                 reserve_blocks * available_blocks / total_reservable_available_blocks;
         if (available_blocks < static_cast<size_t>(need_blocks) + group_reserve_blocks) {

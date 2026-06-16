@@ -382,7 +382,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &KVCacheConfig::enable_dsv4_state_block_independent_eviction)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
-        .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
         .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
         // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
@@ -458,7 +457,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reco_put_broadcast_timeout,
                                       self.reco_client_config,
                                       self.ssm_state_dtype,
-                                      self.dsv4_fixed_pool_blocks,
                                       self.dsv4_hca_state_pool_blocks,
                                       self.enable_gpu_prefix_tree,
                                       self.enable_prefix_tree_memory_cache,
@@ -469,7 +467,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             [](py::tuple t) {
                 const bool has_disk_fields =
                     t.size() >= 50 && py::isinstance<py::str>(t[9]);
-                const size_t expected_size = has_disk_fields ? 56u : 51u;
+                const size_t expected_size = has_disk_fields ? 55u : 50u;
                 if (t.size() != expected_size) {
                     throw std::runtime_error("Invalid state!");
                 }
@@ -528,8 +526,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.reco_put_broadcast_timeout           = t[41 + offset].cast<int>();
                     c.reco_client_config                   = t[42 + offset].cast<std::string>();
                     c.ssm_state_dtype                      = t[43 + offset].cast<std::string>();
-                    c.dsv4_fixed_pool_blocks               = t[44 + offset].cast<uint32_t>();
-                    const size_t extra_start                  = 45 + offset;
+                    const size_t extra_start                  = 44 + offset;
                     c.dsv4_hca_state_pool_blocks              = t[extra_start].cast<uint32_t>();
                     c.enable_gpu_prefix_tree                  = t[extra_start + 1].cast<bool>();
                     c.enable_prefix_tree_memory_cache         = t[extra_start + 2].cast<bool>();

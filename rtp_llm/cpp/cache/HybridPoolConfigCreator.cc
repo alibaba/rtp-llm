@@ -346,7 +346,6 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     config.fromGroupedSpecs(specs, layers_by_group, types, regions, tags);
     setupIndependentPoolSizes(config, is_mtp);
     if (is_dsv4_config) {
-        config.dsv4_fixed_pool_blocks     = kv_cache_config.dsv4_fixed_pool_blocks;
         config.dsv4_hca_state_pool_blocks = kv_cache_config.dsv4_hca_state_pool_blocks;
     }
     return config;
