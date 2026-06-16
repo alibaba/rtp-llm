@@ -262,24 +262,21 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
 }
 
-TEST_F(KVCacheManagerTest, DSV4IndependentPoolsFixedBackingFollowsMemorySwitch) {
-    auto expect_pool_backing = [](RoleType role_type, bool fixed_pool_use_memory) {
+TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
+    auto expect_pool_backing = [](RoleType role_type) {
         auto config = makeCompactDSV4ManagerConfig(/*block_num=*/8);
 
         PDSepConfig pd_sep_config;
         pd_sep_config.role_type = role_type;
         KVCacheConfig kv_cache_config;
-        kv_cache_config.dsv4_fixed_pool_use_memory = fixed_pool_use_memory;
-        config.fixed_pool_uses_pinned_cpu =
-            fixed_pool_use_memory && (config.state_block_size_bytes > 0 || config.swa_block_size_bytes > 0);
-        auto cache_manager      = std::make_shared<KVCacheManager>(config,
-                                                               /*warmup=*/false,
-                                                               nullptr,
-                                                               kv_cache_config,
-                                                               ParallelismConfig{},
-                                                               RuntimeConfig{},
-                                                               SpeculativeExecutionConfig{},
-                                                               pd_sep_config);
+        auto          cache_manager = std::make_shared<KVCacheManager>(config,
+                                                              /*warmup=*/false,
+                                                              nullptr,
+                                                              kv_cache_config,
+                                                              ParallelismConfig{},
+                                                              RuntimeConfig{},
+                                                              SpeculativeExecutionConfig{},
+                                                              pd_sep_config);
         ASSERT_TRUE(cache_manager->init());
 
         auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(cache_manager->allocator_);
@@ -288,18 +285,15 @@ TEST_F(KVCacheManagerTest, DSV4IndependentPoolsFixedBackingFollowsMemorySwitch) 
 
         for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
             const auto region_name = config.group_region_names[gid];
-            const auto expected =
-                (fixed_pool_use_memory && isDsv4FixedRegion(region_name)) ? MemoryType::MEMORY_CPU_PINNED :
-                                                                             MemoryType::MEMORY_GPU;
-            EXPECT_EQ(allocator->groupBlockPools()[gid]->where(), expected)
+            EXPECT_EQ(allocator->groupBlockPools()[gid]->where(), MemoryType::MEMORY_GPU)
                 << "role=" << static_cast<int>(role_type) << " gid=" << gid
                 << " region=" << static_cast<int>(region_name);
         }
     };
 
-    expect_pool_backing(RoleType::PREFILL, true);
-    expect_pool_backing(RoleType::DECODE, false);
-    expect_pool_backing(RoleType::PDFUSION, true);
+    expect_pool_backing(RoleType::PREFILL);
+    expect_pool_backing(RoleType::DECODE);
+    expect_pool_backing(RoleType::PDFUSION);
 }
 
 TEST_F(KVCacheManagerTest, MetricsThreadSmoke) {

@@ -104,15 +104,11 @@ bool HybridPoolKVCacheAllocator::doInit() {
                                 gid);
         const auto group_type = config_.group_types[static_cast<size_t>(gid)];
 
-        const auto& pool_config            = group_pool_configs[static_cast<size_t>(gid)];
-        const bool  use_pinned_cpu_backing = allocation_type_ == AllocationType::DEVICE
-                                            && config_.fixed_pool_uses_pinned_cpu
-                                            && static_cast<size_t>(gid) < config_.group_region_names.size()
-                                            && isDsv4FixedRegion(config_.group_region_names[static_cast<size_t>(gid)]);
+        const auto& pool_config = group_pool_configs[static_cast<size_t>(gid)];
         auto group_pool = std::make_shared<BlockPool>(pool_config,
                                                       allocation_type_,
-                                                      use_pinned_cpu_backing,
-                                                      use_cuda_malloc_block_pool_ && !use_pinned_cpu_backing);
+                                                      /*use_pinned_cpu_backing=*/false,
+                                                      use_cuda_malloc_block_pool_);
         RTP_LLM_CHECK_WITH_INFO(group_pool->init(), "Failed to initialize block pool for group %d", gid);
 
         const auto& ids  = config_.global_layer_ids[static_cast<size_t>(gid)];

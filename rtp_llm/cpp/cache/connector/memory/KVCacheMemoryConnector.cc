@@ -36,19 +36,6 @@ appendBatchedMemoryCopyTile(void* dst, const void* src, size_t bytes, std::vecto
 }
 
 static void
-appendHostMemoryCopyTile(void* dst, const void* src, size_t bytes, std::vector<BatchedMemoryCopyTile>& tiles) {
-    if (dst != nullptr && src != nullptr && bytes > 0) {
-        tiles.push_back(BatchedMemoryCopyTile{dst, src, bytes});
-    }
-}
-
-static void execHostMemoryCopyTiles(const std::vector<BatchedMemoryCopyTile>& tiles) {
-    for (const auto& tile : tiles) {
-        std::memcpy(tile.dst, tile.src, tile.bytes);
-    }
-}
-
-static void
 appendStagedMemoryCopyTile(void* gpu, size_t host_offset, size_t bytes, std::vector<StagedMemoryCopyTile>& tiles) {
     if (gpu != nullptr && bytes > 0) {
         tiles.push_back(StagedMemoryCopyTile{gpu, host_offset, bytes});
@@ -933,7 +920,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
             memory_match_context->clearReadCopyPlan();
         } else {
             RTP_LLM_LOG_WARNING(
-                "async read ignored pinned memory copy plan because range mismatched, plan_start=%d plan_num=%d read_start=%d read_num=%d",
+                "async read ignored read copy plan because range mismatched, plan_start=%d plan_num=%d read_start=%d read_num=%d",
                 memory_match_context->startReadBlockIndex(),
                 memory_match_context->readBlockNum(),
                 start_read_block_index,
@@ -2029,13 +2016,8 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const MemoryOperat
     StagedMemoryCopyParams params;
     params.direction =
         direction == CopyDirection::H2D ? StagedMemoryCopyDirection::H2D : StagedMemoryCopyDirection::D2H;
-    std::vector<BatchedMemoryCopyTile> host_tiles;
-
-    size_t logical_rows       = 0;
-    size_t staged_rows        = 0;
-    size_t host_rows          = 0;
-    size_t payload_bytes      = 0;
-    size_t host_payload_bytes = 0;
+    size_t logical_rows  = 0;
+    size_t payload_bytes = 0;
 
     for (int i = 0; i < request.copy_items_size(); ++i) {
         const auto&                     item      = request.copy_items(i);
@@ -2087,17 +2069,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const MemoryOperat
                 }
                 auto* host_addr = mem_addr + byte_off + within_layer_off;
                 if (!gpu_buffer.is_cuda) {
-                    if (direction == CopyDirection::H2D) {
-                        appendHostMemoryCopyTile(gpu_buffer.addr, host_addr, gpu_buffer.size_bytes, host_tiles);
-                    } else {
-                        appendHostMemoryCopyTile(host_addr, gpu_buffer.addr, gpu_buffer.size_bytes, host_tiles);
-                    }
-                    ++logical_rows;
-                    ++host_rows;
-                    payload_bytes += gpu_buffer.size_bytes;
-                    host_payload_bytes += gpu_buffer.size_bytes;
-                    within_layer_off += gpu_buffer.size_bytes;
-                    continue;
+                    return false;
                 }
                 if (params.device_index < 0) {
                     params.device_index = gpu_buffer.device_index;
@@ -2115,7 +2087,6 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const MemoryOperat
                 appendStagedMemoryCopyTile(gpu_buffer.addr, staging_offset, gpu_buffer.size_bytes, params.tiles);
                 params.host_bytes += gpu_buffer.size_bytes;
                 ++logical_rows;
-                ++staged_rows;
                 payload_bytes += gpu_buffer.size_bytes;
                 within_layer_off += gpu_buffer.size_bytes;
             }
@@ -2124,20 +2095,14 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const MemoryOperat
     }
 
     if (params.tiles.empty()) {
-        execHostMemoryCopyTiles(host_tiles);
         return true;
     }
 
-    RTP_LLM_LOG_DEBUG("cuda staged memory copy, direction=%s, rows=%zu, staged_rows=%zu, host_rows=%zu, "
-                      "tiles=%zu, host_tiles=%zu, bytes=%zu, host_bytes=%zu, span=%zu, device=%d",
+    RTP_LLM_LOG_DEBUG("cuda staged memory copy, direction=%s, rows=%zu, tiles=%zu, bytes=%zu, span=%zu, device=%d",
                       direction == CopyDirection::H2D ? "H2D" : "D2H",
                       logical_rows,
-                      staged_rows,
-                      host_rows,
                       params.tiles.size(),
-                      host_tiles.size(),
                       payload_bytes,
-                      host_payload_bytes,
                       params.host_bytes,
                       params.device_index);
     RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.exec_staged");
@@ -2145,7 +2110,6 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const MemoryOperat
     if (!execStagedMemoryCopy(params, &stagedCopyScratchForDevice(params.device_index))) {
         return false;
     }
-    execHostMemoryCopyTiles(host_tiles);
     return true;
 }
 

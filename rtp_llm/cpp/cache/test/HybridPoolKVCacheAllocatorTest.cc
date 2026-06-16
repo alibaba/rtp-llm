@@ -950,28 +950,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4InitAndAggregatedCounters) {
     EXPECT_EQ(allocator->availableBlocksNum(), expected_total);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedRegionPoolsUsePinnedCpuBackingWhenToggled) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedRegionPoolsUseGpuBacking) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/200);
-    // DSV4_FIXED_POOL_USE_MEMORY path → CacheConfigCreator would set this true.
-    config.fixed_pool_uses_pinned_cpu = true;
-    auto allocator                    = makeAllocator(config);
-    ASSERT_TRUE(allocator->init());
-
-    ASSERT_EQ(config.group_region_names.size(), 7u);
-    ASSERT_EQ(allocator->groupBlockPools().size(), 7u);
-
-    for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
-        const auto region_name = config.group_region_names[gid];
-        EXPECT_EQ(allocator->groupBlockPools()[gid]->where(),
-                  isDsv4FixedRegion(region_name) ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_GPU)
-            << "gid=" << gid << " region=" << static_cast<int>(region_name);
-    }
-}
-
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedRegionPoolsOnGpuWhenFixedPoolMemoryDisabled) {
-    auto config = makeDSV4HybridPoolConfig(/*block_num=*/200);
-    // Default (env=0): fixed_pool_uses_pinned_cpu == false → all 7 pools on GPU.
-    ASSERT_FALSE(config.fixed_pool_uses_pinned_cpu);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
@@ -1071,8 +1051,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumul
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesFixedPoolBlocks) {
-    auto config                       = makeDSV4HybridPoolConfig(/*block_num=*/50);
-    config.fixed_pool_uses_pinned_cpu = true;
+    auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
 
     RuntimeConfig rt;  // unused inside finalizeBlockNums today
     config.finalizeBlockNums(/*global_block_num=*/200, rt);
@@ -1087,12 +1066,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesFixedPoolBlocks)
         }
     }
 
-    // CPU-pinned fixed regions must NOT be charged to the HBM fixed-pool reserve.
     size_t expected_reserve = 0;
     for (size_t gid = 0; gid < config.group_block_size_bytes.size(); ++gid) {
-        const auto region = config.group_region_names[gid];
-        const auto type   = config.group_types[gid];
-        if (type != CacheGroupType::FULL && !isDsv4FixedRegion(region)) {
+        if (config.group_types[gid] != CacheGroupType::FULL) {
             expected_reserve += static_cast<size_t>(config.dsv4_fixed_pool_blocks) * config.group_block_size_bytes[gid];
         }
     }
@@ -1113,24 +1089,6 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesConfiguredFixedB
             EXPECT_EQ(config.group_block_nums[gid], 123u);
         }
     }
-}
-
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4PinnedFixedPoolExcludesFixedReserve) {
-    auto config                       = makeDSV4HybridPoolConfig(/*block_num=*/50);
-    config.fixed_pool_uses_pinned_cpu = true;  // env>0 simulation
-
-    RuntimeConfig rt;
-    config.finalizeBlockNums(/*global_block_num=*/200, rt);
-
-    size_t expected_reserve = 0;
-    for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
-        const auto region = config.group_region_names[gid];
-        const auto type   = config.group_types[gid];
-        if (type != CacheGroupType::FULL && !isDsv4FixedRegion(region)) {
-            expected_reserve += static_cast<size_t>(config.dsv4_fixed_pool_blocks) * config.group_block_size_bytes[gid];
-        }
-    }
-    EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_reserve);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuFixedPoolIncludesFixedReserve) {

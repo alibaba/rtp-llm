@@ -442,11 +442,3 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="DSV4 HCA_STATE pool 单独 block 数。>0 时仅覆盖 HCA_STATE；"
         "不配置或配置为 0 时，HCA_STATE 跟随 DSV4_FIXED_POOL_BLOCKS 或 linear_step 派生 block 数。",
     )
-    kv_cache_group.add_argument(
-        "--dsv4_fixed_pool_use_memory",
-        env_name="DSV4_FIXED_POOL_USE_MEMORY",
-        bind_to=(kv_cache_config, "dsv4_fixed_pool_use_memory"),
-        type=str2bool,
-        default=False,
-        help="DSV4 固定池（INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV）是否使用 pinned CPU memory。False 表示继续使用 GPU memory。",
-    )

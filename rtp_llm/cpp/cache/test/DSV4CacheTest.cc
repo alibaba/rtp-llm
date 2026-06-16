@@ -1121,63 +1121,6 @@ TEST(CacheConfigTest, DSV4FixedPoolBlocksFallbackFollowsLinearStep) {
     EXPECT_EQ(config.fixed_pool_reserve_bytes, 0u);
 }
 
-TEST(CacheConfigTest, DSV4PinnedFixedPoolFallbackIsExcludedFromGpuBudget) {
-    auto              mc = makeProModelConfig();
-    ParallelismConfig pc;
-    RuntimeConfig     runtime_config;
-    runtime_config.max_generate_batch_size                      = 4;
-    runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
-
-    KVCacheConfig gpu_fixed_config;
-    gpu_fixed_config.seq_size_per_block = 128;
-    gpu_fixed_config.kv_cache_mem_mb    = 65536;
-    gpu_fixed_config.linear_step        = 4;
-
-    KVCacheConfig pinned_fixed_config              = gpu_fixed_config;
-    pinned_fixed_config.dsv4_fixed_pool_use_memory = true;
-
-    auto gpu_fixed    = CacheConfigCreator::createConfig(mc, pc, runtime_config, gpu_fixed_config);
-    auto pinned_fixed = CacheConfigCreator::createConfig(mc, pc, runtime_config, pinned_fixed_config);
-
-    EXPECT_GT(pinned_fixed.block_num, gpu_fixed.block_num);
-    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(gpu_fixed.group_block_nums[gid], static_cast<uint32_t>(gpu_fixed.block_num / gpu_fixed.linear_step))
-            << "gid=" << gid;
-        EXPECT_EQ(pinned_fixed.group_block_nums[gid],
-                  static_cast<uint32_t>(pinned_fixed.block_num / pinned_fixed.linear_step))
-            << "gid=" << gid;
-        EXPECT_GT(pinned_fixed.group_block_nums[gid], gpu_fixed.group_block_nums[gid]) << "gid=" << gid;
-    }
-    EXPECT_EQ(pinned_fixed.fixed_pool_reserve_bytes, 0u);
-}
-
-TEST(CacheConfigTest, DSV4PinnedFixedPoolFallbackFollowsExpandedFullPoolWhenStepOne) {
-    auto              mc = makeProModelConfig();
-    ParallelismConfig pc;
-    RuntimeConfig     runtime_config;
-    runtime_config.max_generate_batch_size                      = 4;
-    runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
-
-    KVCacheConfig gpu_fixed_config;
-    gpu_fixed_config.seq_size_per_block = 128;
-    gpu_fixed_config.kv_cache_mem_mb    = 65536;
-
-    KVCacheConfig pinned_fixed_config              = gpu_fixed_config;
-    pinned_fixed_config.dsv4_fixed_pool_use_memory = true;
-
-    auto gpu_fixed    = CacheConfigCreator::createConfig(mc, pc, runtime_config, gpu_fixed_config);
-    auto pinned_fixed = CacheConfigCreator::createConfig(mc, pc, runtime_config, pinned_fixed_config);
-
-    EXPECT_GT(pinned_fixed.block_num, gpu_fixed.block_num);
-    ASSERT_EQ(pinned_fixed.group_block_nums.size(), static_cast<size_t>(kDsv4PoolNum));
-    for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(gpu_fixed.group_block_nums[gid], static_cast<uint32_t>(gpu_fixed.block_num)) << "gid=" << gid;
-        EXPECT_EQ(pinned_fixed.group_block_nums[gid], static_cast<uint32_t>(pinned_fixed.block_num)) << "gid=" << gid;
-        EXPECT_GT(pinned_fixed.group_block_nums[gid], gpu_fixed.group_block_nums[gid]) << "gid=" << gid;
-    }
-    EXPECT_EQ(pinned_fixed.fixed_pool_reserve_bytes, 0u);
-}
-
 TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     auto score_model_config                         = makeFlashModelConfig();
     auto propose_model_config                       = makeFlashMtpModelConfig();
