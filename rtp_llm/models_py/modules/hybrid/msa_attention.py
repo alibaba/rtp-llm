@@ -917,6 +917,15 @@ class MSAAttention(nn.Module):
             )
         else:
             seq_lens = kv_lens.to(torch.int32)
+            # Decode = 1 query token per request: cu_seqlens is [0,1,...,batch].
+            # Pass it + prefix_lens + the trtllm workspace so minimax_sparse_decode
+            # can take the trtllm-gen sparse-decode fast path (same op as prefill)
+            # instead of the legacy triton step3; falls back to triton when the
+            # trtllm gate is not satisfied (e.g. multi-request batch).
+            decode_bsz = int(slot_ids.numel())
+            decode_cu_seqlens = torch.arange(
+                decode_bsz + 1, device=device, dtype=torch.int32
+            )
             _idx_o, o = minimax_sparse_decode(
                 q=q,
                 sink=None,
@@ -937,6 +946,9 @@ class MSAAttention(nn.Module):
                 local_blocks=self.local_blocks,
                 score_type=self.score_type,
                 disable_index_value=self.disable_index_value,
+                workspace=MSAAttention._get_trtllm_workspace(device),
+                cu_seqlens=decode_cu_seqlens,
+                prefix_lens=prefix_lens.to(torch.int32),
             )
 
         attn_output = o.reshape(*input_shape, -1).contiguous()

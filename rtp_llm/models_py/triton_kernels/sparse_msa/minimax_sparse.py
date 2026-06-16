@@ -180,7 +180,45 @@ def minimax_sparse_decode(
     idx_sm_scale: Optional[float] = None,
     score_type: str = "max",
     disable_index_value: bool = False,
+    workspace: Optional[torch.Tensor] = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
+    prefix_lens: Optional[torch.Tensor] = None,
 ):
+    num_idx_heads = idx_q.shape[1]
+    num_kv_heads = k_cache.shape[1]
+    idx_group_size = num_idx_heads // num_kv_heads
+    batch = q.shape[0]
+
+    # Fast path: reuse the trtllm-gen sparse-decode kernel (same op the prefill
+    # fast path uses; it treats every query independently so decode = total_q==batch
+    # queries). Mirrors minimax_sparse_prefill's use_trtllm gate. Single-request
+    # only for now (the fused topk-to-block-table kernel assumes a single
+    # contiguous KV slice: page id = pid_h*num_pages + block_idx, no per-request
+    # offset); multi-request decode falls back to the legacy triton path.
+    use_trtllm = (
+        workspace is not None
+        and cu_seqlens is not None
+        and prefix_lens is not None
+        and idx_group_size == 1
+        and disable_index_value
+        and idx_sink is None
+        and sink is None
+        and batch <= 1
+    )
+    if use_trtllm:
+        sm_scale_v = sm_scale if sm_scale is not None else q.shape[-1] ** -0.5
+        o = flash_prefill_with_trtllm_gen(
+            q=q, k_cache=k_cache, v_cache=v_cache,
+            idx_q=idx_q, idx_k_cache=idx_k_cache,
+            req_to_token=req_to_token, slot_ids=slot_ids,
+            cu_seqlens=cu_seqlens, seq_lens=seq_lens, prefix_lens=prefix_lens,
+            max_seqlen_q=1, max_seqlen_k=max_seqlen,
+            block_size_k=block_size_k, topk=topk,
+            init_blocks=init_blocks, local_blocks=local_blocks,
+            sm_scale=sm_scale_v, workspace=workspace, score_type=score_type,
+        )
+        return None, o
+
     # Step 1: Flash decode with topk index (using index head)
     idx_o, topk_idx = flash_decode_with_topk_idx(
         q=idx_q,
