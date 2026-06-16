@@ -50,7 +50,7 @@ py_test(
     srcs = ["test/codec_test.py"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "H20"},
 )
 
 py_test(
@@ -59,7 +59,7 @@ py_test(
     main = "test/think_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "H20"},
 )
 
 py_test(
@@ -68,7 +68,7 @@ py_test(
     main = "test/inference/servicer_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "H20"},
 )
 
 py_test(
@@ -78,7 +78,7 @@ py_test(
     main = "test/inference/mrcr_smoke_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "H20"},
 )
 
 py_test(
@@ -88,7 +88,20 @@ py_test(
     main = "test/inference/request_smoke_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
+    name = "grpc_inproc_smoke_test",
+    srcs = [
+        "test/inference/grpc_inproc_smoke_test.py",
+        "test/inference/request_smoke_test.py",
+    ],
+    data = ["test/data/dash_sc_request_smoke_cases.json"],
+    main = "test/inference/grpc_inproc_smoke_test.py",
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "H20"},
 )
 
 py_test(
@@ -97,7 +110,16 @@ py_test(
     main = "test/proxy/servicer_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
+    name = "proxy_inference_e2e_smoke_test",
+    srcs = ["test/proxy/inference_e2e_smoke_test.py"],
+    main = "test/proxy/inference_e2e_smoke_test.py",
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "H20"},
 )
 
 py_test(
@@ -105,7 +127,7 @@ py_test(
     srcs = ["test/access_log_test.py"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "H20"},
 )
 
 py_test(
@@ -113,5 +135,5 @@ py_test(
     srcs = ["test/app_test.py"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "H20"},
 )
