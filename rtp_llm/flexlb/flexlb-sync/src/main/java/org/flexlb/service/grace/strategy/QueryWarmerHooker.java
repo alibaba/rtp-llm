@@ -1,7 +1,6 @@
 package org.flexlb.service.grace.strategy;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -223,17 +222,7 @@ public class QueryWarmerHooker implements AppOnlineHooker {
     }
 
     private boolean isRouteableWorker(RoleType roleType, WorkerStatus workerStatus) {
-        if (!isFreshAliveWorker(workerStatus)) {
-            return false;
-        }
-        if (configService == null || resourceMeasureFactory == null) {
-            return workerStatus.getResourceAvailable().get();
-        }
-        FlexlbConfig config = configService.loadBalanceConfig();
-        ResourceMeasure measure = resourceMeasureFactory.getMeasure(config.getResourceMeasureIndicator(roleType));
-        return measure == null
-                ? workerStatus.getResourceAvailable().get()
-                : measure.isResourceAvailable(workerStatus);
+        return workerStatus != null && workerStatus.isAlive();
     }
 
     private boolean isFreshAliveWorker(WorkerStatus workerStatus) {
