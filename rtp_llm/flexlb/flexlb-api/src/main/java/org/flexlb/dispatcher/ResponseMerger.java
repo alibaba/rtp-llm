@@ -4,6 +4,7 @@ import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 
 /**
@@ -36,9 +37,15 @@ public final class ResponseMerger {
     }
 
     public static MergedResponse merge(List<SubBatchResult> subs, BatchEndpointSpec spec) {
+        // The production caller (FanoutService.dispatchChunks) collects subs via flatMapSequential,
+        // so they already arrive in chunk order; sort defensively so the stitched array — successful
+        // items appended in order and failure placeholders filled per chunk — lines up with absolute
+        // item positions for any caller, independent of the order subs are passed in.
+        List<SubBatchResult> ordered = new ArrayList<>(subs);
+        ordered.sort(Comparator.comparingInt(SubBatchResult::startIndex));
         JSONObject envelope = null;
         int totalItems = 0;
-        for (SubBatchResult s : subs) {
+        for (SubBatchResult s : ordered) {
             totalItems += s.chunkSize();
             if (envelope == null && wellFormed(s, spec)) {
                 // Top-level copy only: the template's fields (including the array slot we
@@ -50,18 +57,18 @@ public final class ResponseMerger {
             }
         }
         if (envelope == null) {
-            List<String> reasons = new ArrayList<>(subs.size());
-            for (SubBatchResult s : subs) {
+            List<String> reasons = new ArrayList<>(ordered.size());
+            for (SubBatchResult s : ordered) {
                 reasons.add(reasonFor(s));
             }
-            return new MergedResponse(new JSONObject(), 0, subs.size(),
-                    allIndices(totalItems), reasons, commonErrorStatus(subs));
+            return new MergedResponse(new JSONObject(), 0, ordered.size(),
+                    allIndices(totalItems), reasons, commonErrorStatus(ordered));
         }
         JSONArray merged = envelope.getJSONArray(spec.getResponseArrayField());
         List<Integer> failedIndices = new ArrayList<>();
         List<String> failedReasons = new ArrayList<>();
         int succeededChunks = 0;
-        for (SubBatchResult s : subs) {
+        for (SubBatchResult s : ordered) {
             if (wellFormed(s, spec)) {
                 JSONArray sourceArr = s.body().getJSONArray(spec.getResponseArrayField());
                 merged.addAll(sourceArr);
@@ -86,19 +93,23 @@ public final class ResponseMerger {
             envelope.put("_partial_failure", pf);
         }
         if (spec.getPostMerger() != null) {
-            spec.getPostMerger().apply(envelope, subs, failedIndices);
+            spec.getPostMerger().apply(envelope, ordered, failedIndices);
         }
-        return new MergedResponse(envelope, succeededChunks, subs.size(), failedIndices, failedReasons, 500);
+        return new MergedResponse(envelope, succeededChunks, ordered.size(), failedIndices, failedReasons, 500);
     }
 
     /**
-     * HTTP status for the all-failed case: the shared FE status when every sub-batch failed with
-     * the same 4xx (so a client error is not masked as a server 500), otherwise 500.
+     * HTTP status for the all-failed case: the shared FE 4xx when every sub-batch that reached an FE
+     * failed with that same client error, otherwise 500. Transport/pick failures carry no HTTP status
+     * (feStatus 0) and don't vote, so they can't mask a 4xx the FE-reachable chunks agreed on.
      */
     private static int commonErrorStatus(List<SubBatchResult> subs) {
         int common = -1;
         for (SubBatchResult s : subs) {
             int st = s.feStatus();
+            if (st <= 0) {
+                continue;
+            }
             if (st < 400 || st > 499) {
                 return 500;
             }

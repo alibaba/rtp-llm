@@ -42,9 +42,8 @@ public final class EmbeddingMerger implements BatchEndpointSpec.PostMerger {
             promptTokens += usage.getLongValue("prompt_tokens", 0);
             totalTokens += usage.getLongValue("total_tokens", 0);
         }
-        boolean envelopeHasUsage = mergedBody.getJSONObject("usage") != null;
-        if (envelopeHasUsage || promptTokens > 0 || totalTokens > 0) {
-            JSONObject u = mergedBody.getJSONObject("usage");
+        JSONObject u = mergedBody.getJSONObject("usage");
+        if (u != null || promptTokens > 0 || totalTokens > 0) {
             if (u == null) {
                 u = new JSONObject();
                 mergedBody.put("usage", u);

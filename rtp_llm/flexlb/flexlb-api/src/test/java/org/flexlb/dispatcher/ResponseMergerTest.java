@@ -55,6 +55,27 @@ class ResponseMergerTest {
     }
 
     @Test
+    void outOfOrderSubBatchesAreStitchedByAbsoluteIndex() {
+        // Sub-batches may complete in any order; merge orders by startIndex so the stitched array
+        // and the _partial_failure indices still line up with absolute input positions.
+        SubBatchResult s2 = SubBatchResult.ok(envelopeBatchInfer("r4", "r5"), 2, 4);
+        SubBatchResult s0 = SubBatchResult.ok(envelopeBatchInfer("r0", "r1"), 2, 0);
+        SubBatchResult s1 = SubBatchResult.failed(2, 2, "timeout");
+        ResponseMerger.MergedResponse merged =
+                ResponseMerger.merge(List.of(s2, s0, s1), BATCH_INFER);
+
+        JSONArray out = merged.body().getJSONArray("response_batch");
+        assertEquals(6, out.size());
+        assertEquals("r0", out.getString(0));
+        assertEquals("r1", out.getString(1));
+        assertNull(out.get(2));
+        assertNull(out.get(3));
+        assertEquals("r4", out.getString(4));
+        assertEquals("r5", out.getString(5));
+        assertEquals(List.of(2, 3), merged.failedIndices());
+    }
+
+    @Test
     void allFailedReturnsEmptyEnvelopeWithAllIndices() {
         SubBatchResult s0 = SubBatchResult.failed(2, 0, "no_route");
         SubBatchResult s1 = SubBatchResult.failed(3, 2, "no_route");
@@ -93,6 +114,17 @@ class ResponseMergerTest {
                 List.of(SubBatchResult.failed(1, 0, "no_route"),
                         SubBatchResult.failed(1, 1, "fe_500", 500)), BATCH_INFER);
         assertEquals(500, server.errorStatus());
+    }
+
+    @Test
+    void allFailedSharedFourxxNotMaskedByTransportFailure() {
+        // A transport failure (no HTTP status) mixed with a shared FE 4xx must not collapse to 500.
+        ResponseMerger.MergedResponse merged = ResponseMerger.merge(
+                List.of(SubBatchResult.failed(1, 0, "no_route"),
+                        SubBatchResult.failed(1, 1, "bad_request", 400),
+                        SubBatchResult.failed(1, 2, "bad_request", 400)), BATCH_INFER);
+        assertTrue(merged.allFailed());
+        assertEquals(400, merged.errorStatus());
     }
 
     @Test

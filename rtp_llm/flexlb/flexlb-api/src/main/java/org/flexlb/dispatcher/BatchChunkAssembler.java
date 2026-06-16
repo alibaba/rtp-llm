@@ -14,11 +14,12 @@ import java.util.List;
  * stamps {@code generate_config.force_batch} and any pre-resolved BE targets.
  *
  * <p>Per-chunk isolation strategy: every chunk gets a shallow-copy of the top-level envelope
- * (so {@code model} and other non-mutated fields share references) but a deep-cloned
+ * (so {@code model} and other non-mutated fields share references) and a per-chunk copy of
  * {@code generate_config} (so the per-chunk {@code force_batch} / {@code role_addrs} writes
- * land on private objects). Deep-cloning only {@code generate_config} — typically a handful
- * of scalar fields — keeps assembly O(chunk_count) on the small sub-object instead of
- * O(envelope_size × chunk_count) on the whole tree.
+ * land on private objects). The gc copy is shallow by default — isolating the top-level scalars
+ * that get written — and deep only when the source carries {@code role_addrs}, whose per-chunk
+ * append targets a nested array. Copying only the small {@code generate_config} sub-object keeps
+ * assembly O(chunk_count) instead of O(envelope_size × chunk_count) on the whole tree.
  */
 public final class BatchChunkAssembler {
 
@@ -90,15 +91,18 @@ public final class BatchChunkAssembler {
     /**
      * Builds per-chunk request bodies. Each is a <em>shallow</em> copy of {@code envelope} with
      * the {@code requestArrayField} replaced by the chunk slice and {@code generate_config}
-     * replaced by a fresh deep clone of the source {@code generate_config}, then
+     * replaced by a per-chunk copy of the source {@code generate_config}, then
      * {@code force_batch} stamped per {@link #injectForceBatch} contract.
      *
-     * <p>Only {@code generate_config} is deep-cloned because it's the one sub-tree that
-     * per-chunk writes ({@code force_batch}, {@code role_addrs} append) mutate; every other
-     * top-level field is either replaced wholesale ({@code requestArrayField}) or never written
-     * to per chunk ({@code model}, etc.), so sharing references is safe and cheap. Reparsing
-     * the entire envelope per chunk — the prior implementation — was O(envelope_size ×
-     * chunk_count) and blew up to ~500ms CPU on a 730KB envelope at 100 chunks.
+     * <p>{@code generate_config} is copied per chunk because it's the one sub-tree that per-chunk
+     * writes ({@code force_batch}, {@code role_addrs} append) mutate. A shallow {@code new
+     * JSONObject(sourceGc)} isolates only the top-level scalars that get written; when the source
+     * carries {@code role_addrs} the per-chunk append targets a nested array, so that case is
+     * deep-cloned instead. Every other top-level envelope field is either replaced wholesale
+     * ({@code requestArrayField}) or never written per chunk ({@code model}, etc.), so sharing
+     * references is safe and cheap. Reparsing the entire envelope per chunk — the prior
+     * implementation — was O(envelope_size × chunk_count) and blew up to ~500ms CPU on a 730KB
+     * envelope at 100 chunks.
      */
     public static List<JSONObject> buildChunkBodies(JSONObject envelope, List<JSONArray> chunks,
                                                     String requestArrayField) {
