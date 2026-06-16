@@ -48,22 +48,21 @@ KVCacheSpecPtr getDefaultSpecFromModel(const ModelConfig&       model_config,
         auto* mla_spec = dynamic_cast<MLAKVCacheSpec*>(spec.get());
         RTP_LLM_CHECK_WITH_INFO(mla_spec != nullptr && spec->type == KVCacheSpecType::MultiHeadLatentAttention,
                                 "default kv_cache spec must be MLAKVCacheSpec for MLA model");
-        spec->local_head_num_kv  = 1;
-        spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-        mla_spec->kv_lora_rank   = static_cast<uint32_t>(model_config.attn_config.kv_lora_rank);
-        mla_spec->rope_head_dim  = static_cast<uint32_t>(model_config.attn_config.rope_head_dim);
+        // local_head_num_kv is already set to 1 by Python-side MLAKVCacheSpec default.
+        // kv_lora_rank and rope_head_dim are already populated by Python.
     } else {
         auto* mha_spec = dynamic_cast<MHAKVCacheSpec*>(spec.get());
         RTP_LLM_CHECK_WITH_INFO(mha_spec != nullptr && spec->type == KVCacheSpecType::MultiHeadAttention,
                                 "default kv_cache spec must be MHAKVCacheSpec for MHA/GQA model");
+        // local_head_num_kv depends on TP and cannot be provided by Python-side spec.
         spec->local_head_num_kv = static_cast<uint32_t>(
             (model_config.attn_config.kv_head_num % parallelism_config.get_attn_tp_size() == 0) ?
                 model_config.attn_config.kv_head_num / parallelism_config.get_attn_tp_size() :
                 model_config.attn_config.kv_head_num
                     / std::gcd(model_config.attn_config.kv_head_num, parallelism_config.get_attn_tp_size()));
-        spec->seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-        mha_spec->size_per_head  = static_cast<uint32_t>(model_config.attn_config.size_per_head);
+        // size_per_head is already populated by Python.
     }
+    // dtype depends on runtime quantization config and cannot be provided by Python-side spec.
     spec->dtype = dtype;
     return spec;
 }
