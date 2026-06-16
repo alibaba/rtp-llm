@@ -32,3 +32,13 @@ py_test(
     visibility = ["//visibility:public"],
     exec_properties = {"gpu": "H20"},
 )
+
+py_test(
+    name = "test_ep_scatter_bf16",
+    srcs = ["test_ep_scatter_bf16.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:moe",
+    ] + [":triton", ":torch"],
+    visibility = ["//visibility:public"],
+    exec_properties = {"gpu": "H20"},
+)

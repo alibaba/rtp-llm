@@ -1,4 +1,5 @@
 import functools
+import importlib.util
 from contextlib import contextmanager
 from typing import Any, Callable, Generator, List, NoReturn, Optional, Tuple
 
@@ -6,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.utils.module_util import has_module, resolve_symbol
+from rtp_llm.utils.module_util import resolve_symbol
 
 __all__ = [
     "fp8_gemm_nt",
@@ -30,13 +31,18 @@ _deep_gemm_impl_new_map = {
     "m_grouped_bf16_gemm_nt_masked": "m_grouped_bf16_gemm_nt_masked",
 }
 
+# Legacy/fallback symbol names. resolve_symbol() tries _new_map first and only
+# falls back here, so existing fp8 resolution is unchanged. The bf16 entries are
+# the real deep_gemm symbols (gemm_bf16_bf16_bf16_nt*); they only make the bf16
+# grouped-GEMM path (previously dormant) resolvable and do not affect any caller
+# that already resolved via _new_map.
 _deep_gemm_impl_old_map = {
     "fp8_gemm_nt": "fp8_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous": "m_grouped_fp8_gemm_nt_contiguous",
     "m_grouped_fp8_gemm_nt_masked": "fp8_m_grouped_gemm_nt_masked",
-    "bf16_gemm_nt": "bf16_gemm_nt",
-    "m_grouped_bf16_gemm_nt_contiguous": "m_grouped_bf16_gemm_nt_contiguous",
-    "m_grouped_bf16_gemm_nt_masked": "m_grouped_bf16_gemm_nt_masked",
+    "bf16_gemm_nt": "gemm_bf16_bf16_bf16_nt",
+    "m_grouped_bf16_gemm_nt_contiguous": "m_grouped_gemm_bf16_bf16_bf16_nt_contiguous",
+    "m_grouped_bf16_gemm_nt_masked": "m_grouped_gemm_bf16_bf16_bf16_nt_masked",
 }
 
 
@@ -48,10 +54,23 @@ _m_grouped_bf16_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_masked_impl: Callable[..., Any] | None = None
 
 
-@functools.cache
+_deep_gemm_available: bool | None = None
+
+
 def has_deep_gemm() -> bool:
-    """Whether the optional `deep_gemm` package is available."""
-    return has_module("deep_gemm")
+    """Whether the optional `deep_gemm` package is available.
+
+    Re-checks until first successful detection, then caches True.
+    This handles late sys.path setup in spawned subprocesses where
+    deep_gemm may not be importable at module-load time.
+    """
+    global _deep_gemm_available
+    if _deep_gemm_available is True:
+        return True
+    available = importlib.util.find_spec("deep_gemm") is not None
+    if available:
+        _deep_gemm_available = True
+    return available
 
 
 @functools.cache
@@ -62,6 +81,7 @@ def is_deep_gemm_e8m0_used() -> bool:
 @contextmanager
 def configure_deep_gemm_num_sms(num_sms: int) -> Generator[None, None, None]:
     """Configure the number of sms for deep gemm."""
+    _ensure_initialized()
     if not has_deep_gemm():
         raise RuntimeError(
             "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
@@ -135,7 +155,22 @@ def _lazy_init_deep_gemm_once():
     )
 
 
-_lazy_init_deep_gemm_once()
+_symbols_initialized = False
+
+
+def _ensure_initialized():
+    """Resolve deep_gemm symbols on first actual use (not at import time).
+
+    Retries until deep_gemm becomes available on sys.path, which handles
+    spawned subprocesses where path setup happens after module import.
+    """
+    global _symbols_initialized
+    if _symbols_initialized:
+        return
+    if not has_deep_gemm():
+        return
+    _lazy_init_deep_gemm_once()
+    _symbols_initialized = True
 
 
 @triton.jit
@@ -387,6 +422,7 @@ def fp8_gemm_nt(
         None
     """
     global _fp8_gemm_nt_impl
+    _ensure_initialized()
     if _fp8_gemm_nt_impl is None:
         return _missing_deep_gemm()
     _fp8_gemm_nt_impl(
@@ -424,6 +460,7 @@ def m_grouped_fp8_gemm_nt_contiguous(
     """
 
     global _m_grouped_fp8_gemm_nt_contiguous_impl
+    _ensure_initialized()
     if _m_grouped_fp8_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
     _m_grouped_fp8_gemm_nt_contiguous_impl(
@@ -487,6 +524,7 @@ def m_grouped_fp8_gemm_nt_masked(
             Defaults to None, which will be set to False if E8M0 scale is used, otherwise True.
     """
     global _m_grouped_fp8_gemm_nt_masked_impl
+    _ensure_initialized()
     if _m_grouped_fp8_gemm_nt_masked_impl is None:
         return _missing_deep_gemm()
 
@@ -527,6 +565,7 @@ def bf16_gemm_nt(
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
     global _bf16_gemm_nt_impl
+    _ensure_initialized()
     if _bf16_gemm_nt_impl is None:
         return _missing_deep_gemm()
     _bf16_gemm_nt_impl(a, b, output, c, compiled_dims)
@@ -550,6 +589,7 @@ def m_grouped_bf16_gemm_nt_contiguous(
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
     global _m_grouped_bf16_gemm_nt_contiguous_impl
+    _ensure_initialized()
     if _m_grouped_bf16_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
     _m_grouped_bf16_gemm_nt_contiguous_impl(
@@ -557,7 +597,6 @@ def m_grouped_bf16_gemm_nt_contiguous(
         b,
         output,
         m_indices,
-        compiled_dims,
     )
 
 
@@ -580,6 +619,7 @@ def m_grouped_bf16_gemm_nt_masked(
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
     global _m_grouped_bf16_gemm_nt_masked_impl
+    _ensure_initialized()
     if _m_grouped_bf16_gemm_nt_masked_impl is None:
         return _missing_deep_gemm()
     _m_grouped_bf16_gemm_nt_masked_impl(
@@ -588,5 +628,4 @@ def m_grouped_bf16_gemm_nt_masked(
         output,
         masked_m,
         expected_m,
-        compiled_dims,
     )

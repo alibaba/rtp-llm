@@ -183,6 +183,118 @@ def ep_scatter(
 
 
 @triton.jit
+def _fwd_kernel_ep_scatter_2_bf16(
+    total_token_num,
+    expert_start_loc,
+    recv_x,
+    recv_x_stride0,
+    recv_x_stride1,
+    recv_topk,
+    recv_topk_stride0,
+    recv_topk_stride1,
+    output_tensor,
+    output_tensor_stride0,
+    output_tensor_stride1,
+    output_index,
+    output_index_stride0,
+    output_index_stride1,
+    topk_num: tl.constexpr,
+    num_experts: tl.constexpr,
+    HIDDEN_SIZE: tl.constexpr,
+    HIDDEN_SIZE_PAD: tl.constexpr,
+):
+    """BF16 contiguous scatter kernel (no FP8 scale).
+
+    Mirrors _fwd_kernel_ep_scatter_2 but for BF16 input without scale tensors.
+    Scatters tokens into expert-sorted flat layout for m_grouped_bf16_gemm_nt_contiguous.
+    """
+    start_token_id = tl.program_id(0)
+    grid_num = tl.num_programs(0)
+    offset_in = tl.arange(0, HIDDEN_SIZE_PAD)
+    mask = offset_in < HIDDEN_SIZE
+    for token_id_int32 in range(start_token_id, total_token_num, grid_num):
+        token_id = token_id_int32.to(tl.int64)
+        to_copy = tl.load(recv_x + token_id * recv_x_stride0 + offset_in, mask=mask)
+        for topk_idx_int32 in tl.range(0, topk_num, 1, num_stages=4):
+            topk_index = topk_idx_int32.to(tl.int64)
+            expert_id = tl.load(recv_topk + token_id * recv_topk_stride0 + topk_index)
+            if expert_id >= 0 and expert_id < num_experts:
+                dest_token_index_int32 = tl.atomic_add(expert_start_loc + expert_id, 1)
+                dest_token_index = dest_token_index_int32.to(tl.int64)
+                tl.store(
+                    output_index + token_id * output_index_stride0 + topk_index,
+                    dest_token_index_int32,
+                )
+                output_tensor_ptr = output_tensor + dest_token_index * output_tensor_stride0
+                tl.store(output_tensor_ptr + offset_in, to_copy, mask=mask)
+
+
+@torch.no_grad()
+def ep_scatter_bf16(
+    recv_x: torch.Tensor,
+    recv_topk: torch.Tensor,
+    num_recv_tokens_per_expert: torch.Tensor,
+    expert_start_loc: torch.Tensor,
+    output_tensor: torch.Tensor,
+    m_indices: torch.Tensor,
+    output_index: torch.Tensor,
+):
+    """BF16 contiguous scatter: flat [M, K] → expert-sorted flat [all_tokens, K].
+
+    Unlike ep_scatter_v2_bf16 (which produces a 3D masked layout for small token counts),
+    this produces a contiguous flat layout suited for large token counts (prefill).
+    Use with m_grouped_bf16_gemm_nt_contiguous.
+
+    Args:
+        recv_x: Input tokens [M, K] in bf16.
+        recv_topk: Local expert assignments [M, topk] (local IDs, -1 = invalid).
+        num_recv_tokens_per_expert: Aligned token counts per local expert [E], GPU tensor.
+        expert_start_loc: Pre-allocated per-expert start locations [E], GPU tensor.
+        output_tensor: Output flat tensor [all_tokens, K] in bf16.
+        m_indices: Output expert index per slot [all_tokens].
+        output_index: Output index mapping [M, topk].
+    """
+    BLOCK_E = 128
+    num_warps = 8
+    num_experts = num_recv_tokens_per_expert.shape[0]
+    hidden_size = recv_x.shape[1]
+
+    assert m_indices.shape[0] % BLOCK_E == 0
+    _fwd_kernel_ep_scatter_1[(num_experts,)](
+        num_recv_tokens_per_expert,
+        expert_start_loc,
+        m_indices,
+        num_experts=num_experts,
+        num_warps=num_warps,
+        BLOCK_E=BLOCK_E,
+        BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
+    )
+    grid = min(recv_topk.shape[0], 1024 * 8)
+    _fwd_kernel_ep_scatter_2_bf16[(grid,)](
+        recv_topk.shape[0],
+        expert_start_loc,
+        recv_x,
+        recv_x.stride(0),
+        recv_x.stride(1),
+        recv_topk,
+        recv_topk.stride(0),
+        recv_topk.stride(1),
+        output_tensor,
+        output_tensor.stride(0),
+        output_tensor.stride(1),
+        output_index,
+        output_index.stride(0),
+        output_index.stride(1),
+        topk_num=recv_topk.shape[1],
+        num_experts=num_experts,
+        num_warps=num_warps,
+        HIDDEN_SIZE=hidden_size,
+        HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),
+    )
+    return
+
+
+@triton.jit
 def _fwd_kernel_ep_scatter_1_v2(
     alignment,
     expert_start_loc,
@@ -327,6 +439,110 @@ def ep_scatter_v2(
         HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),
         SCALE_HIDDEN_SIZE=scale_hidden_size,
         SCALE_HIDDEN_SIZE_PAD=triton.next_power_of_2(scale_hidden_size),
+    )
+    return
+
+
+@triton.jit
+def _fwd_kernel_ep_scatter_2_v2_bf16(
+    total_token_num,
+    expert_start_loc,
+    recv_x,
+    recv_x_stride0,
+    recv_x_stride1,
+    recv_topk,
+    recv_topk_stride0,
+    recv_topk_stride1,
+    output_tensor,
+    output_tensor_stride0,
+    output_tensor_stride1,
+    output_index,
+    output_index_stride0,
+    output_index_stride1,
+    topk_num: tl.constexpr,
+    num_experts: tl.constexpr,
+    alignment: tl.constexpr,
+    HIDDEN_SIZE: tl.constexpr,
+    HIDDEN_SIZE_PAD: tl.constexpr,
+):
+    start_token_id = tl.program_id(0)
+    grid_num = tl.num_programs(0)
+    offset_in = tl.arange(0, HIDDEN_SIZE_PAD)
+    mask = offset_in < HIDDEN_SIZE
+    for token_id_int32 in range(start_token_id, total_token_num, grid_num):
+        token_id = token_id_int32.to(tl.int64)
+        to_copy = tl.load(recv_x + token_id * recv_x_stride0 + offset_in, mask=mask)
+        for topk_idx_int32 in tl.range(0, topk_num, 1, num_stages=4):
+            topk_index = topk_idx_int32.to(tl.int64)
+            expert_id = tl.load(recv_topk + token_id * recv_topk_stride0 + topk_index)
+            if expert_id >= 0 and expert_id < num_experts:
+                dest_token_index_int32 = tl.atomic_add(expert_start_loc + expert_id, 1)
+                dest_token_index = dest_token_index_int32.to(tl.int64)
+                tl.store(
+                    output_index + token_id * output_index_stride0 + topk_index,
+                    dest_token_index_int32,
+                )
+                output_tensor_ptr = (
+                    output_tensor + dest_token_index * output_tensor_stride0
+                )
+                tl.store(output_tensor_ptr + offset_in, to_copy, mask=mask)
+
+
+@torch.no_grad()
+def ep_scatter_v2_bf16(
+    recv_x: torch.Tensor,
+    recv_topk: torch.Tensor,
+    alignment: int,
+    expert_start_loc: torch.Tensor,
+    output_tensor: torch.Tensor,
+    output_index: torch.Tensor,
+):
+    """BF16 version of ep_scatter_v2 without FP8 scale handling.
+
+    Scatters tokens from flat layout to 3D [E, alignment, K] layout
+    based on expert assignments, for use with deepgemm bf16 masked GEMM.
+
+    Args:
+        recv_x: Input tokens [M, K] in bf16.
+        recv_topk: Expert assignments [M, topk].
+        alignment: Token alignment per expert.
+        expert_start_loc: Per-expert start locations [E].
+        output_tensor: Output 3D tensor [E * alignment, K] in bf16.
+        output_index: Output index mapping [M, topk].
+    """
+    num_warps = 8
+    num_experts = expert_start_loc.shape[0]
+    hidden_size = recv_x.shape[1]
+
+    _fwd_kernel_ep_scatter_1_v2[(1,)](
+        alignment,
+        expert_start_loc,
+        num_experts=num_experts,
+        num_warps=num_warps,
+        BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
+    )
+    grid = min(recv_topk.shape[0], 1024 * 8)
+    _fwd_kernel_ep_scatter_2_v2_bf16[(grid,)](
+        recv_topk.shape[0],
+        expert_start_loc,
+        recv_x,
+        recv_x.stride(0),
+        recv_x.stride(1),
+        recv_topk,
+        recv_topk.stride(0),
+        recv_topk.stride(1),
+        output_tensor,
+        output_tensor.stride(0),
+        output_tensor.stride(1),
+        output_index,
+        output_index.stride(0),
+        output_index.stride(1),
+        topk_num=recv_topk.shape[1],
+        num_experts=num_experts,
+        alignment=alignment,
+        num_warps=num_warps,
+        HIDDEN_SIZE=hidden_size,
+        HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),
     )
     return
 
