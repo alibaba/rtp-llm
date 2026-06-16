@@ -595,6 +595,7 @@ std::vector<KVCachePoolMetricsSnapshot> HybridPoolKVCacheAllocator::poolMetricsS
         }
         KVCachePoolMetricsSnapshot snapshot;
         snapshot.pool_index           = gid;
+        snapshot.pool_name            = pool->poolName();
         snapshot.total_blocks         = pool->totalBlocksNum();
         snapshot.available_blocks     = pool->availableBlocksNum();
         snapshot.free_blocks          = pool->freeBlocksNum();

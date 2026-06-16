@@ -74,6 +74,9 @@ public:
     size_t getTotalSizeBytes() const {
         return config_.total_size_bytes;
     }
+    const std::string& poolName() const {
+        return config_.pool_name;
+    }
 
 private:
     void initFreeBlocks();
