@@ -66,8 +66,8 @@ def _fused_logits_head_gate_kernel(
     BLOCK_N: tl.constexpr,
     W_IS_TRANSPOSED: tl.constexpr,
 ):
-    pid_m = tl.program_id(0)
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    pid_m = tl.program_id(0).to(tl.int64)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
     mask_m = offs_m < T
     offs_n = tl.arange(0, BLOCK_N)
     mask_n = offs_n < N
@@ -103,9 +103,7 @@ def _fused_logits_head_gate_kernel(
                 mask=mask_n[:, None] & mask_k[None, :],
                 other=0.0,
             ).to(tl.float32)
-            acc += tl.dot(
-                x, tl.trans(w), out_dtype=tl.float32, input_precision="tf32"
-            )
+            acc += tl.dot(x, tl.trans(w), out_dtype=tl.float32, input_precision="tf32")
 
     # Load q_scale [BLOCK_M, BLOCK_N] (already squeezed from [T, N, 1])
     qs = tl.load(
@@ -145,7 +143,7 @@ def _fused_logits_head_gate_small_t_kernel(
     Best with contiguous weight (stride_w_k=1); callers should pre-contiguify
     transposed weight at init time.
     """
-    t = tl.program_id(0)
+    t = tl.program_id(0).to(tl.int64)
     n = tl.program_id(1)
 
     offs_k = tl.arange(0, BLOCK_K)

@@ -45,10 +45,12 @@ if triton is not None:
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
     ):
-        pid_m_blk = tl.program_id(0)
+        # Large prefill rows can make row * hidden_stride approach int32 range.
+        # Use int64 row offsets for all pointer arithmetic.
+        pid_m_blk = tl.program_id(0).to(tl.int64)
         pid_blk = tl.program_id(1)
 
-        offs_m = pid_m_blk * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_m = pid_m_blk * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
         offs_32 = tl.arange(0, 32)
         row_mask = offs_m < M
         packed = tl.zeros((BLOCK_M,), dtype=tl.int32)
