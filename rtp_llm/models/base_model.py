@@ -224,12 +224,10 @@ class BaseModel(object):
             and model_config.mla_ops_type != MlaOpsType.MHA
         ):
             spec = MLAKVCacheSpec()
-            spec.type = KVCacheSpecType.MultiHeadLatentAttention
             spec.kv_lora_rank = int(model_config.attn_config.kv_lora_rank)
             spec.rope_head_dim = int(model_config.attn_config.rope_head_dim)
         else:
             spec = MHAKVCacheSpec()
-            spec.type = KVCacheSpecType.MultiHeadAttention
             spec.size_per_head = int(model_config.attn_config.size_per_head)
 
         spec.tag = "default"

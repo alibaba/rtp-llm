@@ -644,6 +644,11 @@ class DeepSeekV4(DeepSeekV2):
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
         _refresh_dsv4_kv_cache_specs(model_config)
+        # DSV4 uses 7 independent BlockPools (one per cache group). Declare this
+        # explicitly so CacheConfigCreator routes to HybridPoolConfigCreator
+        # without inspecting internal spec tags or layer_compress_ratios.
+        model_config.hybrid_attention_config.enable_hybrid_attention = True
+        model_config.hybrid_attention_config.enable_independent_kv_cache_pools = True
 
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
@@ -935,6 +940,9 @@ class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
         config.moe_layer_index = list(range(config.num_layers))
         config.reverse_e_h_norm = True
         config.is_mtp = True
+        # MTP module shares the same 7-pool topology as the main model.
+        config.hybrid_attention_config.enable_hybrid_attention = True
+        config.hybrid_attention_config.enable_independent_kv_cache_pools = True
         return config
 
     def _create_python_model(self):

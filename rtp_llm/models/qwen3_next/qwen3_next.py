@@ -149,14 +149,12 @@ class Qwen3NextBase(BaseModel):
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
         full_spec = MHAKVCacheSpec()
         full_spec.tag = "full"
-        full_spec.type = KVCacheSpecType.MultiHeadAttention
         full_spec.seq_size_per_block = int(model_config.attn_config.tokens_per_block)
         full_spec.size_per_head = int(model_config.attn_config.size_per_head)
 
         linear_config = model_config.linear_attention_config
         linear_spec = LinearKVCacheSpec()
         linear_spec.tag = "linear"
-        linear_spec.type = KVCacheSpecType.LinearAttention
         linear_spec.seq_size_per_block = int(model_config.attn_config.tokens_per_block)
         linear_spec.head_k_dim = int(linear_config.linear_key_head_dim)
         linear_spec.head_v_dim = int(linear_config.linear_value_head_dim)
