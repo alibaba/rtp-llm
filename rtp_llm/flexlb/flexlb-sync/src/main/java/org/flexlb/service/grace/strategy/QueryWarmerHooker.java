@@ -10,6 +10,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.listener.AppOnlineHooker;
 import org.flexlb.service.grace.GracefulLifecycleReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
@@ -40,6 +41,7 @@ public class QueryWarmerHooker implements AppOnlineHooker {
     private final AtomicBoolean warmUpInProgress = new AtomicBoolean(false);
     private volatile Thread warmUpThread;
 
+    @Autowired
     public QueryWarmerHooker(
             GracefulLifecycleReporter lifecycleReporter,
             ModelMetaConfig modelMetaConfig,
