@@ -442,7 +442,8 @@ torch::Tensor GenerateStream::multimodalLocations() const {
 }
 
 bool GenerateStream::hasInputEmbeddings() const {
-    return generate_input_->input_embeddings.has_value();
+    return (generate_input_->input_embeddings.has_value() && !generate_input_->input_embeddings->empty())
+           || (generate_input_->input_embeddings_locs.has_value() && !generate_input_->input_embeddings_locs->empty());
 }
 
 const std::vector<torch::Tensor>& GenerateStream::inputEmbeddings() const {
