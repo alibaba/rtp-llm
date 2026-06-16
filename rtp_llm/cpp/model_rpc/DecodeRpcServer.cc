@@ -16,7 +16,9 @@
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/models_py/bindings/core/RuntimeDevice.h"
 #include "autil/LockFreeThreadPool.h"
+#include <c10/core/DeviceGuard.h>
 
 using namespace std;
 using namespace autil::legacy;
@@ -38,6 +40,10 @@ const bool kPdDebugEnabled = []() {
 
 bool pdDebugEnabled() {
     return kPdDebugEnabled;
+}
+
+torch::TensorOptions runtimeCudaI32Options() {
+    return torch::TensorOptions().dtype(torch::kInt32).device(rtp_llm::getTorchCudaDevice());
 }
 }  // namespace
 
@@ -318,7 +324,8 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                          generate_stream->reuseLength());
     }
     {
-        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        c10::DeviceGuard runtime_device_guard(getTorchCudaDevice());
+        const auto       cuda_i32 = runtimeCudaI32Options();
         generate_stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
             .epoch                 = 0,
             .last_sample_token_gpu = new_tokens.reshape({1}).to(cuda_i32),
@@ -368,9 +375,10 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
         auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
 
-        const auto cuda_i32             = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-        sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
-        sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
+        c10::DeviceGuard runtime_device_guard(getTorchCudaDevice());
+        const auto       cuda_i32       = runtimeCudaI32Options();
+        sp_output_buffer->all_probs     = propose_probs_t.to(getTorchCudaDevice());
+        sp_output_buffer->hidden_states = propose_hidden_t.to(getTorchCudaDevice());
 
         auto propose_tokens_gpu              = torch::empty({1}, cuda_i32);
         auto target_token_gpu                = torch::empty({1}, cuda_i32);

@@ -10,12 +10,22 @@
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
+#include "rtp_llm/models_py/bindings/core/RuntimeDevice.h"
+#include <c10/core/DeviceGuard.h>
 #include <thread>
 #include <torch/extension.h>
 
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+torch::TensorOptions runtimeCudaI32Options() {
+    return torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice());
+}
+
+}  // namespace
 
 // ----------------------------- KVCacheConnectorReadWriteContextImpl -----------------------------
 
@@ -152,7 +162,8 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                         .src_batch_indices = {},
                         .all_hidden_states = {}});
         if (stream->nextBatchSize() == 1) {
-            const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            c10::DeviceGuard runtime_device_guard(getTorchCudaDevice());
+            const auto       cuda_i32 = runtimeCudaI32Options();
             stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
                 .epoch                 = 0,
                 .last_sample_token_gpu = new_tokens.reshape({1}).to(cuda_i32),
@@ -197,18 +208,20 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         // propose-token tensor for xgrammar, while feature/glm5_cu13 split
         // target/propose GPU tensors for MTP graft prefill cudagraph. Keep
         // one CUDA int32 option and publish target plus draft-token slices.
-        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-        auto       flat_gpu = sp_output_buffer->tokens.reshape({-1}).to(cuda_i32, /*non_blocking=*/true);
+        c10::DeviceGuard runtime_device_guard(getTorchCudaDevice());
+        const auto       cuda_i32 = runtimeCudaI32Options();
+        auto             flat_gpu = sp_output_buffer->tokens.reshape({-1}).to(cuda_i32, /*non_blocking=*/true);
         if (flat_gpu.numel() >= 2) {
             sp_output_buffer->target_token_gpu   = flat_gpu.narrow(0, 0, 1);
             sp_output_buffer->propose_tokens_gpu = flat_gpu.narrow(0, 1, flat_gpu.numel() - 1);
         }
 
         if (tensorPbHasPayload(payload->propose_probs)) {
-            sp_output_buffer->all_probs = TensorPbConvert::pbToTorch(payload->propose_probs).to(torch::kCUDA);
+            sp_output_buffer->all_probs = TensorPbConvert::pbToTorch(payload->propose_probs).to(getTorchCudaDevice());
         }
         if (tensorPbHasPayload(payload->propose_hidden)) {
-            sp_output_buffer->hidden_states = TensorPbConvert::pbToTorch(payload->propose_hidden).to(torch::kCUDA);
+            sp_output_buffer->hidden_states =
+                TensorPbConvert::pbToTorch(payload->propose_hidden).to(getTorchCudaDevice());
         }
 
         stream->setSPOutputBuffer(sp_output_buffer);

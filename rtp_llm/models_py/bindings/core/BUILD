@@ -54,6 +54,16 @@ cc_library(
 )
 
 cc_library(
+    name = "runtime_device_hdr",
+    hdrs = [
+        "RuntimeDevice.h",
+    ],
+    deps = torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "tensor_holder",
     hdrs = [
         "TensorHolder.h",
@@ -97,6 +107,7 @@ cc_library(
         "ExecOps.h",
     ],
     deps = [
+        ":runtime_device_hdr",
         ":op_data",
         ":device_data",
         "//rtp_llm/cpp/config:config_modules",

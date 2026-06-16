@@ -7,6 +7,7 @@
 #include <string>
 #include <atomic>
 #include <mutex>
+#include <c10/core/DeviceGuard.h>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include <pybind11/pybind11.h>
@@ -178,8 +179,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     weights_               = params.weights;
     model_id_              = params.model_id;
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
+    c10::DeviceGuard runtime_device_guard(getTorchCudaDevice());
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
-        auto residual_tensor = torch::tensor({(float)description_.residual_scalar}, torch::kFloat32).cuda();
+        auto residual_tensor =
+            torch::tensor({(float)description_.residual_scalar}, torch::kFloat32).to(getTorchCudaDevice());
 #if USING_CUDA
         c10::cuda::getCurrentCUDAStream().synchronize();
 #endif
@@ -366,10 +369,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_CHECK_WITH_INFO(false, "CUDA/HIP Graph is only supported on CUDA/ROCm platform");
 #endif
         if (weights_.position_encoding) {
-            graph_runner_->setPositionEncoding(weights_.position_encoding->kernel.cuda());
+            graph_runner_->setPositionEncoding(weights_.position_encoding->kernel.to(getTorchCudaDevice()));
         }
         if (weights_.token_type_embedding) {
-            graph_runner_->setTokenTypeEmbedding(weights_.token_type_embedding->kernel.cuda());
+            graph_runner_->setTokenTypeEmbedding(weights_.token_type_embedding->kernel.to(getTorchCudaDevice()));
         }
         graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
