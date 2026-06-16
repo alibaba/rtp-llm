@@ -48,6 +48,51 @@ def prepare_fp4_weight_scale_for_deepgemm(
     )
 
 
+def prepare_fp8_weight_scale_for_deepgemm(
+    scale: torch.Tensor,
+    mn: int,
+    k: int,
+    num_groups: Optional[int] = None,
+) -> torch.Tensor:
+    """Convert FP8 128x128 per-block scales to DeepGEMM's packed layout."""
+    if scale.dtype == torch.int32:
+        return scale
+    if scale.dtype not in (torch.float8_e8m0fnu, torch.float32):
+        raise TypeError(
+            f"expected FP8 per-block scale or packed int32, got {scale.dtype}"
+        )
+
+    os.environ.setdefault(
+        "DG_JIT_CACHE_DIR",
+        os.path.join(tempfile.gettempdir(), f"deep_gemm_jit_{os.getuid()}"),
+    )
+    os.makedirs(os.environ["DG_JIT_CACHE_DIR"], exist_ok=True)
+
+    import deep_gemm
+
+    if scale.dim() < 2:
+        raise ValueError(
+            f"FP8 per-block scale must have at least 2 dims, got shape={tuple(scale.shape)}"
+        )
+    expected_m_blocks = (mn + FP8_BLOCK - 1) // FP8_BLOCK
+    expected_k_blocks = (k + FP8_BLOCK - 1) // FP8_BLOCK
+    if tuple(scale.shape[-2:]) != (expected_m_blocks, expected_k_blocks):
+        raise ValueError(
+            "FP8 mega_moe weight scale must be 128x128 per-block or already "
+            f"packed int32. Got shape={tuple(scale.shape)}, expected trailing "
+            f"dims=({expected_m_blocks}, {expected_k_blocks}) for mn={mn}, k={k}."
+        )
+
+    scale_fp32 = scale.float()
+    if num_groups is None:
+        return deep_gemm.transform_sf_into_required_layout(
+            scale_fp32, mn, k, (FP8_BLOCK, FP8_BLOCK)
+        )
+    return deep_gemm.transform_sf_into_required_layout(
+        scale_fp32, mn, k, (FP8_BLOCK, FP8_BLOCK), num_groups
+    )
+
+
 def per_token_cast_to_fp8_packed_ue8m0(
     x: torch.Tensor,
     gran_k: int = 32,
