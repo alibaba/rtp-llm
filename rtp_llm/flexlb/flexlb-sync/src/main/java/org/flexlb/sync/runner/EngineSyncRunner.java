@@ -168,14 +168,27 @@ public class EngineSyncRunner implements Runnable {
     }
 
     private void submitCachedWorkerChecks(Map<String, WorkerStatus> cachedWorkerStatuses, Set<String> excludeIpPorts) {
-        cachedWorkerStatuses.forEach((workerIpPort, workerStatus) -> {
+        int submitted = 0;
+        int skipped = 0;
+        for (Map.Entry<String, WorkerStatus> entry : cachedWorkerStatuses.entrySet()) {
+            String workerIpPort = entry.getKey();
+            WorkerStatus workerStatus = entry.getValue();
             if (excludeIpPorts.contains(workerIpPort) || workerStatus == null) {
-                return;
+                skipped++;
+                continue;
             }
-            logger.warn("service discovery result is unreliable, directly checking cached worker: {}, role: {}",
+            logger.debug("service discovery result is unreliable, directly checking cached worker: {}, role: {}",
                     workerIpPort, roleType);
             submitWorkerChecks(workerIpPort, workerStatus.getSite(), workerStatus.getGroup(), workerStatus);
-        });
+            submitted++;
+        }
+        if (submitted > 0 || skipped > 0) {
+            logger.warn(
+                    "service discovery result is unreliable, directly checked cached workers, role={}, submitted={}, skipped={}",
+                    roleType,
+                    submitted,
+                    skipped);
+        }
     }
 
     private void submitWorkerChecks(String workerIpPort, String site, String group, WorkerStatus workerStatus) {
