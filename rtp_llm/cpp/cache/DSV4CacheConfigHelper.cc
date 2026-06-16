@@ -70,30 +70,6 @@ constexpr int kCsaOverlap           = 1;
 constexpr int kHcaOverlap           = 0;
 constexpr int kIndexerOverlap       = 1;
 
-const char* dsv4RegionName(KVCacheRegionName region_name) {
-    switch (region_name) {
-        case KVCacheRegionName::DEFAULT:
-            return "DEFAULT";
-        case KVCacheRegionName::CSA_KV:
-            return "CSA_KV";
-        case KVCacheRegionName::HCA_KV:
-            return "HCA_KV";
-        case KVCacheRegionName::INDEXER_KV:
-            return "INDEXER_KV";
-        case KVCacheRegionName::INDEXER_STATE:
-            return "INDEXER_STATE";
-        case KVCacheRegionName::CSA_STATE:
-            return "CSA_STATE";
-        case KVCacheRegionName::HCA_STATE:
-            return "HCA_STATE";
-        case KVCacheRegionName::SWA_KV:
-            return "SWA_KV";
-        case KVCacheRegionName::REGION_COUNT:
-            return "REGION_COUNT";
-    }
-    return "UNKNOWN";
-}
-
 inline uint32_t alignUpToMultiple(uint32_t value, uint32_t multiple) {
     RTP_LLM_CHECK_WITH_INFO(multiple > 0, "DSV4 align multiple must be > 0");
     return ((value + multiple - 1) / multiple) * multiple;
@@ -142,7 +118,7 @@ uint32_t maybeAdjustFixedEntriesForCpSharding(uint32_t                 entries,
     const auto entries_per_block     = prefill_sliced ? ring_capacity_entries / cp_size : ring_capacity_entries;
     RTP_LLM_LOG_INFO("DSV4 fixed/SWA CP sharding region=%s(%d) min_entries=%u ring_capacity_entries=%u "
                      "entries_per_block=%u cp_size=%u prefill_sliced=%d expanded=%d role=%d",
-                     dsv4RegionName(region_name),
+                     cacheRegionName(region_name),
                      static_cast<int>(region_name),
                      entries,
                      ring_capacity_entries,
@@ -606,7 +582,7 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
                          "entries_per_block=%u tokens_per_block=%u physical_tokens_per_block=%u "
                          "prefill_cp_fixed_sliced=%d",
                          gid,
-                         dsv4RegionName(pool.region_name),
+                         cacheRegionName(pool.region_name),
                          static_cast<int>(pool.region_name),
                          pool.is_paged ? "FULL" : "SWA/FIXED",
                          pool.layer_ids->size(),
