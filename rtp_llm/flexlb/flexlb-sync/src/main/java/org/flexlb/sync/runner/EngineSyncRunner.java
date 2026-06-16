@@ -113,7 +113,12 @@ public class EngineSyncRunner implements Runnable {
 
             logger.info("Submitting status check tasks for {} workers", latestEngineWorkerList.size());
             for (WorkerHost host : latestEngineWorkerList) {
-                submitStatusChecks(host);
+                try {
+                    submitStatusChecks(host);
+                } catch (Exception e) {
+                    logger.error("skip worker with submit failure, model={}, role={}, ipPort={}, error:{}",
+                            modelName, roleType, host.getIpPort(), e.getMessage());
+                }
             }
             logger.info("Finished submitting status check tasks for model: {}, role: {}, worker count: {}", modelName,
                     roleType, latestEngineWorkerList.size());
@@ -267,15 +272,13 @@ public class EngineSyncRunner implements Runnable {
     }
 
     private WorkerStatus getOrCreateWorkerStatus(Map<String, WorkerStatus> workerStatuses, String workerIpPort) {
-        WorkerStatus workerStatus = workerStatuses.get(workerIpPort);
-        if (workerStatus == null) {
-            workerStatus = new WorkerStatus();
-            String[] split = workerIpPort.split(":");
+        return workerStatuses.computeIfAbsent(workerIpPort, key -> {
+            WorkerStatus workerStatus = new WorkerStatus();
+            String[] split = key.split(":");
             workerStatus.setIp(split[0]);
             workerStatus.setPort(Integer.parseInt(split[1]));
-            workerStatuses.put(workerIpPort, workerStatus);
-            logger.info("Created new WorkerStatus for worker: {}", workerIpPort);
-        }
-        return workerStatus;
+            logger.info("Created new WorkerStatus for worker: {}", key);
+            return workerStatus;
+        });
     }
 }
