@@ -12,7 +12,12 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-from rtp_llm.test.perf_test.dataclass import PerfTestConfig
+from rtp_llm.test.perf_test.dataclass import (
+    MetricState,
+    PerfTestConfig,
+    TableType,
+    create_metrics_table,
+)
 from rtp_llm.test.perf_test.distribution_runner import DistributionRunner
 from rtp_llm.test.perf_test.grid_runner import GridRunner
 from rtp_llm.test.perf_test.perf_config import (
@@ -133,6 +138,11 @@ def _run_decode(
                 **kwargs,
             ).run()
         else:
+            # 逐 input_len 跑（每个 seq 的 batch_size 受 KV cache 约束、各不相同）。
+            # 每个 GridRunner.run() 会把结果写到同一个 Decode_Result.json —— 会互相覆盖，
+            # 导致只剩最后一个 seq。这里累计所有 seq 的 metrics，循环后再统一写一次，
+            # 得到含全部 (bs,seq) 的完整结果（修复 Decode_Result.json overwrite bug）。
+            all_metrics: List[MetricState] = []
             for input_len in config.input_len_list:
                 filtered_bs = filter_bs_by_kvcache(
                     config.batch_size_list, input_len, max_kv
@@ -142,7 +152,7 @@ def _run_decode(
                         f"No BS fits KV cache for input_len={input_len}, skipping"
                     )
                     continue
-                GridRunner(
+                all_metrics += GridRunner(
                     port,
                     dp_size,
                     filtered_bs,
@@ -151,6 +161,15 @@ def _run_decode(
                     is_decode=True,
                     **kwargs,
                 ).run()
+            if all_metrics:
+                create_metrics_table(
+                    TableType.Decode,
+                    all_metrics,
+                    kwargs.get("dump_json_path", "."),
+                    {"dp_size": dp_size, "tp_size": kwargs.get("tp_size", 1)},
+                    "Decode Result",
+                    kwargs.get("generate_config"),
+                )
 
 
 # ---------------------------------------------------------------------------
