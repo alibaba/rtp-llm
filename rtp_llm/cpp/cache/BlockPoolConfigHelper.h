@@ -105,8 +105,9 @@ public:
         const bool has_group_blocks =
             group_id < cache_config.group_block_nums.size() && cache_config.group_block_nums[group_id] > 0;
         config.block_num = has_group_blocks ? cache_config.group_block_nums[group_id] : cache_config.block_num;
-        RTP_LLM_LOG_INFO("createConfigForGroup: gid=%zu block_num=%d (has_group_blocks=%d, "
+        RTP_LLM_LOG_INFO("createConfigForGroup: pool_name=%s gid=%zu block_num=%d (has_group_blocks=%d, "
                          "group_block_nums.size=%zu, global_block_num=%d)",
+                         config.pool_name.c_str(),
                          group_id,
                          config.block_num,
                          has_group_blocks,

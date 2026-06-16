@@ -64,6 +64,8 @@ private:
     int groupIdForLayerRegion(int layer_id, KVCacheRegionName region_name) const;
     int defaultGroupIdForLayer(int layer_id) const;
     size_t minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
+    size_t totalReservableAvailableBlocks() const;
+    size_t reserveBlocksForPool(size_t gid, size_t reserve_blocks, size_t total_reservable_available_blocks) const;
 
     std::vector<BlockPoolPtr> group_block_pools_;
     RoleType                  role_type_{RoleType::PDFUSION};

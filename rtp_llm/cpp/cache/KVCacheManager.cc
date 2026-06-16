@@ -71,13 +71,15 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
                             const KVCachePoolMetricsSnapshot&   pool_snapshot,
                             bool                                should_log) {
     if (should_log) {
-        RTP_LLM_LOG_INFO("kvc raw pool[%s]: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu ratio=%.4f%%",
+        RTP_LLM_LOG_INFO("kvc raw pool[%s]: total=%zu avail=%zu req_ref=%zu con_ref=%zu free=%zu reserve=%zu "
+                         "ratio=%.4f%%",
                          pool_snapshot.pool_name.c_str(),
                          pool_snapshot.total_blocks,
                          pool_snapshot.available_blocks,
                          pool_snapshot.request_ref_blocks,
                          pool_snapshot.connector_ref_blocks,
                          pool_snapshot.free_blocks,
+                         pool_snapshot.reserve_blocks,
                          pool_snapshot.used_ratio);
     }
 
@@ -87,6 +89,7 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     pool_collector.request_ref_blocks   = static_cast<int64_t>(pool_snapshot.request_ref_blocks);
     pool_collector.connector_ref_blocks = static_cast<int64_t>(pool_snapshot.connector_ref_blocks);
     pool_collector.total_blocks         = static_cast<int64_t>(pool_snapshot.total_blocks);
+    pool_collector.reserve_blocks       = static_cast<int64_t>(pool_snapshot.reserve_blocks);
     pool_collector.used_ratio           = pool_snapshot.used_ratio;
 
     kmonitor::MetricsTags pool_tags("pool_name", pool_snapshot.pool_name);

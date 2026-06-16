@@ -38,7 +38,7 @@ void appendPoolSummary(
         os << "; ";
     }
     has_any = true;
-    os << "gid=" << gid << ", region=" << cacheRegionName(region_name)
+    os << "pool_name=" << pool_config.pool_name << ", gid=" << gid << ", region=" << cacheRegionName(region_name)
        << ", type=" << cacheGroupTypeName(group_type) << ", size=" << pool_config.total_size_bytes << " bytes("
        << std::fixed << std::setprecision(2) << static_cast<double>(pool_config.total_size_bytes) / kBytesPerMB
        << " MB)"
@@ -99,17 +99,19 @@ bool HybridPoolKVCacheAllocator::doInit() {
     }
 
     for (int gid = 0; gid < group_nums; ++gid) {
+        const auto& pool_config = group_pool_configs[static_cast<size_t>(gid)];
         RTP_LLM_CHECK_WITH_INFO(gid < static_cast<int>(config_.group_types.size()),
-                                "missing group type for group %d in HybridPoolKVCacheAllocator",
+                                "missing group type for pool %s(group %d) in HybridPoolKVCacheAllocator",
+                                pool_config.pool_name.c_str(),
                                 gid);
         const auto group_type = config_.group_types[static_cast<size_t>(gid)];
 
-        const auto& pool_config = group_pool_configs[static_cast<size_t>(gid)];
         auto group_pool = std::make_shared<BlockPool>(pool_config,
                                                       allocation_type_,
                                                       /*use_pinned_cpu_backing=*/false,
                                                       use_cuda_malloc_block_pool_);
-        RTP_LLM_CHECK_WITH_INFO(group_pool->init(), "Failed to initialize block pool for group %d", gid);
+        RTP_LLM_CHECK_WITH_INFO(
+            group_pool->init(), "Failed to initialize block pool %s(group %d)", pool_config.pool_name.c_str(), gid);
 
         const auto& ids  = config_.global_layer_ids[static_cast<size_t>(gid)];
         auto        spec = config_.cache_specs[static_cast<size_t>(gid)];
@@ -128,7 +130,8 @@ bool HybridPoolKVCacheAllocator::doInit() {
             full_group_ids_.push_back(gid);
         }
 
-        RTP_LLM_CHECK_WITH_INFO(group->init(), "Failed to initialize KVCacheGroup gid %d", gid);
+        RTP_LLM_CHECK_WITH_INFO(
+            group->init(), "Failed to initialize KVCacheGroup %s(gid %d)", pool_config.pool_name.c_str(), gid);
         group_block_pools_.push_back(group_pool);
         kv_cache_groups_.push_back(group);
     }
@@ -347,7 +350,9 @@ void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, co
                     kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, dest_block_index);
 
                 if (!src_addr_info.kv_addr || !dst_addr_info.kv_addr) {
-                    RTP_LLM_LOG_ERROR("Failed to get block address for group %d layer %d, src_block %d, dst_block %d",
+                    RTP_LLM_LOG_ERROR("Failed to get block address for pool %s(group %d) layer %d, src_block %d, "
+                                      "dst_block %d",
+                                      group_block_pools_[static_cast<size_t>(gid)]->poolName().c_str(),
                                       gid,
                                       layer_id,
                                       src_block_index,
@@ -588,6 +593,8 @@ KVCacheTokenCapacity HybridPoolKVCacheAllocator::tokenCapacity(size_t default_se
 std::vector<KVCachePoolMetricsSnapshot> HybridPoolKVCacheAllocator::poolMetricsSnapshots() const {
     std::vector<KVCachePoolMetricsSnapshot> snapshots;
     snapshots.reserve(group_block_pools_.size());
+    const size_t reserve_blocks                     = reserveBlockNum();
+    const size_t total_reservable_available_blocks = totalReservableAvailableBlocks();
     for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
         const auto& pool = group_block_pools_[gid];
         if (!pool) {
@@ -601,6 +608,7 @@ std::vector<KVCachePoolMetricsSnapshot> HybridPoolKVCacheAllocator::poolMetricsS
         snapshot.free_blocks          = pool->freeBlocksNum();
         snapshot.request_ref_blocks   = pool->requestRefBlocksNum();
         snapshot.connector_ref_blocks = pool->connectorRefBlocksNum();
+        snapshot.reserve_blocks       = reserveBlocksForPool(gid, reserve_blocks, total_reservable_available_blocks);
         snapshot.used_ratio           = (snapshot.total_blocks == 0) ?
                                             0.0f :
                                             static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
@@ -624,6 +632,27 @@ int64_t HybridPoolKVCacheAllocator::getMrCostTimeMs() const {
     return total;
 }
 
+size_t HybridPoolKVCacheAllocator::totalReservableAvailableBlocks() const {
+    size_t total = 0;
+    for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
+        if (!group_block_pools_[gid] || config_.usesExplicitIndependentBlocks(gid)) {
+            continue;
+        }
+        total += group_block_pools_[gid]->availableBlocksNum();
+    }
+    return total;
+}
+
+size_t HybridPoolKVCacheAllocator::reserveBlocksForPool(size_t gid,
+                                                        size_t reserve_blocks,
+                                                        size_t total_reservable_available_blocks) const {
+    if (gid >= group_block_pools_.size() || !group_block_pools_[gid] || config_.usesExplicitIndependentBlocks(gid)
+        || total_reservable_available_blocks == 0) {
+        return 0;
+    }
+    return reserve_blocks * group_block_pools_[gid]->availableBlocksNum() / total_reservable_available_blocks;
+}
+
 bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& malloc_info,
                                                               size_t            reserve_blocks) const {
     if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
@@ -637,13 +666,7 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
     const int   reserve_step       = malloc_info.complete_token_ids->getReserveStep();
     const bool  reuse_enabled      = malloc_info.reuse_cache;
 
-    size_t total_reservable_available_blocks = 0;
-    for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
-        if (config_.usesExplicitIndependentBlocks(gid)) {
-            continue;
-        }
-        total_reservable_available_blocks += group_block_pools_[gid]->availableBlocksNum();
-    }
+    const size_t total_reservable_available_blocks = totalReservableAvailableBlocks();
 
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
         const auto group_type             = static_cast<size_t>(gid) < config_.group_types.size() ?
@@ -658,18 +681,21 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
         if (need_blocks <= 0) {
             continue;
         }
-        const size_t available_blocks     = group_block_pools_[static_cast<size_t>(gid)]->availableBlocksNum();
-        const bool   uses_explicit_blocks = config_.usesExplicitIndependentBlocks(static_cast<size_t>(gid));
-        const size_t group_reserve_blocks = uses_explicit_blocks || total_reservable_available_blocks == 0 ?
-                                                0 :
-                                                reserve_blocks * available_blocks / total_reservable_available_blocks;
+        const auto&  pool                 = group_block_pools_[static_cast<size_t>(gid)];
+        const size_t available_blocks     = pool->availableBlocksNum();
+        const size_t total_blocks         = pool->totalBlocksNum();
+        const size_t group_reserve_blocks =
+            reserveBlocksForPool(static_cast<size_t>(gid), reserve_blocks, total_reservable_available_blocks);
         if (available_blocks < static_cast<size_t>(need_blocks) + group_reserve_blocks) {
             if (malloc_info.verbose) {
-                RTP_LLM_LOG_INFO("HybridPool initMalloc rejected by reserve blocks: request_id=%ld group=%d "
-                                 "need_blocks=%d available_blocks=%zu reserve_blocks=%zu group_reserve_blocks=%zu",
+                RTP_LLM_LOG_INFO("HybridPool initMalloc rejected by reserve blocks: request_id=%ld pool_name=%s "
+                                 "group=%d need_blocks=%d total_blocks=%zu available_blocks=%zu "
+                                 "reserve_blocks=%zu group_reserve_blocks=%zu",
                                  malloc_info.request_id,
+                                 pool->poolName().c_str(),
                                  gid,
                                  need_blocks,
+                                 total_blocks,
                                  available_blocks,
                                  reserve_blocks,
                                  group_reserve_blocks);

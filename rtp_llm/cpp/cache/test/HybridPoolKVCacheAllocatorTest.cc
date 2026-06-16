@@ -766,6 +766,28 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksRejectsWhenGroupCannotMeetIt
     EXPECT_FALSE(result.success);
 }
 
+TEST_F(HybridPoolKVCacheAllocatorTest, PoolMetricsSnapshotsReportReserveBlocks) {
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    constexpr size_t reserve_blocks = 6;
+    allocator->setReserveBlockNum(reserve_blocks);
+
+    const auto snapshots = allocator->poolMetricsSnapshots();
+    ASSERT_EQ(snapshots.size(), 2u);
+    EXPECT_EQ("group_0", snapshots[0].pool_name);
+    EXPECT_EQ("group_1", snapshots[1].pool_name);
+
+    const size_t total_reservable_available_blocks =
+        snapshots[0].available_blocks + snapshots[1].available_blocks;
+    ASSERT_GT(total_reservable_available_blocks, 0u);
+    EXPECT_EQ(reserve_blocks * snapshots[0].available_blocks / total_reservable_available_blocks,
+              snapshots[0].reserve_blocks);
+    EXPECT_EQ(reserve_blocks * snapshots[1].available_blocks / total_reservable_available_blocks,
+              snapshots[1].reserve_blocks);
+}
+
 TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksUseCPShardedFullGroupNeed) {
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/20, /*full_block_num=*/6);
     auto allocator = makeAllocator(config);
