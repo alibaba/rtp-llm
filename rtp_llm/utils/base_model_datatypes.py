@@ -48,6 +48,7 @@ class GenerateInput:
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
     allow_pd_route_retry: bool = True
+    client_streaming: Optional[bool] = None
 
     class Config:
         arbitrary_types_allowed = True

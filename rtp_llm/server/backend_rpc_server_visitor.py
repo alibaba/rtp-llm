@@ -555,7 +555,12 @@ class BackendRPCServerVisitor:
         async def stream_with_aux_info():
             attempt = 0
             retry_limit = self._pd_route_retry_limit(input)
-            is_client_streaming = input.generate_config.is_streaming
+            client_streaming = getattr(input, "client_streaming", None)
+            is_client_streaming = (
+                client_streaming
+                if client_streaming is not None
+                else input.generate_config.is_streaming
+            )
             while True:
                 yielded_output = False
                 buffered_outputs = []
