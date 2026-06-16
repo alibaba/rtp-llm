@@ -100,19 +100,21 @@ public class EngineSyncRunner implements Runnable {
                     markMissingWorkersUnavailable(cachedWorkerStatuses, Set.of());
                 } else {
                     logger.warn("keep cached workers because service discovery result is unreliable, role: {}", roleType);
+                    submitCachedWorkerChecks(cachedWorkerStatuses, Set.of());
                 }
                 return;
             } else {
                 logger.info("latestEngineWorkerList for role: {}, workers:{}", roleType, latestEngineWorkerList.size());
             }
 
+            Set<String> latestValidIpPorts = latestEngineWorkerList.stream()
+                    .map(WorkerHost::getIpPort)
+                    .collect(Collectors.toSet());
             if (discoveryResult.reliable()) {
-                Set<String> latestValidIpPorts = latestEngineWorkerList.stream()
-                        .map(WorkerHost::getIpPort)
-                        .collect(Collectors.toSet());
                 markMissingWorkersUnavailable(cachedWorkerStatuses, latestValidIpPorts);
             } else {
                 logger.warn("skip missing worker mark because service discovery result is unreliable, role: {}", roleType);
+                submitCachedWorkerChecks(cachedWorkerStatuses, latestValidIpPorts);
             }
 
             logger.info("Submitting status check tasks for {} workers", latestEngineWorkerList.size());
@@ -122,27 +124,7 @@ public class EngineSyncRunner implements Runnable {
 
                 WorkerStatus workerStatus = getOrCreateWorkerStatus(cachedWorkerStatuses, workerIpPort);
 
-                if (workerStatus.getStatusCheckInProgress().compareAndSet(false, true)) {
-                    logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
-                    GrpcWorkerStatusRunner grpcWorkerStatusRunner
-                            = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
-                            workerStatus, engineHealthReporter, engineGrpcService,
-                            syncRequestTimeoutMs);
-                    statusCheckExecutor.submit(grpcWorkerStatusRunner);
-                } else {
-                    logger.info("Skip status check for worker: {}, previous request in progress", workerIpPort);
-                }
-
-                if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
-                    logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
-                    GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
-                            = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
-                            workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
-                            syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
-                    statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
-                } else {
-                    logger.info("Skip cache check for worker: {}, previous request in progress", workerIpPort);
-                }
+                submitWorkerChecks(workerIpPort, site, host.getGroup(), workerStatus);
             }
             logger.info("Finished submitting status check tasks for model: {}, role: {}, worker count: {}", modelName,
                     roleType, latestEngineWorkerList.size());
@@ -182,6 +164,41 @@ public class EngineSyncRunner implements Runnable {
             } else {
                 logger.debug("Less than 2 workers, skipping variance calculation for model: {}", modelName);
             }
+        }
+    }
+
+    private void submitCachedWorkerChecks(Map<String, WorkerStatus> cachedWorkerStatuses, Set<String> excludeIpPorts) {
+        cachedWorkerStatuses.forEach((workerIpPort, workerStatus) -> {
+            if (excludeIpPorts.contains(workerIpPort) || workerStatus == null) {
+                return;
+            }
+            logger.warn("service discovery result is unreliable, directly checking cached worker: {}, role: {}",
+                    workerIpPort, roleType);
+            submitWorkerChecks(workerIpPort, workerStatus.getSite(), workerStatus.getGroup(), workerStatus);
+        });
+    }
+
+    private void submitWorkerChecks(String workerIpPort, String site, String group, WorkerStatus workerStatus) {
+        if (workerStatus.getStatusCheckInProgress().compareAndSet(false, true)) {
+            logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
+            GrpcWorkerStatusRunner grpcWorkerStatusRunner
+                    = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, group,
+                    workerStatus, engineHealthReporter, engineGrpcService,
+                    syncRequestTimeoutMs);
+            statusCheckExecutor.submit(grpcWorkerStatusRunner);
+        } else {
+            logger.info("Skip status check for worker: {}, previous request in progress", workerIpPort);
+        }
+
+        if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
+            logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
+            GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
+                    = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
+                    workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
+                    syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
+            statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
+        } else {
+            logger.info("Skip cache check for worker: {}, previous request in progress", workerIpPort);
         }
     }
 

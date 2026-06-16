@@ -20,6 +20,7 @@ import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.grace.strategy.HealthCheckHooker;
+import org.flexlb.service.grace.strategy.QueryWarmerHooker;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.JsonUtils;
@@ -99,13 +100,10 @@ public class HttpLoadBalanceServer {
      * @return a reactive response containing the load balancing result
      */
     public Mono<ServerResponse> scheduleRequest(ServerRequest request) {
-        if (HealthCheckHooker.isShutDownSignalReceived) {
-            Logger.warn("Reject schedule request because shutdown signal has been received");
-            Response response = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
-            response.setErrorMessage("flexlb is shutting down");
-            return ServerResponse.status(503)
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(Mono.just(response), Response.class);
+        String unavailableReason = trafficUnavailableReason();
+        if (unavailableReason != null) {
+            Logger.warn("Reject schedule request because {}", unavailableReason);
+            return unavailableResponse(unavailableReason);
         }
         BalanceContext ctx = new BalanceContext();
         return request.bodyToMono(Request.class)
@@ -198,7 +196,12 @@ public class HttpLoadBalanceServer {
                 });
     }
 
-    private Mono<ServerResponse> responseMasterInfo(ServerRequest request) {
+    Mono<ServerResponse> responseMasterInfo(ServerRequest request) {
+        String unavailableReason = trafficUnavailableReason();
+        if (unavailableReason != null) {
+            Logger.warn("Reject master info request because {}", unavailableReason);
+            return unavailableResponse(unavailableReason);
+        }
         return request.bodyToMono(Request.class)
                 .flatMap((Function<Request, Mono<ServerResponse>>) req -> {
                     Response result = new Response();
@@ -219,6 +222,24 @@ public class HttpLoadBalanceServer {
                             .contentType(MediaType.APPLICATION_JSON)
                             .body(Mono.just(errorResponse), Response.class);
                 });
+    }
+
+    private String trafficUnavailableReason() {
+        if (HealthCheckHooker.isShutDownSignalReceived) {
+            return "flexlb is shutting down";
+        }
+        if (!QueryWarmerHooker.warmUpFinished) {
+            return "flexlb warmup is not finished";
+        }
+        return null;
+    }
+
+    private Mono<ServerResponse> unavailableResponse(String reason) {
+        Response response = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
+        response.setErrorMessage(reason);
+        return ServerResponse.status(503)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Mono.just(response), Response.class);
     }
 
     public Mono<ServerResponse> notifyParticipant(ServerRequest request) {

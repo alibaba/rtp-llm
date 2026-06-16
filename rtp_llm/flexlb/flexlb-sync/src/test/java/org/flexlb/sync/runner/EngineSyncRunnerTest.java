@@ -129,7 +129,7 @@ class EngineSyncRunnerTest {
     }
 
     @Test
-    void should_keep_cached_worker_routeable_when_service_discovery_empty_result_is_unreliable() {
+    void should_directly_check_cached_worker_when_service_discovery_empty_result_is_unreliable() {
         WorkerStatus staleWorker = freshAliveWorker("10.0.0.1", 8080);
         workerStatusMap.put("10.0.0.1:8080", staleWorker);
         when(workerAddressService.getEngineWorkerDiscoveryResult(modelName, roleType))
@@ -138,7 +138,7 @@ class EngineSyncRunnerTest {
         engineSyncRunner.run();
 
         assertTrue(staleWorker.isAlive());
-        verify(statusCheckExecutor, never()).submit(any(Runnable.class));
+        verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
     }
 
     @Test
@@ -172,7 +172,7 @@ class EngineSyncRunnerTest {
 
         assertTrue(staleWorker.isAlive());
         assertTrue(activeWorker.isAlive());
-        verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
+        verify(statusCheckExecutor, times(4)).submit(any(Runnable.class));
     }
 
     private static WorkerStatus freshAliveWorker(String ip, int port) {
