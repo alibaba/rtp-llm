@@ -111,7 +111,7 @@ class QueryWarmerHookerTest {
     }
 
     @Test
-    void should_keep_health_offline_until_configured_roles_share_routeable_group() throws InterruptedException {
+    void should_mark_warmup_finished_when_configured_roles_use_different_routeable_groups() throws InterruptedException {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS
                 .getPrefillStatusMap()
                 .put("127.0.0.1:8080", freshAliveWorker("127.0.0.1", 8080, "group-a"));
@@ -132,15 +132,14 @@ class QueryWarmerHookerTest {
 
         try {
             hooker.afterStartUp();
-            Thread.sleep(20);
-            assertFalse(QueryWarmerHooker.warmUpFinished);
+            assertTrue(waitUntil(() -> QueryWarmerHooker.warmUpFinished));
         } finally {
             hooker.stopWarmUp();
         }
     }
 
     @Test
-    void should_keep_health_offline_until_all_positive_traffic_groups_are_routeable() throws InterruptedException {
+    void should_not_block_health_on_partial_positive_traffic_group_observation() throws InterruptedException {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS
                 .getPrefillStatusMap()
                 .put("127.0.0.1:8080", freshAliveWorker("127.0.0.1", 8080, "old"));
@@ -168,13 +167,6 @@ class QueryWarmerHookerTest {
 
         try {
             hooker.afterStartUp();
-            Thread.sleep(20);
-            assertFalse(QueryWarmerHooker.warmUpFinished);
-
-            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS
-                    .getDecodeStatusMap()
-                    .put("127.0.0.4:8081", freshAliveWorker("127.0.0.4", 8081, "new"));
-
             assertTrue(waitUntil(() -> QueryWarmerHooker.warmUpFinished));
         } finally {
             hooker.stopWarmUp();

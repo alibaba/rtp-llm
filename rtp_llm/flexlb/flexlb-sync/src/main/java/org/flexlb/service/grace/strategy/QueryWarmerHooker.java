@@ -15,7 +15,6 @@ import org.flexlb.sync.status.EngineWorkerStatus;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -177,7 +176,7 @@ public class QueryWarmerHooker implements AppOnlineHooker {
 
     private boolean areRequiredRolesReady(List<RoleType> requiredRoleTypes) {
         Set<String> requiredTrafficGroups = requiredTrafficGroups();
-        Set<String> commonRouteableGroups = null;
+        Set<String> observedRouteableGroups = new java.util.HashSet<>();
         for (RoleType roleType : requiredRoleTypes) {
             Map<String, WorkerStatus> roleStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getRoleStatusMap(roleType);
             Set<String> roleRouteableGroups = roleStatusMap.values()
@@ -189,34 +188,18 @@ public class QueryWarmerHooker implements AppOnlineHooker {
                 log.info("route warmup waiting for role {}, cachedWorkers={}", roleType, roleStatusMap.size());
                 return false;
             }
-            if (commonRouteableGroups == null) {
-                commonRouteableGroups = new HashSet<>(roleRouteableGroups);
-            } else {
-                commonRouteableGroups.retainAll(roleRouteableGroups);
-                if (commonRouteableGroups.isEmpty()) {
-                    log.info("route warmup waiting for common routeable group, role={}, roleGroups={}",
-                            roleType, roleRouteableGroups);
-                    return false;
-                }
-            }
+            observedRouteableGroups.addAll(roleRouteableGroups);
         }
-        if (commonRouteableGroups == null || commonRouteableGroups.isEmpty()) {
-            return false;
-        }
-        if (requiredTrafficGroups.isEmpty()) {
-            return true;
-        }
-        if (!commonRouteableGroups.containsAll(requiredTrafficGroups)) {
-            Set<String> missingGroups = new HashSet<>(requiredTrafficGroups);
-            missingGroups.removeAll(commonRouteableGroups);
+        if (!requiredTrafficGroups.isEmpty() && !observedRouteableGroups.containsAll(requiredTrafficGroups)) {
+            Set<String> missingGroups = new java.util.HashSet<>(requiredTrafficGroups);
+            missingGroups.removeAll(observedRouteableGroups);
             log.info(
-                    "route warmup waiting for traffic target groups, requiredGroups={}, "
-                            + "routeableGroups={}, missingGroups={}",
+                    "route warmup observed partial traffic target groups, requiredGroups={}, "
+                            + "observedRouteableGroups={}, missingGroups={}",
                     requiredTrafficGroups,
-                    commonRouteableGroups,
+                    observedRouteableGroups,
                     missingGroups
             );
-            return false;
         }
         return true;
     }
