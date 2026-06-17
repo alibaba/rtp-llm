@@ -25,6 +25,7 @@ struct CacheConfig {
     std::vector<std::vector<int>>  linear_groups;  // for hybrid attention
     std::vector<std::vector<int>>  full_groups;    // for hybrid attention
     std::vector<CacheGroupType>    group_types;    // for hybrid attention
+    std::vector<CacheGroupPolicy>  group_policies;
     std::vector<CacheGroupType>    layer_group_types;
     std::vector<KVCacheRegionName> group_region_names;        // group id -> cache identity
     std::vector<std::string>       group_tags;                // group id -> semantic cache tag
@@ -166,6 +167,7 @@ struct CacheConfig {
         global_layer_ids.clear();
         layer_ids.clear();
         group_types.clear();
+        group_policies.clear();
         group_region_names.clear();
         group_tags.clear();
 
@@ -173,6 +175,7 @@ struct CacheConfig {
         global_layer_ids.reserve(group_num);
         layer_ids.reserve(group_num);
         group_types.reserve(group_num);
+        group_policies.reserve(group_num);
         group_region_names.reserve(group_num);
         group_tags.reserve(group_num);
 
@@ -222,6 +225,7 @@ struct CacheConfig {
             layer_ids.push_back(layers_by_group[gid]);
             group_types.push_back(types[gid]);
             group_region_names.push_back(region_name);
+            group_policies.push_back(cacheGroupPolicyForLegacyRegion(types[gid], region_name));
             group_tags.push_back(tag);
 
             std::vector<bool> seen_layer(static_cast<size_t>(layer_num), false);

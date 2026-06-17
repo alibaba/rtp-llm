@@ -174,6 +174,7 @@ void appendGroup(CacheConfig&            config,
     config.cache_specs.push_back(spec);
     config.group_types.push_back(group_type);
     config.group_region_names.push_back(region_name);
+    config.group_policies.push_back(cacheGroupPolicyForLegacyRegion(group_type, region_name));
     config.group_tags.push_back(std::move(tag));
 }
 
@@ -260,6 +261,7 @@ void populateHybridAttentionGroups(CacheConfig&             config,
     config.global_layer_ids.clear();
     config.layer_ids.clear();
     config.group_types.clear();
+    config.group_policies.clear();
     config.group_region_names.clear();
     config.group_tags.clear();
 

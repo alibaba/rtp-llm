@@ -14,6 +14,19 @@ enum class CacheGroupType : int8_t {
     SWA    = 2,
 };
 
+enum class CacheReusePolicy : int8_t {
+    REUSABLE     = 0,
+    NON_REUSABLE = 1,
+};
+
+struct CacheGroupPolicy {
+    CacheReusePolicy reuse_policy              = CacheReusePolicy::REUSABLE;
+    int              active_tail_blocks        = 2;
+    bool             validate_tail_blocks      = true;
+    uint32_t         explicit_block_num        = 0;
+    bool             reserve_from_paged_budget = false;
+};
+
 inline const char* cacheGroupTypeName(CacheGroupType group_type) {
     switch (group_type) {
         case CacheGroupType::LINEAR:
@@ -76,6 +89,17 @@ inline bool isDsv4FixedRegion(KVCacheRegionName region_name) {
 
 inline bool skipReuseCacheRegion(KVCacheRegionName region_name) {
     return region_name == KVCacheRegionName::HCA_STATE;
+}
+
+inline CacheGroupPolicy cacheGroupPolicyForLegacyRegion(CacheGroupType group_type, KVCacheRegionName region_name) {
+    CacheGroupPolicy policy;
+    policy.active_tail_blocks = group_type == CacheGroupType::SWA ? 2 : 0;
+    if (region_name == KVCacheRegionName::HCA_STATE) {
+        policy.reuse_policy         = CacheReusePolicy::NON_REUSABLE;
+        policy.active_tail_blocks   = 1;
+        policy.validate_tail_blocks = false;
+    }
+    return policy;
 }
 
 }  // namespace rtp_llm

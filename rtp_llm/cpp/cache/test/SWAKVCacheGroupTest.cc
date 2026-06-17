@@ -49,6 +49,10 @@ std::shared_ptr<DSV4StateSpec> makeDsv4StateSpec(KVCacheRegionName region_name, 
                                            seq_size_per_block);
 }
 
+CacheGroupPolicy makePolicy(KVCacheRegionName region_name) {
+    return cacheGroupPolicyForLegacyRegion(CacheGroupType::SWA, region_name);
+}
+
 size_t validBlockCount(const BlockIndicesType& blocks) {
     return static_cast<size_t>(std::count_if(blocks.begin(), blocks.end(), [](BlockIdxType block) {
         return !isNullBlockIdx(block);
@@ -147,7 +151,8 @@ TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ReuseEnabledUsesSparse) {
 
 TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_HCAStateReuseEnabledCountsTailOnly) {
     auto spec  = makeDsv4StateSpec(KVCacheRegionName::HCA_STATE, 4);
-    auto group = SWAKVCacheGroup({}, spec, block_pool_, 5, /*linear_step=*/3, shared_cache_.get());
+    auto group = SWAKVCacheGroup(
+        {}, spec, block_pool_, 5, /*linear_step=*/3, shared_cache_.get(), nullptr, makePolicy(KVCacheRegionName::HCA_STATE));
 
     // seq_len=40 => seq_slots=10. If reuse sparse allocation were enabled, step hits
     // would keep positions 2/5/8 plus tail position 9. HCA_STATE skips reuse and keeps only tail 9.
@@ -158,7 +163,8 @@ TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_HCAStateReuseEnabledCountsTailOnly) {
 
 TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_CSAStateReuseEnabledStillUsesSparse) {
     auto spec  = makeDsv4StateSpec(KVCacheRegionName::CSA_STATE, 4);
-    auto group = SWAKVCacheGroup({}, spec, block_pool_, 4, /*linear_step=*/3, shared_cache_.get());
+    auto group = SWAKVCacheGroup(
+        {}, spec, block_pool_, 4, /*linear_step=*/3, shared_cache_.get(), nullptr, makePolicy(KVCacheRegionName::CSA_STATE));
 
     auto need = group.getNeedBlocks(0, 40, 0, 0, true);
     EXPECT_EQ(need.common_blocks, 0);
@@ -276,7 +282,8 @@ TEST_F(SWAKVCacheGroupTest, Malloc_NoOpWhenEnoughBlocks) {
 TEST_F(SWAKVCacheGroupTest, Malloc_DSV4TrapSkipsHCAStateNullTail) {
     ScopedEnvVar env("DSV4_TRAP_INVALID_KV_ACCESS", "1");
     auto         spec  = makeDsv4StateSpec(KVCacheRegionName::HCA_STATE, 4);
-    auto         group = SWAKVCacheGroup({}, spec, block_pool_, 5, 0, shared_cache_.get());
+    auto         group =
+        SWAKVCacheGroup({}, spec, block_pool_, 5, 0, shared_cache_.get(), nullptr, makePolicy(KVCacheRegionName::HCA_STATE));
     BlockIds     block_ids(1);
     block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
 
@@ -285,7 +292,8 @@ TEST_F(SWAKVCacheGroupTest, Malloc_DSV4TrapSkipsHCAStateNullTail) {
 
 TEST_F(SWAKVCacheGroupTest, Malloc_HCAStateReuseEnabledAllocatesTailOnly) {
     auto     spec  = makeDsv4StateSpec(KVCacheRegionName::HCA_STATE, 4);
-    auto     group = SWAKVCacheGroup({}, spec, block_pool_, 5, /*linear_step=*/3, shared_cache_.get());
+    auto     group = SWAKVCacheGroup(
+        {}, spec, block_pool_, 5, /*linear_step=*/3, shared_cache_.get(), nullptr, makePolicy(KVCacheRegionName::HCA_STATE));
     BlockIds block_ids(1);
 
     ASSERT_TRUE(group.malloc(block_ids, 40, /*enable_reuse_cache=*/true, /*reserve_step=*/0));
@@ -299,7 +307,8 @@ TEST_F(SWAKVCacheGroupTest, Malloc_HCAStateReuseEnabledAllocatesTailOnly) {
 
 TEST_F(SWAKVCacheGroupTest, Malloc_CSAStateReuseEnabledKeepsSparseBlocks) {
     auto     spec  = makeDsv4StateSpec(KVCacheRegionName::CSA_STATE, 4);
-    auto     group = SWAKVCacheGroup({}, spec, block_pool_, 4, /*linear_step=*/3, shared_cache_.get());
+    auto     group = SWAKVCacheGroup(
+        {}, spec, block_pool_, 4, /*linear_step=*/3, shared_cache_.get(), nullptr, makePolicy(KVCacheRegionName::CSA_STATE));
     BlockIds block_ids(1);
 
     ASSERT_TRUE(group.malloc(block_ids, 40, /*enable_reuse_cache=*/true, /*reserve_step=*/0));
@@ -316,7 +325,8 @@ TEST_F(SWAKVCacheGroupTest, Malloc_CSAStateReuseEnabledKeepsSparseBlocks) {
 TEST_F(SWAKVCacheGroupTest, Malloc_DSV4TrapChecksSWAKVNullTail) {
     ScopedEnvVar env("DSV4_TRAP_INVALID_KV_ACCESS", "1");
     auto         spec  = makeDsv4StateSpec(KVCacheRegionName::SWA_KV, 4);
-    auto         group = SWAKVCacheGroup({}, spec, block_pool_, 6, 0, shared_cache_.get());
+    auto         group =
+        SWAKVCacheGroup({}, spec, block_pool_, 6, 0, shared_cache_.get(), nullptr, makePolicy(KVCacheRegionName::SWA_KV));
     BlockIds     block_ids(1);
     block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
 
@@ -326,7 +336,8 @@ TEST_F(SWAKVCacheGroupTest, Malloc_DSV4TrapChecksSWAKVNullTail) {
 TEST_F(SWAKVCacheGroupTest, Malloc_DSV4TrapChecksNonSkipStateNullTail) {
     ScopedEnvVar env("DSV4_TRAP_INVALID_KV_ACCESS", "1");
     auto         spec  = makeDsv4StateSpec(KVCacheRegionName::CSA_STATE, 4);
-    auto         group = SWAKVCacheGroup({}, spec, block_pool_, 4, 0, shared_cache_.get());
+    auto         group =
+        SWAKVCacheGroup({}, spec, block_pool_, 4, 0, shared_cache_.get(), nullptr, makePolicy(KVCacheRegionName::CSA_STATE));
     BlockIds     block_ids(1);
     block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
 
@@ -488,7 +499,8 @@ TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_HCAStateReuseEnabledKeepsTailOnl
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
     auto spec  = makeDsv4StateSpec(KVCacheRegionName::HCA_STATE, 4);
-    auto group = SWAKVCacheGroup({}, spec, block_pool, 5, /*linear_step=*/2);
+    auto group =
+        SWAKVCacheGroup({}, spec, block_pool, 5, /*linear_step=*/2, nullptr, nullptr, makePolicy(KVCacheRegionName::HCA_STATE));
 
     auto allocated = block_pool->malloc(6);
     ASSERT_EQ(allocated.size(), 6u);

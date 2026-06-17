@@ -564,6 +564,7 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
     config.global_layer_ids.clear();
     config.layer_ids.clear();
     config.group_types.clear();
+    config.group_policies.clear();
     config.group_region_names.clear();
     config.group_tags.clear();
     config.group_seq_size_per_block.clear();
@@ -572,6 +573,7 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
     config.global_layer_ids.reserve(pools.size());
     config.layer_ids.reserve(pools.size());
     config.group_types.reserve(pools.size());
+    config.group_policies.reserve(pools.size());
     config.group_region_names.reserve(pools.size());
     config.group_tags.reserve(pools.size());
     for (size_t gid = 0; gid < pools.size(); ++gid) {
@@ -596,8 +598,10 @@ void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
         config.group_seq_size_per_block.push_back(pool.tokens_per_block);
         config.global_layer_ids.push_back(*pool.layer_ids);
         config.layer_ids.push_back(*pool.layer_ids);
-        config.group_types.push_back(pool.is_paged ? CacheGroupType::FULL : CacheGroupType::SWA);
+        const auto group_type = pool.is_paged ? CacheGroupType::FULL : CacheGroupType::SWA;
+        config.group_types.push_back(group_type);
         config.group_region_names.push_back(pool.region_name);
+        config.group_policies.push_back(cacheGroupPolicyForLegacyRegion(group_type, pool.region_name));
         config.group_tags.push_back(pool.tag);
     }
 }

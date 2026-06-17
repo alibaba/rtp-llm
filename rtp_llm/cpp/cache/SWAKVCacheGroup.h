@@ -8,15 +8,17 @@ namespace rtp_llm {
 
 class SWAKVCacheGroup: public KVCacheGroup {
 public:
-    SWAKVCacheGroup(const LayerIdsType&          layer_ids,
-                    std::shared_ptr<KVCacheSpec> kvcache_spec,
-	                    BlockPoolPtr                 block_pool,
-	                    int                          group_id,
-	                    int                          linear_step  = 0,
-	                    SharedBlockCache*            shared_cache = nullptr,
-	                    const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-	        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, shared_cache, metrics_reporter),
-	        linear_step_(linear_step) {}
+    SWAKVCacheGroup(const LayerIdsType&                    layer_ids,
+                    std::shared_ptr<KVCacheSpec>           kvcache_spec,
+                    BlockPoolPtr                           block_pool,
+                    int                                    group_id,
+                    int                                    linear_step      = 0,
+                    SharedBlockCache*                      shared_cache     = nullptr,
+                    const kmonitor::MetricsReporterPtr&    metrics_reporter = nullptr,
+                    CacheGroupPolicy                       policy           = CacheGroupPolicy{}):
+        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, shared_cache, metrics_reporter),
+        linear_step_(linear_step),
+        policy_(policy) {}
 
     MatchResult match(const CacheKeysType& cache_keys) override;
     MatchResult matchSingleKey(CacheKeyType cache_key) const;
@@ -39,6 +41,7 @@ private:
     void checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const;
 
     int linear_step_ = 0;
+    CacheGroupPolicy policy_;
 };
 
 using SWAKVCacheGroupPtr = std::shared_ptr<SWAKVCacheGroup>;

@@ -4,15 +4,11 @@
 #include <cstdlib>
 #include <string>
 
-#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
 namespace {
-
-constexpr int kSwaActiveTailBlocks      = 2;
-constexpr int kHcaStateActiveTailBlocks = 1;
 
 bool isActiveTailBlock(int block_idx, int seq_slots, int active_tail_blocks) {
     if (seq_slots <= 0 || block_idx >= seq_slots) {
@@ -44,27 +40,15 @@ bool SWAKVCacheGroup::shouldCheckSWATailBlockIds() const {
     if (!dsv4TrapInvalidKVAccessEnabled()) {
         return false;
     }
-    const auto dsv4_state_spec = std::dynamic_pointer_cast<DSV4StateSpec>(kvcache_spec_);
-    if (dsv4_state_spec != nullptr) {
-        return !skipReuseCacheRegion(dsv4_state_spec->cache_type);
-    }
-    return true;
+    return policy_.validate_tail_blocks;
 }
 
 bool SWAKVCacheGroup::effectiveReuseCacheForAllocation(bool enable_reuse_cache) const {
-    if (!enable_reuse_cache) {
-        return false;
-    }
-    const auto dsv4_state_spec = std::dynamic_pointer_cast<DSV4StateSpec>(kvcache_spec_);
-    return dsv4_state_spec == nullptr || !skipReuseCacheRegion(dsv4_state_spec->cache_type);
+    return enable_reuse_cache && policy_.reuse_policy == CacheReusePolicy::REUSABLE;
 }
 
 int SWAKVCacheGroup::activeTailBlocks() const {
-    const auto dsv4_state_spec = std::dynamic_pointer_cast<DSV4StateSpec>(kvcache_spec_);
-    if (dsv4_state_spec != nullptr && dsv4_state_spec->cache_type == KVCacheRegionName::HCA_STATE) {
-        return kHcaStateActiveTailBlocks;
-    }
-    return kSwaActiveTailBlocks;
+    return std::max(1, policy_.active_tail_blocks);
 }
 
 void SWAKVCacheGroup::checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const {
