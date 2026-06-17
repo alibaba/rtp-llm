@@ -28,6 +28,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
     CudaFp8PerBlockPureCPStrategy,
     CudaFp8PerBlockPureDPStrategy,
     CudaFp8PerTensorNoDPStrategy,
+    CudaNoQuantDpNormalDeepGemmStrategy,
     CudaW4a8Int4PerChannelNoDPStrategy,
 )
 from rtp_llm.ops import CPRotateMethod, MoeConfig, ParallelismConfig
@@ -796,6 +797,147 @@ class TestCudaFp8PerBlockPureDPStrategy(unittest.TestCase):
         self.assertEqual(attributes.router_class.router_type(), router_type)
         self.assertEqual(attributes.executor_class.executor_type(), executor_type)
         self.assertEqual(strategy.priority, expected_priority)
+
+
+class TestCudaNoQuantDpNormalDeepGemmStrategy(unittest.TestCase):
+    """Test CUDA no-quant DeepEP-Normal bf16 DeepGEMM strategy (opt-in)."""
+
+    def _make_config(
+        self,
+        *,
+        data_type: str = "bf16",
+        moe_strategy: str = "no_quant_dp_normal_deepgemm",
+        ep_size: int = 2,
+        tp_size: int = 1,
+        dp_size: int = 1,
+        enable_cuda_graph: bool = False,
+    ) -> MoEConfigAdapter:
+        model_config = create_model_config_without_quant()
+        model_config.data_type = data_type
+        return create_moe_config_adapter(
+            model_config=model_config,
+            parallelism_config=create_parallelism_config(
+                ep_size=ep_size, tp_size=tp_size, dp_size=dp_size
+            ),
+            moe_config=create_moe_config(
+                use_deepep_low_latency=False, moe_strategy=moe_strategy
+            ),
+            enable_cuda_graph=enable_cuda_graph,
+        )
+
+    @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
+    @patch(
+        "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm_bf16_grouped"
+    )
+    @patch("rtp_llm.models_py.utils.arch.get_sm")
+    @patch("rtp_llm.models_py.distributed.deepep_wrapper.DeepEPWrapper.supported")
+    def test_can_handle_and_attributes(
+        self,
+        mock_supported: Any,
+        mock_get_sm: Any,
+        mock_has_grouped: Any,
+        mock_has_deep_gemm: Any,
+    ) -> None:
+        """Positive: explicit opt-in, bf16, ep>1, sm9, no cuda graph -> selected,
+        and routes to DeepEP-Normal router + bf16 hybrid executor."""
+        mock_supported.return_value = True
+        mock_get_sm.return_value = (9, 0)
+        mock_has_grouped.return_value = True
+        mock_has_deep_gemm.return_value = True
+
+        strategy = CudaNoQuantDpNormalDeepGemmStrategy()
+        self.assertTrue(strategy.can_handle(self._make_config()))
+
+        attrs = strategy.get_attributes()
+        self.assertEqual(attrs.router_class.__name__, "DeepepNormalRouterNoQuant")
+        self.assertEqual(attrs.executor_class.__name__, "DeepGemmBf16HybridExecutor")
+
+    @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
+    @patch(
+        "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm_bf16_grouped"
+    )
+    @patch("rtp_llm.models_py.utils.arch.get_sm")
+    @patch("rtp_llm.models_py.distributed.deepep_wrapper.DeepEPWrapper.supported")
+    def test_negative_cases(
+        self,
+        mock_supported: Any,
+        mock_get_sm: Any,
+        mock_has_grouped: Any,
+        mock_has_deep_gemm: Any,
+    ) -> None:
+        """Negative: fp16 dtype, auto (not opt-in), cuda graph, and missing bf16
+        grouped symbols each disqualify the strategy."""
+        mock_supported.return_value = True
+        mock_get_sm.return_value = (9, 0)
+        mock_has_grouped.return_value = True
+        mock_has_deep_gemm.return_value = True
+
+        strategy = CudaNoQuantDpNormalDeepGemmStrategy()
+
+        # fp16 (not bf16)
+        self.assertFalse(strategy.can_handle(self._make_config(data_type="fp16")))
+        # not explicitly opted in
+        self.assertFalse(strategy.can_handle(self._make_config(moe_strategy="auto")))
+        # CUDA graph incompatible (runtime masked/contiguous dispatch)
+        self.assertFalse(
+            strategy.can_handle(self._make_config(enable_cuda_graph=True))
+        )
+        # bf16 grouped GEMM symbols unavailable -> fail fast at selection
+        mock_has_grouped.return_value = False
+        self.assertFalse(strategy.can_handle(self._make_config()))
+
+
+class TestHasDeepGemmBf16Grouped(unittest.TestCase):
+    """has_deep_gemm_bf16_grouped() must report unavailability, never raise, so it
+    is safe to call during strategy enumeration for any config."""
+
+    @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
+    def test_false_when_package_absent(self, mock_has_deep_gemm: Any) -> None:
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+            has_deep_gemm_bf16_grouped,
+        )
+
+        mock_has_deep_gemm.return_value = False
+        self.assertFalse(has_deep_gemm_bf16_grouped())
+
+    @patch(
+        "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper._ensure_bf16_initialized"
+    )
+    @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
+    def test_false_not_raise_on_symbol_resolution_error(
+        self, mock_has_deep_gemm: Any, mock_ensure_bf16: Any
+    ) -> None:
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+            has_deep_gemm_bf16_grouped,
+        )
+
+        mock_has_deep_gemm.return_value = True
+        mock_ensure_bf16.side_effect = RuntimeError("symbol not found")
+        # Must swallow the resolution error and return False, not propagate.
+        self.assertFalse(has_deep_gemm_bf16_grouped())
+
+
+class TestEnsureBf16Initialized(unittest.TestCase):
+    """The bf16 symbol init must be decoupled from the fp8 path: missing bf16
+    symbols leave the impls None and never raise, so _ensure_initialized() (fp8)
+    is unaffected."""
+
+    @patch(
+        "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper._bf16_symbols_initialized",
+        False,
+    )
+    @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper._lazy_init_deep_gemm")
+    @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
+    def test_tolerates_missing_bf16_symbols(
+        self, mock_has_deep_gemm: Any, mock_lazy_init: Any
+    ) -> None:
+        from rtp_llm.models_py.kernels.cuda import deepgemm_wrapper
+
+        mock_has_deep_gemm.return_value = True
+        mock_lazy_init.side_effect = RuntimeError("bf16 grouped symbol not found")
+        # Must not propagate the resolution error (would otherwise break the fp8
+        # path's _ensure_initialized, which is a separate call).
+        deepgemm_wrapper._ensure_bf16_initialized()
 
 
 if __name__ == "__main__":

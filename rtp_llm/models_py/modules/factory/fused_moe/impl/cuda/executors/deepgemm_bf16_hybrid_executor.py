@@ -156,6 +156,14 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
         )
 
         token_num = payload.expert_x.shape[0]
+        # Empty rank: DeepEP small-batch / skewed routing can leave this rank with
+        # zero tokens. Return an empty same-shape output before dispatch — otherwise
+        # the masked path (token_num <= masked_max_token_num) would run with
+        # alignment == 0 and launch 0-grid Triton scatter / 0-size DeepGEMM.
+        if token_num == 0:
+            return CombineForwardPayload(
+                fused_expert_output=torch.empty_like(payload.expert_x)
+            )
         if token_num <= self.masked_max_token_num:
             return self.execute_masked(
                 payload, activation, expert_map, a2_scale, apply_router_weight_on_input, extra_expert_args
@@ -307,7 +315,7 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
 
         num_recv_tokens_per_expert_gpu = torch.tensor(
             aligned_tokens, dtype=torch.int32, pin_memory=True, device="cpu"
-        ).cuda(non_blocking=True)
+        ).to(device=device, non_blocking=True)
         expert_start_loc = torch.empty_like(num_recv_tokens_per_expert_gpu)
         m_indices = torch.empty(all_tokens, device=device, dtype=torch.int32)
         output_index = torch.empty_like(topk_idx)

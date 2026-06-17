@@ -108,17 +108,27 @@ class CudaNoQuantDpNormalDeepGemmStrategy(MoeStrategy):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import has_deep_gemm
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+            has_deep_gemm_bf16_grouped,
+        )
         from rtp_llm.models_py.utils.arch import get_sm
 
-        resolver = MoeConfigResolver()
-        quant_method = resolver.get_quant_method(config)
-        checker.check(quant_method is None)
         # Opt-in only: must be explicitly requested via --moe_strategy. Not part of
         # "auto" selection because the bf16 deepgemm path is not yet benchmarked on
         # CUDA — keeping it out of auto avoids changing the default CUDA MoE path.
+        # Gate on this FIRST and short-circuit: ConditionChecker does not stop at the
+        # first failed check, so without this return the bf16-grouped symbol probe
+        # below would run for every config during strategy enumeration (incl. "auto").
         checker.check(config.moe_strategy == "no_quant_dp_normal_deepgemm")
-        checker.check(has_deep_gemm())
+        if config.moe_strategy != "no_quant_dp_normal_deepgemm":
+            return
+
+        resolver = MoeConfigResolver()
+        checker.check(resolver.get_quant_method(config) is None)
+        # Probe the actual bf16 grouped GEMM symbols (not just the deep_gemm package),
+        # so a build missing them rejects this strategy here instead of failing later
+        # in the executor's first forward. has_deep_gemm_bf16_grouped() never raises.
+        checker.check(has_deep_gemm_bf16_grouped())
         checker.check(get_sm()[0] >= 9)
         # executor dispatches masked/contiguous at runtime — incompatible with CUDA Graph replay
         checker.check(not config.enable_cuda_graph)
