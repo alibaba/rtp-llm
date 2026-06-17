@@ -1,14 +1,17 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <numeric>
 #include <string>
+#include <vector>
 #include <cstring>
 
 namespace rtp_llm {
@@ -148,6 +151,19 @@ void setVerifyPairInputs(GptModelInputs& model_input,
 
 torch::Tensor interleaveTokenPairs(const torch::Tensor& first, const torch::Tensor& second) {
     return torch::stack({first, second}, /*dim=*/1).reshape({-1});
+}
+
+void copyScoreSamplerTokenIds(torch::Tensor&       token_ids,
+                              const torch::Tensor& complete_token_ids,
+                              int64_t              batch_idx,
+                              int64_t              score_len,
+                              int64_t              seq_len) {
+    if (score_len <= 0 || seq_len <= 0) {
+        return;
+    }
+    auto dst = token_ids.narrow(0, batch_idx, score_len).narrow(1, 0, seq_len);
+    auto src = complete_token_ids.narrow(0, 0, 1).narrow(1, 0, seq_len).expand({score_len, seq_len});
+    dst.copy_(src);
 }
 
 const char* missingMtpStateReason(const GenerateStreamPtr& stream) {
@@ -311,15 +327,11 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
     int batch_idx = 0;
     for (auto& stream : all_streams) {
         auto complete_token_ids = stream->completeTokenIds();
-        auto seq_len            = stream->seqLength();
-        auto current_batch_size = score_len;
+        auto seq_len            = static_cast<int64_t>(stream->seqLength());
 
-        for (int i = 0; i < current_batch_size; ++i) {
-            memcpy(sampler_inputs.token_ids.data_ptr<int32_t>() + ((batch_idx) * (sampler_inputs.step + 1)),
-                   complete_token_ids.data_ptr<int32_t>(),
-                   seq_len * sizeof(int));
-            batch_idx += 1;
-        }
+        copyScoreSamplerTokenIds(
+            sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
+        batch_idx += static_cast<int64_t>(score_len);
         RTP_LLM_LOG_DEBUG("stream [%ld], sampler inputs token ids = [%s]",
                           stream->streamId(),
                           tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());

@@ -325,12 +325,12 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
     torch_ext::BertEmbeddingInputs bert_embedding_inputs;
 
     // Convert combo_position_ids from Buffer to torch::Tensor
-    if (inputs.combo_position_ids.defined()) {
+    if (inputs.combo_position_ids.defined() && inputs.combo_position_ids.numel() > 0) {
         bert_embedding_inputs.combo_position_ids = inputs.combo_position_ids.cuda();
     }
 
     // Convert combo_tokens_type_ids from Buffer to torch::Tensor
-    if (inputs.combo_tokens_type_ids.defined()) {
+    if (inputs.combo_tokens_type_ids.defined() && inputs.combo_tokens_type_ids.numel() > 0) {
         {
             DevicePerfWrapper wrapper(enable_device_perf_, "py model combo_tokens.cuda()");
             bert_embedding_inputs.combo_tokens_type_ids = inputs.combo_tokens_type_ids.cuda();
@@ -630,7 +630,13 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
 
     graph_state_         = CudaGraphState();
     auto empty_tensor    = torch::Tensor();
-    auto py_model_inputs = PyModelInputs({empty_tensor, empty_tensor, empty_tensor, PyEmbeddingInputs(), PyMultimodalInputs(),attention_inputs_, empty_tensor});
+    auto py_model_inputs = PyModelInputs({empty_tensor,
+                                          empty_tensor,
+                                          empty_tensor,
+                                          PyEmbeddingInputs(),
+                                          PyMultimodalInputs(),
+                                          attention_inputs_,
+                                          empty_tensor});
 
     if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
@@ -666,8 +672,13 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     // via the focused graph_runner hook (no replay of unrelated D2D copies).
     if (enable_cuda_graph_) {
         auto empty_tensor    = torch::Tensor();
-        auto py_model_inputs = PyModelInputs(
-            {empty_tensor, empty_tensor, empty_tensor, PyEmbeddingInputs(), PyMultimodalInputs(), attention_inputs_, empty_tensor});
+        auto py_model_inputs = PyModelInputs({empty_tensor,
+                                              empty_tensor,
+                                              empty_tensor,
+                                              PyEmbeddingInputs(),
+                                              PyMultimodalInputs(),
+                                              attention_inputs_,
+                                              empty_tensor});
         if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
             graph_runner_->updateKVCacheKernelBlockId(py_model_inputs, graph_state_);
         }

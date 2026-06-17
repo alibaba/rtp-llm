@@ -116,33 +116,6 @@ using SamplerT = float;
 
 namespace {
 
-// Cached handles to flashinfer.sampling Python entry points. The static
-// initialization is guarded by C++17 thread-safe statics + GIL, and the
-// caller must hold the GIL when invoking these helpers.
-pybind11::object& pyTopKRenormFn() {
-    static pybind11::object fn = pybind11::module_::import("flashinfer.sampling").attr("top_k_renorm_probs");
-    return fn;
-}
-
-pybind11::object& pyTopPRenormFn() {
-    static pybind11::object fn = pybind11::module_::import("flashinfer.sampling").attr("top_p_renorm_probs");
-    return fn;
-}
-
-// Python FlashInfer returns a new tensor; copy back into renorm_probs to
-// preserve the original in-place C++ contract.
-void pyTopKRenormProbs(const torch::Tensor& probs, torch::Tensor& renorm_probs, const torch::Tensor& top_k) {
-    pybind11::gil_scoped_acquire gil;
-    auto                         result = pyTopKRenormFn()(probs, top_k).cast<torch::Tensor>();
-    renorm_probs.copy_(result, /*non_blocking=*/true);
-}
-
-void pyTopPRenormProbs(const torch::Tensor& probs, torch::Tensor& renorm_probs, const torch::Tensor& top_p) {
-    pybind11::gil_scoped_acquire gil;
-    auto                         result = pyTopPRenormFn()(probs, top_p).cast<torch::Tensor>();
-    renorm_probs.copy_(result, /*non_blocking=*/true);
-}
-
 void processLogits(const GreedyParams&  params,
                    const torch::Tensor& device_tokens,
                    const torch::Tensor& transposed_tokens) {
@@ -321,8 +294,8 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                         (int64_t)cur_stream);
         if (need_renorm_probs) {
             torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
-            pyTopKRenormProbs(probs_t, temp_t, top_k_t);
-            pyTopPRenormProbs(temp_t, output_all_probs_t, top_p_t);
+            top_k_renorm_probs(probs_t, temp_t, top_k_t, 0, (int64_t)cur_stream);
+            top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
         }
     }
 
