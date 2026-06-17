@@ -424,6 +424,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                                                              const StreamGroups& stream_groups,
                                                              TensorHolder&       host_holder) const {
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_context_streams");
+    std::vector<torch::Tensor> gathered_mm_features;
     std::vector<torch::Tensor> gathered_mm_extra_input;
     const auto                 context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
     // TODO(async): prefixLength() is still stream CPU state. Stage it explicitly
@@ -464,7 +465,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
             ctx.input_lengths[ctx.batch_idx]           = input_tokens.size();
             ctx.prefix_lengths_host[prefill_batch_idx] = stream->prefixLength();
-            gatherMultimodalFeaturesForContextBatch(stream, ctx, gathered_mm_extra_input, host_holder);
+            gatherMultimodalFeaturesForContextBatch(stream, ctx, gathered_mm_features, host_holder);
 
             if (ctx.need_cal_position_id) {
                 auto context_pos_ids = stream->generateContextPositionIds();
@@ -510,10 +511,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         stream->step();
     }
 
-    if (config_.is_multimodal && !gathered_mm_extra_input.empty()) {
-        model_input.multimodal_features = std::move(gathered_mm_extra_input);
+    if (config_.is_multimodal && !gathered_mm_features.empty()) {
+        model_input.multimodal_features = std::move(gathered_mm_features);
     }
-    if (ctx.has_mm_extra_input && gathered_mm_extra_input.size() > 0) {
+    if (ctx.has_mm_extra_input && !gathered_mm_extra_input.empty()) {
         model_input.mm_extra_input = std::move(gathered_mm_extra_input);
     }
     // mm_features_locs was over-allocated using raw stream->multimodalFeaturesLength();
