@@ -336,6 +336,75 @@ class DispatcherE2ETest {
     }
 
     @Test
+    void emptyBatchArrayShortCircuitsTo200EmptyEnvelopeWithoutContactingFe() throws Exception {
+        // A present-but-empty batch array is answered locally: the dispatcher must not fan out a
+        // zero-item request (no FE contacted) and must return 200 with an empty response array.
+        WebTestClient client = buildClient(/*subBatchSize=*/2);
+
+        ObjectNode body = mapper.createObjectNode();
+        body.put("model", "qwen");
+        body.putArray("prompt_batch");
+
+        JsonNode resp = client.post().uri("/dispatcher/batch_infer")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(JsonNode.class)
+                .returnResult().getResponseBody();
+
+        assertNotNull(resp);
+        JsonNode arr = resp.get("response_batch");
+        assertNotNull(arr, "empty batch must still carry the response array field");
+        assertTrue(arr.isArray());
+        assertEquals(0, arr.size());
+        assertNull(resp.get("_partial_failure"));
+        // Empty batch is answered locally — no FE round-trip.
+        assertEquals(0, fe1.getRequestCount());
+        assertEquals(0, fe2.getRequestCount());
+        assertEquals(0, fe3.getRequestCount());
+    }
+
+    @Test
+    void allChunksFailWithSharedClientErrorSurfaces4xxNot500() throws Exception {
+        // 4 items at size:2 → 2 chunks → fe1 + fe2, both returning 400. The dispatcher must surface
+        // the shared client-error status (400), not collapse it to 500 — exercising the real
+        // WebClientResponseException → httpStatusOf → feStatus → commonErrorStatus → errorStatus chain
+        // end to end (the unit test pins the merge vote with a hand-built SubBatchResult; this pins
+        // the transport glue that feeds it).
+        fe1.enqueue(new MockResponse().setResponseCode(400).setBody("bad request"));
+        fe2.enqueue(new MockResponse().setResponseCode(400).setBody("bad request"));
+
+        WebTestClient client = buildClient(/*subBatchSize=*/2);
+
+        ObjectNode body = mapper.createObjectNode();
+        body.put("model", "qwen");
+        var requests = body.putArray("requests");
+        for (int i = 0; i < 4; i++) {
+            ObjectNode req = requests.addObject();
+            req.put("custom_id", "c" + i);
+            req.putArray("messages").addObject().put("role", "user").put("content", "hi");
+        }
+
+        JsonNode resp = client.post().uri("/dispatcher/v1/batch/chat/completions")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .exchange()
+                .expectStatus().isBadRequest()
+                .expectBody(JsonNode.class)
+                .returnResult().getResponseBody();
+
+        assertNotNull(resp);
+        assertEquals("all_sub_batches_failed", resp.get("error").asText());
+        assertEquals(4, resp.get("failed_count").asInt());
+        assertEquals(2, resp.get("total_chunks").asInt());
+        assertTrue(resp.get("failed_reasons").isArray() && resp.get("failed_reasons").size() > 0,
+                "all-failed body must carry at least one failure reason");
+        // Both failing chunks landed on fe1/fe2; fe3 never contacted.
+        assertEquals(0, fe3.getRequestCount());
+    }
+
+    @Test
     void snapshotEndpointReturnsCurrentFePoolThroughRealRouter() {
         // Wires the real DispatcherSnapshotHandler through the real DispatchRouter and HTTP
         // transport to verify the route is registered (and not shadowed by the /dispatcher/**

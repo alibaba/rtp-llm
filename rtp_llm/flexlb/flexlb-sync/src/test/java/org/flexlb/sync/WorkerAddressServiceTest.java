@@ -2,6 +2,10 @@ package org.flexlb.sync;
 
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.route.Endpoint;
+import org.flexlb.dao.route.GroupRoleEndPoint;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.exception.ServiceDiscoveryException;
 import org.flexlb.service.address.WorkerAddressService;
@@ -92,5 +96,39 @@ class WorkerAddressServiceTest {
 
         // Assertions - should return hosts
         Assertions.assertFalse(actualHosts.isEmpty());
+    }
+
+    @Test
+    void testGetEngineWorkerList_OneGroupDiscoveryFailure_AbortsWholeRoleRefresh() throws Exception {
+        // Multi-group role where one group's discovery fails. getEngineWorkerList has no per-group
+        // try/catch, so a single group's outage aborts the whole round (ServiceDiscoveryException
+        // propagates) rather than returning the healthy group's hosts. EngineSyncRunner's catch then
+        // refreshes the staleness clock so no healthy worker is evicted during the outage. Pin this
+        // contract so the partial-discovery behavior cannot silently regress to "merge what we got".
+        RoleType roleType = RoleType.PDFUSION;
+
+        Endpoint healthyEndpoint = new Endpoint();
+        healthyEndpoint.setAddress("healthy-address");
+        GroupRoleEndPoint healthyGroup = new GroupRoleEndPoint();
+        healthyGroup.setGroup("group-healthy");
+        healthyGroup.setPdFusionEndpoint(healthyEndpoint);
+
+        Endpoint failingEndpoint = new Endpoint();
+        failingEndpoint.setAddress("failing-address");
+        GroupRoleEndPoint failingGroup = new GroupRoleEndPoint();
+        failingGroup.setGroup("group-failing");
+        failingGroup.setPdFusionEndpoint(failingEndpoint);
+
+        ServiceRoute route = new ServiceRoute();
+        route.setRoleEndpoints(List.of(healthyGroup, failingGroup));
+
+        when(modelMetaConfig.getServiceRoute(anyString())).thenReturn(route);
+        when(serviceDiscovery.getHosts("healthy-address"))
+                .thenReturn(List.of(new WorkerHost("10.0.0.1", 8080, 8081, 8082, "site1", "group-healthy")));
+        when(serviceDiscovery.getHosts("failing-address"))
+                .thenThrow(new RuntimeException("vipserver down"));
+
+        Assertions.assertThrows(ServiceDiscoveryException.class,
+                () -> workerAddressService.getEngineWorkerList("TestModel", roleType));
     }
 }
