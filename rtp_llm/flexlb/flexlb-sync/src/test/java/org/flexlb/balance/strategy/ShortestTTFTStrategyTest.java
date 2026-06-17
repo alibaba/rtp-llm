@@ -159,6 +159,50 @@ class ShortestTTFTStrategyTest {
         Assertions.assertEquals("127.0.0.2", result.getServerIp());
     }
 
+    @Test
+    void should_report_candidate_and_selected_routing_cache_match_tokens() {
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+
+        WorkerStatus longestMatchWorker = createWorkerStatus("127.0.0.1", 1000);
+        WorkerStatus selectedWorker = createWorkerStatus("127.0.0.2", 0);
+        prefillStatusMap.put(longestMatchWorker.getIpPort(), longestMatchWorker);
+        prefillStatusMap.put(selectedWorker.getIpPort(), selectedWorker);
+
+        EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
+        CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        org.flexlb.balance.resource.ResourceMeasure resourceMeasure = Mockito.mock(org.flexlb.balance.resource.ResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
+        Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.anyList(), Mockito.any(), Mockito.any()))
+                .thenReturn(Map.of(
+                        longestMatchWorker.getIpPort(), 4,
+                        selectedWorker.getIpPort(), 1));
+
+        ShortestTTFTStrategy strategy = new ShortestTTFTStrategy(
+                engineWorkerStatus,
+                engineHealthReporter,
+                cacheAwareService,
+                resourceMeasureFactory,
+                fixedCandidatePoolConfigService(1));
+
+        BalanceContext balanceContext = createBalanceContext(4096L);
+        // Page-RR sends virtual block tokens here: seq_size_per_block * cp_size.
+        balanceContext.getRequest().setCacheKeyBlockSize(1024L);
+
+        ServerStatus result = strategy.select(balanceContext, RoleType.PREFILL, null);
+
+        Assertions.assertTrue(result.isSuccess(), "Result should be successful but got: " + result.getMessage());
+        Assertions.assertEquals("127.0.0.2", result.getServerIp());
+        Mockito.verify(engineHealthReporter).reportRoutingCandidateCacheMatchMetrics(
+                RoleType.PREFILL, "127.0.0.1", 4096L, 4096L);
+        Mockito.verify(engineHealthReporter).reportRoutingCandidateCacheMatchMetrics(
+                RoleType.PREFILL, "127.0.0.2", 1024L, 4096L);
+        Mockito.verify(engineHealthReporter).reportRoutingSelectedCacheMatchMetrics(
+                RoleType.PREFILL, "127.0.0.2", 1024L, 4096L);
+    }
+
     private ShortestTTFTStrategy createStrategy(EngineWorkerStatus engineWorkerStatus, ConfigService configService) {
         EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
         CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
