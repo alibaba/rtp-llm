@@ -118,9 +118,9 @@ private:
 private:
     std::vector<int> getDecodeBatchSizesToCapture();
     std::vector<int> getPrefillSequenceLengthsToCapture();
-    /// Select graph key for decode; false if no captured graph can serve current_batch_size (e.g. lower_bound hit end).
+    /// Select graph key for decode. Exceeding the configured capture range is a config error, not a fallback case.
     bool tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state);
-    /// Select graph key for prefill; false if capture_range_ empty or seq_len above max captured (lower_bound hit end).
+    /// Select graph key for prefill. Exceeding the configured capture range is a config error, not a fallback case.
     bool                    tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
     void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
     void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);

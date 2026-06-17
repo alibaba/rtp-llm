@@ -587,8 +587,9 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, 
     state.current_batch_size = inputs.attention_inputs.input_lengths.size(0);
     state.current_seq_len    = inferTotalTokensNoSync(inputs);
     if (state.current_seq_len <= 0) {
-        RTP_LLM_CHECK_WITH_INFO(
-            false, "prefill cuda graph: cannot infer total tokens without CPU sync, fallback to normal run");
+        // CUDA graph replay must know the graph key without introducing a CPU sync here.
+        // Missing metadata is an internal graph-mode invariant violation.
+        RTP_LLM_CHECK_WITH_INFO(false, "prefill cuda graph: cannot infer total tokens without CPU sync");
         return false;
     }
     if (capture_range_.empty()) {
@@ -596,7 +597,7 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, 
         return false;
     }
     auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), state.current_seq_len);
-    // No captured graph for seq_len >= current (all captures smaller than requested)
+    // Oversized requests mean capture config and scheduler limits disagree; do not silently fallback.
     RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(),
                             "prefill seq_len %d exceeds max captured %d "
                             "(extend prefill_capture_seq_lens or reduce seq_len)",
@@ -614,7 +615,7 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
                             "decode cuda graph: capture_range_ is empty, cannot run "
                             "(should not happen when enable_cuda_graph=true)");
     auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), state.current_batch_size);
-    // No captured graph for batch >= current (all captures smaller)
+    // Oversized requests mean capture config and scheduler limits disagree; do not silently fallback.
     RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(),
                             "decode batch size %d exceeds max captured %d "
                             "(extend decode_capture_batch_sizes or reduce batch size)",
