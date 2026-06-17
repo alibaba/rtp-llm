@@ -65,9 +65,21 @@ struct KVCacheSpec {
 
     virtual KVCacheSpecPtr clone() const = 0;
 
+    std::string fingerprint() const {
+        std::ostringstream os;
+        os << "tag=" << tag << ";type=" << static_cast<int>(type) << ";dtype=" << static_cast<int>(dtype)
+           << ";local_head_num_kv=" << local_head_num_kv << ";seq_size_per_block=" << seq_size_per_block;
+        os << fingerprintExtra();
+        return os.str();
+    }
+
     virtual std::string debugString(size_t indent = 0) const = 0;
 
 protected:
+    virtual std::string fingerprintExtra() const {
+        return "";
+    }
+
     // Helper method to generate common parts of debug string
     std::string commonDebugString(size_t indent = 0) const {
         const std::string indent_str = std::string(indent, ' ');

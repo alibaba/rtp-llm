@@ -84,6 +84,14 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         return std::make_shared<MLAKVCacheSpec>(*this);
     }
 
+protected:
+    std::string fingerprintExtra() const override {
+        std::ostringstream os;
+        os << ";mla.kv_lora_rank=" << kv_lora_rank << ";mla.rope_head_dim=" << rope_head_dim;
+        return os.str();
+    }
+
+public:
     std::string debugString(size_t indent = 0) const override {
         const std::string indent_str = std::string(indent, ' ');
         const std::string indent1    = indent_str + "  ";

@@ -101,6 +101,17 @@ struct DSV4KVSpec: public KVCacheSpec {
         return std::make_shared<DSV4KVSpec>(*this);
     }
 
+protected:
+    std::string fingerprintExtra() const override {
+        std::ostringstream os;
+        os << ";dsv4kv.cache_type=" << static_cast<int>(cache_type) << ";dsv4kv.entry_elems=" << entry_elems
+           << ";dsv4kv.compression_ratio=" << compression_ratio
+           << ";dsv4kv.store_dtype=" << static_cast<int>(store_dtype)
+           << ";dsv4kv.block_size_bytes_alignment=" << block_size_bytes_alignment;
+        return os.str();
+    }
+
+public:
     std::string debugString(size_t indent = 0) const override {
         std::ostringstream os;
         os << std::string(indent, ' ') << "DSV4KVSpec{\n";
@@ -196,6 +207,18 @@ struct DSV4StateSpec: public KVCacheSpec {
         return std::make_shared<DSV4StateSpec>(*this);
     }
 
+protected:
+    std::string fingerprintExtra() const override {
+        std::ostringstream os;
+        os << ";dsv4state.cache_type=" << static_cast<int>(cache_type) << ";dsv4state.state_dim=" << state_dim
+           << ";dsv4state.store_dtype=" << static_cast<int>(store_dtype)
+           << ";dsv4state.block_size_bytes_override=" << block_size_bytes_override
+           << ";dsv4state.block_size_bytes_alignment=" << block_size_bytes_alignment
+           << ";dsv4state.block_size_alignment_min_entries=" << block_size_alignment_min_entries;
+        return os.str();
+    }
+
+public:
     std::string debugString(size_t indent = 0) const override {
         std::ostringstream os;
         os << std::string(indent, ' ') << "DSV4StateSpec{\n";

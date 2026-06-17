@@ -39,7 +39,7 @@ KVCacheSpecPtr getDefaultSpecFromModel(const ModelConfig&       model_config,
 
     for (int64_t layer_id = 1; layer_id < model_config.num_layers; ++layer_id) {
         auto layer_spec = getLayerDefaultSpec(model_config, layer_id);
-        RTP_LLM_CHECK_WITH_INFO(CacheConfig::specFingerprint(layer_spec) == CacheConfig::specFingerprint(spec),
+        RTP_LLM_CHECK_WITH_INFO(layer_spec->fingerprint() == spec->fingerprint(),
                                 "single cache config default spec differs at layer %ld",
                                 layer_id);
     }

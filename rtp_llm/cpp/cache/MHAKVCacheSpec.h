@@ -130,6 +130,14 @@ struct MHAKVCacheSpec: public KVCacheSpec {
         return std::make_shared<MHAKVCacheSpec>(*this);
     }
 
+protected:
+    std::string fingerprintExtra() const override {
+        std::ostringstream os;
+        os << ";mha.size_per_head=" << size_per_head;
+        return os.str();
+    }
+
+public:
     std::string debugString(size_t indent = 0) const override {
         const std::string indent_str = std::string(indent, ' ');
         const std::string indent1    = indent_str + "  ";
