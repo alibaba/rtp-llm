@@ -237,6 +237,11 @@ class PreStopDrainSecondsTest(TestCase):
         app._shutdown_event = Mock()
         handlers = {}
 
+        class _ServerConfig:
+            shutdown_timeout = 30
+
+        app.server_config = _ServerConfig()
+
         def capture_signal(sig, handler):
             handlers[sig] = handler
 
@@ -246,7 +251,11 @@ class PreStopDrainSecondsTest(TestCase):
         handlers[signal.SIGUSR1](signal.SIGUSR1, None)
 
         self.assertFalse(app._shutdown_manager.is_draining())
+        self.assertTrue(app._shutdown_manager.is_unavailable())
         self.assertIsNone(app._shutdown_started_at)
+        self.assertTrue(app._shutdown_manager.try_begin_request())
+        self.assertEqual(app._shutdown_manager.active_request_count(), 1)
+        app._shutdown_manager.finish_request()
         app._shutdown_event.set.assert_not_called()
 
     def test_sigterm_marks_unavailable_until_grpc_stop(self) -> None:
@@ -272,8 +281,10 @@ class PreStopDrainSecondsTest(TestCase):
         ):
             handlers[signal.SIGTERM](signal.SIGTERM, None)
 
-        self.assertFalse(app._shutdown_manager.try_begin_request())
+        self.assertTrue(app._shutdown_manager.try_begin_request())
+        app._shutdown_manager.finish_request()
         self.assertFalse(app._shutdown_manager.is_draining())
+        self.assertTrue(app._shutdown_manager.is_unavailable())
         self.assertIsNotNone(app._shutdown_started_at)
         app._shutdown_event.set.assert_called_once()
 
@@ -339,7 +350,7 @@ class DashScShutdownManagerTest(TestCase):
         self.assertFalse(called)
         self.assertEqual(manager.active_request_count(), 0)
 
-    def test_pre_stop_unavailable_interceptor_rejects_new_rpc(self) -> None:
+    def test_pre_stop_unavailable_interceptor_allows_stale_rpc(self) -> None:
         manager = DashScShutdownManager()
         interceptor = DashScGrpcDrainAioInterceptor(manager)
         called = False
@@ -359,14 +370,13 @@ class DashScShutdownManagerTest(TestCase):
                 continuation, SimpleNamespace(method="/test.Service/Unary")
             )
             context = self._AbortContext()
-            with self.assertRaisesRegex(RuntimeError, "aborted"):
-                await handler.unary_unary(object(), context)
-            return context.abort_args
+            result = await handler.unary_unary(object(), context)
+            return result, context.abort_args
 
-        abort_args = asyncio.run(run())
-        self.assertEqual(abort_args[0], grpc.StatusCode.UNAVAILABLE)
-        self.assertIn("dash_sc is unavailable", abort_args[1])
-        self.assertFalse(called)
+        result, abort_args = asyncio.run(run())
+        self.assertEqual(result, "ok")
+        self.assertIsNone(abort_args)
+        self.assertTrue(called)
         self.assertEqual(manager.active_request_count(), 0)
 
     def test_draining_rejects_new_stream_rpc(self) -> None:
