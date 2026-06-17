@@ -9,6 +9,7 @@
 #include <mutex>
 #include <vector>
 #include <algorithm>
+#include <limits>
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <cstdlib>
@@ -41,6 +42,15 @@ AttentionInputMetadataStream getCurrentAttentionInputMetadataStream() {
 }
 }  // namespace
 #endif
+
+namespace {
+int64_t sumIntTensor(const torch::Tensor& tensor) {
+    if (!tensor.defined() || tensor.numel() == 0) {
+        return 0;
+    }
+    return tensor.sum(torch::kInt64).item<int64_t>();
+}
+}  // namespace
 
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
     if (tensor.device().is_cuda()) {
@@ -210,10 +220,13 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     if (context_batch_size > 0) {
         RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs(context_metadata)");
         py_attn_inputs.total_tokens = inputs.combo_tokens.defined() ? static_cast<int>(inputs.combo_tokens.size(0)) : 0;
-        // TODO(async): context_total_kv_length is still a legacy CPU scalar.
-        // The exact value for non-zero prefix lengths is available as
-        // cu_kv_seqlens[-1] on device; do not D2H here just to fill this field.
-        py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens;
+        // TRT paged prefill still consumes this legacy CPU scalar as token_num_kv.
+        const int64_t context_total_kv_length =
+            static_cast<int64_t>(py_attn_inputs.total_tokens) + sumIntTensor(prefix_lengths_src);
+        RTP_LLM_CHECK_WITH_INFO(context_total_kv_length <= std::numeric_limits<int>::max(),
+                                "context_total_kv_length overflow: %ld",
+                                context_total_kv_length);
+        py_attn_inputs.context_total_kv_length = static_cast<int>(context_total_kv_length);
         py_attn_inputs.cu_seqlens              = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.cu_kv_seqlens           = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.padding_offset          = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
