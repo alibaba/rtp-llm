@@ -99,7 +99,9 @@ class DeepSeekV4Detector(BaseFormatDetector):
         self.partial_parameter_regex = (
             r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="([^"]+)"\s*>(.*)$'
         )
-        self.function_calls_regex = r"<｜DSML｜tool_calls>(.*?)</｜DSML｜tool_calls>"
+        self.function_calls_regex = (
+            r"<｜DSML｜tool_calls>(.*?)</｜DSML｜tool_calls>"
+        )
         self.invoke_regex = (
             r'<｜DSML｜invoke\s+name="([^"]+)"\s*>(.*?)(</｜DSML｜invoke>|$)'
         )
@@ -220,9 +222,7 @@ class DeepSeekV4Detector(BaseFormatDetector):
                 continue
 
             param_type = "string"
-            if param_name in param_config and isinstance(
-                param_config[param_name], dict
-            ):
+            if param_name in param_config and isinstance(param_config[param_name], dict):
                 param_type = param_config[param_name].get("type", "string")
             parameters[param_name] = self._convert_param_value(param_value, param_type)
 
@@ -517,42 +517,3 @@ class DeepSeekV4Detector(BaseFormatDetector):
             end="</｜DSML｜invoke>",
             trigger=f"<｜DSML｜invoke",
         )
-
-    def tool_call_structural_tag(
-        self,
-        tools: List[Tool],
-        *,
-        stop_after_first: bool,
-    ) -> Dict[str, Any]:
-        """Build DeepSeek-V4 native structural_tag for forced tool-call decoding."""
-        get_structure_info = self.structure_info()
-        invoke_tags = []
-        for tool in tools:
-            function = tool.function
-            info = get_structure_info(function.name)
-            invoke_tags.append(
-                {
-                    "type": "tag",
-                    "begin": info.begin,
-                    "content": {
-                        "type": "json_schema",
-                        "json_schema": function.parameters or {},
-                    },
-                    "end": info.end,
-                }
-            )
-
-        return {
-            "format": {
-                "type": "tag",
-                "begin": f"{self.bot_token}\n",
-                "content": {
-                    "type": "tags_with_separator",
-                    "tags": invoke_tags,
-                    "separator": "\n",
-                    "at_least_one": True,
-                    "stop_after_first": stop_after_first,
-                },
-                "end": f"\n{self.eot_token}",
-            }
-        }

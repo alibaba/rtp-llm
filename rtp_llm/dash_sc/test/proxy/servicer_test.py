@@ -18,14 +18,19 @@ import grpc
 
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.proxy.access_record import ForwardAccessRecord
-from rtp_llm.dash_sc.proxy.service_route import BackendAddr, VipServerServiceDiscovery
 from rtp_llm.dash_sc.proxy.service_route_config import (
     LEGACY_FORWARD_ENV_KEY,
     SERVICE_ROUTE_ENV_KEY,
     load_service_route_config_from_env,
     parse_service_route_config,
 )
-from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
+from rtp_llm.dash_sc.proxy.service_route import (
+    BackendAddr,
+    VipServerServiceDiscovery,
+)
+from rtp_llm.dash_sc.proxy.servicer import (
+    DashScProxyServicer,
+)
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
 
@@ -150,7 +155,8 @@ class ServiceRouteConfigTest(unittest.TestCase):
 
     def test_parse_supported_route_types(self) -> None:
         cfg = parse_service_route_config(
-            '{"type": "ip_port_list", "address": ' '"10.0.0.1:8096;10.0.0.2:8096"}'
+            '{"type": "ip_port_list", "address": '
+            '"10.0.0.1:8096;10.0.0.2:8096"}'
         )
         self.assertEqual(
             (cfg.type, cfg.address),
@@ -238,7 +244,8 @@ class ServiceRouteConfigTest(unittest.TestCase):
 
     def test_servicer_reads_service_route_env(self) -> None:
         os.environ[SERVICE_ROUTE_ENV_KEY] = (
-            '{"type": "ip_port_list", "address": ' '"10.0.0.1:8096;10.0.0.2:8096"}'
+            '{"type": "ip_port_list", "address": '
+            '"10.0.0.1:8096;10.0.0.2:8096"}'
         )
         servicer = DashScProxyServicer()
         self.assertEqual(
@@ -355,21 +362,6 @@ class ParameterValidationTest(unittest.IsolatedAsyncioTestCase):
                 self._assert_parameter_error(responses)
                 self.mock_stub.ModelStreamInfer.assert_not_called()
                 self.mock_stub.reset_mock()
-
-    async def test_structural_tag_is_not_parsed_by_proxy_validation_hot_path(
-        self,
-    ) -> None:
-        self.mock_stub.ModelStreamInfer.return_value = _AsyncIter([_make_response()])
-        req = _make_request("req1")
-        req.parameters["max_new_tokens"].int64_param = 16
-        req.parameters["tool_call_structural_tag"].string_param = "not-json"
-
-        responses = await _drain(
-            self.servicer.ModelStreamInfer(_request_gen(req), MagicMock())
-        )
-
-        self.assertEqual(len(responses), 1)
-        self.mock_stub.ModelStreamInfer.assert_called_once()
 
 
 class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):

@@ -108,13 +108,6 @@ def append_sampling_params_to_model_infer_request(
         request.parameters["response_format"].string_param = response_format
     if sampling.json_format:
         request.parameters["json_format"].bool_param = True
-    if sampling.structural_tag is not None:
-        structural_tag = sampling.structural_tag
-        if not isinstance(structural_tag, str):
-            structural_tag = json.dumps(
-                structural_tag, ensure_ascii=False, separators=(",", ":")
-            )
-        request.parameters["tool_call_structural_tag"].string_param = structural_tag
 
     groups = sampling.stop_words_list
     if not groups:
@@ -356,7 +349,7 @@ def build_dash_sc_grpc_client_argparser() -> argparse.ArgumentParser:
         "--prompt",
         type=str,
         default="Hello, world!",
-        help="Prompt to encode with tokenizer.encode and send as input_ids",
+        help="Prompt to encode and send",
     )
     parser.add_argument(
         "--request_id",
@@ -454,14 +447,6 @@ def build_dash_sc_grpc_client_argparser() -> argparse.ArgumentParser:
         help="Set request.parameters['json_format']=true.",
     )
     parser.add_argument(
-        "--tool_call_structural_tag",
-        "--structural_tag",
-        dest="structural_tag",
-        type=str,
-        default="",
-        help="Optional tool-call structural_tag JSON sent as request.parameters['tool_call_structural_tag'].",
-    )
-    parser.add_argument(
         "--enable_thinking",
         type=_parse_optional_bool_arg,
         default=None,
@@ -507,7 +492,6 @@ def main():
         stop_words_list=_parse_stop_token_ids_csv(args.stop_token_ids or None),
         response_format=args.response_format.strip() or None,
         json_format=bool(args.json_format),
-        structural_tag=args.structural_tag.strip() or None,
     )
 
     request = build_model_infer_request(

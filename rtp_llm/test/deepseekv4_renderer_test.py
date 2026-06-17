@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase, TestCase, main, skipUnless
 from unittest.mock import AsyncMock, Mock
 
-from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -107,30 +106,6 @@ def _rtp_tools():
     ]
 
 
-def _rtp_two_tools():
-    tools = _tool_dicts() + [
-        {
-            "type": "function",
-            "function": {
-                "name": "search",
-                "description": "Search documents",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"query": {"type": "string"}},
-                    "required": ["query"],
-                },
-            },
-        }
-    ]
-    return [
-        GPTToolDefinition(
-            type="function",
-            function=GPTFunctionDefinition(**tool["function"]),
-        )
-        for tool in tools
-    ]
-
-
 def _rtp_messages_with_tools(messages, tools):
     expected_messages = copy.deepcopy(messages)
     if not tools:
@@ -152,9 +127,9 @@ def _rtp_messages_with_tools(messages, tools):
 def _normalize_effort(effort):
     if not isinstance(effort, str) or effort == "none":
         return None
-    if effort in ("low", "medium"):
-        return None
-    return "max" if effort == "xhigh" else effort
+    if effort == "max":
+        return "xhigh"
+    return effort
 
 
 def _rtp_expected_prompt(
@@ -173,70 +148,6 @@ def _rtp_expected_prompt(
         add_default_bos_token=add_default_bos_token,
         reasoning_effort=_normalize_effort(reasoning_effort),
     )
-
-
-class DeepseekV4ToolChoiceConstraintTest(TestCase):
-    def setUp(self):
-        self.renderer = DeepseekV4Renderer.__new__(DeepseekV4Renderer)
-
-    def test_named_tool_choice_filters_structural_tag_tools(self):
-        request = ChatCompletionRequest(
-            messages=[{"role": "user", "content": "Search docs"}],
-            tools=_rtp_two_tools(),
-            tool_choice={"type": "function", "function": {"name": "search"}},
-        )
-        config = GenerateConfig()
-
-        self.renderer.apply_chat_completion_constraints(request, config)
-
-        tag = json.loads(config.structural_tag)
-        invoke_info = DeepSeekV4Detector().structure_info()("search")
-        self.assertEqual(
-            [item["begin"] for item in tag["format"]["content"]["tags"]],
-            [invoke_info.begin],
-        )
-        self.assertIs(tag["format"]["content"]["stop_after_first"], True)
-
-    def test_required_tool_choice_keeps_all_tools_and_allows_multiple_calls(self):
-        request = ChatCompletionRequest(
-            messages=[{"role": "user", "content": "Search weather"}],
-            tools=_rtp_two_tools(),
-            tool_choice="required",
-        )
-        config = GenerateConfig()
-
-        self.renderer.apply_chat_completion_constraints(request, config)
-
-        tag = json.loads(config.structural_tag)
-        get_info = DeepSeekV4Detector().structure_info()
-        self.assertEqual(
-            [item["begin"] for item in tag["format"]["content"]["tags"]],
-            [get_info("get_weather").begin, get_info("search").begin],
-        )
-        self.assertIs(tag["format"]["content"]["stop_after_first"], False)
-
-    def test_forced_tool_choice_rejects_existing_grammar_constraints(self):
-        request = ChatCompletionRequest(
-            messages=[{"role": "user", "content": "Weather?"}],
-            tools=_rtp_tools(),
-            tool_choice="required",
-        )
-        cases = [
-            GenerateConfig(json_format=True),
-            GenerateConfig(json_schema={"type": "object"}),
-            GenerateConfig(regex=".*"),
-            GenerateConfig(ebnf='root ::= "x"'),
-            GenerateConfig(structural_tag={"format": {"type": "tag"}}),
-            GenerateConfig(response_format={"type": "json_object"}),
-        ]
-
-        for config in cases:
-            with self.subTest(config=config):
-                with self.assertRaisesRegex(
-                    FtRuntimeException,
-                    "tool_choice forced tool-call decoding conflicts",
-                ):
-                    self.renderer.apply_chat_completion_constraints(request, config)
 
 
 @skipUnless(
@@ -325,11 +236,11 @@ class DeepseekV4RendererTest(TestCase):
     def test_reasoning_effort_is_applied_without_changing_thinking_mode(self):
         messages = [{"role": "user", "content": "Hello"}]
         for effort, mapped in (
-            ("max", "max"),
-            ("xhigh", "max"),
+            ("max", "xhigh"),
+            ("xhigh", "xhigh"),
             ("high", "high"),
-            ("medium", None),
-            ("low", None),
+            ("medium", "medium"),
+            ("low", "low"),
             ("none", None),
             (None, None),
         ):
@@ -363,7 +274,7 @@ class DeepseekV4RendererTest(TestCase):
             self.encoding,
             messages,
             thinking_mode="thinking",
-            reasoning_effort="max",
+            reasoning_effort="xhigh",
         )
 
         self.assertEqual(rendered.rendered_prompt, expected)
@@ -435,41 +346,6 @@ class DeepseekV4RendererTest(TestCase):
 
         self.assertEqual(rendered.rendered_prompt, expected)
 
-    def test_tool_choice_none_does_not_expose_tools_to_dsv4_prompt(self):
-        messages = [{"role": "user", "content": "Weather?"}]
-        request = ChatCompletionRequest(
-            messages=messages,
-            tools=_rtp_tools(),
-            tool_choice="none",
-        )
-
-        rendered = self.renderer.render_chat(request)
-        expected = _rtp_expected_prompt(self.encoding, messages)
-
-        self.assertEqual(rendered.rendered_prompt, expected)
-        self.assertIsNone(self.renderer._create_detector(request))
-
-    def test_named_tool_choice_filters_prompt_and_structural_tag(self):
-        messages = [{"role": "user", "content": "Search docs"}]
-        request = ChatCompletionRequest(
-            messages=messages,
-            tools=_rtp_two_tools(),
-            tool_choice={"type": "function", "function": {"name": "search"}},
-        )
-        config = GenerateConfig()
-
-        rendered = self.renderer.render_chat(request)
-        self.renderer.apply_chat_completion_constraints(request, config)
-        tag = json.loads(config.structural_tag)
-
-        self.assertIn("search", rendered.rendered_prompt)
-        self.assertNotIn("get_weather", rendered.rendered_prompt)
-        invoke_info = DeepSeekV4Detector().structure_info()("search")
-        self.assertEqual(
-            [item["begin"] for item in tag["format"]["content"]["tags"]],
-            [invoke_info.begin],
-        )
-
     def test_history_tool_call_arguments_dict_is_encoded_as_json(self):
         request_messages = [
             {"role": "user", "content": "Call the tool"},
@@ -506,82 +382,6 @@ class DeepseekV4RendererTest(TestCase):
         )
 
         self.assertEqual(rendered.rendered_prompt, expected)
-
-    def test_openai_tool_call_history_messages_are_rendered(self):
-        request_messages = [
-            {
-                "role": "system",
-                "content": "你是一个严谨的助手。在回答用户之前，你可以调用工具获取外部数据。",
-            },
-            {
-                "role": "user",
-                "content": "帮我查一下上海和北京的天气。",
-            },
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "call_sh_001",
-                        "type": "function",
-                        "function": {
-                            "name": "get_weather",
-                            "arguments": '{"city": "上海"}',
-                        },
-                    },
-                    {
-                        "id": "call_bj_002",
-                        "type": "function",
-                        "function": {
-                            "name": "get_weather",
-                            "arguments": '{"city": "北京"}',
-                        },
-                    },
-                ],
-            },
-            {
-                "role": "tool",
-                "tool_call_id": "call_sh_001",
-                "name": "get_weather",
-                "content": '{"temperature": "26C", "status": "晴"}',
-            },
-            {
-                "role": "tool",
-                "tool_call_id": "call_bj_002",
-                "name": "get_weather",
-                "content": '{"temperature": "18C", "status": "多云"}',
-            },
-        ]
-        request = ChatCompletionRequest(
-            messages=request_messages,
-            tools=_rtp_tools(),
-        )
-
-        self.assertEqual(request.messages[3].name, "get_weather")
-        self.assertEqual(request.messages[3].tool_call_id, "call_sh_001")
-        self.assertEqual(request.messages[4].name, "get_weather")
-        self.assertEqual(request.messages[4].tool_call_id, "call_bj_002")
-
-        rendered = self.renderer.render_chat(request)
-        expected = _rtp_expected_prompt(
-            self.encoding,
-            request_messages,
-            tools=_tool_dicts(),
-        )
-
-        self.assertEqual(rendered.rendered_prompt, expected)
-        self.assertEqual(
-            rendered.rendered_prompt.count('<｜DSML｜invoke name="get_weather">'),
-            2,
-        )
-        self.assertIn(
-            '<tool_result>{"temperature": "26C", "status": "晴"}</tool_result>',
-            rendered.rendered_prompt,
-        )
-        self.assertIn(
-            '<tool_result>{"temperature": "18C", "status": "多云"}</tool_result>',
-            rendered.rendered_prompt,
-        )
 
 
 class DeepseekV4DetectorTest(TestCase):

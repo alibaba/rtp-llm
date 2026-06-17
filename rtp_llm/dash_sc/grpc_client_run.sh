@@ -68,7 +68,6 @@ STOP_TOKEN_IDS="${STOP_TOKEN_IDS:-}"
 RETURN_INPUT_IDS="${RETURN_INPUT_IDS:-}"
 RESPONSE_FORMAT="${RESPONSE_FORMAT:-}"
 JSON_FORMAT="${JSON_FORMAT:-}"
-TOOL_CALL_STRUCTURAL_TAG="${TOOL_CALL_STRUCTURAL_TAG:-${STRUCTURAL_TAG:-}}"
 ENABLE_THINKING="${ENABLE_THINKING:-}"
 GRPC_CLIENT_LOOPS="${GRPC_CLIENT_LOOPS:-1}"
 GRPC_CLIENT_DELAY_SEC="${GRPC_CLIENT_DELAY_SEC:-0}"
@@ -96,7 +95,6 @@ run_once() {
   [[ -n "$SEED" ]] && cmd+=(--seed "$SEED")
   [[ -n "$STOP_TOKEN_IDS" ]] && cmd+=(--stop_token_ids "$STOP_TOKEN_IDS")
   [[ -n "$RESPONSE_FORMAT" ]] && cmd+=(--response_format "$RESPONSE_FORMAT")
-  [[ -n "$TOOL_CALL_STRUCTURAL_TAG" ]] && cmd+=(--tool_call_structural_tag "$TOOL_CALL_STRUCTURAL_TAG")
   [[ -n "$ENABLE_THINKING" ]] && cmd+=(--enable_thinking "$ENABLE_THINKING")
   case "${RETURN_INPUT_IDS}" in
     1|true|TRUE|yes|YES) cmd+=(--return_input_ids) ;;

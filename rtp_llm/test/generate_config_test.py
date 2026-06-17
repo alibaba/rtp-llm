@@ -17,7 +17,6 @@ from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
 )
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, GenerateConfig
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.pipeline.pipeline import Pipeline
 
@@ -125,16 +124,6 @@ class GenerateConfigTest(TestCase):
         with self.assertRaisesRegex(Exception, "beam search"):
             GenerateConfig(num_beams=2, regex="[0-9]+").validate()
 
-    def test_openai_response_format_structural_tag_is_not_public_api(self):
-        with self.assertRaises(Exception):
-            ChatCompletionRequest(
-                messages=[],
-                response_format={
-                    "type": "structural_tag",
-                    "format": {"type": "tag"},
-                },
-            )
-
     def test_response_format_text_clears_stale_extra_config_response_format(self):
         config = GenerateConfig(
             response_format={
@@ -152,66 +141,6 @@ class GenerateConfigTest(TestCase):
 
         self.assertIsNone(config.response_format)
         self.assertFalse(config._has_grammar_constraint())
-
-    def test_tool_choice_dict_is_validated_at_request_parse(self):
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_weather",
-                    "description": "Get current weather",
-                    "parameters": {"type": "object"},
-                },
-            }
-        ]
-
-        request = ChatCompletionRequest(
-            messages=[],
-            tools=tools,
-            tool_choice={"type": "function", "function": {"name": "get_weather"}},
-        )
-        self.assertEqual(request.tool_choice["function"]["name"], "get_weather")
-
-        cases = [
-            (
-                {"type": "bad"},
-                tools,
-                "tool_choice.type must be 'function'",
-            ),
-            (
-                {"type": "function"},
-                tools,
-                "tool_choice.function must be an object",
-            ),
-            (
-                {"type": "function", "function": {}},
-                tools,
-                "tool_choice.function.name must be a non-empty string",
-            ),
-            (
-                {"type": "function", "function": {"name": "missing"}},
-                tools,
-                "tool_choice function .* is not in tools",
-            ),
-            (
-                {"type": "function", "function": {"name": "get_weather"}},
-                None,
-                "tool_choice function requires non-empty tools",
-            ),
-            (
-                "required",
-                None,
-                "tool_choice='required' requires non-empty tools",
-            ),
-        ]
-        for tool_choice, case_tools, message in cases:
-            with self.subTest(tool_choice=tool_choice):
-                with self.assertRaisesRegex(ValueError, message):
-                    ChatCompletionRequest(
-                        messages=[],
-                        tools=case_tools,
-                        tool_choice=tool_choice,
-                    )
 
     def test_stop_words_merge(self):
         special_tokens = SpecialTokens()
@@ -464,57 +393,6 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertFalse(config.in_think_mode)
         self.assertEqual(config.max_thinking_tokens, 0)
         self.assertEqual(config.end_think_token_ids, [102])
-
-    def test_renderer_chat_constraints_are_applied_to_generate_config(self):
-        class Renderer:
-            def apply_chat_completion_constraints(self, request, config):
-                config.structural_tag = '{"type":"test"}'
-
-        config = GenerateConfig()
-
-        OpenaiEndpoint._apply_renderer_chat_constraints(
-            Renderer(),
-            ChatCompletionRequest(messages=[]),
-            config,
-        )
-
-        self.assertEqual(config.structural_tag, '{"type":"test"}')
-
-    def test_default_renderer_chat_constraints_allow_non_forcing_tool_choice(self):
-        renderer = CustomChatRenderer.__new__(CustomChatRenderer)
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_weather",
-                    "description": "Get current weather",
-                    "parameters": {"type": "object"},
-                },
-            }
-        ]
-
-        for tool_choice in (None, "auto", "none"):
-            with self.subTest(tool_choice=tool_choice):
-                OpenaiEndpoint._apply_renderer_chat_constraints(
-                    renderer,
-                    ChatCompletionRequest(
-                        messages=[],
-                        tools=tools,
-                        tool_choice=tool_choice,
-                    ),
-                    GenerateConfig(),
-                )
-
-        with self.assertRaisesRegex(Exception, "is not supported"):
-            OpenaiEndpoint._apply_renderer_chat_constraints(
-                renderer,
-                ChatCompletionRequest(
-                    messages=[],
-                    tools=tools,
-                    tool_choice="required",
-                ),
-                GenerateConfig(),
-            )
 
     def test_disable_thinking_zeroes_backend_thinking_budget(self):
         generate_env_config = GenerateEnvConfig()

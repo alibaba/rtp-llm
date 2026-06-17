@@ -360,11 +360,10 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
         elif status == "CANCELLED":
             kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1, tags)
         else:
-            error_code = access_record.backend_error_code or status
             kmonitor.report(
                 AccMetrics.ERROR_QPS_METRIC,
                 1,
-                self._tags(access_record.method, error_code=error_code),
+                self._tags(access_record.method, error_code=status),
             )
 
     def intercept_service(self, continuation, handler_call_details):
@@ -479,10 +478,7 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
             # (``BACKEND_RuntimeError`` / ``BACKEND_OutOfMemoryError`` /
             # ``BACKEND_EMPTY_OUTPUTS`` / …). Transport-level outcomes still
             # use their gRPC code names (``CANCELLED`` / ``UNAVAILABLE`` / …).
-            access_record.status = (
-                access_record.backend_error_code
-                or _classify_error_message(access_record.error_message)
-            )
+            access_record.status = _classify_error_message(access_record.error_message)
             access_record.status_detail = access_record.error_message
         elif exc is not None:
             if access_record.terminal_seen:

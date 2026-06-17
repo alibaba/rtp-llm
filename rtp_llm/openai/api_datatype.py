@@ -90,7 +90,6 @@ class ContentPart(BaseModel):
 class ChatMessage(BaseModel):
     role: RoleEnum
     content: Union[str, None, List[ContentPart]] = ""
-    name: Optional[str] = None
     reasoning_content: Optional[str] = None
     function_call: Optional[FunctionCall] = None
     tool_calls: Optional[List[ToolCall]] = None
@@ -122,34 +121,6 @@ class GPTToolDefinition(BaseModel):
     function: GPTFunctionDefinition
 
 
-ToolChoice = Union[Literal["none", "auto", "required"], Dict[str, Any]]
-
-
-def get_tool_choice_function_name(tool_choice: Optional[ToolChoice]) -> Optional[str]:
-    if tool_choice is None:
-        return None
-    if isinstance(tool_choice, str):
-        if tool_choice in {"none", "auto", "required"}:
-            return None
-        raise ValueError(
-            "tool_choice must be 'none', 'auto', 'required', or a function choice"
-        )
-    if not isinstance(tool_choice, dict):
-        raise ValueError(
-            "tool_choice must be 'none', 'auto', 'required', or a function choice"
-        )
-    if tool_choice.get("type") != "function":
-        raise ValueError("tool_choice.type must be 'function'")
-
-    function = tool_choice.get("function")
-    if not isinstance(function, dict):
-        raise ValueError("tool_choice.function must be an object")
-    name = function.get("name")
-    if not isinstance(name, str) or not name:
-        raise ValueError("tool_choice.function.name must be a non-empty string")
-    return name
-
-
 class ResponseFormatJSONSchema(BaseModel):
     name: Optional[str] = None
     schema: Optional[Dict[str, Any]] = None
@@ -157,10 +128,13 @@ class ResponseFormatJSONSchema(BaseModel):
 
 
 class ResponseFormat(BaseModel):
-    type: Literal["text", "json_schema", "json_object", "regex", "ebnf"]
+    type: Literal[
+        "text", "json_schema", "json_object", "regex", "ebnf", "structural_tag"
+    ]
     json_schema: Optional[ResponseFormatJSONSchema] = None
     pattern: Optional[str] = None
     grammar: Optional[str] = None
+    structural_tag: Optional[Dict[str, Any]] = None
 
     @model_validator(mode="after")
     def _check_payload(self) -> "ResponseFormat":
@@ -175,6 +149,11 @@ class ResponseFormat(BaseModel):
         elif self.type == "ebnf":
             if not self.grammar:
                 raise ValueError("response_format.type=ebnf requires grammar")
+        elif self.type == "structural_tag":
+            if not self.structural_tag:
+                raise ValueError(
+                    "response_format.type=structural_tag requires structural_tag"
+                )
         return self
 
 
@@ -183,7 +162,6 @@ class ChatCompletionRequest(BaseModel):
     messages: List[ChatMessage]
     functions: Optional[List[GPTFunctionDefinition]] = None
     tools: Optional[List[GPTToolDefinition]] = None
-    tool_choice: Optional[ToolChoice] = None
     reasoning_effort: Optional[str] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
@@ -221,22 +199,6 @@ class ChatCompletionRequest(BaseModel):
     master_info: Optional[Dict[str, Any]] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     enable_thinking: Optional[bool] = None
-
-    @model_validator(mode="after")
-    def _check_tool_choice(self) -> "ChatCompletionRequest":
-        if self.tool_choice == "required" and not self.tools:
-            raise ValueError("tool_choice='required' requires non-empty tools")
-
-        name = get_tool_choice_function_name(self.tool_choice)
-        if name is None:
-            return self
-
-        if not self.tools:
-            raise ValueError("tool_choice function requires non-empty tools")
-        tool_names = {tool.function.name for tool in self.tools}
-        if name not in tool_names:
-            raise ValueError(f"tool_choice function {name!r} is not in tools")
-        return self
 
     @staticmethod
     def is_openai_request(request: Dict[str, Any]):

@@ -97,11 +97,6 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         """创建Resoning解析器，子类可选实现"""
         return None
 
-    def _effective_tools(
-        self, request: ChatCompletionRequest
-    ) -> Optional[List[GPTToolDefinition]]:
-        return request.tools
-
     @override
     def should_process_think(self, request: ChatCompletionRequest):
         # 避免在父类中也处理Think
@@ -521,7 +516,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
 
         tool_calls, remaining_after_tools = await self._extract_tool_calls_content(
             status.detector,
-            self._effective_tools(status.request),
+            status.request.tools,
             remaining_after_reasoning,
             is_streaming,
         )

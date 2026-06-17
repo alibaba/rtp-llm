@@ -22,7 +22,6 @@ import time
 from typing import Any, Optional
 
 from rtp_llm.dash_sc.codec import (
-    parse_ds_header_attributes,
     parse_input_ids_from_request,
     parse_other_params,
     parse_sampling_params,
@@ -215,10 +214,6 @@ class ForwardAccessRecord:
     # success). Kept here so a successful gRPC status can still be classified as
     # a backend failure when the payload says so.
     error_message: Optional[str] = None
-    # Structured backend code populated by the real dash-sc inference servicer.
-    # When present it is a more precise error bucket than free-form
-    # ``error_message`` classification.
-    backend_error_code: Optional[str] = None
     status: str = "OK"
     status_detail: Optional[str] = None
     # Exception-path diagnostics.
@@ -260,10 +255,9 @@ class ForwardAccessRecord:
                 self.input_len = len(ids)
         if self.generate_config is None:
             try:
-                ds_attrs = parse_ds_header_attributes(request)
-                sampling = parse_sampling_params(request, ds_attrs)
+                sampling = parse_sampling_params(request)
                 self.generate_config = _sampling_to_dict(sampling)
-                other = parse_other_params(request, ds_attrs)
+                other = parse_other_params(request)
                 self.generate_config["enable_thinking"] = other.enable_thinking
                 self.generate_config["max_new_think_tokens"] = (
                     other.max_new_think_tokens
@@ -444,7 +438,6 @@ class ForwardAccessRecord:
             "status": self.status,
             "status_detail": self.status_detail,
             "error_message": self.error_message,
-            "backend_error_code": self.backend_error_code,
             "exc_type": self.exc_type,
             "context_code": self.context_code,
             "context_active": self.context_active,
