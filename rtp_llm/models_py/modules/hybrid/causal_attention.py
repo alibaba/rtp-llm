@@ -1,4 +1,5 @@
-from typing import Dict, Optional
+import os
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -39,6 +40,7 @@ class CausalAttention(nn.Module):
         self.num_key_value_groups = attn_config.head_num // attn_config.kv_head_num
         self.head_dim = attn_config.size_per_head
         self.q_size = attn_config.head_num * self.head_dim
+        self.kv_size = attn_config.kv_head_num * self.head_dim
 
         # Create linear layers using LinearFactory
         self.qkv_proj = LinearFactory.create_linear_from_weights(
@@ -74,22 +76,94 @@ class CausalAttention(nn.Module):
                 layernorm_eps,
             )
 
-    def forward(
+    def _should_use_hipb_qkv(self, hidden_states: torch.Tensor) -> bool:
+        """Decide whether to route QKV through aiter.hipb_mm (hipBLASLt FP8 +
+        fused bias epilogue) instead of the default CK tuned path.
+
+        Empirically only beneficial when M >= 8192 (bs=64 visionbert): at smaller
+        M the kernel-time saving is eaten by GPU idle gaps. hidden_size==768
+        is the only shape we have validated.
+        """
+        if os.environ.get("USE_FP8_QKV_HIPB", "1") == "0":
+            return False
+        expected_qkv_size = self.q_size + 2 * self.kv_size
+        return (
+            self.tp_size == 1
+            and hidden_states.dim() == 2
+            and hidden_states.shape[-1] == 768
+            and hidden_states.shape[0] >= 8192
+            and expected_qkv_size == 3 * hidden_states.shape[-1]
+            and getattr(self.qkv_proj, "hidden_size", None) == hidden_states.shape[-1]
+            and getattr(self.qkv_proj, "output_size", None) == expected_qkv_size
+            and getattr(self.qkv_proj, "bias", None) is not None
+            and hasattr(self.qkv_proj, "forward_hipb_bias")
+        )
+
+    def _forward_impl(
         self,
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache],
-        gate: Optional[torch.Tensor] = None,  # for qwen3 next
-    ) -> torch.Tensor:
+        gate: Optional[torch.Tensor] = None,
+        defer_output_bias: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         input_shape = hidden_states.shape[:-1]
-        qkv = self.qkv_proj(hidden_states)
+        if self._should_use_hipb_qkv(hidden_states):
+            qkv = self.qkv_proj.forward_hipb_bias(hidden_states)
+        else:
+            qkv = self.qkv_proj(hidden_states)
         if self.qk_fuse_norm is not None:
             qkv = self.qk_fuse_norm(qkv)
         attn_output = fmha_impl.forward(qkv, kv_cache, self.layer_idx)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)
-        output = self.o_proj(attn_output)
+
+        output_bias = None
+        can_defer_bias = (
+            defer_output_bias
+            and self.tp_size == 1
+            and hasattr(self.o_proj, "forward_without_bias")
+        )
+        if (
+            can_defer_bias
+            and hasattr(self.o_proj, "forward_hipb_bias")
+            and getattr(self.o_proj, "bias", None) is not None
+        ):
+            output = self.o_proj.forward_hipb_bias(attn_output)
+        elif can_defer_bias:
+            output = self.o_proj.forward_without_bias(attn_output)
+            output_bias = getattr(self.o_proj, "bias", None)
+        else:
+            output = self.o_proj(attn_output)
+
         if self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
+        return output, output_bias
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        kv_cache: Optional[LayerKVCache],
+        gate: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        output, _ = self._forward_impl(
+            hidden_states, fmha_impl, kv_cache, gate, defer_output_bias=False
+        )
         return output
+
+    def forward_defer_output_bias(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        kv_cache: Optional[LayerKVCache],
+        gate: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Same as forward() but returns o_proj's bias separately so the caller
+        can fuse it into a following residual-add+LayerNorm. Only effective for
+        FP8 linear with tp_size==1; otherwise behaves like forward().
+        """
+        return self._forward_impl(
+            hidden_states, fmha_impl, kv_cache, gate, defer_output_bias=True
+        )

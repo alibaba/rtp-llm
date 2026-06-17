@@ -6,6 +6,70 @@ import triton.language as tl
 
 
 @triton.jit
+def _bias_gelu_kernel(
+    output_ptr,
+    input_ptr,
+    bias_ptr,
+    N: tl.int32,
+    input_row_stride: tl.int32,
+    input_col_stride: tl.int32,
+    output_row_stride: tl.int32,
+    output_col_stride: tl.int32,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    pid_m = tl.program_id(axis=0)
+    pid_n_block = tl.program_id(axis=1)
+    n_offsets = pid_n_block * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    mask = n_offsets < N
+
+    input_ptrs = input_ptr + pid_m * input_row_stride + n_offsets * input_col_stride
+    output_ptrs = output_ptr + pid_m * output_row_stride + n_offsets * output_col_stride
+
+    x = tl.load(input_ptrs, mask=mask, other=0.0).to(tl.float32)
+    bias = tl.load(bias_ptr + n_offsets, mask=mask, other=0.0).to(tl.float32)
+    x = x + bias
+
+    # Exact GELU: 0.5 * x * (1 + erf(x / sqrt(2)))
+    sqrt_half = 0.70710678118654752440
+    output = 0.5 * x * (1.0 + tl.erf(x * sqrt_half))
+    tl.store(output_ptrs, output, mask=mask)
+
+
+def bias_gelu(input_tensor: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
+    """Fused (input + bias) -> GELU in a single Triton kernel.
+
+    Replaces a separate elementwise-add + GELU pair, used in BERT-style FFN_up
+    when the FP8 linear has deferred its bias. Both inputs are 2D [M, N].
+    """
+    assert input_tensor.ndim == 2, "input_tensor must be 2D"
+
+    bias = bias.reshape(-1)
+    assert bias.numel() == input_tensor.shape[-1], "bias size must match hidden size"
+    if bias.dtype != input_tensor.dtype or bias.device != input_tensor.device:
+        bias = bias.to(device=input_tensor.device, dtype=input_tensor.dtype)
+    if not bias.is_contiguous():
+        bias = bias.contiguous()
+
+    output = torch.empty_like(input_tensor)
+    M, N = input_tensor.shape
+    block_size_n = 1024 if N > 1024 else triton.next_power_of_2(N)
+    grid = (M, triton.cdiv(N, block_size_n))
+
+    _bias_gelu_kernel[grid](
+        output,
+        input_tensor,
+        bias,
+        N,
+        input_tensor.stride(0),
+        input_tensor.stride(1),
+        output.stride(0),
+        output.stride(1),
+        BLOCK_SIZE_N=block_size_n,
+    )
+    return output
+
+
+@triton.jit
 def _silu_and_mul_kernel(
     output_ptr,
     input_ptr,
