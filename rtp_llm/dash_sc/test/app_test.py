@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import threading
+import time
 from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import Mock, patch
@@ -190,7 +192,32 @@ class PreStopDrainSecondsTest(TestCase):
         ), patch("rtp_llm.dash_sc.app.time.monotonic", return_value=101.0):
             self.assertEqual(app._remaining_grpc_stop_grace_seconds(), 3.0)
 
-    def test_sleep_before_stop_counts_prior_drain_signal_time(self) -> None:
+    def test_pre_stop_active_wait_counts_prior_drain_signal_time(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app._shutdown_started_at = 100.0
+        app._shutdown_manager = DashScShutdownManager()
+        self.assertTrue(app._shutdown_manager.try_begin_request())
+        app._shutdown_manager.start_unavailable("unit test")
+
+        class _ServerConfig:
+            shutdown_timeout = 30
+
+        app.server_config = _ServerConfig()
+
+        with patch.dict(
+            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "10"}, clear=True
+        ), patch.object(
+            app._shutdown_manager, "drain_elapsed_seconds", return_value=9.0
+        ), patch.object(
+            app._shutdown_manager,
+            "wait_for_no_active_requests",
+            return_value=False,
+        ) as wait_for_no_active:
+            app._sleep_before_stop_for_drain()
+
+        wait_for_no_active.assert_called_once_with(1.0)
+
+    def test_pre_stop_route_linger_runs_without_active_rpc(self) -> None:
         app = bg_app.DashScApp.__new__(bg_app.DashScApp)
         app._shutdown_started_at = 100.0
         app._shutdown_manager = DashScShutdownManager()
@@ -204,12 +231,17 @@ class PreStopDrainSecondsTest(TestCase):
         with patch.dict(
             os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "10"}, clear=True
         ), patch.object(
-            app._shutdown_manager, "drain_elapsed_seconds", return_value=9.0
-        ), patch(
-            "rtp_llm.dash_sc.app.time.sleep"
-        ) as sleep:
+            app._shutdown_manager,
+            "drain_elapsed_seconds",
+            return_value=9.0,
+        ), patch.object(
+            app._shutdown_manager,
+            "wait_for_no_active_requests",
+            return_value=False,
+        ) as wait_for_no_active, patch("rtp_llm.dash_sc.app.time.sleep") as sleep:
             app._sleep_before_stop_for_drain()
 
+        wait_for_no_active.assert_not_called()
         sleep.assert_called_once_with(1.0)
 
     def test_sleep_before_stop_skips_when_already_draining(self) -> None:
@@ -308,6 +340,37 @@ class PreStopDrainSecondsTest(TestCase):
         app._grpc_server.stop.assert_called_once_with(5.0)
         app._stop_enqueue_loop.assert_called_once()
 
+    def test_grpc_stop_waits_for_active_rpc_to_drain(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app._shutdown_started_at = 100.0
+        app._shutdown_manager = DashScShutdownManager()
+        app._grpc_server = Mock()
+        app._stop_enqueue_loop = Mock()
+
+        class _ServerConfig:
+            shutdown_timeout = 30
+
+        app.server_config = _ServerConfig()
+        self.assertTrue(app._shutdown_manager.try_begin_request())
+
+        def finish_request():
+            time.sleep(0.05)
+            app._shutdown_manager.finish_request()
+
+        t = threading.Thread(target=finish_request)
+        t.start()
+        start = time.monotonic()
+        with patch.object(app, "_sleep_before_stop_for_drain"), patch.object(
+            app, "_remaining_grpc_stop_grace_seconds", return_value=1.0
+        ):
+            app.stop()
+        t.join(timeout=1.0)
+
+        self.assertGreaterEqual(time.monotonic() - start, 0.04)
+        self.assertTrue(app._shutdown_manager.is_draining())
+        app._grpc_server.stop.assert_called_once_with(1.0)
+        app._stop_enqueue_loop.assert_called_once()
+
 
 class DashScShutdownManagerTest(TestCase):
     class _AbortContext:
@@ -386,6 +449,32 @@ class DashScShutdownManagerTest(TestCase):
         self.assertFalse(manager.try_begin_request())
         self.assertEqual(manager.active_request_count(), 1)
         self.assertEqual(manager.finish_request(), 0)
+
+    def test_wait_for_no_active_requests_notifies_on_finish(self) -> None:
+        manager = DashScShutdownManager()
+        self.assertTrue(manager.try_begin_request())
+
+        def finish_request():
+            time.sleep(0.05)
+            manager.finish_request()
+
+        t = threading.Thread(target=finish_request)
+        t.start()
+        start = time.monotonic()
+        self.assertTrue(manager.wait_for_no_active_requests(1.0))
+        t.join(timeout=1.0)
+        self.assertGreaterEqual(time.monotonic() - start, 0.04)
+        self.assertEqual(manager.active_request_count(), 0)
+
+    def test_wait_for_no_active_requests_times_out(self) -> None:
+        manager = DashScShutdownManager()
+        self.assertTrue(manager.try_begin_request())
+
+        start = time.monotonic()
+        self.assertFalse(manager.wait_for_no_active_requests(0.02))
+        self.assertGreaterEqual(time.monotonic() - start, 0.015)
+        self.assertEqual(manager.active_request_count(), 1)
+        manager.finish_request()
 
     def test_draining_rejects_new_stream_rpc(self) -> None:
         manager = DashScShutdownManager()

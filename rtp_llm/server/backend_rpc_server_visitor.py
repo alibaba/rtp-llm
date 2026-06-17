@@ -35,7 +35,10 @@ if TYPE_CHECKING:
 route_logger = logging.getLogger("route_logger")
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
-DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
+# Whale min_health=50 restarts can leave stale service-discovery entries visible
+# for more than a few RPC attempts. Retrying is still disabled after a
+# client-visible streaming chunk by the enqueue loop below.
+DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 12
 
 
 class BackendRPCServerVisitor:

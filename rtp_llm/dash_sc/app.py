@@ -77,7 +77,7 @@ class DashScShutdownManager:
     """Tracks DashSc draining state and accepted in-flight RPCs."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.Condition(threading.Lock())
         self._unavailable = False
         self._draining = False
         self._drain_reason = ""
@@ -146,11 +146,30 @@ class DashScShutdownManager:
                 self._active_requests = 0
                 return 0
             self._active_requests -= 1
-            return self._active_requests
+            active_requests = self._active_requests
+            if active_requests == 0:
+                self._lock.notify_all()
+            return active_requests
 
     def active_request_count(self) -> int:
         with self._lock:
             return self._active_requests
+
+    def wait_for_no_active_requests(self, timeout: Optional[float]) -> bool:
+        deadline = (
+            None if timeout is None or timeout < 0 else time.monotonic() + timeout
+        )
+        with self._lock:
+            while self._active_requests > 0:
+                if deadline is None:
+                    wait_s = 1.0
+                else:
+                    wait_s = deadline - time.monotonic()
+                    if wait_s <= 0:
+                        return False
+                    wait_s = min(1.0, wait_s)
+                self._lock.wait(wait_s)
+            return True
 
 
 async def _create_proxy_servicer_on_loop() -> DashScProxyServicer:
@@ -539,7 +558,25 @@ class DashScApp:
             self.stop()
 
     def stop(self) -> None:
+        self._shutdown_manager.start_unavailable("grpc stop")
         self._sleep_before_stop_for_drain()
+        grace = self._remaining_grpc_stop_grace_seconds()
+        if self._shutdown_manager.active_request_count() > 0:
+            logging.info(
+                "[DashScApp] waiting active gRPC requests before stop: "
+                "active_requests=%s, timeout=%s",
+                self._shutdown_manager.active_request_count(),
+                grace,
+            )
+            drained = self._shutdown_manager.wait_for_no_active_requests(grace)
+            if drained:
+                logging.info("[DashScApp] active gRPC requests drained before stop")
+            else:
+                logging.warning(
+                    "[DashScApp] timed out waiting active gRPC requests before stop: "
+                    "active_requests=%s",
+                    self._shutdown_manager.active_request_count(),
+                )
         self._shutdown_manager.start_draining("grpc stop")
         grace = self._remaining_grpc_stop_grace_seconds()
         logging.info(
@@ -574,8 +611,34 @@ class DashScApp:
         remaining = drain_seconds - elapsed
         if remaining <= 0:
             return
+        active_requests = self._shutdown_manager.active_request_count()
+        if active_requests > 0:
+            logging.info(
+                "[DashScApp] pre-stop active RPC drain before grpc stop: "
+                "remaining=%.3fs, active_requests=%s",
+                remaining,
+                active_requests,
+            )
+            drained = self._shutdown_manager.wait_for_no_active_requests(remaining)
+            if drained:
+                logging.info(
+                    "[DashScApp] active gRPC requests drained in pre-stop window"
+                )
+            else:
+                logging.warning(
+                    "[DashScApp] pre-stop active RPC drain timed out: "
+                    "active_requests=%s",
+                    self._shutdown_manager.active_request_count(),
+                )
+                return
+
+        elapsed = self._shutdown_manager.drain_elapsed_seconds()
+        remaining = drain_seconds - elapsed
+        if remaining <= 0:
+            return
         logging.info(
-            "[DashScApp] pre-stop drain before grpc stop: remaining=%.3fs",
+            "[DashScApp] pre-stop route convergence linger before grpc stop: "
+            "remaining=%.3fs",
             remaining,
         )
         time.sleep(remaining)

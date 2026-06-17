@@ -1,3 +1,4 @@
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -86,6 +87,12 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 
 
 class BackendRPCServerVisitorRetryTest(unittest.TestCase):
+    def test_default_pd_route_retry_covers_restart_convergence_window(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                BackendRPCServerVisitor._pd_route_retry_on_unavailable(), 12
+            )
+
     def test_pd_route_retry_can_be_disabled_per_request(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.pd_route_retry_on_unavailable = 3
