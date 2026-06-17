@@ -698,6 +698,7 @@ class DeepSeekV2(BaseModel):
             config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
             config.has_moe_norm = config_json.get("norm_topk_prob", False)
             config.moe_style = 2  # shared + expert
+            config.swiglu_limit = float(config_json.get("swiglu_limit", 10.0))
 
             moe_step = config_json["moe_layer_freq"]
             first_k_dense_replace = config_json["first_k_dense_replace"]

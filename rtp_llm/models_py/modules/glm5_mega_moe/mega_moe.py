@@ -248,7 +248,7 @@ class GLM5MegaMoE(nn.Module):
         moe_inter_dim: int = 2048,
         n_routed_experts: int = 256,
         n_activated_experts: int = 8,
-        swiglu_limit: float = 0.0,
+        swiglu_limit: float = 10.0,
         ep_size: int = 4,
         ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,

@@ -5,6 +5,7 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules.glm5_mega_moe import (
+    mega_moe,
     mega_moe_fp8_wrapper,
     mega_moe_fused_wrapper,
     mega_moe_wrapper,
@@ -34,7 +35,13 @@ class _FakeMegaMoE:
         self.fused_shared_jit_warmed = True
 
 
-def _config(hidden_size=8, inter=4, max_seq_len=16, gen_num_per_cycle=0):
+def _config(
+    hidden_size=8,
+    inter=4,
+    max_seq_len=16,
+    gen_num_per_cycle=0,
+    swiglu_limit=0.0,
+):
     return SimpleNamespace(
         hidden_size=hidden_size,
         expert_num=2,
@@ -42,6 +49,7 @@ def _config(hidden_size=8, inter=4, max_seq_len=16, gen_num_per_cycle=0):
         moe_inter_size=inter,
         max_seq_len=max_seq_len,
         gen_num_per_cycle=gen_num_per_cycle,
+        swiglu_limit=swiglu_limit,
     )
 
 
@@ -94,7 +102,7 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
         torch.testing.assert_close(captured["w3_scale"], up_s)
 
     def test_fp8_wrapper_uses_fp8_mega_moe_class_and_reorders_layout(self):
-        config = _config(hidden_size=8, inter=4)
+        config = _config(hidden_size=8, inter=4, swiglu_limit=10.0)
         up_w = torch.full((2, 4, 8), 3, dtype=torch.float32).to(torch.float8_e4m3fn)
         gate_w = torch.full((2, 4, 8), 7, dtype=torch.float32).to(torch.float8_e4m3fn)
         up_s = torch.full((2, 4, 1), 5, dtype=torch.int32)
@@ -113,6 +121,7 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
                 config, _parallelism(), weights, moe_config=None, layer_idx=0
             )
 
+        self.assertEqual(_FakeMegaMoE.instance.params["swiglu_limit"], 10.0)
         captured = _FakeMegaMoE.instance.fp8_kwargs
         torch.testing.assert_close(captured["w1_fp8"], gate_w)
         torch.testing.assert_close(captured["w1_scale"], gate_s)
@@ -120,6 +129,37 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
         torch.testing.assert_close(captured["w2_scale"], s2)
         torch.testing.assert_close(captured["w3_fp8"], up_w)
         torch.testing.assert_close(captured["w3_scale"], up_s)
+
+    def test_missing_config_swiglu_limit_defaults_to_ten(self):
+        config = _config(hidden_size=8, inter=4)
+        delattr(config, "swiglu_limit")
+        weights = {
+            W.moe_w1: torch.zeros((2, 8, 4), dtype=torch.int8),
+            W.moe_s1: torch.ones((2, 8, 2), dtype=torch.float32),
+            W.moe_w2: torch.ones((2, 8, 2), dtype=torch.int8),
+            W.moe_s2: torch.ones((2, 8, 1), dtype=torch.float32),
+        }
+
+        with patch.object(mega_moe_wrapper, "GLM5MegaMoE", _FakeMegaMoE):
+            mega_moe_wrapper.MegaMoeWrapper(
+                config, _parallelism(), weights, moe_config=None, layer_idx=0
+            )
+
+        self.assertEqual(_FakeMegaMoE.instance.params["swiglu_limit"], 10.0)
+
+    def test_from_params_swiglu_limit_defaults_to_ten(self):
+        moe = mega_moe.GLM5MegaMoE.from_params(
+            layer_id=0,
+            dim=8,
+            moe_inter_dim=4,
+            n_routed_experts=2,
+            n_activated_experts=1,
+            ep_size=1,
+            ep_rank=0,
+            max_tokens_per_rank=16,
+        )
+
+        self.assertEqual(moe.cfg.swiglu_limit, 10.0)
 
     def test_fp4_stacked_moe_w1_reorders_up_gate_for_deepgemm(self):
         config = _config(hidden_size=8, inter=4)

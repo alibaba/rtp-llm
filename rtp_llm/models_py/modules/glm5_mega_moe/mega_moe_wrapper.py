@@ -75,6 +75,7 @@ class MegaMoeWrapper(nn.Module):
         dim = config.hidden_size
         n_routed_experts = config.expert_num
         n_activated_experts = config.moe_k
+        swiglu_limit = float(getattr(config, "swiglu_limit", 10.0) or 10.0)
 
         moe_inter_dim_raw = getattr(config, "moe_inter_size", None) or None
         if moe_inter_dim_raw is None or moe_inter_dim_raw == 0:
@@ -149,6 +150,7 @@ class MegaMoeWrapper(nn.Module):
             moe_inter_dim=moe_inter_dim_raw,
             n_routed_experts=n_routed_experts,
             n_activated_experts=n_activated_experts,
+            swiglu_limit=swiglu_limit,
             ep_size=ep_size,
             ep_rank=ep_rank,
             max_tokens_per_rank=max_tokens_per_rank,
