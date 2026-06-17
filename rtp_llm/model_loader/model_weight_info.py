@@ -428,7 +428,12 @@ class ModelDeployWeightInfo:
                     attn_q_weight_info = weight.weights[0]
                     break
 
-            assert attn_q_weight_info is not None
+            # Hybrid models (linear+full attention) have layers without QKV:
+            # linear-attention layers use SSM recurrent state, not the paged KV
+            # cache, so they need no attention-output static-quant scale. Skip them
+            # instead of asserting every layer is a standard QKV-attention layer.
+            if attn_q_weight_info is None:
+                continue
             weights.append(
                 AtomicWeight(
                     W.attention_output_static_quant_reciprocal,
