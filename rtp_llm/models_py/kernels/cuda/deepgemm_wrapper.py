@@ -56,6 +56,8 @@ _m_grouped_fp8_gemm_nt_masked_impl: Callable[..., Any] | None = None
 _bf16_gemm_nt_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_masked_impl: Callable[..., Any] | None = None
+_bf16_contiguous_has_compiled_dims: bool | None = None
+_bf16_masked_has_compiled_dims: bool | None = None
 
 
 _deep_gemm_available: bool | None = None
@@ -588,16 +590,19 @@ def m_grouped_bf16_gemm_nt_contiguous(
             The length of m_indices is the a.shape[0], and the corresponding value of valid tokens is group_idx.
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
-    global _m_grouped_bf16_gemm_nt_contiguous_impl
+    global _m_grouped_bf16_gemm_nt_contiguous_impl, _bf16_contiguous_has_compiled_dims
     _ensure_initialized()
     if _m_grouped_bf16_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
-    _m_grouped_bf16_gemm_nt_contiguous_impl(
-        a,
-        b,
-        output,
-        m_indices,
-    )
+    if _bf16_contiguous_has_compiled_dims is None:
+        import inspect
+        _bf16_contiguous_has_compiled_dims = "compiled_dims" in inspect.signature(
+            _m_grouped_bf16_gemm_nt_contiguous_impl
+        ).parameters
+    if _bf16_contiguous_has_compiled_dims:
+        _m_grouped_bf16_gemm_nt_contiguous_impl(a, b, output, m_indices, compiled_dims)
+    else:
+        _m_grouped_bf16_gemm_nt_contiguous_impl(a, b, output, m_indices)
 
 
 _bf16_masked_max_block_n = int(os.environ.get("RTP_MOE_MAX_BLOCK_N", "0"))
@@ -621,18 +626,19 @@ def m_grouped_bf16_gemm_nt_masked(
         expected_m (int): Expected number of valid tokens in each group.
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
-    global _m_grouped_bf16_gemm_nt_masked_impl
+    global _m_grouped_bf16_gemm_nt_masked_impl, _bf16_masked_has_compiled_dims
     _ensure_initialized()
     if _m_grouped_bf16_gemm_nt_masked_impl is None:
         return _missing_deep_gemm()
+    if _bf16_masked_has_compiled_dims is None:
+        import inspect
+        _bf16_masked_has_compiled_dims = "compiled_dims" in inspect.signature(
+            _m_grouped_bf16_gemm_nt_masked_impl
+        ).parameters
     kwargs = {}
     if _bf16_masked_max_block_n > 0:
         kwargs["max_block_n"] = _bf16_masked_max_block_n
-    _m_grouped_bf16_gemm_nt_masked_impl(
-        a,
-        b,
-        output,
-        masked_m,
-        expected_m,
-        **kwargs,
-    )
+    if _bf16_masked_has_compiled_dims:
+        _m_grouped_bf16_gemm_nt_masked_impl(a, b, output, masked_m, expected_m, compiled_dims, **kwargs)
+    else:
+        _m_grouped_bf16_gemm_nt_masked_impl(a, b, output, masked_m, expected_m, **kwargs)
