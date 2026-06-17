@@ -342,6 +342,60 @@ class WorkerStatusTest {
     }
 
     @Nested
+    @DisplayName("Local task accounting")
+    class LocalTaskAccountingTests {
+
+        private static final Long REQUEST_ID = 1000L;
+
+        @BeforeEach
+        void setUpWorkerStatus() {
+            workerStatus.getAvailableKvCacheTokens().set(1000);
+        }
+
+        @Test
+        @DisplayName("Duplicate put for same request should not double count local resources")
+        void duplicatePutSameRequest_shouldNotDoubleCountLocalResources() {
+            workerStatus.putLocalTask(REQUEST_ID, taskInfo(100, 20));
+            workerStatus.putLocalTask(REQUEST_ID, taskInfo(100, 20));
+
+            assertEquals(1, workerStatus.getLocalTaskMap().size());
+            assertEquals(TaskInfo.estimatePrefillTimeMs(100, 20), workerStatus.getRunningQueueTime().get());
+            assertEquals(920, workerStatus.getAvailableKvCacheTokens().get());
+            assertEquals(80, workerStatus.getUsedKvCacheTokens().get());
+        }
+
+        @Test
+        @DisplayName("Duplicate put for same request should replace previous local resource accounting")
+        void duplicatePutSameRequest_shouldReplacePreviousLocalResourceAccounting() {
+            workerStatus.putLocalTask(REQUEST_ID, taskInfo(100, 20));
+            workerStatus.putLocalTask(REQUEST_ID, taskInfo(200, 50));
+
+            TaskInfo localTask = workerStatus.getLocalTaskMap().get(REQUEST_ID);
+            assertNotNull(localTask);
+            assertEquals(200, localTask.getInputLength());
+            assertEquals(50, localTask.getPrefixLength());
+            assertEquals(TaskInfo.estimatePrefillTimeMs(200, 50), workerStatus.getRunningQueueTime().get());
+            assertEquals(850, workerStatus.getAvailableKvCacheTokens().get());
+            assertEquals(150, workerStatus.getUsedKvCacheTokens().get());
+
+            workerStatus.removeLocalTask(REQUEST_ID);
+
+            assertNull(workerStatus.getLocalTaskMap().get(REQUEST_ID));
+            assertEquals(0, workerStatus.getRunningQueueTime().get());
+            assertEquals(1000, workerStatus.getAvailableKvCacheTokens().get());
+            assertEquals(0, workerStatus.getUsedKvCacheTokens().get());
+        }
+
+        private TaskInfo taskInfo(long inputLength, long prefixLength) {
+            TaskInfo taskInfo = new TaskInfo();
+            taskInfo.setRequestId(REQUEST_ID);
+            taskInfo.setInputLength(inputLength);
+            taskInfo.setPrefixLength(prefixLength);
+            return taskInfo;
+        }
+    }
+
+    @Nested
     @DisplayName("updateTaskStates - waiting task handling")
     class UpdateTaskStatesTests {
 

@@ -373,6 +373,19 @@ public class EngineHealthReporter {
         cacheMetricsReporter.reportCacheHitMetrics(roleType, engineIp, hitTokens, hitRatio);
     }
 
+    public void reportCacheSelectionMetrics(RoleType roleType,
+                                            String selectedEngineIp,
+                                            String cacheBestEngineIp,
+                                            double selectedHitRatio,
+                                            double cacheBestHitRatio) {
+        cacheMetricsReporter.reportCacheSelectionMetrics(
+                roleType,
+                selectedEngineIp,
+                cacheBestEngineIp,
+                selectedHitRatio,
+                cacheBestHitRatio);
+    }
+
     public void reportArriveDelayTime(BalanceContext ctx) {
         if (ctx.getRequest().getRequestTimeMs() == 0) {
             return;

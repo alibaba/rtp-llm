@@ -20,9 +20,11 @@ import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_NEW_CATCH_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
+import static org.flexlb.constant.MetricConstant.CACHE_SELECTED_BEST_HIT_RATIO_DIFF;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
@@ -82,6 +84,8 @@ public class CacheMetricsReporter {
         // Cache hit rate metrics
         monitor.register(CACHE_HIT_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE);
+        monitor.register(CACHE_NEW_CATCH_HIT_RATIO, FlexMetricType.GAUGE);
+        monitor.register(CACHE_SELECTED_BEST_HIT_RATIO_DIFF, FlexMetricType.GAUGE);
         monitor.register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.QPS);
         monitor.register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.QPS);
         monitor.register(CACHE_THEORY_HIT_COUNT, FlexMetricType.GAUGE);
@@ -159,6 +163,28 @@ public class CacheMetricsReporter {
         monitor.report(CACHE_HIT_COUNT, baseTags, hitTokens);
         monitor.report(CACHE_HIT_RATIO, baseTags, hitRatio);
         monitor.report(CACHE_REQUEST_TOTAL, baseTags, 1.0);
+    }
+
+    /**
+     * Report cache-best hit ratio and the hit-ratio gap against the selected worker.
+     */
+    public void reportCacheSelectionMetrics(RoleType roleType,
+                                            String selectedEngineIp,
+                                            String cacheBestEngineIp,
+                                            double selectedHitRatio,
+                                            double cacheBestHitRatio) {
+        FlexMetricTags bestTags = FlexMetricTags.of(
+                "role", roleType.name(),
+                "engineIp", cacheBestEngineIp
+        );
+        monitor.report(CACHE_NEW_CATCH_HIT_RATIO, bestTags, cacheBestHitRatio);
+
+        FlexMetricTags diffTags = FlexMetricTags.of(
+                "role", roleType.name(),
+                "selectedEngineIp", selectedEngineIp,
+                "cacheBestEngineIp", cacheBestEngineIp
+        );
+        monitor.report(CACHE_SELECTED_BEST_HIT_RATIO_DIFF, diffTags, cacheBestHitRatio - selectedHitRatio);
     }
 
     /**

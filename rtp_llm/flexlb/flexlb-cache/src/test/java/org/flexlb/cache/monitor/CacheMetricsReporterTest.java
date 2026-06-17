@@ -1,5 +1,6 @@
 package org.flexlb.cache.monitor;
 
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
@@ -11,8 +12,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.lang.reflect.Field;
 
+import static org.flexlb.constant.MetricConstant.CACHE_NEW_CATCH_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_SELECTED_BEST_HIT_RATIO_DIFF;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
@@ -46,6 +49,8 @@ class CacheMetricsReporterTest {
 
         verify(monitor).register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.QPS);
         verify(monitor).register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.QPS);
+        verify(monitor).register(CACHE_NEW_CATCH_HIT_RATIO, FlexMetricType.GAUGE);
+        verify(monitor).register(CACHE_SELECTED_BEST_HIT_RATIO_DIFF, FlexMetricType.GAUGE);
         verify(monitor).register(CACHE_THEORY_HIT_COUNT, FlexMetricType.GAUGE);
         verify(monitor).register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.GAUGE);
         verify(monitor).register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
@@ -67,6 +72,19 @@ class CacheMetricsReporterTest {
         FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", "1800000");
         verify(monitor, never()).report(CACHE_RECENT_KEY_HIT_COUNT, tags, 0L);
         verify(monitor, never()).report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, 0L);
+    }
+
+    @Test
+    void should_report_cache_best_hit_ratio_and_selected_gap() {
+        reporter.reportCacheSelectionMetrics(RoleType.PREFILL, "10.0.0.1", "10.0.0.2", 0.25D, 0.75D);
+
+        FlexMetricTags bestTags = FlexMetricTags.of("role", "PREFILL", "engineIp", "10.0.0.2");
+        FlexMetricTags diffTags = FlexMetricTags.of(
+                "role", "PREFILL",
+                "selectedEngineIp", "10.0.0.1",
+                "cacheBestEngineIp", "10.0.0.2");
+        verify(monitor).report(CACHE_NEW_CATCH_HIT_RATIO, bestTags, 0.75D);
+        verify(monitor).report(CACHE_SELECTED_BEST_HIT_RATIO_DIFF, diffTags, 0.5D);
     }
 
     @Test

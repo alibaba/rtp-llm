@@ -57,15 +57,15 @@ public class WorkerStatus {
      * @param taskInfo Task information
      */
     public void putLocalTask(Long requestId, TaskInfo taskInfo) {
-        localTaskMap.put(requestId, taskInfo);
         taskInfo.updateTaskState(TaskStateEnum.IN_TRANSIT);
-
-        // Local incremental queue time update
-        this.addRunningQueueTime(taskInfo.estimatePrefillTime());
-        // Local incremental KV cache tokens update
-        long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
-        this.decKvCacheFree(needNewKvCacheLen);
-        this.addKvCacheUsed(needNewKvCacheLen);
+        localTaskMap.compute(requestId, (id, previousTask) -> {
+            if (previousTask != null) {
+                releaseLocalTaskResources(previousTask);
+                Logger.debug("Task {} already exists in local queue, replacing previous local task", requestId);
+            }
+            reserveLocalTaskResources(taskInfo);
+            return taskInfo;
+        });
 
         lastSelectedTime.set(System.nanoTime() / 1000);
         Logger.debug("Task {} added to local queue with state: {}", requestId, TaskStateEnum.IN_TRANSIT);
@@ -76,14 +76,24 @@ public class WorkerStatus {
      * @param requestId Request ID
      */
     public void removeLocalTask(Long requestId) {
-        TaskInfo taskInfo = localTaskMap.get(requestId);
-        if (taskInfo != null) {
-            safeDecrementQueueTime(runningQueueTime, taskInfo.estimatePrefillTime());
-            long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
-            decKvCacheFree(-needNewKvCacheLen);
-            addKvCacheUsed(-needNewKvCacheLen);
-            localTaskMap.remove(requestId);
-        }
+        localTaskMap.computeIfPresent(requestId, (id, taskInfo) -> {
+            releaseLocalTaskResources(taskInfo);
+            return null;
+        });
+    }
+
+    private void reserveLocalTaskResources(TaskInfo taskInfo) {
+        this.addRunningQueueTime(taskInfo.estimatePrefillTime());
+        long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
+        this.decKvCacheFree(needNewKvCacheLen);
+        this.addKvCacheUsed(needNewKvCacheLen);
+    }
+
+    private void releaseLocalTaskResources(TaskInfo taskInfo) {
+        safeDecrementQueueTime(runningQueueTime, taskInfo.estimatePrefillTime());
+        long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
+        decKvCacheFree(-needNewKvCacheLen);
+        addKvCacheUsed(-needNewKvCacheLen);
     }
 
     /**

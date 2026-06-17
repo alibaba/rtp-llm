@@ -130,6 +130,16 @@ public class MetricConstant {
     public static final String CACHE_HIT_RATIO = "app.cache.hit.ratio";
 
     /**
+     * Cache-best worker hit ratio for each routing decision.
+     */
+    public static final String CACHE_NEW_CATCH_HIT_RATIO = "app.cache.new_catch_hit_ratio";
+
+    /**
+     * Hit-ratio gap between cache-best worker and selected worker.
+     */
+    public static final String CACHE_SELECTED_BEST_HIT_RATIO_DIFF = "app.cache.selected.best.hit.ratio.diff";
+
+    /**
      * Recent cache-key hit count for requests in the current metric bucket.
      */
     public static final String CACHE_RECENT_KEY_HIT_COUNT = "app.cache.recent.key.hit.count";

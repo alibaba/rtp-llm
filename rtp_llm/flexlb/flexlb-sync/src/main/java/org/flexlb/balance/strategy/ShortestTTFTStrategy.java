@@ -131,13 +131,14 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         StrategyConfigs.CandidatePoolConfig candidatePoolConfig = configService.getStrategyConfigs()
                 .getShortestTtft()
                 .getCandidatePool();
-        ScoredWorker bestWorker = selectBestWorker(scoredWorkers, candidatePoolConfig);
-        if (bestWorker == null) {
+        ScoredWorker selectedWorker = selectBestWorker(scoredWorkers, candidatePoolConfig);
+        if (selectedWorker == null) {
             Logger.warn("Failed to find best worker for role: {}", roleType);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
+        ScoredWorker cacheBestWorker = selectCacheBestWorker(scoredWorkers);
 
-        return finalizeWorkerSelection(bestWorker, balanceContext, roleType, requestId, seqLen);
+        return finalizeWorkerSelection(selectedWorker, cacheBestWorker, balanceContext, roleType, requestId, seqLen);
     }
 
     /**
@@ -222,6 +223,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @return Server status
      */
     private ServerStatus finalizeWorkerSelection(ScoredWorker selectedWorker,
+                                                 ScoredWorker cacheBestWorker,
                                                  BalanceContext balanceContext,
                                                  RoleType roleType,
                                                  long requestId,
@@ -230,6 +232,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
 
         logWorkerSelection(selectedWorker, roleType);
         reportCacheHitMetrics(roleType, workerStatus.getIp(), selectedWorker.hitCacheTokens(), seqLen);
+        reportCacheSelectionMetrics(roleType, selectedWorker, cacheBestWorker, seqLen);
 
         TaskInfo task = createTaskInfo(requestId, balanceContext.getRequest().getSeqLen(), selectedWorker.hitCacheTokens());
         workerStatus.putLocalTask(requestId, task);
@@ -262,8 +265,29 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param seqLen Sequence length
      */
     private void reportCacheHitMetrics(RoleType roleType, String ip, long hitCacheTokens, long seqLen) {
-        double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
+        double hitRate = calculateHitRate(hitCacheTokens, seqLen);
         engineHealthReporter.reportCacheHitMetrics(roleType, ip, hitCacheTokens, hitRate);
+    }
+
+    private void reportCacheSelectionMetrics(RoleType roleType,
+                                             ScoredWorker selectedWorker,
+                                             ScoredWorker cacheBestWorker,
+                                             long seqLen) {
+        if (cacheBestWorker == null) {
+            return;
+        }
+        double selectedHitRate = calculateHitRate(selectedWorker.hitCacheTokens(), seqLen);
+        double cacheBestHitRate = calculateHitRate(cacheBestWorker.hitCacheTokens(), seqLen);
+        engineHealthReporter.reportCacheSelectionMetrics(
+                roleType,
+                selectedWorker.worker().getIp(),
+                cacheBestWorker.worker().getIp(),
+                selectedHitRate,
+                cacheBestHitRate);
+    }
+
+    private double calculateHitRate(long hitCacheTokens, long seqLen) {
+        return seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
     }
 
     /**
@@ -316,6 +340,12 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         List<ScoredWorker> similarWorkers = filterSimilarWorkers(candidates, minTTFT, threshold);
 
         return selectWorkerByScheduleFairness(similarWorkers, candidates);
+    }
+
+    private ScoredWorker selectCacheBestWorker(List<ScoredWorker> scoredWorkers) {
+        return scoredWorkers.stream()
+                .max(Comparator.comparingLong(ScoredWorker::hitCacheTokens))
+                .orElse(null);
     }
 
     /**

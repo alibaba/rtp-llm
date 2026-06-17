@@ -159,6 +159,47 @@ class ShortestTTFTStrategyTest {
         Assertions.assertEquals("127.0.0.2", result.getServerIp());
     }
 
+    @Test
+    void should_report_cache_best_hit_ratio_and_gap_when_selected_worker_is_not_cache_best() {
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+
+        WorkerStatus cacheBestWorker = createWorkerStatus("127.0.0.1", 1000);
+        WorkerStatus selectedWorker = createWorkerStatus("127.0.0.2", 0);
+
+        prefillStatusMap.put(cacheBestWorker.getIpPort(), cacheBestWorker);
+        prefillStatusMap.put(selectedWorker.getIpPort(), selectedWorker);
+
+        EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
+        CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        org.flexlb.balance.resource.ResourceMeasure resourceMeasure = Mockito.mock(org.flexlb.balance.resource.ResourceMeasure.class);
+
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
+        Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.anyList(), Mockito.any(), Mockito.any()))
+                .thenReturn(Map.of(cacheBestWorker.getIpPort(), 2, selectedWorker.getIpPort(), 0));
+
+        ShortestTTFTStrategy strategy = new ShortestTTFTStrategy(
+                engineWorkerStatus,
+                engineHealthReporter,
+                cacheAwareService,
+                resourceMeasureFactory,
+                fixedCandidatePoolConfigService(1));
+
+        ServerStatus result = strategy.select(createBalanceContext(1024L), RoleType.PREFILL, null);
+
+        Assertions.assertTrue(result.isSuccess(), "Result should be successful but got: " + result.getMessage());
+        Assertions.assertEquals(selectedWorker.getIp(), result.getServerIp());
+        Mockito.verify(engineHealthReporter).reportCacheHitMetrics(RoleType.PREFILL, selectedWorker.getIp(), 0L, 0.0D);
+        Mockito.verify(engineHealthReporter).reportCacheSelectionMetrics(
+                RoleType.PREFILL,
+                selectedWorker.getIp(),
+                cacheBestWorker.getIp(),
+                0.0D,
+                0.5D);
+    }
+
     private ShortestTTFTStrategy createStrategy(EngineWorkerStatus engineWorkerStatus, ConfigService configService) {
         EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
         CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
