@@ -199,7 +199,6 @@ class TestCudaGraphPrefill(unittest.TestCase):
         cu_seqlens[batch_size] = total_seq_len
         attention_inputs.cu_seqlens = cu_seqlens
         attention_inputs.cu_kv_seqlens = cu_seqlens.clone()
-        attention_inputs.context_total_kv_length = total_seq_len
         attention_inputs.total_tokens = total_seq_len
         if not use_max_padded_mode:
             attention_inputs.padding_offset = self._calculate_padding_offset(

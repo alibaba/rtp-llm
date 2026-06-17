@@ -46,7 +46,7 @@ ParamsBasePtr TRTPrefillOpBase::prepare(torch_ext::PyAttentionInputs attn_inputs
     attn_params->cu_kv_seqlens           = attn_inputs.cu_kv_seqlens;
     attn_params->max_seq_len             = attn_inputs.input_lengths.max().item<int32_t>();
     attn_params->max_prefix_length       = attn_inputs.prefix_lengths.max().item<int32_t>();
-    attn_params->context_total_kv_length = attn_inputs.context_total_kv_length;
+    attn_params->context_total_kv_length = attn_inputs.cu_kv_seqlens[batch_size].item<int32_t>();
     attn_params->input_lengths           = attn_inputs.input_lengths;
 
     // 创建 TRT V2 FMHA Runner

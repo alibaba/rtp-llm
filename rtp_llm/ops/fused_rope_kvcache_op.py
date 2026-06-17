@@ -30,7 +30,6 @@ class FusedRopeAttnParams:
     sequence_lengths: torch.Tensor
     max_seq_len: int
     max_prefix_length: int
-    context_total_kv_length: int
     decode_plan: bool
     attn_type: torch.dtype
 
@@ -67,7 +66,6 @@ class FusedRopeKVCachePrefillOpBase:
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths.max().item(),
             attn_inputs.prefix_lengths.max().item(),
-            attn_inputs.context_total_kv_length,
             False,
             get_scalar_type(attn_inputs.dtype),
         )
@@ -259,7 +257,6 @@ class FusedRopeKVCacheDecodeOp:
             attn_inputs.sequence_lengths,
             0,
             0,
-            attn_inputs.context_total_kv_length,
             True,
             get_scalar_type(attn_inputs.dtype),
         )

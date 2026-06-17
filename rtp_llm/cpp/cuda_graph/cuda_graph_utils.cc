@@ -109,7 +109,6 @@ void debugPrintPyModelInputs(const torch_ext::PyModelInputs& inputs) {
     printTensorInfo("decode_cu_seqlens_d", inputs.attention_inputs.decode_cu_seqlens_d);
     printTensorInfo("padding_offset", inputs.attention_inputs.padding_offset);
 
-    std::cout << "  context_total_kv_length: " << inputs.attention_inputs.context_total_kv_length << std::endl;
     std::cout << "  total_tokens: " << inputs.attention_inputs.total_tokens << std::endl;
 
     std::cout << "  prefill_cuda_graph_copy_params: ";

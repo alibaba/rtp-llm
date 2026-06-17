@@ -935,7 +935,6 @@ void CudaGraphRunner::initCapture() {
                 capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, 1);
             inputs.attention_inputs.padding_offset =
                 capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, post_check_tokens);
-            inputs.attention_inputs.context_total_kv_length = post_check_tokens;
             // ``prefix_lengths`` must mirror the per-request batch size of
             // the sliced post-check forward; downstream (e.g. DSv4 indexer)
             // asserts ``prefix_lengths.numel() == batch_size`` and aborts on

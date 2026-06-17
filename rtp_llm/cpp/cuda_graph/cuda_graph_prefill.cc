@@ -64,7 +64,6 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.cu_kv_seqlens.copy_(cu_kv_seqlens_host);
         }
 
-        inputs.attention_inputs.context_total_kv_length = seq_len;
         inputs.attention_inputs.prefill_cuda_graph_copy_params =
             capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
         if (inputs.attention_inputs.prefill_cuda_graph_copy_params) {

@@ -216,12 +216,11 @@ struct AttentionCommonInputs {
     torch::Tensor kv_seqlens;
     torch::Tensor padding_offset;
 
-    size_t context_batch_size      = 0;
-    size_t decoder_batch_size      = 0;
-    size_t context_max_seq_len     = 0;
-    size_t decoder_max_seq_len     = 0;
-    size_t context_token_num       = 0;
-    size_t context_total_kv_length = 0;
+    size_t context_batch_size  = 0;
+    size_t decoder_batch_size  = 0;
+    size_t context_max_seq_len = 0;
+    size_t decoder_max_seq_len = 0;
+    size_t context_token_num   = 0;
 
     torch::Tensor position_ids;
     torch::Tensor attention_mask;
