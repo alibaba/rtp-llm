@@ -40,8 +40,8 @@ enum KVCacheSpecType {
     MultiHeadAttention,        // MHAKVCacheSpec: standard multi-head attention KV cache
     MultiHeadLatentAttention,  // MLAKVCacheSpec: MLA compressed latent KV cache
     LinearAttention,           // LinearKVCacheSpec: linear / SSM attention state cache
-    CompressedKV,              // DSV4KVSpec: byte-addressed compressed paged KV pool
-    FixedState,                // DSV4StateSpec: fixed-allocation state / SWA_KV pool
+    OpaqueKV,                  // Byte-addressed opaque paged KV pool
+    OpaqueState,               // Fixed-allocation opaque state / SWA-like pool
 };
 
 inline const char* KVCacheSpecTypeToString(KVCacheSpecType t) {
@@ -52,10 +52,10 @@ inline const char* KVCacheSpecTypeToString(KVCacheSpecType t) {
             return "MultiHeadLatentAttention";
         case KVCacheSpecType::LinearAttention:
             return "LinearAttention";
-        case KVCacheSpecType::CompressedKV:
-            return "CompressedKV";
-        case KVCacheSpecType::FixedState:
-            return "FixedState";
+        case KVCacheSpecType::OpaqueKV:
+            return "OpaqueKV";
+        case KVCacheSpecType::OpaqueState:
+            return "OpaqueState";
         default:
             return "Unknown";
     }
@@ -75,7 +75,7 @@ struct KVCacheSpec {
     // Lifecycle governs the allocation strategy for this cache group.
     // Each concrete spec subclass sets this in its constructor; do NOT set it
     // manually from outside the spec class hierarchy.
-    //   FULL    - standard paged allocation (MHA, MLA, CompressedKV)
+    //   FULL    - standard paged allocation (MHA, MLA, OpaqueKV)
     //   LINEAR  - fixed-capacity ring buffer (LinearAttention / SSM state)
     //   SWA     - fixed-size tail-allocation pool (DSV4 state / SWA_KV)
     CacheGroupType   lifecycle = CacheGroupType::FULL;
@@ -105,6 +105,10 @@ struct KVCacheSpec {
     }
 
     virtual KVCacheSpecPtr clone() const = 0;
+
+    virtual KVCacheRegionName regionName() const {
+        return KVCacheRegionName::DEFAULT;
+    }
 
     std::string fingerprint() const {
         std::ostringstream os;

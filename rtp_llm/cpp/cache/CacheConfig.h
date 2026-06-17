@@ -8,7 +8,6 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
-#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -129,13 +128,7 @@ struct CacheConfig {
     }
 
     static KVCacheRegionName inferRegionName(const KVCacheSpecPtr& spec) {
-        if (const auto* kv_spec = dynamic_cast<const DSV4KVSpec*>(spec.get())) {
-            return kv_spec->cache_type;
-        }
-        if (const auto* state_spec = dynamic_cast<const DSV4StateSpec*>(spec.get())) {
-            return state_spec->cache_type;
-        }
-        return KVCacheRegionName::DEFAULT;
+        return spec ? spec->regionName() : KVCacheRegionName::DEFAULT;
     }
 
     void fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&             specs,
