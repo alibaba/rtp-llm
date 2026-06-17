@@ -78,10 +78,10 @@ struct CacheConfig {
     size_t kv_block_stride_bytes = 0;
     size_t kv_scale_stride_bytes = 0;
 
-    // Bytes pre-reserved for fixed-allocation pools (e.g. DSV4 state / SWA pools).
+    // Bytes pre-reserved for explicitly-sized pools.
     // CacheConfigCreator deducts this from kv_cache_mem_size before computing the
     // paged block_num, so paged pools don't overcommit HBM. 0 means no reservation.
-    size_t fixed_pool_reserve_bytes = 0;
+    size_t explicitly_sized_pool_reserve_bytes = 0;
 
     // Attention-specific configuration
     int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
@@ -349,35 +349,22 @@ struct CacheConfig {
     void finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
         (void)runtime_config;
         if (!use_independent_block_pools || group_block_nums.empty()) {
-            fixed_pool_reserve_bytes = 0;
+            explicitly_sized_pool_reserve_bytes = 0;
             return;
         }
 
-        const int step    = std::max(1, linear_step);
-        size_t    reserve = 0;
+        size_t reserve = 0;
         for (size_t gid = 0; gid < group_block_nums.size(); ++gid) {
-            const bool is_swa = gid < group_types.size() && group_types[gid] == CacheGroupType::SWA;
-            const auto region = gid < group_region_names.size() ? group_region_names[gid] : KVCacheRegionName::DEFAULT;
-            const bool is_dsv4_fixed_region       = isDsv4FixedRegion(region);
             const auto explicit_independent_blocks = explicitIndependentBlocks(gid);
-            uint32_t   rule_blocks;
-            if (explicit_independent_blocks > 0) {
-                rule_blocks = explicit_independent_blocks;
-            } else if ((is_swa || is_dsv4_fixed_region) && step > 1 && global_block_num > 0) {
-                rule_blocks = std::max(1u, global_block_num / static_cast<uint32_t>(step));
-            } else {
-                rule_blocks = global_block_num;
-            }
+            const auto rule_blocks = explicit_independent_blocks > 0 ? explicit_independent_blocks : global_block_num;
             group_block_nums[gid] = rule_blocks;
 
-            // Explicit DSV4 fixed pools are allocated outside the paged FULL
-            // pool budget. The linear-step fallback is accounted by the
-            // effective block-size formula instead, so no reserve is needed.
+            // Explicit independent pools are allocated outside the paged pool budget.
             if (explicit_independent_blocks > 0 && gid < group_block_size_bytes.size()) {
                 reserve += static_cast<size_t>(rule_blocks) * group_block_size_bytes[gid];
             }
         }
-        fixed_pool_reserve_bytes = reserve;
+        explicitly_sized_pool_reserve_bytes = reserve;
     }
 
     std::string debugString(size_t indent = 0) const {

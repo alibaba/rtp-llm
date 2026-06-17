@@ -1084,7 +1084,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesHcaStatePoolBloc
     }
 
     const size_t expected_reserve = 50u * config.group_block_size_bytes[5];
-    EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_reserve);
+    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, expected_reserve);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesGlobalBlocksWhenHcaStateBlocksDisabled) {
@@ -1097,7 +1097,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesGlobalBlocksWhen
     for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
         EXPECT_EQ(config.group_block_nums[gid], 123u);
     }
-    EXPECT_EQ(config.fixed_pool_reserve_bytes, 0u);
+    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, 0u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuHcaStatePoolIncludesFixedReserve) {
@@ -1112,10 +1112,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuHcaStatePoolIncludesFixedReserve) 
         EXPECT_EQ(config.group_block_nums[gid], expected) << "gid=" << gid;
     }
     const size_t expected_reserve = 50u * config.group_block_size_bytes[5];
-    EXPECT_EQ(config.fixed_pool_reserve_bytes, expected_reserve);
+    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, expected_reserve);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsFallbackFollowsLinearStep) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksUseGlobalBlocks) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
@@ -1129,13 +1129,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsFallbackFollowsLinearSte
 
     ASSERT_EQ(config.group_block_nums.size(), config.group_region_names.size());
     for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
-        if (config.group_types[gid] == CacheGroupType::FULL) {
-            EXPECT_EQ(config.group_block_nums[gid], 128u) << "gid=" << gid;
-        } else {
-            EXPECT_EQ(config.group_block_nums[gid], 32u) << "gid=" << gid;
-        }
+        EXPECT_EQ(config.group_block_nums[gid], 128u) << "gid=" << gid;
     }
-    EXPECT_EQ(config.fixed_pool_reserve_bytes, 0u);
+    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, 0u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConvertIndexToAddrByRegionRoutesToCorrectPool) {

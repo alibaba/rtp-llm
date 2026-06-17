@@ -165,7 +165,7 @@ static void expectDsv4SwaAllocatedBlocks(const CacheConfig& config,
 }
 
 // Creates an intentionally tight DSV4 config for eviction stress tests: FULL
-// groups use a large paged pool, while SWA groups use a small fixed pool.
+// groups use a large paged pool, while SWA groups use a small independent pool.
 static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, uint32_t swa_batch_size) {
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
@@ -1247,7 +1247,7 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
         return cti;
     };
 
-    // Seed one reusable SWA/state block per fixed pool.  For a 2-block request,
+    // Seed one reusable SWA/state block per independent pool. For a 2-block request,
     // insertIntoCache keeps only the first full block; the active tail is not cached.
     auto       seed_res    = makeDSV4BatchResource(manager_config);
     auto       seed_tokens = makeTokens(2 * spb);
@@ -1264,7 +1264,7 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     manager->insertIntoCache(InsertInfo{seed_res, seed_tokens, /*is_resident=*/false});
     manager->free(FreeInfo{seed_res, seed_tokens});
 
-    // Same prefix, one more block.  This hits one cached fixed-pool block and
+    // Same prefix, one more block. This hits one cached independent-pool block and
     // must still have room for the two fresh tail blocks.  The matched block is
     // then skipped out of the active SWA tail by the decode allocation path.
     auto       reuse_res    = makeDSV4BatchResource(manager_config);
@@ -1300,11 +1300,11 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     //
     // Tight stress layout:
     //   FULL groups (0,1,2): large paged pool (block_num=8, 7 usable)
-    //   SWA  groups (3,4,5,6): small fixed pool with 3 usable blocks
+    //   SWA  groups (3,4,5,6): small independent pool with 3 usable blocks
     //
     // SWA pools are sized by concurrency, NOT by global block_num. This test verifies that
     // eviction is triggered independently on SWA groups when concurrent requests exhaust
-    // the fixed pool, and that decode-phase removeSkippedBlocks interacts correctly with eviction.
+    // the independent pool, and that decode-phase removeSkippedBlocks interacts correctly with eviction.
     //
     // Lifecycle:
     //   Phase 1: 2 requests complete and get cached → SWA pools nearly full (2 of 3 cached)

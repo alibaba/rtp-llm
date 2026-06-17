@@ -259,7 +259,7 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     } else {
         config.block_size_bytes = paged_block_bytes;
     }
-    config.fixed_pool_reserve_bytes = 0;
+    config.explicitly_sized_pool_reserve_bytes = 0;
 }
 
 void populateHybridAttentionGroups(CacheConfig&             config,

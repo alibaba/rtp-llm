@@ -147,23 +147,23 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     } else {
         const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
             runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
-        // Fixed-pool sizing depends on runtime scheduler limits, so finalize it
-        // here after RuntimeConfig is available. The temporary global block
-        // number is only used for groups that are not fixed pools.
+        // Explicitly-sized pool reservation depends on runtime scheduler limits,
+        // so finalize it here after RuntimeConfig is available. The temporary
+        // global block number is only used for groups without explicit sizes.
         config.finalizeBlockNums(0, runtime_config);
-        // Deduct fixed-pool reservation from the budget so paged pools don't overcommit HBM.
+        // Deduct explicitly-sized pool reservation so paged pools don't overcommit HBM.
         size_t paged_budget = kv_cache_mem_size;
-        if (config.fixed_pool_reserve_bytes > 0) {
-            RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > config.fixed_pool_reserve_bytes,
-                                    "kv cache budget %zu MiB is smaller than fixed-pool reservation %zu MiB "
+        if (config.explicitly_sized_pool_reserve_bytes > 0) {
+            RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > config.explicitly_sized_pool_reserve_bytes,
+                                    "kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "
                                     "(DSV4_HCA_STATE_POOL_BLOCKS=%u; reduce it if needed)",
                                     kv_cache_mem_size / 1024 / 1024,
-                                    config.fixed_pool_reserve_bytes / 1024 / 1024,
+                                    config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
                                     config.dsv4_hca_state_pool_blocks);
-            paged_budget = kv_cache_mem_size - config.fixed_pool_reserve_bytes;
-            RTP_LLM_LOG_INFO("kv cache: total budget %zu MiB, fixed-pool reserve %zu MiB, paged budget %zu MiB",
+            paged_budget = kv_cache_mem_size - config.explicitly_sized_pool_reserve_bytes;
+            RTP_LLM_LOG_INFO("kv cache: total budget %zu MiB, explicitly-sized pool reserve %zu MiB, paged budget %zu MiB",
                              kv_cache_mem_size / 1024 / 1024,
-                             config.fixed_pool_reserve_bytes / 1024 / 1024,
+                             config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
                              paged_budget / 1024 / 1024);
         }
         const int  joint_step       = std::max(1, config.linear_step);
@@ -263,8 +263,9 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         total_block_size_bytes += propose_config.block_size_bytes;
     }
 
-    const size_t fixed_reserve = score_config.fixed_pool_reserve_bytes
-                                 + propose_config.fixed_pool_reserve_bytes * static_cast<size_t>(num_mtp_modules);
+    const size_t explicit_pool_reserve =
+        score_config.explicitly_sized_pool_reserve_bytes
+        + propose_config.explicitly_sized_pool_reserve_bytes * static_cast<size_t>(num_mtp_modules);
 
     size_t block_num = 0;
     if (kv_cache_config.test_block_num > 0) {
@@ -274,19 +275,19 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
             runtime_config, kv_cache_config, score_model_config, parallelism_config, warm_up_result, sp_config);
 
         size_t paged_budget = kv_cache_mem_size;
-        if (fixed_reserve > 0) {
-            RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > fixed_reserve,
-                                    "sp kv cache budget %zu MiB is smaller than fixed-pool reservation %zu MiB "
+        if (explicit_pool_reserve > 0) {
+            RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > explicit_pool_reserve,
+                                    "sp kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "
                                     "(DSV4_HCA_STATE_POOL_BLOCKS; reduce it if needed)",
                                     kv_cache_mem_size / 1024 / 1024,
-                                    fixed_reserve / 1024 / 1024);
-            paged_budget = kv_cache_mem_size - fixed_reserve;
+                                    explicit_pool_reserve / 1024 / 1024);
+            paged_budget = kv_cache_mem_size - explicit_pool_reserve;
             RTP_LLM_LOG_INFO(
-                "sp kv cache: total budget %zu MiB, fixed-pool reserve %zu MiB (score=%zu MiB + propose=%zu MiB x %d), paged budget %zu MiB",
+                "sp kv cache: total budget %zu MiB, explicitly-sized pool reserve %zu MiB (score=%zu MiB + propose=%zu MiB x %d), paged budget %zu MiB",
                 kv_cache_mem_size / 1024 / 1024,
-                fixed_reserve / 1024 / 1024,
-                score_config.fixed_pool_reserve_bytes / 1024 / 1024,
-                propose_config.fixed_pool_reserve_bytes / 1024 / 1024,
+                explicit_pool_reserve / 1024 / 1024,
+                score_config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
+                propose_config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
                 num_mtp_modules,
                 paged_budget / 1024 / 1024);
         }
@@ -308,7 +309,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     config.block_size_bytes = total_block_size_bytes;
     // config.block_size       = config.block_size_bytes / rtp_llm::getTypeSize(config.dtype);
     config.block_num                = block_num;
-    config.fixed_pool_reserve_bytes = fixed_reserve;
+    config.explicitly_sized_pool_reserve_bytes = explicit_pool_reserve;
 
     const uint32_t main_layer_num = score_config.layer_num;
     const uint32_t mtp_layer_num  = propose_config.layer_num;
@@ -437,7 +438,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     }
 
     config.finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
-    config.fixed_pool_reserve_bytes = fixed_reserve;
+    config.explicitly_sized_pool_reserve_bytes = explicit_pool_reserve;
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%zu, "
