@@ -164,7 +164,7 @@ jobs:
     #       exit 1
     #     fi
 
-  sync-qwen35-0331:
+  sync-feat-dsv4-on-dev-xjn:
     runs-on: cpu-only
     permissions:
       contents: write
@@ -187,37 +187,37 @@ jobs:
         git remote add upstream https://github.com/alibaba/rtp-llm.git || true
         git remote -v
 
-    - name: Check if origin has qwen35-0331 branch
-      id: check_qwen35
+    - name: Check if origin has feat/dsv4_on_dev_xjn branch
+      id: check_feat_dsv4
       run: |
-        if git ls-remote --heads origin qwen35-0331 | grep -q 'refs/heads/qwen35-0331$'; then
+        if git ls-remote --heads origin feat/dsv4_on_dev_xjn | grep -q 'refs/heads/feat/dsv4_on_dev_xjn$'; then
           echo "exists=true" >> $GITHUB_OUTPUT
         else
           echo "exists=false" >> $GITHUB_OUTPUT
         fi
 
-    - name: Fetch and checkout qwen35-0331 if exists
-      if: steps.check_qwen35.outputs.exists == 'true'
+    - name: Fetch and checkout feat/dsv4_on_dev_xjn if exists
+      if: steps.check_feat_dsv4.outputs.exists == 'true'
       run: |
-        git fetch origin qwen35-0331
-        git checkout qwen35-0331
-        git reset --hard origin/qwen35-0331
+        git fetch origin feat/dsv4_on_dev_xjn
+        git checkout feat/dsv4_on_dev_xjn
+        git reset --hard origin/feat/dsv4_on_dev_xjn
 
-    - name: Create and checkout qwen35-0331 if not exists
-      if: steps.check_qwen35.outputs.exists == 'false'
+    - name: Create and checkout feat/dsv4_on_dev_xjn if not exists
+      if: steps.check_feat_dsv4.outputs.exists == 'false'
       run: |
-        git checkout -b qwen35-0331
+        git checkout -b feat/dsv4_on_dev_xjn
 
-    - name: Check if sync is needed for qwen35-0331
-      id: check_sync_qwen35
+    - name: Check if sync is needed for feat/dsv4_on_dev_xjn
+      id: check_sync_feat_dsv4
       run: |
-        git fetch upstream qwen35-0331
-        UPSTREAM_COMMIT=$(git rev-parse upstream/qwen35-0331)
+        git fetch upstream feat/dsv4_on_dev_xjn
+        UPSTREAM_COMMIT=$(git rev-parse upstream/feat/dsv4_on_dev_xjn)
         CURRENT_COMMIT=$(git rev-parse HEAD)
         echo "UPSTREAM_COMMIT: $UPSTREAM_COMMIT"
 
         if [ "$CURRENT_COMMIT" = "$UPSTREAM_COMMIT" ]; then
-          echo "Already synced with upstream/qwen35-0331"
+          echo "Already synced with upstream/feat/dsv4_on_dev_xjn"
           echo "needs_sync=false" >> $GITHUB_OUTPUT
           exit 0
         fi
@@ -227,20 +227,20 @@ jobs:
         if [ "$PARENT_COMMIT" = "$UPSTREAM_COMMIT" ]; then
           COMMIT_MSG=$(git log -1 --pretty=%B)
           if echo "$COMMIT_MSG" | grep -q "\[CI\]\[AMD\] add workflows"; then
-            echo "Already synced with upstream/qwen35-0331 (has CI commit)"
+            echo "Already synced with upstream/feat/dsv4_on_dev_xjn (has CI commit)"
             echo "needs_sync=false" >> $GITHUB_OUTPUT
             exit 0
           fi
         fi
 
-        echo "Need to sync with upstream/qwen35-0331"
+        echo "Need to sync with upstream/feat/dsv4_on_dev_xjn"
         echo "needs_sync=true" >> $GITHUB_OUTPUT
 
-    - name: Sync qwen35-0331 with upstream and add AMD workflows
-      if: steps.check_sync_qwen35.outputs.needs_sync == 'true'
+    - name: Sync feat/dsv4_on_dev_xjn with upstream and add AMD workflows
+      if: steps.check_sync_feat_dsv4.outputs.needs_sync == 'true'
       run: |
-        git fetch upstream qwen35-0331
-        git reset --hard upstream/qwen35-0331
+        git fetch upstream feat/dsv4_on_dev_xjn
+        git reset --hard upstream/feat/dsv4_on_dev_xjn
         # rm -rf .github/workflows/*.yaml
         # rm -rf .github/workflows/*.yml
         # git fetch origin yuzho/ci_workflows
@@ -248,4 +248,4 @@ jobs:
         # git checkout origin/yuzho/ci_workflows -- .github/workflows/run_tests.yaml
         # git checkout origin/yuzho/ci_workflows -- .github/workflows/create_pr.yaml
         # git commit -a -m '[CI][AMD] add workflows'
-        git push --set-upstream origin qwen35-0331 --force
+        git push --set-upstream origin feat/dsv4_on_dev_xjn --force
