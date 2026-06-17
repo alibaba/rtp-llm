@@ -13,24 +13,6 @@ namespace rtp_llm {
 
 namespace {
 
-bool hasDsv4KvCacheSpecs(const ModelConfig& model_config) {
-    constexpr const char* kExpectedTags[] = {
-        "csa_kv", "hca_kv", "indexer_kv", "indexer_state", "csa_state", "hca_state", "swa_kv"};
-    for (const auto& layer_specs : model_config.kv_cache_specs) {
-        for (const auto& spec : layer_specs.second) {
-            if (spec == nullptr) {
-                continue;
-            }
-            for (const char* expected_tag : kExpectedTags) {
-                if (spec->tag == expected_tag) {
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
 struct HybridPoolLayers {
     std::vector<int> full_layers;
     std::vector<int> linear_layers;
@@ -320,11 +302,8 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     config.linear_step        = 1;
     config.is_sparse          = model_config.attn_config.is_sparse;
 
-    RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.layer_compress_ratios.empty() || hasDsv4KvCacheSpecs(model_config),
-                            "DSV4 cache config requires model_config.kv_cache_specs; "
-                            "layer_compress_ratios fallback is disabled");
-
-    if (hasDsv4KvCacheSpecs(model_config)) {
+    const bool is_dsv4_config = hasTypedHybridPoolLayout(model_config);
+    if (is_dsv4_config) {
         DSV4CacheConfigHelper::applyConfig(
             config, model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     } else {
@@ -334,7 +313,6 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     }
 
     RTP_LLM_CHECK_WITH_INFO(!config.cache_specs.empty(), "hybrid-pool config produced no cache specs");
-    const bool is_dsv4_config = hasDsv4KvCacheSpecs(model_config);
     setupGroupCounts(config);
     auto specs          = config.cache_specs;
     auto layers_by_group = config.layer_ids;

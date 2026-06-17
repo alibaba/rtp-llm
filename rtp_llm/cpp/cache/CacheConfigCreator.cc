@@ -7,37 +7,13 @@
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
+#include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
 namespace {
-
-bool hasDsv4KvCacheSpecs(const ModelConfig& model_config) {
-    constexpr const char* kExpectedTags[] = {
-        "csa_kv", "hca_kv", "indexer_kv", "indexer_state", "csa_state", "hca_state", "swa_kv"};
-    for (const auto& layer_specs : model_config.kv_cache_specs) {
-        for (const auto& spec : layer_specs.second) {
-            if (spec == nullptr) {
-                continue;
-            }
-            for (const char* expected_tag : kExpectedTags) {
-                if (spec->tag == expected_tag) {
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
-bool hasTypedHybridPoolLayout(const ModelConfig& model_config) {
-    RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.layer_compress_ratios.empty() || hasDsv4KvCacheSpecs(model_config),
-                            "DSV4 cache config requires model_config.kv_cache_specs; "
-                            "layer_compress_ratios fallback is disabled");
-    return hasDsv4KvCacheSpecs(model_config);
-}
 
 size_t steppedBytes(size_t bytes, int step) {
     return (bytes > 0 && step > 1) ? bytes / static_cast<size_t>(step) : bytes;
