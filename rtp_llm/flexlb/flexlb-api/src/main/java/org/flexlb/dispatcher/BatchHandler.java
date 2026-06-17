@@ -14,6 +14,7 @@ import reactor.core.publisher.Mono;
 import reactor.core.publisher.SignalType;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Dispatcher batch handler. Reads each batch request body as raw bytes, parses with
@@ -53,8 +54,7 @@ public class BatchHandler {
 
     public Mono<ServerResponse> handle(ServerRequest request, BatchEndpointSpec spec) {
         DispatchPvLogData pv = DispatchPvLogData.batch(spec.getPath(), System.currentTimeMillis());
-        java.util.concurrent.atomic.AtomicBoolean delegatedToPassthrough =
-                new java.util.concurrent.atomic.AtomicBoolean(false);
+        AtomicBoolean delegatedToPassthrough = new AtomicBoolean(false);
         return request.bodyToMono(byte[].class).defaultIfEmpty(new byte[0]).flatMap(bytes -> {
             JSONObject body = BatchBodyParser.parseObject(bytes);
             if (body == null) {

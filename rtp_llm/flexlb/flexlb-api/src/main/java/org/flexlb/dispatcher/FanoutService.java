@@ -13,6 +13,8 @@ import reactor.core.scheduler.Schedulers;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Per-chunk fanout on the dispatcher batch path. Serializes each chunk via fastjson2's
@@ -40,14 +42,12 @@ public class FanoutService {
      * FE outage the fanout path fails per chunk, and at production QPS an uncapped WARN
      * stream is tens of thousands of log lines per second — enough to cost real throughput.
      */
-    private static final long FAILURE_WARN_INTERVAL_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(1);
+    private static final long FAILURE_WARN_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(1);
 
     private final FeClient feClient;
     private final FePool fePool;
-    private final java.util.concurrent.atomic.AtomicLong lastFailureWarnNanos =
-            new java.util.concurrent.atomic.AtomicLong();
-    private final java.util.concurrent.atomic.AtomicLong suppressedFailureWarns =
-            new java.util.concurrent.atomic.AtomicLong();
+    private final AtomicLong lastFailureWarnNanos = new AtomicLong();
+    private final AtomicLong suppressedFailureWarns = new AtomicLong();
 
     public Mono<List<SubBatchResult>> dispatchChunks(String fePath,
                                                      List<JSONObject> chunkBodies,

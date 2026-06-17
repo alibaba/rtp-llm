@@ -20,8 +20,9 @@ public final class EmbeddingMerger implements BatchEndpointSpec.PostMerger {
     public static final EmbeddingMerger INSTANCE = new EmbeddingMerger();
 
     @Override
-    public void apply(JSONObject mergedBody, List<SubBatchResult> subs, List<Integer> failedIndices) {
-        JSONArray data = mergedBody.getJSONArray("data");
+    public void apply(JSONObject mergedBody, List<SubBatchResult> subs, List<Integer> failedIndices,
+                      BatchEndpointSpec spec) {
+        JSONArray data = mergedBody.getJSONArray(spec.getResponseArrayField());
         if (data != null) {
             for (int i = 0; i < data.size(); i++) {
                 Object item = data.get(i);
@@ -33,7 +34,7 @@ public final class EmbeddingMerger implements BatchEndpointSpec.PostMerger {
         long promptTokens = 0;
         long totalTokens = 0;
         for (SubBatchResult s : subs) {
-            if (!ResponseMerger.wellFormed(s, "data")) {
+            if (!ResponseMerger.wellFormed(s, spec)) {
                 continue;
             }
             JSONObject usage = s.body().getJSONObject("usage");

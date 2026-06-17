@@ -76,7 +76,8 @@ public class BatchEndpointSpec {
     public interface PostMerger {
         void apply(JSONObject mergedBody,
                    List<SubBatchResult> subs,
-                   List<Integer> failedIndices);
+                   List<Integer> failedIndices,
+                   BatchEndpointSpec spec);
     }
 
     /**

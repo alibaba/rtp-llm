@@ -4,6 +4,7 @@ import org.flexlb.util.Logger;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -59,7 +60,7 @@ public class FePool {
         }
         // Round-robin over the alive subset so a dead host's share spreads across the whole
         // pool instead of funneling onto its successor.
-        List<String> alive = new java.util.ArrayList<>(snapshot.size());
+        List<String> alive = new ArrayList<>(snapshot.size());
         for (String candidate : snapshot) {
             if (isAlive.test(candidate)) {
                 alive.add(candidate);

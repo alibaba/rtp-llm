@@ -93,7 +93,7 @@ public final class ResponseMerger {
             envelope.put("_partial_failure", pf);
         }
         if (spec.getPostMerger() != null) {
-            spec.getPostMerger().apply(envelope, ordered, failedIndices);
+            spec.getPostMerger().apply(envelope, ordered, failedIndices, spec);
         }
         return new MergedResponse(envelope, succeededChunks, ordered.size(), failedIndices, failedReasons, 500);
     }
@@ -127,14 +127,10 @@ public final class ResponseMerger {
     }
 
     static boolean wellFormed(SubBatchResult s, BatchEndpointSpec spec) {
-        return wellFormed(s, spec.getResponseArrayField());
-    }
-
-    static boolean wellFormed(SubBatchResult s, String responseArrayField) {
         if (!s.success() || s.body() == null) {
             return false;
         }
-        JSONArray arr = s.body().getJSONArray(responseArrayField);
+        JSONArray arr = s.body().getJSONArray(spec.getResponseArrayField());
         return arr != null && arr.size() == s.chunkSize();
     }
 

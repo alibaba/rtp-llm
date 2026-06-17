@@ -162,13 +162,13 @@ public class DefaultRouter implements Router {
         // (4) Batch strategy (independent of /schedule's strategy) must support batch.
         //     Default is ROUND_ROBIN; an operator-configured non-batch-capable batchStrategy
         //     fails loudly here rather than silently falling back, so misconfiguration is loud.
-        if (!(this.batchLoadBalancer instanceof BatchLoadBalancer batchLoadBalancer)) {
+        if (!(this.batchLoadBalancer instanceof BatchLoadBalancer batch)) {
             return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
                     "batchStrategy for role " + roleType.getCode() + " does not support batch_schedule");
         }
 
         // (5) RR pick N targets
-        List<BatchScheduleTarget> targets = batchLoadBalancer.selectBatch(count, roleType, null);
+        List<BatchScheduleTarget> targets = batch.selectBatch(count, roleType, null);
         if (targets == null || targets.isEmpty()) {
             return BatchScheduleResponse.error(roleType.getErrorType());
         }
