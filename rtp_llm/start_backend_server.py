@@ -26,7 +26,7 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
-from rtp_llm.utils.import_util import has_internal_source
+from rtp_llm.utils.jit_cache_manager import ensure_jit_cache_run_id
 from rtp_llm.utils.process_manager import ProcessManager
 
 setup_logging()
@@ -53,9 +53,7 @@ def bootstrap_local_jit_cache(py_env_configs: PyEnvConfigs):
 
 
 def prepare_jit_cache(py_env_configs: PyEnvConfigs):
-    if not has_internal_source():
-        return None
-    from internal_source.rtp_llm.utils.jit_cache_manager import JitCacheManager
+    from rtp_llm.utils.jit_cache_manager import JitCacheManager
 
     manager = JitCacheManager(py_env_configs.jit_config)
     manager.bootstrap_env()
@@ -478,12 +476,7 @@ def start_backend_server(
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
-    if has_internal_source():
-        from internal_source.rtp_llm.utils.jit_cache_manager import (
-            ensure_jit_cache_run_id,
-        )
-
-        ensure_jit_cache_run_id()
+    ensure_jit_cache_run_id()
 
     clear_jit_filelock()
 

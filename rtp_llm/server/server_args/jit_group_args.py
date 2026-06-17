@@ -8,6 +8,30 @@ def init_jit_group_args(parser, jit_config):
         env_name="LOCAL_JIT_CACHE_DIR",
         bind_to=(jit_config, "local_jit_cache_dir"),
         type=str,
-        default="~/.cache/rtp_llm/jit",
+        default="./jit_cache",
         help="JIT本地cache目录",
+    )
+    jit_group.add_argument(
+        "--remote_jit_dir",
+        env_name="REMOTE_JIT_DIR",
+        bind_to=(jit_config, "remote_jit_dir"),
+        type=str,
+        default="",
+        help="JIT远程cache挂载目录，必须是已存在的绝对路径",
+    )
+    jit_group.add_argument(
+        "--jit_prepare_timeout_s",
+        env_name="JIT_PREPARE_TIMEOUT_S",
+        bind_to=(jit_config, "jit_prepare_timeout_s"),
+        type=float,
+        default=30,
+        help="JIT远程cache启动预热超时时间，单位秒",
+    )
+    jit_group.add_argument(
+        "--jit_sync_interval_s",
+        env_name="JIT_SYNC_INTERVAL_S",
+        bind_to=(jit_config, "jit_sync_interval_s"),
+        type=float,
+        default=300,
+        help="JIT远程cache后台同步间隔，单位秒；小于等于0时仅退出时同步",
     )

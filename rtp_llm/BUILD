@@ -129,6 +129,8 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
+    "watchdog",
+    "zstandard",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
 
@@ -152,6 +154,8 @@ py_library(
         ":cpm_kernels",
         ":prettytable",
         ":psutil",
+        ":watchdog",
+        ":zstandard",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
     ] + internal_deps()
 )

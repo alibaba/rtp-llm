@@ -9,6 +9,16 @@ filegroup(
 )
 
 py_test(
+    name = "jit_cache_manager_test",
+    srcs = [
+        "jit_cache_manager_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+)
+
+py_test(
     name = "ckpt_database_test",
     srcs = [
         "ckpt_database_test.py",
