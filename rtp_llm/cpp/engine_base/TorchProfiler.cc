@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "autil/TimeUtility.h"
 #include <string>
@@ -91,6 +92,20 @@ void ProfilerSaveWorker::run() {
 StepWindowProfiler::StepWindowProfiler(const std::string& default_output_dir, int world_rank):
     default_output_dir_(default_output_dir.empty() ? "." : default_output_dir), world_rank_(world_rank) {}
 
+StepWindowProfiler::StepScope::StepScope(StepWindowProfiler& profiler): profiler_(profiler) {
+    profiler_.beginStep();
+}
+
+StepWindowProfiler::StepScope::~StepScope() {
+    try {
+        profiler_.endStep();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("timeline profiler endStep failed: %s", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("timeline profiler endStep failed with unknown exception");
+    }
+}
+
 void StepWindowProfiler::configure(bool enable, const std::string& trace_name, int start_step, int num_steps) {
     // First-come-first-served: if a profiling session is already active, ignore new requests
     // to prevent concurrent requests from repeatedly restarting the profiler.
@@ -114,7 +129,14 @@ void StepWindowProfiler::configure(bool enable, const std::string& trace_name, i
                      trace_name.c_str());
 }
 
-void StepWindowProfiler::tick() {
+void StepWindowProfiler::configureFromConfig(const ProfilingDebugLoggingConfig& cfg) {
+    if (!cfg.gen_timeline_sync) {
+        return;
+    }
+    configure(true, cfg.timeline_trace_name, cfg.timeline_start_step, cfg.timeline_num_steps);
+}
+
+void StepWindowProfiler::beginStep() {
     // Fast path: no profiling active and no profiler to clean up — zero cost
     if (!enabled_.load(std::memory_order_relaxed) && !has_profiler_.load(std::memory_order_relaxed)) {
         return;
@@ -166,6 +188,22 @@ void StepWindowProfiler::tick() {
                          prefix.c_str(),
                          start_step_.load(),
                          num_steps_.load());
+    }
+}
+
+void StepWindowProfiler::endStep() {
+    // Fast path: no profiling active and no profiler to clean up — zero cost
+    if (!enabled_.load(std::memory_order_relaxed) && !has_profiler_.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    if (!enabled_.load(std::memory_order_relaxed)) {
+        stopProfiler("disabled");
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!profiler_) {
         return;
     }
 
