@@ -65,6 +65,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] ?
             (std::uint8_t)torchDTypeToDataType(inputs.multimodal_features.value()[0].dtype()) :
             0;
+    shape_hints_ptr[GptModelInputIndex::mmHasExtraInput] =
+        inputs.mm_extra_input.has_value() ? inputs.mm_extra_input.value().size() : 0;
+    shape_hints_ptr[GptModelInputIndex::mmExtraInputDtype] =
+        (inputs.mm_extra_input.has_value() && !inputs.mm_extra_input.value().empty()) ?
+            (std::uint8_t)torchDTypeToDataType(inputs.mm_extra_input.value()[0].dtype()) :
+            0;
     shape_hints_ptr[GptModelInputIndex::needAllLogits]       = inputs.need_all_logits;
     shape_hints_ptr[GptModelInputIndex::needAllHiddenStates] = inputs.need_all_hidden_states;
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStates] =
@@ -106,10 +112,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;
     int32_t*      mm_features_shape_ptr = nullptr;
-    inputs.need_all_logits              = shape_hints_ptr[GptModelInputIndex::needAllLogits];
-    inputs.need_all_hidden_states       = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
-    inputs.skip_run                     = shape_hints_ptr[GptModelInputIndex::skipRun];
-    inputs.is_fake_stream               = shape_hints_ptr[GptModelInputIndex::isFakeStream];
+    // extra-input (model-specific, treated as opaque flat 1-D tensors) per-tensor element count
+    torch::Tensor mm_extra_input_shape_t;
+    int64_t*      mm_extra_input_shape_ptr = nullptr;
+    inputs.need_all_logits                 = shape_hints_ptr[GptModelInputIndex::needAllLogits];
+    inputs.need_all_hidden_states          = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
+    inputs.skip_run                        = shape_hints_ptr[GptModelInputIndex::skipRun];
+    inputs.is_fake_stream                  = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     if (inputs.skip_run) {
         return;
     }
@@ -123,6 +132,21 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         // CPU broadcast (UDS path; fallback handles cudaSyncAndCheck).
         execBroadcastCpu({{mm_features_shape_t}, 0});
+    }
+
+    // extra-input element counts broadcast: each extra-input is an opaque flat 1-D tensor,
+    // so we send its element count first ("先传shape") and allocate a 1-D buffer on non-root.
+    const size_t mm_extra_input_num = (size_t)shape_hints_ptr[GptModelInputIndex::mmHasExtraInput];
+    if (mm_extra_input_num) {
+        mm_extra_input_shape_t   = torch::empty({(int64_t)mm_extra_input_num}, torch::kInt64).pin_memory();
+        mm_extra_input_shape_ptr = mm_extra_input_shape_t.data_ptr<int64_t>();
+        for (size_t i = 0; i < mm_extra_input_num; ++i) {
+            mm_extra_input_shape_ptr[i] =
+                inputs.mm_extra_input.has_value() ? inputs.mm_extra_input.value()[i].numel() : 0;
+        }
+        execBroadcast({{mm_extra_input_shape_t}, 0});
+        execSyncCommunication(false);
+        cudaSyncAndCheck();
     }
 
     auto   max_kernel_blocks       = (size_t)shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch];
@@ -237,6 +261,17 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             }
             inputs.multimodal_features = std::move(mm_features);
         }
+        if (mm_extra_input_num) {
+            std::vector<torch::Tensor> mm_extra_input;
+            auto                       extra_dtype =
+                dataTypeToTorchType((rtp_llm::DataType)shape_hints_ptr[GptModelInputIndex::mmExtraInputDtype]);
+            for (size_t i = 0; i < mm_extra_input_num; ++i) {
+                mm_extra_input.emplace_back(
+                    torch::empty({(int64_t)mm_extra_input_shape_ptr[i]},
+                                 torch::TensorOptions().dtype(extra_dtype).device(torch::kCUDA)));
+            }
+            inputs.mm_extra_input = std::move(mm_extra_input);
+        }
     }
 
     // Collect all tensors that participate in broadcast.
@@ -281,6 +316,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (mm_features_num) {
         for (auto& f : inputs.multimodal_features.value()) {
             collect(f);
+        }
+    }
+    if (mm_extra_input_num) {
+        for (auto& e : inputs.mm_extra_input.value()) {
+            collect(e);
         }
     }
     if (hidden_states_size) {

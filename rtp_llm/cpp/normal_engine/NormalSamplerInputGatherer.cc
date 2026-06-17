@@ -14,10 +14,10 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
     (void)model_inputs;
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_CHECK(!stream_groups.empty());
-    auto all_streams          = stream_groups.allStreams();
-    auto total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
-    auto total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
-    bool return_all_probs     = stream_groups.needReturnAllProbs();
+    auto               all_streams          = stream_groups.allStreams();
+    auto               total_batch_size_in  = stream_groups.totalSamplerBatchSizeIn();
+    auto               total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
+    ReturnAllProbsMode return_all_probs     = stream_groups.needReturnAllProbs();
 
     SamplerInputs sampler_inputs = allocateSamplerInputs(stream_groups, total_batch_size_in, total_batch_size_out);
     fillSamplerCommonInputs(sampler_inputs, all_streams);
@@ -67,7 +67,6 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
 
     auto vocab_size           = (size_t)model_output.logits.size(1);
     sampler_inputs.vocab_size = vocab_size;
-
     if (!raw_logprobs_row_indices.empty()) {
         RTP_LLM_CHECK(model_output.logits.defined());
         RTP_LLM_CHECK(model_output.logits.dim() == 2);
@@ -104,9 +103,12 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
         sampler_inputs.raw_logprobs_logits =
             model_output.logits.narrow(1, 0, real_vocab_size).index_select(0, row_indices_device);
     }
-    if (return_all_probs) {
+    if (return_all_probs != ReturnAllProbsMode::NONE) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size_in, (int64_t)vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        if (return_all_probs == ReturnAllProbsMode::ORIGINAL) {
+            sampler_inputs.return_original_all_probs = true;
+        }
     }
 
     // copy logits when needs tiling or returning logits

@@ -122,6 +122,11 @@ class Qwen35MoeMTP(Qwen35Moe):
         config.moe_layer_index = [0]
         config.num_layers = 1
         config.is_mtp = True
+        # Draft MTP consumes text tokens only (no vision tokens), so MRoPE's 3D
+        # position encoding is unnecessary. Falling back to plain RoPE keeps the
+        # PyFlashinfer prefill impl eligible (it filters out MRoPE), which is the
+        # only impl in the registry that handles prefill CUDA graph correctly.
+        config.attn_config.rope_config.style = 1
         return config
 
     def _create_python_model(self) -> Optional[Any]:

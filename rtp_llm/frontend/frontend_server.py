@@ -108,6 +108,7 @@ class FrontendServer(object):
             embedding_config=self.py_env_configs.embedding_config,
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
+            vit_config=self.py_env_configs.vit_config,
         )
 
         # Create a temporary tokenizer to initialize special_tokens
@@ -266,9 +267,7 @@ class FrontendServer(object):
             "rank_id": self.rank_id,
             "server_id": self.server_id,
             "source": str(request_dict.get("source", "unknown")),
-            "priority": qos_priority_tag(
-                normalized_headers.get(QOS_PRIORITY_HEADER)
-            ),
+            "priority": qos_priority_tag(normalized_headers.get(QOS_PRIORITY_HEADER)),
         }
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
@@ -420,9 +419,7 @@ class FrontendServer(object):
             )
 
         try:
-            rep = await self._infer_wrap(
-                req, raw_request, generate_call, metric_tags
-            )
+            rep = await self._infer_wrap(req, raw_request, generate_call, metric_tags)
         except BaseException as e:
             self._global_controller.decrement()
             raise e

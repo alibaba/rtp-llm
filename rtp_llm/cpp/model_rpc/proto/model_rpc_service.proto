@@ -76,6 +76,7 @@ message GenerateConfigPB {
     bool sp_edit = 24;
     repeated int32 sp_advice_prompt_token_ids = 25;
     bool force_disable_sp_run = 26;
+    // legacy compat: false=NONE, true=DEFAULT/ORIGINAL (cannot distinguish across versions)
     bool return_all_probs = 27;
     bool sp_input_lookup = 28;
     bool can_use_pd_separation = 29;
@@ -117,6 +118,11 @@ message GenerateConfigPB {
     bool return_logprobs = 64;
     uint32 top_logprobs = 65;
     bool frontend_metric_streaming = 66;
+    // 生成式推荐：组合 token 粒度去重与曝光过滤
+    int32 combo_token_size = 67;
+    IntMatrix banned_combo_token_ids = 68;
+    // 0=unset(fallback to bool return_all_probs), 1=NONE, 2=DEFAULT, 3=ORIGINAL
+    int32 return_all_probs_mode = 69;
 }
 
 message MMPreprocessConfigPB {
@@ -127,6 +133,8 @@ message MMPreprocessConfigPB {
     int32 fps = 5;
     int32 min_frames = 6;
     int32 max_frames = 7;
+    repeated float crop_positions = 8;
+    int32 mm_timeout_ms = 9;
 }
 
 message MultimodalInputPB {
@@ -143,10 +151,8 @@ message MultimodalInputsPB {
 message MultimodalOutputPB {
     TensorPB multimodal_embedding = 1;
     TensorPB multimodal_pos_id = 2;
-}
-
-message MultimodalOutputsPB {
-    repeated MultimodalOutputPB multimodal_outputs = 1;
+    repeated TensorPB multimodal_extra_input = 3;
+    repeated int32 split_size = 4;
 }
 
 message RequestInfoPB {
@@ -205,6 +211,7 @@ message AuxInfoPB {
     int64 context_execute_time_us = 30;
     int64 generate_execute_time_us = 31;
     int64 context_execute_time_with_cache_us = 32;
+    map<int32, int32> multimodal_lengths = 33;
 }
 
 message FlattenOutputPB {
@@ -506,6 +513,7 @@ message EmbeddingInputPB {
     repeated int32 input_lengths = 3;
     int64 request_id = 4;
     repeated MultimodalInputPB multimodal_features = 5;
+    string vit_role_addr = 6;
 }
 
 message EmbeddingHealthRequestPB {
@@ -812,8 +820,10 @@ service RpcService {
     rpc Cancel(CancelRequestPB) returns (CancelResponsePB);
 }
 
+// Response type intentionally changed as part of multimodal refactoring — not a rolling-upgrade concern
+// because VIT proxy and LLM backend are always deployed together in this service.
 service MultimodalRpcService {
-    rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputsPB);
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
+    rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
 }

@@ -133,6 +133,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  no_repeat_ngram_size,
                  cum_log_probs_out.defined() ? std::optional<torch::Tensor>(cum_log_probs_out) : std::nullopt,
                  std::nullopt,  // output_log_probs
+                 inputs.return_original_all_probs,
                  all_probs,
                  presence_penalty,
                  frequency_penalty,

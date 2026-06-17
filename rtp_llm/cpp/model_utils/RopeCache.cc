@@ -127,6 +127,18 @@ RopeCache getRopeCacheOnce(const RopeConfig& rope_config,
     static std::once_flag rope_cache_flag_non_interleaved;
     static RopeCache      rope_cache_non_interleaved;
 
+    // Refuse to initialize the cache from a bogus size (e.g. warmup with empty
+    // batch passing input_lengths.max() == 0). std::call_once would otherwise
+    // permanently bake in an empty cache and break every subsequent decode.
+    if (max_position_embeddings <= 0) {
+        RTP_LLM_LOG_WARNING(
+            "getRopeCacheOnce called with max_position_embeddings=%d, returning unused cache to avoid baking in a bad value",
+            max_position_embeddings);
+        RopeCache empty;
+        empty.used = false;
+        return empty;
+    }
+
     if (interleave) {
         // Use interleaved cache
         std::call_once(rope_cache_flag_interleaved, [&]() {

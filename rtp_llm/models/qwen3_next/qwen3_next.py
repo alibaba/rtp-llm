@@ -167,23 +167,82 @@ class Qwen35Moe(Qwen3NextBase):
         return config_json
 
     @classmethod
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
+        config_path = os.path.join(ckpt_path, "config.json")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"config.json not found in {ckpt_path}")
+
+        with open(config_path) as reader:
+            config_json = json.loads(reader.read())
+
+        text_config_json = config_json["text_config"]
+
+        config = ModelConfig()
+        config.ckpt_path = ckpt_path
+
+        cls._parse_basic_config(text_config_json, config)
+        cls._parse_rope_config(text_config_json, config)
+        cls._parse_normalization_config(text_config_json, config)
+        cls._parse_moe_config(text_config_json, config)
+        cls._parse_hybrid_attention_config(text_config_json, config)
+        cls._parse_linear_attention_config(text_config_json, config)
+        cls._parse_mm_config(config_json, config)
+
+        return config
+
+    @classmethod
     def _parse_rope_config(cls, config_json: dict, config: ModelConfig):
         rope_parameters = config_json["rope_parameters"]
         # TODO@xieshui support mrope in cuda graph and reopen config
-        # mrope_interleaved = rope_parameters["mrope_interleaved"]
-        # assert mrope_interleaved, "mrope_interleaved should be True"
-        config.attn_config.rope_config.style = 1
+        mrope_interleaved = rope_parameters["mrope_interleaved"]
+        assert mrope_interleaved, "mrope_interleaved should be True"
+        config.attn_config.rope_config.style = 7
         config.attn_config.rope_config.base = rope_parameters["rope_theta"]
         config.partial_rotary_factor = rope_parameters["partial_rotary_factor"]
         config.attn_config.rope_config.dim = int(
             config.attn_config.size_per_head * config.partial_rotary_factor
         )
-        # mrope_section = rope_parameters["mrope_section"]
-        # config.attn_config.rope_config.index_factor = len(mrope_section)
-        # config.attn_config.rope_config.mrope_dim1 = mrope_section[0]
-        # config.attn_config.rope_config.mrope_dim2 = mrope_section[1]
-        # config.attn_config.rope_config.mrope_dim3 = mrope_section[2]
-        # config.mm_model_config.mm_position_ids_style = 2
+        mrope_section = rope_parameters["mrope_section"]
+        config.attn_config.rope_config.index_factor = len(mrope_section)
+        config.attn_config.rope_config.mrope_dim1 = mrope_section[0]
+        config.attn_config.rope_config.mrope_dim2 = mrope_section[1]
+        config.attn_config.rope_config.mrope_dim3 = mrope_section[2]
+        config.mm_model_config.mm_position_ids_style = 2
+
+    @classmethod
+    def _parse_mm_config(cls, config_json: dict, config: ModelConfig):
+        config.mm_model_config.is_multimodal = True
+        config.mm_model_config.mm_sep_tokens = [
+            [config_json["vision_start_token_id"], config_json["vision_end_token_id"]]
+        ]
+
+        config.mm_related_params.config["ckpt_path"] = config.ckpt_path
+
+    def _create_python_model(self):
+        model_config = self.model_config
+        parallelism_config = self.parallelism_config
+        fmha_config = self.fmha_config
+        py_hw_kernel_config = self.hw_kernel_config
+        moe_config = self.moe_config
+        max_generate_batch_size = self.max_generate_batch_size
+
+        from rtp_llm.models_py.utils.arch import is_cuda
+
+        if not is_cuda():
+            raise RuntimeError("Qwen3Next is only supported in cuda arch")
+        from rtp_llm.models_py.model_desc.qwen3_next import Qwen35Model
+
+        self.py_model = Qwen35Model(
+            model_config,
+            parallelism_config,
+            self.weight,
+            moe_config,
+            max_generate_batch_size=max_generate_batch_size,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
+            device_resource_config=self.device_resource_config,
+        )
+        return self.py_model
 
 
 class Qwen35Dense(Qwen35Moe):

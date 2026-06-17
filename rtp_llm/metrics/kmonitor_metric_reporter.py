@@ -63,6 +63,10 @@ class AccMetrics(Enum):
     # Tool-call output fell into a repeated span. Reported once per request by the
     # frontend gRPC access-log interceptor; tags intentionally avoid request_id.
     TOOL_CALL_LOOP_QPS_METRIC = "py_rtp_tool_call_loop_qps"
+    VIT_QPS_METRIC = "py_rtp_vit_qps"
+    VIT_ERROR_QPS_METRIC = "py_rtp_vit_error_qps"
+    VIT_SUCCESS_QPS_METRIC = "py_rtp_vit_success_qps"
+    VIT_PROCESS_POOL_RESTART_QPS_METRIC = "py_rtp_vit_process_pool_restart_qps"
 
 
 class GaugeMetrics(Enum):
@@ -98,6 +102,7 @@ class GaugeMetrics(Enum):
 
     # vit preprocess
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
+    VIT_EMBEDDING_RT_METRIC = "py_rtp_vit_embedding_rt"
 
     TOOL_CALL_LOOP_REPEAT_COUNT_METRIC = "py_rtp_tool_call_loop_repeat_count"
     TOOL_CALL_LOOP_CURRENT_SPAN_TOKENS_METRIC = (

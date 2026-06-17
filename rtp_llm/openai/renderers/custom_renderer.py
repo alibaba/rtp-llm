@@ -32,6 +32,7 @@ from rtp_llm.openai.api_datatype import (
     TopLogprob,
     UsageInfo,
 )
+from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.utils.base_model_datatypes import (
@@ -39,8 +40,8 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
+    MMUrlType,
 )
-from rtp_llm.utils.multimodal_util import MMPreprocessConfig, MMUrlType, MultimodalInput
 from rtp_llm.utils.util import has_overlap_kmp
 from rtp_llm.utils.word_util import (
     get_stop_word_slices,
@@ -105,6 +106,29 @@ def _make_frontend_metric_generate_config(
         update={"frontend_metric_streaming": True, "aux_info": True},
         deep=True,
     )
+
+
+def _build_prompt_tokens_details(
+    cached_tokens: int = 0,
+    multimodal_lengths: Optional[Dict[int, int]] = None,
+) -> Optional[PromptTokensDetails]:
+    image_tokens = (
+        multimodal_lengths.get(MMUrlType.IMAGE) if multimodal_lengths else None
+    )
+    video_tokens = (
+        multimodal_lengths.get(MMUrlType.VIDEO) if multimodal_lengths else None
+    )
+    audio_tokens = (
+        multimodal_lengths.get(MMUrlType.AUDIO) if multimodal_lengths else None
+    )
+    if cached_tokens > 0 or image_tokens or video_tokens or audio_tokens:
+        return PromptTokensDetails(
+            cached_tokens=cached_tokens if cached_tokens > 0 else None,
+            image_tokens=image_tokens,
+            video_tokens=video_tokens,
+            audio_tokens=audio_tokens,
+        )
+    return None
 
 
 def _get_think_config(generate_env_config):
@@ -288,6 +312,7 @@ class OutputDelta:
     input_length: int
     output_length: int
     reuse_length: int
+    multimodal_lengths: Optional[Dict[int, int]] = None
     extra_outputs: Optional[ChatCompletionExtraOutputs] = None
 
 
@@ -325,14 +350,18 @@ class RenderedInputs:
             )
 
         if len(preprocess_configs) == 0:
-            preprocess_configs = [MMPreprocessConfig()] * len(input_urls)
-        elif len(preprocess_configs) != len(preprocess_configs):
+            preprocess_configs = [
+                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+            ] * len(input_urls)
+        elif len(preprocess_configs) != len(input_urls):
             raise Exception(
                 f"the number of multimodal preprocess config must match url, now types {len(preprocess_configs)} urls {len(input_urls)}"
             )
 
         for url, type, config in zip(input_urls, input_urls_type, preprocess_configs):
-            self.multimodal_inputs.append(MultimodalInput(url, type, config))
+            self.multimodal_inputs.append(
+                MultimodalInput(url, type, torch.empty(0), config)
+            )
 
 
 class CustomChatRenderer:
@@ -625,6 +654,7 @@ class CustomChatRenderer:
             input_length=aux_info.input_len,
             output_length=aux_info.output_len,
             reuse_length=aux_info.reuse_len,
+            multimodal_lengths=aux_info.multimodal_lengths,
         )
 
     def _token_id_to_bytes(
@@ -1389,10 +1419,8 @@ class CustomChatRenderer:
                     if think_status_list[0].enable_think_mode > 0
                     else None
                 ),
-                prompt_tokens_details=(
-                    PromptTokensDetails(cached_tokens=reuse_lengths)
-                    if reuse_lengths > 0
-                    else None
+                prompt_tokens_details=_build_prompt_tokens_details(
+                    reuse_lengths, items[0].multimodal_lengths
                 ),
             ),
             # TODO(zhangjianning.zjn): merge all extra outputs for streaming request
@@ -1426,6 +1454,7 @@ class CustomChatRenderer:
                     aux_info.input_len,
                     aux_info.output_len,
                     aux_info.reuse_len,
+                    multimodal_lengths=aux_info.multimodal_lengths,
                 )
             )
         return await self._generate_stream_response(output_items, think_status_list)
@@ -1439,6 +1468,7 @@ class CustomChatRenderer:
         input_token_length = 0
         output_token_length = 0
         reuse_length = 0
+        multimodal_lengths = {}
         aux_info = None
         for i, buffer in enumerate(buffer_list):
             if buffer.output is None:
@@ -1461,6 +1491,7 @@ class CustomChatRenderer:
             if i == 0:
                 input_token_length = buffer.output.aux_info.input_len
                 reuse_length = buffer.output.aux_info.reuse_len
+                multimodal_lengths = buffer.output.aux_info.multimodal_lengths
                 aux_info = buffer.output.aux_info if request.aux_info else None
             output_token_length += buffer.output.aux_info.output_len
         return StreamResponseObject(
@@ -1487,10 +1518,8 @@ class CustomChatRenderer:
                     if think_status_list[0].enable_think_mode
                     else None
                 ),
-                prompt_tokens_details=(
-                    PromptTokensDetails(cached_tokens=reuse_length)
-                    if reuse_length > 0
-                    else None
+                prompt_tokens_details=_build_prompt_tokens_details(
+                    reuse_length, multimodal_lengths
                 ),
             ),
             aux_info=aux_info,
@@ -1751,10 +1780,8 @@ class CustomChatRenderer:
                 prompt_tokens=input_lengths,
                 total_tokens=input_lengths + output_lengths,
                 completion_tokens=output_lengths,
-                prompt_tokens_details=(
-                    PromptTokensDetails(cached_tokens=reuse_lengths)
-                    if reuse_lengths > 0
-                    else None
+                prompt_tokens_details=_build_prompt_tokens_details(
+                    reuse_lengths, items[0].multimodal_lengths
                 ),
             ),
         )
@@ -1829,10 +1856,9 @@ class CustomChatRenderer:
                 prompt_tokens=input_token_length,
                 total_tokens=input_token_length + output_token_length,
                 completion_tokens=output_token_length,
-                prompt_tokens_details=(
-                    PromptTokensDetails(cached_tokens=reuse_length)
-                    if reuse_length > 0
-                    else None
+                prompt_tokens_details=_build_prompt_tokens_details(
+                    reuse_length,
+                    aux_info.multimodal_lengths if aux_info is not None else None,
                 ),
             ),
             aux_info=aux_info,

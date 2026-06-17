@@ -23,7 +23,6 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
 )
-from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
@@ -422,9 +421,7 @@ def multi_rank_start(
 
     # Wait for all ranks to report startup status
     try:
-        _wait_for_ranks_startup(
-            processes, rank_pipe_readers, local_world_size, manager
-        )
+        _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size, manager)
 
         # Report success via external pipe
         if pipe_writer is not None:
@@ -563,17 +560,11 @@ def start_backend_server(
 
     clear_jit_filelock()
 
-    if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
-        from rtp_llm.server.vit_rpc_server import vit_start_server
-
-        return vit_start_server()
-
     py_env_configs.server_config.shutdown_timeout = (
         ProcessManager.sync_shutdown_timeout_env(
             py_env_configs.server_config.shutdown_timeout
         )
     )
-
     if not torch.cuda.is_available():
         return local_rank_start(global_controller, py_env_configs)
 

@@ -291,12 +291,11 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     compact_top_logprobs          = copyToPinnedCpuAsync(compact_top_logprobs, need_d2h_sync);
     syncPinnedCpuCopies(need_d2h_sync);
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
-
     int  batch_idx_in       = 0;
     int  batch_idx_out      = 0;
     int  token_offset       = 0;
     int  logprobs_batch_idx = 0;
-    bool return_all_probs   = stream_groups.needReturnAllProbs();
+    bool return_all_probs   = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
     auto new_tokens_all     = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
 
     for (const auto& stream : all_streams) {

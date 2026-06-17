@@ -478,6 +478,7 @@ class VitSeperationCaseRunner(CaseRunner):
 
         vit_envs["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids[llm_gpu_size:])
         vit_envs["VIT_SEPARATION"] = "1"
+        vit_envs["ROLE_TYPE"] = "VIT"
         vit_envs["MODEL_SERVICE_CONFIG"] = service_route.model_dump_json()
         server_configs = [
             {

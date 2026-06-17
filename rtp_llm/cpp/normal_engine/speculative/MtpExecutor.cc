@@ -3135,8 +3135,8 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
             }
         }
 
-        // init sp output buffer if not exist
-        stream->setReturnAllProbs(true);
+        // set base properties
+        stream->setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
         if (stream->getSPOutputBuffer() == nullptr) {
             const auto cuda_i32         = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
             auto       sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
