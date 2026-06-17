@@ -13,20 +13,38 @@ class FrontendShutdownManager:
         self._draining = False
         self._drain_reason = ""
         self._drain_started_at: Optional[float] = None
+        self._accept_unavailable_until: Optional[float] = None
         self._active_requests = 0
 
-    def start_unavailable(self, reason: str) -> None:
+    def start_unavailable(
+        self, reason: str, stale_accept_seconds: Optional[float] = None
+    ) -> None:
+        accept_until = (
+            time.monotonic() + max(0.0, stale_accept_seconds)
+            if stale_accept_seconds is not None and stale_accept_seconds > 0
+            else None
+        )
         with self._lock:
             if self._unavailable:
+                if stale_accept_seconds is None:
+                    self._accept_unavailable_until = None
+                elif (
+                    accept_until is not None
+                    and self._accept_unavailable_until is None
+                ):
+                    self._accept_unavailable_until = accept_until
                 return
             self._unavailable = True
             self._drain_reason = reason
-            self._drain_started_at = time.time()
+            self._drain_started_at = time.monotonic()
+            self._accept_unavailable_until = accept_until
             active_requests = self._active_requests
         logging.info(
-            "Frontend entering pre-stop unavailable state, reason=%s, active_requests=%s",
+            "Frontend entering pre-stop unavailable state, reason=%s, "
+            "active_requests=%s, stale_accept_seconds=%s",
             reason,
             active_requests,
+            stale_accept_seconds,
         )
 
     def start_draining(self, reason: str) -> None:
@@ -36,8 +54,9 @@ class FrontendShutdownManager:
             self._unavailable = True
             self._draining = True
             self._drain_reason = reason
+            self._accept_unavailable_until = None
             if self._drain_started_at is None:
-                self._drain_started_at = time.time()
+                self._drain_started_at = time.monotonic()
             active_requests = self._active_requests
         logging.info(
             "Frontend entering graceful shutdown drain, reason=%s, active_requests=%s",
@@ -61,11 +80,16 @@ class FrontendShutdownManager:
         with self._lock:
             if self._drain_started_at is None:
                 return 0.0
-            return time.time() - self._drain_started_at
+            return time.monotonic() - self._drain_started_at
 
     def try_begin_request(self) -> bool:
         with self._lock:
-            if self._unavailable:
+            if self._draining:
+                return False
+            if self._unavailable and (
+                self._accept_unavailable_until is None
+                or time.monotonic() >= self._accept_unavailable_until
+            ):
                 return False
             self._active_requests += 1
             return True

@@ -318,11 +318,10 @@ class DashScGrpcDrainAioInterceptor(grpc.aio.ServerInterceptor):
 
     Health/service-discovery should remove the node once pre-stop starts, but
     upstream clients can still have stale endpoints cached for a short window.
-    Reject new RPCs as soon as the process enters the pre-stop unavailable
-    state so no new request starts on a node that is leaving service discovery.
-    RPCs that already entered the handler keep their active counter until the
-    handler completes, and grpc stop later uses its grace window for those
-    in-flight RPCs.
+    Keep serving those stale RPCs during the pre-stop unavailable window because
+    not all upstreams retry gRPC UNAVAILABLE. Once true draining begins, reject
+    new RPCs before backend enqueue. RPCs that already entered the handler keep
+    their active counter until the handler completes.
     """
 
     def __init__(self, shutdown_manager: Any):

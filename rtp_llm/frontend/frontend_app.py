@@ -113,7 +113,10 @@ class GracefulShutdownServer(Server):
             sig_name = signal.Signals(sig).name
         except ValueError:
             sig_name = str(sig)
-        self.shutdown_manager.start_unavailable(f"signal {sig_name}")
+        self.shutdown_manager.start_unavailable(
+            f"signal {sig_name}",
+            stale_accept_seconds=self._effective_pre_stop_drain_seconds(),
+        )
         logging.info(
             "Frontend entering pre-stop unavailable state without uvicorn shutdown: "
             "signal=%s, active_requests=%s",
@@ -153,7 +156,9 @@ class GracefulShutdownServer(Server):
                 )
                 return True
 
-            self.shutdown_manager.start_unavailable(f"signal {sig_name}")
+            self.shutdown_manager.start_unavailable(
+                f"signal {sig_name}", stale_accept_seconds=remaining
+            )
             logging.info(
                 "Frontend entering pre-stop unavailable window before uvicorn shutdown: "
                 "remaining=%.3fs, elapsed=%.3fs, active_requests=%s",
