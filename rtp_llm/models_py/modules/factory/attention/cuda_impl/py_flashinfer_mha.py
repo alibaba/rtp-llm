@@ -723,15 +723,29 @@ class PyFlashinferDecodeAttnOp(object):
         else:  # BASE
             kv_datatype = get_scalar_type(attn_inputs.dtype)
 
-        # Steady-state decode drops the host metadata loop and H2D copy.
-        self.fmha_params.fill_params_mha_device(
-            attn_inputs.prefix_lengths,
-            attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id_device,
-            self.seq_size_per_block,
-            forbid_realloc=forbid_realloc,
-        )
+        if self._requires_fa2_cuda_graph_replan():
+            # FlashInfer tensor-core decode is routed through the fa2 prefill
+            # planner, which reads host-side page-table metadata during plan().
+            # Keep those host views at the runtime batch size; the device-only
+            # planner keeps its pinned host views at the reserved cache capacity.
+            self.fmha_params.fill_params(
+                attn_inputs.prefix_lengths,
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths,
+                attn_inputs.kv_cache_kernel_block_id_host,
+                self.seq_size_per_block,
+                forbid_realloc=forbid_realloc,
+            )
+        else:
+            # Steady-state decode drops the host metadata loop and H2D copy.
+            self.fmha_params.fill_params_mha_device(
+                attn_inputs.prefix_lengths,
+                attn_inputs.sequence_lengths,
+                attn_inputs.input_lengths,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                self.seq_size_per_block,
+                forbid_realloc=forbid_realloc,
+            )
 
         if self.enable_cuda_graph and self.decode_wrapper._fixed_batch_size == 0:
             batch_size = attn_inputs.input_lengths.size(0)
