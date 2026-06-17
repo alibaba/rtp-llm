@@ -8,9 +8,10 @@ namespace rtp_llm {
 constexpr int kMaxCudaGraphPrepareFillRegions = 32;
 
 struct CudaGraphPrepareFillRegion {
-    int32_t* ptr   = nullptr;
-    int64_t  count = 0;
-    int32_t  value = 0;
+    int32_t*       ptr       = nullptr;
+    int64_t        count     = 0;
+    int32_t        value     = 0;
+    const int32_t* value_ptr = nullptr;
 };
 
 struct CudaGraphPrepareFillParams {

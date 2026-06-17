@@ -17,8 +17,9 @@ __global__ void cudaGraphPrepareFillKernel(CudaGraphPrepareFillParams params) {
         if (region.ptr == nullptr || region.count <= 0) {
             continue;
         }
+        const int32_t value = region.value_ptr == nullptr ? region.value : *region.value_ptr;
         for (int64_t i = tid; i < region.count; i += stride) {
-            region.ptr[i] = region.value;
+            region.ptr[i] = value;
         }
     }
 }

@@ -115,6 +115,41 @@ void addCudaGraphPrepareFillRegion(
     region.count = end - start;
     region.value = value;
 }
+
+void addCudaGraphPrepareFillRegionFromDeviceValue(CudaGraphPrepareFillParams& params,
+                                                  torch::Tensor&              tensor,
+                                                  int64_t                     start,
+                                                  int64_t                     end,
+                                                  const torch::Tensor&        value_tensor,
+                                                  int64_t                     value_index) {
+    if (!tensor.defined() || !tensor.is_cuda() || end <= start) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(tensor.scalar_type() == torch::kInt32, "cuda graph prepare fill expects int32 CUDA tensor");
+    RTP_LLM_CHECK_WITH_INFO(tensor.is_contiguous(), "cuda graph prepare fill expects contiguous tensor");
+    RTP_LLM_CHECK_WITH_INFO(start >= 0 && end <= tensor.numel(),
+                            "cuda graph prepare fill range [%ld, %ld) exceeds tensor numel %ld",
+                            start,
+                            end,
+                            tensor.numel());
+    RTP_LLM_CHECK_WITH_INFO(value_tensor.defined() && value_tensor.is_cuda(),
+                            "cuda graph prepare fill device value expects CUDA tensor");
+    RTP_LLM_CHECK_WITH_INFO(value_tensor.scalar_type() == torch::kInt32,
+                            "cuda graph prepare fill device value expects int32 tensor");
+    RTP_LLM_CHECK_WITH_INFO(value_tensor.is_contiguous(),
+                            "cuda graph prepare fill device value expects contiguous tensor");
+    RTP_LLM_CHECK_WITH_INFO(value_index >= 0 && value_index < value_tensor.numel(),
+                            "cuda graph prepare fill device value index %ld exceeds tensor numel %ld",
+                            value_index,
+                            value_tensor.numel());
+    RTP_LLM_CHECK_WITH_INFO(params.region_count < kMaxCudaGraphPrepareFillRegions,
+                            "too many cuda graph prepare fill regions: %d",
+                            params.region_count);
+    auto& region     = params.regions[params.region_count++];
+    region.ptr       = tensor.data_ptr<int32_t>() + start;
+    region.count     = end - start;
+    region.value_ptr = value_tensor.data_ptr<int32_t>() + value_index;
+}
 #endif
 
 int inferTotalTokensNoSync(const PyModelInputs& inputs) {
@@ -304,20 +339,18 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                               0);
             }
             int last_valid_q = state.current_seq_len;
-            int last_valid_kv =
-                last_valid_q
-                + inputs.attention_inputs.prefix_lengths.slice(0, 0, state.current_batch_size).sum().item<int>();
 
             addCudaGraphPrepareFillRegion(fill_params,
                                           py_model_inputs_.attention_inputs.cu_seqlens,
                                           state.current_batch_size + 1,
                                           captured_batch_size + 1,
                                           last_valid_q);
-            addCudaGraphPrepareFillRegion(fill_params,
-                                          py_model_inputs_.attention_inputs.cu_kv_seqlens,
-                                          state.current_batch_size + 1,
-                                          captured_batch_size + 1,
-                                          last_valid_kv);
+            addCudaGraphPrepareFillRegionFromDeviceValue(fill_params,
+                                                         py_model_inputs_.attention_inputs.cu_kv_seqlens,
+                                                         state.current_batch_size + 1,
+                                                         captured_batch_size + 1,
+                                                         inputs.attention_inputs.cu_kv_seqlens,
+                                                         state.current_batch_size);
         } else {
             auto& seq_lens_tail = py_model_inputs_.attention_inputs.sequence_lengths;
             if (seq_lens_tail.defined()) {
