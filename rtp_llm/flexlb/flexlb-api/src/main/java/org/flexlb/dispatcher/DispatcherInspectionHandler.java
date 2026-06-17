@@ -6,7 +6,6 @@ import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.util.Logger;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.codec.DecodingException;
-import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
@@ -74,7 +73,7 @@ public class DispatcherInspectionHandler {
         }
         fePool.put("hosts", hosts);
         root.put("fePool", fePool);
-        return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(BatchBodyParser.serialize(root));
+        return DispatcherResponses.jsonBytes(200, BatchBodyParser.serialize(root));
     }
 
     // ───────────────────────── dryRun ─────────────────────────
@@ -168,7 +167,7 @@ public class DispatcherInspectionHandler {
             chunksOut.addAll(chunkBodies);
             out.put("chunks", chunksOut);
             return out;
-        }).flatMap(out -> ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(BatchBodyParser.serialize(out)));
+        }).flatMap(out -> DispatcherResponses.jsonBytes(200, BatchBodyParser.serialize(out)));
     }
 
     /**
@@ -185,7 +184,7 @@ public class DispatcherInspectionHandler {
         out.put("chunkCount", 0);
         out.put("disposition", "passthrough");
         out.put("reason", "request is not splittable for this endpoint; forwarded whole to a single FE");
-        return ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(BatchBodyParser.serialize(out));
+        return DispatcherResponses.jsonBytes(200, BatchBodyParser.serialize(out));
     }
 
     private Mono<ServerResponse> badRequest(String message) {
