@@ -286,7 +286,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 g,
                 beta,
                 prefix_lengths=(
-                    attn_inputs.prefix_lengths_d if ssm_states is not None else None
+                    attn_inputs.prefix_lengths if ssm_states is not None else None
                 ),
                 block_map=(
                     attn_inputs.kv_cache_kernel_block_id_device
@@ -804,9 +804,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 g,
                 beta,
                 prefix_lengths=(
-                    attention_inputs.prefix_lengths_d
-                    if ssm_states is not None
-                    else None
+                    attention_inputs.prefix_lengths if ssm_states is not None else None
                 ),
                 block_map=(
                     attention_inputs.kv_cache_kernel_block_id_device
