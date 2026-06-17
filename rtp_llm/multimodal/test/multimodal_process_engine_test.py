@@ -1,5 +1,6 @@
 import concurrent.futures
 import os
+import threading
 import time
 from typing import List
 from unittest import TestCase, main
@@ -20,7 +21,12 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputPB,
     MultimodalInputsPB,
 )
-from rtp_llm.multimodal.mm_process_engine import MMProcessEngine, MMWorkItem
+from rtp_llm.multimodal.mm_process_engine import (
+    MMEmbeddingAsyncCache,
+    MMEmbeddingCacheEntry,
+    MMProcessEngine,
+    MMWorkItem,
+)
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
 )
@@ -284,6 +290,240 @@ class MMProcessEngineTest(TestCase):
         # Pool should have been rebuilt
         self.assertIsNot(executor.pool, old_pool)
         self.assertEqual(executor._consecutive_timeouts, 0)
+        engine.stop()
+
+
+class FakeSlowEmbeddingInterface(FakeMultiModalEmbeddingInterface):
+    """Embedding that takes a configurable delay, for testing async concurrency."""
+
+    delay = 0.3
+
+    @torch.inference_mode()
+    def embedding(self, data, **kwargs):
+        time.sleep(self.delay)
+        return torch.tensor(1), None
+
+
+class MMEmbeddingCacheEntryTest(TestCase):
+    def test_complete_then_wait(self):
+        entry = MMEmbeddingCacheEntry()
+        self.assertFalse(entry.is_done)
+        entry.complete("result_value")
+        self.assertTrue(entry.is_done)
+        self.assertEqual(entry.wait(), "result_value")
+
+    def test_wait_blocks_until_complete(self):
+        entry = MMEmbeddingCacheEntry()
+        result_holder = [None]
+
+        def setter():
+            time.sleep(0.1)
+            entry.complete(42)
+
+        threading.Thread(target=setter, daemon=True).start()
+        result_holder[0] = entry.wait(timeout=5.0)
+        self.assertEqual(result_holder[0], 42)
+
+    def test_wait_timeout(self):
+        entry = MMEmbeddingCacheEntry()
+        with self.assertRaises(TimeoutError):
+            entry.wait(timeout=0.05)
+
+    def test_fail_then_wait_raises(self):
+        entry = MMEmbeddingCacheEntry()
+        entry.fail(ValueError("boom"))
+        self.assertTrue(entry.is_done)
+        with self.assertRaises(ValueError):
+            entry.wait()
+
+
+class MMEmbeddingAsyncCacheTest(TestCase):
+    def test_miss_then_complete_then_hit(self):
+        cache = MMEmbeddingAsyncCache(max_size=10)
+        state, entry = cache.try_acquire("key1")
+        self.assertEqual(state, "miss")
+        self.assertFalse(entry.is_done)
+
+        entry.complete("val1")
+
+        state2, entry2 = cache.try_acquire("key1")
+        self.assertEqual(state2, "complete")
+        self.assertIs(entry2, entry)
+        self.assertEqual(entry2.wait(), "val1")
+
+    def test_in_progress_state(self):
+        cache = MMEmbeddingAsyncCache(max_size=10)
+        state, entry = cache.try_acquire("key1")
+        self.assertEqual(state, "miss")
+
+        state2, entry2 = cache.try_acquire("key1")
+        self.assertEqual(state2, "in_progress")
+        self.assertIs(entry2, entry)
+
+    def test_remove(self):
+        cache = MMEmbeddingAsyncCache(max_size=10)
+        _, entry = cache.try_acquire("key1")
+        entry.complete("v")
+        cache.remove("key1")
+
+        state, entry2 = cache.try_acquire("key1")
+        self.assertEqual(state, "miss")
+        self.assertIsNot(entry2, entry)
+
+    def test_eviction(self):
+        cache = MMEmbeddingAsyncCache(max_size=2)
+        _, e1 = cache.try_acquire("k1")
+        e1.complete("v1")
+        _, e2 = cache.try_acquire("k2")
+        e2.complete("v2")
+        _, e3 = cache.try_acquire("k3")
+
+        # Eviction ran when k3 was inserted (3 > max_size=2),
+        # removing k1 (oldest done entry). k3 is in_progress.
+        self.assertEqual(len(cache._entries), 2)
+        self.assertNotIn("k1", cache._entries)
+        state_k3, _ = cache.try_acquire("k3")
+        self.assertEqual(state_k3, "in_progress")
+
+    def test_resize(self):
+        cache = MMEmbeddingAsyncCache(max_size=5)
+        cache.resize(20)
+        self.assertEqual(cache._max_size, 20)
+
+
+class AsyncSubmitGetEmbeddingTest(TestCase):
+    def _make_engine(self, mm_part=None):
+        model = FakeModel(mm_part or FakeMultiModalEmbeddingInterface())
+        vit_config = VitConfig()
+        vit_config.use_local_preprocess = True
+        return MMProcessEngine(
+            model.mm_part,
+            model.model_config,
+            vit_config,
+            ProfilingDebugLoggingConfig(),
+        )
+
+    def _make_input(self, url):
+        return MultimodalInput(
+            url,
+            MMUrlType.IMAGE,
+            torch.empty(0),
+            MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000),
+        )
+
+    def test_async_submit_returns_keys(self):
+        engine = self._make_engine()
+        inp = self._make_input("./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg")
+        keys = engine.async_submit([inp])
+        self.assertEqual(len(keys), 1)
+        self.assertIsInstance(keys[0], str)
+        self.assertTrue(len(keys[0]) > 0)
+        engine.stop()
+
+    def test_submit_then_get(self):
+        engine = self._make_engine()
+        inp = self._make_input("./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg")
+        engine.async_submit([inp])
+        results = engine.get_embedding_result([inp])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].embeddings, [torch.tensor(0)])
+        engine.stop()
+
+    def test_get_without_submit_computes_synchronously(self):
+        engine = self._make_engine()
+        inp = self._make_input("./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg")
+        results = engine.get_embedding_result([inp])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].embeddings, [torch.tensor(0)])
+        engine.stop()
+
+    def test_cache_hit_is_fast(self):
+        engine = self._make_engine()
+        inp = self._make_input("./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg")
+        engine.get_embedding_result([inp])
+
+        t0 = time.time()
+        results = engine.get_embedding_result([inp])
+        elapsed = time.time() - t0
+        self.assertLess(elapsed, 0.05)
+        self.assertEqual(results[0].embeddings, [torch.tensor(0)])
+        engine.stop()
+
+    def test_duplicate_submit_no_recompute(self):
+        engine = self._make_engine()
+        inp = self._make_input("./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg")
+        keys1 = engine.async_submit([inp])
+        keys2 = engine.async_submit([inp])
+        self.assertEqual(keys1, keys2)
+        engine.stop()
+
+    def test_multiple_inputs_independent(self):
+        engine = self._make_engine()
+        inp1 = self._make_input("./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg")
+        inp2 = self._make_input("./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg")
+        # Same URL → same cache key
+        keys = engine.async_submit([inp1, inp2])
+        self.assertEqual(len(keys), 2)
+        self.assertEqual(keys[0], keys[1])
+
+        results = engine.get_embedding_result([inp1, inp2])
+        self.assertEqual(len(results), 2)
+        engine.stop()
+
+    def test_concurrent_get_same_key(self):
+        engine = self._make_engine(FakeSlowEmbeddingInterface())
+        inp = self._make_input("./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg")
+        results = [None, None]
+        errors = [None, None]
+
+        def worker(idx):
+            try:
+                results[idx] = engine.get_embedding_result([inp])
+            except Exception as e:
+                errors[idx] = e
+
+        t0 = time.time()
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        elapsed = time.time() - t0
+
+        for e in errors:
+            self.assertIsNone(e)
+        for r in results:
+            self.assertIsNotNone(r)
+            self.assertEqual(len(r), 1)
+        # Both should finish in roughly one embedding time, not two
+        self.assertLess(elapsed, FakeSlowEmbeddingInterface.delay * 2)
+        engine.stop()
+
+    def test_error_clears_cache(self):
+        engine = self._make_engine(
+            FakeMultiModalEmbeddingInterfacePreprocessException()
+        )
+        # Use a unique URL so the global vit_emb_cache_ won't have a hit
+        # from earlier tests (which would skip preprocessing entirely).
+        inp = self._make_input(
+            "./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg?error_test"
+        )
+
+        with self.assertRaises(PreprcoesException):
+            engine.get_embedding_result([inp])
+
+        # After error, cache entry should be removed — next call should re-attempt
+        state, _ = engine._async_cache.try_acquire(inp.cache_key())
+        self.assertEqual(state, "miss")
+        engine.stop()
+
+    def test_empty_url_raises(self):
+        engine = self._make_engine()
+        inp = self._make_input("")
+        with self.assertRaises(ValueError):
+            engine.async_submit([inp])
+        with self.assertRaises(ValueError):
+            engine.get_embedding_result([inp])
         engine.stop()
 
 

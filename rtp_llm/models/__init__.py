@@ -31,6 +31,8 @@ _CLASS_TO_MODULE: Dict[str, str] = {
     "Baichuan": "rtp_llm.models.llama",
     "Llava": "rtp_llm.models.llava",
     "MegatronBert": "rtp_llm.models.megatron_bert",
+    "MiniMaxM3": "rtp_llm.models.minimax_m3",
+    "MiniMaxM3_VL": "rtp_llm.models.minimax_m3_vl",
     "MiniCPMV": "rtp_llm.models.minicpmv.minicpmv",
     "MiniCPMVEmbedding": "rtp_llm.models.minicpmv_embedding.minicpmv_embedding",
     "Mixtral": "rtp_llm.models.mixtral",
@@ -55,7 +57,6 @@ _CLASS_TO_MODULE: Dict[str, str] = {
 }
 
 __all__ = sorted(_CLASS_TO_MODULE) + ["load_all_models"]
-
 
 def load_all_models() -> None:
     ensure_all_models_registered()

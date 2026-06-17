@@ -14,6 +14,7 @@ import grpc
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
+    EmptyPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
     StatusVersionPB,
@@ -203,6 +204,27 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         except Exception as e:
             logging.error(f"Error forwarding request to worker {worker_address}: {e}")
             kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
+            raise
+        finally:
+            if worker_address:
+                self.load_balancer.decrement_connections(worker_address)
+
+    def AsyncSubmitEmbedding(self, request: MultimodalInputsPB, context) -> EmptyPB:
+        worker_address = None
+        try:
+            worker_address = self.load_balancer.get_worker()
+            self.load_balancer.increment_connections(worker_address)
+            stub = self.connection_pool.get_stub(worker_address)
+            return stub.AsyncSubmitEmbedding(request, timeout=5.0)
+        except grpc.RpcError as e:
+            logging.error(
+                f"RPC error when forwarding AsyncSubmit to worker {worker_address}: {e.code()} - {e.details()}"
+            )
+            raise
+        except Exception as e:
+            logging.error(
+                f"Error forwarding AsyncSubmit to worker {worker_address}: {e}"
+            )
             raise
         finally:
             if worker_address:

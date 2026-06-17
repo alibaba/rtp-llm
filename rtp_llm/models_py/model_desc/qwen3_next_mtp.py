@@ -71,6 +71,7 @@ class Qwen3NextMTPModel(GptModelBase):
                     moe_config,
                     max_generate_batch_size,
                     enable_cuda_graph,
+                    py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]

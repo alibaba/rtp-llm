@@ -40,6 +40,7 @@ class MultimodalGenericModel(GenericMoeModel):
                 residual,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                attn_inputs=inputs.attention_inputs,
             )
             hidden_states = output.hidden_states
             residual = output.residual
