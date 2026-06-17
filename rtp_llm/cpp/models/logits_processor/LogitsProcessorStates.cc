@@ -4,9 +4,6 @@
 #include <string>
 #include <utility>
 
-#if USING_CUDA || USING_ROCM
-#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
-#endif
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -63,7 +60,7 @@ void LogitsProcessorStates::batchProcess(const SamplerInputs& inputs) {
         invokeApplyXGrammarBitmaskInplace(logits,
                                           inputs.spec_vocab_mask_gpu,
                                           static_cast<int64_t>(inputs.vocab_size),
-                                          cuda_graph::graphGetCurrentStream().stream());
+                                          at::cuda::getCurrentCUDAStream().stream());
 #else
         // ROCm / non-CUDA: no packed-bitmask kernel. Unpack the int32 packed
         // bitmask into a dense bool disallow-mask using torch ops, then

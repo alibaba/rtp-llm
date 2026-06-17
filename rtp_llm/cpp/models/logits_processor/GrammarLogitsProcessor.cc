@@ -4,10 +4,7 @@
 #include <cstring>
 #include <limits>
 
-#if USING_CUDA || USING_ROCM
-#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
-#endif
-#include "rtp_llm/cpp/models/logits_processor/grammar/BitmaskUtils.h"
+#include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -16,6 +13,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
 #include "rtp_llm/cpp/models/logits_processor/grammar_kernels/xgrammar_kernels.h"
 #endif
 
@@ -107,12 +105,6 @@ GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::buildDeviceMaskS
         reusable_bitmask_gpu_.copy_(bitmask, /*non_blocking=*/true);
         state.packed_bitmask = reusable_bitmask_gpu_.narrow(1, 0, words);
         state.mode           = DeviceMaskMode::Mask;
-        // Re-record onto the per-processor event; avoids per-token event allocation.
-        if (!reusable_ready_event_) {
-            reusable_ready_event_ = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-        }
-        reusable_ready_event_->record(cuda_graph::graphGetCurrentStream());
-        state.ready_event = reusable_ready_event_;
         return state;
     }
 #endif
@@ -143,13 +135,6 @@ void GrammarLogitsProcessor::publishMaskToDevice(DeviceMaskState&   state,
     }
 
     state.vocab_mask = vocab_mask.to(device, /*non_blocking=*/true);
-#if USING_CUDA
-    if (!reusable_ready_event_) {
-        reusable_ready_event_ = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-    }
-    reusable_ready_event_->record(cuda_graph::graphGetCurrentStream());
-    state.ready_event = reusable_ready_event_;
-#endif
 }
 
 void GrammarLogitsProcessor::applyDeviceMaskState(const torch::Tensor& logits, const DeviceMaskState& state) {
@@ -164,14 +149,11 @@ void GrammarLogitsProcessor::applyDeviceMaskState(const torch::Tensor& logits, c
 
 #if USING_CUDA
     if (state.packed_bitmask.defined() && logits.is_cuda()) {
-        if (state.ready_event) {
-            state.ready_event->block(cuda_graph::graphGetCurrentStream());
-        }
         auto logits_2d = logits.unsqueeze(0);
         invokeApplyXGrammarBitmaskInplace(logits_2d,
                                           state.packed_bitmask,
                                           static_cast<int64_t>(state.grammar_vocab_size),
-                                          cuda_graph::graphGetCurrentStream().stream());
+                                          at::cuda::getCurrentCUDAStream().stream());
         // Tail [grammar_vocab, model_vocab) must be -inf to match CPU path.
         const int64_t model_vocab   = logits.size(0);
         const int64_t grammar_vocab = static_cast<int64_t>(state.grammar_vocab_size);
@@ -185,11 +167,6 @@ void GrammarLogitsProcessor::applyDeviceMaskState(const torch::Tensor& logits, c
     if (!state.vocab_mask.defined()) {
         return;
     }
-#if USING_CUDA
-    if (state.ready_event && logits.is_cuda()) {
-        state.ready_event->block(cuda_graph::graphGetCurrentStream());
-    }
-#endif
     auto mask = state.vocab_mask;
     if (mask.device() != logits.device()) {
         mask = mask.to(logits.device(), /*non_blocking=*/true);

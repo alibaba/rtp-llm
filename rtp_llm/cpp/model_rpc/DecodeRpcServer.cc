@@ -1,8 +1,5 @@
-#include <algorithm>
-#include <limits>
 #include <mutex>
 #include <memory>
-#include <stdexcept>
 #include <unistd.h>
 #include <limits.h>
 #include <condition_variable>
@@ -91,32 +88,24 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
 void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
-    std::shared_ptr<GenerateInput> input;
-    try {
-        input = QueryConverter::transQuery(&decode_context.allocate_request.input());
-    } catch (const std::invalid_argument& e) {
-        decode_context.error_status =
-            grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::string("invalid request: ") + e.what());
-        return;
-    }
-    auto generate_stream = engine_->makeStream(input);
-    if (generate_stream->hasError()) {
-        const auto status_info = generate_stream->statusInfo();
-        decode_context.error_status =
-            grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "stream creation failed: " + status_info.ToString());
-        return;
-    }
+    auto input                        = QueryConverter::transQuery(&decode_context.allocate_request.input());
+    auto generate_stream              = engine_->makeStream(input);
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
 
     // Set CanRun event so that handleWaiting() will execute initKVBlock()
     generate_stream->reportEvent(StreamEvents::CanRun);
     decode_context.setStream(generate_stream);
 
-    if (auto wait_status = waitStreamReady(decode_context, generate_stream); wait_status.hasError()) {
-        const string error_msg = "request: [" + decode_context.request_key
-                                 + "] allocate resource failed at decode node: " + wait_status.ToString();
+    // WAITING -> LOADING_CACHE -> WAITING, 直到load cache完成并移动到 WAITING 状态
+    // NOTE: 此处的 busy-wait 是安全的，因为 stream 尚未 enqueue 到 scheduler，
+    // 不会与其他线程并发调用 moveToNext()。gRPC 线程独占驱动状态机直到 WAITING。
+    while (!generate_stream->hasError() && generate_stream->moveToNext() == StreamState::LOADING_CACHE) {
+        this_thread::sleep_for(chrono::milliseconds(1));
+    }
+    if (generate_stream->hasError()) {
+        string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node";
         RTP_LLM_LOG_ERROR(error_msg);
-        decode_context.error_status = grpc::Status(transErrorCodeToGrpc(wait_status.code()), error_msg);
+        decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
         return;
     }
 
@@ -126,45 +115,6 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
                       "failed to write allocate output");
 
     RTP_LLM_LOG_DEBUG("request [%s] allocate resource done", decode_context.request_key.c_str());
-}
-
-ErrorInfo DecodeRpcServer::waitStreamReady(const DecodeGenerateContext&           decode_context,
-                                           const std::shared_ptr<GenerateStream>& stream) {
-    // Both timeouts are upper bounds on how long we should hold a slot waiting for
-    // alloc — take the tighter one (min of positives). The previous std::max()
-    // amplified a short user-supplied request_timeout_ms up to the server-side
-    // prefill_max_wait_timeout_ms cap, violating the client-given deadline.
-    int64_t       deadline_ms = (decode_context.request_timeout_ms > 0)
-                                    ? decode_context.request_timeout_ms
-                                    : std::numeric_limits<int64_t>::max();
-    const int64_t server_cap  = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms;
-    if (server_cap > 0) {
-        deadline_ms = std::min(deadline_ms, server_cap);
-    }
-    const bool    has_deadline = deadline_ms != std::numeric_limits<int64_t>::max();
-    const int64_t deadline_us  = has_deadline ? (currentTimeUs() + deadline_ms * 1000) : 0;
-
-    while (!stream->hasError()) {
-        // Client gave up — release the slot promptly instead of holding it until
-        // deadline_us elapses (frees pd_sep capacity for the next request).
-        if (decode_context.server_context && decode_context.server_context->IsCancelled()) {
-            const std::string msg = "decode allocate wait cancelled by client";
-            RTP_LLM_LOG_WARNING("request [%s] %s", decode_context.request_key.c_str(), msg.c_str());
-            stream->reportEvent(StreamEvents::Error, ErrorCode::CANCELLED, msg);
-            return stream->statusInfo();
-        }
-        if (stream->moveToNext() == StreamState::WAITING && stream->hasEvent(StreamEvents::LoadInitiated)) {
-            return ErrorInfo::OkStatus();
-        }
-        if (has_deadline && currentTimeUs() > deadline_us) {
-            const std::string msg = "decode allocate wait timeout, limit is " + std::to_string(deadline_ms) + " ms";
-            RTP_LLM_LOG_WARNING("request [%s] %s", decode_context.request_key.c_str(), msg.c_str());
-            stream->reportEvent(StreamEvents::Error, ErrorCode::WAIT_TO_RUN_TIMEOUT, msg);
-            return stream->statusInfo();
-        }
-        this_thread::sleep_for(chrono::milliseconds(1));
-    }
-    return stream->statusInfo();
 }
 
 void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context) {
@@ -211,23 +161,20 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     generate_stream->setIsContextStream(false);
     generate_stream->step();
 
+    auto new_tokens = torch::zeros({(int64_t)generate_stream->nextBatchSize(), 1}, torch::kInt32);
+
+    new_tokens.data_ptr<int32_t>()[0] = generate_request.first_generate_token_id();
     generate_stream->incLastOutputPos();
-    {
-        auto bonus_tokens = torch::zeros({(int64_t)generate_stream->nextBatchSize(), 1}, torch::kInt32);
-        bonus_tokens.data_ptr<int32_t>()[0] = generate_request.first_generate_token_id();
-        StreamUpdateInfo bonus_info{bonus_tokens,
-                                    /*num_new_tokens=*/1,
-                                    torch::Tensor(),
-                                    torch::Tensor(),
-                                    torch::Tensor(),
-                                    torch::Tensor(),
-                                    torch::Tensor(),
-                                    torch::Tensor(),
-                                    torch::Tensor(),
-                                    torch::Tensor(),
-                                    /*update_remote_generate=*/false};
-        generate_stream->update(bonus_info);
-    }
+    generate_stream->update({new_tokens,
+                             1,
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor(),
+                             torch::Tensor()});
     if (generate_request.position_ids_size() > 0) {
         auto context_position_ids = torch::from_blob(const_cast<int32_t*>(generate_request.position_ids().data()),
                                                      {(int64_t)generate_request.position_ids_size()},

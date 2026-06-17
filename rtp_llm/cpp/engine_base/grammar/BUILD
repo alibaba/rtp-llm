@@ -8,13 +8,16 @@ cc_library(
     hdrs = [
         "RtpGrammarMatcher.h",
         "XGrammarBackend.h",
+        "XGrammarBootstrap.h",
     ],
     srcs = [
         "RtpGrammarMatcher.cc",
         "XGrammarBackend.cc",
+        "XGrammarBootstrap.cc",
     ],
     deps = [
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:special_tokens",
         "//rtp_llm/cpp/utils:core_utils",
         "@havenask//aios/autil:json",
         "@xgrammar//:xgrammar",

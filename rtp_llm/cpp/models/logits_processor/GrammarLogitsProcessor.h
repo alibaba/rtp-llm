@@ -57,12 +57,11 @@ private:
     };
 
     struct DeviceMaskState {
-        DeviceMaskMode                mode      = DeviceMaskMode::Skip;
-        int64_t                       token_len = -1;
-        torch::Tensor                 vocab_mask;
-        torch::Tensor                 packed_bitmask;
-        int32_t                       grammar_vocab_size = 0;
-        std::shared_ptr<torch::Event> ready_event;
+        DeviceMaskMode mode      = DeviceMaskMode::Skip;
+        int64_t        token_len = -1;
+        torch::Tensor  vocab_mask;
+        torch::Tensor  packed_bitmask;
+        int32_t        grammar_vocab_size = 0;
     };
 
     // stream_lock_held: true when the caller already holds the GenerateStream's mutex_
@@ -83,11 +82,10 @@ private:
     int64_t                       accepted_token_len_ = 0;
     std::optional<c10::Device>     last_mask_device_;
     std::optional<DeviceMaskState> device_mask_state_;
-    torch::Tensor                 reusable_bitmask_cpu_;
-    torch::Tensor                 reusable_bitmask_gpu_;
-    torch::Tensor                 reusable_vocab_mask_cpu_;
-    int32_t                       reusable_mask_words_ = 0;
-    std::shared_ptr<torch::Event> reusable_ready_event_;
+    torch::Tensor reusable_bitmask_cpu_;
+    torch::Tensor reusable_bitmask_gpu_;
+    torch::Tensor reusable_vocab_mask_cpu_;
+    int32_t       reusable_mask_words_ = 0;
 };
 
 }  // namespace rtp_llm

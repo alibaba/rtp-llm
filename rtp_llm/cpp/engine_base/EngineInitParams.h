@@ -114,8 +114,9 @@ struct EngineInitParams {
     py::object                  py_eplb;
     py::object                  py_sp_model;
     py::object                  weight_manager;
-    // Grammar/structured-output config (empty tokenizer_info_json = disabled);
-    // tokenizer_info_json is populated in RtpLLMOp::initModel.
+    // Grammar/structured-output config. tokenizer_info_json is filled in by
+    // RtpLLMOp::initModel from the loaded model's tokenizer; if it stays empty,
+    // grammar is disabled.
     GrammarConfig                grammar_config;
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
 

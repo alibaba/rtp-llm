@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
-#include "rtp_llm/cpp/models/logits_processor/grammar/BitmaskUtils.h"
+#include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 

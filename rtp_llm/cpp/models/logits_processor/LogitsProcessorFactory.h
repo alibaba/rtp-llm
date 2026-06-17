@@ -9,15 +9,18 @@
 namespace rtp_llm {
 
 class GenerateConfig;
-struct StructuredOutputConfig;
-using GrammarConfig = StructuredOutputConfig;
+struct GrammarConfig;
 
 class LogitsProcessorFactory {
 public:
     using ErrorReporter = LogitsProcessorErrorReporter;
 
-    static void
-    init(const std::string& ckpt_path, const std::string& tree_decode_config, const GrammarConfig& grammar_config);
+    // grammar_config.tokenizer_info_json must already be populated by the
+    // caller (RtpLLMOp does the bootstrap at the pybind boundary). The factory
+    // is pure-C++ and stays out of the Python ABI.
+    static void init(const std::string&   ckpt_path,
+                     const std::string&   tree_decode_config,
+                     const GrammarConfig& grammar_config);
 
     // True iff `config` carries any structured-output request. Only typed
     // grammar fields (json_schema/regex/ebnf/structural_tag) are inspected;

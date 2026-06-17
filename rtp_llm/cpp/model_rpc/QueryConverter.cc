@@ -90,19 +90,6 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(regex);
     TRANS_OPTIONAL(ebnf);
     TRANS_OPTIONAL(structural_tag);
-    // proto field 65 (response_format) is a deprecated wire slot. The Python
-    // frontend projects the envelope to typed grammar fields in
-    // GenerateConfig.validate() before gRPC and leaves the wire field empty.
-    // A non-empty wire field reaching us means a non-Python client sent a raw
-    // envelope without projecting it; silently accepting would drop the
-    // constraint and return free-form output to a caller that believed the
-    // schema was enforced. Reject so the contract failure is visible.
-    if (config_proto->has_response_format() && !generate_config->hasStructuredOutputRequest()) {
-        throw std::invalid_argument(
-            "response_format envelope is not consumed on the gRPC wire path; project it to "
-            "json_schema/regex/ebnf/structural_tag in the client (Python frontend does this "
-            "via GenerateConfig.validate()).");
-    }
     TRANS_OPTIONAL(task_id);
     TRANS_OPTIONAL(adapter_name);
     generate_config->in_think_mode       = config_proto->in_think_mode();

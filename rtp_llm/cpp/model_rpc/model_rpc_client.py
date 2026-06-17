@@ -10,43 +10,12 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
-    ErrorCodePB,
     ErrorDetailsPB,
     GenerateInputPB,
     GenerateOutputsPB,
     MultimodalInputPB,
     RoleAddrPB,
 )
-
-# Mirror of cpp/model_rpc/RpcErrorCode.h::transRPCErrorCode for codes plumbed
-# through the batch_enqueue result table — i.e. ErrorCodes that
-# LocalRpcServer::BatchGenerateCall can write into BatchGenerateResultPB.
-# Sources:
-#   - prepareInput failure: INVALID_PARAMS, ERROR_GENERATE_CONFIG_FORMAT,
-#     plus CANCELLED stamped on sibling rows in the batch.
-#   - collectStreamOutput surfacing reportError() from engine_base/normal_engine:
-#     GENERATE_TIMEOUT, MALLOC_FAILED, DECODE_MALLOC_FAILED, OUT_OF_VOCAB_RANGE,
-#     LONG_PROMPT_ERROR, EXCEEDS_KV_CACHE_MAX_LEN, OUTPUT_QUEUE_FULL,
-#     WAIT_TO_RUN_TIMEOUT, EXECUTION_EXCEPTION.
-# P2P/CACHE_STORE codes travel via RpcErrorPB on RemoteGenerate/BroadcastLoad/
-# StartLoad — not this dict. FINISHED / OUTPUT_QUEUE_IS_EMPTY are control-flow
-# markers, never reported as errors. Unmapped codes fall through to
-# UNKNOWN_ERROR via the .get() default at the call site.
-_RPC_TO_EXCEPTION_TYPE: dict[int, "ExceptionType"] = {
-    ErrorCodePB.CANCELLED: ExceptionType.CANCELLED,
-    ErrorCodePB.INVALID_PARAMS: ExceptionType.INVALID_PARAMS,
-    ErrorCodePB.ERROR_GENERATE_CONFIG_FORMAT: ExceptionType.ERROR_GENERATE_CONFIG_FORMAT,
-    ErrorCodePB.GENERATE_TIMEOUT: ExceptionType.GENERATE_TIMEOUT,
-    # ExceptionType keeps the legacy MALLOC_ERROR name for MALLOC_FAILED.
-    ErrorCodePB.MALLOC_FAILED: ExceptionType.MALLOC_ERROR,
-    ErrorCodePB.DECODE_MALLOC_FAILED: ExceptionType.DECODE_MALLOC_FAILED,
-    ErrorCodePB.WAIT_TO_RUN_TIMEOUT: ExceptionType.WAIT_TO_RUN_TIMEOUT,
-    ErrorCodePB.OUT_OF_VOCAB_RANGE: ExceptionType.OUT_OF_VOCAB_RANGE,
-    ErrorCodePB.LONG_PROMPT_ERROR: ExceptionType.LONG_PROMPT_ERROR,
-    ErrorCodePB.EXCEEDS_KV_CACHE_MAX_LEN: ExceptionType.EXCEEDS_KV_CACHE_MAX_LEN,
-    ErrorCodePB.EXECUTION_EXCEPTION: ExceptionType.EXECUTION_EXCEPTION,
-    ErrorCodePB.OUTPUT_QUEUE_FULL: ExceptionType.OUTPUT_QUEUE_FULL,
-}
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
@@ -153,11 +122,6 @@ def trans_input(input_py: GenerateInput):
         generate_config_pb.structural_tag.value = _pb_string_value_for_json_field(
             input_py.generate_config.structural_tag
         )
-    # response_format envelope must already be projected to typed grammar fields
-    # by GenerateConfig.validate() before reaching here; the proto.response_format
-    # wire field is deprecated and the C++ server (QueryConverter) rejects raw
-    # envelopes with INVALID_PARAMS to surface non-Python clients that forgot to
-    # project.
     trans_option(generate_config_pb, input_py.generate_config, "adapter_name")
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "task_id", functools.partial(str)
@@ -229,7 +193,9 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.combo_token_size = input_py.generate_config.combo_token_size
     for i in range(len(input_py.generate_config.banned_combo_token_ids)):
         banned_combo = generate_config_pb.banned_combo_token_ids.rows.add()
-        banned_combo.values.extend(input_py.generate_config.banned_combo_token_ids[i])
+        banned_combo.values.extend(
+            input_py.generate_config.banned_combo_token_ids[i]
+        )
 
     for role_addr in input_py.generate_config.role_addrs:
         role_addr_pb = RoleAddrPB()
@@ -603,12 +569,8 @@ class ModelRpcClient(object):
                     result_pb.HasField("error_info")
                     and result_pb.error_info.error_message
                 ):
-                    # PB enum renumbered (dense) — static dict, not raw ErrorCode cast.
-                    exc_type = _RPC_TO_EXCEPTION_TYPE.get(
-                        result_pb.error_info.error_code, ExceptionType.UNKNOWN_ERROR
-                    )
                     raise FtRuntimeException(
-                        exc_type,
+                        ExceptionType.UNKNOWN_ERROR,
                         f"batch item {i} failed: {result_pb.error_info.error_message}",
                     )
                 stream_state = StreamState()

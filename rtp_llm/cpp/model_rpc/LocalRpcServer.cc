@@ -133,11 +133,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
 }
 
 ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) {
-    try {
-        output = QueryConverter::transQuery(&input_pb);
-    } catch (const std::invalid_argument& e) {
-        return ErrorInfo(ErrorCode::INVALID_PARAMS, e.what());
-    }
+    output = QueryConverter::transQuery(&input_pb);
     if (mm_processor_ != nullptr && output->multimodal_inputs) {
         RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
         auto mm_res = mm_processor_->updateMultimodalFeatures(output);
@@ -229,17 +225,15 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         std::shared_ptr<GenerateInput> input;
         auto                           err = prepareInput(request->inputs(i), input);
         if (!err.ok()) {
-            const ErrorCodePB code_pb = transErrorCodeToRPC(err.code());
+            // Fill error results for all requests (0..batch_size-1) to maintain 1:1 mapping
             for (int j = 0; j < batch_size; j++) {
                 auto* result = response->add_results();
                 auto* err_pb = result->mutable_error_info();
+                err_pb->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
                 if (j == i) {
-                    err_pb->set_error_code(code_pb);
-                    err_pb->set_error_message("prepareInput failed: " + err.ToString());
+                    err_pb->set_error_message("multimodal processing failed: " + err.ToString());
                 } else {
-                    err_pb->set_error_code(ErrorCodePB::CANCELLED);
-                    err_pb->set_error_message("batch aborted due to prepareInput failure at index "
-                                              + std::to_string(i));
+                    err_pb->set_error_message("batch aborted due to multimodal failure at index " + std::to_string(i));
                 }
             }
             return grpc::Status::OK;
@@ -261,11 +255,9 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         GenerateOutputs last_outputs;
         auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
         if (!err.ok()) {
-            // Per-ErrorCode mapping (instead of CANCELLED / UNKNOWN binary) so the
-            // Python client can distinguish INVALID_PARAMS / GENERATE_TIMEOUT /
-            // OOM / etc. and raise the matching FtRuntimeException.
             auto* err_pb = result->mutable_error_info();
-            err_pb->set_error_code(transErrorCodeToRPC(err.code()));
+            err_pb->set_error_code(err.code() == ErrorCode::CANCELLED ? ErrorCodePB::CANCELLED :
+                                                                        ErrorCodePB::UNKNOWN_ERROR);
             err_pb->set_error_message(err.ToString());
         } else {
             auto* output_pb = result->mutable_final_output();

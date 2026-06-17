@@ -201,52 +201,16 @@ TEST_F(QueryConverterTest, TransTensorPB_UnsupportedType) {
     EXPECT_THROW(QueryConverter::transTensorPB(&tensor_pb, tensor), std::runtime_error);
 }
 
-// proto field 65 (response_format) is a deprecated wire slot. The Python
-// frontend projects the envelope to typed grammar fields in
-// GenerateConfig.validate() before gRPC, so the wire field stays empty on
-// that path. A non-empty wire field at the C++ server means a non-Python
-// client sent a raw envelope without projecting — silently accepting would
-// drop the constraint and return free-form output to a caller that believed
-// the schema was enforced. QueryConverter must reject so the failure is loud.
-TEST_F(QueryConverterTest, ResponseFormat_RawWireEnvelopeIsRejected) {
-    const std::vector<std::string> envelopes = {
-        R"({"type":"json_schema","json_schema":{"schema":{"type":"object"}}})",
-        R"({"type":"json_schema","json_schema":{}})",
-        R"({"type":"regex","pattern":"#[0-9A-Fa-f]{6}"})",
-        "this is not json {{{",
-    };
-    for (const auto& env : envelopes) {
-        GenerateInputPB input;
-        input.add_token_ids(0);
-        input.mutable_generate_config()->mutable_response_format()->set_value(env);
-        EXPECT_THROW(QueryConverter::transQuery(&input), std::invalid_argument)
-            << "envelope: " << env;
-    }
-}
-
-// If the client did its job and projected the envelope to typed fields, the
-// wire response_format field stays empty (matching the Python frontend's
-// behavior). QueryConverter accepts and the typed fields reach the engine.
-TEST_F(QueryConverterTest, ResponseFormat_ProjectedTypedFieldsAreAccepted) {
+// Typed grammar fields (json_schema / regex / ebnf / structural_tag) flow
+// through the wire as google.protobuf.StringValue and reach GenerateConfig as
+// Optional<string>.
+TEST_F(QueryConverterTest, GrammarTypedFieldsAreAccepted) {
     GenerateInputPB input;
     input.add_token_ids(0);
     input.mutable_generate_config()->mutable_json_schema()->set_value(R"({"type":"object"})");
     auto cfg = QueryConverter::transQuery(&input)->generate_config;
     ASSERT_TRUE(cfg->json_schema.has_value());
     EXPECT_EQ(cfg->json_schema.value(), R"({"type":"object"})");
-}
-
-// Belt-and-suspenders: if a client both projected to typed fields AND left
-// the wire envelope set, accept — the engine consumes the typed fields and
-// the envelope is just redundant baggage, not a missed constraint.
-TEST_F(QueryConverterTest, ResponseFormat_WireEnvelopeWithTypedFieldIsAccepted) {
-    GenerateInputPB input;
-    input.add_token_ids(0);
-    input.mutable_generate_config()->mutable_json_schema()->set_value(R"({"type":"object"})");
-    input.mutable_generate_config()->mutable_response_format()->set_value(
-        R"({"type":"json_schema","json_schema":{"schema":{"type":"object"}}})");
-    auto cfg = QueryConverter::transQuery(&input)->generate_config;
-    ASSERT_TRUE(cfg->json_schema.has_value());
 }
 
 }  // namespace rtp_llm

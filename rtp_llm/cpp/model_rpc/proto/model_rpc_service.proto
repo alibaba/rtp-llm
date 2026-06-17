@@ -109,8 +109,7 @@ message GenerateConfigPB {
     google.protobuf.StringValue regex = 62;
     google.protobuf.StringValue ebnf = 63;
     google.protobuf.StringValue structural_tag = 64;
-    google.protobuf.StringValue response_format = 65;
-    repeated int32 begin_think_token_ids = 66;
+    repeated int32 begin_think_token_ids = 65;
 }
 
 message MMPreprocessConfigPB {
@@ -239,22 +238,6 @@ enum ErrorCodePB {
     P2P_CONNECTOR_WORKER_READ_CANCELED = 23;
     P2P_CONNECTOR_WORKER_READ_TIMEOUT = 24;
     P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
-
-    // Admission / runtime errors that previously collapsed to UNKNOWN_ERROR
-    // when batch_enqueue surfaced them through the result table.
-    INVALID_PARAMS = 26;
-    ERROR_GENERATE_CONFIG_FORMAT = 27;
-    GENERATE_TIMEOUT = 28;
-    MALLOC_FAILED = 29;
-    DECODE_MALLOC_FAILED = 30;
-    WAIT_TO_RUN_TIMEOUT = 31;
-    OUT_OF_VOCAB_RANGE = 32;
-    LONG_PROMPT_ERROR = 33;
-    EXCEEDS_KV_CACHE_MAX_LEN = 34;
-    EXECUTION_EXCEPTION = 35;
-    OUTPUT_QUEUE_FULL = 36;
-    OUTPUT_QUEUE_IS_EMPTY = 37;
-    FINISHED = 38;
 }
 
 // transfer between prefill and decode

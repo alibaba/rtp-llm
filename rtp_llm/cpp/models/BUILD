@@ -63,7 +63,7 @@ cc_library(
         "logits_processor/GrammarLogitsProcessor.h",
         "logits_processor/ReasoningGrammarLogitsProcessor.h",
         "logits_processor/SpecLogitsVerifyRunner.h",
-        "logits_processor/grammar/BitmaskUtils.h",
+        "logits_processor/BitmaskUtils.h",
     ],
     srcs = [
         "logits_processor/BaseLogitsProcessor.cc",
@@ -91,15 +91,10 @@ cc_library(
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + select({
         "//:using_cuda": [
-            "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
-            "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
             "//rtp_llm/cpp/models/logits_processor/grammar_kernels:xgrammar_kernels",
         ],
-        "@//:using_rocm": [
-            "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
-            "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
-        ],
+        "@//:using_rocm": [],
         "//conditions:default": [],
     }),
     copts = copts(),
