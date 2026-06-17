@@ -47,12 +47,9 @@ struct DSV4PoolDesc {
 
 using DSV4SpecMap = std::map<std::string, KVCacheSpecPtr>;
 
-constexpr int kCsaCompressRatio     = 4;
-constexpr int kHcaCompressRatio     = 128;
-constexpr int kIndexerCompressRatio = 4;
-constexpr int kCsaOverlap           = 1;
-constexpr int kHcaOverlap           = 0;
-constexpr int kIndexerOverlap       = 1;
+constexpr int kCsaOverlap     = 1;
+constexpr int kHcaOverlap     = 0;
+constexpr int kIndexerOverlap = 1;
 
 inline uint32_t alignUpToMultiple(uint32_t value, uint32_t multiple) {
     RTP_LLM_CHECK_WITH_INFO(multiple > 0, "DSV4 align multiple must be > 0");
@@ -337,16 +334,26 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
                                              uint32_t                 physical_tokens_per_block,
                                              const ParallelismConfig& parallelism_config,
                                              int                      gen_num_per_cycle) {
+    // Read compress_ratio from the spec declaration instead of hardcoded
+    // constants so missing paged specs (e.g. MTP SWA-only model) default to
+    // ratio=1 and produce empty placeholder pools downstream.
+    auto try_compress_ratio = [&](const char* tag) -> int {
+        const auto it = spec_decls.find(tag);
+        return (it != spec_decls.end()) ? static_cast<int>(dsv4SpecCompressionRatio(*it->second)) : 1;
+    };
+    const auto  csa_compress_ratio     = try_compress_ratio("csa_kv");
+    const auto  hca_compress_ratio     = try_compress_ratio("hca_kv");
+    const auto  indexer_compress_ratio = try_compress_ratio("indexer_kv");
     const uint32_t csa_state_eb =
-        maybeAdjustFixedEntriesForCpSharding(computeStateRing(kCsaCompressRatio, kCsaOverlap, gen_num_per_cycle),
+        maybeAdjustFixedEntriesForCpSharding(computeStateRing(csa_compress_ratio, kCsaOverlap, gen_num_per_cycle),
                                              parallelism_config,
                                              KVCacheRegionName::CSA_STATE);
     const uint32_t hca_state_eb =
-        maybeAdjustFixedEntriesForCpSharding(computeStateRing(kHcaCompressRatio, kHcaOverlap, gen_num_per_cycle),
+        maybeAdjustFixedEntriesForCpSharding(computeStateRing(hca_compress_ratio, kHcaOverlap, gen_num_per_cycle),
                                              parallelism_config,
                                              KVCacheRegionName::HCA_STATE);
     const uint32_t indexer_state_eb = maybeAdjustFixedEntriesForCpSharding(
-        computeStateRing(kIndexerCompressRatio, kIndexerOverlap, gen_num_per_cycle),
+        computeStateRing(indexer_compress_ratio, kIndexerOverlap, gen_num_per_cycle),
         parallelism_config,
         KVCacheRegionName::INDEXER_STATE);
     // SWA_KV ring = window + MTP draft slack, sized like the HCA state ring.
