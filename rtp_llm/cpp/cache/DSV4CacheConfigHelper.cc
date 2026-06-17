@@ -300,7 +300,7 @@ std::pair<DSV4LayerSets, DSV4SpecMap> parseDSV4Specs(const ModelConfig& model_co
                                         "DSV4 kv_cache spec tag=%s must set compression_ratio",
                                         decl.tag.c_str());
             }
-            const auto fingerprint = CacheConfig::specFingerprint(spec);
+            const auto fingerprint = spec->fingerprint();
             const auto fp_it       = fingerprints.find(decl.tag);
             if (fp_it == fingerprints.end()) {
                 fingerprints.emplace(decl.tag, fingerprint);

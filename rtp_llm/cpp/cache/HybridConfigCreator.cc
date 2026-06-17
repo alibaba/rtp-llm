@@ -90,7 +90,7 @@ KVCacheSpecPtr HybridConfigCreator::getSpecByTag(const ModelConfig& model_config
             RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "hybrid kv_cache_specs must not contain null specs");
             RTP_LLM_CHECK_WITH_INFO(!spec->tag.empty(), "hybrid kv_cache_specs must not contain empty tags");
             if (spec->tag == tag) {
-                const auto current_fingerprint = CacheConfig::specFingerprint(spec);
+                const auto current_fingerprint = spec->fingerprint();
                 if (result == nullptr) {
                     result      = spec;
                     fingerprint = current_fingerprint;

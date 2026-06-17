@@ -137,6 +137,18 @@ struct LinearKVCacheSpec: public KVCacheSpec {
         return std::make_shared<LinearKVCacheSpec>(*this);
     }
 
+protected:
+    std::string fingerprintExtra() const override {
+        std::ostringstream os;
+        os << ";linear.local_num_k_heads=" << local_num_k_heads
+           << ";linear.local_num_v_heads=" << local_num_v_heads << ";linear.head_k_dim=" << head_k_dim
+           << ";linear.head_v_dim=" << head_v_dim << ";linear.conv_kernel_dim=" << conv_kernel_dim
+           << ";linear.ssm_state_dtype=" << static_cast<int>(ssm_state_dtype)
+           << ";linear.conv_state_dtype=" << static_cast<int>(conv_state_dtype);
+        return os.str();
+    }
+
+public:
     std::string debugString(size_t indent = 0) const override {
         const std::string indent_str = std::string(indent, ' ');
         const std::string indent1    = indent_str + "  ";

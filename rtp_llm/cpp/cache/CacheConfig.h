@@ -115,47 +115,13 @@ struct CacheConfig {
     }
 
     int groupIdForLayerTag(int layer_id, const std::string& tag) const {
-        if (layer_id < 0 || static_cast<size_t>(layer_id) >= layer_tag_to_group_id.size()) {
-            return -1;
-        }
+        RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layer_tag_to_group_id.size(),
+                                "CacheConfig::groupIdForLayerTag invalid layer_id=%d, layer_tag_to_group_id.size=%zu",
+                                layer_id,
+                                layer_tag_to_group_id.size());
         const auto& tag_to_group = layer_tag_to_group_id[static_cast<size_t>(layer_id)];
         const auto  it           = tag_to_group.find(tag);
         return it == tag_to_group.end() ? -1 : it->second;
-    }
-
-    static std::string specFingerprint(const KVCacheSpecPtr& spec) {
-        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheConfig got null kv_cache spec");
-        std::ostringstream os;
-        os << "tag=" << spec->tag << ";type=" << static_cast<int>(spec->type) << ";dtype=" << static_cast<int>(spec->dtype)
-           << ";local_head_num_kv=" << spec->local_head_num_kv
-           << ";seq_size_per_block=" << spec->seq_size_per_block;
-        if (const auto* mha = dynamic_cast<const MHAKVCacheSpec*>(spec.get())) {
-            os << ";mha.size_per_head=" << mha->size_per_head;
-        } else if (const auto* mla = dynamic_cast<const MLAKVCacheSpec*>(spec.get())) {
-            os << ";mla.kv_lora_rank=" << mla->kv_lora_rank << ";mla.rope_head_dim=" << mla->rope_head_dim;
-        } else if (const auto* linear = dynamic_cast<const LinearKVCacheSpec*>(spec.get())) {
-            os << ";linear.local_num_k_heads=" << linear->local_num_k_heads
-               << ";linear.local_num_v_heads=" << linear->local_num_v_heads
-               << ";linear.head_k_dim=" << linear->head_k_dim
-               << ";linear.head_v_dim=" << linear->head_v_dim
-               << ";linear.conv_kernel_dim=" << linear->conv_kernel_dim
-               << ";linear.ssm_state_dtype=" << static_cast<int>(linear->ssm_state_dtype)
-               << ";linear.conv_state_dtype=" << static_cast<int>(linear->conv_state_dtype);
-        } else if (const auto* dsv4_kv = dynamic_cast<const DSV4KVSpec*>(spec.get())) {
-            os << ";dsv4kv.cache_type=" << static_cast<int>(dsv4_kv->cache_type)
-               << ";dsv4kv.entry_elems=" << dsv4_kv->entry_elems
-               << ";dsv4kv.compression_ratio=" << dsv4_kv->compression_ratio
-               << ";dsv4kv.store_dtype=" << static_cast<int>(dsv4_kv->store_dtype)
-               << ";dsv4kv.block_size_bytes_alignment=" << dsv4_kv->block_size_bytes_alignment;
-        } else if (const auto* dsv4_state = dynamic_cast<const DSV4StateSpec*>(spec.get())) {
-            os << ";dsv4state.cache_type=" << static_cast<int>(dsv4_state->cache_type)
-               << ";dsv4state.state_dim=" << dsv4_state->state_dim
-               << ";dsv4state.store_dtype=" << static_cast<int>(dsv4_state->store_dtype)
-               << ";dsv4state.block_size_bytes_override=" << dsv4_state->block_size_bytes_override
-               << ";dsv4state.block_size_bytes_alignment=" << dsv4_state->block_size_bytes_alignment
-               << ";dsv4state.block_size_alignment_min_entries=" << dsv4_state->block_size_alignment_min_entries;
-        }
-        return os.str();
     }
 
     static CacheGroupType inferGroupType(const KVCacheSpecPtr& spec, KVCacheRegionName region_name) {
@@ -241,7 +207,7 @@ struct CacheConfig {
             RTP_LLM_CHECK_WITH_INFO(!tag.empty(),
                                     "CacheConfig::fromGroupedSpecs requires non-empty tag for cache spec %zu",
                                     gid);
-            const auto fingerprint = specFingerprint(spec);
+            const auto fingerprint = spec->fingerprint();
             const auto fp_it       = tag_fingerprints.find(tag);
             if (fp_it == tag_fingerprints.end()) {
                 tag_fingerprints.emplace(tag, fingerprint);
@@ -351,7 +317,7 @@ struct CacheConfig {
                                         layer_id,
                                         tag.c_str());
 
-                const auto fingerprint = specFingerprint(spec);
+                const auto fingerprint = spec->fingerprint();
                 const auto fp_it = tag_fingerprints.find(tag);
                 if (fp_it == tag_fingerprints.end()) {
                     tag_fingerprints.emplace(tag, fingerprint);
