@@ -43,26 +43,33 @@ size_t steppedBytes(size_t bytes, int step) {
     return (bytes > 0 && step > 1) ? bytes / static_cast<size_t>(step) : bytes;
 }
 
-size_t fallbackFixedPoolHbmBytes(const CacheConfig& config) {
-    if (config.use_typed_cache_regions && !config.group_region_names.empty()
-        && config.group_region_names.size() == config.group_block_size_bytes.size()) {
-        size_t bytes = 0;
-        for (size_t gid = 0; gid < config.group_region_names.size(); ++gid) {
-            const auto region = config.group_region_names[gid];
-            if (!isDsv4FixedRegion(region)) {
-                continue;
-            }
-            if (!config.usesExplicitIndependentBlocks(gid)) {
-                bytes += config.group_block_size_bytes[gid];
-            }
-        }
-        return bytes;
+size_t nonExplicitDsv4IndependentPoolHbmBytes(const CacheConfig& config) {
+    if (!config.use_typed_cache_regions) {
+        return 0;
     }
-    return config.swa_block_size_bytes + config.state_block_size_bytes;
+    RTP_LLM_CHECK_WITH_INFO(!config.group_region_names.empty(),
+                            "typed cache config requires group_region_names for independent pool sizing");
+    RTP_LLM_CHECK_WITH_INFO(
+        config.group_region_names.size() == config.group_block_size_bytes.size(),
+        "typed cache config requires group_region_names.size(%zu) == group_block_size_bytes.size(%zu)",
+        config.group_region_names.size(),
+        config.group_block_size_bytes.size());
+
+    size_t bytes = 0;
+    for (size_t gid = 0; gid < config.group_region_names.size(); ++gid) {
+        const auto region = config.group_region_names[gid];
+        if (!isDsv4FixedRegion(region)) {
+            continue;
+        }
+        if (!config.usesExplicitIndependentBlocks(gid)) {
+            bytes += config.group_block_size_bytes[gid];
+        }
+    }
+    return bytes;
 }
 
 size_t effectivePagedBlockBytes(const CacheConfig& config, int step) {
-    return config.block_size_bytes + steppedBytes(fallbackFixedPoolHbmBytes(config), step);
+    return config.block_size_bytes + steppedBytes(nonExplicitDsv4IndependentPoolHbmBytes(config), step);
 }
 
 void validateDsv4KernelSeqSize(size_t seq_size_per_block, size_t kernel_seq_size_per_block, const char* config_name) {

@@ -1035,7 +1035,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsIgnoreSmallHCAStatePool) 
     EXPECT_EQ(allocator->totalTokensNum(), allocator->maxAvailableTokensNum());
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumulator) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigUsesOnlyPagedGroupsForBlockSize) {
     auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
@@ -1065,8 +1065,6 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigSplitsStateBytesOutOfSwaAccumul
     EXPECT_GT(expected_swa_bytes, 0u);
     EXPECT_GT(expected_full_bytes, 0u);
 
-    EXPECT_EQ(config.state_block_size_bytes, expected_state_bytes);
-    EXPECT_EQ(config.swa_block_size_bytes, expected_swa_bytes);  // SWA_KV only, no STATE
     EXPECT_EQ(config.block_size_bytes, expected_full_bytes);
 }
 

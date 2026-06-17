@@ -69,10 +69,6 @@ struct CacheConfig {
     size_t kv_block_size_bytes  = 0;
     size_t kv_scale_size_bytes  = 0;
     size_t block_size_bytes     = 0;  // (kv + scales together)
-    size_t swa_block_size_bytes = 0;  // SWA groups (joint allocation with full groups)
-
-    // Per-block bytes of all DSV4 STATE pools (INDEXER_STATE, CSA_STATE, HCA_STATE).
-    size_t state_block_size_bytes = 0;
 
     // ---- Per-block strides (one layer) ----
     size_t kv_block_stride_bytes = 0;
@@ -401,7 +397,6 @@ struct CacheConfig {
         OUTPUT_FIELD(kv_block_size_bytes);
         OUTPUT_FIELD(kv_scale_size_bytes);
         OUTPUT_FIELD(block_size_bytes);
-        OUTPUT_FIELD(swa_block_size_bytes);
         OUTPUT_FIELD(kv_block_stride_bytes);
         OUTPUT_FIELD(kv_scale_stride_bytes);
         os << "\n";

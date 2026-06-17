@@ -199,10 +199,6 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     size_t   max_scale_stride        = 0;
     size_t   total_kv_block_bytes    = 0;
     size_t   total_scale_block_bytes = 0;
-    size_t   swa_kv_block_bytes      = 0;
-    size_t   swa_scale_block_bytes   = 0;
-    size_t   state_kv_block_bytes    = 0;
-    size_t   state_scale_block_bytes = 0;
     uint32_t max_group_layers        = 0;
 
     config.layer_to_block_stride_bytes.assign(config.layer_all_num, 0);
@@ -221,14 +217,8 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         const auto region =
             gid < config.group_region_names.size() ? config.group_region_names[gid] : KVCacheRegionName::DEFAULT;
         const bool is_state = isStateRegion(region);
-        const bool is_swa   = gid < config.group_types.size() && config.group_types[gid] == CacheGroupType::SWA;
-        if (is_state) {
-            state_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
-            state_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
-        } else if (is_swa) {
-            swa_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
-            swa_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
-        } else {
+        const auto type     = gid < config.group_types.size() ? config.group_types[gid] : CacheGroupType::FULL;
+        if (!is_state && type == CacheGroupType::FULL) {
             total_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
             total_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
         }
@@ -247,8 +237,6 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.kv_scale_stride_bytes   = max_scale_stride;
     config.kv_block_size_bytes     = total_kv_block_bytes;
     config.kv_scale_size_bytes     = total_scale_block_bytes;
-    config.swa_block_size_bytes    = swa_kv_block_bytes + swa_scale_block_bytes;
-    config.state_block_size_bytes  = state_kv_block_bytes + state_scale_block_bytes;
     const size_t paged_block_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
     if (paged_block_bytes == 0) {
         RTP_LLM_CHECK_WITH_INFO(is_mtp && config.use_typed_cache_regions,

@@ -3284,7 +3284,6 @@ protected:
         config.kv_scale_stride_bytes = 0;
         config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * full_stride;
         config.kv_scale_size_bytes   = 0;
-        config.swa_block_size_bytes  = static_cast<size_t>(layer_num) * swa_stride;
         config.block_size_bytes      = config.kv_block_size_bytes;
 
         std::vector<int> full_layer_ids(layer_num);
