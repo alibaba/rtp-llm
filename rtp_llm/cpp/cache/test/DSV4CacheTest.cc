@@ -399,17 +399,21 @@ TEST(HybridPoolConfigCreatorTest, Dsv4GroupPoliciesMatchLegacyBehavior) {
         HybridPoolConfigCreator::createConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
 
     ASSERT_EQ(config.group_policies.size(), config.group_region_names.size());
-    auto expect_policy = [&](KVCacheRegionName region, CacheReusePolicy reuse_policy, int active_tail_blocks) {
+    auto expect_policy = [&](KVCacheRegionName region,
+                             CacheReusePolicy reuse_policy,
+                             CacheEvictPolicy evict_policy,
+                             int active_tail_blocks) {
         auto it = std::find(config.group_region_names.begin(), config.group_region_names.end(), region);
         ASSERT_NE(it, config.group_region_names.end()) << cacheRegionName(region);
         const auto gid = static_cast<size_t>(std::distance(config.group_region_names.begin(), it));
         EXPECT_EQ(config.group_policies[gid].reuse_policy, reuse_policy) << cacheRegionName(region);
+        EXPECT_EQ(config.group_policies[gid].evict_policy, evict_policy) << cacheRegionName(region);
         EXPECT_EQ(config.group_policies[gid].active_tail_blocks, active_tail_blocks) << cacheRegionName(region);
     };
 
-    expect_policy(KVCacheRegionName::HCA_STATE, CacheReusePolicy::NON_REUSABLE, 1);
-    expect_policy(KVCacheRegionName::SWA_KV, CacheReusePolicy::REUSABLE, 2);
-    expect_policy(KVCacheRegionName::CSA_STATE, CacheReusePolicy::REUSABLE, 2);
+    expect_policy(KVCacheRegionName::HCA_STATE, CacheReusePolicy::NON_REUSABLE, CacheEvictPolicy::CHAIN, 1);
+    expect_policy(KVCacheRegionName::SWA_KV, CacheReusePolicy::REUSABLE, CacheEvictPolicy::INDEPENDENT, 2);
+    expect_policy(KVCacheRegionName::CSA_STATE, CacheReusePolicy::REUSABLE, CacheEvictPolicy::INDEPENDENT, 2);
 }
 
 TEST(HybridPoolConfigCreatorTest, Dsv4SpecsMissingFailsFastWithoutRatioFallback) {

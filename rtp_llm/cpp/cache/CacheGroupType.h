@@ -19,8 +19,15 @@ enum class CacheReusePolicy : int8_t {
     NON_REUSABLE = 1,
 };
 
+enum class CacheEvictPolicy : int8_t {
+    CHAIN       = 0,
+    INDEPENDENT = 1,
+    NONE        = 2,
+};
+
 struct CacheGroupPolicy {
     CacheReusePolicy reuse_policy              = CacheReusePolicy::REUSABLE;
+    CacheEvictPolicy evict_policy              = CacheEvictPolicy::CHAIN;
     int              active_tail_blocks        = 2;
     bool             validate_tail_blocks      = true;
     uint32_t         explicit_block_num        = 0;
@@ -37,6 +44,18 @@ inline const char* cacheGroupTypeName(CacheGroupType group_type) {
             return "SWA";
     }
     return "UNKNOWN";
+}
+
+inline const char* cacheEvictPolicyName(CacheEvictPolicy evict_policy) {
+    switch (evict_policy) {
+        case CacheEvictPolicy::CHAIN:
+            return "chain";
+        case CacheEvictPolicy::INDEPENDENT:
+            return "independent";
+        case CacheEvictPolicy::NONE:
+            return "none";
+    }
+    return "unknown";
 }
 
 // Cache identity for models where one logical layer owns multiple cache entries.
@@ -94,6 +113,9 @@ inline bool skipReuseCacheRegion(KVCacheRegionName region_name) {
 inline CacheGroupPolicy cacheGroupPolicyForLegacyRegion(CacheGroupType group_type, KVCacheRegionName region_name) {
     CacheGroupPolicy policy;
     policy.active_tail_blocks = group_type == CacheGroupType::SWA ? 2 : 0;
+    if (isDsv4FixedRegion(region_name) && !skipReuseCacheRegion(region_name)) {
+        policy.evict_policy = CacheEvictPolicy::INDEPENDENT;
+    }
     if (region_name == KVCacheRegionName::HCA_STATE) {
         policy.reuse_policy         = CacheReusePolicy::NON_REUSABLE;
         policy.active_tail_blocks   = 1;

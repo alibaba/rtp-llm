@@ -406,7 +406,8 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
             RtpLLMCacheEvictionMetricsCollector collector;
             collector.lifetime_ms = lifetime_ms;
             kmonitor::MetricsTags tags("scope", "gpu");
-            tags.AddTag("kind", evict_result.evicted_state_only_group.count(cache_key) ? "state_swa_kv" : "chain");
+            tags.AddTag("evict_policy",
+                        evict_result.evicted_independent_group.count(cache_key) ? "independent" : "chain");
             tags.AddTag("backing", "device");
             metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
                                                                                                        &collector);

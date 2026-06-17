@@ -2502,8 +2502,7 @@ bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info)
 
     while (true) {
         std::vector<PrefixTreeMemoryBlockCache::CacheItem> evicted_items;
-        if (kv_cache_config_.enable_dsv4_state_block_independent_eviction
-            && copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
+        if (kv_cache_config_.enable_independent_group_eviction && copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
             evicted_items = prefix_block_cache_->popOldestStateOrChainEvictable(CacheBackingType::MEMORY);
             if (evicted_items.empty() && diskCacheEnabled()) {
                 evicted_items = prefix_block_cache_->popOldestStateOrChainEvictable(CacheBackingType::DISK);

@@ -57,7 +57,7 @@ public:
         std::unordered_map<CacheKeyType, BlockDependency>           evicted_dependencies;
         std::unordered_map<CacheKeyType, NamespaceId>               evicted_namespaces;
         std::unordered_map<CacheKeyType, int64_t>                   evicted_lifetime_ms;
-        std::unordered_map<CacheKeyType, int>                       evicted_state_only_group;
+        std::unordered_map<CacheKeyType, int>                       evicted_independent_group;
     };
 
     struct MatchResult {
@@ -103,7 +103,7 @@ public:
     int64_t version() const;
     void    setPrefixTreeEnabled(bool enabled);
     bool    prefixTreeEnabled() const;
-    void    setStateBlockIndependentEviction(bool enabled, const std::vector<int>& state_group_ids);
+    void    setIndependentGroupEviction(bool enabled, const std::vector<int>& group_ids);
 
 private:
     static const size_t kCacheMaxCapacity = 10000000;
@@ -159,17 +159,17 @@ private:
     bool chainHasUsableSlotLocked(const std::vector<NamespacedKey>& chain, int group_id) const;
     bool chainHasReachableAncestorSlotLocked(const std::vector<NamespacedKey>& chain, int group_id) const;
     bool subtreeEvictableForAncestorSlotLocked(const NamespacedKey& key) const;
-    bool selectStateOnlyEvictionsLocked(int group_id, size_t min_blocks, EvictResult& result);
+    bool selectIndependentGroupEvictionsLocked(int group_id, size_t min_blocks, EvictResult& result);
     void removeSlotFromItemLocked(CacheKeyType cache_key, int group_id, EvictResult& result);
     bool hasFlatItemLocked(CacheKeyType cache_key) const;
     bool isFlatItemResidentLocked(CacheKeyType cache_key) const;
-    bool isStateEvictionGroupLocked(int group_id) const;
+    bool isIndependentEvictionGroupLocked(int group_id) const;
 
     LRUCacheType       lru_cache_;
     mutable std::mutex mu_;
     int64_t            version_{0};
     bool               prefix_tree_enabled_{true};
-    bool               state_block_independent_eviction_enabled_{false};
+    bool               independent_group_eviction_enabled_{false};
     uint64_t           tree_access_seq_{0};
 
     int                       group_num_ = 0;
@@ -179,7 +179,7 @@ private:
     std::unordered_map<NamespacedKey, std::unordered_set<NamespacedKey, NamespacedKeyHash>, NamespacedKeyHash>
         pending_children_by_parent_;
     std::set<LeafKey> leaf_lru_;
-    std::unordered_set<int> state_eviction_group_ids_;
+    std::unordered_set<int> independent_eviction_group_ids_;
 };
 
 using SharedBlockCachePtr = std::shared_ptr<SharedBlockCache>;

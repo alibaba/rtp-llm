@@ -246,7 +246,7 @@ TEST(SharedBlockCacheTest, NonMatchableSlotStillEvictsButDoesNotMatchGroup) {
 
 TEST(SharedBlockCacheTest, StateIndependentEvictionDropsDeepestNonLeafStateFirst) {
     SharedBlockCache cache;
-    cache.setStateBlockIndependentEviction(/*enabled=*/true, {3});
+    cache.setIndependentGroupEviction(/*enabled=*/true, {3});
 
     cache.put(1, std::vector<BlockIdxType>{101, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 301}, false,
               SharedBlockCache::kGpuLogicalNamespace, rootDep(0));
@@ -260,8 +260,8 @@ TEST(SharedBlockCacheTest, StateIndependentEvictionDropsDeepestNonLeafStateFirst
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{2}));
     ASSERT_EQ(evicted.evicted_slots.at(2),
               (std::vector<BlockIdxType>{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 302}));
-    ASSERT_TRUE(evicted.evicted_state_only_group.count(2));
-    EXPECT_EQ(evicted.evicted_state_only_group.at(2), 3);
+    ASSERT_TRUE(evicted.evicted_independent_group.count(2));
+    EXPECT_EQ(evicted.evicted_independent_group.at(2), 3);
     EXPECT_EQ(cache.matchGroup(2, 0), 102);
     EXPECT_TRUE(isNullBlockIdx(cache.matchGroup(2, 3)));
     EXPECT_EQ(cache.matchGroup(3, 3), 303);
@@ -269,7 +269,7 @@ TEST(SharedBlockCacheTest, StateIndependentEvictionDropsDeepestNonLeafStateFirst
 
 TEST(SharedBlockCacheTest, StateIndependentEvictionScansMultipleLeavesSafely) {
     SharedBlockCache cache;
-    cache.setStateBlockIndependentEviction(/*enabled=*/true, {3});
+    cache.setIndependentGroupEviction(/*enabled=*/true, {3});
 
     cache.put(1, std::vector<BlockIdxType>{101, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 301}, false,
               SharedBlockCache::kGpuLogicalNamespace, rootDep(0));
@@ -295,7 +295,7 @@ TEST(SharedBlockCacheTest, StateIndependentEvictionScansMultipleLeavesSafely) {
 
 TEST(SharedBlockCacheTest, StateIndependentEvictionFallsBackToWholeChainWhenOnlyLeafStateRemains) {
     SharedBlockCache cache;
-    cache.setStateBlockIndependentEviction(/*enabled=*/true, {3});
+    cache.setIndependentGroupEviction(/*enabled=*/true, {3});
 
     cache.put(1, std::vector<BlockIdxType>{101, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX}, false,
               SharedBlockCache::kGpuLogicalNamespace, rootDep(0));
@@ -305,13 +305,13 @@ TEST(SharedBlockCacheTest, StateIndependentEvictionFallsBackToWholeChainWhenOnly
     auto evicted = cache.selectAndEvictForGroup(/*group_id=*/3, /*min_blocks=*/1);
 
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{1, 2}));
-    ASSERT_FALSE(evicted.evicted_state_only_group.count(2));
+    ASSERT_FALSE(evicted.evicted_independent_group.count(2));
     EXPECT_TRUE(cache.empty());
 }
 
 TEST(SharedBlockCacheTest, SelectAndEvictForGroupSkipsChainsWithoutTargetSlot) {
     SharedBlockCache cache;
-    cache.setStateBlockIndependentEviction(/*enabled=*/true, {3});
+    cache.setIndependentGroupEviction(/*enabled=*/true, {3});
 
     cache.put(1, std::vector<BlockIdxType>{101, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX}, false,
               SharedBlockCache::kGpuLogicalNamespace, rootDep(0));

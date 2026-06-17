@@ -380,8 +380,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &KVCacheConfig::enable_legacy_memory_connector_fallback)
         .def_readwrite("prefix_tree_memory_state_swa_pool_ratio",
                        &KVCacheConfig::prefix_tree_memory_state_swa_pool_ratio)
-        .def_readwrite("enable_dsv4_state_block_independent_eviction",
-                       &KVCacheConfig::enable_dsv4_state_block_independent_eviction)
+        .def_readwrite("enable_independent_group_eviction", &KVCacheConfig::enable_independent_group_eviction)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
@@ -464,7 +463,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_prefix_tree_memory_cache,
                                       self.enable_legacy_memory_connector_fallback,
                                       self.prefix_tree_memory_state_swa_pool_ratio,
-                                      self.enable_dsv4_state_block_independent_eviction);
+                                      self.enable_independent_group_eviction);
             },
             [](py::tuple t) {
                 const bool has_disk_fields =
@@ -534,8 +533,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.enable_prefix_tree_memory_cache         = t[extra_start + 2].cast<bool>();
                     c.enable_legacy_memory_connector_fallback = t[extra_start + 3].cast<bool>();
                     c.prefix_tree_memory_state_swa_pool_ratio = t[extra_start + 4].cast<int64_t>();
-                    c.enable_dsv4_state_block_independent_eviction =
-                        t[extra_start + 5].cast<bool>();
+                    c.enable_independent_group_eviction = t[extra_start + 5].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }
