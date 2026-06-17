@@ -1,4 +1,6 @@
 import functools
+import importlib.util
+import os
 from contextlib import contextmanager
 from typing import Any, Callable, Generator, List, NoReturn, Optional, Tuple
 
@@ -6,7 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.utils.module_util import has_module, resolve_symbol
+from rtp_llm.utils.module_util import resolve_symbol
 
 __all__ = [
     "fp8_gemm_nt",
@@ -39,6 +41,14 @@ _deep_gemm_impl_old_map = {
     "m_grouped_bf16_gemm_nt_masked": "m_grouped_bf16_gemm_nt_masked",
 }
 
+_deep_gemm_impl_full_name_map = {
+    "fp8_gemm_nt": "gemm_fp8_fp8_bf16_nt",
+    "m_grouped_fp8_gemm_nt_contiguous": "m_grouped_gemm_fp8_fp8_bf16_nt_contiguous",
+    "m_grouped_fp8_gemm_nt_masked": "m_grouped_gemm_fp8_fp8_bf16_nt_masked",
+    "bf16_gemm_nt": "gemm_bf16_bf16_bf16_nt",
+    "m_grouped_bf16_gemm_nt_contiguous": "m_grouped_gemm_bf16_bf16_bf16_nt_contiguous",
+    "m_grouped_bf16_gemm_nt_masked": "m_grouped_gemm_bf16_bf16_bf16_nt_masked",
+}
 
 _fp8_gemm_nt_impl: Callable[..., Any] | None = None
 _m_grouped_fp8_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
@@ -48,10 +58,22 @@ _m_grouped_bf16_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_masked_impl: Callable[..., Any] | None = None
 
 
-@functools.cache
+_deep_gemm_available: bool | None = None
+
+
 def has_deep_gemm() -> bool:
-    """Whether the optional `deep_gemm` package is available."""
-    return has_module("deep_gemm")
+    """Whether the optional `deep_gemm` package is available.
+
+    Re-checks until first successful detection, then caches True.
+    This handles late sys.path setup in spawned subprocesses.
+    """
+    global _deep_gemm_available
+    if _deep_gemm_available is True:
+        return True
+    available = importlib.util.find_spec("deep_gemm") is not None
+    if available:
+        _deep_gemm_available = True
+    return available
 
 
 @functools.cache
@@ -62,6 +84,7 @@ def is_deep_gemm_e8m0_used() -> bool:
 @contextmanager
 def configure_deep_gemm_num_sms(num_sms: int) -> Generator[None, None, None]:
     """Configure the number of sms for deep gemm."""
+    _ensure_initialized()
     if not has_deep_gemm():
         raise RuntimeError(
             "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
@@ -107,19 +130,16 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
 
     import deep_gemm
 
-    # resolve symbols
     for i, symbol in enumerate(symbols):
         symbol_impl = symbol_impls[i]
-        try:
-            globals()[symbol_impl] = resolve_symbol(
-                deep_gemm,
-                _deep_gemm_impl_new_map[symbol],
-                _deep_gemm_impl_old_map[symbol],
-            )
-        except AttributeError:
-            raise RuntimeError(
-                f"DeepGEMM symbol {_deep_gemm_impl_new_map[symbol]} and {_deep_gemm_impl_old_map[symbol]} not found in deep_gemm module"
-            )
+        resolved = resolve_symbol(
+            deep_gemm,
+            _deep_gemm_impl_new_map[symbol],
+            _deep_gemm_impl_old_map[symbol],
+        )
+        if resolved is None and symbol in _deep_gemm_impl_full_name_map:
+            resolved = getattr(deep_gemm, _deep_gemm_impl_full_name_map[symbol], None)
+        globals()[symbol_impl] = resolved
 
 
 def _lazy_init_deep_gemm_once():
@@ -135,7 +155,22 @@ def _lazy_init_deep_gemm_once():
     )
 
 
-_lazy_init_deep_gemm_once()
+_symbols_initialized = False
+
+
+def _ensure_initialized():
+    """Resolve deep_gemm symbols on first actual use (not at import time).
+
+    Retries until deep_gemm becomes available on sys.path, which handles
+    spawned subprocesses where path setup happens after module import.
+    """
+    global _symbols_initialized
+    if _symbols_initialized:
+        return
+    if not has_deep_gemm():
+        return
+    _lazy_init_deep_gemm_once()
+    _symbols_initialized = True
 
 
 @triton.jit
@@ -387,6 +422,7 @@ def fp8_gemm_nt(
         None
     """
     global _fp8_gemm_nt_impl
+    _ensure_initialized()
     if _fp8_gemm_nt_impl is None:
         return _missing_deep_gemm()
     _fp8_gemm_nt_impl(
@@ -424,6 +460,7 @@ def m_grouped_fp8_gemm_nt_contiguous(
     """
 
     global _m_grouped_fp8_gemm_nt_contiguous_impl
+    _ensure_initialized()
     if _m_grouped_fp8_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
     _m_grouped_fp8_gemm_nt_contiguous_impl(
@@ -487,6 +524,7 @@ def m_grouped_fp8_gemm_nt_masked(
             Defaults to None, which will be set to False if E8M0 scale is used, otherwise True.
     """
     global _m_grouped_fp8_gemm_nt_masked_impl
+    _ensure_initialized()
     if _m_grouped_fp8_gemm_nt_masked_impl is None:
         return _missing_deep_gemm()
 
@@ -527,6 +565,7 @@ def bf16_gemm_nt(
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
     global _bf16_gemm_nt_impl
+    _ensure_initialized()
     if _bf16_gemm_nt_impl is None:
         return _missing_deep_gemm()
     _bf16_gemm_nt_impl(a, b, output, c, compiled_dims)
@@ -550,6 +589,7 @@ def m_grouped_bf16_gemm_nt_contiguous(
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
     global _m_grouped_bf16_gemm_nt_contiguous_impl
+    _ensure_initialized()
     if _m_grouped_bf16_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
     _m_grouped_bf16_gemm_nt_contiguous_impl(
@@ -557,8 +597,10 @@ def m_grouped_bf16_gemm_nt_contiguous(
         b,
         output,
         m_indices,
-        compiled_dims,
     )
+
+
+_bf16_masked_max_block_n = int(os.environ.get("RTP_MOE_MAX_BLOCK_N", "0"))
 
 
 def m_grouped_bf16_gemm_nt_masked(
@@ -580,13 +622,17 @@ def m_grouped_bf16_gemm_nt_masked(
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
     global _m_grouped_bf16_gemm_nt_masked_impl
+    _ensure_initialized()
     if _m_grouped_bf16_gemm_nt_masked_impl is None:
         return _missing_deep_gemm()
+    kwargs = {}
+    if _bf16_masked_max_block_n > 0:
+        kwargs["max_block_n"] = _bf16_masked_max_block_n
     _m_grouped_bf16_gemm_nt_masked_impl(
         a,
         b,
         output,
         masked_m,
         expected_m,
-        compiled_dims,
+        **kwargs,
     )
