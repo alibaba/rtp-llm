@@ -6,7 +6,6 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include <cstdint>
 #include <stdexcept>
-#include <mutex>
 #include <vector>
 #include <algorithm>
 #include "rtp_llm/cpp/pybind/PyUtils.h"
@@ -14,8 +13,15 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <numeric>
+#include <sstream>
+#include "autil/EnvUtil.h"
+#include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #if USING_CUDA
@@ -27,6 +33,164 @@
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+std::string formatAccessLogTime() {
+    const int64_t      now_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    std::ostringstream ms;
+    ms << std::setfill('0') << std::setw(3) << (now_us / 1000 % 1000);
+    return autil::TimeUtility::usFormat(now_us, "%Y-%m-%d %H:%M:%S") + "." + ms.str();
+}
+
+bool modelInputsLogEnabled() {
+    static const bool enabled = autil::EnvUtil::getEnv("ENABLE_MODEL_INPUTS_LOG", false);
+    return enabled;
+}
+
+std::string jsonEscape(const std::string& input) {
+    std::ostringstream os;
+    for (unsigned char c : input) {
+        switch (c) {
+            case '\\':
+                os << "\\\\";
+                break;
+            case '"':
+                os << "\\\"";
+                break;
+            case '\n':
+                os << "\\n";
+                break;
+            case '\r':
+                os << "\\r";
+                break;
+            case '\t':
+                os << "\\t";
+                break;
+            default:
+                os << static_cast<char>(c);
+                break;
+        }
+    }
+    return os.str();
+}
+
+int64_t firstRequestId(const GptModelInputs& inputs) {
+    const auto& tensor = inputs.request_id;
+    if (!tensor.defined() || tensor.is_cuda() || tensor.numel() <= 0) {
+        return -1;
+    }
+    if (tensor.scalar_type() == torch::kInt64) {
+        return tensor.contiguous().data_ptr<int64_t>()[0];
+    }
+    if (tensor.scalar_type() == torch::kInt32) {
+        return tensor.contiguous().data_ptr<int32_t>()[0];
+    }
+    return -1;
+}
+
+constexpr size_t  kModelInputsLogMaxBytes        = 100ULL * 1024ULL * 1024ULL;
+constexpr int64_t kModelInputsLogFlushIntervalUs = 100 * 1000;
+constexpr size_t  kModelInputsLogFlushThreshold  = 100;
+
+class ModelInputsLogWriter {
+public:
+    ModelInputsLogWriter(int64_t rank_id, int backup_count): backup_count_(std::max(backup_count, 0)) {
+        const auto      log_dir = std::filesystem::path(autil::EnvUtil::getEnv("LOG_PATH", std::string("logs")));
+        std::error_code ec;
+        std::filesystem::create_directories(log_dir, ec);
+        if (ec) {
+            RTP_LLM_LOG_WARNING(
+                "Failed to create model inputs log directory %s: %s", log_dir.string().c_str(), ec.message().c_str());
+            return;
+        }
+        const auto server_id = autil::EnvUtil::getEnv("FRONTEND_SERVER_ID", 0);
+        file_path_ = log_dir / ("model_inputs_r" + std::to_string(rank_id) + "_s" + std::to_string(server_id) + ".log");
+        bytes_     = std::filesystem::exists(file_path_, ec) ? std::filesystem::file_size(file_path_, ec) : 0;
+        output_.open(file_path_, std::ios::out | std::ios::app);
+        if (!output_.is_open()) {
+            RTP_LLM_LOG_WARNING("Failed to open model inputs log file %s", file_path_.c_str());
+            return;
+        }
+        valid_ = true;
+    }
+
+    void write(const std::string& line) {
+        if (!valid_) {
+            return;
+        }
+        std::lock_guard<std::mutex> guard(mutex_);
+        rotateIfNeeded(line.size() + 1);
+        output_ << line << '\n';
+        bytes_ += line.size() + 1;
+        pending_lines_++;
+        const auto now_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (pending_lines_ >= kModelInputsLogFlushThreshold
+            || now_us - last_flush_us_ >= kModelInputsLogFlushIntervalUs) {
+            output_.flush();
+            pending_lines_ = 0;
+            last_flush_us_ = now_us;
+        }
+    }
+
+private:
+    void rotateIfNeeded(size_t next_bytes) {
+        if (bytes_ + next_bytes <= kModelInputsLogMaxBytes) {
+            return;
+        }
+        output_.close();
+        std::error_code ec;
+        if (backup_count_ > 0) {
+            std::filesystem::remove(file_path_.string() + "." + std::to_string(backup_count_), ec);
+            for (int i = backup_count_ - 1; i >= 1; --i) {
+                const auto src = file_path_.string() + "." + std::to_string(i);
+                const auto dst = file_path_.string() + "." + std::to_string(i + 1);
+                if (std::filesystem::exists(src, ec)) {
+                    std::filesystem::rename(src, dst, ec);
+                }
+            }
+            if (std::filesystem::exists(file_path_, ec)) {
+                std::filesystem::rename(file_path_, file_path_.string() + ".1", ec);
+            }
+        } else {
+            std::filesystem::remove(file_path_, ec);
+        }
+        output_.open(file_path_, std::ios::out | std::ios::trunc);
+        bytes_ = 0;
+    }
+
+    std::mutex            mutex_;
+    std::filesystem::path file_path_;
+    std::ofstream         output_;
+    int                   backup_count_  = 0;
+    size_t                bytes_         = 0;
+    size_t                pending_lines_ = 0;
+    int64_t               last_flush_us_ = 0;
+    bool                  valid_         = false;
+};
+
+void logModelInputsIfEnabled(const GptModelInputs&               inputs,
+                             int64_t                             rank_id,
+                             int                                 backup_count,
+                             const kmonitor::MetricsReporterPtr& metrics_reporter) {
+    if (!modelInputsLogEnabled() || inputs.is_fake_stream) {
+        return;
+    }
+    const auto                                   total_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    static std::once_flag                        init_once;
+    static std::unique_ptr<ModelInputsLogWriter> writer;
+    std::call_once(init_once, [&]() { writer = std::make_unique<ModelInputsLogWriter>(rank_id, backup_count); });
+    const auto model_inputs = inputs.modelInputsLogString();
+    const auto line = "{\"id\":" + std::to_string(firstRequestId(inputs)) + ",\"log_time\":\"" + formatAccessLogTime()
+                      + "\",\"model_inputs\":\"" + jsonEscape(model_inputs) + "\"}";
+    writer->write(line);
+    const auto total_us = autil::TimeUtility::currentTimeInMicroSeconds() - total_start_us;
+    if (metrics_reporter) {
+        metrics_reporter->report(total_us, "rtp_llm_model_inputs_log_us", kmonitor::MetricType::GAUGE, nullptr, true);
+    }
+}
+
+}  // namespace
 
 static torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayout>& layout_opt) {
     if (!layout_opt.has_value() || layout_opt->layer_region_to_group_id.empty()) {
@@ -676,6 +840,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
     DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
     holdInputsHostBuffers(inputs);
+    logModelInputsIfEnabled(
+        inputs, model_inputs_log_rank_id_, model_inputs_log_backup_count_, model_inputs_log_metrics_reporter_);
 
     // RAII guard: ensure prepared_attention_inputs_ is always reset to false on scope exit,
     // even if forward() throws. Without this, an exception after async prepareAttentionInputs

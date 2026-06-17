@@ -4,6 +4,7 @@
 #include <cstring>
 #include <sstream>
 #include <string>
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/Types.h"
@@ -19,6 +20,11 @@ namespace {
 bool asyncDebugEnabled() {
     const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
     return env != nullptr && std::string(env) == "1";
+}
+
+bool modelInputsLogEnabled() {
+    static const bool enabled = autil::EnvUtil::getEnv("ENABLE_MODEL_INPUTS_LOG", false);
+    return enabled;
 }
 
 struct GatherModelInputContext {
@@ -450,7 +456,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                 model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
 
             if (ctx.max_blocks_num && config_.role_type == RoleType::PREFILL && stream->hasCacheKeys()) {
-                RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(stream->cacheKeys(i).size()) <= model_input.cache_keys.size(1),
+                RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(stream->cacheKeys(i).size())
+                                            <= model_input.cache_keys.size(1),
                                         "cache_keys overflow: stream keys=%zu tensor width=%ld",
                                         stream->cacheKeys(i).size(),
                                         model_input.cache_keys.size(1));
@@ -474,6 +481,9 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
     if (config_.is_multimodal && !gathered_mm_features.empty()) {
         model_input.multimodal_features = std::move(gathered_mm_features);
+    }
+    if (modelInputsLogEnabled()) {
+        model_input.prefix_lengths_host_for_log = prefix_lengths_host;
     }
     model_input.prefix_lengths = publishInt32ToCuda(prefix_lengths_host, host_holder);
     return absl::OkStatus();
@@ -532,6 +542,17 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
+    if (modelInputsLogEnabled()) {
+        if (model_input.combo_tokens.defined() && !model_input.combo_tokens.is_cuda()) {
+            model_input.combo_tokens_host_for_log = model_input.combo_tokens;
+        }
+        if (model_input.input_lengths.defined() && !model_input.input_lengths.is_cuda()) {
+            model_input.input_lengths_host_for_log = model_input.input_lengths;
+        }
+        if (model_input.sequence_lengths.defined() && !model_input.sequence_lengths.is_cuda()) {
+            model_input.sequence_lengths_host_for_log = model_input.sequence_lengths;
+        }
+    }
     publishModelInputCoreTensorsToCuda(model_input, host_holder);
     model_input.lm_output_indexes = buildLmOutputIndexesOnCuda(model_input, stream_groups);
     return model_input;
