@@ -40,6 +40,12 @@ class RequestFormat:
     CHAT_API = "chatapi"
 
 
+class ReturnAllProbsMode:
+    NONE = 0
+    DEFAULT = 1
+    ORIGINAL = 2
+
+
 class RoleAddr(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -137,7 +143,7 @@ class GenerateConfig(BaseModel):
     force_disable_sp_run: bool = False
     force_sp_accept: bool = False
     return_cum_log_probs: bool = False
-    return_all_probs: bool = False
+    return_all_probs: int = ReturnAllProbsMode.NONE
     return_softmax_probs: bool = False
     aux_info: bool = True
     can_use_pd_separation: bool = True
@@ -157,6 +163,13 @@ class GenerateConfig(BaseModel):
 
     # multimodal preprocess
     resized_shape: Optional[List[int]] = None
+    max_pixels: Optional[int] = None
+    min_pixels: Optional[int] = None
+    fps: Optional[int] = None
+    min_frames: Optional[int] = None
+    max_frames: Optional[int] = None
+    crop_positions: Optional[List[float]] = None
+    mm_timeout_ms: Optional[int] = None
 
     # whether add vision id in chat template; only use in frontend
     add_vision_id: bool = True
@@ -179,6 +192,19 @@ class GenerateConfig(BaseModel):
     batch_group_timeout: Optional[int] = None  # ms
 
     unique_key: str = ""
+
+    @field_validator("return_all_probs", mode="before")
+    @classmethod
+    def _coerce_return_all_probs(cls, v):
+        """Legacy bool → ReturnAllProbsMode int. True → DEFAULT, False → NONE.
+
+        return_all_probs was a `bool` field before the ORIGINAL/DEFAULT/NONE three-state
+        refactor. Old callers may still pass `True/False`; pydantic strict mode would
+        otherwise reject the bool→int implicit conversion.
+        """
+        if isinstance(v, bool):
+            return ReturnAllProbsMode.DEFAULT if v else ReturnAllProbsMode.NONE
+        return v
 
     def gen_hash_value(self):
         cp = copy.copy(self)

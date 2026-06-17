@@ -193,7 +193,7 @@ class CPFlashInferImpl(FMHAImplBase):
     ) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
         if need_rope_kv_cache:
-            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+            fmha_input = self.rope_kvcache_impl.forward(qkv, None, self.rope_params)
         else:
             fmha_input = qkv
 

@@ -167,6 +167,7 @@ try:
 
     # Alias for backward compatibility
     EplbConfig = EPLBConfig
+    from libth_transformer_config import MMPreprocessConfig, MultimodalInput
     from libth_transformer_config import (
         get_block_cache_keys as cpp_get_block_cache_keys,
     )

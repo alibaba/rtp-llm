@@ -94,9 +94,9 @@ void assertCumLogProbMatches(const std::vector<float>&   cum_log_probs,
 }
 
 struct SamplingAccuracyStats {
-    double l1                  = 0.0;
-    double max_abs             = 0.0;
-    double kl                  = 0.0;
+    double  l1                 = 0.0;
+    double  max_abs            = 0.0;
+    double  kl                 = 0.0;
     int64_t valid_count        = 0;
     int64_t invalid_count      = 0;
     int64_t support_violations = 0;
@@ -186,7 +186,11 @@ protected:
 };
 
 TEST_F(CudaSamplerTest, DISABLED_benchmarkLatestFlashinferSamplingVsCurrentRtp) {
-    enum class Kind { TopK, TopP, TopKTopP };
+    enum class Kind {
+        TopK,
+        TopP,
+        TopKTopP
+    };
     struct Case {
         std::string name;
         Kind        kind;
@@ -196,9 +200,9 @@ TEST_F(CudaSamplerTest, DISABLED_benchmarkLatestFlashinferSamplingVsCurrentRtp) 
         float       top_p;
     };
 
-    constexpr int64_t      vocab_size  = 129280;
+    constexpr int64_t          vocab_size  = 129280;
     const std::vector<int64_t> batch_sizes = {1, 2, 4, 8, 16, 32, 64, 96, 128};
-    std::vector<Case>      cases;
+    std::vector<Case>          cases;
     cases.reserve(batch_sizes.size() * 3);
     for (auto batch_size : batch_sizes) {
         const auto suffix = "_b" + std::to_string(batch_size) + "_v" + std::to_string(vocab_size);
@@ -207,13 +211,12 @@ TEST_F(CudaSamplerTest, DISABLED_benchmarkLatestFlashinferSamplingVsCurrentRtp) 
         cases.push_back({"top_k_top_p" + suffix, Kind::TopKTopP, batch_size, vocab_size, 100, 0.9f});
     }
 
-    constexpr bool deterministic = true;
-    constexpr int  warmup        = 20;
-    constexpr int  iterations    = 100;
-    auto           stream        = at::cuda::getCurrentCUDAStream().stream();
-    auto           l2_flush_buffer =
-        torch::empty({kL2FlushBytes / static_cast<int64_t>(sizeof(float))},
-                     torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    constexpr bool deterministic   = true;
+    constexpr int  warmup          = 20;
+    constexpr int  iterations      = 100;
+    auto           stream          = at::cuda::getCurrentCUDAStream().stream();
+    auto           l2_flush_buffer = torch::empty({kL2FlushBytes / static_cast<int64_t>(sizeof(float))},
+                                        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     l2_flush_buffer.zero_();
     cudaDeviceSynchronize();
 
@@ -234,14 +237,12 @@ TEST_F(CudaSamplerTest, DISABLED_benchmarkLatestFlashinferSamplingVsCurrentRtp) 
         auto new_samples  = torch::empty({c.batch_size}, int_options);
         auto new_valid    = torch::empty({c.batch_size}, bool_options);
         auto top_k_h = torch::full({c.batch_size}, c.top_k, torch::TensorOptions().dtype(torch::kInt32)).pin_memory();
-        auto top_p_h =
-            torch::full({c.batch_size}, c.top_p, torch::TensorOptions().dtype(torch::kFloat32)).pin_memory();
-        auto top_k_d     = top_k_h.to(torch::kCUDA, /*non_blocking=*/true).contiguous();
-        auto top_p_d     = top_p_h.to(torch::kCUDA, /*non_blocking=*/true).contiguous();
+        auto top_p_h = torch::full({c.batch_size}, c.top_p, torch::TensorOptions().dtype(torch::kFloat32)).pin_memory();
+        auto top_k_d = top_k_h.to(torch::kCUDA, /*non_blocking=*/true).contiguous();
+        auto top_p_d = top_p_h.to(torch::kCUDA, /*non_blocking=*/true).contiguous();
         auto seed_options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
-        auto seed_d      = torch::full({c.batch_size}, 20260525, seed_options);
-        auto offset_d =
-            torch::arange(0, c.batch_size * 32, 32, seed_options);
+        auto seed_d       = torch::full({c.batch_size}, 20260525, seed_options);
+        auto offset_d     = torch::arange(0, c.batch_size * 32, 32, seed_options);
 
         auto old_kernel = [&](const torch::Tensor& uniform) {
             switch (c.kind) {
@@ -255,15 +256,15 @@ TEST_F(CudaSamplerTest, DISABLED_benchmarkLatestFlashinferSamplingVsCurrentRtp) 
                     break;
                 case Kind::TopKTopP:
                     ::top_k_top_p_sampling_from_probs(probs,
-                                                       uniform,
-                                                       old_samples,
-                                                       old_valid,
-                                                       top_k_h,
-                                                       0,
-                                                       top_p_h,
-                                                       1.0,
-                                                       deterministic,
-                                                       (int64_t)stream);
+                                                      uniform,
+                                                      old_samples,
+                                                      old_valid,
+                                                      top_k_h,
+                                                      0,
+                                                      top_p_h,
+                                                      1.0,
+                                                      deterministic,
+                                                      (int64_t)stream);
                     break;
             }
         };
@@ -328,19 +329,22 @@ TEST_F(CudaSamplerTest, DISABLED_benchmarkLatestFlashinferSamplingVsCurrentRtp) 
         double old_uniform_rng_us =
             benchmarkCudaEventUs([&]() { rng_uniform.uniform_(0.0, 1.0); }, l2_flush_buffer, warmup, iterations);
         double old_full_us = old_kernel_us + old_uniform_rng_us;
-        double latest_us = benchmarkCudaEventUs(latest_kernel, l2_flush_buffer, warmup, iterations);
+        double latest_us   = benchmarkCudaEventUs(latest_kernel, l2_flush_buffer, warmup, iterations);
 
-        std::cout << "[sampling-benchmark] case=" << c.name << " batch=" << c.batch_size
-                  << " vocab=" << c.vocab_size << " old_kernel_us=" << old_kernel_us
-                  << " old_uniform_rng_us=" << old_uniform_rng_us << " old_with_uniform_rng_us=" << old_full_us
-                  << " latest_us=" << latest_us
+        std::cout << "[sampling-benchmark] case=" << c.name << " batch=" << c.batch_size << " vocab=" << c.vocab_size
+                  << " old_kernel_us=" << old_kernel_us << " old_uniform_rng_us=" << old_uniform_rng_us
+                  << " old_with_uniform_rng_us=" << old_full_us << " latest_us=" << latest_us
                   << " speedup_vs_old_kernel=" << (old_kernel_us / latest_us)
                   << " speedup_vs_old_with_rng=" << (old_full_us / latest_us) << std::endl;
     }
 }
 
 TEST_F(CudaSamplerTest, DISABLED_compareLatestFlashinferSamplingAccuracyVsCurrentRtp) {
-    enum class Kind { TopK, TopP, TopKTopP };
+    enum class Kind {
+        TopK,
+        TopP,
+        TopKTopP
+    };
     struct Case {
         std::string name;
         Kind        kind;
@@ -348,16 +352,29 @@ TEST_F(CudaSamplerTest, DISABLED_compareLatestFlashinferSamplingAccuracyVsCurren
         float       top_p;
     };
 
-    constexpr int64_t trials       = 8192;
-    constexpr int64_t batch_size   = 1;
-    constexpr int64_t vocab_size   = 16;
+    constexpr int64_t trials        = 8192;
+    constexpr int64_t batch_size    = 1;
+    constexpr int64_t vocab_size    = 16;
     constexpr bool    deterministic = true;
-    auto              stream       = at::cuda::getCurrentCUDAStream().stream();
+    auto              stream        = at::cuda::getCurrentCUDAStream().stream();
 
-    const std::vector<float> base_probs = {
-        0.23f, 0.18f, 0.14f, 0.11f, 0.09f, 0.075f, 0.055f, 0.04f,
-        0.025f, 0.018f, 0.012f, 0.009f, 0.006f, 0.004f, 0.003f, 0.001f};
-    auto probs = torch::tensor(base_probs, torch::TensorOptions().dtype(torch::kFloat32))
+    const std::vector<float> base_probs = {0.23f,
+                                           0.18f,
+                                           0.14f,
+                                           0.11f,
+                                           0.09f,
+                                           0.075f,
+                                           0.055f,
+                                           0.04f,
+                                           0.025f,
+                                           0.018f,
+                                           0.012f,
+                                           0.009f,
+                                           0.006f,
+                                           0.004f,
+                                           0.003f,
+                                           0.001f};
+    auto                     probs      = torch::tensor(base_probs, torch::TensorOptions().dtype(torch::kFloat32))
                      .reshape({batch_size, vocab_size})
                      .to(torch::kCUDA);
     probs = probs.div(probs.sum(-1, /*keepdim=*/true)).contiguous();
@@ -373,8 +390,7 @@ TEST_F(CudaSamplerTest, DISABLED_compareLatestFlashinferSamplingAccuracyVsCurren
 
     for (const auto& c : cases) {
         auto top_k_h = torch::full({batch_size}, c.top_k, torch::TensorOptions().dtype(torch::kInt32)).pin_memory();
-        auto top_p_h =
-            torch::full({batch_size}, c.top_p, torch::TensorOptions().dtype(torch::kFloat32)).pin_memory();
+        auto top_p_h = torch::full({batch_size}, c.top_p, torch::TensorOptions().dtype(torch::kFloat32)).pin_memory();
         auto top_k_d = top_k_h.to(torch::kCUDA, /*non_blocking=*/true).contiguous();
         auto top_p_d = top_p_h.to(torch::kCUDA, /*non_blocking=*/true).contiguous();
 
@@ -412,22 +428,22 @@ TEST_F(CudaSamplerTest, DISABLED_compareLatestFlashinferSamplingAccuracyVsCurren
                     break;
                 case Kind::TopKTopP:
                     ::top_k_top_p_sampling_from_probs(probs,
-                                                       old_uniform,
-                                                       old_sample,
-                                                       old_ok,
-                                                       top_k_h,
-                                                       0,
-                                                       top_p_h,
-                                                       1.0,
-                                                       deterministic,
-                                                       (int64_t)stream);
+                                                      old_uniform,
+                                                      old_sample,
+                                                      old_ok,
+                                                      top_k_h,
+                                                      0,
+                                                      top_p_h,
+                                                      1.0,
+                                                      deterministic,
+                                                      (int64_t)stream);
                     break;
             }
 
-            auto new_sample = new_samples.select(0, i);
-            auto new_ok     = new_valid.select(0, i);
-            const auto seed = static_cast<uint64_t>(20260526);
-            const auto offset = static_cast<uint64_t>(i * 32);
+            auto       new_sample = new_samples.select(0, i);
+            auto       new_ok     = new_valid.select(0, i);
+            const auto seed       = static_cast<uint64_t>(20260526);
+            const auto offset     = static_cast<uint64_t>(i * 32);
             switch (c.kind) {
                 case Kind::TopK:
                     rtp_llm::top_k_sampling_from_probs(probs,
@@ -486,9 +502,9 @@ TEST_F(CudaSamplerTest, DISABLED_compareLatestFlashinferSamplingAccuracyVsCurren
         auto old_stats = compareEmpiricalToReference(toHostInt(old_samples), old_valid_host, reference_host);
         auto new_stats = compareEmpiricalToReference(toHostInt(new_samples), new_valid_host, reference_host);
 
-        std::cout << "[sampling-accuracy] case=" << c.name << " trials=" << trials
-                  << " old_l1=" << old_stats.l1 << " old_max_abs=" << old_stats.max_abs
-                  << " old_kl=" << old_stats.kl << " old_invalid=" << old_stats.invalid_count
+        std::cout << "[sampling-accuracy] case=" << c.name << " trials=" << trials << " old_l1=" << old_stats.l1
+                  << " old_max_abs=" << old_stats.max_abs << " old_kl=" << old_stats.kl
+                  << " old_invalid=" << old_stats.invalid_count
                   << " old_support_violations=" << old_stats.support_violations << " new_l1=" << new_stats.l1
                   << " new_max_abs=" << new_stats.max_abs << " new_kl=" << new_stats.kl
                   << " new_invalid=" << new_stats.invalid_count
@@ -535,6 +551,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK1) {
         nullopt,
         nullopt,
         nullopt,
+        false,
         nullopt,
         nullopt,
         nullopt,
@@ -586,6 +603,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
         nullopt,
         nullopt,
         nullopt,
+        false,
         nullopt,
         nullopt,
         nullopt,
@@ -645,6 +663,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopP) {
         nullopt,
         nullopt,
         nullopt,
+        false,
         nullopt,
         nullopt,
         nullopt,
@@ -706,6 +725,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
         nullopt,
         nullopt,
         nullopt,
+        false,
         nullopt,
         nullopt,
         nullopt,
@@ -766,6 +786,7 @@ TEST_F(CudaSamplerTest, testFlashinferKernelFailed) {
         nullopt,
         nullopt,
         nullopt,
+        false,
         nullopt,
         nullopt,
         nullopt,
@@ -895,6 +916,7 @@ TEST_F(CudaSamplerTest, testPenalty) {
                          nullopt,
                          cum_log_probs_t,
                          nullopt,
+                         false,
                          output_all_probs_t,
                          presence_penalty_t,
                          frequency_penalty_t,
@@ -974,6 +996,7 @@ TEST_F(CudaSamplerTest, testDoSample) {
                          nullopt,
                          cum_log_probs_t,
                          nullopt,
+                         false,
                          output_all_probs_t,
                          nullopt,
                          nullopt,

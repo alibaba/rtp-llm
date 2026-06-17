@@ -36,6 +36,20 @@ public:
         return inputLength() - prefix_length;
     }
 
+    std::map<int, int> multimodalLengths() const {
+        std::map<int, int> lengths;
+        if (!multimodal_inputs.has_value() || !multimodal_features.has_value()) {
+            return {};
+        } else {
+            RTP_LLM_CHECK(multimodal_inputs.value().size() == multimodal_features.value().size());
+            int mm_num = multimodal_inputs.value().size();
+            for (int i = 0; i < mm_num; ++i) {
+                lengths[multimodal_inputs.value()[i].mm_type] += multimodal_features.value()[i].size(0);
+            }
+        }
+        return lengths;
+    }
+
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "GenerateInput {"
@@ -71,6 +85,7 @@ public:
     std::optional<torch::Tensor>                text_tokens_mask;  // text part for 1 and multimodal part for 0
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
+    std::optional<std::vector<torch::Tensor>>   mm_extra_input;
 
     int     prefix_length = 0;
     int64_t begin_time_us = 0;
@@ -106,6 +121,7 @@ struct AuxInfo {
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> all_probs;
     std::optional<torch::Tensor> softmax_probs;
+    std::map<int, int>           multimodal_lengths = {};
 };
 
 class GenerateOutput {

@@ -6,6 +6,10 @@ import threading
 import time
 import traceback
 
+import requests
+import torch
+
+from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.utils.time_util import timer_wrapper
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -17,7 +21,7 @@ from rtp_llm.config.server_config_setup import (
     maybe_write_jit_cache_to_remote,
     setup_and_configure_server,
 )
-from rtp_llm.ops import RoleType, SpeculativeType
+from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import ProcessManager
@@ -86,10 +90,10 @@ def start_backend_server_impl(
         os._exit(-1)
 
     # Create pipe for subprocess startup status communication
-    pipe_reader, pipe_writer = multiprocessing.Pipe(duplex=False)
+    pipe_reader, pipe_writer = torch.multiprocessing.Pipe(duplex=False)
     logging.info(f"[PROCESS_SPAWN]Start backend server process outer")
 
-    backend_process = multiprocessing.Process(
+    backend_process = torch.multiprocessing.Process(
         target=start_backend_server,
         args=(global_controller, py_env_configs, pipe_writer),
         name="backend_manager",
@@ -145,7 +149,7 @@ def start_backend_server_impl(
             processes=[backend_process],
             process_name="backend_server",
             check_ready_fn=check_backend_ready,
-            retry_interval_seconds=0.1,
+            retry_interval_seconds=1,
         )
 
     return backend_process
@@ -265,6 +269,146 @@ def start_dash_sc_server_impl(
     return dash_sc_processes
 
 
+@timer_wrapper(description="start vit server")
+def start_vit_server_impl(
+    py_env_configs: PyEnvConfigs,
+    process_manager: ProcessManager = None,
+):
+    """
+    启动 VIT 服务器
+
+    Args:
+        py_env_configs: 配置对象
+        process_manager: 进程管理器
+    """
+    from rtp_llm.multimodal.vit_proxy_start_server import vit_proxy_start_server
+    from rtp_llm.multimodal.vit_start_server import vit_start_server
+
+    server_config = py_env_configs.server_config
+    start_port = server_config.start_port
+    vit_server_count = server_config.vit_server_count
+
+    if vit_server_count > 1:
+        logging.info(
+            f"[VIT_SERVER] Starting in PROXY mode: 1 proxy + {vit_server_count} workers "
+            f"(role_type=VIT)"
+        )
+
+        worker_processes = []
+        worker_addresses = []
+        worker_http_addresses = []
+
+        base_grpc_port = py_env_configs.server_config.rpc_server_port
+
+        # Per-worker we consume two ports (grpc + http). Fail fast if the
+        # range would walk past the 16-bit TCP port ceiling — otherwise
+        # bind() errors only surface inside the spawned worker and look like
+        # health-check timeouts.
+        max_port = base_grpc_port + vit_server_count * 2
+        if max_port >= 65536:
+            raise ValueError(
+                f"VIT worker port range exceeds 65535: base={base_grpc_port}, "
+                f"vit_server_count={vit_server_count}, max={max_port}"
+            )
+
+        for i in range(vit_server_count):
+            internal_grpc_port = base_grpc_port + i * 2 + 1
+            internal_http_port = base_grpc_port + i * 2 + 2
+            worker_addresses.append(f"127.0.0.1:{internal_grpc_port}")
+            worker_http_addresses.append(f"127.0.0.1:{internal_http_port}")
+
+            logging.info(
+                f"[PROCESS_SPAWN] Start vit worker process worker_{i} "
+                f"(internal grpc_port={internal_grpc_port}, "
+                f"internal http_port={internal_http_port})"
+            )
+            process = torch.multiprocessing.Process(
+                target=vit_start_server,
+                args=(
+                    i,
+                    py_env_configs,
+                    internal_grpc_port,  # grpc_port
+                    internal_http_port,  # http_port
+                    True,  # is_proxy_mode (proxy 模式下的 worker 进程)
+                ),
+                name=f"vit_worker_{i}",
+            )
+            worker_processes.append(process)
+            process.start()
+
+        external_grpc_port = base_grpc_port  # 主进程使用基础 gRPC 端口
+        external_http_port = py_env_configs.server_config.server_port
+
+        # 2. 启动主进程（代理服务器）
+        logging.info(
+            f"[PROCESS_SPAWN] Start vit proxy process "
+            f"(external grpc_port={external_grpc_port}, http_port={external_http_port})"
+        )
+        proxy_process = torch.multiprocessing.Process(
+            target=vit_proxy_start_server,
+            args=(
+                py_env_configs,
+                worker_addresses,
+                external_grpc_port,  # grpc_port
+                external_http_port,  # http_port
+                worker_http_addresses,  # worker_http_addresses
+            ),
+            name="vit_proxy",
+        )
+        proxy_process.start()
+
+        vit_processes = [proxy_process] + worker_processes
+
+        # 健康检查：检查代理服务器的端口（代理模式只在 VIT 角色时启用）
+        vit_server_port = py_env_configs.server_config.server_port
+        # 保存 worker 地址列表，用于健康检查
+
+    else:
+        grpc_port = py_env_configs.server_config.rpc_server_port
+        http_port = py_env_configs.server_config.server_port
+        vit_server_port = http_port
+        logging.info(
+            f"[PROCESS_SPAWN] Start vit server process "
+            f"(grpc_port={grpc_port}, http_port={http_port})"
+        )
+        process = torch.multiprocessing.Process(
+            target=vit_start_server,
+            args=(
+                0,
+                py_env_configs,
+                grpc_port,  # grpc_port
+                http_port,  # http_port
+                False,  # is_proxy_mode (standalone 模式，需要记录 QPS)
+            ),
+            name="vit_server",
+        )
+        process.start()
+        vit_processes = [process]
+
+    if process_manager and vit_processes:
+        logging.info(
+            f"[VIT_SERVER] Registering health check for {len(vit_processes)} VIT processes, "
+            f"current_managed_processes={len(process_manager.processes)}"
+        )
+
+        def check_vit_ready():
+            return check_server_health(vit_server_port)
+
+        process_manager.register_health_check(
+            processes=vit_processes,
+            process_name="vit_server",
+            check_ready_fn=check_vit_ready,
+            retry_interval_seconds=1,
+        )
+        logging.info(
+            f"[VIT_SERVER] Health check registered, after_registration: "
+            f"managed_processes={len(process_manager.processes)}, "
+            f"health_check_processes={len(process_manager.health_check_processes)}"
+        )
+
+    return vit_processes
+
+
 @timer_wrapper(description="start frontend server")
 def start_frontend_server_impl(
     global_controller,
@@ -317,7 +461,7 @@ def start_frontend_server_impl(
                 logging.info(f"rank {pc.world_rank + rank} skipping frontend startup")
 
     if process_manager and frontend_processes:
-        # Register health check with ProcessManager for the first frontend server
+
         def check_frontend_ready():
             return check_server_health(
                 py_env_configs.server_config.start_port, path="/frontend_health"
@@ -327,7 +471,7 @@ def start_frontend_server_impl(
             processes=frontend_processes,
             process_name="frontend_server",
             check_ready_fn=check_frontend_ready,
-            retry_interval_seconds=0.1,
+            retry_interval_seconds=1,
         )
 
     return frontend_processes
@@ -463,7 +607,8 @@ def start_server(py_env_configs: PyEnvConfigs):
     logging.info(f"[PROCESS_START]Start server")
     start_time = time.time()
     try:
-        multiprocessing.set_start_method("spawn")
+        multiprocessing.set_start_method("spawn", force=True)
+        torch.multiprocessing.set_start_method("spawn", force=True)
     except RuntimeError as e:
         logging.warning(str(e))
 
@@ -480,25 +625,45 @@ def start_server(py_env_configs: PyEnvConfigs):
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
         monitor_interval=py_env_configs.server_config.monitor_interval,
     )
+    # Backward compat: VIT_SEPARATION=ROLE without ROLE_TYPE=VIT
+    if (
+        py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
+        and py_env_configs.role_config.role_type == RoleType.PDFUSION
+    ):
+        logging.warning(
+            "VIT_SEPARATION=ROLE detected without ROLE_TYPE=VIT. "
+            "Auto-setting ROLE_TYPE=VIT for backward compatibility. "
+            "Please migrate to ROLE_TYPE=VIT explicitly."
+        )
+        py_env_configs.role_config.role_type = RoleType.VIT
+
     # Initialize backend_process to None in case role_type is FRONTEND
     backend_process = None
     startup_warmup_gate_file = _setup_startup_warmup_health_gate(py_env_configs)
 
     try:
-        if py_env_configs.role_config.role_type != RoleType.FRONTEND:
-            logging.info("start backend server")
+        if py_env_configs.role_config.role_type == RoleType.VIT:
+            vit_processes = start_vit_server_impl(py_env_configs, process_manager)
+            process_manager.add_processes(vit_processes)
+
+        if (
+            py_env_configs.role_config.role_type != RoleType.FRONTEND
+            and py_env_configs.role_config.role_type != RoleType.VIT
+        ):
+            # For backend server, vit_process_engine is None when vit is separated
             backend_process = start_backend_server_impl(
                 global_controller, py_env_configs, process_manager
             )
             process_manager.add_process(backend_process, shutdown_group="backend")
 
-        logging.info("start frontend server")
-        frontend_process = start_frontend_server_impl(
-            global_controller, py_env_configs, process_manager
-        )
-        process_manager.add_processes(frontend_process, shutdown_group="frontend")
-
         if py_env_configs.role_config.role_type != RoleType.VIT:
+            # vit has its own frontend server
+            logging.info("start frontend server")
+            frontend_process = start_frontend_server_impl(
+                global_controller, py_env_configs, process_manager
+            )
+            process_manager.add_processes(frontend_process, shutdown_group="frontend")
+
             logging.info("start dash_sc server")
             dash_sc_processes = start_dash_sc_server_impl(
                 global_controller, py_env_configs, process_manager
@@ -508,9 +673,8 @@ def start_server(py_env_configs: PyEnvConfigs):
                     dash_sc_processes, shutdown_group="frontend"
                 )
 
-        # Start parallel health checks and wait for completion
         if not process_manager.run_health_checks():
-            logging.error("Health checks failed")
+            logging.error("[START_SERVER] Health checks failed")
             raise Exception("Health checks failed")
 
         startup_warmup_succeeded = _maybe_run_startup_real_warmup(py_env_configs)

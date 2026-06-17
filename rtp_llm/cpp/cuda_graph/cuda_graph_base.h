@@ -38,7 +38,12 @@ struct GraphParams {
     // CudaGraphRunner allocates input_hiddens with hidden_size * hc_mult so
     // the DSv4 MTP draft graph captures with the [T, hc*dim] residual shape
     // produced by the target's getMtpTargetHiddenStates accessor.
-    int64_t              hc_mult            = 1;
+    int64_t hc_mult = 1;
+    // Per-token position-id factor for combo_position_ids capture buffer.
+    // 0 = model does not use combo_position_ids (no buffer allocated, capture skips it).
+    // >0 = factor (e.g. Mrope = rope_config.index_factor). Sourced from
+    //     description_.attention_conf.rope_config in the model wrapper, not Python reflection.
+    int position_id_len_factor = 0;
 };
 
 class GraphBase {

@@ -66,9 +66,9 @@ std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std:
     auto off_ptr  = offset_h.data_ptr<int64_t>();
 
     for (int64_t i = 0; i < batch_size; ++i) {
-        auto generator = (i < static_cast<int64_t>(generators.size()) && generators[i].defined()) ?
-                             std::make_optional(generators[i]) :
-                             std::nullopt;
+        auto generator      = (i < static_cast<int64_t>(generators.size()) && generators[i].defined()) ?
+                                  std::make_optional(generators[i]) :
+                                  std::nullopt;
         auto [seed, offset] = get_seed_and_offset(increment, generator);
         seed_ptr[i]         = static_cast<int64_t>(seed);
         off_ptr[i]          = static_cast<int64_t>(offset);
@@ -198,11 +198,10 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     // [1, batch_size] — last row of transposed_tokens
     auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0));
 
-    constexpr bool       deterministic    = true;
-    constexpr int        max_sampling_rounds = 32;
-    auto [seed_t, offset_t] =
-        makeSamplingSeedOffsetTensors(
-            params.generator, batch_size, static_cast<int>(max_sampling_rounds), params.buffer_holder);
+    constexpr bool deterministic       = true;
+    constexpr int  max_sampling_rounds = 32;
+    auto [seed_t, offset_t]            = makeSamplingSeedOffsetTensors(
+        params.generator, batch_size, static_cast<int>(max_sampling_rounds), params.buffer_holder);
 
     torch::Tensor success_t = success;
     torch::Tensor top_k_t   = params.top_k;
@@ -225,11 +224,13 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
     const bool all_top_p_one =
         std::all_of(top_p_ptr, top_p_ptr + batch_size, [](auto t) { return std::abs(t - 1.0f) < 1e-7; });
 
+    bool need_renorm_probs = output_all_probs_t.defined() && !params.return_original_all_probs;
+
     if (all_top_k_one) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens, true);
         success = torch::Tensor();  // mark as undefined — all succeeded
-        if (output_all_probs_t.defined()) {
+        if (need_renorm_probs) {
             top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
         }
     } else if (all_top_k_no_limit) {
@@ -245,7 +246,7 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                   offset_t,
                                   0,
                                   (int64_t)cur_stream);
-        if (output_all_probs_t.defined()) {
+        if (need_renorm_probs) {
             top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
         }
     } else {
@@ -266,7 +267,7 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                       offset_t,
                                       0,
                                       (int64_t)cur_stream);
-            if (output_all_probs_t.defined()) {
+            if (need_renorm_probs) {
                 top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, (int64_t)cur_stream);
             }
         } else {
@@ -284,12 +285,16 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                             offset_t,
                                             0,
                                             (int64_t)cur_stream);
-            if (output_all_probs_t.defined()) {
+            if (need_renorm_probs) {
                 torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
                 top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
                 top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
             }
         }
+    }
+
+    if (params.return_original_all_probs && output_all_probs_t.defined()) {
+        top_k_renorm_probs(probs_t, output_all_probs_t, std::nullopt, 1 << 30, (int64_t)cur_stream);
     }
 
     if (params.cum_log_probs.has_value()) {
@@ -623,9 +628,9 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     auto top_p_t   = params.top_p;
     auto top_p_ptr = params.top_p.data_ptr<float>();
 
-    bool          need_output_all_probs = params.output_all_probs.has_value();
+    bool          need_renorm_probs = params.output_all_probs.has_value() && !params.return_original_all_probs;
     torch::Tensor output_all_probs_t;
-    if (need_output_all_probs) {
+    if (params.output_all_probs.has_value()) {
         output_all_probs_t = params.output_all_probs.value();
     }
     if (params.cum_log_probs.has_value() && !output_all_probs_t.defined()) {
@@ -638,7 +643,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens);
-        if (need_output_all_probs) {
+        if (need_renorm_probs) {
             top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, reinterpret_cast<uintptr_t>(cur_stream));
         }
     } else {
@@ -683,9 +688,13 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         filtered_probs = filtered_probs / row_sums.clamp_min(1e-10);
         auto selected  = torch::multinomial(filtered_probs, 1, /*replacement=*/false).squeeze(-1);
         samples_t.copy_(selected);
-        if (need_output_all_probs) {
+        if (need_renorm_probs) {
             output_all_probs_t.copy_(filtered_probs);
         }
+    }
+
+    if (params.return_original_all_probs && output_all_probs_t.defined()) {
+        top_k_renorm_probs(probs_t, output_all_probs_t, std::nullopt, 1 << 30, reinterpret_cast<uintptr_t>(cur_stream));
     }
 
     // 7. Update cum_log_probs

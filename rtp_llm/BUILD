@@ -63,13 +63,13 @@ xft_dep = select({
 arch_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
-    "//conditions:default": [":decord"],
+    "//conditions:default": [":decord", ":av"],
 })
 
 arch_with_version_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
-    "//conditions:default": ["decord==0.6.0"],
+    "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
 })
 
 requirement([
@@ -106,6 +106,7 @@ requirement([
     "xfastertransformer_devel",
     "xfastertransformer_devel_icx",
     "decord",
+    "av",
     # add qwen agent package
     "pydantic",
     "json5",
@@ -153,7 +154,7 @@ py_library(
         ":prettytable",
         ":psutil",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
-    ] + arch_dep + internal_deps()
+    ] + internal_deps()
 )
 
 py_library(
@@ -210,6 +211,31 @@ py_library(
 )
 
 py_library(
+    name = "multimodal",
+    srcs = glob([
+        "multimodal/*.py",
+        "multimodal/**/*.py",
+    ]),
+    deps = [
+        ":utils",
+        ":Pillow",
+        ":pillow-heif",
+        ":pillow-avif-plugin",
+        ":nest_asyncio",
+        ":matplotlib",
+        ":torchvision",
+        ":protobuf",
+        ":pyOpenSSL",
+    ] + select({
+        "@//:using_arm": [],
+	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
+        "@//:using_cpu": [],
+        "@//:using_cuda12_arm": [],
+        "//conditions:default": ["flash_attn"]
+    }) + arch_dep,
+)
+
+py_library(
     name = "models",
     srcs = glob([
         "models/*.py",
@@ -223,23 +249,17 @@ py_library(
         ":pynvml",
         ":tiktoken",
         ":protobuf",
-        ":Pillow",
-        ":pillow-heif",
-        ":pillow-avif-plugin",
         ":torch",
-        ":torchvision",
         ":triton",
-        ":pyOpenSSL",
         ":einops",
         ":utils",
         ":ops",
         ":timm",
         ":onnx",
         #":decord",
-        ":nest_asyncio",
-        ":matplotlib",
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
+        ":multimodal",
     ] + arch_dep + select({
         # cuda13 lock omits deep_ep pending rebuild → only deep_gemm here.
         "@//:using_cuda13_x86": ["deep_gemm"],
@@ -317,7 +337,8 @@ py_library(
         "config/**/*.py",
     ]),
     deps = [
-        "//rtp_llm/distribute:distribute"
+        "//rtp_llm/distribute:distribute",
+        ":multimodal"
     ],
     data = [":alog_config"]
 )
@@ -568,7 +589,7 @@ whl_reqs = [
     "sympy",
     "typing-extensions",
     "importlib_metadata",
-    "transformers==4.51.2",
+    "transformers==4.57.1",
     "sentencepiece==0.2.0",
     "fastapi==0.115.6",
     "grpcio-tools==1.57.0",
@@ -585,7 +606,6 @@ whl_reqs = [
     "pyarrow==14.0.0",
     "safetensors",
     "cpm_kernels",
-    "pyodps",
     "Pillow",
     "pillow-heif",
     "pillow-avif-plugin",

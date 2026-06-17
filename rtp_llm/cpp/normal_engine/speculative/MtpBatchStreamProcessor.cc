@@ -387,8 +387,8 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_spec_sampler_input");
     (void)model_inputs;
     RTP_LLM_CHECK(!stream_groups.empty());
-    auto all_streams      = stream_groups.allStreams();
-    bool return_all_probs = stream_groups.needReturnAllProbs();
+    auto               all_streams      = stream_groups.allStreams();
+    ReturnAllProbsMode return_all_probs = stream_groups.needReturnAllProbs();
 
     for (auto& stream : all_streams) {
         RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1, "stream tile num must be 1 in ScoreExecutor");
@@ -426,9 +426,12 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
     auto vocab_size           = (size_t)model_output.logits.size(1);
     sampler_inputs.vocab_size = vocab_size;
-    if (return_all_probs) {
+    if (return_all_probs != ReturnAllProbsMode::NONE) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        if (return_all_probs == ReturnAllProbsMode::ORIGINAL) {
+            sampler_inputs.return_original_all_probs = true;
+        }
     }
 
     sampler_inputs.logits = model_output.logits.clone();

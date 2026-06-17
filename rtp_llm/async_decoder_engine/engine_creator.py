@@ -30,6 +30,7 @@ def create_engine(
         alog_conf_path: Path to the alog configuration file
         world_info: Distributed world info (e.g., from get_world_info())
         propose_model: Optional propose model for speculative decoding
+        mm_process_engine: Optional MMProcessEngine instance for multimodal processing in EmbeddingCppEngine
 
     Returns:
         BaseEngine instance
@@ -44,13 +45,13 @@ def create_engine(
     if model.model_config.task_type == TaskType.LANGUAGE_MODEL:
         from rtp_llm.async_decoder_engine.rpc_engine import LanguageCppEngine
 
+        logging.info("create llm engine")
         return LanguageCppEngine(
             model=model,
             engine_config=engine_config,
             world_info=world_info,
             propose_model=propose_model,
         )
-        logging.info("create llm engine")
     else:
         from rtp_llm.async_decoder_engine.embedding.embedding_engine import (
             EmbeddingCppEngine,

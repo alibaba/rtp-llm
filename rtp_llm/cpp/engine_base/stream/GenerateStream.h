@@ -234,7 +234,15 @@ public:
     void step();
     void spStep();
 
+    // Raw multimodal accessors — return the full per-image vectors/tensor unfiltered.
+    // Stream is a pure data holder; the reuse-filtering rule ("an image is reused only
+    // when reuse_length covers its full token span") lives in NormalModelInputGatherer
+    // (see computeReusedMultimodalCount there). multimodalFeaturesLength() and
+    // hasMultimodalExtraInput() also return RAW counts; consumers that need post-reuse
+    // counts compute them on demand.
     std::vector<torch::Tensor> multimodalFeatures() const;
+    std::vector<torch::Tensor> multimodalExtraInput() const;
+    bool                       hasMultimodalExtraInput() const;
     int                        multimodalFeaturesLength() const;
     torch::Tensor              multimodalLocations() const;
 
@@ -310,11 +318,11 @@ public:
 
     void CopyOnWrite(const GenerateStream& other_stream, bool copy_loss = true, bool share = false);
 
-    void setReturnAllProbs(bool return_all_probs) {
+    void setReturnAllProbs(ReturnAllProbsMode return_all_probs) {
         return_all_probs_ = return_all_probs;
     }
 
-    bool getReturnAllProbs() {
+    ReturnAllProbsMode getReturnAllProbs() const {
         return return_all_probs_;
     }
 
@@ -727,7 +735,6 @@ protected:
     int                                   device_reuse_length_  = 0;
     int                                   remote_reuse_length_  = 0;
     int                                   memory_reuse_length_  = 0;
-    int                                   reuse_mm_length_      = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;
@@ -738,7 +745,7 @@ protected:
     bool released_              = false;
     bool need_release_resource_ = true;
 
-    bool return_all_probs_ = false;
+    ReturnAllProbsMode return_all_probs_ = ReturnAllProbsMode::NONE;
 
     bool last_block_aligned_ = false;
 

@@ -171,14 +171,14 @@ struct KVCache {
         }
 
         LayerKVCache layer_cache;
-        layer_cache.layer_id      = idx;
-        layer_cache.group_id      = layer_region_to_group_id.empty() ? -1 : layer_region_to_group_id[layer][attn];
-        layer_cache.region_name   = region_name;
-        const bool is_full_region = !rtp_llm::isDsv4FixedRegion(region_name);
-        layer_cache.seq_size_per_block =
-            is_full_region && kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block :
-                                                              groupSeqSizePerBlock(layer_cache.group_id);
-        layer_cache.kv_cache_base = base;
+        layer_cache.layer_id           = idx;
+        layer_cache.group_id           = layer_region_to_group_id.empty() ? -1 : layer_region_to_group_id[layer][attn];
+        layer_cache.region_name        = region_name;
+        const bool is_full_region      = !rtp_llm::isDsv4FixedRegion(region_name);
+        layer_cache.seq_size_per_block = is_full_region && kernel_seq_size_per_block > 0 ?
+                                             kernel_seq_size_per_block :
+                                             groupSeqSizePerBlock(layer_cache.group_id);
+        layer_cache.kv_cache_base      = base;
         if (!kv_scale_base_by_layer_region.empty() && layer < kv_scale_base_by_layer_region.size()
             && attn < kv_scale_base_by_layer_region[layer].size()) {
             layer_cache.kv_scale_base = kv_scale_base_by_layer_region[layer][attn];
@@ -311,11 +311,10 @@ struct PyAttentionInputs {
     torch::Tensor cu_seqlens_host;
     torch::Tensor cu_kv_seqlens;
     torch::Tensor decode_cu_seqlens_host;
-
     int           context_total_kv_length = 0;
     int           total_tokens            = 0;
     torch::Tensor padding_offset;
-    torch::Tensor position_ids;
+    torch::Tensor combo_position_ids;
 
     // for write cache store
     std::optional<PyCacheStoreInputs> cache_store_inputs;
@@ -342,9 +341,23 @@ struct BertEmbeddingInputs {
     float         input_embedding_scalar{1.0};
 };
 
+struct PyEmbeddingInputs {
+    torch::Tensor combo_tokens_type_ids;
+    torch::Tensor text_tokens_mask;
+};
+
+struct PyMultimodalInputs {
+    std::vector<torch::Tensor> multimodal_features;
+    torch::Tensor              mm_features_locs;
+    std::vector<torch::Tensor> mm_extra_input;
+};
+
 struct PyModelInputs {
     torch::Tensor       input_ids;
     torch::Tensor       input_hiddens;
+    torch::Tensor       combo_position_ids;
+    PyEmbeddingInputs   embedding_inputs;
+    PyMultimodalInputs  multimodal_inputs;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
 };

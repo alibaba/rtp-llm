@@ -95,6 +95,8 @@ private:
 private:
     // Helper functions to reduce code duplication
     torch_ext::PyAttentionInputs   buildPyAttentionInputs(const GptModelInputs& inputs);
+    torch_ext::PyEmbeddingInputs   buildPyEmbeddingInputs(const GptModelInputs& inputs);
+    torch_ext::PyMultimodalInputs  buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs buildBertEmbeddingInputs(const GptModelInputs& inputs);
     void setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs, const GptModelInputs& inputs);
     GptModelOutputs callForwardPostLayers(torch::Tensor         hidden_states,
@@ -311,6 +313,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
         graph_params.kv_cache_group_num           = params.kv_cache_group_num;
+        // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
+        // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
+        // >0 = factor (Mrope models such as qwen3-vl / qwen35-moe set rope_config.style
+        // = Mrope and rope_config.index_factor accordingly). No Python reflection — the
+        // rope style is intrinsic to the model description and already populated here.
+        graph_params.position_id_len_factor = (description_.attention_conf.rope_config.style == RopeStyle::Mrope) ?
+                                                  description_.attention_conf.rope_config.index_factor :
+                                                  0;
 
         if (kv_cache_layer_to_group.size() > 0) {
             graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;

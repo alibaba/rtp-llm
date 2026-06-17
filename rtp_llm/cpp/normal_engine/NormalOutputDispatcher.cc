@@ -82,7 +82,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     int  batch_idx_in     = 0;
     int  batch_idx_out    = 0;
     int  token_offset     = 0;
-    bool return_all_probs = stream_groups.needReturnAllProbs();
+    bool return_all_probs = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
     auto new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
 
     for (auto& stream : stream_groups.allStreams()) {

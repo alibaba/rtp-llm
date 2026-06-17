@@ -16,8 +16,7 @@ from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse
-from fastapi.responses import StreamingResponse
+from fastapi.responses import ORJSONResponse, StreamingResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
@@ -301,7 +300,6 @@ class FrontendApp(object):
                     status_code=400,
                     content={"error": f" HTTP health check failed"},
                 )
-            return "ok"
 
         @app.get("/")
         async def health(request: Request):
@@ -435,6 +433,8 @@ class FrontendApp(object):
             return self.frontend_server.tokenize(req)
 
         if self.frontend_server.is_embedding:
+            from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
+
             # embedding
             @app.post("/v1/embeddings/similarity")
             @app.post("/v1/reranker")

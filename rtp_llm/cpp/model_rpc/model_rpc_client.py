@@ -1,13 +1,13 @@
 import functools
 import json
 import logging
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 import grpc
 from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import RoleType
+from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     ErrorDetailsPB,
     GenerateInputPB,
@@ -16,19 +16,25 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+from rtp_llm.server.request_headers import (
+    extract_correlation_request_id,
+    extract_trace_id,
+)
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateConfig,
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
-)
-from rtp_llm.server.request_headers import (
-    extract_correlation_request_id,
-    extract_trace_id,
+    RoleAddr,
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
-from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
+from rtp_llm.utils.grpc_util import (
+    trans_from_tensor,
+    trans_option,
+    trans_option_cast,
+    trans_tensor,
+)
 
 
 class StreamState:
@@ -70,11 +76,15 @@ def trans_input(input_py: GenerateInput):
 
     request_info = getattr(input_py, "request_info", None)
     if request_info is not None:
-        input_pb.request_info.frontend_ip = getattr(request_info, "frontend_ip", "") or ""
+        input_pb.request_info.frontend_ip = (
+            getattr(request_info, "frontend_ip", "") or ""
+        )
         input_pb.request_info.dash_ip = getattr(request_info, "dash_ip", "") or ""
         input_pb.request_info.trace_id = getattr(request_info, "trace_id", "") or ""
         input_pb.request_info.request_id = getattr(request_info, "request_id", "") or ""
-        input_pb.request_info.source_role = getattr(request_info, "source_role", "") or ""
+        input_pb.request_info.source_role = (
+            getattr(request_info, "source_role", "") or ""
+        )
     if not input_pb.request_info.trace_id:
         input_pb.request_info.trace_id = str(
             input_py.generate_config.trace_id
@@ -170,7 +180,10 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.return_cum_log_probs = (
         input_py.generate_config.return_cum_log_probs
     )
-    generate_config_pb.return_all_probs = input_py.generate_config.return_all_probs
+    # dual-write: legacy bool (true if any probs requested) + new int32 mode (offset 1)
+    _rapm = input_py.generate_config.return_all_probs
+    generate_config_pb.return_all_probs = _rapm != ReturnAllProbsMode.NONE
+    generate_config_pb.return_all_probs_mode = _rapm + 1
     generate_config_pb.return_softmax_probs = (
         input_py.generate_config.return_softmax_probs
     )
@@ -214,6 +227,13 @@ def trans_input(input_py: GenerateInput):
     return input_pb
 
 
+def get_multimodal_preprocess_value(value: Optional[int], default: int):
+    if value is not None and value != -1:
+        return value
+    else:
+        return default
+
+
 def trans_multimodal_input(
     input_py: GenerateInput, input_pb: GenerateInputPB, generate_config: GenerateConfig
 ):
@@ -230,17 +250,35 @@ def trans_multimodal_input(
         mm_input_pb.multimodal_url = mm_input.url
         mm_input_pb.multimodal_type = mm_input.mm_type
         mm_preprocess_config_pb = mm_input_pb.mm_preprocess_config
-        mm_preprocess_config_pb.width = (
-            mm_input.config.width if mm_input.config.width != -1 else resized_shape[0]
+        mm_preprocess_config_pb.width = get_multimodal_preprocess_value(
+            mm_input.mm_preprocess_config.width, resized_shape[0]
         )
-        mm_preprocess_config_pb.height = (
-            mm_input.config.height if mm_input.config.height != -1 else resized_shape[1]
+        mm_preprocess_config_pb.height = get_multimodal_preprocess_value(
+            mm_input.mm_preprocess_config.height, resized_shape[1]
         )
-        mm_preprocess_config_pb.min_pixels = mm_input.config.min_pixels
-        mm_preprocess_config_pb.max_pixels = mm_input.config.max_pixels
-        mm_preprocess_config_pb.fps = mm_input.config.fps
-        mm_preprocess_config_pb.min_frames = mm_input.config.min_frames
-        mm_preprocess_config_pb.max_frames = mm_input.config.max_frames
+        mm_preprocess_config_pb.min_pixels = get_multimodal_preprocess_value(
+            generate_config.min_pixels, mm_input.mm_preprocess_config.min_pixels
+        )
+        mm_preprocess_config_pb.max_pixels = get_multimodal_preprocess_value(
+            generate_config.max_pixels, mm_input.mm_preprocess_config.max_pixels
+        )
+        mm_preprocess_config_pb.fps = get_multimodal_preprocess_value(
+            generate_config.fps, mm_input.mm_preprocess_config.fps
+        )
+        mm_preprocess_config_pb.min_frames = get_multimodal_preprocess_value(
+            generate_config.min_frames, mm_input.mm_preprocess_config.min_frames
+        )
+        mm_preprocess_config_pb.max_frames = get_multimodal_preprocess_value(
+            generate_config.max_frames, mm_input.mm_preprocess_config.max_frames
+        )
+        mm_preprocess_config_pb.crop_positions.extend(
+            generate_config.crop_positions
+            if generate_config.crop_positions is not None
+            else mm_input.mm_preprocess_config.crop_positions
+        )
+        mm_preprocess_config_pb.mm_timeout_ms = get_multimodal_preprocess_value(
+            generate_config.mm_timeout_ms, mm_input.mm_preprocess_config.mm_timeout_ms
+        )
         input_pb.multimodal_inputs.append(mm_input_pb)
 
 
@@ -346,6 +384,10 @@ def trans_output(
                 current_aux_info.softmax_probs = trans_tensor(
                     aux_info_pb.softmax_probs
                 ).tolist()
+            if len(aux_info_pb.multimodal_lengths) > 0:
+                current_aux_info.multimodal_lengths = dict(
+                    aux_info_pb.multimodal_lengths
+                )
 
             output_py.aux_info = current_aux_info
 
@@ -455,10 +497,13 @@ class ModelRpcClient(object):
                     break
 
         if not address_list:
-            raise ValueError(f"No address found for request: {input_pb.request_id}")
+            raise ValueError(f"No address found for request: {input_py.request_id}")
         logging.debug(
-            f"request: [{input_pb.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
+            f"request: [{input_py.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
         )
+
+        input_pb = trans_input(input_py)
+
         try:
             # Select target address
             target_address = address_list[input_py.request_id % len(address_list)]

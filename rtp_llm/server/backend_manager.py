@@ -86,6 +86,7 @@ class BackendManager(object):
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
             eplb_config=self.py_env_configs.eplb_config,
+            vit_config=self.py_env_configs.vit_config,
         )
         # Let engine_config finalize based on model_config (e.g. scheduler config)
         ModelFactory.update_engine_config_from_model_config(

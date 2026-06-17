@@ -91,6 +91,7 @@ struct GatherModelInputContext {
     int          batch_idx;
     int*         sequence_lengths;
     bool         has_multimodal_input;
+    bool         has_mm_extra_input;
     size_t       total_decode_batch_size;
     int*         prefix_lengths_host;
     int*         merged_text_mask;
@@ -121,6 +122,7 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
     ctx.combo_position_ids   = ctx.need_cal_position_id ? model_input.combo_position_ids.data_ptr<int32_t>() : nullptr;
     ctx.has_multimodal_input = config.is_multimodal && stream_groups.has_multimodal_input();
     ctx.prefix_lengths_host  = nullptr;
+    ctx.has_mm_extra_input   = config.is_multimodal && stream_groups.hasMMExtraInput();
     ctx.merged_text_mask     = ctx.has_multimodal_input ? model_input.text_tokens_mask.data_ptr<int32_t>() : nullptr;
     ctx.mm_features_locs     = ctx.has_multimodal_input ? model_input.mm_features_locs.data_ptr<int32_t>() : nullptr;
 
@@ -232,6 +234,33 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
     }
 }
 
+// Count of leading multimodal images whose token spans [loc, loc + feature_len) are
+// fully covered by reuse_length. Partially-cached images do NOT count (they must be
+// recomputed). The rule lives here (not on GenerateStream) so the stream stays a pure
+// data holder.
+int computeReusedMultimodalCount(const GenerateStreamPtr& stream) {
+    auto mm_features = stream->multimodalFeatures();
+    auto mm_locs     = stream->multimodalLocations();
+    if (!mm_locs.defined() || mm_features.empty()) {
+        return 0;
+    }
+    const int reuse_length = stream->reuseLength();
+    auto*     locs_data    = mm_locs.data_ptr<int32_t>();
+    const int n            = std::min<int>(mm_locs.numel(), static_cast<int>(mm_features.size()));
+    // Backward scan assumes mm_locs are in ascending document order; if they
+    // aren't, finding the last fully-reused image doesn't imply all earlier
+    // ones are reused too, silently producing wrong reuse counts.
+    RTP_LLM_CHECK_WITH_INFO(std::is_sorted(locs_data, locs_data + n),
+                            "mm_locs must be sorted in ascending order for reuse count logic");
+    for (int i = n - 1; i >= 0; --i) {
+        const int mm_end = locs_data[i] + static_cast<int>(mm_features[i].size(0));
+        if (reuse_length >= mm_end) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
 void gatherMultimodalFeaturesForContextBatch(const GenerateStreamPtr&    stream,
                                              GatherModelInputContext&    ctx,
                                              std::vector<torch::Tensor>& gathered_mm_features,
@@ -244,12 +273,24 @@ void gatherMultimodalFeaturesForContextBatch(const GenerateStreamPtr&    stream,
     if (!mm_locs.defined()) {
         return;
     }
-    auto* mm_locs_data = mm_locs.data_ptr<int>();
-    for (int i = 0; i < mm_locs.numel(); ++i) {
+    // Stream getters return RAW (unfiltered) data; the gatherer skips leading images
+    // whose entire token span is already covered by reuse_length.
+    const int reuse_mm_count = computeReusedMultimodalCount(stream);
+    auto*     mm_locs_data   = mm_locs.data_ptr<int>();
+    // The two loops below iterate mm_locs and mm_features independently; if
+    // their counts disagree the per-image alignment is wrong and downstream
+    // expandTokenIds reads garbage. Enforce equality up front.
+    RTP_LLM_CHECK_WITH_INFO(mm_locs.numel() == static_cast<int64_t>(mm_features.size()),
+                            "mm_locs count %ld != mm_features count %zu for stream %ld",
+                            mm_locs.numel(),
+                            mm_features.size(),
+                            stream->streamId());
+    for (int i = reuse_mm_count; i < mm_locs.numel(); ++i) {
         ctx.mm_features_locs[ctx.mm_feature_index] = mm_locs_data[i] + ctx.token_idx - stream->reuseLength();
         ctx.mm_feature_index++;
     }
-    for (auto& mm_feature : mm_features) {
+    for (int i = reuse_mm_count; i < static_cast<int>(mm_features.size()); ++i) {
+        auto& mm_feature = mm_features[i];
         if (!mm_feature.is_cuda()) {
             host_holder.hold_host(mm_feature);
             gathered_mm_features.emplace_back(mm_feature.to(getTorchCudaDevice(), /*non_blocking=*/true));
@@ -551,6 +592,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                                                              TensorHolder&       host_holder) const {
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_context_streams");
     std::vector<torch::Tensor> gathered_mm_features;
+    std::vector<torch::Tensor> gathered_mm_extra_input;
     const auto                 context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
     // TODO(async): prefixLength() is still stream CPU state. Stage it explicitly
     // on host here, then publish only a CUDA tensor in GptModelInputs.
@@ -601,6 +643,20 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                        (context_pos_ids.numel() - reuse_offset) * sizeof(int));
             }
 
+            if (ctx.has_mm_extra_input) {
+                auto      mm_extra_input = stream->multimodalExtraInput();
+                const int reuse_mm_count = computeReusedMultimodalCount(stream);
+                RTP_LLM_CHECK_WITH_INFO(mm_extra_input.size() == stream->multimodalFeatures().size()
+                                            || mm_extra_input.empty(),
+                                        "mm_extra_input count %zu != mm_features count %zu for stream %ld",
+                                        mm_extra_input.size(),
+                                        stream->multimodalFeatures().size(),
+                                        stream->streamId());
+                for (int j = reuse_mm_count; j < static_cast<int>(mm_extra_input.size()); ++j) {
+                    gathered_mm_extra_input.emplace_back(mm_extra_input[j].to(torch::kCUDA));
+                }
+            }
+
             copyKvCacheBlocksToModelInput(
                 model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
 
@@ -632,6 +688,16 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
     model_input.prefix_lengths = publishInt32ToCuda(prefix_lengths_host, host_holder);
+    if (ctx.has_mm_extra_input && gathered_mm_extra_input.size() > 0) {
+        model_input.mm_extra_input = std::move(gathered_mm_extra_input);
+    }
+    // mm_features_locs was over-allocated using raw stream->multimodalFeaturesLength();
+    // slice down to the actual count written (post-reuse) so Python consumers see the
+    // correct tensor size.
+    if (ctx.has_multimodal_input && model_input.mm_features_locs.defined()
+        && ctx.mm_feature_index < model_input.mm_features_locs.numel()) {
+        model_input.mm_features_locs = model_input.mm_features_locs.slice(0, 0, ctx.mm_feature_index);
+    }
     return absl::OkStatus();
 }
 

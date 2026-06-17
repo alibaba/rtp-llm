@@ -113,7 +113,7 @@ public:
         auto        sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
         vector<int> propose_tokens   = vector<int>(2, -1);
         setSpOutputTokens(sp_output_buffer, propose_tokens);
-        stream->setReturnAllProbs(true);
+        stream->setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
         stream->setSPOutputBuffer(sp_output_buffer);
         stream->generate_status_->status = StreamState::RUNNING;
         stream->setNeedReleaseResource(false);
