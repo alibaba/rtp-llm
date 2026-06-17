@@ -64,16 +64,7 @@ void GenerateStateMachine::handleWaiting() {
     if (!events_.has(StreamEvents::LoadInitiated)) {
         auto result = stream_cache_resource_->initKVBlock(reserve_step_);
         if (!result.ok()) {
-            if (result.message() == "malloc failed") {
-                const auto failed_times = stream_cache_resource_->mallocFailedTimes();
-                if (failed_times <= 10 || failed_times % 100 == 0) {
-                    RTP_LLM_LOG_WARNING(
-                        "initKVBlock failed with LACK MEM; keep stream waiting for retry, failed_times=%d",
-                        failed_times);
-                }
-                return;
-            }
-            error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "initKVBlock failed: " + result.ToString());
+            error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
             status.store(StreamState::FINISHED, std::memory_order_release);
             releaseResource();
             return;
@@ -106,16 +97,7 @@ void GenerateStateMachine::handleWaiting() {
     // cache block tables aligned with the growing sequence length.
     auto result = stream_cache_resource_->incrKVBlock(reserve_step_);
     if (!result.ok()) {
-        if (result.message() == "malloc failed") {
-            const auto failed_times = stream_cache_resource_->mallocFailedTimes();
-            if (failed_times <= 10 || failed_times % 100 == 0) {
-                RTP_LLM_LOG_WARNING("incrKVBlock failed with LACK MEM while waiting; keep stream waiting for retry, "
-                                    "failed_times=%d",
-                                    failed_times);
-            }
-            return;
-        }
-        error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "incrKVBlock failed: " + result.ToString());
+        error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
         status.store(StreamState::FINISHED, std::memory_order_release);
         releaseResource();
         return;
@@ -173,18 +155,8 @@ void GenerateStateMachine::handleRunning() {
     }
     auto result = stream_cache_resource_->incrKVBlock(reserve_step_, seq_len_override);
     if (!result.ok()) {
-        if (result.message() == "malloc failed") {
-            const auto failed_times = stream_cache_resource_->mallocFailedTimes();
-            if (failed_times <= 10 || failed_times % 100 == 0) {
-                RTP_LLM_LOG_WARNING("incrKVBlock failed with LACK MEM while running; move stream back to waiting for "
-                                    "retry, failed_times=%d",
-                                    failed_times);
-            }
-            status.store(StreamState::WAITING, std::memory_order_release);
-            return;
-        }
         // Report Error event so moveToNext() won't be called again on this stream
-        reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "incrKVBlock failed: " + result.ToString());
+        reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "incrKVBlock failed: LACK MEM");
         status.store(StreamState::FINISHED, std::memory_order_release);
         releaseResource();
     }
