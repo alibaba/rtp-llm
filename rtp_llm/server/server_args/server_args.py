@@ -52,6 +52,9 @@ from rtp_llm.server.server_args.quantization_group_args import (
     init_quantization_group_args,
 )
 from rtp_llm.server.server_args.render_group_args import init_render_group_args
+from rtp_llm.server.server_args.repetition_detection_group_args import (
+    init_repetition_detection_group_args,
+)
 from rtp_llm.server.server_args.role_group_args import init_role_group_args
 from rtp_llm.server.server_args.rpc_discovery_group_args import (
     init_rpc_discovery_group_args,
@@ -475,6 +478,9 @@ def init_all_group_args(
     )
     init_quantization_group_args(parser, py_env_configs.quantization_config)
     init_render_group_args(parser, py_env_configs.render_config)
+    init_repetition_detection_group_args(
+        parser, py_env_configs.repetition_detection_config
+    )
     init_role_group_args(parser, py_env_configs.role_config)
     init_rpc_discovery_group_args(parser)
     init_scheduler_group_args(parser, py_env_configs.runtime_config)

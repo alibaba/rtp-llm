@@ -24,6 +24,11 @@ from rtp_llm.dash_sc.inference.servicer import (
     build_think_runtime,
 )
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
+from rtp_llm.dash_sc.repetition_monitor import (
+    RequestRepetitionMonitorConfig,
+    ToolCallLoopConfig,
+    ToolCallMarkerConfig,
+)
 from rtp_llm.dash_sc.server import DashScGrpcServer
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.metrics import kmonitor
@@ -182,6 +187,45 @@ def _derive_echo_prefix_ids(generate_env_config: Any, base_tok: Any) -> List[int
         return []
     logging.info("[DashScApp] echo_prefix_ids=%s (think_start_tag=%r)", ids, tag)
     return ids
+
+
+def _tokenize_marker_text(base_tok: Any, text: str) -> List[int]:
+    tokenizer = getattr(base_tok, "tokenizer", base_tok)
+    try:
+        token_ids = tokenizer.encode(text, add_special_tokens=False)
+    except TypeError:
+        token_ids = tokenizer.encode(text)
+    return [int(token_id) for token_id in token_ids]
+
+
+def _build_repetition_monitor_config(
+    config: Any, base_tok: Any = None
+) -> RequestRepetitionMonitorConfig:
+    tool_loop_config = ToolCallLoopConfig(
+        enabled=config.tool_call_loop_monitor,
+        repeat_threshold=config.tool_call_loop_threshold,
+        max_span_tokens=config.tool_call_loop_max_span_tokens,
+    )
+    # Tool-call begin/end markers are a service-level constant: tokenize the
+    # configured strings once here. Monitoring stays off unless both are set.
+    tool_markers: tuple[ToolCallMarkerConfig, ...] = ()
+    if (
+        base_tok is not None
+        and config.tool_call_loop_begin_marker
+        and (config.tool_call_loop_end_marker)
+    ):
+        begin_ids = tuple(
+            _tokenize_marker_text(base_tok, config.tool_call_loop_begin_marker)
+        )
+        end_ids = tuple(
+            _tokenize_marker_text(base_tok, config.tool_call_loop_end_marker)
+        )
+        if begin_ids and end_ids:
+            tool_markers = (ToolCallMarkerConfig(begin_ids=begin_ids, end_ids=end_ids),)
+    return RequestRepetitionMonitorConfig(
+        tool_loop_config=tool_loop_config,
+        tool_markers=tool_markers,
+    )
 
 
 def _derive_stop_word_ids_list(
@@ -395,6 +439,7 @@ class DashScApp:
 
     def start(self, ready_pipe_writer=None) -> None:
         servicer: Any = None
+        repetition_monitor_config = RequestRepetitionMonitorConfig()
         try:
             port = self.server_config.dash_sc_grpc_server_port
             is_proxy = _is_proxy_mode_enabled()
@@ -430,6 +475,10 @@ class DashScApp:
                 )
                 extra_stop_word_ids = _derive_stop_word_ids_list(
                     model_config, self.py_env_configs, base_tok
+                )
+                repetition_monitor_config = _build_repetition_monitor_config(
+                    self.py_env_configs.repetition_detection_config,
+                    base_tok,
                 )
                 # ``think_terminate_token_id`` <= 0 means the operator turned off
                 # the in-stream "stop thinking" branch via env/args; carry that
@@ -490,6 +539,7 @@ class DashScApp:
                 log_path=get_log_path(),
                 backup_count=self.py_env_configs.profiling_debug_logging_config.log_file_backup_count,
                 rank_id=self.server_config.rank_id,
+                repetition_monitor_config=repetition_monitor_config,
             )
             logging.info("[DashScApp] gRPC server bound on port %s", port)
         except BaseException as e:

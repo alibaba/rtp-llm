@@ -109,6 +109,16 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     ASSERT_TRUE(stream->reuseCache());
 }
 
+TEST_F(GenerateStreamTest, testInitialReuseLengthMustBeLessThanSeqLength) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
+
+    stream->setInitialReuseLength(stream->seqLength() - 1);
+    ASSERT_EQ(stream->initialReuseLength(), stream->seqLength() - 1);
+
+    EXPECT_THROW(stream->setInitialReuseLength(stream->seqLength()), RTPException);
+}
+
 // clearMtpAsyncDeviceState rejects stale epochs. A worker that
 // captured epoch N must not clear state that step N+1 already published
 // under epoch N+1.

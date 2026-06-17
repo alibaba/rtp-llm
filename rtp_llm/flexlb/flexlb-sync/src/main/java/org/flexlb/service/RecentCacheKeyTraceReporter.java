@@ -62,15 +62,16 @@ public class RecentCacheKeyTraceReporter {
         }
 
         List<Long> cacheKeys = request.getBlockCacheKeys();
-        if (!hasCacheKeys(cacheKeys)) {
-            return;
-        }
-
         RecentCacheKeyWindow.Snapshot snapshot = recentCacheKeyWindow.record(cacheKeys);
-        CacheHitTheoryStats.Snapshot theorySnapshot = theoryStats.record(
+        long inputTokens = Math.max(0L, request.getSeqLen());
+        long hitTokens = theoryHitTokens(
                 snapshot.getRequestHitOccurrences(),
-                snapshot.getRequestOccurrences());
-        logTraceIfEnabled(balanceContext, request, snapshot, config);
+                inputTokens,
+                request.getCacheKeyBlockSize());
+        CacheHitTheoryStats.Snapshot theorySnapshot = theoryStats.record(
+                hitTokens,
+                inputTokens);
+        logTraceIfEnabled(balanceContext, request, snapshot, hitTokens, inputTokens, config);
         logTheoryIfEnabled(balanceContext, request, theorySnapshot, config);
 
         if (cacheMetricsReporter == null || (config != null && !config.isCacheHitMetricReportEnabled())) {
@@ -78,26 +79,27 @@ public class RecentCacheKeyTraceReporter {
         }
 
         cacheMetricsReporter.reportRecentCacheKeyHitMetrics(snapshot.getTimeWindowMs(),
-                snapshot.getRequestHitOccurrences(),
-                snapshot.getRequestOccurrences());
+                hitTokens,
+                inputTokens);
         cacheMetricsReporter.reportTheoryCacheHitMetrics(theorySnapshot);
     }
 
-    private static boolean hasCacheKeys(List<Long> cacheKeys) {
-        if (cacheKeys == null || cacheKeys.isEmpty()) {
-            return false;
+    private static long theoryHitTokens(long hitKeyCount, long inputTokens, long cacheKeyBlockSize) {
+        if (hitKeyCount <= 0L || inputTokens <= 0L || cacheKeyBlockSize <= 0L) {
+            return 0L;
         }
-        for (Long cacheKey : cacheKeys) {
-            if (cacheKey != null) {
-                return true;
-            }
+        long hitTokens = hitKeyCount * cacheKeyBlockSize;
+        if (hitTokens < 0L) {
+            return inputTokens;
         }
-        return false;
+        return Math.min(inputTokens, hitTokens);
     }
 
     private void logTraceIfEnabled(BalanceContext balanceContext,
                                    Request request,
                                    RecentCacheKeyWindow.Snapshot snapshot,
+                                   long hitTokens,
+                                   long inputTokens,
                                    FlexlbConfig config) {
         if (config == null || !config.isCacheHitTraceLogEnabled()) {
             return;
@@ -105,7 +107,7 @@ public class RecentCacheKeyTraceReporter {
         List<Long> cacheKeys = request.getBlockCacheKeys();
         Logger.info("Master cache-key trace: masterRequestId={}, requestId={}, retryCount={}, "
                         + "seqLen={}, requestTimeMs={}, requestCacheKeys={}, hitCacheKeys={}, hitRatio={}, "
-                        + "cacheKeyDigest={}, selectedServers={}, cacheKeys={}",
+                        + "hitTokens={}, inputTokens={}, tokenHitRatio={}, cacheKeyDigest={}, selectedServers={}, cacheKeys={}",
                 balanceContext.getRequestId(),
                 request.getRequestId(),
                 balanceContext.getRetryCount(),
@@ -114,6 +116,9 @@ public class RecentCacheKeyTraceReporter {
                 snapshot.getRequestOccurrences(),
                 snapshot.getRequestHitOccurrences(),
                 hitRatio(snapshot.getRequestHitOccurrences(), snapshot.getRequestOccurrences()),
+                hitTokens,
+                inputTokens,
+                hitRatio(hitTokens, inputTokens),
                 cacheKeyDigest(cacheKeys),
                 formatServerStatusList(balanceContext.getResponse()),
                 formatCacheKeys(cacheKeys));
@@ -142,41 +147,22 @@ public class RecentCacheKeyTraceReporter {
     private static String formatTheoryLogLine(BalanceContext balanceContext,
                                               Request request,
                                               CacheHitTheoryStats.Snapshot snapshot) {
-        CacheHitTheoryStats.WindowSnapshot window1m = snapshot.getWindow1m();
-        CacheHitTheoryStats.WindowSnapshot window5m = snapshot.getWindow5m();
-        CacheHitTheoryStats.WindowSnapshot window10m = snapshot.getWindow10m();
-        CacheHitTheoryStats.WindowSnapshot window15m = snapshot.getWindow15m();
         return String.format(Locale.ROOT,
                 "time=%s ts_ms=%d source=master master_request_id=%s request_id=%d seq_len=%d "
-                        + "request_hit=%d request_total=%d request_ratio=%.6f "
-                        + "all_hit=%d all_total=%d all_ratio=%.6f "
-                        + "win1m_hit=%d win1m_total=%d win1m_ratio=%.6f "
-                        + "win5m_hit=%d win5m_total=%d win5m_ratio=%.6f "
-                        + "win10m_hit=%d win10m_total=%d win10m_ratio=%.6f "
-                        + "win15m_hit=%d win15m_total=%d win15m_ratio=%.6f",
+                        + "cache_key_block_size=%d request_hit_tokens=%d request_input_tokens=%d request_ratio=%.6f "
+                        + "all_hit_tokens=%d all_input_tokens=%d all_ratio=%.6f",
                 formatTimestamp(snapshot.getNowMs()),
                 snapshot.getNowMs(),
                 balanceContext == null ? "" : String.valueOf(balanceContext.getRequestId()),
                 request == null ? 0L : request.getRequestId(),
                 request == null ? 0L : request.getSeqLen(),
+                request == null ? 0L : request.getCacheKeyBlockSize(),
                 snapshot.getRequestHitCount(),
                 snapshot.getRequestTotalCount(),
                 snapshot.getRequestHitRatio(),
                 snapshot.getAllHitCount(),
                 snapshot.getAllTotalCount(),
-                snapshot.getAllHitRatio(),
-                window1m.getHitCount(),
-                window1m.getTotalCount(),
-                window1m.getHitRatio(),
-                window5m.getHitCount(),
-                window5m.getTotalCount(),
-                window5m.getHitRatio(),
-                window10m.getHitCount(),
-                window10m.getTotalCount(),
-                window10m.getHitRatio(),
-                window15m.getHitCount(),
-                window15m.getTotalCount(),
-                window15m.getHitRatio());
+                snapshot.getAllHitRatio());
     }
 
     private static String formatTimestamp(long timestampMs) {

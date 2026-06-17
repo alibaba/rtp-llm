@@ -52,16 +52,16 @@ class CacheMetricsReporterTest {
     }
 
     @Test
-    void should_report_zero_hit_request_as_visible_data_point() {
-        reporter.reportRecentCacheKeyHitMetrics(1800000L, 0L, 3L);
+    void should_report_zero_hit_token_request_as_visible_data_point() {
+        reporter.reportRecentCacheKeyHitMetrics(1800000L, 0L, 300L);
 
         FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", "1800000");
         verify(monitor).report(CACHE_RECENT_KEY_HIT_COUNT, tags, 0L);
-        verify(monitor).report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, 3L);
+        verify(monitor).report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, 300L);
     }
 
     @Test
-    void should_skip_empty_cache_key_request() {
+    void should_skip_empty_token_request() {
         reporter.reportRecentCacheKeyHitMetrics(1800000L, 0L, 0L);
 
         FlexMetricTags tags = FlexMetricTags.of("timeWindowMs", "1800000");
@@ -77,12 +77,8 @@ class CacheMetricsReporterTest {
         reporter.reportTheoryCacheHitMetrics(snapshot);
 
         FlexMetricTags allTags = FlexMetricTags.of("window", "all", "windowMs", "0");
-        FlexMetricTags oneMinuteTags = FlexMetricTags.of("window", "1m", "windowMs", "60000");
         verify(monitor).report(CACHE_THEORY_HIT_COUNT, allTags, 2L);
         verify(monitor).report(CACHE_THEORY_TOTAL_COUNT, allTags, 4L);
         verify(monitor).report(CACHE_THEORY_HIT_RATIO, allTags, 0.5D);
-        verify(monitor).report(CACHE_THEORY_HIT_COUNT, oneMinuteTags, 2L);
-        verify(monitor).report(CACHE_THEORY_TOTAL_COUNT, oneMinuteTags, 4L);
-        verify(monitor).report(CACHE_THEORY_HIT_RATIO, oneMinuteTags, 0.5D);
     }
 }

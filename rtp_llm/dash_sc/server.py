@@ -25,6 +25,7 @@ from rtp_llm.dash_sc.access_log import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
+from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 
 
 def _resolve_dash_sc_grpc_config(dash_sc_grpc_config):
@@ -123,6 +124,7 @@ class DashScGrpcServer:
         log_path: str = "",
         backup_count: int = 0,
         rank_id: Optional[int] = None,
+        repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
     ) -> grpc.aio.Server:
         """Bind + start the aio gRPC server. Must be awaited on the owning loop.
 
@@ -188,6 +190,7 @@ class DashScGrpcServer:
             rank_id=rank_id,
             server_id=server_id_int,
             raw_mode=is_proxy,
+            repetition_monitor_config=repetition_monitor_config,
         )
         interceptors = [interceptor]
         if shutdown_manager is not None:
@@ -226,6 +229,7 @@ class DashScGrpcServer:
         log_path: str = "",
         backup_count: int = 0,
         rank_id: Optional[int] = None,
+        repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
         startup_timeout_s: float = _DEFAULT_DASH_SC_GRPC_STARTUP_TIMEOUT_S,
     ) -> None:
         """Schedule ``start()`` on ``loop`` and block until it returns or raises.
@@ -245,6 +249,7 @@ class DashScGrpcServer:
                 log_path=log_path,
                 backup_count=backup_count,
                 rank_id=rank_id,
+                repetition_monitor_config=repetition_monitor_config,
             ),
             loop,
         )

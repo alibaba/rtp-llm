@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import grpc
 
 from rtp_llm.dash_sc import access_log as access_log_module
+from rtp_llm.dash_sc import repetition_monitor as repetition_monitor_module
 from rtp_llm.dash_sc.access_log import (
     DASH_SC_GRPC_ACCESS_LOGGER_NAME,
     DASH_SC_GRPC_QUERY_LOGGER_NAME,
@@ -26,6 +27,11 @@ from rtp_llm.dash_sc.access_log import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.proxy.access_record import ForwardAccessRecord
+from rtp_llm.dash_sc.repetition_monitor import (
+    RequestRepetitionMonitorConfig,
+    ToolCallLoopResult,
+    ToolCallMarkerConfig,
+)
 from rtp_llm.metrics import AccMetrics, GaugeMetrics
 
 
@@ -1545,6 +1551,77 @@ class QueryLogTest(InterceptorTestBase):
         self.assertEqual(len(self.query_records), 1)
         # Completion log still fires.
         self.assertEqual(len(self.records), 1)
+
+
+class ToolCallLoopObservabilityTest(InterceptorTestBase):
+    """Tool-call loop wiring on the ForwardAccessRecord path.
+
+    Detection itself is covered in ``repetition_monitor_test``; here we only
+    prove the interceptor feeds the monitor the right tokens and surfaces its
+    verdict into the log record + kmonitor, and that a marker-less request stays
+    a zero-overhead no-op.
+    """
+
+    def _run_bidi(self, *frames):
+        def inner(request_iterator, context):
+            list(request_iterator)
+            for frame in frames:
+                yield frame
+
+        handler = _make_handler(
+            request_streaming=True, response_streaming=True, inner=inner
+        )
+        behavior = _wrapped_behavior(self.interceptor, handler)
+        request = _make_infer_request(input_ids=[1, 2, 3])
+        list(behavior(iter([request]), FakeContext()))
+        return self.records[0]
+
+    def test_marker_request_feeds_monitor_and_reports_loop(self) -> None:
+        markers = (ToolCallMarkerConfig(begin_ids=(7,), end_ids=(8,)),)
+        # Markers are a service-level constant configured at startup.
+        self.interceptor._repetition_monitor_config = RequestRepetitionMonitorConfig(
+            tool_markers=markers
+        )
+        captured: dict[str, Any] = {}
+
+        def _detect(input_ids, output_ids, _markers, _config):
+            captured["input_ids"] = list(input_ids)
+            captured["output_ids"] = list(output_ids)
+            return ToolCallLoopResult(
+                hit=True, repeat_count=5, current_span_tokens=6, marker_index=0
+            )
+
+        with patch.object(
+            repetition_monitor_module, "detect_tool_call_loop", side_effect=_detect
+        ):
+            rec = self._run_bidi(
+                _make_stream_response(generated_ids=[7, 9, 8]),
+                _make_stream_response(generated_ids=[7, 9, 8], finish_reason=0),
+            )
+
+        # Monitor saw the request input_ids + the concatenated generated stream.
+        self.assertEqual(captured["input_ids"], [1, 2, 3])
+        self.assertEqual(captured["output_ids"], [7, 9, 8, 7, 9, 8])
+        # Verdict surfaced into the flat log record.
+        self.assertTrue(rec["tool_call_loop_hit"])
+        self.assertTrue(rec["repetition_alert"])
+        self.assertEqual(rec["tool_call_loop_repeat_count"], 5)
+        # kmonitor fired the loop family once.
+        metrics = [c[0] for c in self.kmon_calls]
+        self.assertEqual(metrics.count(AccMetrics.TOOL_CALL_LOOP_QPS_METRIC), 1)
+        self.assertEqual(metrics.count(GaugeMetrics.TOOL_CALL_LOOP_CHECK_RT_METRIC), 1)
+
+    def test_markerless_request_is_noop(self) -> None:
+        with patch.object(repetition_monitor_module, "detect_tool_call_loop") as detect:
+            rec = self._run_bidi(
+                _make_stream_response(generated_ids=[7, 9, 8], finish_reason=0)
+            )
+
+        detect.assert_not_called()
+        self.assertFalse(rec["tool_call_loop_hit"])
+        self.assertFalse(rec["repetition_alert"])
+        metrics = [c[0] for c in self.kmon_calls]
+        self.assertNotIn(AccMetrics.TOOL_CALL_LOOP_QPS_METRIC, metrics)
 
 
 if __name__ == "__main__":

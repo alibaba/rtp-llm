@@ -117,40 +117,14 @@ bool PrefillRecentCacheKeyMetrics::init(kmonitor::MetricsGroupManager* manager) 
     REGISTER_GAUGE_MUTABLE_METRIC(retained_unique_cache_keys_metric,
                                   "rtp_llm_prefill_worker_recent_cache_key_retained_unique_cache_keys");
     REGISTER_GAUGE_MUTABLE_METRIC(time_window_ms_metric, "rtp_llm_prefill_worker_recent_cache_key_time_window_ms");
-    REGISTER_GAUGE_MUTABLE_METRIC(theory_all_hit_count_metric,
-                                  "rtp_llm_prefill_worker_theory_cache_key_all_hit_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(theory_all_hit_count_metric, "rtp_llm_prefill_worker_theory_cache_all_hit_tokens");
     REGISTER_GAUGE_MUTABLE_METRIC(theory_all_total_count_metric,
-                                  "rtp_llm_prefill_worker_theory_cache_key_all_total_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(theory_all_hit_ratio_metric,
-                                  "rtp_llm_prefill_worker_theory_cache_key_all_hit_ratio");
-    REGISTER_GAUGE_MUTABLE_METRIC(theory_1m_hit_count_metric,
-                                  "rtp_llm_prefill_worker_theory_cache_key_1m_hit_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(theory_1m_total_count_metric,
-                                  "rtp_llm_prefill_worker_theory_cache_key_1m_total_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(theory_1m_hit_ratio_metric,
-                                  "rtp_llm_prefill_worker_theory_cache_key_1m_hit_ratio");
-    REGISTER_GAUGE_MUTABLE_METRIC(theory_5m_hit_count_metric,
-                                  "rtp_llm_prefill_worker_theory_cache_key_5m_hit_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(theory_5m_total_count_metric,
-                                  "rtp_llm_prefill_worker_theory_cache_key_5m_total_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(theory_5m_hit_ratio_metric,
-                                  "rtp_llm_prefill_worker_theory_cache_key_5m_hit_ratio");
-    REGISTER_GAUGE_MUTABLE_METRIC(theory_10m_hit_count_metric,
-                                  "rtp_llm_prefill_worker_theory_cache_key_10m_hit_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(theory_10m_total_count_metric,
-                                  "rtp_llm_prefill_worker_theory_cache_key_10m_total_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(theory_10m_hit_ratio_metric,
-                                  "rtp_llm_prefill_worker_theory_cache_key_10m_hit_ratio");
-    REGISTER_GAUGE_MUTABLE_METRIC(theory_15m_hit_count_metric,
-                                  "rtp_llm_prefill_worker_theory_cache_key_15m_hit_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(theory_15m_total_count_metric,
-                                  "rtp_llm_prefill_worker_theory_cache_key_15m_total_count");
-    REGISTER_GAUGE_MUTABLE_METRIC(theory_15m_hit_ratio_metric,
-                                  "rtp_llm_prefill_worker_theory_cache_key_15m_hit_ratio");
+                                  "rtp_llm_prefill_worker_theory_cache_all_input_tokens");
+    REGISTER_GAUGE_MUTABLE_METRIC(theory_all_hit_ratio_metric, "rtp_llm_prefill_worker_theory_cache_all_hit_ratio");
     return true;
 }
 
-void PrefillRecentCacheKeyMetrics::report(const kmonitor::MetricsTags*              tags,
+void PrefillRecentCacheKeyMetrics::report(const kmonitor::MetricsTags*           tags,
                                           PrefillRecentCacheKeyMetricsCollector* collector) {
     if (collector->request_count) {
         REPORT_MUTABLE_QPS(request_count_metric);
@@ -173,26 +147,6 @@ void PrefillRecentCacheKeyMetrics::report(const kmonitor::MetricsTags*          
     REPORT_MUTABLE_METRIC(theory_all_hit_count_metric, collector->theory_all_hit_count);
     REPORT_MUTABLE_METRIC(theory_all_total_count_metric, collector->theory_all_total_count);
     REPORT_MUTABLE_METRIC(theory_all_hit_ratio_metric, collector->theory_all_hit_ratio);
-    if (collector->theory_1m_total_count > 0) {
-        REPORT_MUTABLE_METRIC(theory_1m_hit_count_metric, collector->theory_1m_hit_count);
-        REPORT_MUTABLE_METRIC(theory_1m_total_count_metric, collector->theory_1m_total_count);
-        REPORT_MUTABLE_METRIC(theory_1m_hit_ratio_metric, collector->theory_1m_hit_ratio);
-    }
-    if (collector->theory_5m_total_count > 0) {
-        REPORT_MUTABLE_METRIC(theory_5m_hit_count_metric, collector->theory_5m_hit_count);
-        REPORT_MUTABLE_METRIC(theory_5m_total_count_metric, collector->theory_5m_total_count);
-        REPORT_MUTABLE_METRIC(theory_5m_hit_ratio_metric, collector->theory_5m_hit_ratio);
-    }
-    if (collector->theory_10m_total_count > 0) {
-        REPORT_MUTABLE_METRIC(theory_10m_hit_count_metric, collector->theory_10m_hit_count);
-        REPORT_MUTABLE_METRIC(theory_10m_total_count_metric, collector->theory_10m_total_count);
-        REPORT_MUTABLE_METRIC(theory_10m_hit_ratio_metric, collector->theory_10m_hit_ratio);
-    }
-    if (collector->theory_15m_total_count > 0) {
-        REPORT_MUTABLE_METRIC(theory_15m_hit_count_metric, collector->theory_15m_hit_count);
-        REPORT_MUTABLE_METRIC(theory_15m_total_count_metric, collector->theory_15m_total_count);
-        REPORT_MUTABLE_METRIC(theory_15m_hit_ratio_metric, collector->theory_15m_hit_ratio);
-    }
 }
 
 void RpcMetrics::report(const kmonitor::MetricsTags* tags, RpcMetricsCollector* collector) {
@@ -514,12 +468,11 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
 }
 
 bool RtpLLMCacheEvictionMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_lifetime_ms_metric,
-                                  "rtp_llm_kv_cache_evicted_block_lifetime_ms");
+    REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_lifetime_ms_metric, "rtp_llm_kv_cache_evicted_block_lifetime_ms");
     return true;
 }
 
-void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*       tags,
+void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*         tags,
                                         RtpLLMCacheEvictionMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(evicted_block_lifetime_ms_metric, collector->lifetime_ms);
 }

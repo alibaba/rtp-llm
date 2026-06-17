@@ -162,12 +162,12 @@ public class CacheMetricsReporter {
     }
 
     /**
-     * Report cache-key hits for the current request against the recent cache-key pool.
+     * Report token hits for the current request against the recent cache-key pool.
      */
     public void reportRecentCacheKeyHitMetrics(long timeWindowMs,
-                                               long hitOccurrences,
-                                               long totalOccurrences) {
-        if (totalOccurrences <= 0L) {
+                                               long hitTokens,
+                                               long inputTokens) {
+        if (inputTokens <= 0L) {
             return;
         }
 
@@ -175,12 +175,12 @@ public class CacheMetricsReporter {
                 "timeWindowMs", String.valueOf(timeWindowMs)
         );
 
-        monitor.report(CACHE_RECENT_KEY_HIT_COUNT, tags, hitOccurrences);
-        monitor.report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, totalOccurrences);
+        monitor.report(CACHE_RECENT_KEY_HIT_COUNT, tags, hitTokens);
+        monitor.report(CACHE_RECENT_KEY_TOTAL_COUNT, tags, inputTokens);
     }
 
     /**
-     * Report cumulative and rolling-window theory cache-hit counters.
+     * Report cumulative theory cache-hit token counters.
      */
     public void reportTheoryCacheHitMetrics(CacheHitTheoryStats.Snapshot snapshot) {
         if (snapshot == null) {
@@ -190,21 +190,6 @@ public class CacheMetricsReporter {
                 snapshot.getAllHitCount(),
                 snapshot.getAllTotalCount(),
                 snapshot.getAllHitRatio());
-        reportTheoryWindow(snapshot.getWindow1m());
-        reportTheoryWindow(snapshot.getWindow5m());
-        reportTheoryWindow(snapshot.getWindow10m());
-        reportTheoryWindow(snapshot.getWindow15m());
-    }
-
-    private void reportTheoryWindow(CacheHitTheoryStats.WindowSnapshot window) {
-        if (window == null) {
-            return;
-        }
-        reportTheoryWindow(window.getLabel(),
-                window.getWindowMs(),
-                window.getHitCount(),
-                window.getTotalCount(),
-                window.getHitRatio());
     }
 
     private void reportTheoryWindow(String window, long windowMs, long hitCount, long totalCount, double hitRatio) {

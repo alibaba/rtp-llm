@@ -16,16 +16,16 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+from rtp_llm.server.request_headers import (
+    extract_correlation_request_id,
+    extract_trace_id,
+)
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateConfig,
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
-)
-from rtp_llm.server.request_headers import (
-    extract_correlation_request_id,
-    extract_trace_id,
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
@@ -70,11 +70,15 @@ def trans_input(input_py: GenerateInput):
 
     request_info = getattr(input_py, "request_info", None)
     if request_info is not None:
-        input_pb.request_info.frontend_ip = getattr(request_info, "frontend_ip", "") or ""
+        input_pb.request_info.frontend_ip = (
+            getattr(request_info, "frontend_ip", "") or ""
+        )
         input_pb.request_info.dash_ip = getattr(request_info, "dash_ip", "") or ""
         input_pb.request_info.trace_id = getattr(request_info, "trace_id", "") or ""
         input_pb.request_info.request_id = getattr(request_info, "request_id", "") or ""
-        input_pb.request_info.source_role = getattr(request_info, "source_role", "") or ""
+        input_pb.request_info.source_role = (
+            getattr(request_info, "source_role", "") or ""
+        )
     if not input_pb.request_info.trace_id:
         input_pb.request_info.trace_id = str(
             input_py.generate_config.trace_id
@@ -456,13 +460,14 @@ class ModelRpcClient(object):
 
         if not address_list:
             raise ValueError(f"No address found for request: {input_pb.request_id}")
+        # Select target address before entering the try block so it is always
+        # available to the error handlers below (surfaced in logs only)
+        # details to identify which backend peer dropped the connection).
+        target_address = address_list[input_py.request_id % len(address_list)]
         logging.debug(
-            f"request: [{input_pb.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
+            f"request: [{input_pb.request_id}] send to address: {target_address}"
         )
         try:
-            # Select target address
-            target_address = address_list[input_py.request_id % len(address_list)]
-            logging.debug(f"target_address: {target_address}")
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
@@ -482,7 +487,7 @@ class ModelRpcClient(object):
                 metadata["grpc-status-details-bin"]
             ):
                 logging.error(
-                    f"request: [{input_pb.request_id}] RPC failed: "
+                    f"request: [{input_pb.request_id}] RPC to [{target_address}] failed: "
                     f"{e.code()}, {e.details()}, detail error code is "
                     f"{ExceptionType.from_value(error_details.error_code)}"
                 )
@@ -491,19 +496,24 @@ class ModelRpcClient(object):
                 )
             else:
                 logging.error(
-                    f"request: [{input_pb.request_id}] RPC failed: "
+                    f"request: [{input_pb.request_id}] RPC to [{target_address}] failed: "
                     f"error code is {e.code()}, detail is {e.details()}"
                 )
+                # NOTE: keep the backend peer (target_address) in the log line above
+                # ONLY. Do NOT append it to the FtRuntimeException message, which is
+                # serialized into the client-facing error response and would leak
+                # internal cluster topology (worker ip:port) to callers.
+                details = e.details() or ""
                 if e.code() == StatusCode.DEADLINE_EXCEEDED:
-                    raise FtRuntimeException(
-                        ExceptionType.GENERATE_TIMEOUT, e.details()
-                    )
+                    raise FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, details)
                 elif e.code() == StatusCode.CANCELLED:
-                    raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
+                    raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, details)
                 elif e.code() == StatusCode.UNAVAILABLE:
-                    details = e.details() or ""
                     lower_details = details.lower()
-                    if "socket closed" in lower_details or "connection reset" in lower_details:
+                    if (
+                        "socket closed" in lower_details
+                        or "connection reset" in lower_details
+                    ):
                         exception_type = ExceptionType.CONNECTION_RESET_BY_PEER
                     elif "timed out" in lower_details or "timeout" in lower_details:
                         exception_type = ExceptionType.CONNECT_TIMEOUT
@@ -511,9 +521,11 @@ class ModelRpcClient(object):
                         exception_type = ExceptionType.CONNECT_FAILED
                     raise FtRuntimeException(exception_type, details)
                 else:
-                    raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
+                    raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, details)
         except Exception as e:
-            logging.error(f"rpc unknown error:{str(e)}")
+            logging.error(
+                f"request: [{input_pb.request_id}] rpc to [{target_address}] unknown error: {str(e)}"
+            )
             raise e
         finally:
             if response_iterator:
