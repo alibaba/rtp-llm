@@ -499,11 +499,16 @@ bool StreamCacheResource::loadCacheDone() {
     if (!load_cache_context_->done()) {
         return false;  // coordinator 后台线程尚未处理完
     }
-    // 加载完成（无论成功失败），更新 reuse lengths
-    waitLoadCacheDone(load_cache_context_);
-    if (!load_cache_context_->success()) {
+    auto load_context = load_cache_context_;
+    load_context->waitDone();
+    if (!load_context->success()) {
+        auto error = load_context->errorInfo();
+        RTP_LLM_LOG_WARNING("load cache done but not success, stream: [%s], error: %s",
+                            stream_->streamLogTag().c_str(),
+                            error.ToString().c_str());
+
         // 区分匹配失败和传输失败
-        auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
+        auto      read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_context);
         bool      should_retry = false;
         const int max_retry    = resource_context_.load_cache_retry_times;
         if (read_context && read_context->fusedMatchContext()) {
@@ -518,8 +523,6 @@ bool StreamCacheResource::loadCacheDone() {
             // 如果匹配到了块（matched_blocks > 0），说明是传输失败，需要重试，否则是匹配失败，不重试
             if (matched_blocks > 0) {
                 should_retry = true;
-                // 即使传输失败，也更新已匹配到的 reuse lengths
-                updateReuseLengthsFromContext(read_context);
                 RTP_LLM_LOG_WARNING(
                     "load cache failed (matched %zu blocks but transfer failed), retry count: %d/%d, stream: [%ld]",
                     matched_blocks,
@@ -537,23 +540,28 @@ bool StreamCacheResource::loadCacheDone() {
         if (should_retry) {
             // 传输失败：保持重试逻辑
             if (load_cache_retry_count_ >= max_retry) {
-                RTP_LLM_LOG_WARNING("load cache failed after %d retries (transfer error), stream: [%ld]",
+                RTP_LLM_LOG_WARNING("load cache failed after %d retries (transfer error), fallback without cache, "
+                                    "stream: [%ld]",
                                     load_cache_retry_count_,
                                     stream_->streamId());
-                stream_->reportEventWithoutLock(StreamEvents::Error,
-                                                ErrorCode::LOAD_CACHE_TIMEOUT,
-                                                "load cache failed after " + std::to_string(max_retry)
-                                                    + " retries (transfer error)");
-                releaseResource();
+                clearReuseLengthsForFallback();
                 return true;
             }
             load_cache_retry_count_++;
+            load_cache_once_.store(false, std::memory_order_release);
             asyncLoadCache();
             return false;  // 失败重试
         } else {
             // 匹配失败：不重试，继续执行
             return true;
         }
+    }
+    auto read_context = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_context);
+    if (!read_context) {
+        RTP_LLM_LOG_WARNING("load cache success but cast context failed, stream: [%s]",
+                            stream_->streamLogTag().c_str());
+    } else {
+        updateReuseLengthsFromContext(read_context);
     }
     load_cache_context_.reset();
     return true;
@@ -720,6 +728,15 @@ void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<Fu
     if (!applyP2PSideChannelToStream(read_context, stream_)) {
         // Not a P2P read or no side-channel payload — this is normal for non-P2P paths
     }
+}
+
+void StreamCacheResource::clearReuseLengthsForFallback() {
+    stream_->setInitialReuseLength(0);
+    stream_->setReuseLength(0);
+    stream_->setLocalReuseLength(0);
+    stream_->setMemoryReuseLength(0);
+    stream_->setRemoteReuseLength(0);
+    stream_->setMtpTokenIndex(0);
 }
 
 std::shared_ptr<AsyncContext> StreamCacheResource::storeCacheAsync(

@@ -216,7 +216,18 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {
     auto result   = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/50, rpc_call);
     ASSERT_NE(result, nullptr);
 
-    EXPECT_DEATH(result->waitDone(), "broadcast rpc timeout");
+    result->waitDone();
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+
+    const auto& responses = result->responses();
+    EXPECT_EQ(responses.size(), server_addrs.size());
+    for (size_t i = 0; i < responses.size(); ++i) {
+        const auto& ctx = result->worker_contexts_.at(i);
+        ASSERT_NE(ctx, nullptr);
+        EXPECT_EQ(ctx->status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+        EXPECT_FALSE(responses[i].has_mem_response());
+    }
 }
 
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
@@ -247,7 +258,24 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
     auto result   = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/50, rpc_call);
     ASSERT_NE(result, nullptr);
 
-    EXPECT_DEATH(result->waitDone(), "broadcast rpc timeout");
+    result->waitDone();
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+
+    const auto& responses = result->responses();
+    EXPECT_EQ(responses.size(), server_addrs.size());
+    for (size_t i = 0; i < responses.size(); ++i) {
+        const auto& ctx = result->worker_contexts_.at(i);
+        ASSERT_NE(ctx, nullptr);
+        if (i == 0) {
+            EXPECT_EQ(ctx->status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+            EXPECT_FALSE(responses[i].has_mem_response());
+        } else {
+            EXPECT_EQ(ctx->status.error_code(), grpc::StatusCode::OK);
+            EXPECT_TRUE(responses[i].has_mem_response());
+            EXPECT_TRUE(responses[i].mem_response().success());
+        }
+    }
 }
 
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialResponseRpcStatusFailed) {

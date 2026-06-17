@@ -95,6 +95,59 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
 }
 
+TEST_F(FIFOSchedulerTest, testInitKVCacheLackMemWaitsAndRetries) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 5, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 4);
+
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto make_stream = [&]() {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = torch::tensor({1, 2, 3}, torch::kInt32);
+        query->generate_config               = make_shared<GenerateConfig>();
+        return make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    };
+
+    auto stream1 = make_stream();
+    auto stream2 = make_stream();
+    ASSERT_TRUE(scheduler.enqueue(stream1).ok());
+    ASSERT_TRUE(scheduler.enqueue(stream2).ok());
+
+    auto first_schedule = scheduler.schedule();
+    ASSERT_TRUE(first_schedule.ok());
+    ASSERT_EQ(first_schedule.value().size(), 1);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+    ASSERT_FALSE(stream2->hasError());
+    ASSERT_EQ(stream2->getStatus(), StreamState::WAITING);
+    ASSERT_EQ(stream2->curBlocksNum(), 0);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
+
+    stream1->reportEvent(StreamEvents::GenerateDone);
+    auto second_schedule = scheduler.schedule();
+    ASSERT_TRUE(second_schedule.ok());
+    ASSERT_EQ(second_schedule.value().size(), 1);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_FALSE(stream2->hasError());
+    ASSERT_EQ(stream2->getStatus(), StreamState::RUNNING);
+    ASSERT_GT(stream2->curBlocksNum(), 0);
+}
+
 TEST_F(FIFOSchedulerTest, testMaxInitedKVCacheStreamsBlocksNewInit) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 10, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
@@ -189,10 +242,10 @@ TEST_F(FIFOSchedulerTest, testRejectInputWithoutSpeculativeReserveSpace) {
 }
 
 TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
-    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 3, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 6, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 5);
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
     ModelConfig model_config;
@@ -205,29 +258,48 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     ModelSpecificConfig model_specific_config;
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
-    std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
-    query->input_ids                     = torch::tensor({1, 2, 3, 4}, torch::kInt32);
-    query->generate_config               = make_shared<GenerateConfig>();
-    shared_ptr<GenerateStream> stream =
-        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
-    ASSERT_TRUE(scheduler.enqueue(stream).ok());
 
-    // Single schedule: stream calls initKVBlock and asyncLoadCache (returns false)
-    // Since no cache loading is needed, stream transitions directly to RUNNING in one schedule call
+    auto make_stream = [&]() {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+        query->generate_config               = make_shared<GenerateConfig>();
+        return make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    };
+
+    auto stream1 = make_stream();
+    auto stream2 = make_stream();
+    ASSERT_TRUE(scheduler.enqueue(stream1).ok());
+    ASSERT_TRUE(scheduler.enqueue(stream2).ok());
+
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
-    ASSERT_EQ(streams_status.value().size(), 1);
-    ASSERT_FALSE(stream->hasError());
-    ASSERT_EQ(stream->stopReason(), "");
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 0);
+    ASSERT_EQ(streams_status.value().size(), 2);
+    ASSERT_FALSE(stream1->hasError());
+    ASSERT_FALSE(stream2->hasError());
+    ASSERT_EQ(stream1->curBlocksNum(), 2);
+    ASSERT_EQ(stream2->curBlocksNum(), 2);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
 
-    stream->setSeqLength(stream->seqLength() + 1);
+    stream2->setSeqLength(7);
     auto streams_status2 = scheduler.schedule();
     ASSERT_TRUE(streams_status2.ok());
-    ASSERT_EQ(streams_status2.value().size(), 0);
-    ASSERT_TRUE(stream->hasError());
-    ASSERT_EQ(stream->stopReason(), "incrKVBlock failed: LACK MEM");
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
+    ASSERT_EQ(streams_status2.value().size(), 1);
+    ASSERT_FALSE(stream2->hasError());
+    ASSERT_EQ(stream2->getStatus(), StreamState::WAITING);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+    ASSERT_EQ(stream2->curBlocksNum(), 2);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
+
+    stream1->reportEvent(StreamEvents::GenerateDone);
+    auto streams_status3 = scheduler.schedule();
+    ASSERT_TRUE(streams_status3.ok());
+    ASSERT_EQ(streams_status3.value().size(), 1);
+    ASSERT_FALSE(stream2->hasError());
+    ASSERT_EQ(stream2->getStatus(), StreamState::RUNNING);
+    ASSERT_GT(stream2->curBlocksNum(), 2);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
 }
 
 TEST_F(FIFOSchedulerTest, testInitKVCacheRejectedByReserveBlocks) {
@@ -273,8 +345,10 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheRejectedByReserveBlocks) {
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(streams_status.value().size(), 0);
-    ASSERT_TRUE(stream->hasError());
-    ASSERT_EQ(stream->stopReason(), "LACK MEM");
+    ASSERT_FALSE(stream->hasError());
+    ASSERT_EQ(stream->getStatus(), StreamState::WAITING);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 0);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
     ASSERT_EQ(cache_manager->availableBlocksNum(), 10);
 }
@@ -792,9 +866,9 @@ TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
-        runtime_config.max_generate_batch_size                         = 100;
-        runtime_config.fifo_scheduler_config.max_batch_tokens_size     = 8192;
-        runtime_config.fifo_scheduler_config.cp_force_single_prefill   = cp_force_single_prefill;
+        runtime_config.max_generate_batch_size                       = 100;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
+        runtime_config.fifo_scheduler_config.cp_force_single_prefill = cp_force_single_prefill;
         PDSepConfig         pd_sep_config;
         ParallelismConfig   parallelism_config;
         ModelSpecificConfig model_specific_config;
