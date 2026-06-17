@@ -484,9 +484,27 @@ class TalkerInference:
                     if new_key is not None:
                         state_dict[new_key] = v
 
+        if not state_dict:
+            raise RuntimeError(
+                f"No talker weights found in {ckpt_path}. "
+                f"Checked {len(talker_files)} shard file(s). "
+                f"Expected keys with 'talker.' prefix in model.safetensors.index.json."
+            )
+
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
+
+        # Filter out known safe buffer keys (e.g., rotary embedding caches)
+        _SAFE_MISSING_BUFFERS = {"rotary_emb.inv_freq", "rotary_emb.cos_cached", "rotary_emb.sin_cached"}
+        critical_missing = [k for k in missing if not any(buf in k for buf in _SAFE_MISSING_BUFFERS)]
+        if critical_missing:
+            raise RuntimeError(
+                f"Talker model has {len(critical_missing)} missing weight(s) that will cause "
+                f"incorrect inference. Missing keys: {critical_missing[:20]}"
+                f"{'...' if len(critical_missing) > 20 else ''}. "
+                f"Checkpoint: {ckpt_path}"
+            )
         if missing:
-            logger.warning(f"Talker missing keys: {missing[:10]}{'...' if len(missing) > 10 else ''}")
+            logger.info(f"Talker loaded with {len(missing)} non-critical buffer(s) missing (rotary caches)")
         if unexpected:
             logger.warning(f"Talker unexpected keys: {unexpected[:10]}{'...' if len(unexpected) > 10 else ''}")
 
