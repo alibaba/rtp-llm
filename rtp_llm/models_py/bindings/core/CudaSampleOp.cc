@@ -539,7 +539,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // 3. Fast path for topk = 1
     auto top_k_ptr = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })
-        && !params.output_all_probs.has_value()) {
+        && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()) {
         torch::Tensor samples_t =
             transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);
         torch::Tensor probs_t         = params.logits;
@@ -562,7 +562,6 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     auto top_p_t   = params.top_p;
     auto top_p_ptr = params.top_p.data_ptr<float>();
 
-    bool          need_renorm_probs = params.output_all_probs.has_value() && !params.return_original_all_probs;
     torch::Tensor output_all_probs_t;
     if (params.output_all_probs.has_value()) {
         output_all_probs_t = params.output_all_probs.value();
@@ -570,6 +569,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     if (params.cum_log_probs.has_value() && !output_all_probs_t.defined()) {
         output_all_probs_t = torch::zeros_like(probs_t);
     }
+    bool need_renorm_probs = output_all_probs_t.defined() && !params.return_original_all_probs;
 
     std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
 
@@ -645,7 +645,9 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // 7. Update cum_log_probs
     if (params.cum_log_probs.has_value()) {
         auto cum_log_probs_t = params.cum_log_probs.value();
-        cum_log_probs_t.add_(probs_t.log());
+        auto sample_indices  = samples_t.reshape({(int64_t)batch_size, 1}).to(torch::kLong);
+        auto token_probs_t   = output_all_probs_t.gather(1, sample_indices).squeeze(1);
+        cum_log_probs_t.add_(token_probs_t.log().to(cum_log_probs_t.device()));
     }
 
     // 8. Copy results back
