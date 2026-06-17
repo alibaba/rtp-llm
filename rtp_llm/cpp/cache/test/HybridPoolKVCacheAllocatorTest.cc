@@ -175,6 +175,17 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     return config;
 }
 
+static void setExplicitBlocksForRegion(CacheConfig& config, KVCacheRegionName region, uint32_t block_num) {
+    ASSERT_EQ(config.group_policies.size(), config.group_region_names.size());
+    for (size_t gid = 0; gid < config.group_region_names.size(); ++gid) {
+        if (config.group_region_names[gid] == region) {
+            config.group_policies[gid].explicit_block_num = block_num;
+            return;
+        }
+    }
+    FAIL() << "missing region " << cacheRegionName(region);
+}
+
 static CompleteTokenIdsPtr makeCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block) {
     auto  cti        = std::make_shared<CompleteTokenIds>(batch_size, batch_size, seq_length + 64, seq_size_per_block);
     auto  input_ids  = torch::empty({(int64_t)seq_length}, torch::kInt32);
@@ -1070,7 +1081,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigUsesOnlyPagedGroupsForBlockSize
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesHcaStatePoolBlocks) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
-    config.dsv4_hca_state_pool_blocks = 50;
+    setExplicitBlocksForRegion(config, KVCacheRegionName::HCA_STATE, 50);
 
     RuntimeConfig rt;  // unused inside finalizeBlockNums today
     config.finalizeBlockNums(/*global_block_num=*/200, rt);
@@ -1087,7 +1098,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesHcaStatePoolBloc
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesGlobalBlocksWhenHcaStateBlocksDisabled) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/123);
-    config.dsv4_hca_state_pool_blocks = 0;
+    setExplicitBlocksForRegion(config, KVCacheRegionName::HCA_STATE, 0);
 
     RuntimeConfig rt;
     config.finalizeBlockNums(/*global_block_num=*/123, rt);
@@ -1100,7 +1111,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesGlobalBlocksWhen
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuHcaStatePoolIncludesFixedReserve) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
-    config.dsv4_hca_state_pool_blocks = 50;
+    setExplicitBlocksForRegion(config, KVCacheRegionName::HCA_STATE, 50);
 
     RuntimeConfig rt;
     config.finalizeBlockNums(/*global_block_num=*/200, rt);

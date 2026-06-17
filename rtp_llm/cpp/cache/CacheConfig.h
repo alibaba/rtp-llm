@@ -38,7 +38,6 @@ struct CacheConfig {
     std::vector<size_t>            group_kv_scale_stride_bytes;
     std::vector<size_t>            group_block_size_bytes;
     std::vector<uint32_t>          group_block_nums;
-    uint32_t                       dsv4_hca_state_pool_blocks              = 256;
     bool                           use_independent_block_pools              = false;
     bool                           use_typed_cache_regions                  = false;
     bool                           use_opaque_kv_cache_store                = false;
@@ -96,14 +95,10 @@ struct CacheConfig {
     }
 
     uint32_t explicitIndependentBlocks(size_t gid) const {
-        if (gid >= group_region_names.size()) {
+        if (gid >= group_policies.size()) {
             return 0;
         }
-        const auto region = group_region_names[gid];
-        if (region == KVCacheRegionName::HCA_STATE && dsv4_hca_state_pool_blocks > 0) {
-            return dsv4_hca_state_pool_blocks;
-        }
-        return 0;
+        return group_policies[gid].explicit_block_num;
     }
 
     bool usesExplicitIndependentBlocks(size_t gid) const {
@@ -405,7 +400,6 @@ struct CacheConfig {
         OUTPUT_FIELD(linear_group_num);
         OUTPUT_FIELD(swa_group_num);
         OUTPUT_FIELD(full_group_num);
-        OUTPUT_FIELD(dsv4_hca_state_pool_blocks);
         OUTPUT_FIELD(use_independent_block_pools);
         OUTPUT_FIELD(use_typed_cache_regions);
         OUTPUT_FIELD(use_opaque_kv_cache_store);

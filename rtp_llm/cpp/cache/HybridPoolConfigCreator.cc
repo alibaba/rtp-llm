@@ -324,18 +324,18 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     }
 
     RTP_LLM_CHECK_WITH_INFO(!config.cache_specs.empty(), "hybrid-pool config produced no cache specs");
-    const bool is_dsv4_config = hasDsv4KvCacheSpecs(model_config);
     setupGroupCounts(config);
-    auto specs          = config.cache_specs;
+    auto specs           = config.cache_specs;
     auto layers_by_group = config.layer_ids;
-    auto types          = config.group_types;
-    auto regions        = config.group_region_names;
-    auto tags           = config.group_tags;
+    auto types           = config.group_types;
+    auto regions         = config.group_region_names;
+    auto tags            = config.group_tags;
+    auto policies        = config.group_policies;
     config.fromGroupedSpecs(specs, layers_by_group, types, regions, tags);
-    setupIndependentPoolSizes(config, is_mtp);
-    if (is_dsv4_config) {
-        config.dsv4_hca_state_pool_blocks = kv_cache_config.dsv4_hca_state_pool_blocks;
+    if (policies.size() == config.group_policies.size()) {
+        config.group_policies = std::move(policies);
     }
+    setupIndependentPoolSizes(config, is_mtp);
     return config;
 }
 

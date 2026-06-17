@@ -163,10 +163,9 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         if (config.explicitly_sized_pool_reserve_bytes > 0) {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > config.explicitly_sized_pool_reserve_bytes,
                                     "kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "
-                                    "(DSV4_HCA_STATE_POOL_BLOCKS=%u; reduce it if needed)",
+                                    "(reduce explicitly sized pool blocks if needed)",
                                     kv_cache_mem_size / 1024 / 1024,
-                                    config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
-                                    config.dsv4_hca_state_pool_blocks);
+                                    config.explicitly_sized_pool_reserve_bytes / 1024 / 1024);
             paged_budget = kv_cache_mem_size - config.explicitly_sized_pool_reserve_bytes;
             RTP_LLM_LOG_INFO("kv cache: total budget %zu MiB, explicitly-sized pool reserve %zu MiB, paged budget %zu MiB",
                              kv_cache_mem_size / 1024 / 1024,
@@ -285,7 +284,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         if (explicit_pool_reserve > 0) {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > explicit_pool_reserve,
                                     "sp kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "
-                                    "(DSV4_HCA_STATE_POOL_BLOCKS; reduce it if needed)",
+                                    "(reduce explicitly sized pool blocks if needed)",
                                     kv_cache_mem_size / 1024 / 1024,
                                     explicit_pool_reserve / 1024 / 1024);
             paged_budget = kv_cache_mem_size - explicit_pool_reserve;

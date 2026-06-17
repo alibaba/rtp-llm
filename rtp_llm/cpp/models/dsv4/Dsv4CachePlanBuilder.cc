@@ -601,7 +601,11 @@ void Dsv4CachePlanBuilder::applyConfig(CacheConfig&             config,
         const auto group_type = pool.is_paged ? CacheGroupType::FULL : CacheGroupType::SWA;
         config.group_types.push_back(group_type);
         config.group_region_names.push_back(pool.region_name);
-        config.group_policies.push_back(cacheGroupPolicyForLegacyRegion(group_type, pool.region_name));
+        auto policy = cacheGroupPolicyForLegacyRegion(group_type, pool.region_name);
+        if (pool.region_name == KVCacheRegionName::HCA_STATE) {
+            policy.explicit_block_num = kv_cache_config.dsv4_hca_state_pool_blocks;
+        }
+        config.group_policies.push_back(policy);
         config.group_tags.push_back(pool.tag);
     }
 }
