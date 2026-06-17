@@ -50,6 +50,24 @@ class EmbeddingMergerTest {
     }
 
     @Test
+    void malformedSuccessfulSubExcludedFromUsage() {
+        SubBatchResult s0 = SubBatchResult.ok(embeddingBody(2, 3, 5), 2, 0);
+        // HTTP 200 but data length (1) != chunkSize (2): ResponseMerger treats this chunk
+        // as failed and replaces its items with placeholders, so its usage must not be summed.
+        SubBatchResult malformed = SubBatchResult.ok(embeddingBody(1, 99, 99), 2, 2);
+        ResponseMerger.MergedResponse merged =
+                ResponseMerger.merge(List.of(s0, malformed), EMBEDDINGS);
+
+        JSONArray data = merged.body().getJSONArray("data");
+        assertEquals(4, data.size());
+        assertEquals("malformed_sub_batch", data.getJSONObject(2).getString("error"));
+        assertEquals("malformed_sub_batch", data.getJSONObject(3).getString("error"));
+        JSONObject usage = merged.body().getJSONObject("usage");
+        assertEquals(3, usage.getLongValue("prompt_tokens"));
+        assertEquals(5, usage.getLongValue("total_tokens"));
+    }
+
+    @Test
     void omitsUsageWhenNoSuccessfulSubsAndEnvelopeMissingUsage() {
         JSONObject envelopeNoUsage = new JSONObject();
         envelopeNoUsage.put("data", new JSONArray());

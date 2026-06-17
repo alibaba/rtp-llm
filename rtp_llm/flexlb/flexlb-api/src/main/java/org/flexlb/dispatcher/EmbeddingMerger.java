@@ -11,8 +11,9 @@ import java.util.List;
  * any {@link BatchEndpointSpec.FailedItemFactory#EMBEDDING_NULL} placeholders at absolute
  * failed indices), this post-merger renumbers each item's {@code index} to its absolute offset
  * in the merged array and sums {@code usage.prompt_tokens} / {@code usage.total_tokens} across
- * all successful sub-bodies. Failed sub-batches contribute zero to {@code usage}; their
- * pre-assigned absolute indices are preserved.
+ * all well-formed sub-bodies — the same ones whose items {@link ResponseMerger} stitched into the
+ * array. Failed or malformed sub-batches contribute zero to {@code usage}; their absolute indices
+ * are preserved as failure placeholders.
  */
 public final class EmbeddingMerger implements BatchEndpointSpec.PostMerger {
 
@@ -32,7 +33,7 @@ public final class EmbeddingMerger implements BatchEndpointSpec.PostMerger {
         long promptTokens = 0;
         long totalTokens = 0;
         for (SubBatchResult s : subs) {
-            if (!s.success() || s.body() == null) {
+            if (!ResponseMerger.wellFormed(s, "data")) {
                 continue;
             }
             JSONObject usage = s.body().getJSONObject("usage");

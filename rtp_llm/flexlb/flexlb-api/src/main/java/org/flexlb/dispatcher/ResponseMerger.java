@@ -126,11 +126,15 @@ public final class ResponseMerger {
         return s.success() ? "malformed_sub_batch" : s.reason();
     }
 
-    private static boolean wellFormed(SubBatchResult s, BatchEndpointSpec spec) {
+    static boolean wellFormed(SubBatchResult s, BatchEndpointSpec spec) {
+        return wellFormed(s, spec.getResponseArrayField());
+    }
+
+    static boolean wellFormed(SubBatchResult s, String responseArrayField) {
         if (!s.success() || s.body() == null) {
             return false;
         }
-        JSONArray arr = s.body().getJSONArray(spec.getResponseArrayField());
+        JSONArray arr = s.body().getJSONArray(responseArrayField);
         return arr != null && arr.size() == s.chunkSize();
     }
 
