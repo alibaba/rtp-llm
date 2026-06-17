@@ -122,8 +122,6 @@ public:
         return false;
     }
 
-    virtual void wakeupOutputQueue() {}
-
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
     void         specUpdate(const StreamSpecUpdateInfo& update_info);

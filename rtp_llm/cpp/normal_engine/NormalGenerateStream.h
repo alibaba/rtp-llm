@@ -36,9 +36,6 @@ public:
     bool                         hasOutput() override;
     ErrorResult<GenerateOutputs> nextOutput() override;
     void                         updateOutput(const StreamUpdateInfo& update_info) override;
-    void                         wakeupOutputQueue() override {
-        generate_outputs_queue_.wakeup();
-    }
 
 private:
     GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);

@@ -505,7 +505,8 @@ void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
                                             const std::string&      error_msg) {
     generate_status_->reportEvent(event, error_code, error_msg);
     if (event == StreamEvents::Error) {
-        wakeupOutputQueue();
+        // 唤醒在 cv_ 上等待输出的消费者（nextOutput），使其立即发现错误并返回，而非空等超时。
+        cv_->notify_all();
     }
 }
 
@@ -550,7 +551,6 @@ StreamState GenerateStream::moveToNext() {
     // notify one thread waiting for stream completion
     if (new_status == StreamState::FINISHED) {
         cv_->notify_one();
-        wakeupOutputQueue();
     }
     return state;
 }
