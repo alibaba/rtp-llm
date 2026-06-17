@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
+#include "rtp_llm/cpp/models/dsv4/Dsv4CachePlanBuilder.h"
 
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -502,7 +502,7 @@ KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool) {
 
 }  // namespace
 
-void DSV4CacheConfigHelper::applyConfig(CacheConfig&             config,
+void Dsv4CachePlanBuilder::applyConfig(CacheConfig&             config,
                                         const ModelConfig&       model_config,
                                         const ParallelismConfig& parallelism_config,
                                         const KVCacheConfig&     kv_cache_config,

@@ -6,7 +6,7 @@
 
 namespace rtp_llm {
 
-class DSV4CacheConfigHelper {
+class Dsv4CachePlanBuilder {
 public:
     static void applyConfig(CacheConfig&             config,
                             const ModelConfig&       model_config,

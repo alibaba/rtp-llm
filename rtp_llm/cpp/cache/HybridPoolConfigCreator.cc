@@ -4,9 +4,9 @@
 #include <numeric>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
+#include "rtp_llm/cpp/models/dsv4/Dsv4CachePlanBuilder.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -315,7 +315,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
                             "layer_compress_ratios fallback is disabled");
 
     if (hasDsv4KvCacheSpecs(model_config)) {
-        DSV4CacheConfigHelper::applyConfig(
+        Dsv4CachePlanBuilder::applyConfig(
             config, model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     } else {
         RTP_LLM_CHECK_WITH_INFO(model_config.hybrid_attention_config.enable_hybrid_attention,

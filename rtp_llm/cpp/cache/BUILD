@@ -219,7 +219,6 @@ cc_library(
     name = "cache_core",
     srcs = [
         "CacheConfigCreator.cc",
-        "DSV4CacheConfigHelper.cc",
         "HybridConfigCreator.cc",
         "HybridPoolConfigCreator.cc",
         "KVCacheHashUtil.cc",
@@ -228,7 +227,6 @@ cc_library(
     ],
     hdrs = [
         "CacheConfigCreator.h",
-        "DSV4CacheConfigHelper.h",
         "HybridConfigCreator.h",
         "HybridPoolConfigCreator.h",
         "KVCacheHashUtil.h",
@@ -249,6 +247,7 @@ cc_library(
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
+        "//rtp_llm/cpp/models:dsv4_cache_plan_builder",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "@com_google_absl//absl/status",

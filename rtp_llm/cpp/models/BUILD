@@ -119,6 +119,24 @@ cc_library(
 )
 
 cc_library(
+    name = "dsv4_cache_plan_builder",
+    srcs = [
+        "dsv4/Dsv4CachePlanBuilder.cc",
+    ],
+    hdrs = [
+        "dsv4/Dsv4CachePlanBuilder.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "models",
     hdrs = glob([
         "*.h",
