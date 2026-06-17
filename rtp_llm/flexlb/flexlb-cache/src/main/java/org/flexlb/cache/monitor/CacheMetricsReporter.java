@@ -179,11 +179,7 @@ public class CacheMetricsReporter {
         );
         monitor.report(CACHE_NEW_CATCH_HIT_RATIO, bestTags, cacheBestHitRatio);
 
-        FlexMetricTags diffTags = FlexMetricTags.of(
-                "role", roleType.name(),
-                "selectedEngineIp", selectedEngineIp,
-                "cacheBestEngineIp", cacheBestEngineIp
-        );
+        FlexMetricTags diffTags = FlexMetricTags.of("role", roleType.name());
         monitor.report(CACHE_SELECTED_BEST_HIT_RATIO_DIFF, diffTags, cacheBestHitRatio - selectedHitRatio);
     }
 
