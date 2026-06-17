@@ -40,14 +40,7 @@ class StreamChannel:
         try:
             self._queue.put_nowait(_SENTINEL)
         except queue.Full:
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self._queue.put_nowait(_SENTINEL)
-            except queue.Full:
-                pass
+            pass  # __iter__ checks self.closed after draining
 
     def close(self) -> None:
         with self._lock:

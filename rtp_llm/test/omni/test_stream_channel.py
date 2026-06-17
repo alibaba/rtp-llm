@@ -94,5 +94,33 @@ class TestStreamChannel(unittest.TestCase):
         self.assertEqual(ch.pending, 1)
 
 
+    def test_close_on_full_queue_does_not_block(self):
+        ch = StreamChannel(maxsize=2)
+        ch.emit("a")
+        ch.emit("b")
+        # Queue is now full; close must not block
+        completed = [False]
+
+        def closer():
+            ch.close()
+            completed[0] = True
+
+        t = threading.Thread(target=closer)
+        t.start()
+        t.join(timeout=2.0)
+        self.assertTrue(completed[0], "close() blocked on a full queue")
+        self.assertTrue(ch.closed)
+
+    def test_close_on_full_queue_preserves_all_chunks(self):
+        ch = StreamChannel(maxsize=3)
+        ch.emit("a")
+        ch.emit("b")
+        ch.emit("c")
+        # Queue is full; close should not displace any enqueued data
+        ch.close()
+        chunks = list(ch)
+        self.assertEqual(chunks, ["a", "b", "c"])
+
+
 if __name__ == "__main__":
     unittest.main()
