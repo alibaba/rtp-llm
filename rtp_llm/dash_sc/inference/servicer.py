@@ -351,6 +351,7 @@ def _make_generate_input(
     invocation_metadata: Optional[Any],
     request_headers: Optional[dict[str, str]] = None,
     allow_pd_route_retry: bool = True,
+    client_streaming: Optional[bool] = None,
 ) -> GenerateInput:
     headers = dict(request_headers or {})
     headers.update(_headers_from_invocation_metadata(invocation_metadata))
@@ -369,6 +370,7 @@ def _make_generate_input(
             source_role="dash",
         ),
         allow_pd_route_retry=allow_pd_route_retry,
+        client_streaming=client_streaming,
     )
 
 
@@ -698,12 +700,14 @@ async def iter_real_model_stream_infer(
         )
         cumulative_sent_ids: list[int] = []
         generate_think_token_num: Optional[int] = None
+        emitted_upstream_response = False
         generate_input = _make_generate_input(
             request_id=rtp_llm_request_id,
             input_ids_list=input_ids_list,
             generate_config=generate_config,
             invocation_metadata=invocation_metadata,
             request_headers=other.request_headers,
+            client_streaming=True,
         )
         is_streaming = bool(getattr(generate_config, "is_streaming", True))
         logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)
@@ -720,7 +724,6 @@ async def iter_real_model_stream_infer(
         # ``phase2_triggered`` blocks the second entry. Tracking only one
         # boolean keeps the guard cheap on the hot path.
         phase2_triggered = False
-        emitted_upstream_response = False
         stream = await backend_visitor.enqueue(generate_input)
         async for go in stream:
             chunk_idx += 1
@@ -939,48 +942,78 @@ async def iter_real_model_stream_infer(
                     metric_err,
                 )
         if phase2_needed:
-            phase2_config = _clone_generate_config(generate_config)
-            phase2_config.in_think_mode = False
-            if hasattr(phase2_config, "thinking"):
-                phase2_config.thinking = False
-            if sampling.max_new_tokens_from_completion_alias:
-                phase2_config.max_new_tokens = (
-                    _phase2_max_new_tokens_for_completion_alias(
-                        sampling, generate_think_token_num
-                    )
-                )
-            # trace_id stays equal across phases so the dashscope log search
-            # aggregates both halves under a single trace; phase distinction is
-            # carried by request_log_tag (phase=2) and by the ``-2`` suffix on
-            # the response infer.id (client-facing).
-            phase2_config.trace_id = trace_str
             phase2_input_ids = _phase2_input_ids_for_deepseek_v4(
                 input_ids_list, matched_think_bos_ids, list(runtime.empty_tokens)
             )
-            phase2_request_id = (
-                phase2_request_id_factory()
-                if phase2_request_id_factory is not None
-                else rtp_llm_request_id
-            )
-            phase2_tag = stream_log_tag(
-                request_id_numeric=phase2_request_id, trace_id=trace_str, phase=2
-            )
-            phase2_generate_input = _make_generate_input(
-                request_id=phase2_request_id,
-                input_ids_list=phase2_input_ids,
-                generate_config=phase2_config,
-                invocation_metadata=invocation_metadata,
-                request_headers=other.request_headers,
-                allow_pd_route_retry=True,
-            )
-            logging.debug(
-                "[DashScGrpc] [%s] phase-2 generate_input: %s",
-                phase2_tag,
-                phase2_generate_input,
-            )
-            phase2_stream = await backend_visitor.enqueue(phase2_generate_input)
 
-            async def _iter_phase2_responses() -> (
+            async def _start_phase2_attempt() -> tuple[
+                Any,
+                str,
+                GenerateInput,
+                AsyncIterator[Any],
+            ]:
+                phase2_config = _clone_generate_config(generate_config)
+                phase2_config.in_think_mode = False
+                if hasattr(phase2_config, "thinking"):
+                    phase2_config.thinking = False
+                if sampling.max_new_tokens_from_completion_alias:
+                    phase2_config.max_new_tokens = (
+                        _phase2_max_new_tokens_for_completion_alias(
+                            sampling, generate_think_token_num
+                        )
+                    )
+                # trace_id stays equal across phases so the dashscope log search
+                # aggregates both halves under a single trace; phase distinction is
+                # carried by request_log_tag (phase=2) and by the ``-2`` suffix on
+                # the response infer.id (client-facing).
+                phase2_config.trace_id = trace_str
+                phase2_request_id = (
+                    phase2_request_id_factory()
+                    if phase2_request_id_factory is not None
+                    else rtp_llm_request_id
+                )
+                phase2_tag = stream_log_tag(
+                    request_id_numeric=phase2_request_id,
+                    trace_id=trace_str,
+                    phase=2,
+                )
+                phase2_generate_input = _make_generate_input(
+                    request_id=phase2_request_id,
+                    input_ids_list=phase2_input_ids,
+                    generate_config=phase2_config,
+                    invocation_metadata=invocation_metadata,
+                    request_headers=other.request_headers,
+                    allow_pd_route_retry=True,
+                    client_streaming=True,
+                )
+                logging.debug(
+                    "[DashScGrpc] [%s] phase-2 generate_input: %s",
+                    phase2_tag,
+                    phase2_generate_input,
+                )
+                phase2_stream = await backend_visitor.enqueue(phase2_generate_input)
+                return phase2_config, phase2_tag, phase2_generate_input, phase2_stream
+
+            def _phase2_retry_limit(phase2_generate_input: GenerateInput) -> int:
+                limit_fn = getattr(backend_visitor, "_pd_route_retry_limit", None)
+                if callable(limit_fn):
+                    return int(limit_fn(phase2_generate_input))
+                return max(
+                    0,
+                    int(getattr(backend_visitor, "pd_route_retry_on_unavailable", 0)),
+                )
+
+            def _is_retryable_phase2_error(e: BaseException) -> bool:
+                checker = getattr(backend_visitor, "_is_retryable_route_rpc_error", None)
+                if callable(checker):
+                    return bool(checker(e))
+                return False
+
+            async def _iter_phase2_responses(
+                phase2_config: Any,
+                phase2_tag: str,
+                phase2_stream: AsyncIterator[Any],
+            ) -> (
                 AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]
             ):
                 phase2_cumulative_sent_ids: list[int] = []
@@ -1140,31 +1173,82 @@ async def iter_real_model_stream_infer(
                 finally:
                     await _close_async_stream_if_possible(phase2_stream, phase2_tag)
 
-            phase2_responses = _iter_phase2_responses()
-            phase2_responses_started = False
+            async def _new_phase2_responses() -> tuple[
+                AsyncIterator[predict_v2_pb2.ModelStreamInferResponse],
+                GenerateInput,
+            ]:
+                (
+                    phase2_config,
+                    phase2_tag,
+                    phase2_generate_input,
+                    phase2_stream,
+                ) = await _start_phase2_attempt()
+                return (
+                    _iter_phase2_responses(
+                        phase2_config, phase2_tag, phase2_stream
+                    ),
+                    phase2_generate_input,
+                )
+
+            async def _prefetch_phase2_response_with_retry() -> tuple[
+                Optional[predict_v2_pb2.ModelStreamInferResponse],
+                AsyncIterator[predict_v2_pb2.ModelStreamInferResponse],
+            ]:
+                attempt = 0
+                while True:
+                    phase2_responses, phase2_generate_input = (
+                        await _new_phase2_responses()
+                    )
+                    try:
+                        prefetched = await anext(phase2_responses)
+                        return prefetched, phase2_responses
+                    except StopAsyncIteration:
+                        return None, phase2_responses
+                    except BaseException as e:
+                        await phase2_responses.aclose()
+                        retry_limit = _phase2_retry_limit(phase2_generate_input)
+                        if (
+                            attempt >= retry_limit
+                            or not _is_retryable_phase2_error(e)
+                        ):
+                            raise
+                        attempt += 1
+                        logging.warning(
+                            "[DashScGrpc] [%s] retrying phase-2 before first "
+                            "client-visible response after retryable error, "
+                            "attempt=%s/%s, error=%s",
+                            tag,
+                            attempt,
+                            retry_limit,
+                            e,
+                        )
+                        await asyncio.sleep(min(0.2, 0.05 * attempt))
+
+            phase2_responses: Optional[
+                AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]
+            ] = None
             try:
                 prefetched_phase2_response = None
-                if phase1_pending_responses and not emitted_upstream_response:
-                    try:
-                        phase2_responses_started = True
-                        prefetched_phase2_response = await anext(phase2_responses)
-                    except StopAsyncIteration:
-                        prefetched_phase2_response = None
+                if not emitted_upstream_response:
+                    (
+                        prefetched_phase2_response,
+                        phase2_responses,
+                    ) = await _prefetch_phase2_response_with_retry()
+                else:
+                    phase2_responses, _ = await _new_phase2_responses()
                 for response in phase1_pending_responses:
                     emitted_upstream_response = True
                     yield response
                 if prefetched_phase2_response is not None:
                     emitted_upstream_response = True
                     yield prefetched_phase2_response
-                phase2_responses_started = True
-                async for response in phase2_responses:
-                    emitted_upstream_response = True
-                    yield response
+                if phase2_responses is not None:
+                    async for response in phase2_responses:
+                        emitted_upstream_response = True
+                        yield response
             finally:
-                if phase2_responses_started:
+                if phase2_responses is not None:
                     await phase2_responses.aclose()
-                else:
-                    await _close_async_stream_if_possible(phase2_stream, phase2_tag)
     except FtRuntimeException as e:
         if e.exception_type == ExceptionType.GENERATE_TIMEOUT:
             logging.warning("[DashScGrpc] [%s] generate timeout: %s", tag, e)

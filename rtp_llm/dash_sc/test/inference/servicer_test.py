@@ -50,9 +50,12 @@ def _unpack_int32_le(raw: bytes) -> list[int]:
 class _FakeAsyncStream:
     """Simple async iterator over a fixed chunk list, with optional error injection."""
 
-    def __init__(self, chunks, raise_after: int | None = None):
+    def __init__(
+        self, chunks, raise_after: int | None = None, error: BaseException | None = None
+    ):
         self._chunks = list(chunks)
         self._raise_after = raise_after
+        self._error = error or RuntimeError("backend down")
         self._emitted = 0
         self.aclose_called = False
 
@@ -61,7 +64,7 @@ class _FakeAsyncStream:
 
     async def __anext__(self):
         if self._raise_after is not None and self._emitted >= self._raise_after:
-            raise RuntimeError("backend down")
+            raise self._error
         if self._emitted >= len(self._chunks):
             raise StopAsyncIteration
         item = self._chunks[self._emitted]
@@ -105,8 +108,15 @@ class _MultiStreamVisitor:
 
 
 class _RecordingAsyncStream(_FakeAsyncStream):
-    def __init__(self, name: str, chunks, events: list[str]):
-        super().__init__(chunks)
+    def __init__(
+        self,
+        name: str,
+        chunks,
+        events: list[str],
+        raise_after: int | None = None,
+        error: BaseException | None = None,
+    ):
+        super().__init__(chunks, raise_after=raise_after, error=error)
         self._name = name
         self._events = events
 
@@ -1134,6 +1144,100 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(visitor.generate_inputs[1].allow_pd_route_retry)
         rest = [chunk async for chunk in stream]
         self.assertEqual([_gen_ids(chunk) for chunk in rest], [[128822, 271], [20]])
+
+    async def test_terminate_phase2_retries_buffered_chunk_before_client_visible(
+        self,
+    ) -> None:
+        """A retryable phase-2 failure after backend-internal chunks but before
+        any DashSc-visible response should retry the whole phase-2 attempt and
+        discard the failed attempt's buffered tokens."""
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1, 99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2_buffered_then_fail = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([77], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2_retry_success = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        events: list[str] = []
+        visitor = _RecordingMultiStreamVisitor(
+            [
+                _RecordingAsyncStream("phase1", [phase1], events),
+                _RecordingAsyncStream(
+                    "phase2_fail",
+                    [phase2_buffered_then_fail],
+                    events,
+                    raise_after=1,
+                    error=FtRuntimeException(
+                        ExceptionType.CONNECT_FAILED, "stale phase2 route"
+                    ),
+                ),
+                _RecordingAsyncStream("phase2_retry", [phase2_retry_success], events),
+            ],
+            events,
+        )
+        visitor._pd_route_retry_limit = lambda _input: 1
+        visitor._is_retryable_route_rpc_error = lambda _e: True
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        phase2_request_ids = iter([200, 201])
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: next(phase2_request_ids),
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 3)
+        self.assertEqual(
+            events,
+            [
+                "enqueue:1",
+                "next:phase1",
+                "close:phase1",
+                "enqueue:2",
+                "next:phase2_fail",
+                "next:phase2_fail",
+                "close:phase2_fail",
+                "enqueue:3",
+                "next:phase2_retry",
+                "next:phase2_retry",
+                "close:phase2_retry",
+            ],
+        )
+        self.assertEqual(
+            [_gen_ids(chunk) for chunk in chunks],
+            [[10], [128822, 271], [20]],
+        )
 
     async def test_prefetched_phase2_closed_when_client_cancels_phase1_yield(
         self,
