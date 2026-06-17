@@ -1,5 +1,6 @@
 import functools
 import importlib.util
+import logging
 import os
 from contextlib import contextmanager
 from typing import Any, Callable, Generator, List, NoReturn, Optional, Tuple
@@ -58,6 +59,7 @@ _m_grouped_bf16_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_masked_impl: Callable[..., Any] | None = None
 _bf16_contiguous_has_compiled_dims: bool | None = None
 _bf16_masked_has_compiled_dims: bool | None = None
+_bf16_masked_has_max_block_n: bool | None = None
 
 
 _deep_gemm_available: bool | None = None
@@ -605,7 +607,21 @@ def m_grouped_bf16_gemm_nt_contiguous(
         _m_grouped_bf16_gemm_nt_contiguous_impl(a, b, output, m_indices)
 
 
-_bf16_masked_max_block_n = int(os.environ.get("RTP_MOE_MAX_BLOCK_N", "0"))
+_bf16_masked_max_block_n: int | None = None
+
+
+def _get_bf16_masked_max_block_n() -> int:
+    global _bf16_masked_max_block_n
+    if _bf16_masked_max_block_n is None:
+        raw = os.environ.get("RTP_MOE_MAX_BLOCK_N", "0")
+        try:
+            _bf16_masked_max_block_n = int(raw)
+        except ValueError:
+            logging.warning(
+                f"RTP_MOE_MAX_BLOCK_N={raw!r} is not a valid integer, using 0"
+            )
+            _bf16_masked_max_block_n = 0
+    return _bf16_masked_max_block_n
 
 
 def m_grouped_bf16_gemm_nt_masked(
@@ -626,18 +642,19 @@ def m_grouped_bf16_gemm_nt_masked(
         expected_m (int): Expected number of valid tokens in each group.
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
-    global _m_grouped_bf16_gemm_nt_masked_impl, _bf16_masked_has_compiled_dims
+    global _m_grouped_bf16_gemm_nt_masked_impl, _bf16_masked_has_compiled_dims, _bf16_masked_has_max_block_n
     _ensure_initialized()
     if _m_grouped_bf16_gemm_nt_masked_impl is None:
         return _missing_deep_gemm()
-    if _bf16_masked_has_compiled_dims is None:
+    if _bf16_masked_has_compiled_dims is None or _bf16_masked_has_max_block_n is None:
         import inspect
-        _bf16_masked_has_compiled_dims = "compiled_dims" in inspect.signature(
-            _m_grouped_bf16_gemm_nt_masked_impl
-        ).parameters
+        params = inspect.signature(_m_grouped_bf16_gemm_nt_masked_impl).parameters
+        _bf16_masked_has_compiled_dims = "compiled_dims" in params
+        _bf16_masked_has_max_block_n = "max_block_n" in params
     kwargs = {}
-    if _bf16_masked_max_block_n > 0:
-        kwargs["max_block_n"] = _bf16_masked_max_block_n
+    max_block_n = _get_bf16_masked_max_block_n()
+    if max_block_n > 0 and _bf16_masked_has_max_block_n:
+        kwargs["max_block_n"] = max_block_n
     if _bf16_masked_has_compiled_dims:
         _m_grouped_bf16_gemm_nt_masked_impl(a, b, output, masked_m, expected_m, compiled_dims, **kwargs)
     else:
