@@ -36,7 +36,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return false;
         }
 
-        long queueSize = workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size();
+        long queueSize = effectiveQueueSize(workerStatus);
         return workerStatus.updateResourceAvailabilityWithHysteresis(queueSize, queueSizeThreshold, hysteresisBiasPercent);
     }
 
@@ -68,7 +68,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return 0.0;
         }
 
-        long queueSize = workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size();
+        long queueSize = effectiveQueueSize(workerStatus);
 
         if (queueSize <= 0) {
             return 0.0;
@@ -77,5 +77,10 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         } else {
             return (queueSize * 100.0) / maxQueueSize;
         }
+    }
+
+    private long effectiveQueueSize(WorkerStatus workerStatus) {
+        long waitingTaskCount = workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size();
+        return Math.max(waitingTaskCount, workerStatus.getLocalPendingTaskCount());
     }
 }

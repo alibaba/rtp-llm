@@ -132,7 +132,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 Map<String, TaskInfo> waitingTaskInfo = newWorkerStatus.getWaitingTaskInfo();
                 Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
                 Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
+                workerStatus.setWaitingTaskList(waitingTaskInfo);
+                workerStatus.setRunningTaskList(runningTaskInfo);
                 workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo);
+                workerStatus.updateRunningQueueTime();
 
                 // Report success even when version is not updated
                 engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
