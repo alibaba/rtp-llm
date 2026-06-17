@@ -1192,10 +1192,13 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("close:phase2", events)
         self.assertEqual(events.count("close:phase2"), 1)
 
-    async def test_terminate_phase2_retry_disabled_after_prior_yield(self) -> None:
-        """If phase-1 already emitted a visible chunk, phase-2 cannot safely
-        retry on another route because the upstream stream is no longer
-        replayable."""
+    async def test_terminate_phase2_retry_allowed_after_prior_phase1_yield(self) -> None:
+        """Phase-2 can still retry after phase-1 emitted visible chunks.
+
+        BackendRPCServerVisitor disables retry after the phase-2 stream itself
+        yields output, so enabling route retry here only replays phase-2 before
+        any phase-2 token becomes client-visible.
+        """
         req = self._minimal_request()
         phase1_a = GenerateOutputs(
             generate_outputs=[
@@ -1246,7 +1249,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(visitor.enqueue_called, 2)
-        self.assertFalse(visitor.generate_inputs[1].allow_pd_route_retry)
+        self.assertTrue(visitor.generate_inputs[1].allow_pd_route_retry)
         self.assertEqual(
             [_gen_ids(chunk) for chunk in chunks],
             [[5], [10], [128822, 271], [20]],

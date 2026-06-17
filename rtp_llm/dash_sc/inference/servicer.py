@@ -971,7 +971,7 @@ async def iter_real_model_stream_infer(
                 generate_config=phase2_config,
                 invocation_metadata=invocation_metadata,
                 request_headers=other.request_headers,
-                allow_pd_route_retry=not emitted_upstream_response,
+                allow_pd_route_retry=True,
             )
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",
