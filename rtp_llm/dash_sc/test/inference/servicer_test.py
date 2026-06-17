@@ -1296,12 +1296,14 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("close:phase2", events)
         self.assertEqual(events.count("close:phase2"), 1)
 
-    async def test_terminate_phase2_retry_allowed_after_prior_phase1_yield(self) -> None:
-        """Phase-2 can still retry after phase-1 emitted visible chunks.
+    async def test_terminate_phase2_route_retry_disabled_after_prior_phase1_yield(
+        self,
+    ) -> None:
+        """Phase-2 route retry is disabled after any client-visible chunk.
 
-        BackendRPCServerVisitor disables retry after the phase-2 stream itself
-        yields output, so enabling route retry here only replays phase-2 before
-        any phase-2 token becomes client-visible.
+        Once phase-1 has emitted a visible chunk, replaying phase-2 can no
+        longer recreate the complete client-visible stream, even if phase-2 has
+        not yielded backend output yet.
         """
         req = self._minimal_request()
         phase1_a = GenerateOutputs(
@@ -1353,11 +1355,87 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(visitor.enqueue_called, 2)
-        self.assertTrue(visitor.generate_inputs[1].allow_pd_route_retry)
+        self.assertFalse(visitor.generate_inputs[1].allow_pd_route_retry)
         self.assertEqual(
             [_gen_ids(chunk) for chunk in chunks],
             [[5], [10], [128822, 271], [20]],
         )
+
+    async def test_terminate_phase2_error_after_prior_phase1_yield_not_retried(
+        self,
+    ) -> None:
+        """A retryable phase-2 error is surfaced after phase-1 became visible.
+
+        The DashSc-level retry only applies before the first client-visible
+        response. Once phase-1 has yielded, the phase-2 GenerateInput also
+        disables BackendRPCServerVisitor route retry so no hidden replay can
+        occur below the servicer.
+        """
+        req = self._minimal_request()
+        phase1_a = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([5], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase1_b = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        events: list[str] = []
+        visitor = _RecordingMultiStreamVisitor(
+            [
+                _RecordingAsyncStream("phase1", [phase1_a, phase1_b], events),
+                _RecordingAsyncStream(
+                    "phase2_fail",
+                    [],
+                    events,
+                    raise_after=0,
+                    error=FtRuntimeException(
+                        ExceptionType.CONNECT_FAILED, "stale phase2 route"
+                    ),
+                ),
+                _RecordingAsyncStream("phase2_retry", [], events),
+            ],
+            events,
+        )
+        visitor._pd_route_retry_limit = lambda _input: 1
+        visitor._is_retryable_route_rpc_error = lambda _e: True
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200 + visitor.enqueue_called,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 2)
+        self.assertFalse(visitor.generate_inputs[1].allow_pd_route_retry)
+        self.assertEqual(
+            [_gen_ids(chunk) for chunk in chunks[:-1]],
+            [[5], [10], [128822, 271]],
+        )
+        self.assertIn("stale phase2 route", chunks[-1].error_message)
+        self.assertNotIn("enqueue:3", events)
+        self.assertNotIn("next:phase2_retry", events)
 
     async def test_unstarted_phase2_closed_when_client_cancels_buffered_phase1(
         self,

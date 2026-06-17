@@ -14,6 +14,7 @@ coroutine automatically.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -983,7 +984,7 @@ async def iter_real_model_stream_infer(
                     generate_config=phase2_config,
                     invocation_metadata=invocation_metadata,
                     request_headers=other.request_headers,
-                    allow_pd_route_retry=True,
+                    allow_pd_route_retry=not emitted_upstream_response,
                     client_streaming=True,
                 )
                 logging.debug(
