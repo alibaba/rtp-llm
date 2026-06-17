@@ -389,11 +389,13 @@ TEST_F(HybridPoolKVCacheAllocatorTest, SwaDefaultRegionGroupPoolUsesGpuBacking) 
     EXPECT_EQ(allocator->groupBlockPools()[1]->where(), MemoryType::MEMORY_GPU);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, GetBlockPoolReturnsFirstGroupPool) {
+TEST_F(HybridPoolKVCacheAllocatorTest, GetBlockPoolReturnsNullptrInHybridPoolMode) {
+    // HybridPoolKVCacheAllocator owns one BlockPool per group and does not
+    // expose a single canonical block_pool_; getBlockPool() must return nullptr.
     auto config    = makeTinyMultiPoolHybridConfig();
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
-    EXPECT_EQ(allocator->getBlockPool(), allocator->groupBlockPools()[0]);
+    EXPECT_EQ(allocator->getBlockPool(), nullptr);
 }
 
 // ---------------------------------------------------------------------------
