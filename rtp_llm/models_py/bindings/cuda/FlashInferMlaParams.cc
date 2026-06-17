@@ -679,6 +679,8 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
     paged_kv_last_page_len_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
     decode_page_indptr_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size + 1});
     page_indice_d.unsafeGetTensorImpl()->set_sizes_contiguous({page_num_upper});
+    batch_indice_d.unsafeGetTensorImpl()->set_sizes_contiguous({input_token_num_upper});
+    positions_d.unsafeGetTensorImpl()->set_sizes_contiguous({input_token_num_upper});
 
     decode_page_indptr     = decode_page_indptr_d;
     page_indice            = page_indice_d;
