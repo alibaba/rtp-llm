@@ -104,6 +104,33 @@ class TestTalker2Code2WavFunction(unittest.TestCase):
         self.assertEqual(result.token_ids, [100, 200, 300])
         self.assertNotIn(8294, result.token_ids)
 
+    def test_process_filters_all_codec_special_tokens(self):
+        """All codec special tokens (pad=8292, bos=8293, eos=8294, etc.) must be filtered."""
+        from rtp_llm.omni.models.qwen2_5_omni.stage_processors import (
+            talker2code2wav,
+            CODEC_SPECIAL_TOKEN_MIN,
+        )
+
+        self.assertEqual(CODEC_SPECIAL_TOKEN_MIN, 8292)
+
+        source = StageOutput(
+            token_ids=[100, 8292, 200, 8293, 300, 8294, 400, 8296, 500],
+            metadata={"stage": "talker"},
+        )
+        result = talker2code2wav(source)
+        self.assertEqual(result.token_ids, [100, 200, 300, 400, 500])
+        self.assertEqual(result.metadata["codec_token_count"], 5)
+        for special in (8292, 8293, 8294, 8296):
+            self.assertNotIn(special, result.token_ids)
+
+    def test_process_empty_token_ids(self):
+        from rtp_llm.omni.models.qwen2_5_omni.stage_processors import talker2code2wav
+
+        source = StageOutput(token_ids=None, metadata={})
+        result = talker2code2wav(source)
+        self.assertEqual(result.token_ids, [])
+        self.assertEqual(result.metadata["codec_token_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
