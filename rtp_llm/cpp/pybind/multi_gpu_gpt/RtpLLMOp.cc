@@ -441,9 +441,13 @@ RtpLLMOp::generate(torch::Tensor input_ids,
         while (true) {
             auto output_result = stream->nextOutput();
             if (!output_result.ok()) {
-                RTP_LLM_LOG_WARNING("Generate stream error: %s",
-                                    output_result.status().ToString().c_str());
-                break;
+                if (output_result.status().code() == ErrorCode::FINISHED) {
+                    break;  // Normal stream completion, no more data
+                }
+                // Real error — propagate to Python caller via pybind11
+                throw std::runtime_error(
+                    std::string("Generate stream error: ") +
+                    output_result.status().ToString());
             }
             auto& outputs = output_result.value();
             for (auto& output : outputs.generate_outputs) {
