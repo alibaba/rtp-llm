@@ -68,11 +68,8 @@ inline GraphStream toGraphStream(const torch::Stream& stream) {
 
 inline void setDevice(int rank) {
 #if USING_ROCM
-    auto result = hipSetDevice(rank);
-    RTP_LLM_CHECK_WITH_INFO(result == hipSuccess, "hipSetDevice(%d) failed: %s", rank, hipGetErrorString(result));
     at::hip::set_device(rank);
 #else
-    check_cuda_value(cudaSetDevice(rank));
     at::cuda::set_device(rank);
 #endif
 }
