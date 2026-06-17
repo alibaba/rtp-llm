@@ -130,7 +130,7 @@ public class MetricConstant {
     public static final String CACHE_HIT_RATIO = "app.cache.hit.ratio";
 
     /**
-     * Cache-best worker hit ratio for each routing decision.
+     * Cache-best hit ratio for each routing decision.
      */
     public static final String CACHE_NEW_CATCH_HIT_RATIO = "app.cache.new_catch_hit_ratio";
 

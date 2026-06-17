@@ -76,9 +76,9 @@ class CacheMetricsReporterTest {
 
     @Test
     void should_report_cache_best_hit_ratio_and_selected_gap() {
-        reporter.reportCacheSelectionMetrics(RoleType.PREFILL, "10.0.0.1", "10.0.0.2", 0.25D, 0.75D);
+        reporter.reportCacheSelectionMetrics(RoleType.PREFILL, 0.25D, 0.75D);
 
-        FlexMetricTags bestTags = FlexMetricTags.of("role", "PREFILL", "engineIp", "10.0.0.2");
+        FlexMetricTags bestTags = FlexMetricTags.of("role", "PREFILL");
         FlexMetricTags diffTags = FlexMetricTags.of("role", "PREFILL");
         verify(monitor).report(CACHE_NEW_CATCH_HIT_RATIO, bestTags, 0.75D);
         verify(monitor).report(CACHE_SELECTED_BEST_HIT_RATIO_DIFF, diffTags, 0.5D);

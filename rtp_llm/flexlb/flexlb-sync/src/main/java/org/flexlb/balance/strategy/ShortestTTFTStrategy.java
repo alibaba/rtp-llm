@@ -280,8 +280,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         double cacheBestHitRate = calculateHitRate(cacheBestWorker.hitCacheTokens(), seqLen);
         engineHealthReporter.reportCacheSelectionMetrics(
                 roleType,
-                selectedWorker.worker().getIp(),
-                cacheBestWorker.worker().getIp(),
                 selectedHitRate,
                 cacheBestHitRate);
     }

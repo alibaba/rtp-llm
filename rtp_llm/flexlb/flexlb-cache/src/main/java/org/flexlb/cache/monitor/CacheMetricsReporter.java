@@ -166,17 +166,12 @@ public class CacheMetricsReporter {
     }
 
     /**
-     * Report cache-best hit ratio and the hit-ratio gap against the selected worker.
+     * Report the cache-best hit ratio and the hit-ratio gap against the selected worker.
      */
     public void reportCacheSelectionMetrics(RoleType roleType,
-                                            String selectedEngineIp,
-                                            String cacheBestEngineIp,
                                             double selectedHitRatio,
                                             double cacheBestHitRatio) {
-        FlexMetricTags bestTags = FlexMetricTags.of(
-                "role", roleType.name(),
-                "engineIp", cacheBestEngineIp
-        );
+        FlexMetricTags bestTags = FlexMetricTags.of("role", roleType.name());
         monitor.report(CACHE_NEW_CATCH_HIT_RATIO, bestTags, cacheBestHitRatio);
 
         FlexMetricTags diffTags = FlexMetricTags.of("role", roleType.name());

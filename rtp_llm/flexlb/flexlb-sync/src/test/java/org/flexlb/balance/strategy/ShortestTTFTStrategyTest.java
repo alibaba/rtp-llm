@@ -194,8 +194,6 @@ class ShortestTTFTStrategyTest {
         Mockito.verify(engineHealthReporter).reportCacheHitMetrics(RoleType.PREFILL, selectedWorker.getIp(), 0L, 0.0D);
         Mockito.verify(engineHealthReporter).reportCacheSelectionMetrics(
                 RoleType.PREFILL,
-                selectedWorker.getIp(),
-                cacheBestWorker.getIp(),
                 0.0D,
                 0.5D);
     }

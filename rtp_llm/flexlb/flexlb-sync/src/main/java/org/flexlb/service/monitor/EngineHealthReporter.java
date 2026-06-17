@@ -374,14 +374,10 @@ public class EngineHealthReporter {
     }
 
     public void reportCacheSelectionMetrics(RoleType roleType,
-                                            String selectedEngineIp,
-                                            String cacheBestEngineIp,
                                             double selectedHitRatio,
                                             double cacheBestHitRatio) {
         cacheMetricsReporter.reportCacheSelectionMetrics(
                 roleType,
-                selectedEngineIp,
-                cacheBestEngineIp,
                 selectedHitRatio,
                 cacheBestHitRatio);
     }
