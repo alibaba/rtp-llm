@@ -557,16 +557,6 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     params.logits.copy_(probs_t);
 
     // 5. Prepare sampling parameters
-    constexpr bool deterministic = true;
-    auto           seed_h        = torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt64));
-    auto           offset_h      = torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt64));
-    for (int64_t i = 0; i < (int64_t)batch_size; i++) {
-        auto [sd, ofst] = get_seed_and_offset(
-            batch_size * 32, params.generator[i].defined() ? std::make_optional(params.generator[i]) : std::nullopt);
-        seed_h.data_ptr<int64_t>()[i]   = static_cast<int64_t>(sd);
-        offset_h.data_ptr<int64_t>()[i] = static_cast<int64_t>(ofst);
-    }
-
     auto samples_t = transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).flatten();
     auto top_k_t   = params.top_k;
     auto top_p_t   = params.top_p;
@@ -627,10 +617,21 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                 }
             }
         }
-        // Re-normalize and sample
+        // Re-normalize and sample each row with its request-local generator.
         auto row_sums  = filtered_probs.sum(-1, /*keepdim=*/true);
         filtered_probs = filtered_probs / row_sums.clamp_min(1e-10);
-        auto selected  = torch::multinomial(filtered_probs, 1, /*replacement=*/false).squeeze(-1);
+
+        std::vector<torch::Tensor> selected_rows;
+        selected_rows.reserve(batch_size);
+        for (int64_t b = 0; b < (int64_t)batch_size; ++b) {
+            auto row = filtered_probs[b];
+            if (params.generator[b].defined()) {
+                selected_rows.emplace_back(torch::multinomial(row, 1, /*replacement=*/false, params.generator[b]));
+            } else {
+                selected_rows.emplace_back(torch::multinomial(row, 1, /*replacement=*/false));
+            }
+        }
+        auto selected = torch::cat(selected_rows, 0);
         samples_t.copy_(selected);
         if (need_renorm_probs) {
             output_all_probs_t.copy_(filtered_probs);
