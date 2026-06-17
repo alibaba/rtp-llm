@@ -336,17 +336,24 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
     RTP_LLM_PROFILE_SCOPE("py_model.buildBertEmbeddingInputs");
     DevicePerfWrapper              wrapper(enable_device_perf_, "py model buildBertEmbeddingInputs");
     torch_ext::BertEmbeddingInputs bert_embedding_inputs;
+    auto                           to_cuda_async = [this](const torch::Tensor& tensor) -> torch::Tensor {
+        if (!tensor.defined() || tensor.device().is_cuda()) {
+            return tensor;
+        }
+        buffer_holder_.hold_host(tensor);
+        return tensor.to(torch::kCUDA, /*non_blocking=*/true);
+    };
 
     // Convert combo_position_ids from Buffer to torch::Tensor
     if (inputs.combo_position_ids.defined() && inputs.combo_position_ids.numel() > 0) {
-        bert_embedding_inputs.combo_position_ids = inputs.combo_position_ids.cuda();
+        bert_embedding_inputs.combo_position_ids = to_cuda_async(inputs.combo_position_ids);
     }
 
     // Convert combo_tokens_type_ids from Buffer to torch::Tensor
     if (inputs.combo_tokens_type_ids.defined() && inputs.combo_tokens_type_ids.numel() > 0) {
         {
             DevicePerfWrapper wrapper(enable_device_perf_, "py model combo_tokens.cuda()");
-            bert_embedding_inputs.combo_tokens_type_ids = inputs.combo_tokens_type_ids.cuda();
+            bert_embedding_inputs.combo_tokens_type_ids = to_cuda_async(inputs.combo_tokens_type_ids);
         }
     }
 
@@ -560,11 +567,18 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 torch_ext::PyEmbeddingInputs PyWrappedModel::buildPyEmbeddingInputs(const GptModelInputs& inputs) {
     DevicePerfWrapper            wrapper(enable_device_perf_, "py model buildPyEmbeddingInputs");
     torch_ext::PyEmbeddingInputs embedding_inputs;
-    if (inputs.combo_tokens_type_ids.defined()) {
-        embedding_inputs.combo_tokens_type_ids = inputs.combo_tokens_type_ids.cuda();
+    auto                         to_cuda_async = [this](const torch::Tensor& tensor) -> torch::Tensor {
+        if (!tensor.defined() || tensor.device().is_cuda()) {
+            return tensor;
+        }
+        buffer_holder_.hold_host(tensor);
+        return tensor.to(torch::kCUDA, /*non_blocking=*/true);
+    };
+    if (inputs.combo_tokens_type_ids.defined() && inputs.combo_tokens_type_ids.numel() > 0) {
+        embedding_inputs.combo_tokens_type_ids = to_cuda_async(inputs.combo_tokens_type_ids);
     }
-    if (inputs.text_tokens_mask.defined()) {
-        embedding_inputs.text_tokens_mask = inputs.text_tokens_mask.cuda();
+    if (inputs.text_tokens_mask.defined() && inputs.text_tokens_mask.numel() > 0) {
+        embedding_inputs.text_tokens_mask = to_cuda_async(inputs.text_tokens_mask);
     }
     return embedding_inputs;
 }
