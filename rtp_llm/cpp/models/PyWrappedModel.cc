@@ -711,9 +711,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
         }
 
-        // Direct async H2D for combo_tokens (the only tensorHoldHostAndToCuda call site that
-        // used to live on this code path). Bypass d2d_copies_ so forward() does not depend on
-        // the fused-copy queue — that queue is now an internal detail of prepareAttentionInputs.
+        // Direct async H2D for model-bound token tensors. Bypass d2d_copies_ so forward()
+        // does not depend on the fused-copy queue — that queue is now an internal detail
+        // of prepareAttentionInputs.
         // Host buffer is already kept alive by holdInputsHostBuffers() above.
         torch::Tensor token_ids;
         if (inputs.combo_tokens.device().is_cuda()) {
@@ -726,13 +726,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
 
-        torch::Tensor combo_position_ids = inputs.combo_position_ids.defined() ?
-                                               tensorHoldHostAndToCuda(inputs.combo_position_ids) :
-                                               torch::empty({0});
-
         auto embedding_inputs      = buildPyEmbeddingInputs(inputs);
         auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
-        auto attention_inputs      = buildPyAttentionInputs(inputs);
         auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
 
         if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
@@ -743,9 +738,19 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             attention_inputs_.context_parallel_info = cp_params;
         }
 
+        torch::Tensor combo_position_ids;
+        if (!inputs.combo_position_ids.defined()) {
+            combo_position_ids = torch::empty({0});
+        } else if (inputs.combo_position_ids.device().is_cuda()) {
+            combo_position_ids = inputs.combo_position_ids;
+        } else {
+            buffer_holder_.hold_host(inputs.combo_position_ids);
+            combo_position_ids = inputs.combo_position_ids.to(torch::kCUDA, /*non_blocking=*/true);
+        }
+
         // No fusedCopy here: prepareAttentionInputs (above) already flushed its queue,
-        // and combo_tokens above used direct .to(non_blocking=true). Both are async on
-        // the current stream and will be ordered correctly with the kernels below.
+        // and token_ids/combo_position_ids use direct .to(non_blocking=true). All are
+        // async on the current stream and ordered correctly with the kernels below.
 
         auto           py_model_inputs = PyModelInputs({token_ids,
                                                         input_hiddens,
