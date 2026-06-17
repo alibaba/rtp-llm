@@ -1,6 +1,7 @@
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, final
+from typing import Any, Callable, Dict, List, Optional, Union, final
 
 import torch
 
@@ -14,6 +15,15 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
     ExecutorType,
     RouterType,
 )
+
+
+def _moe_chunk_tokens() -> int:
+    if os.environ.get("DSV4_MOE_CHUNK_PREFILL", "0") != "1":
+        return 0
+    try:
+        return max(0, int(os.environ.get("DSV4_MOE_CHUNK_TOKENS", "8192")))
+    except ValueError:
+        return 0
 
 
 @dataclass
@@ -172,21 +182,19 @@ class FusedMoe(torch.nn.Module):
     def topk_ids_dtype(self) -> torch.dtype:
         return self.fused_experts.topk_ids_dtype
 
-    def forward(
+    def _forward_once(
         self,
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        inplace: bool = False,
-        activation: str = "silu",
-        expert_map: Optional[torch.Tensor] = None,
-        a1_scale: Optional[torch.Tensor] = None,
-        a2_scale: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        extra_expert_args: Optional[Dict[str, Any]] = None,
-        extra_finalize_args: Optional[Dict[str, Any]] = None,
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+        extra_expert_args: Optional[Dict[str, Any]],
+        extra_finalize_args: Optional[Dict[str, Any]],
     ) -> torch.Tensor:
-
         a1 = hidden_states
 
         expert_payload = self.router.prepare(
@@ -224,20 +232,18 @@ class FusedMoe(torch.nn.Module):
                 extra_expert_args=extra_expert_args,
             )
 
-        # pass a1.shape to finalize for shape check
-        if extra_finalize_args is None:
-            extra_finalize_args = {"a1_shape": a1.shape}
-        else:
-            extra_finalize_args.update({"a1_shape": a1.shape})
-
-        extra_finalize_args.update({"original_num_tokens": hidden_states.size(0)})
+        finalize_args: Dict[str, Any] = (
+            {} if extra_finalize_args is None else dict(extra_finalize_args)
+        )
+        finalize_args.update({"a1_shape": a1.shape})
+        finalize_args.update({"original_num_tokens": hidden_states.size(0)})
 
         output = self.router.finalize(
             combine_payload,
             expert_payload.expert_topk_weights,
             expert_payload.expert_topk_ids,
             apply_router_weight_on_input,
-            extra_finalize_args,
+            finalize_args,
         )
 
         assert (
@@ -245,3 +251,63 @@ class FusedMoe(torch.nn.Module):
         ), f"output batch size mismatch: expected {hidden_states.shape}, got {output.shape}"
 
         return output
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        inplace: bool = False,
+        activation: str = "silu",
+        expert_map: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        extra_expert_args: Optional[Dict[str, Any]] = None,
+        extra_finalize_args: Optional[Dict[str, Any]] = None,
+    ) -> torch.Tensor:
+
+        chunk_tokens = _moe_chunk_tokens()
+        if (
+            chunk_tokens > 0
+            and hidden_states.size(0) > chunk_tokens
+            and self.router.router_type() == RouterType.DEEPEP_NORMAL
+            and self.fused_experts.executor_type() == ExecutorType.DEEPGEMM_CONTINUOUS
+            and a1_scale is None
+            and a2_scale is None
+            and not (hidden_states.is_cuda and torch.cuda.is_current_stream_capturing())
+        ):
+            output = torch.empty_like(hidden_states)
+            for token_start in range(0, hidden_states.size(0), chunk_tokens):
+                token_end = min(token_start + chunk_tokens, hidden_states.size(0))
+                with torch.profiler.record_function(
+                    "fused_moe.chunked_deepep_deepgemm"
+                ):
+                    chunk_output = self._forward_once(
+                        hidden_states[token_start:token_end],
+                        topk_weights[token_start:token_end],
+                        topk_ids[token_start:token_end],
+                        activation,
+                        expert_map,
+                        None,
+                        None,
+                        apply_router_weight_on_input,
+                        extra_expert_args,
+                        extra_finalize_args,
+                    )
+                    output[token_start:token_end].copy_(chunk_output)
+                    del chunk_output
+            return output
+
+        return self._forward_once(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            activation,
+            expert_map,
+            a1_scale,
+            a2_scale,
+            apply_router_weight_on_input,
+            extra_expert_args,
+            extra_finalize_args,
+        )
