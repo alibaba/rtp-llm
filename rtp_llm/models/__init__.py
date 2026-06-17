@@ -60,11 +60,13 @@ from .glm4_moe import Glm4Moe
 from .jina_bert.jina_bert import JinaBert
 from .megatron_bert import MegatronBert
 from .minimax_m3 import MiniMaxM3
+from .minimax_m3_vl import MiniMaxM3_VL
 from .mixtral import Mixtral
 from .qwen3_next.qwen3_next import Qwen3Next
 from .qwen3_next.qwen3_next_mtp import Qwen3NextMTP
 from .qwen_v2_moe import Qwen2Moe
 from .qwen_v3_moe import Qwen3Moe
+
 
 def load_all_models() -> None:
     ensure_all_models_registered()

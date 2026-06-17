@@ -305,6 +305,75 @@ class MMEmbeddingRes:
         return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, extra_input_shape={[d.shape for d in self.extra_input] if self.extra_input is not None else []})"
 
 
+class MMEmbeddingCacheEntry:
+    """Three-state cache entry for async embedding computation.
+
+    States: PENDING (event not set) -> COMPLETE (result set) or ERROR (error set).
+    """
+
+    def __init__(self):
+        self._event = threading.Event()
+        self.result: Optional[Any] = None
+        self.error: Optional[Exception] = None
+
+    def wait(self, timeout: Optional[float] = None) -> Any:
+        if not self._event.wait(timeout=timeout):
+            raise TimeoutError("Waiting for embedding result timed out")
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    def complete(self, result: Any) -> None:
+        self.result = result
+        self._event.set()
+
+    def fail(self, error: Exception) -> None:
+        self.error = error
+        self._event.set()
+
+    @property
+    def is_done(self) -> bool:
+        return self._event.is_set()
+
+
+class MMEmbeddingAsyncCache:
+    """Cache with three states per key: miss, in_progress, complete."""
+
+    def __init__(self, max_size: int = 10):
+        self._lock = threading.Lock()
+        self._entries: dict = {}
+        self._max_size = max_size
+
+    def try_acquire(self, cache_key: str) -> Tuple[str, MMEmbeddingCacheEntry]:
+        with self._lock:
+            if cache_key in self._entries:
+                entry = self._entries[cache_key]
+                if entry.is_done:
+                    return ("complete", entry)
+                else:
+                    return ("in_progress", entry)
+            else:
+                entry = MMEmbeddingCacheEntry()
+                self._entries[cache_key] = entry
+                self._evict_if_needed()
+                return ("miss", entry)
+
+    def _evict_if_needed(self) -> None:
+        if len(self._entries) <= self._max_size:
+            return
+        done_keys = [k for k, v in self._entries.items() if v.is_done]
+        for k in done_keys[: len(self._entries) - self._max_size]:
+            del self._entries[k]
+
+    def remove(self, cache_key: str) -> None:
+        with self._lock:
+            self._entries.pop(cache_key, None)
+
+    def resize(self, max_size: int) -> None:
+        with self._lock:
+            self._max_size = max_size
+
+
 class MMWorkItem:
     """Represents a work item for processing multimodal inputs."""
 
@@ -412,6 +481,10 @@ class MMProcessEngine:
 
         vit_emb_cache_.resize_cache(self.vit_config.mm_cache_item_num)
         url_data_cache_.resize_cache(self.vit_config.url_cache_item_num)
+
+        self._async_cache = MMEmbeddingAsyncCache(
+            max_size=self.vit_config.mm_cache_item_num
+        )
 
     def inc_query_num(self) -> None:
         """Increment the query counter."""
@@ -580,6 +653,73 @@ class MMProcessEngine:
             # extra input is a flat 1-D tensor per image
             tensor_res.extend(self._maybe_tensor_to_list(tensor, dim=1))
         return emb_res, pos_res, tensor_res
+
+    def async_submit(self, mm_inputs: List[MultimodalInput]) -> List[str]:
+        """Asynchronously submit multimodal URLs for embedding computation.
+
+        Each input is submitted independently, keyed by its own cache_key.
+        Returns the list of cache keys. Inputs already in-progress or complete
+        are not recomputed.
+        """
+        cache_keys = []
+        for mm_input in mm_inputs:
+            if mm_input.url == "":
+                raise ValueError("async_submit requires non-empty url for each input")
+
+            cache_key = mm_input.cache_key()
+            cache_keys.append(cache_key)
+
+            state, entry = self._async_cache.try_acquire(cache_key)
+            if state == "miss":
+                single_input = [mm_input]
+                thread = threading.Thread(
+                    target=self._async_compute,
+                    args=(single_input, cache_key, entry),
+                    daemon=True,
+                )
+                thread.start()
+
+        return cache_keys
+
+    def get_embedding_result(
+        self, mm_inputs: List[MultimodalInput], timeout_ms: int = 120000
+    ) -> List[MMEmbeddingRes]:
+        """Retrieve embedding results, blocking until ready if necessary.
+
+        Each input is looked up independently by its cache_key.
+        If a key was never submitted, computes synchronously.
+        If in-progress, blocks until the computing thread finishes.
+        If complete, returns immediately.
+        """
+        results = []
+        for mm_input in mm_inputs:
+            if mm_input.url == "":
+                raise ValueError(
+                    "get_embedding_result requires non-empty url for each input"
+                )
+
+            cache_key = mm_input.cache_key()
+            state, entry = self._async_cache.try_acquire(cache_key)
+
+            if state == "miss":
+                self._async_compute([mm_input], cache_key, entry)
+
+            results.append(entry.wait(timeout=timeout_ms / 1000.0))
+
+        return results
+
+    def _async_compute(
+        self,
+        mm_inputs: List[MultimodalInput],
+        cache_key: str,
+        entry: MMEmbeddingCacheEntry,
+    ) -> None:
+        try:
+            result = self.mm_embedding_impl(mm_inputs)
+            entry.complete(result)
+        except Exception as e:
+            entry.fail(e)
+            self._async_cache.remove(cache_key)
 
     def stop(self) -> None:
         """Shutdown the preprocessing executor."""

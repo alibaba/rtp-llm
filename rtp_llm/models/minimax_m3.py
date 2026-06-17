@@ -271,8 +271,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                         W.q_ln_gamma,
                         [
                             CkptWeightInfo(
-                                self.prefix
-                                + "model.layers.{i}.self_attn.q_norm.weight"
+                                self.prefix + "model.layers.{i}.self_attn.q_norm.weight"
                             )
                         ],
                         add_unit_offset,
@@ -282,8 +281,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                         W.k_ln_gamma,
                         [
                             CkptWeightInfo(
-                                self.prefix
-                                + "model.layers.{i}.self_attn.k_norm.weight"
+                                self.prefix + "model.layers.{i}.self_attn.k_norm.weight"
                             )
                         ],
                         add_unit_offset,
@@ -313,8 +311,14 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
         # attention (numerically equivalent to MSA for kv_len <= topk*block);
         # when on, sparse layers load the index weights and route to MSAAttention.
         import os as _os
-        _load_msa_index = _os.environ.get("M3_LOAD_MSA_INDEX", "false").strip().lower() in (
-            "1", "true", "yes", "on",
+
+        _load_msa_index = _os.environ.get(
+            "M3_LOAD_MSA_INDEX", "false"
+        ).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
         )
         if _load_msa_index and layer_id in sparse_set:
             idx_prefix = self.prefix + "model.layers.{i}.self_attn."
@@ -449,11 +453,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                     sub_weights=[
                         MoeAtomicWeight(
                             W.moe_gate,
-                            [
-                                CkptWeightInfo(
-                                    moe_root + "gate.weight", identity
-                                )
-                            ],
+                            [CkptWeightInfo(moe_root + "gate.weight", identity)],
                             transpose,
                             config=moe_config,
                         ),
@@ -461,8 +461,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                             W.moe_w2,
                             [
                                 CkptWeightInfo(
-                                    moe_root
-                                    + "experts.{expert_id}.w2.weight",
+                                    moe_root + "experts.{expert_id}.w2.weight",
                                     identity,
                                 )
                             ],
@@ -477,15 +476,13 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                             W.moe_w1,
                             [
                                 CkptWeightInfo(
-                                    moe_root
-                                    + "experts.{expert_id}.w3.weight",
+                                    moe_root + "experts.{expert_id}.w3.weight",
                                     identity,
                                 )
                             ]
                             + [
                                 CkptWeightInfo(
-                                    moe_root
-                                    + "experts.{expert_id}.w1.weight",
+                                    moe_root + "experts.{expert_id}.w1.weight",
                                     identity,
                                 )
                             ],
@@ -519,11 +516,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                     sub_weights=[
                         FfnAtomicWeight(
                             W.ffn_w1,
-                            [
-                                CkptWeightInfo(
-                                    mlp_root + "gate_proj.weight", identity
-                                )
-                            ],
+                            [CkptWeightInfo(mlp_root + "gate_proj.weight", identity)],
                             functools.partial(
                                 transpose_pad,
                                 align_size=align_size,
@@ -533,11 +526,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                         ),
                         FfnAtomicWeight(
                             W.ffn_w2,
-                            [
-                                CkptWeightInfo(
-                                    mlp_root + "down_proj.weight", identity
-                                )
-                            ],
+                            [CkptWeightInfo(mlp_root + "down_proj.weight", identity)],
                             functools.partial(
                                 transpose_pad,
                                 align_size=align_size,
@@ -547,11 +536,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                         ),
                         FfnAtomicWeight(
                             W.ffn_w3,
-                            [
-                                CkptWeightInfo(
-                                    mlp_root + "up_proj.weight", identity
-                                )
-                            ],
+                            [CkptWeightInfo(mlp_root + "up_proj.weight", identity)],
                             functools.partial(
                                 transpose_pad,
                                 align_size=align_size,
@@ -572,20 +557,12 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
         weights = [
             AtomicWeight(
                 W.embedding,
-                [
-                    CkptWeightInfo(
-                        self.prefix + "model.embed_tokens.weight", identity
-                    )
-                ],
+                [CkptWeightInfo(self.prefix + "model.embed_tokens.weight", identity)],
                 identity,
             ),
             AtomicWeight(
                 W.final_ln_gamma,
-                [
-                    CkptWeightInfo(
-                        self.prefix + "model.norm.weight", identity
-                    )
-                ],
+                [CkptWeightInfo(self.prefix + "model.norm.weight", identity)],
                 add_unit_offset,
             ),
             AtomicWeight(
@@ -720,12 +697,10 @@ class MiniMaxM3(DeepSeekV2):
         if moe_layer_freq is None:
             config.moe_layer_index = list(range(num_layers))
         else:
-            assert len(moe_layer_freq) == num_layers, (
-                f"moe_layer_freq length {len(moe_layer_freq)} != num_layers {num_layers}"
-            )
-            config.moe_layer_index = [
-                i for i, v in enumerate(moe_layer_freq) if v != 0
-            ]
+            assert (
+                len(moe_layer_freq) == num_layers
+            ), f"moe_layer_freq length {len(moe_layer_freq)} != num_layers {num_layers}"
+            config.moe_layer_index = [i for i, v in enumerate(moe_layer_freq) if v != 0]
 
         config.expert_num = int(text_cfg.get("num_local_experts", 0))
         config.moe_k = int(text_cfg.get("num_experts_per_tok", 0))
@@ -756,9 +731,7 @@ class MiniMaxM3(DeepSeekV2):
         config.scoring_func = 1 if scoring == "sigmoid" else 0
         # In sglang TopK uses renormalize=True for M3 — match that.
         config.has_moe_norm = True
-        config.routed_scaling_factor = float(
-            text_cfg.get("routed_scaling_factor", 1.0)
-        )
+        config.routed_scaling_factor = float(text_cfg.get("routed_scaling_factor", 1.0))
         # M3 does NOT use grouped TopK; leave n_group/topk_group at the
         # default 1 so SelectTopk + GroupTopK (correction_bias path) take the
         # ungrouped branch.
@@ -838,9 +811,10 @@ class MiniMaxM3(DeepSeekV2):
 #   - HF arch via auto-mapping : MiniMaxM3SparseForConditionalGeneration
 #                                (the VL container; we load only the LLM)
 # ----------------------------------------------------------------------
+# arch routing moved to MiniMaxM3_VL in minimax_m3_vl.py — text-only ckpts require explicit --model_type=minimax_m3
 register_model(
     "minimax_m3",
     MiniMaxM3,
-    ["MiniMaxM3SparseForConditionalGeneration"],
+    [],
     [],
 )

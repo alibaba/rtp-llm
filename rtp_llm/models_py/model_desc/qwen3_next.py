@@ -517,6 +517,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         weights: Dict[str, torch.Tensor],
         layernorm_eps: float,
         quant_config: Optional[object] = None,
+        hw_kernel_config=None,
     ):
         super().__init__()
         self.linear_attn_config = linear_attn_config
@@ -824,6 +825,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         moe_config,
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
+        hw_kernel_config=None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -837,6 +839,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 weights,
                 config.layernorm_eps,
                 config.quant_config,
+                hw_kernel_config,
             )
         else:
             attn_configs = config.getAttentionConfigs(
@@ -1054,6 +1057,7 @@ class Qwen3NextModel(GptModelBase):
                     moe_config,
                     max_generate_batch_size,
                     enable_cuda_graph,
+                    py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]

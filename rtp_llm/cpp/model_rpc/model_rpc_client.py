@@ -13,9 +13,13 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateInputPB,
     GenerateOutputsPB,
     MultimodalInputPB,
+    MultimodalInputsPB,
     RoleAddrPB,
 )
-from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+    MultimodalRpcServiceStub,
+    RpcServiceStub,
+)
 from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
     extract_trace_id,
@@ -504,6 +508,9 @@ class ModelRpcClient(object):
 
         input_pb = trans_input(input_py)
 
+        if input_pb.multimodal_inputs:
+            await self._try_async_submit_vit(input_py, input_pb)
+
         try:
             # Select target address
             target_address = address_list[input_py.request_id % len(address_list)]
@@ -553,3 +560,21 @@ class ModelRpcClient(object):
         finally:
             if response_iterator:
                 response_iterator.cancel()
+
+    async def _try_async_submit_vit(
+        self, input_py: GenerateInput, input_pb: GenerateInputPB
+    ) -> None:
+        for role_addr in input_py.generate_config.role_addrs:
+            if role_addr.role == RoleType.VIT:
+                vit_addr = f"{role_addr.ip}:{role_addr.grpc_port}"
+                try:
+                    mm_inputs_pb = MultimodalInputsPB()
+                    mm_inputs_pb.multimodal_inputs.extend(input_pb.multimodal_inputs)
+                    channel = await self._channel_pool.get(vit_addr)
+                    stub = MultimodalRpcServiceStub(channel)
+                    await stub.AsyncSubmitEmbedding(mm_inputs_pb, timeout=5.0)
+                except Exception as e:
+                    logging.warning(
+                        f"request: [{input_py.request_id}] async vit submit to {vit_addr} failed: {e}"
+                    )
+                break
