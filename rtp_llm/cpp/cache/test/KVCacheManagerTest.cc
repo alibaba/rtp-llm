@@ -693,7 +693,7 @@ TEST_F(KVCacheManagerTest, DSV4InsertIntoDeviceBlockCacheThenReuseSamePrefix) {
         EXPECT_EQ(second_resource->blocks(0, gid)[1], first_blocks[gid][1]);
     }
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        if (skipReuseCacheRegion(manager_config.group_region_names[static_cast<size_t>(gid)])) {
+        if (manager_config.group_policies[static_cast<size_t>(gid)].reuse_policy == CacheReusePolicy::NON_REUSABLE) {
             continue;
         }
         ASSERT_GE(second_resource->blocksNum(0, gid), 3) << "tail group " << gid;
@@ -744,7 +744,7 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
     EXPECT_EQ(reuse_result.reuse_len, 4 * spb);
 
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        if (skipReuseCacheRegion(manager_config.group_region_names[static_cast<size_t>(gid)])) {
+        if (manager_config.group_policies[static_cast<size_t>(gid)].reuse_policy == CacheReusePolicy::NON_REUSABLE) {
             continue;
         }
         const auto& blocks = second_resource->blocks(0, gid);
@@ -1277,7 +1277,7 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     EXPECT_EQ(reuse_result.reuse_len, 2 * spb);
 
     for (int gid = 3; gid < kDsv4PoolNum; ++gid) {
-        if (skipReuseCacheRegion(manager_config.group_region_names[static_cast<size_t>(gid)])) {
+        if (manager_config.group_policies[static_cast<size_t>(gid)].reuse_policy == CacheReusePolicy::NON_REUSABLE) {
             continue;
         }
         const auto& blocks = reuse_res->blocks(0, gid);

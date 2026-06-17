@@ -141,6 +141,10 @@ CacheConfig createDsv4TypedConnectorConfig() {
                                            CacheGroupType::SWA,
                                            CacheGroupType::SWA,
                                            CacheGroupType::SWA};
+    for (size_t gid = 0; gid < kDsv4PoolNum; ++gid) {
+        config.group_policies.push_back(
+            cacheGroupPolicyForLegacyRegion(config.group_types[gid], config.group_region_names[gid]));
+    }
     config.group_kv_block_stride_bytes  = {16, 24, 32, 8, 12, 20, 28};
     config.group_kv_scale_stride_bytes  = std::vector<size_t>(kDsv4PoolNum, 0);
     config.layer_to_group_id            = {6, 6};

@@ -1601,12 +1601,14 @@ TEST_F(DSV4AllocatorTest, KVBlockStrideIsMaxAcrossGroups) {
 TEST_F(DSV4AllocatorTest, HCAStateIsExcludedFromReuseCachePolicy) {
     auto config = makeDSV4AllocatorConfig();
     ASSERT_EQ(config.group_region_names.size(), 7u);
+    ASSERT_EQ(config.group_policies.size(), config.group_region_names.size());
 
     for (size_t gid = 0; gid < config.group_region_names.size(); ++gid) {
         if (gid == 5) {
-            EXPECT_TRUE(skipReuseCacheRegion(config.group_region_names[gid])) << "HCA_STATE should skip reuse cache";
+            EXPECT_EQ(config.group_policies[gid].reuse_policy, CacheReusePolicy::NON_REUSABLE)
+                << "HCA_STATE should skip reuse cache";
         } else {
-            EXPECT_FALSE(skipReuseCacheRegion(config.group_region_names[gid])) << "group " << gid;
+            EXPECT_EQ(config.group_policies[gid].reuse_policy, CacheReusePolicy::REUSABLE) << "group " << gid;
         }
     }
 }

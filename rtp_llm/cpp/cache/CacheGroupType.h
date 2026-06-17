@@ -106,14 +106,10 @@ inline bool isDsv4FixedRegion(KVCacheRegionName region_name) {
     return isStateRegion(region_name) || region_name == KVCacheRegionName::SWA_KV;
 }
 
-inline bool skipReuseCacheRegion(KVCacheRegionName region_name) {
-    return region_name == KVCacheRegionName::HCA_STATE;
-}
-
 inline CacheGroupPolicy cacheGroupPolicyForLegacyRegion(CacheGroupType group_type, KVCacheRegionName region_name) {
     CacheGroupPolicy policy;
     policy.active_tail_blocks = group_type == CacheGroupType::SWA ? 2 : 0;
-    if (isDsv4FixedRegion(region_name) && !skipReuseCacheRegion(region_name)) {
+    if (isDsv4FixedRegion(region_name) && region_name != KVCacheRegionName::HCA_STATE) {
         policy.evict_policy = CacheEvictPolicy::INDEPENDENT;
     }
     if (region_name == KVCacheRegionName::HCA_STATE) {

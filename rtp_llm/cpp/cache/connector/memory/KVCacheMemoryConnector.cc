@@ -506,7 +506,9 @@ std::vector<KVCacheMemoryConnector::LayerRegionSlot> KVCacheMemoryConnector::lay
                     continue;
                 }
                 const auto region_name = static_cast<KVCacheRegionName>(attn);
-                if (skipReuseCacheRegion(region_name)) {
+                if (static_cast<size_t>(gid) < cache_config_.group_policies.size()
+                    && cache_config_.group_policies[static_cast<size_t>(gid)].reuse_policy
+                           == CacheReusePolicy::NON_REUSABLE) {
                     has_typed_slot = true;
                     continue;
                 }

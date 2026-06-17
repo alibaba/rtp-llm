@@ -80,8 +80,8 @@ BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) 
 }  // namespace
 
 bool HybridKVCacheAllocator::skipReuseCacheGroup(int gid) const {
-    return static_cast<size_t>(gid) < config_.group_region_names.size()
-           && skipReuseCacheRegion(config_.group_region_names[static_cast<size_t>(gid)]);
+    return gid >= 0 && static_cast<size_t>(gid) < config_.group_policies.size()
+           && config_.group_policies[static_cast<size_t>(gid)].reuse_policy == CacheReusePolicy::NON_REUSABLE;
 }
 
 bool HybridKVCacheAllocator::cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const {
