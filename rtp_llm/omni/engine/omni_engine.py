@@ -11,6 +11,8 @@ from rtp_llm.omni.config.stage_config import (
     OmniStageConfig,
     StageExecutionType,
 )
+from rtp_llm.async_decoder_engine.engine_creator import create_engine
+from rtp_llm.model_factory import ModelFactory
 from rtp_llm.omni.engine.orchestrator import OmniOrchestrator
 from rtp_llm.omni.engine.output_processor import OmniOutputProcessor
 from rtp_llm.omni.engine.stage_connector import SharedMemoryConnector, StageConnector, StageOutput
@@ -110,8 +112,6 @@ class OmniEngine:
         Calls model_cls._create_config() for architecture-specific settings,
         then copies shared runtime settings from the main (thinker) config.
         """
-        from rtp_llm.model_factory import ModelFactory
-
         model_cls = ModelFactory.get_model_cls(stage.model_type)
         stage_config = model_cls._create_config(main_model_config.ckpt_path)
 
@@ -163,7 +163,6 @@ class OmniEngine:
         self.config = model_config
         self.engine_config = engine_config
 
-        from rtp_llm.model_factory import ModelFactory
         import inspect
 
         for stage in self.pipeline_config.stages:
@@ -244,10 +243,26 @@ class OmniEngine:
                 )
 
     def start(self) -> None:
-        for stage_name, engine in self.stage_engines.items():
-            if hasattr(engine, 'start'):
-                logger.info(f"Starting stage '{stage_name}'")
-                engine.start()
+        started_engines: List[str] = []
+        try:
+            for stage_name, engine in self.stage_engines.items():
+                if hasattr(engine, 'start'):
+                    logger.info(f"Starting stage '{stage_name}'")
+                    engine.start()
+                    started_engines.append(stage_name)
+        except Exception:
+            logger.error(
+                f"Failed to start stage '{stage_name}', rolling back "
+                f"{len(started_engines)} previously started stage(s)"
+            )
+            for name in reversed(started_engines):
+                eng = self.stage_engines[name]
+                if hasattr(eng, 'stop'):
+                    try:
+                        eng.stop()
+                    except Exception as stop_err:
+                        logger.warning(f"Error stopping stage '{name}' during rollback: {stop_err}")
+            raise
         self.started = True
         logger.info(
             f"OmniEngine started with {len(self.stage_engines)} active stages"
