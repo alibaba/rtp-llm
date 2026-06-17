@@ -30,7 +30,6 @@ cc_library(
 cc_library(
     name = "kv_cache_specs",
     hdrs = [
-        "DSV4KVCacheSpec.h",
         "KVCacheSpec.h",
         "KVCacheSpecBase.h",
         "MHAKVCacheSpec.h",
@@ -61,7 +60,6 @@ cc_library(
         "BufferTypes.h",
         "CacheConfig.h",
         "CacheGroupType.h",
-        "DSV4KVCacheSpec.h",
         "KVCacheSpec.h",
         "KVCacheSpecBase.h",
         "MHAKVCacheSpec.h",

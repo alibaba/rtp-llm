@@ -37,6 +37,7 @@ cc_library(
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:model_config",  # Add ModelConfig implementation
         "//rtp_llm/cpp/cache:kv_cache_specs",
+        "//rtp_llm/cpp/models:dsv4_cache_specs",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/config:eplb_config",
         "//rtp_llm/cpp/utils:core_utils",

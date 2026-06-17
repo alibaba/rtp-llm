@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/models/dsv4/Dsv4CachePlanBuilder.h"
 
-#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
+#include "rtp_llm/cpp/models/dsv4/Dsv4KVCacheSpec.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 

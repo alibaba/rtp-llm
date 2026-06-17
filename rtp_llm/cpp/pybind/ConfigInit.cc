@@ -10,7 +10,7 @@
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
-#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
+#include "rtp_llm/cpp/models/dsv4/Dsv4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/model_utils/RopeCache.h"
 #include "pybind11/pybind11.h"
@@ -47,8 +47,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("MultiHeadAttention", KVCacheSpecType::MultiHeadAttention)
         .value("MultiHeadLatentAttention", KVCacheSpecType::MultiHeadLatentAttention)
         .value("LinearAttention", KVCacheSpecType::LinearAttention)
-        .value("CompressedKV", KVCacheSpecType::CompressedKV)
-        .value("FixedState", KVCacheSpecType::FixedState);
+        .value("OpaqueKV", KVCacheSpecType::OpaqueKV)
+        .value("OpaqueState", KVCacheSpecType::OpaqueState);
 
     py::enum_<CPRotateMethod>(m, "CPRotateMethod")
         .value("DISABLED", CPRotateMethod::DISABLED)
@@ -1582,7 +1582,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
 
     py::class_<DSV4StateSpec, KVCacheSpec, std::shared_ptr<DSV4StateSpec>>(m, "DSV4StateSpec")
         .def(py::init<>())
-        .def_readwrite("state_dim", &DSV4StateSpec::state_dim)
+        .def_property("state_dim",
+                      [](const DSV4StateSpec& spec) { return spec.state_dim; },
+                      [](DSV4StateSpec& spec, uint32_t value) { spec.state_dim = value; })
         .def_readwrite("entries_per_block", &DSV4StateSpec::entries_per_block)
         .def_readwrite("store_dtype", &DSV4StateSpec::store_dtype)
         .def_readwrite("block_size_bytes_override", &DSV4StateSpec::block_size_bytes_override)

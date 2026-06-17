@@ -127,10 +127,23 @@ cc_library(
         "dsv4/Dsv4CachePlanBuilder.h",
     ],
     deps = [
+        ":dsv4_cache_specs",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/utils:core_utils",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "dsv4_cache_specs",
+    hdrs = [
+        "dsv4/Dsv4KVCacheSpec.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cache:kv_cache_specs",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

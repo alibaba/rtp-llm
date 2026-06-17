@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
+#include "rtp_llm/cpp/models/dsv4/Dsv4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"

@@ -1077,6 +1077,8 @@ class KVCacheSpecType:
     MultiHeadAttention: typing.ClassVar[KVCacheSpecType]
     MultiHeadLatentAttention: typing.ClassVar[KVCacheSpecType]
     LinearAttention: typing.ClassVar[KVCacheSpecType]
+    OpaqueKV: typing.ClassVar[KVCacheSpecType]
+    OpaqueState: typing.ClassVar[KVCacheSpecType]
 
     @property
     def name(self) -> str:

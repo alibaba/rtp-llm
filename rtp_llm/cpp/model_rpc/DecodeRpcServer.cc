@@ -7,7 +7,7 @@
 #include <exception>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
-#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
+#include "rtp_llm/cpp/models/dsv4/Dsv4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"

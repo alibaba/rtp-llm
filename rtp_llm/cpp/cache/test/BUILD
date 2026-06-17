@@ -55,6 +55,7 @@ test_deps = [
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/cache",
+    "//rtp_llm/cpp/models:dsv4_cache_specs",
     "//rtp_llm/cpp/utils:core_utils",
     ":cache_config_test_utils",
     "@com_google_googletest//:gtest",
@@ -84,6 +85,7 @@ cc_library(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/models:dsv4_cache_specs",
         "//rtp_llm/cpp/config:model_config",
     ],
     visibility = ["//visibility:public"],
