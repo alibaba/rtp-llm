@@ -43,10 +43,9 @@ public class RouteService {
         if (flexlbConfig.isEnableQueueing()) {
             resultMono = queueManager.tryRouteAsync(balanceContext);  // Use async queuing mechanism
         } else {
-            // Direct routing: keep the worker-map scan off the caller's Netty event loop, the same
-            // way batchSchedule does. The queue path above already hands off to a worker thread.
-            resultMono = Mono.fromCallable(() -> router.route(balanceContext))
-                    .subscribeOn(Schedulers.parallel());
+            // Direct routing runs inline on the subscribing thread so a client cancel cannot
+            // interleave with the worker reservation taken inside router.route().
+            resultMono = Mono.fromCallable(() -> router.route(balanceContext));
         }
 
         return resultMono.doOnSuccess(result -> {
