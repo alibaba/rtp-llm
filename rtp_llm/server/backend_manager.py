@@ -1,12 +1,10 @@
 import gc
 import logging
-import os
 import threading
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.engine_config import EngineConfig, update_worker_addrs
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -15,7 +13,9 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
 from rtp_llm.utils.concurrency_controller import get_global_controller
-from rtp_llm.utils.fuser import _nfs_manager
+
+if TYPE_CHECKING:
+    from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 
 USAGE_HEADER = "USAGE"
 
@@ -35,9 +35,8 @@ class BackendManager(object):
         # just rank 0 report metric
         if py_env_configs.parallelism_config.world_rank == 0:
             kmonitor.init()
-        self.engine: Optional[BaseEngine] = None
+        self.engine: Optional["BaseEngine"] = None
         self._shutdown_requested = threading.Event()
-        self._stopped = threading.Event()
 
     def start(self):
         """Initialize backend server without entering service loop"""
@@ -57,7 +56,7 @@ class BackendManager(object):
             "mega_moe_fused",
         ):
             need_dist = True
-        if need_dist:
+        if need_dist or engine_config.parallelism_config.world_size > 1:
             init_distributed_environment(
                 engine_config.parallelism_config,
                 nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
@@ -146,26 +145,28 @@ class BackendManager(object):
 
     def stop(self) -> None:
         """Stop the backend manager and cleanup resources"""
-        # REBASE CONFLICT CONTEXT(cdc1b18b6): source branch made stop idempotent
-        # and stops the engine before unmounting NFS; keep that with the new base
-        # BackendManager structure.
-        if self._stopped.is_set():
-            logging.info("BackendManager already stopped")
-            return
-        self._stopped.set()
-        if isinstance(self.engine, BaseEngine):
-            engine = self.engine
-            self.engine = None
+        if self.engine is not None:
+            from rtp_llm.utils.fuser import _nfs_manager
+
+            engine_stop_error = None
             try:
-                logging.info("stopping backend engine before unmounting nfs paths")
-                engine.stop()
-                logging.info("backend engine stopped")
+                self.engine.stop()
+            except Exception as e:
+                engine_stop_error = e
+                logging.exception("engine stop failed during backend shutdown")
             finally:
-                _nfs_manager.unmount_all()
-                logging.info("all nfs paths unmounted")
+                try:
+                    _nfs_manager.unmount_all()
+                    logging.info("all nfs paths unmounted")
+                except Exception:
+                    logging.exception("nfs unmount failed during backend shutdown")
+                    if engine_stop_error is None:
+                        raise
+            if engine_stop_error is not None:
+                raise engine_stop_error
 
     def ready(self):
-        if isinstance(self.engine, BaseEngine):
+        if self.engine is not None:
             return self.engine.ready()
         return True
 
