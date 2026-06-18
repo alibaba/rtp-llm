@@ -553,6 +553,23 @@ TEST(PrefixTreeMemoryBlockCacheTest, DetachPrunesEmptyLeafButKeepsStructuralPare
     EXPECT_FALSE(cache.contains(2, CacheBlockKind::COMPRESSED_KV));
     EXPECT_TRUE(cache.contains(1, CacheBlockKind::COMPRESSED_KV));
     EXPECT_EQ(cache.cacheKeys(), (CacheKeysType{1}));
+    auto status_keys = cache.cacheKeysUnorderedForStatus();
+    std::sort(status_keys.begin(), status_keys.end());
+    EXPECT_EQ(status_keys, (CacheKeysType{1}));
+}
+
+TEST(PrefixTreeMemoryBlockCacheTest, StatusCacheKeysAreUnorderedAndDeduplicated) {
+    PrefixTreeMemoryBlockCache cache;
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(0), item(1, CacheBlockKind::COMPRESSED_KV, 11)).first);
+    ASSERT_TRUE(cache.putCommitted(1, rootDep(0), item(1, CacheBlockKind::STATE_SWA_KV, 12)).first);
+    ASSERT_TRUE(cache.putCommitted(2, childDep(1, 1), item(2, CacheBlockKind::COMPRESSED_KV, 21)).first);
+    ASSERT_TRUE(cache.putCommitted(3, childDep(2, 2), item(3, CacheBlockKind::STATE_SWA_KV, 31)).first);
+
+    auto status_keys = cache.cacheKeysUnorderedForStatus();
+    std::sort(status_keys.begin(), status_keys.end());
+
+    EXPECT_EQ(status_keys, (CacheKeysType{1, 2, 3}));
+    EXPECT_EQ(status_keys.size(), cache.cacheKeys().size());
 }
 
 TEST(PrefixTreeMemoryBlockCacheTest, ParentBecomesEvictableAfterChildDetachEvenAfterTouchWhileNonLeaf) {
