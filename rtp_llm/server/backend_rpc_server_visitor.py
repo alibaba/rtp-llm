@@ -36,6 +36,7 @@ route_logger = logging.getLogger("route_logger")
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
 DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
+MAX_FAILED_ROUTE_ADDRS_PER_REQUEST = 64
 
 
 class BackendRPCServerVisitor:
@@ -198,7 +199,9 @@ class BackendRPCServerVisitor:
         return role_list
 
     async def get_master_route_addrs(
-        self, input: GenerateInput
+        self,
+        input: GenerateInput,
+        excluded_role_addrs: Optional[List[RoleAddr]] = None,
     ) -> Optional[FlexlbResponse]:
         """
         Resolve role addrs from FlexLB master (and slave on connection failure).
@@ -223,6 +226,7 @@ class BackendRPCServerVisitor:
                 cache_key_block_size=self._cache_key_block_size(),
                 input=input,
                 request_id=input.request_id,
+                excluded_role_addrs=excluded_role_addrs,
             )
         except BaseException as e:
             exception_json = format_exception(e)
@@ -315,7 +319,11 @@ class BackendRPCServerVisitor:
                 missing_roles,
             )
 
-    async def route_ips(self, input: GenerateInput):
+    async def route_ips(
+        self,
+        input: GenerateInput,
+        excluded_role_addrs: Optional[List[RoleAddr]] = None,
+    ):
         # proactive rejection: check cached queue length before making request to master
         if self.master_config:
             threshold = self.master_config.master_queue_reject_threshold
@@ -343,7 +351,10 @@ class BackendRPCServerVisitor:
             master_route_result: Optional[FlexlbResponse] = None
             if not role_addrs_specified and master_addr and not input_token_batched:
                 with Timer() as master_route_timer:
-                    master_route_result = await self.get_master_route_addrs(input)
+                    master_route_result = await self.get_master_route_addrs(
+                        input,
+                        excluded_role_addrs=excluded_role_addrs,
+                    )
                 kmonitor.report(
                     GaugeMetrics.MASTER_ROUTE_RT_METRIC, master_route_timer.cost_ms()
                 )
@@ -496,19 +507,23 @@ class BackendRPCServerVisitor:
             set_aux_info(e)
             raise
 
-        async def route_and_enqueue(attempt: int):
+        async def route_and_enqueue(
+            attempt: int,
+            failed_route_addrs: List[RoleAddr],
+        ):
             if attempt > 0:
                 input.generate_config.role_addrs = []
             if self.host_service.service_available:
-                await self.route_ips(input)
+                await self.route_ips(input, failed_route_addrs)
             return self.model_rpc_client.enqueue(input)
 
         async def stream_with_aux_info():
             attempt = 0
+            failed_route_addrs: List[RoleAddr] = []
             while True:
                 yielded_output = False
                 try:
-                    stream = await route_and_enqueue(attempt)
+                    stream = await route_and_enqueue(attempt, failed_route_addrs)
                     async for output in stream:
                         yielded_output = True
                         yield output
@@ -521,18 +536,43 @@ class BackendRPCServerVisitor:
                         or not self._is_retryable_route_rpc_error(e)
                     ):
                         raise
+                    self._remember_failed_route_addrs(
+                        failed_route_addrs,
+                        input.generate_config.role_addrs,
+                    )
                     attempt += 1
                     route_logger.warning(
                         "retrying PD route after retryable RPC error, "
-                        "request_id=%s, attempt=%s/%s, error=%s",
+                        "request_id=%s, attempt=%s/%s, excluded_addrs=%s, error=%s",
                         input.request_id,
                         attempt,
                         self.pd_route_retry_on_unavailable,
+                        failed_route_addrs,
                         e,
                     )
                     await asyncio.sleep(min(0.2, 0.05 * attempt))
 
         return stream_with_aux_info()
+
+    @staticmethod
+    def _remember_failed_route_addrs(
+        failed_route_addrs: List[RoleAddr],
+        role_addrs: Optional[List[RoleAddr]],
+    ) -> None:
+        if not role_addrs:
+            return
+        existing = {
+            (addr.role, addr.ip, addr.http_port)
+            for addr in failed_route_addrs
+        }
+        for addr in role_addrs:
+            key = (addr.role, addr.ip, addr.http_port)
+            if key in existing:
+                continue
+            failed_route_addrs.append(addr)
+            existing.add(key)
+            if len(failed_route_addrs) >= MAX_FAILED_ROUTE_ADDRS_PER_REQUEST:
+                return
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
         roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(

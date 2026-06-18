@@ -26,6 +26,36 @@ CONNECTOR_LIMIT_PER_HOST = 30
 CONNECTOR_KEEPALIVE_TIMEOUT_SEC = 30
 
 
+def _role_name(role: Any) -> str:
+    return str(getattr(role, "name", role))
+
+
+def _excluded_worker_payload(role_addrs: Optional[List[RoleAddr]]) -> List[Dict[str, Any]]:
+    if not role_addrs:
+        return []
+    excluded_workers = []
+    seen = set()
+    for role_addr in role_addrs:
+        ip = getattr(role_addr, "ip", None)
+        role = _role_name(getattr(role_addr, "role", ""))
+        if not ip or not role:
+            continue
+        # A failed PD entrance can indicate that other ranks behind the same
+        # host are also transitioning. Exclude the whole host for this request.
+        key = (role, ip)
+        if key in seen:
+            continue
+        seen.add(key)
+        excluded_workers.append(
+            {
+                "role": role,
+                "server_ip": ip,
+                "http_port": 0,
+            }
+        )
+    return excluded_workers
+
+
 @dataclass
 class FlexlbResponse:
     """
@@ -235,6 +265,7 @@ class MasterClient:
         cache_key_block_size: int,
         input: GenerateInput,
         request_id: int,
+        excluded_role_addrs: Optional[List[RoleAddr]] = None,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
@@ -275,6 +306,9 @@ class MasterClient:
             "request_id": request_id,
             "request_time_ms": int(start * 1000),
         }
+        excluded_workers = _excluded_worker_payload(excluded_role_addrs)
+        if excluded_workers:
+            payload["excluded_workers"] = excluded_workers
 
         request_headers = getattr(input, "headers", None)
         resp = await self._send_schedule_request(

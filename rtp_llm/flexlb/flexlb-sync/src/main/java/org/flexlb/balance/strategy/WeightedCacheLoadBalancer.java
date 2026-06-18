@@ -73,6 +73,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         List<WorkerStatus> workerStatusList = new ArrayList<>(workerStatusMap.values()).stream()
                 .filter(WorkerStatus::isAlive)
                 .filter(worker -> worker.isStatusFresh(config.getWorkerStatusStalenessMs()))
+                .filter(worker -> !request.isWorkerExcluded(roleType, worker.getIp(), worker.getPort()))
                 .filter(resourceMeasure::isResourceAvailable)
                 .toList();
         if (CollectionUtils.isEmpty(workerStatusList)) {

@@ -6,6 +6,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.ToString;
+import org.apache.commons.lang3.StringUtils;
+import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
 
@@ -37,4 +39,26 @@ public class Request {
     @JsonAlias({"apikey", "apiKey"})
     @ToString.Exclude
     private String apiKey;
+
+    @JsonProperty("excluded_workers")
+    private List<ExcludedWorker> excludedWorkers;
+
+    public boolean isWorkerExcluded(RoleType roleType, String ip, int port) {
+        if (excludedWorkers == null || excludedWorkers.isEmpty() || StringUtils.isBlank(ip)) {
+            return false;
+        }
+        for (ExcludedWorker excludedWorker : excludedWorkers) {
+            if (excludedWorker == null || excludedWorker.getRole() != roleType) {
+                continue;
+            }
+            if (!ip.equals(excludedWorker.getServerIp())) {
+                continue;
+            }
+            int excludedPort = excludedWorker.getHttpPort();
+            if (excludedPort <= 0 || excludedPort == port) {
+                return true;
+            }
+        }
+        return false;
+    }
 }

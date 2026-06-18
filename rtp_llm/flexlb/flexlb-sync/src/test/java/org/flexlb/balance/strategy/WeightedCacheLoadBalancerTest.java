@@ -6,6 +6,7 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.ExcludedWorker;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
@@ -53,7 +54,8 @@ class WeightedCacheLoadBalancerTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer =
+                new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
 
         Request req = new Request();
         req.setSeqLen(1000);
@@ -203,6 +205,45 @@ class WeightedCacheLoadBalancerTest {
         ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
 
         Assertions.assertFalse(status.isSuccess());
+    }
+
+    @Test
+    void should_not_select_request_excluded_worker() {
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+
+        WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
+        WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
+        decodeMap.put("127.0.0.1:8080", worker1);
+        decodeMap.put("127.0.0.2:8080", worker2);
+
+        ExcludedWorker excludedWorker = new ExcludedWorker();
+        excludedWorker.setRole(RoleType.DECODE);
+        excludedWorker.setServerIp("127.0.0.1");
+        excludedWorker.setHttpPort(0);
+
+        Request req = new Request();
+        req.setSeqLen(1000);
+        req.setRequestId(1000L);
+        req.setExcludedWorkers(java.util.List.of(excludedWorker));
+
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
+
+        BalanceContext balanceContext = new BalanceContext();
+        balanceContext.setRequest(req);
+        balanceContext.setConfig(configService.loadBalanceConfig());
+
+        for (int i = 0; i < 20; i++) {
+            req.setRequestId(1000L + i);
+            ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
+            Assertions.assertTrue(status.isSuccess());
+            Assertions.assertEquals("127.0.0.2", status.getServerIp());
+            weightedCacheLoadBalancer.rollBack(status.getServerIp() + ":8080", req.getRequestId());
+        }
     }
 
     @Test

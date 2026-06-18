@@ -100,6 +100,10 @@ public class RandomStrategy implements LoadBalancer {
         if (!workerStatus.isStatusFresh(config.getWorkerStatusStalenessMs())) {
             return false;
         }
+        Request request = balanceContext.getRequest();
+        if (request != null && request.isWorkerExcluded(roleType, workerStatus.getIp(), workerStatus.getPort())) {
+            return false;
+        }
         ResourceMeasureIndicatorEnum indicator = config.getResourceMeasureIndicator(roleType);
         ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);
         return resourceMeasure == null || resourceMeasure.isResourceAvailable(workerStatus);

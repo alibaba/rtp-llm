@@ -117,7 +117,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
 
         // Get available worker list
         FlexlbConfig config = balanceContext.getConfig();
-        List<WorkerStatus> availableWorkers = getAvailableWorkers(roleType, group, config);
+        List<WorkerStatus> availableWorkers = getAvailableWorkers(balanceContext, roleType, group, config);
         if (CollectionUtils.isEmpty(availableWorkers)) {
             Logger.warn("No available workers for role: {}", roleType.getCode());
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
@@ -148,7 +148,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param indicator ResourceMeasureIndicatorEnum
      * @return Available worker list
      */
-    private List<WorkerStatus> getAvailableWorkers(RoleType roleType, String group, FlexlbConfig config) {
+    private List<WorkerStatus> getAvailableWorkers(BalanceContext balanceContext, RoleType roleType, String group, FlexlbConfig config) {
 
         Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
         if (MapUtils.isEmpty(workerStatusMap)) {
@@ -165,6 +165,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         return new ArrayList<>(workerStatusMap.values()).stream()
                 .filter(WorkerStatus::isAlive)
                 .filter(worker -> worker.isStatusFresh(config.getWorkerStatusStalenessMs()))
+                .filter(worker -> balanceContext.getRequest() == null
+                        || !balanceContext.getRequest().isWorkerExcluded(roleType, worker.getIp(), worker.getPort()))
                 .filter(resourceMeasure::isResourceAvailable)
                 .toList();
     }

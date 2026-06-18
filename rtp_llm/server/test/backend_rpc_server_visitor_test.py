@@ -18,6 +18,7 @@ class _FakeGenerateConfig:
 
 class _FakeInput:
     request_id = 123
+    prompt_length = 17
     token_ids = _FakeTokenIds()
 
     def __init__(self):
@@ -27,6 +28,9 @@ class _FakeInput:
 class _FakeHostService:
     def get_master_addr(self):
         return "master:1234"
+
+    def get_slave_addr(self):
+        return None
 
 
 class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
@@ -65,7 +69,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         visitor.host_service = _FakeHostService()
         visitor.backend_role_list = ["PREFILL"]
 
-        async def get_master_route_addrs(_input):
+        async def get_master_route_addrs(_input, excluded_role_addrs=None):
             return FlexlbResponse.error_response(
                 int(ExceptionType.MASTER_NO_AVAILABLE_WORKER), "no worker"
             )
