@@ -73,13 +73,33 @@ class RocmFp8PTPCLinear(LinearBase):
         super().__init__(
             weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
         )
-        self.hidden_size = weight.shape[0]  # k
-        self.output_size = weight.shape[1]  # n
-        # Reshape weight from [k, n] to [n, k] as done in C++ code
-        self.weight = weight.reshape([weight.shape[1], weight.shape[0]])
-        self.weight_scales = weight_scales.reshape(
-            [weight_scales.shape[1], weight_scales.shape[0]]
+        import os
+
+        self._use_swizzleA = (
+            os.environ.get("USE_SWIZZLEA", "0") == "1"
+            or os.environ.get("USE_SwizzleA", "0") == "1"
         )
+
+        self.hidden_size = weight.shape[0]  # K
+        self.output_size = weight.shape[1]  # N
+
+        if self._use_swizzleA:
+            # Weight is [K, N] COL16_4R16 swizzled from device_impl.py.
+            # Keep as-is for hipb_mm(bpreshuffle=True) → Alik/STA Tensile kernel.
+            self.weight = weight
+            # Scale: need [1, N] for hipBLASLt rowwise scaleB
+            if weight_scales.dim() == 2 and weight_scales.shape[1] == 1:
+                self.weight_scales = weight_scales.T.contiguous()  # [N,1] → [1,N]
+            elif weight_scales.dim() == 2 and weight_scales.shape[0] == 1:
+                self.weight_scales = weight_scales
+            else:
+                self.weight_scales = weight_scales.reshape(1, -1)
+        else:
+            # Weight is CK preshuffled [K, N] — reshape to [N, K] for CK GEMM.
+            self.weight = weight.reshape([weight.shape[1], weight.shape[0]])
+            self.weight_scales = weight_scales.reshape(
+                [weight_scales.shape[1], weight_scales.shape[0]]
+            )
         self.bias = bias
 
     @staticmethod
@@ -96,6 +116,91 @@ class RocmFp8PTPCLinear(LinearBase):
             self._hipb_weight_scales = self.weight_scales.T.contiguous()
         return self._hipb_weight, self._hipb_weight_scales
 
+    def _resolve_hipb_solution(
+        self,
+        input_fp8,
+        hipb_weight,
+        hipb_weight_scales,
+        input_scales,
+        out_dtype,
+        use_gelu: bool,
+    ) -> int:
+        """Pick the best hipBLASLt solution_index for the current shape.
+
+        hipBLASLt's default heuristic (solution_index=-1) picks slow Ailk/noSTA
+        kernels for our FP8 fused-bias/GELU layout; manually sweeping all
+        candidate solutions and benchmarking gives ~25-40% improvement on
+        visionbert FP8 PCC shapes. Cached per (M, use_gelu).
+
+        Disable via HIPB_AUTO_TUNE=0.
+        """
+        import os
+
+        if os.environ.get("HIPB_AUTO_TUNE", "1") == "0":
+            return -1
+
+        if not hasattr(self, "_hipb_sol_cache"):
+            self._hipb_sol_cache = {}
+        M = input_fp8.shape[0]
+        key = (M, use_gelu)
+        if key in self._hipb_sol_cache:
+            return self._hipb_sol_cache[key]
+
+        try:
+            sols = aiter.hipb_findallsols(
+                input_fp8,
+                hipb_weight,
+                bias=self.bias,
+                out_dtype=out_dtype,
+                scaleA=input_scales,
+                scaleB=hipb_weight_scales,
+            )
+        except Exception:
+            self._hipb_sol_cache[key] = -1
+            return -1
+
+        kw = dict(
+            bias=self.bias,
+            out_dtype=out_dtype,
+            scaleA=input_scales,
+            scaleB=hipb_weight_scales,
+        )
+        if use_gelu:
+            kw["use_gelu"] = True
+
+        best_sol, best_us = -1, float("inf")
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        for sol in sols:
+            try:
+                # warmup
+                for _ in range(3):
+                    aiter.hipb_mm(input_fp8, hipb_weight, sol, **kw)
+                torch.cuda.synchronize()
+                start.record()
+                for _ in range(10):
+                    aiter.hipb_mm(input_fp8, hipb_weight, sol, **kw)
+                end.record()
+                torch.cuda.synchronize()
+                us = start.elapsed_time(end) / 10 * 1000
+                if us < best_us:
+                    best_us = us
+                    best_sol = sol
+            except Exception:
+                continue
+
+        logger.info(
+            "RocmFp8PTPCLinear: tuned hipb solution for M=%d use_gelu=%s: "
+            "sol=%d (%.2f us, %d candidates)",
+            M,
+            use_gelu,
+            best_sol,
+            best_us,
+            len(sols),
+        )
+        self._hipb_sol_cache[key] = best_sol
+        return best_sol
+
     def _quantize_input(self, input: torch.Tensor):
         original_dtype = input.dtype
         if input.dtype != torch.bfloat16:
@@ -111,21 +216,43 @@ class RocmFp8PTPCLinear(LinearBase):
             input
         )
 
-        # Always use aiter.gemm_a8w8_bpreshuffle (ck backend) so the tuned
-        # lookup table in module_gemm_a8w8_bpreshuffle.so kicks in. The previous
-        # cktile dispatch was a workaround for missing tuning; with the tuned .so
-        # in place ck is consistently faster on MI308X for visionbert shapes.
-        output = aiter.gemm_a8w8_bpreshuffle(
-            input_fp8,
-            self.weight,
-            input_scales,
-            self.weight_scales,
-            None,
-            input_bf16.dtype,
-        )
-
-        if add_bias and self.bias is not None:
-            output = output + self.bias.to(output.dtype)
+        if self._use_swizzleA:
+            # hipBLASLt path with COL16_4R16 swizzled weight → Alik/STA
+            self.init_hipblas()
+            if add_bias and self.bias is not None:
+                output = aiter.hipb_mm(
+                    input_fp8,
+                    self.weight,
+                    -1,
+                    bias=self.bias,
+                    out_dtype=input_bf16.dtype,
+                    scaleA=input_scales,
+                    scaleB=self.weight_scales,
+                    bpreshuffle=True,
+                )
+            else:
+                output = aiter.hipb_mm(
+                    input_fp8,
+                    self.weight,
+                    -1,
+                    bias=None,
+                    out_dtype=input_bf16.dtype,
+                    scaleA=input_scales,
+                    scaleB=self.weight_scales,
+                    bpreshuffle=True,
+                )
+        else:
+            # CK path with preshuffled weight [N,K]
+            output = aiter.gemm_a8w8_bpreshuffle(
+                input_fp8,
+                self.weight,
+                input_scales,
+                self.weight_scales,
+                None,
+                input_bf16.dtype,
+            )
+            if add_bias and self.bias is not None:
+                output = output + self.bias.to(output.dtype)
 
         if output.dtype != original_dtype:
             output = output.to(original_dtype)
@@ -140,59 +267,88 @@ class RocmFp8PTPCLinear(LinearBase):
         return self._forward_impl(input, add_bias=False)
 
     def forward_hipb_bias(self, input: torch.Tensor) -> torch.Tensor:
-        """Run GEMM via aiter.hipb_mm with fused per-token/per-channel scale and
-        fused bias epilogue. Used by QKV linear on MI308X for large-M shapes
-        where hipBLASLt's bias epilogue saves an independent bias-add kernel.
-
-        Caller must guarantee self.bias is not None.
-        """
+        """Run GEMM via aiter.hipb_mm with fused bias epilogue."""
         assert self.bias is not None
         self.init_hipblas()
-
         input_fp8, input_scales, input_bf16, original_dtype = self._quantize_input(
             input
         )
-        hipb_weight, hipb_weight_scales = self._get_hipb_weight_and_scales()
 
-        output = aiter.hipb_mm(
-            input_fp8,
-            hipb_weight,
-            -1,
-            bias=self.bias,
-            out_dtype=input_bf16.dtype,
-            scaleA=input_scales,
-            scaleB=hipb_weight_scales,
-        )
+        if self._use_swizzleA:
+            output = aiter.hipb_mm(
+                input_fp8,
+                self.weight,
+                -1,
+                bias=self.bias,
+                out_dtype=input_bf16.dtype,
+                scaleA=input_scales,
+                scaleB=self.weight_scales,
+                bpreshuffle=True,
+            )
+        else:
+            hipb_weight, hipb_weight_scales = self._get_hipb_weight_and_scales()
+            sol_idx = self._resolve_hipb_solution(
+                input_fp8,
+                hipb_weight,
+                hipb_weight_scales,
+                input_scales,
+                input_bf16.dtype,
+                use_gelu=False,
+            )
+            output = aiter.hipb_mm(
+                input_fp8,
+                hipb_weight,
+                sol_idx,
+                bias=self.bias,
+                out_dtype=input_bf16.dtype,
+                scaleA=input_scales,
+                scaleB=hipb_weight_scales,
+            )
 
         if output.dtype != original_dtype:
             output = output.to(original_dtype)
         return output
 
     def forward_hipb_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
-        """Run GEMM + bias + GELU in a single hipBLASLt kernel via
-        HIPBLASLT_EPILOGUE_GELU_BIAS. Eliminates the independent
-        _bias_gelu_kernel that otherwise follows FC1 GEMM.
-
-        Caller must guarantee self.bias is not None.
-        """
+        """Run GEMM + bias + GELU in a single hipBLASLt kernel."""
         assert self.bias is not None
         self.init_hipblas()
-
         input_fp8, input_scales, input_bf16, original_dtype = self._quantize_input(
             input
         )
-        hipb_weight, hipb_weight_scales = self._get_hipb_weight_and_scales()
 
-        output = aiter.hipb_mm(
-            input_fp8,
-            hipb_weight,
-            -1,
-            bias=self.bias,
-            out_dtype=input_bf16.dtype,
-            scaleA=input_scales,
-            scaleB=hipb_weight_scales,
-            use_gelu=True,
-        )
+        if self._use_swizzleA:
+            output = aiter.hipb_mm(
+                input_fp8,
+                self.weight,
+                -1,
+                bias=self.bias,
+                out_dtype=input_bf16.dtype,
+                scaleA=input_scales,
+                scaleB=self.weight_scales,
+                bpreshuffle=True,
+                use_gelu=True,
+            )
+        else:
+            hipb_weight, hipb_weight_scales = self._get_hipb_weight_and_scales()
+            sol_idx = self._resolve_hipb_solution(
+                input_fp8,
+                hipb_weight,
+                hipb_weight_scales,
+                input_scales,
+                input_bf16.dtype,
+                use_gelu=True,
+            )
+            output = aiter.hipb_mm(
+                input_fp8,
+                hipb_weight,
+                sol_idx,
+                bias=self.bias,
+                out_dtype=input_bf16.dtype,
+                scaleA=input_scales,
+                scaleB=hipb_weight_scales,
+                use_gelu=True,
+            )
 
         if output.dtype != original_dtype:
             output = output.to(original_dtype)

@@ -59,8 +59,10 @@ def split_raw_qkv(qkv, head_num, head_num_kv, head_dim, token_q_num, token_kv_nu
 
     Used by the ``kv_cache is None`` path (encoder-only models, e.g. BERT)
     where Q and K/V may have different active token counts (token_q_num /
-    token_kv_num). Returns contiguous tensors so the downstream
-    ``flash_attn_varlen_func`` sees clean memory.
+    token_kv_num). Returns views (not contiguous copies): ``flash_attn_varlen_func``
+    only requires ``stride(-1) == 1`` which the views already satisfy after
+    ``split + view``, so forcing ``.contiguous()`` would emit redundant
+    ``direct_copy`` kernels per layer (3 × ~19µs on bs=64 visionbert).
     """
     token_num = qkv.size(0)
     q_size = head_num * head_dim
@@ -69,7 +71,7 @@ def split_raw_qkv(qkv, head_num, head_num_kv, head_dim, token_q_num, token_kv_nu
     query = query.view(token_num, head_num, head_dim)[:token_q_num]
     key = key.view(token_num, head_num_kv, head_dim)[:token_kv_num]
     value = value.view(token_num, head_num_kv, head_dim)[:token_kv_num]
-    return query.contiguous(), key.contiguous(), value.contiguous()
+    return query, key, value
 
 
 def reshape_kv_cache_vectorized(
