@@ -119,6 +119,24 @@ class MultimodalEmbeddingTest(TestCase):
             ):
                 self._run_deepstack_embedding_test(*params)
 
+    def test_input_embeddings_are_applied_before_multimodal_features(self):
+        hidden_size = 4
+        embeddings = torch.zeros(5, hidden_size, device="cuda", dtype=torch.half)
+        input_embedding = torch.ones(3, hidden_size, device="cuda", dtype=torch.half)
+        mm_feature = torch.full((2, hidden_size), 7.0, device="cuda", dtype=torch.half)
+
+        embeddings.narrow(0, 1, 3).copy_(input_embedding)
+        output = MultimodalEmbeddingInjector().cuda()(
+            embeddings,
+            [mm_feature],
+            torch.tensor([2], device="cuda", dtype=torch.int32),
+        )
+
+        expected = torch.zeros(5, hidden_size, device="cuda", dtype=torch.half)
+        expected[1:4] = input_embedding
+        expected[2:4] = mm_feature
+        self.assertTrue(torch.equal(output, expected))
+
 
 if __name__ == "__main__":
     main()

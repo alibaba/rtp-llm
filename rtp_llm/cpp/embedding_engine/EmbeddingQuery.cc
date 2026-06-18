@@ -75,7 +75,8 @@ void EmbeddingInput::checkVaild() {
     }
     if (input_embeddings.has_value() && multimodal_features.has_value()) {
         throw std::runtime_error("input_embeddings cannot be combined with multimodal_features in the same request: "
-                                 "both paths inject into inputs_embeds and have no loc-overlap detection.");
+                                 "embedding engine input_embeddings is a full-sequence tensor and cannot be remapped "
+                                 "across multimodal token expansion.");
     }
 }
 
