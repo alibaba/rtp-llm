@@ -98,6 +98,8 @@ public class EngineSyncRunner implements Runnable {
                 WorkerStatus workerStatus = entry.getValue();
                 String ipPort = entry.getKey();
                 if (!latestValidIpPorts.contains(ipPort)) {
+                    workerStatus.setAlive(false);
+                    workerStatus.getResourceAvailable().set(false);
                     long lastTime = workerStatus.getStatusLastUpdateTime().get();
                     long actualIntervalUs = workerStatus.getStatusUpdateIntervalUs().get();
                     // Use max(3 * actual sync interval, 1s) as removal threshold to tolerate transient service discovery flaps

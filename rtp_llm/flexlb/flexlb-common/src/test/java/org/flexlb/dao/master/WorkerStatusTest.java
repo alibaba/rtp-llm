@@ -32,6 +32,28 @@ class WorkerStatusTest {
     }
 
     @Test
+    @DisplayName("Worker status should be fresh within max staleness")
+    void workerStatusShouldBeFreshWithinMaxStaleness() {
+        workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
+
+        assertTrue(workerStatus.isStatusFresh(1000));
+    }
+
+    @Test
+    @DisplayName("Worker status should be stale after max staleness")
+    void workerStatusShouldBeStaleAfterMaxStaleness() {
+        workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000 - 2_000_000L);
+
+        assertFalse(workerStatus.isStatusFresh(1000));
+    }
+
+    @Test
+    @DisplayName("Worker status freshness check can be disabled")
+    void workerStatusFreshnessCheckCanBeDisabled() {
+        assertTrue(workerStatus.isStatusFresh(0));
+    }
+
+    @Test
     @DisplayName("Duplicate putLocalTask should not double count local resources")
     void duplicatePutLocalTask_shouldNotDoubleCountLocalResources() {
         workerStatus.setRole(RoleType.PREFILL.getCode());

@@ -79,6 +79,14 @@ class ConfigServiceTest {
     }
 
     @Test
+    void should_override_worker_status_staleness_ms_with_environment() {
+        ConfigService configService = new ConfigService(Map.of(
+                "WORKER_STATUS_STALENESS_MS", "2500"));
+
+        assertEquals(2500L, configService.loadBalanceConfig().getWorkerStatusStalenessMs());
+    }
+
+    @Test
     void should_override_cache_hit_time_window_ms_with_environment() {
         ConfigService configService = new ConfigService(Map.of(
                 "CACHE_HIT_TIME_WINDOW_MS", "600000"));

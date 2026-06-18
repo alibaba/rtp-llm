@@ -415,6 +415,7 @@ class RandomStrategyTest {
         workerStatus.setPort(8080);
         workerStatus.setSite("test-site");
         workerStatus.setAlive(true);
+        workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
         return workerStatus;
     }
 }

@@ -315,4 +315,16 @@ public class WorkerStatus {
         }
         return ip + ":" + port;
     }
+
+    public boolean isStatusFresh(long maxStalenessMs) {
+        if (maxStalenessMs <= 0) {
+            return true;
+        }
+        long lastUpdateTimeUs = statusLastUpdateTime.get();
+        if (lastUpdateTimeUs <= 0) {
+            return false;
+        }
+        long ageUs = System.nanoTime() / 1000 - lastUpdateTimeUs;
+        return ageUs <= maxStalenessMs * 1000;
+    }
 }

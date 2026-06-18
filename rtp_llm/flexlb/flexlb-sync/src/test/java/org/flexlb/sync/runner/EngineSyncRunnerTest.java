@@ -1,6 +1,7 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.address.WorkerAddressService;
@@ -12,14 +13,18 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.LongAdder;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class EngineSyncRunnerTest {
@@ -106,5 +111,26 @@ class EngineSyncRunnerTest {
 
         // Verify
         verify(statusCheckExecutor, never()).submit(any(Runnable.class));
+    }
+
+    @Test
+    void should_mark_cached_worker_unavailable_when_missing_from_latest_service_discovery() {
+        WorkerStatus staleWorker = new WorkerStatus();
+        staleWorker.setIp("10.0.0.1");
+        staleWorker.setPort(8080);
+        staleWorker.setAlive(true);
+        staleWorker.getResourceAvailable().set(true);
+        staleWorker.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
+        staleWorker.getStatusUpdateIntervalUs().set(20_000L);
+        workerStatusMap.put("10.0.0.1:8080", staleWorker);
+
+        when(workerAddressService.getEngineWorkerList(modelName, roleType))
+                .thenReturn(List.of(new WorkerHost("10.0.0.2", 8080)));
+
+        engineSyncRunner.run();
+
+        assertFalse(staleWorker.isAlive());
+        assertFalse(staleWorker.getResourceAvailable().get());
+        assertTrue(workerStatusMap.containsKey("10.0.0.1:8080"));
     }
 }

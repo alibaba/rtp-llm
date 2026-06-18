@@ -118,6 +118,12 @@ public class FlexlbConfig {
     private long decodeConcurrencyLimit = 0;
 
     /**
+     * Maximum age for worker status used by routing, in milliseconds.
+     * Values <= 0 disable the freshness check.
+     */
+    private long workerStatusStalenessMs = 1000;
+
+    /**
      * Resource availability hysteresis bias (percentage)
      * Used to prevent frequent switching of resource availability near threshold
      * Range: 0-100, default 15 means hysteresis range is 15%

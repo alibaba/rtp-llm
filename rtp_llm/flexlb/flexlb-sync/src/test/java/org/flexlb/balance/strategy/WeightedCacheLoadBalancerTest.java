@@ -43,6 +43,7 @@ class WeightedCacheLoadBalancerTest {
         workerStatus.setPort(8080);
         workerStatus.setSite("na61");
         workerStatus.setAlive(true);
+        workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
         return workerStatus;
     }
 
@@ -174,6 +175,34 @@ class WeightedCacheLoadBalancerTest {
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.1", status.getServerIp());
+    }
+
+    @Test
+    void should_not_select_worker_with_stale_status() {
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+
+        WorkerStatus worker = createWorkerStatus("127.0.0.1");
+        worker.getStatusLastUpdateTime().set(System.nanoTime() / 1000 - 2_000_000L);
+        decodeMap.put("127.0.0.1:8080", worker);
+
+        Request req = new Request();
+        req.setSeqLen(1000);
+        req.setRequestId(1000L);
+
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
+
+        BalanceContext balanceContext = new BalanceContext();
+        balanceContext.setRequest(req);
+        balanceContext.setConfig(configService.loadBalanceConfig());
+
+        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
+
+        Assertions.assertFalse(status.isSuccess());
     }
 
     @Test

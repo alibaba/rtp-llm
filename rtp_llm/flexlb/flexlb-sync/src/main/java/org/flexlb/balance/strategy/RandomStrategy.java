@@ -97,6 +97,9 @@ public class RandomStrategy implements LoadBalancer {
         FlexlbConfig config = balanceContext.getConfig() != null
                 ? balanceContext.getConfig()
                 : configService.loadBalanceConfig();
+        if (!workerStatus.isStatusFresh(config.getWorkerStatusStalenessMs())) {
+            return false;
+        }
         ResourceMeasureIndicatorEnum indicator = config.getResourceMeasureIndicator(roleType);
         ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);
         return resourceMeasure == null || resourceMeasure.isResourceAvailable(workerStatus);

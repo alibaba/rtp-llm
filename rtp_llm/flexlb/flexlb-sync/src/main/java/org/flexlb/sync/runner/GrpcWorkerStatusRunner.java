@@ -188,9 +188,12 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void logWorkerStatusUpdate(long startTime, WorkerStatus workerStatus) {
-        logger.info("gRPC Worker Status - {}, role:{}, running_queue_tokens:{}, cost:{}",
+        logger.info("gRPC Worker Status - {}, role:{}, alive:{}, resource_available:{}, status_version:{}, running_queue_tokens:{}, cost:{}",
                 ipPort,
                 workerStatus.getRole(),
+                workerStatus.isAlive(),
+                workerStatus.getResourceAvailable().get(),
+                workerStatus.getStatusVersion().get(),
                 workerStatus.getRunningQueueTime(),
                 System.nanoTime() / 1000 - startTime);
     }

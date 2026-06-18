@@ -86,7 +86,7 @@ class ShortestTTFTStrategyTest {
                 new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService, resourceMeasureFactory, configService);
 
         BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setConfig(new FlexlbConfig());
+        balanceContext.setConfig(freshnessDisabledConfig());
         balanceContext.setRequest(req);
         ServerStatus result = staticCacheLoadBalancer.select(balanceContext, RoleType.PREFILL, null);
         if (!result.isSuccess()) {
@@ -208,9 +208,15 @@ class ShortestTTFTStrategyTest {
         req.setBlockCacheKeys(List.of(1L, 2L));
 
         BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setConfig(new FlexlbConfig());
+        balanceContext.setConfig(freshnessDisabledConfig());
         balanceContext.setRequest(req);
         return balanceContext;
+    }
+
+    private FlexlbConfig freshnessDisabledConfig() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setWorkerStatusStalenessMs(0);
+        return config;
     }
 
     WorkerStatus createWorkerStatus(String ip, long runningQueueTime) {
@@ -235,6 +241,7 @@ class ShortestTTFTStrategyTest {
         workerStatus.setPort(8080);
         workerStatus.setSite("na61");
         workerStatus.setAlive(true);
+        workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
         workerStatus.setRole(RoleType.PREFILL.getCode());
         CacheStatus cacheStatus = new CacheStatus();
         cacheStatus.setAvailableKvCache(10000);
