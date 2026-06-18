@@ -238,6 +238,7 @@ struct ProfilingDebugLoggingConfig {
     bool        debug_start_fake_process  = false;
     bool        enable_detail_log         = false;
     bool        check_nan                 = false;
+    bool        enable_model_inputs_log   = false;
 
     std::string to_string() const;
 };

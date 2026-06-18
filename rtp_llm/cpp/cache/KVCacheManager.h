@@ -40,11 +40,8 @@ public:
     // 初始化和配置相关
     bool init();
 
-    const CacheConfig&                  cacheConfig() const;
-    const CacheConfig&                  getMTPModuleCacheConfig(int mtp_module_id) const;
-    const kmonitor::MetricsReporterPtr& metricsReporter() const {
-        return metrics_reporter_;
-    }
+    const CacheConfig& cacheConfig() const;
+    const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
 
     // 显存管理和缓存分配
     MallocResult malloc(const MallocInfo& malloc_info);

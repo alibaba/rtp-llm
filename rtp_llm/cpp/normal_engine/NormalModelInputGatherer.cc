@@ -4,7 +4,6 @@
 #include <cstring>
 #include <sstream>
 #include <string>
-#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/Types.h"
@@ -20,11 +19,6 @@ namespace {
 bool asyncDebugEnabled() {
     const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
     return env != nullptr && std::string(env) == "1";
-}
-
-bool modelInputsLogEnabled() {
-    static const bool enabled = autil::EnvUtil::getEnv("ENABLE_MODEL_INPUTS_LOG", false);
-    return enabled;
 }
 
 struct GatherModelInputContext {
@@ -482,7 +476,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     if (config_.is_multimodal && !gathered_mm_features.empty()) {
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
-    if (modelInputsLogEnabled()) {
+    if (config_.enable_model_inputs_log) {
         model_input.prefix_lengths_host_for_log = prefix_lengths_host;
     }
     model_input.prefix_lengths = publishInt32ToCuda(prefix_lengths_host, host_holder);
@@ -542,7 +536,7 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
-    if (modelInputsLogEnabled()) {
+    if (config_.enable_model_inputs_log) {
         if (model_input.combo_tokens.defined() && !model_input.combo_tokens.is_cuda()) {
             model_input.combo_tokens_host_for_log = model_input.combo_tokens;
         }

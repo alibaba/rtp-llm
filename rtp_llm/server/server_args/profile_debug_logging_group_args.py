@@ -96,3 +96,11 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         default=False,
         help="控制是否check nan, 为了排查。可选值: True (启用), False (禁用)。默认为 False",
     )
+    profile_debug_logging_group.add_argument(
+        "--enable_model_inputs_log",
+        env_name="ENABLE_MODEL_INPUTS_LOG",
+        bind_to=(profiling_debug_config, "enable_model_inputs_log"),
+        type=str2bool,
+        default=False,
+        help="控制是否打印模型输入日志。可选值: True (启用), False (禁用)。默认为 False",
+    )

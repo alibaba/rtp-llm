@@ -10,44 +10,6 @@
 
 namespace rtp_llm {
 
-namespace {
-
-constexpr size_t kMaxTensorLogItems = 64;
-
-std::string tensorDataSuffix(const std::string& tensor_with_data) {
-    const auto pos = tensor_with_data.find(", Data(");
-    return pos == std::string::npos ? tensor_with_data : tensor_with_data.substr(pos + 2);
-}
-
-std::string tensorLogString(const torch::Tensor& tensor, const torch::Tensor& host_snapshot = {}) {
-    const torch::Tensor& meta_tensor  = tensor.defined() ? tensor : host_snapshot;
-    const torch::Tensor& value_tensor = host_snapshot.defined() ? host_snapshot : tensor;
-    if (!meta_tensor.defined()) {
-        return tensorDebugString(meta_tensor);
-    }
-    const auto meta = tensorDebugString(meta_tensor);
-    if (!value_tensor.defined() || value_tensor.is_cuda()) {
-        return meta;
-    }
-    std::string data;
-    switch (value_tensor.scalar_type()) {
-        case torch::kInt32:
-            data = tensorDebugStringWithData<int32_t>(value_tensor, kMaxTensorLogItems);
-            break;
-        case torch::kInt64:
-            data = tensorDebugStringWithData<int64_t>(value_tensor, kMaxTensorLogItems);
-            break;
-        case torch::kBool:
-            data = tensorDebugStringWithData<bool>(value_tensor, kMaxTensorLogItems);
-            break;
-        default:
-            return meta;
-    }
-    return host_snapshot.defined() && tensor.defined() ? meta + ", " + tensorDataSuffix(data) : data;
-}
-
-}  // namespace
-
 std::string combineStrings(const std::vector<std::string>& vec) {
     std::string result = "\" ";
     for (const auto& s : vec) {
@@ -110,58 +72,6 @@ std::string GptModelInputs::debugString(bool force) const {
     debug_string << ", pd_separation: " << pd_separation;
     debug_string << "}";
     return debug_string.str();
-}
-
-std::string GptModelInputs::modelInputsLogString() const {
-    std::ostringstream os;
-    os << "GptModelInputs { ";
-    bool first  = true;
-    auto append = [&](const char* name, const std::string& value) {
-        if (!first) {
-            os << ", ";
-        }
-        first = false;
-        os << name << ": " << value;
-    };
-    auto appendTensor = [&](const char* name, const torch::Tensor& tensor, const torch::Tensor& host_snapshot) {
-        append(name, tensorLogString(tensor, host_snapshot));
-    };
-    auto appendSize = [&](const char* name, size_t value) { append(name, std::to_string(value)); };
-    auto appendBool = [&](const char* name, bool value) { append(name, value ? "true" : "false"); };
-
-    append("trace_ids", combineStrings(trace_ids));
-    appendTensor("combo_tokens", combo_tokens, combo_tokens_host_for_log);
-    appendTensor("input_lengths", input_lengths, input_lengths_host_for_log);
-    appendTensor("sequence_lengths", sequence_lengths, sequence_lengths_host_for_log);
-    appendTensor("lm_output_indexes", lm_output_indexes, torch::Tensor());
-    appendTensor("prefix_lengths", prefix_lengths, prefix_lengths_host_for_log);
-    appendTensor("sequence_lengths_plus_1", sequence_lengths_plus_1, torch::Tensor());
-    appendTensor("combo_tokens_type_ids", combo_tokens_type_ids, torch::Tensor());
-    appendTensor("combo_position_ids", combo_position_ids, torch::Tensor());
-    appendTensor("last_hidden_states", last_hidden_states, torch::Tensor());
-    appendTensor("attention_mask", attention_mask, torch::Tensor());
-    appendTensor("kv_cache_block_id", kv_cache_block_id, torch::Tensor());
-    appendTensor("kv_cache_layer_to_group", kv_cache_layer_to_group, torch::Tensor());
-    appendTensor("kv_cache_group_types", kv_cache_group_types, torch::Tensor());
-    appendTensor("kv_cache_update_mapping", kv_cache_update_mapping, torch::Tensor());
-    appendTensor("request_id", request_id, torch::Tensor());
-    appendTensor("request_pd_separation", request_pd_separation, torch::Tensor());
-    appendSize("kv_block_stride_bytes", kv_block_stride_bytes);
-    appendSize("kv_scale_stride_bytes", kv_scale_stride_bytes);
-    appendSize("seq_size_per_block", seq_size_per_block);
-    appendSize("kernel_seq_size_per_block", kernel_seq_size_per_block);
-    appendBool("pd_separation", pd_separation);
-    appendBool("decode_entrance", decode_entrance);
-    appendBool("use_opaque_kv_cache_store", use_opaque_kv_cache_store);
-    appendBool("need_all_logits", need_all_logits);
-    appendBool("need_all_hidden_states", need_all_hidden_states);
-    appendBool("need_moe_gating", need_moe_gating);
-    appendBool("warmup", warmup);
-    appendBool("skip_run", skip_run);
-    appendBool("is_fake_stream", is_fake_stream);
-    appendBool("is_target_verify", is_target_verify);
-    os << "}";
-    return os.str();
 }
 
 BatchCopyParams::CopyType BatchCopyParams::get_copy_type(MemoryType dst_type, MemoryType src_type) {
