@@ -690,10 +690,8 @@ class GLM5MegaMoE(nn.Module):
             buf,
             recipe=(1, 1, FP4_BLOCK),
             activation="swiglu",
-            activation_clamp=(
-                self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
-            ),
-            fast_math=True,
+            activation_clamp=None, #(self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None),
+            fast_math=False,
         )
         return y
 
