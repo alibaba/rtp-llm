@@ -110,15 +110,22 @@ def configure_deep_gemm_num_sms(num_sms: int) -> Generator[None, None, None]:
 def _has_param(fn: Callable, name: str) -> bool:
     """Check if *fn* accepts a keyword argument called *name*.
 
-    Returns False (conservative default: do not pass the argument) when the
-    callable's signature cannot be introspected — e.g. C/C++ extension
-    functions that do not expose a Python-level signature.
+    Also returns True when the callable has a VAR_KEYWORD (**kwargs) parameter,
+    since it accepts arbitrary keyword arguments.  Returns True (permissive
+    default: try to pass the argument) when the signature cannot be
+    introspected — e.g. C/C++ extension functions — so that compatible
+    parameters are not silently dropped.
     """
     import inspect
     try:
-        return name in inspect.signature(fn).parameters
+        params = inspect.signature(fn).parameters
+        if name in params:
+            return True
+        return any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
     except (ValueError, TypeError):
-        return False
+        return True
 
 
 def _missing_deep_gemm() -> NoReturn:
