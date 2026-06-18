@@ -622,19 +622,22 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
     }
 
     if (need_cache_keys) {
-        std::unordered_set<CacheKeyType> all_keys;
         // device cache keys
         std::vector<CacheKeyType> device_cache_keys;
         auto                      shared_cache = allocator_->sharedBlockCache();
         if (shared_cache) {
             device_cache_keys = shared_cache->allCacheKeys();
-            all_keys.insert(device_cache_keys.begin(), device_cache_keys.end());
             info.version = shared_cache->version();
         }
         // memory cache keys
-        const auto mem_cache_keys = coordinator_->memoryCacheKeys();
+        const auto mem_cache_keys = coordinator_->memoryCacheKeysForStatus();
+
+        std::unordered_set<CacheKeyType> all_keys;
+        all_keys.reserve(device_cache_keys.size() + mem_cache_keys.size());
+        all_keys.insert(device_cache_keys.begin(), device_cache_keys.end());
         all_keys.insert(mem_cache_keys.begin(), mem_cache_keys.end());
 
+        info.cached_keys.reserve(all_keys.size());
         info.cached_keys.assign(all_keys.begin(), all_keys.end());
     }
 
