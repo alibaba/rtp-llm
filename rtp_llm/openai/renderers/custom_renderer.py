@@ -9,6 +9,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 
 import torch
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
@@ -423,6 +424,18 @@ class CustomChatRenderer:
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         raise NotImplementedError
+
+    def apply_chat_completion_constraints(
+        self, request: ChatCompletionRequest, generate_config: GenerateConfig
+    ) -> None:
+        tool_choice = getattr(request, "tool_choice", None)
+        if tool_choice is None or tool_choice in ("auto", "none"):
+            return
+        raise FtRuntimeException(
+            ExceptionType.INVALID_PARAMS,
+            f"tool_choice={tool_choice!r} is not supported by "
+            f"{self.__class__.__name__}",
+        )
 
     async def generate_choice(
         self,

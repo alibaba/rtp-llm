@@ -7,8 +7,14 @@ from typing import Any, Optional, Tuple
 
 from typing_extensions import override
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.openai.api_datatype import ChatCompletionRequest, DeltaMessage
+from rtp_llm.openai.api_datatype import (
+    ChatCompletionRequest,
+    DeltaMessage,
+    get_tool_choice_function_name,
+)
 from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.custom_renderer import OutputDelta, RendererParams
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
@@ -31,6 +37,15 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.deepseekv4_detector i
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
 
+_GRAMMAR_RESPONSE_FORMAT_TYPES = {
+    "json_object",
+    "json_schema",
+    "regex",
+    "ebnf",
+}
+DSML_PREFIX = "<｜DSML｜"
+DSML_TOOL_CALLS_MARKER = f"{DSML_PREFIX}tool_calls>"
+
 
 def _dsv4_renderer_debug_enabled() -> bool:
     return os.environ.get("RTP_LLM_DSV4_RENDERER_DEBUG", "").lower() in (
@@ -50,8 +65,7 @@ def _preview_text(text: str, limit: int = 512) -> str:
 
 
 def _split_reasoning_before_dsml(text: str) -> Optional[Tuple[str, str]]:
-    marker = "<｜DSML｜tool_calls>"
-    idx = text.find(marker)
+    idx = text.find(DSML_TOOL_CALLS_MARKER)
     if idx == -1:
         return None
 
@@ -221,7 +235,11 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
                 "'reasoning_effort' must be one of: "
                 "'low', 'medium', 'high', 'xhigh', 'max'"
             )
-        return "xhigh" if effort == "max" else effort
+        if effort in ("low", "medium"):
+            return None
+        if effort == "xhigh":
+            return "max"
+        return effort
 
     def _normalize_tool_arguments(self, arguments: Any) -> str:
         if arguments is None:
@@ -229,6 +247,95 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         if isinstance(arguments, str):
             return arguments
         return json.dumps(arguments, ensure_ascii=False)
+
+    def _tool_choice_name(self, request: ChatCompletionRequest) -> Optional[str]:
+        return get_tool_choice_function_name(getattr(request, "tool_choice", None))
+
+    def _tool_choice_forces_tool(self, request: ChatCompletionRequest) -> bool:
+        tool_choice = getattr(request, "tool_choice", None)
+        if tool_choice == "required":
+            return True
+        return self._tool_choice_name(request) is not None
+
+    def _active_tools_for_request(self, request: ChatCompletionRequest):
+        tools = request.tools or []
+        tool_choice = getattr(request, "tool_choice", None)
+        if not tools or tool_choice == "none":
+            return []
+
+        name = self._tool_choice_name(request)
+        if name is None:
+            return tools
+
+        selected = [tool for tool in tools if tool.function.name == name]
+        if not selected:
+            raise ValueError(f"tool_choice function {name!r} is not in tools")
+        return selected
+
+    @override
+    def _effective_tools(self, request: ChatCompletionRequest):
+        return self._active_tools_for_request(request)
+
+    def _response_format_has_grammar(self, response_format: Any) -> bool:
+        if response_format is None:
+            return False
+        if isinstance(response_format, str):
+            try:
+                response_format = json.loads(response_format)
+            except Exception:
+                return True
+        if not isinstance(response_format, dict):
+            return False
+        return response_format.get("type") in _GRAMMAR_RESPONSE_FORMAT_TYPES
+
+    def _grammar_constraint_fields(self, config: GenerateConfig):
+        fields = []
+        if config.json_format:
+            fields.append("json_format")
+        if config.json_schema is not None:
+            fields.append("json_schema")
+        if config.regex is not None:
+            fields.append("regex")
+        if config.ebnf is not None:
+            fields.append("ebnf")
+        if config.structural_tag is not None:
+            fields.append("structural_tag")
+        if self._response_format_has_grammar(config.response_format):
+            fields.append("response_format")
+        return fields
+
+    def _build_tool_call_structural_tag(self, request: ChatCompletionRequest):
+        if not self._tool_choice_forces_tool(request):
+            return None
+
+        active_tools = self._active_tools_for_request(request)
+        if not active_tools:
+            raise ValueError("tool_choice requires at least one tool")
+
+        detector = DeepSeekV4Detector()
+        return detector.tool_call_structural_tag(
+            rtp_tools_to_sglang_tools(active_tools),
+            stop_after_first=self._tool_choice_name(request) is not None,
+        )
+
+    def apply_chat_completion_constraints(
+        self,
+        request: ChatCompletionRequest,
+        config: GenerateConfig,
+    ) -> None:
+        structural_tag = self._build_tool_call_structural_tag(request)
+        if structural_tag is None:
+            return
+        conflicts = self._grammar_constraint_fields(config)
+        if conflicts:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "tool_choice forced tool-call decoding conflicts with existing "
+                f"grammar constraint(s): {', '.join(conflicts)}",
+            )
+        config.structural_tag = json.dumps(
+            structural_tag, ensure_ascii=False, separators=(",", ":")
+        )
 
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
         """
@@ -244,6 +351,10 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         messages = []
         for msg in request.messages:
             message_dict = {"role": msg.role.value, "content": msg.content}
+            if msg.name:
+                message_dict["name"] = msg.name
+            if msg.tool_call_id:
+                message_dict["tool_call_id"] = msg.tool_call_id
 
             # Add tool_calls if present (on assistant messages)
             if hasattr(msg, "tool_calls") and msg.tool_calls:
@@ -269,7 +380,8 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
 
         # Add tools from request level to the first system message
         # According to encoding_dsv4 format, tools must be attached to a system message
-        if request.tools:
+        active_tools = self._active_tools_for_request(request)
+        if active_tools:
             tools_data = [
                 {
                     "type": "function",
@@ -279,7 +391,7 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
                         "parameters": tool.function.parameters,
                     },
                 }
-                for tool in request.tools
+                for tool in active_tools
             ]
 
             # Find the first system message and add tools to it
@@ -353,7 +465,7 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
                     "messages=%d tools=%d thinking_mode=%s filtered_config=%s "
                     "prompt_len=%d prompt_tail=%s",
                     len(messages),
-                    len(request.tools or []),
+                    len(active_tools),
                     thinking_mode,
                     filtered_config,
                     len(rendered_prompt),
@@ -382,7 +494,7 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         Returns:
             DeepSeekV4Detector if tools are present, None otherwise
         """
-        if request.tools:
+        if self._active_tools_for_request(request):
             # Determine thinking_mode based on whether request is in thinking mode
             thinking_mode = "thinking" if self.in_think_mode(request) else "chat"
 
@@ -461,9 +573,10 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             reasoning_content = parsed_msg.get(
                 "reasoning_content", parsed_msg.get("reasoning", "")
             )
+            active_tools = self._active_tools_for_request(status.request)
             tool_calls = self._convert_official_tool_calls(
                 status.detector,
-                status.request.tools,
+                active_tools,
                 parsed_msg.get("tool_calls", []),
             )
             reasoning_content, content = _split_content_left_in_reasoning(
@@ -473,23 +586,23 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             if (
                 not tool_calls
                 and reasoning_content
-                and "<｜DSML｜" in reasoning_content
+                and DSML_PREFIX in reasoning_content
             ):
                 split_result = _split_reasoning_before_dsml(reasoning_content)
                 if split_result is not None:
                     reasoning_content, tool_text = split_result
                     tool_calls, remaining_text = await self._extract_tool_calls_content(
                         status.detector,
-                        status.request.tools,
+                        active_tools,
                         tool_text,
                         is_streaming=False,
                     )
                     if remaining_text:
                         content = (content or "") + remaining_text
-            if not tool_calls and content and "<｜DSML｜" in content:
+            if not tool_calls and content and DSML_PREFIX in content:
                 tool_calls, content = await self._extract_tool_calls_content(
                     status.detector,
-                    status.request.tools,
+                    active_tools,
                     content,
                     is_streaming=False,
                 )
@@ -556,7 +669,7 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
 
         think_start = getattr(detector, "think_start_token", "<think>")
         think_end = getattr(detector, "think_end_token", "</think>")
-        dsml_start = "<｜DSML｜tool_calls>"
+        dsml_start = DSML_TOOL_CALLS_MARKER
 
         detector._buffer += text
         current_text = detector._buffer
@@ -642,16 +755,16 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             )
         if (
             reasoning_parser
-            and "<｜DSML｜tool_calls>" in text
-            and "<｜DSML｜tool_calls>" not in remaining_text
+            and DSML_TOOL_CALLS_MARKER in text
+            and DSML_TOOL_CALLS_MARKER not in remaining_text
         ):
             split_result = _split_reasoning_before_dsml(text)
             if split_result is not None:
                 reasoning_text, remaining_text = split_result
 
         if _dsv4_renderer_debug_enabled():
-            text_has_dsml = "<｜DSML｜" in text
-            remaining_has_dsml = "<｜DSML｜" in remaining_text
+            text_has_dsml = DSML_PREFIX in text
+            remaining_has_dsml = DSML_PREFIX in remaining_text
             logging.info(
                 "[DeepSeekV4RendererDebug] reasoning_extract "
                 "streaming=%s parser=%s input_len=%d reasoning_len=%d "
@@ -693,7 +806,7 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
                 is_streaming,
                 type(detector).__name__ if detector else None,
                 len(text),
-                "<｜DSML｜" in text,
+                DSML_PREFIX in text,
                 len(tool_calls or []),
                 len(remaining_text),
                 _preview_text(remaining_text),

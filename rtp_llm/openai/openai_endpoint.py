@@ -206,11 +206,6 @@ class OpenaiEndpoint(object):
         elif rf.type == "ebnf":
             assert rf.grammar
             config.ebnf = rf.grammar
-        elif rf.type == "structural_tag":
-            assert rf.structural_tag
-            config.structural_tag = json.dumps(
-                rf.structural_tag, ensure_ascii=False, separators=(",", ":")
-            )
         else:
             raise FtRuntimeException(
                 ExceptionType.INVALID_PARAMS,
@@ -315,6 +310,16 @@ class OpenaiEndpoint(object):
         if request.debug_info:
             config.return_output_ids = True
         return config
+
+    @staticmethod
+    def _apply_renderer_chat_constraints(
+        renderer,
+        request: ChatCompletionRequest,
+        config: GenerateConfig,
+    ) -> None:
+        apply_constraints = getattr(renderer, "apply_chat_completion_constraints", None)
+        if apply_constraints is not None:
+            apply_constraints(request, config)
 
     @staticmethod
     def _merge_tool_calls(
@@ -580,6 +585,7 @@ class OpenaiEndpoint(object):
         )
         rendered_input = self.render_chat(chat_request)
         generate_config = self._extract_generation_config(chat_request)
+        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
 
         mm_inputs = rendered_input.multimodal_inputs
 
@@ -614,5 +620,6 @@ class OpenaiEndpoint(object):
         )
         rendered_input = renderer.render_chat(chat_request)
         generate_config = self._extract_generation_config(chat_request)
+        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config)
         return debug_info
