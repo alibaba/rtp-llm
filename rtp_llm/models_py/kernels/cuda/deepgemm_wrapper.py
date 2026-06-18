@@ -106,6 +106,20 @@ def configure_deep_gemm_num_sms(num_sms: int) -> Generator[None, None, None]:
         deep_gemm.set_num_sms(original_num_sms)
 
 
+def _has_param(fn: Callable, name: str) -> bool:
+    """Check if *fn* accepts a keyword argument called *name*.
+
+    Returns False (conservative default: do not pass the argument) when the
+    callable's signature cannot be introspected — e.g. C/C++ extension
+    functions that do not expose a Python-level signature.
+    """
+    import inspect
+    try:
+        return name in inspect.signature(fn).parameters
+    except (ValueError, TypeError):
+        return False
+
+
 def _missing_deep_gemm() -> NoReturn:
     """Placeholder for unavailable DeepGEMM package."""
     raise RuntimeError(
@@ -597,10 +611,9 @@ def m_grouped_bf16_gemm_nt_contiguous(
     if _m_grouped_bf16_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
     if _bf16_contiguous_has_compiled_dims is None:
-        import inspect
-        _bf16_contiguous_has_compiled_dims = "compiled_dims" in inspect.signature(
-            _m_grouped_bf16_gemm_nt_contiguous_impl
-        ).parameters
+        _bf16_contiguous_has_compiled_dims = _has_param(
+            _m_grouped_bf16_gemm_nt_contiguous_impl, "compiled_dims"
+        )
     if _bf16_contiguous_has_compiled_dims:
         _m_grouped_bf16_gemm_nt_contiguous_impl(a, b, output, m_indices, compiled_dims)
     else:
@@ -647,10 +660,12 @@ def m_grouped_bf16_gemm_nt_masked(
     if _m_grouped_bf16_gemm_nt_masked_impl is None:
         return _missing_deep_gemm()
     if _bf16_masked_has_compiled_dims is None or _bf16_masked_has_max_block_n is None:
-        import inspect
-        params = inspect.signature(_m_grouped_bf16_gemm_nt_masked_impl).parameters
-        _bf16_masked_has_compiled_dims = "compiled_dims" in params
-        _bf16_masked_has_max_block_n = "max_block_n" in params
+        _bf16_masked_has_compiled_dims = _has_param(
+            _m_grouped_bf16_gemm_nt_masked_impl, "compiled_dims"
+        )
+        _bf16_masked_has_max_block_n = _has_param(
+            _m_grouped_bf16_gemm_nt_masked_impl, "max_block_n"
+        )
     kwargs = {}
     max_block_n = _get_bf16_masked_max_block_n()
     if max_block_n > 0 and _bf16_masked_has_max_block_n:
