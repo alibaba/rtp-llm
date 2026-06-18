@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import os
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
@@ -67,11 +68,22 @@ class RoleAddr(BaseModel):
         return role.name
 
 
+def _env_int(env_name: str, default: int) -> int:
+    """Read an integer from environment variable, fallback to default."""
+    val = os.environ.get(env_name)
+    if val is not None:
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    return default
+
+
 class GenerateConfig(BaseModel):
-    max_new_tokens: int = 32000
+    max_new_tokens: int = _env_int("MAX_NEW_TOKENS", 32000)
     # only for qwen agent fncall check max input tokens
-    max_input_tokens: int = 32000
-    max_thinking_tokens: int = 131073
+    max_input_tokens: int = _env_int("MAX_INPUT_TOKENS", 32000)
+    max_thinking_tokens: int = _env_int("MAX_THINKING_TOKENS", 131073)
     in_think_mode: bool = (
         False  # same as `enable_thinking` in chat_template_kwargs, discard one in the future
     )
