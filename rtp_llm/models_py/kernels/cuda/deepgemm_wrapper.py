@@ -111,10 +111,9 @@ def _has_param(fn: Callable, name: str) -> bool:
     """Check if *fn* accepts a keyword argument called *name*.
 
     Also returns True when the callable has a VAR_KEYWORD (**kwargs) parameter,
-    since it accepts arbitrary keyword arguments.  Returns True (permissive
-    default: try to pass the argument) when the signature cannot be
-    introspected — e.g. C/C++ extension functions — so that compatible
-    parameters are not silently dropped.
+    since it accepts arbitrary keyword arguments.  Returns False (conservative
+    default: do not pass the argument) when the signature cannot be
+    introspected — e.g. C/C++ extension functions.
     """
     import inspect
     try:
@@ -125,7 +124,7 @@ def _has_param(fn: Callable, name: str) -> bool:
             p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
         )
     except (ValueError, TypeError):
-        return True
+        return False
 
 
 def _missing_deep_gemm() -> NoReturn:
