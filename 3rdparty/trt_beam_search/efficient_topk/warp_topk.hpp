@@ -5,6 +5,7 @@
 #include <cassert>
 #include <functional>
 #include <type_traits>
+#include <unordered_map>
 
 #include "bitonic_sort.hpp"
 #include "hip_utils.hpp"
@@ -596,11 +597,22 @@ int calc_smem_size_for_block_wide(int num_of_warp, IdxT k) {
 
 template<template<int, bool, typename, typename> class WarpSortClass, typename T, typename IdxT>
 void calc_launch_parameter_by_occupancy(IdxT k, int* block_size, int* min_grid_size) {
+    // Cache occupancy-derived launch parameters per k. The occupancy API is expensive
+    // and the result only depends on k for a given template instantiation.
+    static std::unordered_map<IdxT, std::pair<int, int>> occupancy_cache;
+    auto it = occupancy_cache.find(k);
+    if (it != occupancy_cache.end()) {
+        *block_size    = it->second.first;
+        *min_grid_size = it->second.second;
+        return;
+    }
+
     auto func = find_block_kernel<true, WarpSortClass, T, IdxT>(k);
     auto calc_smem = [k](int bs) {
         return calc_smem_size_for_block_wide<T, IdxT>(bs / Utils::WARP_SIZE, k);
     };
     HIP_CHECK(hipOccupancyMaxPotentialBlockSizeVariableSMem(min_grid_size, block_size, func, calc_smem));
+    occupancy_cache.emplace(k, std::make_pair(*block_size, *min_grid_size));
 }
 
 template<template<int, bool, typename, typename> class WarpSortClass>
@@ -693,15 +705,15 @@ void warp_sort_topk_impl(int num_of_block,
     IdxT* tmp_idx = nullptr;
 
     if (num_of_block > 1) {
-        std::vector<size_t> sizes = {sizeof(T) * num_of_block * k * batch_size,
-                                     sizeof(IdxT) * num_of_block * k * batch_size};
         using Aligner256 = Utils::MemoryAligner<256>;
+        size_t sizes[2]   = {sizeof(T) * num_of_block * k * batch_size,
+                             sizeof(IdxT) * num_of_block * k * batch_size};
         size_t total_size = Aligner256::calculate_required_size(sizes);
         if (!buf) {
             buf_size = total_size;
             return;
         }
-        std::vector<void*> aligned_pointers = Aligner256::partition_buffer(buf, sizes);
+        auto aligned_pointers = Aligner256::partition_buffer(buf, sizes);
         tmp_val = static_cast<T*>(aligned_pointers[0]);
         tmp_idx = static_cast<IdxT*>(aligned_pointers[1]);
     } else if (!buf) {

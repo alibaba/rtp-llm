@@ -83,10 +83,16 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
     if (req.seed.has_value()) {
         config.random_seed = req.seed.value();
     }
-    if (req.logprobs.has_value() && req.logprobs.value()) {
-        config.return_all_probs = ReturnAllProbsMode::DEFAULT;
-        if (req.logprobs_mode.has_value() && req.logprobs_mode.value() == "original") {
-            config.return_all_probs = ReturnAllProbsMode::ORIGINAL;
+    if (req.logprobs.has_value()) {
+        if (!req.logprobs.value()) {
+            config.return_all_probs = ReturnAllProbsMode::NONE;
+        } else if (config.return_all_probs == ReturnAllProbsMode::NONE) {
+            // Align with Python endpoint: only override the default NONE mode;
+            // honor an explicitly-configured extra_configs.return_all_probs otherwise.
+            config.return_all_probs = ReturnAllProbsMode::DEFAULT;
+            if (req.logprobs_mode.has_value() && req.logprobs_mode.value() == "original") {
+                config.return_all_probs = ReturnAllProbsMode::ORIGINAL;
+            }
         }
     }
     config.addSpecialTokens(model_config_.special_tokens);

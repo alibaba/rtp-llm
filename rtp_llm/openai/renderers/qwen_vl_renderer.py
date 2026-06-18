@@ -1,4 +1,3 @@
-import copy
 from typing import List
 
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
@@ -67,8 +66,9 @@ class QwenVLRenderer(QwenRenderer):
         return PromptWithMMInput(prompt=prompt, urls=images)
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        messages = copy.deepcopy(request.messages)
-        prompt_and_mm_input = self._render_messages(messages)
+        # _render_messages only reads request.messages and builds new dicts/lists,
+        # so a deepcopy is unnecessary.
+        prompt_and_mm_input = self._render_messages(request.messages)
         input_ids = self.tokenizer.encode(prompt_and_mm_input.prompt)
         return RenderedInputs(
             input_ids=input_ids,
@@ -193,7 +193,8 @@ class Qwen2VLRenderer(QwenRenderer):
         )
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        messages = copy.deepcopy(request.messages)
+        # _render_messages only reads request.messages and builds new dicts/lists,
+        # so a deepcopy is unnecessary.
         prompt_and_mm_input = self._render_messages(
             request,
             request.extra_configs.add_vision_id if request.extra_configs else True,

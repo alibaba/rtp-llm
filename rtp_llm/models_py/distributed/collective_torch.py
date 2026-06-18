@@ -634,7 +634,11 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     # return torch.cat(tensor_list, dim=0)
 
 
-def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
+def reduce_scatter(
+    input_tensor: torch.Tensor,
+    group: Group,
+    output_tensor: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     """Reduce-scatter a tensor across all ranks in the group.
 
     Reduces (sums) the input tensor across all ranks and scatters the result
@@ -644,6 +648,9 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         input_tensor: Full-size tensor to reduce-scatter
             (shape: [world_size * chunk_size] + remaining_dims)
         group: Process group to use
+        output_tensor: Optional pre-allocated output buffer. When provided, it
+            must have shape [chunk_size] + remaining_dims, and match the input
+            device and dtype. This avoids allocating a new tensor on every call.
 
     Returns:
         Scattered chunk of the reduced tensor for this rank
@@ -656,11 +663,29 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         f"must be divisible by world_size ({world_size})"
     )
     chunk_size = input_tensor.shape[0] // world_size
-    output_tensor = torch.empty(
-        [chunk_size] + list(input_tensor.shape[1:]),
-        device=input_tensor.device,
-        dtype=input_tensor.dtype,
-    )
+    expected_shape = [chunk_size] + list(input_tensor.shape[1:])
+    if output_tensor is None:
+        output_tensor = torch.empty(
+            expected_shape,
+            device=input_tensor.device,
+            dtype=input_tensor.dtype,
+        )
+    else:
+        if tuple(output_tensor.shape) != tuple(expected_shape):
+            raise ValueError(
+                f"reduce_scatter: output_tensor shape {tuple(output_tensor.shape)} "
+                f"does not match expected {tuple(expected_shape)}"
+            )
+        if output_tensor.device != input_tensor.device:
+            raise ValueError(
+                f"reduce_scatter: output_tensor device {output_tensor.device} "
+                f"does not match input device {input_tensor.device}"
+            )
+        if output_tensor.dtype != input_tensor.dtype:
+            raise ValueError(
+                f"reduce_scatter: output_tensor dtype {output_tensor.dtype} "
+                f"does not match input dtype {input_tensor.dtype}"
+            )
     torch.distributed.reduce_scatter_tensor(
         output_tensor, input_tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
     )

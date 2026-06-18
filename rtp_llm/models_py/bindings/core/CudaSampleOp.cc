@@ -266,8 +266,11 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
 
         if (params.cum_log_probs.has_value()) {
             auto cum_log_probs_t = params.cum_log_probs.value();
-            auto log_probs      = torch::log_softmax(probs_t, -1);
-            cum_log_probs_t.add_(log_probs.gather(-1, selected_tokens.unsqueeze(-1)).squeeze(-1));
+            // Avoid materializing the full [batch, vocab] log_probs tensor.
+            // log p(selected) = logit_selected - logsumexp(logits).
+            auto selected_logits   = probs_t.gather(-1, selected_tokens.unsqueeze(-1)).squeeze(-1);
+            auto selected_logprobs = selected_logits - torch::logsumexp(probs_t, -1);
+            cum_log_probs_t.add_(selected_logprobs.to(cum_log_probs_t.device()));
         }
 
         auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
@@ -408,6 +411,14 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens);
 
+        if (params.cum_log_probs.has_value()) {
+            auto cum_log_probs_t = params.cum_log_probs.value();
+            // Avoid materializing the full [batch, vocab] log_probs tensor.
+            auto selected_logits   = probs_t.gather(-1, selected_tokens.unsqueeze(-1).to(torch::kLong)).squeeze(-1);
+            auto selected_logprobs = selected_logits - torch::logsumexp(probs_t, -1);
+            cum_log_probs_t.add_(selected_logprobs.to(cum_log_probs_t.device()));
+        }
+
         auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
         params.token_ids.copy_(output_tokens);
 
@@ -439,9 +450,8 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     if (params.output_all_probs.has_value()) {
         output_all_probs_t = params.output_all_probs.value();
     }
-    if (params.cum_log_probs.has_value() && !output_all_probs_t.defined()) {
-        output_all_probs_t = torch::zeros_like(probs_t);
-    }
+    // Note: we do NOT allocate a temporary output_all_probs_t just for cum_log_probs.
+    // The cum_log_probs update below uses the final sampling distribution directly.
 
     std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
 
@@ -503,11 +513,14 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         top_k_renorm_probs(probs_t, output_all_probs_t, std::nullopt, 1 << 30, reinterpret_cast<uintptr_t>(cur_stream));
     }
 
-    // 7. Update cum_log_probs
+    // 7. Update cum_log_probs using the final sampling distribution.
+    // filtered_probs is already the normalized distribution used for sampling
+    // (top_k/top_p filtered and renormalized); do not log_softmax it again.
     if (params.cum_log_probs.has_value()) {
         auto cum_log_probs_t = params.cum_log_probs.value();
-        auto log_probs      = torch::log_softmax(probs_t, -1);
-        cum_log_probs_t.add_(log_probs.gather(-1, samples_t.unsqueeze(-1).to(torch::kLong)).squeeze(-1));
+        auto log_probs      = filtered_probs.log();
+        auto gathered = log_probs.gather(-1, samples_t.unsqueeze(-1).to(torch::kLong)).squeeze(-1);
+        cum_log_probs_t.add_(gathered.to(cum_log_probs_t.device()));
     }
 
     // 8. Copy results back

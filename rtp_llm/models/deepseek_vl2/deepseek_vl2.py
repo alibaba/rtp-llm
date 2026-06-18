@@ -141,13 +141,20 @@ class DeepSeekVLV2(BaseModel):
             "global_view_pos", "head"
         )
 
-        tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path or config.ckpt_path)
-        image_id = tokenizer.encode("<image>", add_special_tokens=False)[0]
-        config.mm_related_params.special_token_ids.update(
+        config.mm_model_config.is_multimodal = True
+
+    def load_tokenizer(self) -> None:
+        super().load_tokenizer()
+        # The image token id must come from the actual tokenizer path, which is
+        # only available after model_config (and tokenizer_path) is fully populated
+        # by the loader. _create_config runs too early to see tokenizer_path.
+        tokenizer_path = self.model_config.tokenizer_path or self.model_config.ckpt_path
+        hf_tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        image_id = hf_tokenizer.encode("<image>", add_special_tokens=False)[0]
+        self.model_config.mm_related_params.special_token_ids.update(
             {"ignore_token_index": -100, "image_token_index": image_id}
         )
-        config.mm_model_config.mm_sep_tokens = [[image_id]]
-        config.mm_model_config.is_multimodal = True
+        self.model_config.mm_model_config.mm_sep_tokens = [[image_id]]
 
     @staticmethod
     def get_weight_cls():

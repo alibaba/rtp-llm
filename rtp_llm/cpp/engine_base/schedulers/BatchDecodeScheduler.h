@@ -137,9 +137,20 @@ public:
         waiting_streams_.remove_if([](const auto& s) { return s->hasError(); });
 
         std::list<GenerateStreamPtr> new_streams;
+        ReturnAllProbsMode           batch_return_all_probs_mode = ReturnAllProbsMode::NONE;
         for (auto it = waiting_streams_.begin(); it != waiting_streams_.end(); it++) {
             // 先检查是否有错误，避免错误请求占用资源
             if (!(*it)->hasError()) {
+                // ReturnAllProbsMode isolation: DEFAULT and ORIGINAL must not be mixed in one batch.
+                // NONE streams can join any batch. See FIFOScheduler::evaluateWaitingStreams.
+                auto stream_return_all_probs = (*it)->getReturnAllProbs();
+                if (stream_return_all_probs != ReturnAllProbsMode::NONE) {
+                    if (batch_return_all_probs_mode == ReturnAllProbsMode::NONE) {
+                        batch_return_all_probs_mode = stream_return_all_probs;
+                    } else if (stream_return_all_probs != batch_return_all_probs_mode) {
+                        continue;
+                    }
+                }
                 new_streams.push_back(*it);
             }
             if (new_streams.size() >= batch_size_) {

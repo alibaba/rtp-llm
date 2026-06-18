@@ -44,10 +44,14 @@ private:
         grpc::ClientContext context;
 
         // Set gRPC deadline from the max mm_timeout_ms across all inputs.
-        // This prevents a single stuck VIT worker from blocking the engine thread.
-        int32_t max_timeout_ms = 30000;  // default 30 s
+        // Start from 0 so explicitly small timeouts (e.g. 1000ms) are honored;
+        // fall back to the 30s default only when no input configures a positive timeout.
+        int32_t max_timeout_ms = 0;
         for (const auto& mm_input : mm_inputs) {
             max_timeout_ms = std::max(max_timeout_ms, mm_input.mm_preprocess_config.mm_timeout_ms);
+        }
+        if (max_timeout_ms <= 0) {
+            max_timeout_ms = 30000;  // default 30 s
         }
         context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(max_timeout_ms));
 

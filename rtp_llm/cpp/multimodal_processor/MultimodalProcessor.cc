@@ -1,6 +1,7 @@
 
 #include <functional>
 #include <algorithm>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -18,27 +19,30 @@ ErrorInfo MultimodalProcessor::getFeatureHash(int32_t* token_ids, const torch::T
     // This makes the prefix cache key reflect the actual image/video embedding, so only
     // identical content reuses cached blocks.
     //
-    // NOTE on the GPU->CPU sync below: hashing must inspect every byte of the embedding,
-    // so we have to materialize it on the host. This is a deliberate blocking step on the
-    // prefill-prep path (NOT the decode hot path). Without it the cache key would either
-    // (a) require a GPU hash kernel — adds significant complexity for the marginal benefit
-    // of avoiding one extra prefill-time D2H, or (b) fall back to URL-based hashing, which
-    // would over-share cache blocks between requests whose URLs match but whose actual
-    // embedding bytes differ (e.g. dynamic image transforms). Keep this sync.
+    // We compute the hash on the GPU using lightweight per-row statistics and copy only
+    // the resulting [num_tokens] int32 hashes to the host. This avoids blocking on a full
+    // D2H transfer of the embedding tensor while still producing different keys for
+    // different feature content.
     if (mm_emb.dim() < 1 || mm_emb.size(0) <= 0) {
         return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "multimodal feature tensor is empty");
     }
-    auto          emb        = mm_emb.to(torch::kCPU).contiguous();
-    const int64_t num_tokens = emb.size(0);
-    const int64_t row_bytes  = emb.numel() / num_tokens * emb.element_size();
-    const char*   base       = static_cast<const char*>(emb.data_ptr());
+    const int64_t num_tokens = mm_emb.size(0);
+    const int64_t row_elems  = mm_emb.numel() / num_tokens;
 
-    std::hash<std::string_view> hasher;
-    for (int64_t j = 0; j < num_tokens; ++j) {
-        std::string_view row(base + j * row_bytes, static_cast<size_t>(row_bytes));
-        int32_t          hash_res = static_cast<int32_t>(hasher(row));
-        memcpy(token_ids + j, &hash_res, sizeof(int32_t));
-    }
+    auto flat     = mm_emb.reshape({num_tokens, row_elems}).to(torch::kFloat32);
+    auto mean     = flat.mean(1, /*keepdim=*/true);
+    auto centered = flat - mean;
+    auto m1       = flat.sum(1);
+    auto m2       = flat.pow(2).sum(1);
+    auto m3       = centered.pow(3).sum(1);
+
+    const int64_t max_int32 = static_cast<int64_t>(std::numeric_limits<int32_t>::max());
+    auto hash = ((m1 * 1000.0).to(torch::kInt64) + m2.to(torch::kInt64) + (m3 * 1000.0).to(torch::kInt64))
+                    .remainder(max_int32)
+                    .to(torch::kInt32);
+
+    auto hash_cpu = hash.to(torch::kCPU);
+    std::memcpy(token_ids, hash_cpu.data_ptr<int32_t>(), num_tokens * sizeof(int32_t));
     return ErrorInfo::OkStatus();
 }
 

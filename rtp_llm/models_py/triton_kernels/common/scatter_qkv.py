@@ -64,16 +64,20 @@ def scatter_qkv(
         k = k.view(1, M, num_k_heads, head_k_dim)       # triggers .contiguous()
         v = v.view(1, M, num_v_heads, head_v_dim)       # triggers .contiguous()
     """
-    assert mixed_qkv.dim() == 2 and mixed_qkv.is_contiguous(), (
-        f"mixed_qkv must be 2D contiguous, got shape={tuple(mixed_qkv.shape)} "
-        f"stride={mixed_qkv.stride()} contig={mixed_qkv.is_contiguous()}"
-    )
+    if mixed_qkv.dim() != 2 or not mixed_qkv.is_contiguous():
+        raise ValueError(
+            f"mixed_qkv must be 2D contiguous, got shape={tuple(mixed_qkv.shape)} "
+            f"stride={mixed_qkv.stride()} contig={mixed_qkv.is_contiguous()}"
+        )
     M = mixed_qkv.shape[0]
     k_dim = num_k_heads * head_k_dim
     v_dim = num_v_heads * head_v_dim
-    assert (
-        mixed_qkv.shape[1] == 2 * k_dim + v_dim
-    ), f"expected last dim 2*{k_dim} + {v_dim} = {2*k_dim + v_dim}, got {mixed_qkv.shape[1]}"
+    expected_last_dim = 2 * k_dim + v_dim
+    if mixed_qkv.shape[1] != expected_last_dim:
+        raise ValueError(
+            f"expected last dim 2*{k_dim} + {v_dim} = {expected_last_dim}, "
+            f"got {mixed_qkv.shape[1]}"
+        )
 
     dtype, device = mixed_qkv.dtype, mixed_qkv.device
     q = torch.empty((1, M, num_k_heads, head_k_dim), dtype=dtype, device=device)

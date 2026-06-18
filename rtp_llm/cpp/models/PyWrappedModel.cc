@@ -710,6 +710,18 @@ MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
         return {false, {}};
     }
 
+    // Layer micro-batch splitting currently does not correctly split combo_position_ids,
+    // combo_tokens_type_ids, text_tokens_mask, or remap mm_features_locs. Disable it for
+    // MRoPE and multimodal batches to avoid feeding wrong positions / features to the model.
+    if (inputs.combo_position_ids.defined() && inputs.combo_position_ids.numel() > 0) {
+        RTP_LLM_LOG_DEBUG("micro batch disable because combo_position_ids is present (MRoPE)");
+        return {false, {}};
+    }
+    if (inputs.multimodal_features.has_value() && !inputs.multimodal_features.value().empty()) {
+        RTP_LLM_LOG_DEBUG("micro batch disable because multimodal features are present");
+        return {false, {}};
+    }
+
     const auto&  input_lengths      = inputs.input_lengths;
     const auto&  sequence_lengths   = inputs.sequence_lengths;
     const size_t decoder_batch_size = sequence_lengths.size(0);

@@ -42,6 +42,12 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
     ):
         super().__init__(config, quant_config)
 
+        if not MoriEPWrapper.is_initialized():
+            raise RuntimeError(
+                "MoriEpIntranodeRouter requires MoriEPWrapper to be initialized. "
+                "Call init_moriep_wrapper_from_config() before building the model."
+            )
+
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
         self.expert_num = config.expert_num

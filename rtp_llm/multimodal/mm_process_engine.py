@@ -193,26 +193,24 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         if work_item.embedding_result is not None:
             return
 
+        # Keep the entire apply_async (and rebuild+retry) inside _pool_lock so
+        # another thread cannot replace self.pool between our read and submit.
         with self._pool_lock:
-            pool = self.pool
-        try:
-            work_item.future = pool.apply_async(
-                _worker_process_task, args=(work_item.mm_inputs,)
-            )
-            return
-        except (BrokenPipeError, OSError, EOFError) as e:
-            # multiprocessing.Pool surfaces broken state via these — rebuild and retry once.
-            # Keep both rebuild and the retry submission under _pool_lock so another thread
-            # cannot tear self.pool down between our rebuild and the apply_async call.
-            logging.error(f"Pool broken on submit, rebuilding: {e}", exc_info=True)
-            with self._pool_lock:
+            try:
+                work_item.future = self.pool.apply_async(
+                    _worker_process_task, args=(work_item.mm_inputs,)
+                )
+                return
+            except (BrokenPipeError, OSError, EOFError) as e:
+                # multiprocessing.Pool surfaces broken state via these — rebuild and retry once.
+                logging.error(f"Pool broken on submit, rebuilding: {e}", exc_info=True)
                 self._rebuild_pool()
                 work_item.future = self.pool.apply_async(
                     _worker_process_task, args=(work_item.mm_inputs,)
                 )
-        except Exception as e:
-            logging.error(f"Unexpected error during submission: {e}", exc_info=True)
-            raise
+            except Exception as e:
+                logging.error(f"Unexpected error during submission: {e}", exc_info=True)
+                raise
 
     def get_result(self, work_item: "MMWorkItem") -> None:
         if work_item.future is None:
@@ -320,7 +318,11 @@ class MMWorkItem:
         # proto3 default for unset int is 0; treat <= 0 as "not set" and fall back to the
         # caller-provided default (which comes from VitConfig.mm_timeout_ms, always initialized
         # at server startup via --mm_timeout_ms / MM_TIMEOUT_MS env, default 120000ms).
-        per_request_timeout = self.mm_inputs[0].mm_preprocess_config.mm_timeout_ms
+        # Use the maximum timeout across the whole batch so a single strict request is honored.
+        per_request_timeout = max(
+            (mm_input.mm_preprocess_config.mm_timeout_ms for mm_input in self.mm_inputs),
+            default=0,
+        )
         self.mm_timeout_ms = (
             per_request_timeout if per_request_timeout > 0 else mm_timeout_ms
         )

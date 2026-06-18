@@ -262,6 +262,11 @@ def trans_mm_input(multimodal_inputs):
         ]
     # not sep
     elif isinstance(multimodal_inputs, list):
+        if not all(isinstance(mm_input, MultimodalInput) for mm_input in multimodal_inputs):
+            raise ValueError(
+                f"multimodal_inputs list must contain only MultimodalInput objects, "
+                f"got types {[type(x).__name__ for x in multimodal_inputs]}"
+            )
         return [
             _CppMultimodalInput(
                 mm_input.url,

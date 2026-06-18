@@ -35,8 +35,31 @@ def remap_to_local_ids(
     local_start: int,
     local_end: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    assert dispatch_ids.is_contiguous()
-    assert dispatch_weights.is_contiguous()
+    if dispatch_ids.dim() != 1 or dispatch_weights.dim() != 1:
+        raise ValueError(
+            f"dispatch_ids and dispatch_weights must be 1-D, got shapes "
+            f"{list(dispatch_ids.shape)} and {list(dispatch_weights.shape)}"
+        )
+    if dispatch_ids.shape != dispatch_weights.shape:
+        raise ValueError(
+            f"dispatch_ids shape {list(dispatch_ids.shape)} must match "
+            f"dispatch_weights shape {list(dispatch_weights.shape)}"
+        )
+    if dispatch_ids.device != dispatch_weights.device:
+        raise ValueError(
+            f"dispatch_ids device {dispatch_ids.device} must match "
+            f"dispatch_weights device {dispatch_weights.device}"
+        )
+    if not dispatch_ids.is_contiguous() or not dispatch_weights.is_contiguous():
+        raise ValueError("dispatch_ids and dispatch_weights must be contiguous")
+    if dispatch_ids.dtype != torch.int32:
+        raise ValueError(
+            f"dispatch_ids must be int32, got {dispatch_ids.dtype}"
+        )
+    if dispatch_weights.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+        raise ValueError(
+            f"dispatch_weights must be float32/float16/bfloat16, got {dispatch_weights.dtype}"
+        )
 
     N = dispatch_ids.numel()
 

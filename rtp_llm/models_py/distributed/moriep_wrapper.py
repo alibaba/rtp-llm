@@ -82,6 +82,12 @@ class MoriEPWrapperConfig:
             f"got ep_size={parallelism_config.ep_size}, "
             f"world_size={parallelism_config.world_size}"
         )
+        if model_config.expert_num % parallelism_config.ep_size != 0:
+            raise ValueError(
+                f"expert_num must be divisible by ep_size for MORI EP, "
+                f"got expert_num={model_config.expert_num}, "
+                f"ep_size={parallelism_config.ep_size}"
+            )
         return cls(
             data_type=torch_dtype,
             rank=parallelism_config.ep_rank,

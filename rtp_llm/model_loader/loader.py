@@ -416,7 +416,11 @@ class ModelLoader:
                 complete = weight_info.collector.store_tensor(key, loaded_tensor)
 
             if inline_fp8 and _total_count % 500 == 0 and torch.cuda.is_available():
-                torch.cuda.empty_cache()
+                # Only pay the cost of empty_cache when reserved memory is high;
+                # frequent empty_cache calls fragment the allocator and slow loading.
+                device_props = torch.cuda.get_device_properties(torch.cuda.current_device())
+                if torch.cuda.memory_reserved() > device_props.total_memory * 0.85:
+                    torch.cuda.empty_cache()
             if _total_count % 5000 == 0 and torch.cuda.is_available():
                 alloc_gb = torch.cuda.memory_allocated() / (1024**3)
                 reserved_gb = torch.cuda.memory_reserved() / (1024**3)
@@ -441,7 +445,11 @@ class ModelLoader:
                         model_weights.set_global_weight(name, tensor)
                 weight_info.collector.clear()
                 if inline_fp8:
-                    torch.cuda.empty_cache()
+                    # Avoid empty_cache on every completed weight; only flush when
+                    # reserved memory is high to reduce allocator fragmentation.
+                    device_props = torch.cuda.get_device_properties(torch.cuda.current_device())
+                    if torch.cuda.memory_reserved() > device_props.total_memory * 0.85:
+                        torch.cuda.empty_cache()
                     gc.collect()
 
         _fallback_count = 0

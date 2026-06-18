@@ -255,7 +255,10 @@ def chunk_gated_delta_rule_flydsl_with_cache_store(
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
         )
-    if cu_seqlens is not None:
+    # Avoid GPU sync in the hot path: only validate cu_seqlens when it is on CPU.
+    # GPU-side cu_seqlens are assumed to come from code that already validated input
+    # lengths on the host (e.g., NormalModelInputGatherer).
+    if cu_seqlens is not None and not cu_seqlens.is_cuda:
         seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
         if (seq_lengths <= 0).any():
             raise ValueError(
