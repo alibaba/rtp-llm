@@ -264,6 +264,12 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens, true);
 
+        if (params.cum_log_probs.has_value()) {
+            auto cum_log_probs_t = params.cum_log_probs.value();
+            auto log_probs      = torch::log_softmax(probs_t, -1);
+            cum_log_probs_t.add_(log_probs.gather(-1, selected_tokens.unsqueeze(-1)).squeeze(-1));
+        }
+
         auto output_tokens = transposed_tokens.transpose(0, 1).contiguous();
         params.token_ids.copy_(output_tokens, true);
 
@@ -500,7 +506,8 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // 7. Update cum_log_probs
     if (params.cum_log_probs.has_value()) {
         auto cum_log_probs_t = params.cum_log_probs.value();
-        cum_log_probs_t.add_(probs_t.log());
+        auto log_probs      = torch::log_softmax(probs_t, -1);
+        cum_log_probs_t.add_(log_probs.gather(-1, samples_t.unsqueeze(-1).to(torch::kLong)).squeeze(-1));
     }
 
     // 8. Copy results back

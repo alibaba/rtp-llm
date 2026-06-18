@@ -255,6 +255,13 @@ def chunk_gated_delta_rule_flydsl_with_cache_store(
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
         )
+    if cu_seqlens is not None:
+        seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        if (seq_lengths <= 0).any():
+            raise ValueError(
+                "FlyDSL chunk GDN requires all sequence lengths > 0, "
+                f"but got min length {seq_lengths.min().item()}."
+            )
     if cu_seqlens is not None and initial_state is not None:
         expected_states = len(cu_seqlens) - 1
         if initial_state.shape[0] != expected_states:
