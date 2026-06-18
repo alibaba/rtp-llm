@@ -14,6 +14,7 @@ from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
     DEFER_FIRST_SIGTERM_VALUE,
     FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
+    PRE_STOP_DRAIN_MARKER_PATH_ENV,
     PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV,
     PRE_STOP_DRAIN_SIGNAL_ENV,
     ProcessManager,
@@ -975,6 +976,58 @@ class TestFailureShutdownPaths(unittest.TestCase):
         self.assertTrue(manager.shutdown_requested)
         self.assertFalse(manager.is_deferred_sigterm_pending())
         self.assertFalse(manager.failure_detected)
+
+    def test_signal_handler_marks_pre_stop_drain_marker(self):
+        marker_path = f"/tmp/rtp_llm_test_pre_stop_marker_{os.getpid()}"
+        try:
+            os.unlink(marker_path)
+        except FileNotFoundError:
+            pass
+
+        try:
+            with patch.dict(
+                os.environ,
+                {PRE_STOP_DRAIN_MARKER_PATH_ENV: marker_path},
+            ):
+                manager = ProcessManager(shutdown_timeout=30, monitor_interval=0.01)
+                manager._signal_handler(signal.SIGTERM, None)
+                self.assertTrue(os.path.exists(marker_path))
+        finally:
+            try:
+                os.unlink(marker_path)
+            except FileNotFoundError:
+                pass
+
+    def test_deferred_sigterm_still_marks_pre_stop_drain_marker(self):
+        marker_path = f"/tmp/rtp_llm_test_deferred_pre_stop_marker_{os.getpid()}"
+        try:
+            os.unlink(marker_path)
+        except FileNotFoundError:
+            pass
+
+        try:
+            with patch.dict(
+                os.environ,
+                {
+                    DEFER_FIRST_SIGTERM_ENV: DEFER_FIRST_SIGTERM_VALUE,
+                    DEFER_FIRST_SIGTERM_SECONDS_ENV: "30",
+                    PRE_STOP_DRAIN_MARKER_PATH_ENV: marker_path,
+                },
+            ):
+                manager = ProcessManager(
+                    shutdown_timeout=30,
+                    monitor_interval=0.01,
+                    allow_defer_first_sigterm=True,
+                )
+                manager._signal_handler(signal.SIGTERM, None)
+                self.assertFalse(manager.shutdown_requested)
+                self.assertTrue(manager.is_deferred_sigterm_pending())
+                self.assertTrue(os.path.exists(marker_path))
+        finally:
+            try:
+                os.unlink(marker_path)
+            except FileNotFoundError:
+                pass
 
     def test_deferred_backend_group_gets_staged_sigint(self):
         """Parent-staged backend shutdown must not look like duplicate

@@ -34,6 +34,7 @@ from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
     DEFER_FIRST_SIGTERM_VALUE,
     ProcessManager,
+    mark_pre_stop_draining,
 )
 
 setup_logging()
@@ -112,6 +113,7 @@ def local_rank_start(
         logging.info(
             f"Local rank received signal {signum}, shutting down gracefully..."
         )
+        mark_pre_stop_draining(f"backend rank signal {signum}")
         if defer_first_sigterm and signum == signal.SIGTERM:
             if not deferred_sigterm_seen:
                 deferred_sigterm_seen = True

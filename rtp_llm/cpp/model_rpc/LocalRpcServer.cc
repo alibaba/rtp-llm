@@ -1,5 +1,7 @@
 #include <memory>
 #include <chrono>
+#include <cstdlib>
+#include <unistd.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -15,6 +17,13 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+
+constexpr char kPreStopDrainMarkerPathEnv[] = "RTP_LLM_PRE_STOP_DRAIN_MARKER_PATH";
+
+bool isPreStopDraining() {
+    const char* marker_path = std::getenv(kPreStopDrainMarkerPathEnv);
+    return marker_path != nullptr && marker_path[0] != '\0' && ::access(marker_path, F_OK) == 0;
+}
 
 std::string formatRequestLogTag(const std::string& request_key, const RequestInfo& request_info) {
     std::string tag = "request [" + request_key + "]";
@@ -306,7 +315,7 @@ WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_ver
     status_info.dp_rank                 = maga_init_params_.parallelism_config.dp_rank;
     status_info.status_version          = currentTimeUs();
     status_info.latest_finished_version = status_info.engine_schedule_info.latest_finished_version;
-    status_info.alive                   = true;
+    status_info.alive                   = !isPreStopDraining();
     auto quant_method                   = maga_init_params_.model_config_.quant_algo.getQuantMethod();
 
     switch (quant_method) {

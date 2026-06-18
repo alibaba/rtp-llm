@@ -20,9 +20,35 @@ DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
 PRE_STOP_DRAIN_SIGNAL_ENV = "RTP_LLM_PRE_STOP_DRAIN_SIGNAL"
 PRE_STOP_DRAIN_SIGNAL_DISABLED_VALUE = "0"
 PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
+PRE_STOP_DRAIN_MARKER_PATH_ENV = "RTP_LLM_PRE_STOP_DRAIN_MARKER_PATH"
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 600
 DEFAULT_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS = 60.0
 DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS = 120.0
+
+
+def ensure_pre_stop_drain_marker_path() -> str:
+    marker_path = os.environ.get(PRE_STOP_DRAIN_MARKER_PATH_ENV, "").strip()
+    if marker_path:
+        return marker_path
+
+    marker_path = f"/tmp/rtp_llm_pre_stop_drain_{os.getpid()}"
+    os.environ[PRE_STOP_DRAIN_MARKER_PATH_ENV] = marker_path
+    try:
+        os.unlink(marker_path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        logging.warning("Failed to clear pre-stop drain marker %s: %s", marker_path, e)
+    return marker_path
+
+
+def mark_pre_stop_draining(reason: str) -> None:
+    marker_path = ensure_pre_stop_drain_marker_path()
+    try:
+        with open(marker_path, "w", encoding="utf-8") as marker:
+            marker.write(f"{time.time():.6f} {reason}\n")
+    except OSError as e:
+        logging.warning("Failed to mark pre-stop drain marker %s: %s", marker_path, e)
 
 
 class ProcessManager:
@@ -60,6 +86,7 @@ class ProcessManager:
         self._deferred_sigterm_seen = False
         self._deferred_sigterm_timer: Optional[threading.Timer] = None
         self._used_pre_stop_drain_signal = False
+        ensure_pre_stop_drain_marker_path()
 
         # Health check related attributes
         self.health_check_processes: List[Process] = []
@@ -80,6 +107,7 @@ class ProcessManager:
         logging.info(
             f"Process manager received signal {signum}, initiating shutdown..."
         )
+        mark_pre_stop_draining(f"process manager signal {signum}")
         if self._defer_first_sigterm_if_needed(signum):
             return
         self._cancel_deferred_sigterm_timer()
