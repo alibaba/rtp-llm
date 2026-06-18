@@ -122,6 +122,10 @@ class Qwen2VLRenderer(QwenRenderer):
                             preprocess_configs.append(
                                 get_preprocess_config(content_part.preprocess_config)
                             )
+                        else:
+                            preprocess_configs.append(
+                                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+                            )
                         now_content.append(
                             {"type": "image", "image": content_part.image_url.url}
                         )
@@ -132,6 +136,10 @@ class Qwen2VLRenderer(QwenRenderer):
                         if content_part.preprocess_config:
                             preprocess_configs.append(
                                 get_preprocess_config(content_part.preprocess_config)
+                            )
+                        else:
+                            preprocess_configs.append(
+                                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
                             )
                         now_content.append(
                             {"type": "video", "video": content_part.video_url.url}

@@ -1,8 +1,5 @@
 from typing import Dict, List, Union
 
-from smoke.case_runner import CaseRunner
-from smoke.task_info import TaskInfo, TaskStates
-
 from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
 from rtp_llm.test.smoke.case_runner import CaseRunner
 from rtp_llm.test.smoke.task_info import TaskInfo, TaskStates

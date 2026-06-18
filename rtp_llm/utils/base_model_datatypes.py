@@ -35,13 +35,14 @@ class MMUrlType(IntEnum):
     IGRAPH = 5
 
 
+@dataclass
 class VitParameters:
     """Vit parameters for multimodal models."""
 
     # config includes origin vit config in ckpt/config.json
-    config: Dict[str, Any] = {}
-    special_token_ids: Dict[str, Any] = {}
-    special_tokens: Dict[str, Any] = {}
+    config: Dict[str, Any] = field(default_factory=dict)
+    special_token_ids: Dict[str, Any] = field(default_factory=dict)
+    special_tokens: Dict[str, Any] = field(default_factory=dict)
     vit_weights: Any = None
     preprocess_batch_size: int = 1
     eval_param_count = None

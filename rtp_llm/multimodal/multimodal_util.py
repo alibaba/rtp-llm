@@ -11,6 +11,12 @@ from typing import Optional
 import requests
 import torch
 
+from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    MMPreprocessConfigPB,
+    MultimodalInputsPB,
+)
+from rtp_llm.ops import MMPreprocessConfig as _CppMMPreprocessConfig, MultimodalInput as _CppMultimodalInput
+from rtp_llm.utils.grpc_util import trans_tensor
 from rtp_llm.utils.lru_dict import LruDict
 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
@@ -226,3 +232,46 @@ class MMDataCache(object):
 # Global cache instance for VIT embeddings
 vit_emb_cache_ = MMDataCache(cache_size=10)
 url_data_cache_ = MMDataCache(cache_size=10)
+
+
+def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
+    return _CppMMPreprocessConfig(
+        width=mm_process_config_pb.width,
+        height=mm_process_config_pb.height,
+        min_pixels=mm_process_config_pb.min_pixels,
+        max_pixels=mm_process_config_pb.max_pixels,
+        fps=mm_process_config_pb.fps,
+        min_frames=mm_process_config_pb.min_frames,
+        max_frames=mm_process_config_pb.max_frames,
+        crop_positions=list(mm_process_config_pb.crop_positions),
+        mm_timeout_ms=mm_process_config_pb.mm_timeout_ms,
+    )
+
+
+def trans_mm_input(multimodal_inputs):
+    # vit sep
+    if isinstance(multimodal_inputs, MultimodalInputsPB):
+        return [
+            _CppMultimodalInput(
+                mm_input.multimodal_url,
+                MMUrlType(mm_input.multimodal_type),
+                trans_tensor(mm_input.multimodal_tensor),
+                trans_config(mm_input.mm_preprocess_config),
+            )
+            for mm_input in multimodal_inputs.multimodal_inputs
+        ]
+    # not sep
+    elif isinstance(multimodal_inputs, list):
+        return [
+            _CppMultimodalInput(
+                mm_input.url,
+                MMUrlType(mm_input.mm_type),
+                mm_input.tensor,
+                mm_input.mm_preprocess_config,
+            )
+            for mm_input in multimodal_inputs
+        ]
+    else:
+        raise ValueError(
+            f"Unsupported multimodal input type: {type(multimodal_inputs)}"
+        )

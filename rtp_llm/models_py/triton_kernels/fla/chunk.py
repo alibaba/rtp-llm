@@ -534,7 +534,7 @@ def chunk_gated_delta_rule(
                 f"V-first [N, H, V, K] tensors directly.",
                 stacklevel=2,
             )
-            initial_state = initial_state.transpose(-1, -2).contiguous()
+            initial_state = initial_state.contiguous()
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(

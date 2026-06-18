@@ -193,8 +193,10 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         if work_item.embedding_result is not None:
             return
 
+        with self._pool_lock:
+            pool = self.pool
         try:
-            work_item.future = self.pool.apply_async(
+            work_item.future = pool.apply_async(
                 _worker_process_task, args=(work_item.mm_inputs,)
             )
             return

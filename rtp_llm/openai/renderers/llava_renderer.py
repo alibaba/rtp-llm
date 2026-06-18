@@ -127,6 +127,10 @@ class Conversation:
                             preprocess_configs.append(
                                 get_preprocess_config(content_part.preprocess_config)
                             )
+                        else:
+                            preprocess_configs.append(
+                                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+                            )
                         now_prompt = now_prompt + self.image_sep
                     elif content_part.type == ContentPartTypeEnum.video_url:
                         assert content_part.video_url != None
@@ -135,6 +139,10 @@ class Conversation:
                         if content_part.preprocess_config:
                             preprocess_configs.append(
                                 get_preprocess_config(content_part.preprocess_config)
+                            )
+                        else:
+                            preprocess_configs.append(
+                                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
                             )
                         now_prompt = now_prompt + self.image_sep
                 prompt += f"{self.roles[message.role]}" + self.connector[0] + now_prompt
