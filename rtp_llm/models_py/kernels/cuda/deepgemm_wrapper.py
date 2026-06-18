@@ -57,6 +57,7 @@ _m_grouped_fp8_gemm_nt_masked_impl: Callable[..., Any] | None = None
 _bf16_gemm_nt_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_masked_impl: Callable[..., Any] | None = None
+_bf16_gemm_nt_has_compiled_dims: bool | None = None
 _bf16_contiguous_has_compiled_dims: bool | None = None
 _bf16_masked_has_compiled_dims: bool | None = None
 _bf16_masked_has_max_block_n: bool | None = None
@@ -582,11 +583,16 @@ def bf16_gemm_nt(
         c (Optional[torch.Tensor], optional): Optional bias tensor. Defaults to None.
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
-    global _bf16_gemm_nt_impl
+    global _bf16_gemm_nt_impl, _bf16_gemm_nt_has_compiled_dims
     _ensure_initialized()
     if _bf16_gemm_nt_impl is None:
         return _missing_deep_gemm()
-    _bf16_gemm_nt_impl(a, b, output, c, compiled_dims)
+    if _bf16_gemm_nt_has_compiled_dims is None:
+        _bf16_gemm_nt_has_compiled_dims = _has_param(_bf16_gemm_nt_impl, "compiled_dims")
+    if _bf16_gemm_nt_has_compiled_dims:
+        _bf16_gemm_nt_impl(a, b, output, c, compiled_dims)
+    else:
+        _bf16_gemm_nt_impl(a, b, output, c)
 
 
 def m_grouped_bf16_gemm_nt_contiguous(
