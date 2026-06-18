@@ -431,6 +431,7 @@ class CustomChatRenderer:
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,
                     headers=normalize_request_headers(headers),
+                    client_streaming=bool(request.stream),
                 )
             )
         )

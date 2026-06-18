@@ -2,7 +2,7 @@ import logging
 import os
 import time
 import asyncio
-from typing import TYPE_CHECKING, AsyncGenerator, List, Optional
+from typing import TYPE_CHECKING, AsyncGenerator, List, Optional, Set, Tuple
 
 import torch
 
@@ -35,7 +35,10 @@ if TYPE_CHECKING:
 route_logger = logging.getLogger("route_logger")
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
-DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
+# Rolling restarts can leave stale service-discovery entries visible for more
+# than a few RPC attempts. Retrying is still disabled after a client-visible
+# streaming chunk by the enqueue loop below.
+DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 12
 
 
 class BackendRPCServerVisitor:
@@ -117,6 +120,7 @@ class BackendRPCServerVisitor:
             server_config=server_config,
             master_config=master_config,
         )
+        self._master_route_seen_ready = False
         self.recent_cache_key_window = RecentCacheKeyWindow()
         self.pd_route_retry_on_unavailable = self._pd_route_retry_on_unavailable()
 
@@ -142,10 +146,44 @@ class BackendRPCServerVisitor:
 
     @staticmethod
     def _is_retryable_route_rpc_error(e: BaseException) -> bool:
-        exception_type = getattr(e, "exception_type", None)
-        if exception_type is not None:
+        retryable_codes = {
+            int(ExceptionType.GET_HOST_FAILED),
+            int(ExceptionType.GET_CONNECTION_FAILED),
+            int(ExceptionType.CONNECT_FAILED),
+            int(ExceptionType.CONNECT_TIMEOUT),
+            int(ExceptionType.DEADLINE_EXCEEDED),
+            int(ExceptionType.CONNECTION_RESET_BY_PEER),
+            int(ExceptionType.REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED),
+            int(ExceptionType.REMOTE_ALLOCATE_RESOURCE_READ_FAILED),
+            int(ExceptionType.REMOTE_LOAD_KV_CACHE_FAILED),
+            int(ExceptionType.LOAD_KV_CACHE_FAILED),
+            int(ExceptionType.KEEP_ALIVE_TIMEOUT),
+            int(ExceptionType.LOAD_CACHE_TIMEOUT),
+            int(ExceptionType.CACHE_STORE_LOAD_CONNECT_FAILED),
+            int(ExceptionType.CACHE_STORE_LOAD_SEND_REQUEST_FAILED),
+            int(ExceptionType.CACHE_STORE_CALL_PREFILL_TIMEOUT),
+            int(ExceptionType.CACHE_STORE_LOAD_RDMA_CONNECT_FAILED),
+            int(ExceptionType.CACHE_STORE_LOAD_RDMA_WRITE_FAILED),
+            int(ExceptionType.CACHE_STORE_LOAD_BUFFER_TIMEOUT),
+            int(ExceptionType.CACHE_STORE_LOAD_UNKNOWN_ERROR),
+            int(ExceptionType.P2P_CONNECTOR_CALL_PREFILL_FAILED),
+            int(ExceptionType.P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED),
+            int(ExceptionType.P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED),
+            int(ExceptionType.P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED),
+            int(ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT),
+            int(ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_FAILED),
+            int(ExceptionType.P2P_CONNECTOR_WORKER_READ_TRANSFER_RDMA_FAILED),
+            int(ExceptionType.P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_TIMEOUT),
+            int(ExceptionType.P2P_CONNECTOR_WORKER_READ_FAILED),
+            int(ExceptionType.P2P_CONNECTOR_WORKER_READ_TIMEOUT),
+            int(ExceptionType.MASTER_NO_AVAILABLE_WORKER),
+        }
+        for attr_name in ("rtp_error_code", "exception_type"):
+            code = getattr(e, attr_name, None)
+            if code is None:
+                continue
             try:
-                return int(exception_type) >= 8000
+                return int(code) in retryable_codes
             except (TypeError, ValueError):
                 pass
         text = str(e)
@@ -155,6 +193,11 @@ class BackendRPCServerVisitor:
             or "recvmsg:Connection timed out" in text
             or "Socket closed" in text
         )
+
+    def _pd_route_retry_limit(self, input: GenerateInput) -> int:
+        if not getattr(input, "allow_pd_route_retry", True):
+            return 0
+        return self.pd_route_retry_on_unavailable
 
     @staticmethod
     def get_backend_role_list(
@@ -289,14 +332,61 @@ class BackendRPCServerVisitor:
             return self.seq_size_per_block * self._page_rr_cp_size
         return self.seq_size_per_block
 
-    async def get_domain_route_addrs(self, input: GenerateInput):
+    @staticmethod
+    def _role_addr_key(role_addr: RoleAddr) -> Tuple[str, str, int, int]:
+        role_name = getattr(role_addr.role, "name", str(role_addr.role))
+        return (
+            role_name,
+            role_addr.ip,
+            int(role_addr.grpc_port),
+            int(role_addr.http_port),
+        )
+
+    async def get_domain_route_addrs(
+        self,
+        input: GenerateInput,
+        refresh: bool = False,
+        excluded_role_addrs: Optional[Set[Tuple[str, str, int, int]]] = None,
+    ):
         specified_roles = {addr.role for addr in input.generate_config.role_addrs}
         missing_roles = [
             role for role in self.backend_role_list if role not in specified_roles
         ]
-        role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
-            missing_roles
-        )
+        if excluded_role_addrs and hasattr(
+            self.host_service, "get_backend_role_addr_candidates"
+        ):
+            role_addrs: List[RoleAddr] = []
+            for role in missing_roles:
+                role_candidates = self.host_service.get_backend_role_addr_candidates(
+                    role, refresh=refresh
+                )
+                if not role_candidates:
+                    continue
+                selected_role_addr = None
+                for role_addr in role_candidates:
+                    if self._role_addr_key(role_addr) not in excluded_role_addrs:
+                        selected_role_addr = role_addr
+                        break
+                if selected_role_addr is None:
+                    selected_role_addr = role_candidates[0]
+                    route_logger.warning(
+                        "all %s candidates were used by the failed retry attempt, "
+                        "request_id=%s, reusing first candidate=%s",
+                        role,
+                        input.request_id,
+                        selected_role_addr,
+                    )
+                role_addrs.append(selected_role_addr)
+        else:
+            role_addrs = self.host_service.get_backend_role_addrs(
+                missing_roles, refresh=refresh
+            )
+            if excluded_role_addrs:
+                role_addrs = [
+                    role_addr
+                    for role_addr in role_addrs
+                    if self._role_addr_key(role_addr) not in excluded_role_addrs
+                ]
         if role_addrs:
             input.generate_config.role_addrs.extend(role_addrs)
             route_logger.warning(
@@ -314,6 +404,10 @@ class BackendRPCServerVisitor:
                 input.request_id,
                 missing_roles,
             )
+
+    def _missing_backend_roles(self, input: GenerateInput) -> List[RoleType]:
+        specified_roles = {addr.role for addr in input.generate_config.role_addrs}
+        return [role for role in self.backend_role_list if role not in specified_roles]
 
     async def route_ips(self, input: GenerateInput):
         # proactive rejection: check cached queue length before making request to master
@@ -384,6 +478,13 @@ class BackendRPCServerVisitor:
             ):
                 route_error.rtp_error_code = master_route_result.error_code
             raise route_error
+        missing_roles = self._missing_backend_roles(input)
+        if missing_roles:
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR,
+                "request_id=%s missing backend role addresses after routing: %s"
+                % (input.request_id, missing_roles),
+            )
 
     def check_sp_supported(self, input: GenerateInput):
         if not self.sp_config or not self.sp_config.model_type:
@@ -496,38 +597,79 @@ class BackendRPCServerVisitor:
             set_aux_info(e)
             raise
 
+        excluded_retry_role_addrs: Set[Tuple[str, str, int, int]] = set()
+
         async def route_and_enqueue(attempt: int):
             if attempt > 0:
                 input.generate_config.role_addrs = []
             if self.host_service.service_available:
-                await self.route_ips(input)
+                if attempt > 0:
+                    with Timer() as domain_route_timer:
+                        await self.get_domain_route_addrs(
+                            input,
+                            refresh=True,
+                            excluded_role_addrs=excluded_retry_role_addrs,
+                        )
+                    kmonitor.report(
+                        GaugeMetrics.DOMAIN_ROUTE_RT_METRIC,
+                        domain_route_timer.cost_ms(),
+                    )
+                    missing_roles = self._missing_backend_roles(input)
+                    if not input.generate_config.role_addrs or missing_roles:
+                        route_logger.warning(
+                            "retry domain routing did not produce complete role "
+                            "addresses, request_id=%s, missing_roles=%s, "
+                            "falling back to normal routing",
+                            input.request_id,
+                            missing_roles,
+                        )
+                        input.generate_config.role_addrs = []
+                        await self.route_ips(input)
+                else:
+                    await self.route_ips(input)
             return self.model_rpc_client.enqueue(input)
 
         async def stream_with_aux_info():
             attempt = 0
+            retry_limit = self._pd_route_retry_limit(input)
+            client_streaming = getattr(input, "client_streaming", None)
+            is_client_streaming = (
+                client_streaming
+                if client_streaming is not None
+                else input.generate_config.is_streaming
+            )
             while True:
                 yielded_output = False
+                buffered_outputs = []
                 try:
                     stream = await route_and_enqueue(attempt)
                     async for output in stream:
                         yielded_output = True
-                        yield output
+                        if is_client_streaming:
+                            yield output
+                        else:
+                            buffered_outputs.append(output)
+                    if not is_client_streaming:
+                        for output in buffered_outputs:
+                            yield output
                     return
                 except BaseException as e:
                     set_aux_info(e)
                     if (
-                        yielded_output
-                        or attempt >= self.pd_route_retry_on_unavailable
+                        (yielded_output and is_client_streaming)
+                        or attempt >= retry_limit
                         or not self._is_retryable_route_rpc_error(e)
                     ):
                         raise
+                    for role_addr in input.generate_config.role_addrs or []:
+                        excluded_retry_role_addrs.add(self._role_addr_key(role_addr))
                     attempt += 1
                     route_logger.warning(
                         "retrying PD route after retryable RPC error, "
                         "request_id=%s, attempt=%s/%s, error=%s",
                         input.request_id,
                         attempt,
-                        self.pd_route_retry_on_unavailable,
+                        retry_limit,
                         e,
                     )
                     await asyncio.sleep(min(0.2, 0.05 * attempt))
@@ -535,6 +677,13 @@ class BackendRPCServerVisitor:
         return stream_with_aux_info()
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
+        master_vip = getattr(self.host_service, "master_vip", None)
+        if getattr(master_vip, "domain", ""):
+            if self.host_service.get_master_addr():
+                self._master_route_seen_ready = True
+            elif not getattr(self, "_master_route_seen_ready", False):
+                logging.debug("master route service has not become ready yet")
+                return False
         roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             self.backend_role_list, refresh
         )

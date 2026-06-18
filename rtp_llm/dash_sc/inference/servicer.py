@@ -14,6 +14,7 @@ coroutine automatically.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -70,6 +71,7 @@ _DEBUG_SCORE_TOKEN_LABELS = {
     128822: "</think>",
 }
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
+_PRE_VISIBLE_ROUTE_RETRY_LIMIT = 2
 
 
 def _exception_metric_code(error_code: Any) -> str:
@@ -350,6 +352,8 @@ def _make_generate_input(
     generate_config: Any,
     invocation_metadata: Optional[Any],
     request_headers: Optional[dict[str, str]] = None,
+    allow_pd_route_retry: bool = True,
+    client_streaming: Optional[bool] = None,
 ) -> GenerateInput:
     headers = dict(request_headers or {})
     headers.update(_headers_from_invocation_metadata(invocation_metadata))
@@ -367,6 +371,8 @@ def _make_generate_input(
             request_id=extract_correlation_request_id(headers) or trace_id,
             source_role="dash",
         ),
+        allow_pd_route_retry=allow_pd_route_retry,
+        client_streaming=client_streaming,
     )
 
 
@@ -380,6 +386,29 @@ async def _close_async_stream_if_possible(stream: Any, tag: str) -> None:
             await result
     except Exception as e:
         logging.warning("[DashScGrpc] [%s] phase-1 stream close failed: %s", tag, e)
+
+
+def _pd_route_retry_limit(backend_visitor: Any, generate_input: GenerateInput) -> int:
+    limit_fn = getattr(backend_visitor, "_pd_route_retry_limit", None)
+    if callable(limit_fn):
+        return max(0, int(limit_fn(generate_input)))
+    return max(0, int(getattr(backend_visitor, "pd_route_retry_on_unavailable", 0)))
+
+
+def _is_retryable_route_rpc_error(backend_visitor: Any, e: BaseException) -> bool:
+    checker = getattr(backend_visitor, "_is_retryable_route_rpc_error", None)
+    if callable(checker):
+        return bool(checker(e))
+    return False
+
+
+def _pre_visible_route_retry_limit(
+    backend_visitor: Any, generate_input: GenerateInput
+) -> int:
+    return min(
+        _PRE_VISIBLE_ROUTE_RETRY_LIMIT,
+        _pd_route_retry_limit(backend_visitor, generate_input),
+    )
 
 
 def _phase2_max_new_tokens_for_completion_alias(
@@ -589,6 +618,7 @@ async def iter_real_model_stream_infer(
     think_runtime: Optional[_ThinkRuntime] = None,
     phase2_request_id_factory: Optional[Callable[[], int]] = None,
     access_agg: Any = None,
+    _pre_visible_retry_attempt: int = 0,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -631,6 +661,54 @@ async def iter_real_model_stream_infer(
     matched_echo_ids = _matched_echo_prefix_ids(input_ids_list, echo_prefix_ids)
     should_echo = bool(matched_echo_ids)
     echoed = False
+    emitted_upstream_response = False
+    phase2_pre_visible_retry_exhausted = False
+    generate_input: Optional[GenerateInput] = None
+
+    async def _pre_visible_retry_stream(
+        e: BaseException,
+    ) -> Optional[AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]]:
+        if (
+            generate_input is None
+            or emitted_upstream_response
+            or phase2_pre_visible_retry_exhausted
+        ):
+            return None
+        retry_limit = _pre_visible_route_retry_limit(backend_visitor, generate_input)
+        if (
+            _pre_visible_retry_attempt >= retry_limit
+            or not _is_retryable_route_rpc_error(backend_visitor, e)
+        ):
+            return None
+        next_attempt = _pre_visible_retry_attempt + 1
+        logging.warning(
+            "[DashScGrpc] [%s] retrying whole request before first "
+            "client-visible response after retryable route/RPC error, "
+            "attempt=%s/%s, error=%s",
+            tag,
+            next_attempt,
+            retry_limit,
+            e,
+        )
+        await asyncio.sleep(min(0.2, 0.05 * next_attempt))
+        return iter_real_model_stream_infer(
+            request,
+            input_ids_list,
+            sampling,
+            other,
+            backend_visitor,
+            rtp_llm_request_id=rtp_llm_request_id,
+            echo_prefix_ids=echo_prefix_ids,
+            extra_stop_word_ids=extra_stop_word_ids,
+            invocation_metadata=invocation_metadata,
+            tokenizer=tokenizer,
+            generate_env_config=generate_env_config,
+            think_runtime=think_runtime,
+            phase2_request_id_factory=phase2_request_id_factory,
+            access_agg=access_agg,
+            _pre_visible_retry_attempt=next_attempt,
+        )
+
     try:
         generate_config = sampling.to_generate_config(other=other)
         generate_config.trace_id = trace_str
@@ -702,12 +780,15 @@ async def iter_real_model_stream_infer(
             generate_config=generate_config,
             invocation_metadata=invocation_metadata,
             request_headers=other.request_headers,
+            client_streaming=True,
         )
         is_streaming = bool(getattr(generate_config, "is_streaming", True))
         logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)
         request_shape = list(request.inputs[0].shape) if request.inputs else None
         chunk_idx = 0
         phase2_needed = False
+        phase1_should_close = False
+        phase1_pending_responses: list[predict_v2_pb2.ModelStreamInferResponse] = []
         # One-shot guard: ``phase2_triggered`` flips True the instant we
         # commit to phase-2 (before the ``await backend_visitor.enqueue``
         # below). It pins the invariant "at most ONE phase-2 enqueue per
@@ -746,6 +827,7 @@ async def iter_real_model_stream_infer(
                     max_token_id=max_id,
                     _request_shape=request_shape,
                 )
+                emitted_upstream_response = True
                 yield response
                 continue
             ids_for_accounting = generated_ids
@@ -803,7 +885,10 @@ async def iter_real_model_stream_infer(
                         > 0
                     )
                 cumulative_sent_ids.extend(ids_for_accounting)
-                # Yield thinking content (always intermediate)
+                # Buffer phase-1 thinking / synthetic close responses until
+                # phase-2 has been routed and its first chunk is viable. This
+                # keeps PD-route retry legal when the phase-2 route hits a
+                # stale draining prefill during rolling restart.
                 if generated_ids:
                     response = build_stream_response_from_generate_outputs(
                         dash_sc_request_id=request.id,
@@ -826,8 +911,7 @@ async def iter_real_model_stream_infer(
                             response.infer_response, matched_echo_ids
                         ):
                             echoed = True
-                    yield response
-                # Yield </think> close tokens
+                    phase1_pending_responses.append(response)
                 if runtime.eos_tokens:
                     eos_response = build_stream_response_from_generate_outputs(
                         dash_sc_request_id=request.id,
@@ -848,8 +932,9 @@ async def iter_real_model_stream_infer(
                         stream_finished=not will_do_phase2,
                         token_ids=list(runtime.eos_tokens),
                     )
-                    yield eos_response
+                    phase1_pending_responses.append(eos_response)
                 phase2_needed = will_do_phase2
+                phase1_should_close = True
                 break
             cumulative_sent_ids.extend(ids_for_accounting)
             finish_reason_override = None
@@ -879,6 +964,7 @@ async def iter_real_model_stream_infer(
                     response.infer_response, matched_echo_ids
                 ):
                     echoed = True
+            emitted_upstream_response = True
             yield response
             if phase2_needed:
                 break
@@ -890,6 +976,7 @@ async def iter_real_model_stream_infer(
             )
         if chunk_idx == 0:
             logging.warning("[DashScGrpc] [%s] empty outputs_list", tag)
+            emitted_upstream_response = True
             yield predict_v2_pb2.ModelStreamInferResponse(
                 error_message="empty outputs_list from backend",
             )
@@ -899,8 +986,12 @@ async def iter_real_model_stream_infer(
         # (DSV4 token 1) in the think phase. If phase-1 reaches stream end
         # without ever emitting close or term token, treat the whole stream
         # as reasoning content — do NOT silently restart with empty-think.
-        if phase2_needed:
+        if phase1_should_close:
             await _close_async_stream_if_possible(stream, tag)
+        if phase1_pending_responses and not phase2_needed:
+            for response in phase1_pending_responses:
+                emitted_upstream_response = True
+                yield response
         if phase2_needed and not phase2_triggered:
             # One-shot pin BEFORE any await so a future / unexpected re-entry
             # cannot double-fire phase-2. Set before metric report so even an
@@ -925,189 +1016,317 @@ async def iter_real_model_stream_infer(
                     metric_err,
                 )
         if phase2_needed:
-            phase2_config = _clone_generate_config(generate_config)
-            phase2_config.in_think_mode = False
-            if hasattr(phase2_config, "thinking"):
-                phase2_config.thinking = False
-            if sampling.max_new_tokens_from_completion_alias:
-                phase2_config.max_new_tokens = (
-                    _phase2_max_new_tokens_for_completion_alias(
-                        sampling, generate_think_token_num
-                    )
-                )
-            # trace_id stays equal across phases so the dashscope log search
-            # aggregates both halves under a single trace; phase distinction is
-            # carried by request_log_tag (phase=2) and by the ``-2`` suffix on
-            # the response infer.id (client-facing).
-            phase2_config.trace_id = trace_str
             phase2_input_ids = _phase2_input_ids_for_deepseek_v4(
                 input_ids_list, matched_think_bos_ids, list(runtime.empty_tokens)
             )
-            phase2_request_id = (
-                phase2_request_id_factory()
-                if phase2_request_id_factory is not None
-                else rtp_llm_request_id
-            )
-            phase2_tag = stream_log_tag(
-                request_id_numeric=phase2_request_id, trace_id=trace_str, phase=2
-            )
-            phase2_generate_input = _make_generate_input(
-                request_id=phase2_request_id,
-                input_ids_list=phase2_input_ids,
-                generate_config=phase2_config,
-                invocation_metadata=invocation_metadata,
-                request_headers=other.request_headers,
-            )
-            logging.debug(
-                "[DashScGrpc] [%s] phase-2 generate_input: %s",
-                phase2_tag,
-                phase2_generate_input,
-            )
-            phase2_stream = await backend_visitor.enqueue(phase2_generate_input)
-            phase2_cumulative_sent_ids: list[int] = []
 
-            def _build_phase2_response(
-                resp_go: Any,
-            ) -> predict_v2_pb2.ModelStreamInferResponse:
-                resp_out = resp_go.generate_outputs[0]
-                resp_ids = _token_ids_list_from_generate_output(resp_out)
-                phase2_cumulative_sent_ids.extend(resp_ids)
-                phase2_max_new_tokens = int(
-                    getattr(phase2_config, "max_new_tokens", 0) or 0
+            async def _start_phase2_attempt() -> tuple[
+                Any,
+                str,
+                GenerateInput,
+                AsyncIterator[Any],
+            ]:
+                phase2_config = _clone_generate_config(generate_config)
+                phase2_config.in_think_mode = False
+                if hasattr(phase2_config, "thinking"):
+                    phase2_config.thinking = False
+                if sampling.max_new_tokens_from_completion_alias:
+                    phase2_config.max_new_tokens = (
+                        _phase2_max_new_tokens_for_completion_alias(
+                            sampling, generate_think_token_num
+                        )
+                    )
+                # trace_id stays equal across phases so the dashscope log search
+                # aggregates both halves under a single trace; phase distinction is
+                # carried by request_log_tag (phase=2) and by the ``-2`` suffix on
+                # the response infer.id (client-facing).
+                phase2_config.trace_id = trace_str
+                phase2_request_id = (
+                    phase2_request_id_factory()
+                    if phase2_request_id_factory is not None
+                    else rtp_llm_request_id
                 )
-                finish_reason_override = None
-                if (
-                    resp_out.finished
-                    and phase2_max_new_tokens > 0
-                    and len(phase2_cumulative_sent_ids) >= phase2_max_new_tokens
-                ):
-                    finish_reason_override = FINISH_REASON_LENGTH
-                return build_stream_response_from_generate_outputs(
-                    dash_sc_request_id=f"{request.id}{_PHASE2_SUFFIX}",
-                    model_name=request.model_name,
-                    go=resp_go,
-                    request_log_tag=phase2_tag,
-                    request_input_ids=phase2_input_ids,
-                    return_input_ids=other.return_input_ids,
-                    is_streaming=is_streaming,
+                phase2_tag = stream_log_tag(
+                    request_id_numeric=phase2_request_id,
+                    trace_id=trace_str,
+                    phase=2,
+                )
+                phase2_generate_input = _make_generate_input(
+                    request_id=phase2_request_id,
+                    input_ids_list=phase2_input_ids,
                     generate_config=phase2_config,
-                    eos_token_id=eos_id,
-                    max_token_id=max_id,
-                    generate_think_token_num=generate_think_token_num,
-                    finish_reason_override=finish_reason_override,
-                    _request_shape=request_shape,
+                    invocation_metadata=invocation_metadata,
+                    request_headers=other.request_headers,
+                    allow_pd_route_retry=not emitted_upstream_response,
+                    client_streaming=True,
+                )
+                logging.debug(
+                    "[DashScGrpc] [%s] phase-2 generate_input: %s",
+                    phase2_tag,
+                    phase2_generate_input,
+                )
+                phase2_stream = await backend_visitor.enqueue(phase2_generate_input)
+                return phase2_config, phase2_tag, phase2_generate_input, phase2_stream
+
+            def _phase2_retry_limit(phase2_generate_input: GenerateInput) -> int:
+                return _pre_visible_route_retry_limit(
+                    backend_visitor, phase2_generate_input
                 )
 
-            # Phase-2 sanitization. The phase-2 prompt ends with
-            # ``<think>\n</think>\n\n``; the model occasionally interprets that
-            # as "think + close again" instead of "content only from here".
-            # Two failure modes observed in MRCR:
-            #
-            #   Case A (leading thinking + answer):
-            #     phase-2 emits ``[reasoning..., </think>, answer...]``. Pre-
-            #     close tokens are accidental reasoning and must NOT reach
-            #     ``content``. Discard them, drop the close + eos rest, emit
-            #     only post-close.
-            #
-            #   Case B (clean answer + trailing eos artifact):
-            #     phase-2 emits ``[answer..., </think>\n\n]`` and then EOSes.
-            #     Pre-close tokens ARE the real content. Keep them, drop only
-            #     the trailing close + eos rest.
-            #
-            # The two cases are distinguished by whether tokens follow the
-            # close: post-close non-empty → Case A; post-close empty AND chunk
-            # finished → Case B; otherwise ambiguous (close split across
-            # chunks) → default to Case A so the next chunk's content streams
-            # cleanly. Pre-close chunks are buffered in ``phase2_pending``
-            # until classification completes.
-            phase2_pending: list[Any] = []
-            phase2_seen_close = False
+            def _is_retryable_phase2_error(e: BaseException) -> bool:
+                return _is_retryable_route_rpc_error(backend_visitor, e)
 
-            def _flush_phase2_pending() -> (
-                Iterator[predict_v2_pb2.ModelStreamInferResponse]
+            async def _iter_phase2_responses(
+                phase2_config: Any,
+                phase2_tag: str,
+                phase2_stream: AsyncIterator[Any],
+            ) -> (
+                AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]
             ):
-                """Yield buffered chunks, stripping a trailing eos artifact
-                from whichever chunk carries the finish flag."""
-                for buf_go in phase2_pending:
-                    buf_out = buf_go.generate_outputs[0]
-                    if buf_out.finished and runtime.eos_tokens:
-                        buf_ids = _token_ids_list_from_generate_output(buf_out)
-                        cleaned = _strip_trailing_eos(buf_ids, runtime.eos_tokens)
-                        if cleaned != buf_ids:
-                            buf_out.output_ids = torch.tensor(
-                                cleaned, dtype=torch.int32
+                phase2_cumulative_sent_ids: list[int] = []
+
+                def _build_phase2_response(
+                    resp_go: Any,
+                ) -> predict_v2_pb2.ModelStreamInferResponse:
+                    resp_out = resp_go.generate_outputs[0]
+                    resp_ids = _token_ids_list_from_generate_output(resp_out)
+                    phase2_cumulative_sent_ids.extend(resp_ids)
+                    phase2_max_new_tokens = int(
+                        getattr(phase2_config, "max_new_tokens", 0) or 0
+                    )
+                    finish_reason_override = None
+                    if (
+                        resp_out.finished
+                        and phase2_max_new_tokens > 0
+                        and len(phase2_cumulative_sent_ids) >= phase2_max_new_tokens
+                    ):
+                        finish_reason_override = FINISH_REASON_LENGTH
+                    return build_stream_response_from_generate_outputs(
+                        dash_sc_request_id=f"{request.id}{_PHASE2_SUFFIX}",
+                        model_name=request.model_name,
+                        go=resp_go,
+                        request_log_tag=phase2_tag,
+                        request_input_ids=phase2_input_ids,
+                        return_input_ids=other.return_input_ids,
+                        is_streaming=is_streaming,
+                        generate_config=phase2_config,
+                        eos_token_id=eos_id,
+                        max_token_id=max_id,
+                        generate_think_token_num=generate_think_token_num,
+                        finish_reason_override=finish_reason_override,
+                        _request_shape=request_shape,
+                    )
+
+                # Phase-2 sanitization. The phase-2 prompt ends with
+                # ``<think>\n</think>\n\n``; the model occasionally interprets that
+                # as "think + close again" instead of "content only from here".
+                # Two failure modes observed in MRCR:
+                #
+                #   Case A (leading thinking + answer):
+                #     phase-2 emits ``[reasoning..., </think>, answer...]``. Pre-
+                #     close tokens are accidental reasoning and must NOT reach
+                #     ``content``. Discard them, drop the close + eos rest, emit
+                #     only post-close.
+                #
+                #   Case B (clean answer + trailing eos artifact):
+                #     phase-2 emits ``[answer..., </think>\n\n]`` and then EOSes.
+                #     Pre-close tokens ARE the real content. Keep them, drop only
+                #     the trailing close + eos rest.
+                #
+                # The two cases are distinguished by whether tokens follow the
+                # close: post-close non-empty → Case A; post-close empty AND chunk
+                # finished → Case B; otherwise ambiguous (close split across
+                # chunks) → default to Case A so the next chunk's content streams
+                # cleanly. Pre-close chunks are buffered in ``phase2_pending``
+                # until classification completes.
+                phase2_pending: list[Any] = []
+                phase2_seen_close = False
+
+                def _flush_phase2_pending() -> (
+                    Iterator[predict_v2_pb2.ModelStreamInferResponse]
+                ):
+                    """Yield buffered chunks, stripping a trailing eos artifact
+                    from whichever chunk carries the finish flag."""
+                    for buf_go in phase2_pending:
+                        buf_out = buf_go.generate_outputs[0]
+                        if buf_out.finished and runtime.eos_tokens:
+                            buf_ids = _token_ids_list_from_generate_output(buf_out)
+                            cleaned = _strip_trailing_eos(buf_ids, runtime.eos_tokens)
+                            if cleaned != buf_ids:
+                                buf_out.output_ids = torch.tensor(
+                                    cleaned, dtype=torch.int32
+                                )
+                        yield _build_phase2_response(buf_go)
+
+                phase2_chunk_idx = 0
+                try:
+                    async for go in phase2_stream:
+                        phase2_chunk_idx += 1
+                        if not go.generate_outputs:
+                            raise ValueError(
+                                "empty generate_outputs in phase-2 backend chunk"
                             )
-                    yield _build_phase2_response(buf_go)
+                        out_py = go.generate_outputs[0]
+                        generated_ids = _token_ids_list_from_generate_output(out_py)
+                        _log_debug_token_scores(
+                            tag=phase2_tag,
+                            case_label=debug_score_label,
+                            chunk_idx=phase2_chunk_idx,
+                            generated_ids=generated_ids,
+                            logits=getattr(out_py, "logits", None),
+                            token_ids=debug_score_token_ids,
+                        )
+                        if not generated_ids and not out_py.finished:
+                            continue
 
-            phase2_chunk_idx = 0
-            async for go in phase2_stream:
-                phase2_chunk_idx += 1
-                if not go.generate_outputs:
-                    raise ValueError("empty generate_outputs in phase-2 backend chunk")
-                out_py = go.generate_outputs[0]
-                generated_ids = _token_ids_list_from_generate_output(out_py)
-                _log_debug_token_scores(
-                    tag=phase2_tag,
-                    case_label=debug_score_label,
-                    chunk_idx=phase2_chunk_idx,
-                    generated_ids=generated_ids,
-                    logits=getattr(out_py, "logits", None),
-                    token_ids=debug_score_token_ids,
-                )
-                if not generated_ids and not out_py.finished:
-                    continue
+                        if phase2_seen_close:
+                            # Past the boundary: trailing-eos cleanup on the final
+                            # chunk, otherwise pass through.
+                            if out_py.finished and runtime.eos_tokens:
+                                cleaned = _strip_trailing_eos(
+                                    generated_ids, runtime.eos_tokens
+                                )
+                                if cleaned != generated_ids:
+                                    generated_ids = cleaned
+                                    out_py.output_ids = torch.tensor(
+                                        generated_ids, dtype=torch.int32
+                                    )
+                            if generated_ids or out_py.finished:
+                                yield _build_phase2_response(go)
+                            continue
 
-                if phase2_seen_close:
-                    # Past the boundary: trailing-eos cleanup on the final
-                    # chunk, otherwise pass through.
-                    if out_py.finished and runtime.eos_tokens:
-                        cleaned = _strip_trailing_eos(generated_ids, runtime.eos_tokens)
-                        if cleaned != generated_ids:
-                            generated_ids = cleaned
+                        close_idx, post_close = _split_on_first_close(
+                            generated_ids, think_close_token_id, runtime.eos_tokens
+                        )
+                        if close_idx is None:
+                            phase2_pending.append(go)
+                            if out_py.finished:
+                                # No close ever — buffered chunks are all content.
+                                for resp in _flush_phase2_pending():
+                                    yield resp
+                                phase2_pending = []
+                            continue
+
+                        if post_close:
+                            # Case A: discard pending + emit post-close.
+                            phase2_pending = []
+                            phase2_seen_close = True
+                            if out_py.finished and runtime.eos_tokens:
+                                post_close = _strip_trailing_eos(
+                                    post_close, runtime.eos_tokens
+                                )
                             out_py.output_ids = torch.tensor(
-                                generated_ids, dtype=torch.int32
+                                post_close, dtype=torch.int32
                             )
-                    if generated_ids or out_py.finished:
-                        yield _build_phase2_response(go)
-                    continue
+                            if post_close or out_py.finished:
+                                yield _build_phase2_response(go)
+                        elif out_py.finished:
+                            # Case B: pre-close is real content; keep it, drop close.
+                            pre_close = list(generated_ids[:close_idx])
+                            out_py.output_ids = torch.tensor(
+                                pre_close, dtype=torch.int32
+                            )
+                            phase2_pending.append(go)
+                            for resp in _flush_phase2_pending():
+                                yield resp
+                            phase2_pending = []
+                            phase2_seen_close = True
+                        else:
+                            # Ambiguous: close split across chunks. Default to Case A
+                            # (drop pending + this chunk's pre-close); next chunk's
+                            # content will stream as content normally.
+                            phase2_pending = []
+                            phase2_seen_close = True
+                finally:
+                    await _close_async_stream_if_possible(phase2_stream, phase2_tag)
 
-                close_idx, post_close = _split_on_first_close(
-                    generated_ids, think_close_token_id, runtime.eos_tokens
+            async def _new_phase2_responses() -> tuple[
+                AsyncIterator[predict_v2_pb2.ModelStreamInferResponse],
+                GenerateInput,
+            ]:
+                (
+                    phase2_config,
+                    phase2_tag,
+                    phase2_generate_input,
+                    phase2_stream,
+                ) = await _start_phase2_attempt()
+                return (
+                    _iter_phase2_responses(
+                        phase2_config, phase2_tag, phase2_stream
+                    ),
+                    phase2_generate_input,
                 )
-                if close_idx is None:
-                    phase2_pending.append(go)
-                    if out_py.finished:
-                        # No close ever — buffered chunks are all content.
-                        for resp in _flush_phase2_pending():
-                            yield resp
-                        phase2_pending = []
-                    continue
 
-                if post_close:
-                    # Case A: discard pending + emit post-close.
-                    phase2_pending = []
-                    phase2_seen_close = True
-                    if out_py.finished and runtime.eos_tokens:
-                        post_close = _strip_trailing_eos(post_close, runtime.eos_tokens)
-                    out_py.output_ids = torch.tensor(post_close, dtype=torch.int32)
-                    if post_close or out_py.finished:
-                        yield _build_phase2_response(go)
-                elif out_py.finished:
-                    # Case B: pre-close is real content; keep it, drop close.
-                    pre_close = list(generated_ids[:close_idx])
-                    out_py.output_ids = torch.tensor(pre_close, dtype=torch.int32)
-                    phase2_pending.append(go)
-                    for resp in _flush_phase2_pending():
-                        yield resp
-                    phase2_pending = []
-                    phase2_seen_close = True
+            async def _prefetch_phase2_response_with_retry() -> tuple[
+                Optional[predict_v2_pb2.ModelStreamInferResponse],
+                AsyncIterator[predict_v2_pb2.ModelStreamInferResponse],
+            ]:
+                nonlocal phase2_pre_visible_retry_exhausted
+                attempt = 0
+                while True:
+                    phase2_responses, phase2_generate_input = (
+                        await _new_phase2_responses()
+                    )
+                    try:
+                        prefetched = await anext(phase2_responses)
+                        return prefetched, phase2_responses
+                    except StopAsyncIteration:
+                        return None, phase2_responses
+                    except BaseException as e:
+                        await phase2_responses.aclose()
+                        retry_limit = _phase2_retry_limit(phase2_generate_input)
+                        if (
+                            attempt >= retry_limit
+                            or not _is_retryable_phase2_error(e)
+                        ):
+                            phase2_pre_visible_retry_exhausted = True
+                            raise
+                        attempt += 1
+                        logging.warning(
+                            "[DashScGrpc] [%s] retrying phase-2 before first "
+                            "client-visible response after retryable error, "
+                            "attempt=%s/%s, error=%s",
+                            tag,
+                            attempt,
+                            retry_limit,
+                            e,
+                        )
+                        await asyncio.sleep(min(0.2, 0.05 * attempt))
+
+            phase2_responses: Optional[
+                AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]
+            ] = None
+            try:
+                prefetched_phase2_response = None
+                if not emitted_upstream_response:
+                    (
+                        prefetched_phase2_response,
+                        phase2_responses,
+                    ) = await _prefetch_phase2_response_with_retry()
                 else:
-                    # Ambiguous: close split across chunks. Default to Case A
-                    # (drop pending + this chunk's pre-close); next chunk's
-                    # content will stream as content normally.
-                    phase2_pending = []
-                    phase2_seen_close = True
+                    phase2_responses, _ = await _new_phase2_responses()
+                for response in phase1_pending_responses:
+                    emitted_upstream_response = True
+                    yield response
+                if prefetched_phase2_response is not None:
+                    emitted_upstream_response = True
+                    yield prefetched_phase2_response
+                if phase2_responses is not None:
+                    async for response in phase2_responses:
+                        emitted_upstream_response = True
+                        yield response
+            finally:
+                if phase2_responses is not None:
+                    await phase2_responses.aclose()
     except FtRuntimeException as e:
+        retry_stream = await _pre_visible_retry_stream(e)
+        if retry_stream is not None:
+            try:
+                async for resp in retry_stream:
+                    yield resp
+            finally:
+                await _close_async_stream_if_possible(retry_stream, tag)
+            return
         if e.exception_type == ExceptionType.GENERATE_TIMEOUT:
             logging.warning("[DashScGrpc] [%s] generate timeout: %s", tag, e)
             yield build_finish_reason_done_response(
@@ -1141,6 +1360,14 @@ async def iter_real_model_stream_infer(
                 error_message=f"{type(e).__name__}: {e}"
             )
     except Exception as e:
+        retry_stream = await _pre_visible_retry_stream(e)
+        if retry_stream is not None:
+            try:
+                async for resp in retry_stream:
+                    yield resp
+            finally:
+                await _close_async_stream_if_possible(retry_stream, tag)
+            return
         logging.exception("[DashScGrpc] [%s] enqueue failed: %s", tag, e)
         # Prefix with exception class name so access-log _classify_error_message
         # maps it to a bounded error_code tag (e.g. BACKEND_RuntimeError).
