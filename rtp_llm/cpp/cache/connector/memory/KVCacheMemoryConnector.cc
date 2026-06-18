@@ -3185,6 +3185,15 @@ std::vector<CacheKeyType> KVCacheMemoryConnector::cacheKeys() const {
     return block_cache_->cacheKeys();
 }
 
+std::vector<CacheKeyType> KVCacheMemoryConnector::cacheKeysForStatus() const {
+    if (usePrefixTreeMemoryCache()) {
+        RTP_LLM_CHECK_WITH_INFO(prefix_block_cache_ != nullptr, "prefix block cache should not be null");
+        return prefix_block_cache_->cacheKeysUnorderedForStatus();
+    }
+    RTP_LLM_CHECK_WITH_INFO(block_cache_ != nullptr, "block cache should not be null");
+    return block_cache_->cacheKeys();
+}
+
 void KVCacheMemoryConnector::reportMatchMetrics(bool    success,
                                                 int64_t latency_us,
                                                 int64_t input_block_num,

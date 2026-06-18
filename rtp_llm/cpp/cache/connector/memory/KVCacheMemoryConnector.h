@@ -65,6 +65,7 @@ public:
     // virtual for test
     virtual bool              copyCache(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response);
     std::vector<CacheKeyType> cacheKeys() const;
+    std::vector<CacheKeyType> cacheKeysForStatus() const;
 
 private:
     struct LayerRegionSlot {
