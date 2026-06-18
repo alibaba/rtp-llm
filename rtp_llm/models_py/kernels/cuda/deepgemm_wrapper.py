@@ -57,10 +57,6 @@ _m_grouped_fp8_gemm_nt_masked_impl: Callable[..., Any] | None = None
 _bf16_gemm_nt_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
 _m_grouped_bf16_gemm_nt_masked_impl: Callable[..., Any] | None = None
-_bf16_gemm_nt_has_compiled_dims: bool | None = None
-_bf16_contiguous_has_compiled_dims: bool | None = None
-_bf16_masked_has_compiled_dims: bool | None = None
-_bf16_masked_has_max_block_n: bool | None = None
 
 
 _deep_gemm_available: bool | None = None
@@ -105,26 +101,6 @@ def configure_deep_gemm_num_sms(num_sms: int) -> Generator[None, None, None]:
     finally:
         # restore original num sms
         deep_gemm.set_num_sms(original_num_sms)
-
-
-def _has_param(fn: Callable, name: str) -> bool:
-    """Check if *fn* accepts a keyword argument called *name*.
-
-    Also returns True when the callable has a VAR_KEYWORD (**kwargs) parameter,
-    since it accepts arbitrary keyword arguments.  Returns False (conservative
-    default: do not pass the argument) when the signature cannot be
-    introspected — e.g. C/C++ extension functions.
-    """
-    import inspect
-    try:
-        params = inspect.signature(fn).parameters
-        if name in params:
-            return True
-        return any(
-            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
-        )
-    except (ValueError, TypeError):
-        return False
 
 
 def _missing_deep_gemm() -> NoReturn:
@@ -589,16 +565,11 @@ def bf16_gemm_nt(
         c (Optional[torch.Tensor], optional): Optional bias tensor. Defaults to None.
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
-    global _bf16_gemm_nt_impl, _bf16_gemm_nt_has_compiled_dims
+    global _bf16_gemm_nt_impl
     _ensure_initialized()
     if _bf16_gemm_nt_impl is None:
         return _missing_deep_gemm()
-    if _bf16_gemm_nt_has_compiled_dims is None:
-        _bf16_gemm_nt_has_compiled_dims = _has_param(_bf16_gemm_nt_impl, "compiled_dims")
-    if _bf16_gemm_nt_has_compiled_dims:
-        _bf16_gemm_nt_impl(a, b, output, c, compiled_dims)
-    else:
-        _bf16_gemm_nt_impl(a, b, output, c)
+    _bf16_gemm_nt_impl(a, b, output, c, compiled_dims)
 
 
 def m_grouped_bf16_gemm_nt_contiguous(
@@ -618,18 +589,16 @@ def m_grouped_bf16_gemm_nt_contiguous(
             The length of m_indices is the a.shape[0], and the corresponding value of valid tokens is group_idx.
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
-    global _m_grouped_bf16_gemm_nt_contiguous_impl, _bf16_contiguous_has_compiled_dims
+    global _m_grouped_bf16_gemm_nt_contiguous_impl
     _ensure_initialized()
+    if compiled_dims != "nk":
+        raise ValueError(
+            "m_grouped_bf16_gemm_nt_contiguous only supports compiled_dims='nk', "
+            f"got {compiled_dims!r}"
+        )
     if _m_grouped_bf16_gemm_nt_contiguous_impl is None:
         return _missing_deep_gemm()
-    if _bf16_contiguous_has_compiled_dims is None:
-        _bf16_contiguous_has_compiled_dims = _has_param(
-            _m_grouped_bf16_gemm_nt_contiguous_impl, "compiled_dims"
-        )
-    if _bf16_contiguous_has_compiled_dims:
-        _m_grouped_bf16_gemm_nt_contiguous_impl(a, b, output, m_indices, compiled_dims)
-    else:
-        _m_grouped_bf16_gemm_nt_contiguous_impl(a, b, output, m_indices)
+    _m_grouped_bf16_gemm_nt_contiguous_impl(a, b, output, m_indices)
 
 
 _bf16_masked_max_block_n: int | None = None
@@ -667,22 +636,17 @@ def m_grouped_bf16_gemm_nt_masked(
         expected_m (int): Expected number of valid tokens in each group.
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
     """
-    global _m_grouped_bf16_gemm_nt_masked_impl, _bf16_masked_has_compiled_dims, _bf16_masked_has_max_block_n
+    global _m_grouped_bf16_gemm_nt_masked_impl
     _ensure_initialized()
+    if compiled_dims != "nk":
+        raise ValueError(
+            "m_grouped_bf16_gemm_nt_masked only supports compiled_dims='nk', "
+            f"got {compiled_dims!r}"
+        )
     if _m_grouped_bf16_gemm_nt_masked_impl is None:
         return _missing_deep_gemm()
-    if _bf16_masked_has_compiled_dims is None or _bf16_masked_has_max_block_n is None:
-        _bf16_masked_has_compiled_dims = _has_param(
-            _m_grouped_bf16_gemm_nt_masked_impl, "compiled_dims"
-        )
-        _bf16_masked_has_max_block_n = _has_param(
-            _m_grouped_bf16_gemm_nt_masked_impl, "max_block_n"
-        )
     kwargs = {}
     max_block_n = _get_bf16_masked_max_block_n()
-    if max_block_n > 0 and _bf16_masked_has_max_block_n:
+    if max_block_n > 0:
         kwargs["max_block_n"] = max_block_n
-    if _bf16_masked_has_compiled_dims:
-        _m_grouped_bf16_gemm_nt_masked_impl(a, b, output, masked_m, expected_m, compiled_dims, **kwargs)
-    else:
-        _m_grouped_bf16_gemm_nt_masked_impl(a, b, output, masked_m, expected_m, **kwargs)
+    _m_grouped_bf16_gemm_nt_masked_impl(a, b, output, masked_m, expected_m, **kwargs)
