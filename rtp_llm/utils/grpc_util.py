@@ -27,7 +27,11 @@ def trans_grpc_dtype(type: TensorPB.DataType):
 
 
 def trans_tensor(t: TensorPB):
+    # Handle default-constructed (empty) TensorPB where data_type is not set.
+    # trans_from_tensor returns TensorPB() for empty tensors, so data_type == 0.
     if not (len(t.shape) > 0 and t.shape[0] > 0):
+        if t.data_type == 0:
+            return torch.empty(0, dtype=torch.float32)
         return torch.tensor([], dtype=trans_grpc_dtype(t.data_type))
     if t.data_type == TensorPB.DataType.FP32:
         return torch.frombuffer(t.fp32_data, dtype=torch.float32).reshape(list(t.shape))

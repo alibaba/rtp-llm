@@ -45,6 +45,30 @@ class KimiK25(DeepSeekV2):
     def support_cuda_graph(self) -> bool:
         return True
 
+    def _create_python_model(self):
+        # Override DeepSeekV2._create_python_model to use MultimodalGenericModel
+        # so that vision features are injected into text embeddings.
+        # DeepSeekV2 uses GenericMoeModel (text-only) which silently drops image features.
+        from rtp_llm.models_py.model_desc.multimodal_generic import MultimodalGenericModel
+
+        model_config = self.model_config
+        parallelism_config = self.parallelism_config
+        fmha_config = self.fmha_config
+        py_hw_kernel_config = self.hw_kernel_config
+        moe_config = self.moe_config
+        max_generate_batch_size = self.max_generate_batch_size
+
+        self.py_model = MultimodalGenericModel(
+            model_config,
+            parallelism_config,
+            self.weight,
+            moe_config,
+            max_generate_batch_size=max_generate_batch_size,
+            fmha_config=fmha_config,
+            py_hw_kernel_config=py_hw_kernel_config,
+            device_resource_config=self.device_resource_config,
+        )
+
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         top_config = _read_top_config(ckpt_path)

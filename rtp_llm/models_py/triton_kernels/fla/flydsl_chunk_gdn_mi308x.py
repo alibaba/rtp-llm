@@ -1371,9 +1371,17 @@ def megakernel_fwd(
                 "when FlyDSL writes ssm_states directly"
             )
 
-    # NOTE: the FlyDSL megakernel does NOT support zero-length sequences in
-    # cu_seqlens (g_pad_off = bos + T_actual - 1 would underflow).  Callers
-    # must ensure all per-sequence lengths are > 0 before invoking this path.
+    # Validate that cu_seqlens does not contain zero-length sequences.
+    # The FlyDSL megakernel computes g_pad_off = bos + T_actual - 1, which
+    # underflows when T_actual == 0.  Raise early instead of silently
+    # producing garbage.
+    if cu_seqlens is not None:
+        seq_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        if (seq_lengths <= 0).any():
+            raise ValueError(
+                "FlyDSL megakernel does not support zero-length sequences in "
+                "cu_seqlens; got lengths: " + str(seq_lengths.tolist())
+            )
 
     if cu_seqlens is None:
         if T_total % BT == 0:

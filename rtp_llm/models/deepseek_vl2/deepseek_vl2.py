@@ -31,7 +31,7 @@ class DeepSeekVLV2(BaseModel):
 
     def _create_python_model(self):
 
-        from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel    
+        from rtp_llm.models_py.model_desc.multimodal_generic import MultimodalGenericModel
         model_config = self.model_config
         parallelism_config = self.parallelism_config
         fmha_config = self.fmha_config
@@ -39,9 +39,9 @@ class DeepSeekVLV2(BaseModel):
         moe_config = self.moe_config
         max_generate_batch_size = self.max_generate_batch_size
 
-        # Use GenericMoeModel with new config architecture
-        # attention_type is determined from model_config.attn_config.use_mla
-        self.py_model = GenericMoeModel(
+        # Use MultimodalGenericModel to inject visual features into text embeddings.
+        # GenericMoeModel (text-only) would silently drop image features.
+        self.py_model = MultimodalGenericModel(
             model_config,
             parallelism_config,
             self.weight,
@@ -141,7 +141,7 @@ class DeepSeekVLV2(BaseModel):
             "global_view_pos", "head"
         )
 
-        tokenizer = AutoTokenizer.from_pretrained(config.ckpt_path)
+        tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path or config.ckpt_path)
         image_id = tokenizer.encode("<image>", add_special_tokens=False)[0]
         config.mm_related_params.special_token_ids.update(
             {"ignore_token_index": -100, "image_token_index": image_id}

@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <algorithm>
+#include <chrono>
 #include <string>
 #include <vector>
 #include <torch/python.h>
@@ -41,9 +42,21 @@ private:
         auto                stub       = connection.stub;
         MultimodalOutputPB  output_pb;
         grpc::ClientContext context;
+
+        // Set gRPC deadline from the max mm_timeout_ms across all inputs.
+        // This prevents a single stuck VIT worker from blocking the engine thread.
+        int32_t max_timeout_ms = 30000;  // default 30 s
+        for (const auto& mm_input : mm_inputs) {
+            max_timeout_ms = std::max(max_timeout_ms, mm_input.mm_preprocess_config.mm_timeout_ms);
+        }
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(max_timeout_ms));
+
         auto status = stub->RemoteMultimodalEmbedding(&context, QueryConverter::transMMInputsPB(mm_inputs), &output_pb);
 
         if (!status.ok()) {
+            // Remove the bad connection on failure (timeout, unavailable, etc.)
+            // so subsequent requests don't reuse a dead/stuck VIT worker.
+            pool_.removeConnection(ip_port);
             return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, status.error_message());
         }
         return QueryConverter::transMMOutput(&output_pb);

@@ -159,6 +159,11 @@ class GenericMoeLayer(nn.Module):
         use_ep_shared_allreduce = (
             self.shared_expert is not None and self.ffn_tp_size > 1 and is_ep_mode
         )
+        # TODO(perf): In TP-only mode (ep_size == 1, ffn_tp_size > 1), both
+        # routed and shared experts do separate TP all_reduces (2 total).
+        # When fused_moe supports skip_allreduce, switch to a unified allreduce:
+        # both skip their internal allreduce, combine partial outputs, then do
+        # a single TP all_reduce on the combined result.
 
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
