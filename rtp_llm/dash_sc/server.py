@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import grpc
 
@@ -119,6 +119,7 @@ class DashScGrpcServer:
         port: int,
         *,
         servicer: predict_v2_pb2_grpc.GRPCInferenceServiceServicer,
+        shutdown_manager: Optional[Any] = None,
         server_id: str = "",
         log_path: str = "",
         backup_count: int = 0,
@@ -191,6 +192,9 @@ class DashScGrpcServer:
             raw_mode=is_proxy,
             repetition_monitor_config=repetition_monitor_config,
         )
+        interceptors = [interceptor]
+        if shutdown_manager is not None:
+            interceptors.append(DashScGrpcDrainAioInterceptor(shutdown_manager))
         # Deliberately no ``maximum_concurrent_rpcs`` — under grpc.aio concurrent
         # RPCs are coroutines on one loop, not threads, so any positive value
         # becomes a hard admission cap (RESOURCE_EXHAUSTED once N long streams
@@ -199,7 +203,7 @@ class DashScGrpcServer:
         # retained on the C++ struct for wire compatibility but ignored here.
         server = grpc.aio.server(
             options=opts,
-            interceptors=[interceptor],
+            interceptors=interceptors,
         )
 
         predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(servicer, server)
@@ -220,6 +224,7 @@ class DashScGrpcServer:
         *,
         port: int,
         servicer: predict_v2_pb2_grpc.GRPCInferenceServiceServicer,
+        shutdown_manager: Optional[Any] = None,
         server_id: str = "",
         log_path: str = "",
         backup_count: int = 0,
@@ -239,6 +244,7 @@ class DashScGrpcServer:
             self.start(
                 port=port,
                 servicer=servicer,
+                shutdown_manager=shutdown_manager,
                 server_id=server_id,
                 log_path=log_path,
                 backup_count=backup_count,
@@ -310,6 +316,141 @@ class DashScGrpcServer:
         if server is None or loop is None:
             return
         asyncio.run_coroutine_threadsafe(server.wait_for_termination(), loop).result()
+
+
+class DashScGrpcDrainAioInterceptor(grpc.aio.ServerInterceptor):
+    """Track DashSc RPCs during pre-stop drain.
+
+    Health/service-discovery should remove the node once pre-stop starts, but
+    upstream clients can still have stale endpoints cached for a short window.
+    Reject new RPCs as soon as the process enters the pre-stop unavailable
+    state so no new request starts on a node that is leaving service discovery.
+    RPCs that already entered the handler keep their active counter until the
+    handler completes, and grpc stop later uses its grace window for those
+    in-flight RPCs.
+    """
+
+    def __init__(self, shutdown_manager: Any):
+        self._shutdown_manager = shutdown_manager
+
+    async def intercept_service(self, continuation, handler_call_details):
+        handler = await continuation(handler_call_details)
+        if handler is None:
+            return handler
+
+        method = handler_call_details.method
+        if self._is_liveness_method(method):
+            return handler
+        if handler.request_streaming and handler.response_streaming:
+            return grpc.stream_stream_rpc_method_handler(
+                self._wrap_stream_stream(handler.stream_stream, method),
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+        if handler.request_streaming and not handler.response_streaming:
+            return grpc.stream_unary_rpc_method_handler(
+                self._wrap_stream_unary(handler.stream_unary, method),
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+        if not handler.request_streaming and handler.response_streaming:
+            return grpc.unary_stream_rpc_method_handler(
+                self._wrap_unary_stream(handler.unary_stream, method),
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+        return grpc.unary_unary_rpc_method_handler(
+            self._wrap_unary_unary(handler.unary_unary, method),
+            request_deserializer=handler.request_deserializer,
+            response_serializer=handler.response_serializer,
+        )
+
+    @staticmethod
+    def _is_liveness_method(method: str) -> bool:
+        return method.endswith("/ServerLive")
+
+    async def _begin_or_abort(self, context, method: str) -> bool:
+        if self._shutdown_manager.try_begin_request():
+            return True
+        state = (
+            "draining"
+            if self._shutdown_manager.is_draining()
+            else "unavailable"
+        )
+        detail = (
+            "dash_sc is %s: reason=%s active_requests=%s"
+            % (
+                state,
+                self._shutdown_manager.drain_reason(),
+                self._shutdown_manager.active_request_count(),
+            )
+        )
+        logging.info("[DashScGrpc] rejecting new RPC during %s: %s %s", state, method, detail)
+        await context.abort(grpc.StatusCode.UNAVAILABLE, detail)
+        return False
+
+    def _finish(self, method: str) -> None:
+        active = self._shutdown_manager.finish_request()
+        if self._shutdown_manager.is_draining():
+            logging.info(
+                "[DashScGrpc] RPC finished during drain: method=%s active_requests=%s",
+                method,
+                active,
+            )
+
+    def _wrap_unary_unary(self, inner, method: str):
+        async def behavior(request, context):
+            began = await self._begin_or_abort(context, method)
+            if not began:
+                return None
+            try:
+                return await inner(request, context)
+            finally:
+                if began:
+                    self._finish(method)
+
+        return behavior
+
+    def _wrap_unary_stream(self, inner, method: str):
+        async def behavior(request, context):
+            began = await self._begin_or_abort(context, method)
+            if not began:
+                return
+            try:
+                async for resp in inner(request, context):
+                    yield resp
+            finally:
+                if began:
+                    self._finish(method)
+
+        return behavior
+
+    def _wrap_stream_unary(self, inner, method: str):
+        async def behavior(request_iterator, context):
+            began = await self._begin_or_abort(context, method)
+            if not began:
+                return None
+            try:
+                return await inner(request_iterator, context)
+            finally:
+                if began:
+                    self._finish(method)
+
+        return behavior
+
+    def _wrap_stream_stream(self, inner, method: str):
+        async def behavior(request_iterator, context):
+            began = await self._begin_or_abort(context, method)
+            if not began:
+                return
+            try:
+                async for resp in inner(request_iterator, context):
+                    yield resp
+            finally:
+                if began:
+                    self._finish(method)
+
+        return behavior
 
 
 def main():
