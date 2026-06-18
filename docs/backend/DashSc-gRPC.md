@@ -86,6 +86,75 @@ python -m rtp_llm.dash_sc.client \
 
 常用参数：`--tokenizer_path`（默认与 `ckpt_path` 相同）、`--request_id`、`--model_name`，以及 `--max_new_tokens`、`--top_k`、`--top_p`、`--temperature` 等采样参数。若服务端选项与默认不一致，可传 `--dash_sc_grpc_config_json` 以匹配 channel 的 `client_config`。
 
+DeepSeek-V4 的 dash-sc 请求是预 tokenized wire。Python 客户端只做 raw-token 调试：`tokenizer.encode(prompt)` 后发送 `input_ids`。真实 chat prompt 渲染、tool_choice 语义和 reasoning 参数归一化应由 OpenAI / DashScope 前端链路完成，dash-sc gRPC 层只承接已编码的 `input_ids` 和 generation 参数。
+
+### DeepSeek-V4 tool-call guided decoding
+
+DashSc gRPC 支持把上游传入的 tool-call 结构化约束下沉到 RTP `GenerateConfig.structural_tag`：
+
+- 直接参数：`request.parameters["tool_call_structural_tag"]`
+- 兼容别名：`request.parameters["structural_tag"]`
+- DashScope header 兼容：`ds_header_attributes.parameters.tool_call_structural_tag` / `structural_tag`
+
+若 DashScope 侧把 tag 包成数组（例如 `["{...structural_tag...}", ...]`），dash-sc 与 dashllm 保持一致：非空 list 一律取第一个元素，空 list 视为未设置。dash-sc codec 做轻量 shape 校验，并仅对 DashScope tool-call wrapper `sequence(const_string, tags_with_separator, const_string)` 做窄适配，转换成 xgrammar 可编译的 `tag(begin, content, end)`；其它 grammar 语义仍由 C++ xgrammar backend 编译判断。
+
+客户端调试可用：
+
+```bash
+python -m rtp_llm.dash_sc.client \
+  --grpc_addr 127.0.0.1:<dash_sc_grpc_server_port> \
+  --ckpt_path /mnt/nas1/hf/DeepSeek-V4-Flash \
+  --model_type deepseek_v4 \
+  --prompt "<already-rendered-prompt-or-raw-debug-text>" \
+  --tool_call_structural_tag '<structural_tag_json>' \
+  --max_new_tokens 64 \
+  --temperature 0 \
+  --top_k 1 \
+  --enable_thinking false
+```
+
+`<structural_tag_json>` 必须是 xgrammar 当前支持的新格式，顶层包含 `format` 字段；不支持的 DSL 结构会由 C++ grammar backend 返回 `Invalid structural tag error`：
+
+```json
+{
+  "format": {
+    "type": "triggered_tags",
+    "triggers": ["<｜DSML｜invoke"],
+    "tags": [
+      {
+        "type": "tag",
+        "begin": "<｜DSML｜invoke name=\"get_weather\">",
+        "content": {
+          "type": "json_schema",
+          "json_schema": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"]
+          }
+        },
+        "end": "</｜DSML｜invoke>"
+      }
+    ]
+  }
+}
+```
+
+2026-06-12 在 DeepSeek-V4-Flash PD 服务上做过精确 gRPC 校验，非模糊包含匹配：`input_len=295`，`output_len=47`，`finish_reason=0`，`generated_ids` 全量等于 smoke golden，decoded 输出为：
+
+```text
+
+
+好的，我来查询杭州的天气情况。
+
+<｜DSML｜tool_calls>
+<｜DSML｜invoke name="get_weather">{
+  "city": "杭州"
+}</｜DSML｜invoke>
+</｜DSML｜tool_calls><｜end▁of▁sentence｜>
+```
+
+对应 smoke 用例在 `internal_source/rtp_llm/test/smoke/data/model/deepseek_v4/q_r_v4_flash_sm100_arm_fp8.json`，通过 `result.generated_ids` 做全量精确比较。
+
 仓库内还提供 Bash 封装（**必须用 bash**）：
 
 ```bash
@@ -94,7 +163,7 @@ export GRPC_ADDR=127.0.0.1:<dash_sc_grpc_server_port>
 bash grpc_client_run.sh
 ```
 
-脚本会通过环境变量设置 `PYTHON`、`CKPT_PATH`、`MODEL_TYPE`、`PROMPT` 等；支持压测循环 `GRPC_CLIENT_LOOPS`、`GRPC_CLIENT_DELAY_SEC`。详见脚本内注释。
+脚本会通过环境变量设置 `PYTHON`、`CKPT_PATH`、`MODEL_TYPE`、`PROMPT` 等。Python client 是低层 gRPC 调试工具，只执行 `tokenizer.encode(prompt)` 后发送 `input_ids`；OpenAI / DashScope chat 渲染应在上游完成。支持压测循环 `GRPC_CLIENT_LOOPS`、`GRPC_CLIENT_DELAY_SEC`。详见脚本内注释。
 
 ## 开发：生成 Python proto
 

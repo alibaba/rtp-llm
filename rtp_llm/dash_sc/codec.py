@@ -17,6 +17,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.dash_sc.structural_tag import (
+    DashScStructuralTagError,
+    adapt_dashscope_tool_call_wrapper_to_tag,
+    structural_tag_from_response_format,
+    validate_structural_tag_shape,
+)
 from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
 _INT32_MAX = 2_147_483_647
@@ -27,6 +33,11 @@ FINISH_REASON_STOP_ENGINE_PARAM = 8
 FINISH_REASON_ABORT = 10
 FINISH_REASON_STOP_TIMEOUT = 13
 FINISH_REASON_USE_PARAMETER_STATUS = 1000
+
+
+class DashScParameterError(ValueError):
+    """Explicit user-parameter parse/validation error for dash-sc gRPC."""
+
 
 # ----------------------------------------------------------------------------
 # Low-level tensor decoding helpers (shared by request parsing and access log)
@@ -183,7 +194,7 @@ def _parse_optional_bool(value: Any) -> bool | None:
     return None
 
 
-def _parse_ds_header_attributes(request) -> dict[str, Any]:
+def parse_ds_header_attributes(request) -> dict[str, Any]:
     """Parse ``ds_header_attributes`` into a lower-case-key dict.
 
     The value is a JSON string produced by dashscope-serving. Returning an empty
@@ -244,8 +255,10 @@ def _lookup_ds_request_control(attrs: dict[str, Any], name: str) -> Any:
     return None
 
 
-def _is_openai_compatible_request(request) -> bool:
-    attrs = _parse_ds_header_attributes(request)
+def _is_openai_compatible_request(
+    request, ds_attrs: dict[str, Any] | None = None
+) -> bool:
+    attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
     path = str(attrs.get("x-envoy-original-path", "")).lower()
     raw_path = str(attrs.get("x-dashscope-inner-rawhttppath", "")).lower()
     baggage = str(attrs.get("baggage", "")).lower()
@@ -319,30 +332,28 @@ def _parse_optional_parameter_reasoning_effort(request, param_name: str) -> str 
     return None
 
 
-def _normalize_response_format_value(value: Any) -> str | None:
-    """Normalize Dash wire shapes to the OpenAI response_format object contract."""
+def _parse_response_format_value(value: Any) -> Any:
+    """Parse Dash wire shapes to the OpenAI response_format object contract."""
     if value is None:
         return None
     parsed = value
-    if isinstance(value, str):
-        s = value.strip()
+    while isinstance(parsed, (str, list)):
+        if isinstance(parsed, list):
+            if not parsed:
+                return None
+            parsed = parsed[0]
+            continue
+        s = parsed.strip()
         if not s:
             return None
         try:
             parsed = json.loads(s)
         except Exception:
             return s
-    if isinstance(parsed, list):
-        if len(parsed) == 1:
-            parsed = parsed[0]
-        else:
-            return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
-    if isinstance(parsed, dict):
-        return json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
-    return _jsonable_to_string(parsed)
+    return parsed
 
 
-def _normalize_guided_json_response_format(value: Any) -> str | None:
+def _parse_guided_json_response_format(value: Any) -> dict[str, Any] | None:
     """Normalize Dash/dashllm guided_json to response_format json_schema."""
     if value is None:
         return None
@@ -367,25 +378,53 @@ def _normalize_guided_json_response_format(value: Any) -> str | None:
                 schema = json.loads(s)
             except Exception:
                 schema = s
-    response_format = {"type": "json_schema", "json_schema": {"schema": schema}}
-    return json.dumps(response_format, ensure_ascii=False, separators=(",", ":"))
+    return {"type": "json_schema", "json_schema": {"schema": schema}}
 
 
-def _parse_json_format_controls(request) -> tuple[str | None, bool]:
+def _decode_structural_tag_payload(
+    value: Any, field_name: str
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    while isinstance(value, (str, list)):
+        if isinstance(value, list):
+            if not value:
+                return None
+            value = value[0]
+            continue
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            value = json.loads(s)
+        except Exception:
+            raise DashScParameterError(f"invalid {field_name}") from None
+    if not isinstance(value, dict):
+        raise DashScParameterError(f"invalid {field_name}: $ must be an object")
+    try:
+        validate_structural_tag_shape(value, field_name)
+    except DashScStructuralTagError as e:
+        raise DashScParameterError(str(e)) from None
+    return adapt_dashscope_tool_call_wrapper_to_tag(value)
+
+
+def _parse_grammar_controls(
+    request, ds_attrs: dict[str, Any] | None = None
+) -> tuple[str | None, bool, str | None]:
     response_format = _parse_optional_parameter_string(request, "response_format")
     guided_json = _parse_optional_parameter_string(request, "guided_json")
     json_format_value = _parse_optional_parameter_bool(request, "json_format")
-    ds_attrs = _parse_ds_header_attributes(request)
+    ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
 
-    response_format = _normalize_response_format_value(response_format)
+    response_format = _parse_response_format_value(response_format)
     if response_format is None:
-        response_format = _normalize_response_format_value(
+        response_format = _parse_response_format_value(
             _lookup_ds_request_control(ds_attrs, "response_format")
         )
 
-    guided_response_format = _normalize_guided_json_response_format(guided_json)
+    guided_response_format = _parse_guided_json_response_format(guided_json)
     if guided_response_format is None:
-        guided_response_format = _normalize_guided_json_response_format(
+        guided_response_format = _parse_guided_json_response_format(
             _lookup_ds_request_control(ds_attrs, "guided_json")
         )
     if guided_response_format is not None:
@@ -395,7 +434,43 @@ def _parse_json_format_controls(request) -> tuple[str | None, bool]:
         json_format_value = _parse_optional_bool(
             _lookup_ds_request_control(ds_attrs, "json_format")
         )
-    return response_format, bool(json_format_value)
+
+    raw_structural_tag = _parse_optional_parameter_string(
+        request, "tool_call_structural_tag"
+    )
+    if raw_structural_tag is None:
+        raw_structural_tag = _parse_optional_parameter_string(request, "structural_tag")
+    if raw_structural_tag is None:
+        raw_structural_tag = _lookup_ds_request_control(
+            ds_attrs, "tool_call_structural_tag"
+        )
+    if raw_structural_tag is None:
+        raw_structural_tag = _lookup_ds_request_control(ds_attrs, "structural_tag")
+
+    structural_tag = _decode_structural_tag_payload(
+        raw_structural_tag, "tool_call_structural_tag"
+    )
+
+    if isinstance(response_format, dict):
+        if response_format.get("type") == "structural_tag":
+            try:
+                response_structural_tag = structural_tag_from_response_format(
+                    response_format, "response_format"
+                )
+            except DashScStructuralTagError as e:
+                raise DashScParameterError(str(e)) from None
+            response_structural_tag = adapt_dashscope_tool_call_wrapper_to_tag(
+                response_structural_tag
+            )
+            if structural_tag is None:
+                structural_tag = response_structural_tag
+            response_format = None
+
+    return (
+        _jsonable_to_string(response_format),
+        bool(json_format_value),
+        _jsonable_to_string(structural_tag),
+    )
 
 
 def _parse_stop_words_list_input(request) -> tuple[tuple[int, ...], ...] | None:
@@ -422,6 +497,62 @@ def _parse_stop_words_list_input(request) -> tuple[tuple[int, ...], ...] | None:
 # ----------------------------------------------------------------------------
 # Sampling / Other params (dataclasses consumed by the inference path)
 # ----------------------------------------------------------------------------
+
+
+def parse_max_new_tokens_for_proxy(request) -> tuple[int, bool]:
+    """Read only max-token controls; proxy hot path must not parse grammar."""
+    max_new_tokens, from_completion_alias, _ = _parse_max_token_limits(request)
+    return max_new_tokens, from_completion_alias
+
+
+def _parse_max_token_limits(
+    request, ds_attrs: dict[str, Any] | None = None
+) -> tuple[int, bool, int | None]:
+    max_new_tokens = _DEFAULT_MAX_NEW_TOKENS
+    max_new_tokens_from_completion_alias = False
+    max_total_tokens: int | None = None
+
+    v = _parse_optional_scalar_int(request, "max_tokens")
+    if v is None:
+        v = _parse_optional_parameter_int(request, "max_tokens")
+    if v is not None and v > 0:
+        max_total_tokens = v
+
+    v = _parse_optional_scalar_int(request, "max_completion_tokens")
+    if v is None:
+        v = _parse_optional_parameter_int(request, "max_completion_tokens")
+    if v is not None:
+        if v > 0:
+            max_new_tokens = v
+        else:
+            # Preserve the invalid alias value so dash-sc can reject it before
+            # it reaches the engine as max_new_tokens=0/-1 and becomes a 500.
+            max_new_tokens = v
+        max_new_tokens_from_completion_alias = True
+    else:
+        legacy_max_new_tokens = _parse_optional_scalar_int(request, "max_new_tokens")
+        if legacy_max_new_tokens is None:
+            v = _parse_optional_scalar_int(request, "max_tokens")
+        else:
+            v = legacy_max_new_tokens
+        if v is None:
+            legacy_max_new_tokens = _parse_optional_parameter_int(
+                request, "max_new_tokens"
+            )
+            v = legacy_max_new_tokens
+        if v is None:
+            v = _parse_optional_parameter_int(request, "max_tokens")
+        if legacy_max_new_tokens is not None and legacy_max_new_tokens <= 0:
+            if ds_attrs is None:
+                ds_attrs = parse_ds_header_attributes(request)
+            if _is_openai_compatible_request(request, ds_attrs):
+                pass
+            else:
+                max_new_tokens = v if v is not None else max_new_tokens
+        elif v is not None:
+            max_new_tokens = v
+
+    return max_new_tokens, max_new_tokens_from_completion_alias, max_total_tokens
 
 
 @dataclass(frozen=True)
@@ -458,6 +589,7 @@ class SamplingParams:
     max_new_think_tokens: int | None = None
     response_format: str | None = None
     json_format: bool = False
+    structural_tag: str | None = None
 
     @property
     def n(self) -> int:
@@ -509,6 +641,7 @@ class SamplingParams:
             is_streaming=True,
             response_format=self.response_format,
             json_format=self.json_format,
+            structural_tag=self.structural_tag,
         )
 
 
@@ -528,7 +661,9 @@ def parse_input_ids_from_request(request) -> list[int] | None:
     return _parse_int_tensor_flat(inp, raw)
 
 
-def parse_sampling_params(request) -> SamplingParams:
+def parse_sampling_params(
+    request, ds_attrs: dict[str, Any] | None = None
+) -> SamplingParams:
     """Read sampling fields from ``request.inputs``.
 
     Tensor names: ``max_completion_tokens`` (or legacy ``max_new_tokens`` /
@@ -541,9 +676,6 @@ def parse_sampling_params(request) -> SamplingParams:
     Legacy: if there is no ``top_k`` input, ``request.parameters["top_k"].int64_param``
     is used instead.
     """
-    max_new_tokens = _DEFAULT_MAX_NEW_TOKENS
-    max_new_tokens_from_completion_alias = False
-    max_total_tokens: int | None = None
     num_return_sequences = 0
     top_p = 1.0
     top_k = 0
@@ -555,46 +687,12 @@ def parse_sampling_params(request) -> SamplingParams:
     presence_penalty = 0.0
     max_new_think_tokens: int | None = None
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
-    openai_compatible_request = _is_openai_compatible_request(request)
-
-    v = _parse_optional_scalar_int(request, "max_tokens")
-    if v is None:
-        v = _parse_optional_parameter_int(request, "max_tokens")
-    if v is not None and v > 0:
-        max_total_tokens = v
-
-    v = _parse_optional_scalar_int(request, "max_completion_tokens")
-    if v is None:
-        v = _parse_optional_parameter_int(request, "max_completion_tokens")
-    if v is not None:
-        if v > 0:
-            max_new_tokens = v
-        else:
-            # Preserve the invalid alias value so dash-sc can reject it before
-            # it reaches the engine as max_new_tokens=0/-1 and becomes a 500.
-            max_new_tokens = v
-        max_new_tokens_from_completion_alias = True
-    else:
-        legacy_max_new_tokens = _parse_optional_scalar_int(request, "max_new_tokens")
-        if legacy_max_new_tokens is None:
-            v = _parse_optional_scalar_int(request, "max_tokens")
-        else:
-            v = legacy_max_new_tokens
-        if v is None:
-            legacy_max_new_tokens = _parse_optional_parameter_int(
-                request, "max_new_tokens"
-            )
-            v = legacy_max_new_tokens
-        if v is None:
-            v = _parse_optional_parameter_int(request, "max_tokens")
-        if (
-            legacy_max_new_tokens is not None
-            and legacy_max_new_tokens <= 0
-            and openai_compatible_request
-        ):
-            pass
-        elif v is not None:
-            max_new_tokens = v
+    ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
+    (
+        max_new_tokens,
+        max_new_tokens_from_completion_alias,
+        max_total_tokens,
+    ) = _parse_max_token_limits(request, ds_attrs)
 
     v = _parse_optional_scalar_int(request, "num_return_sequences")
     if v is None:
@@ -650,7 +748,9 @@ def parse_sampling_params(request) -> SamplingParams:
     if sw is not None:
         stop_words_list = sw
 
-    response_format, json_format = _parse_json_format_controls(request)
+    response_format, json_format, structural_tag = _parse_grammar_controls(
+        request, ds_attrs
+    )
 
     return SamplingParams(
         max_new_tokens=max_new_tokens,
@@ -669,10 +769,11 @@ def parse_sampling_params(request) -> SamplingParams:
         stop_words_list=stop_words_list,
         response_format=response_format,
         json_format=json_format,
+        structural_tag=structural_tag,
     )
 
 
-def parse_other_params(request) -> OtherParams:
+def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> OtherParams:
     """Parse non-sampling request controls.
 
     ``ds_header_attributes`` carries DashScope request-scoped controls that need
@@ -693,7 +794,7 @@ def parse_other_params(request) -> OtherParams:
                 if vf is not None:
                     return_input_ids = vf != 0.0
 
-    ds_attrs = _parse_ds_header_attributes(request)
+    ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
     enable_thinking = _parse_optional_bool(
         _lookup_ds_request_control(ds_attrs, "x-ds-llm-thinking")
     )
@@ -776,7 +877,12 @@ def parse_dash_sc_grpc_request(
     ids = parse_input_ids_from_request(request)
     if ids is None:
         return None, None, None
-    return ids, parse_sampling_params(request), parse_other_params(request)
+    ds_attrs = parse_ds_header_attributes(request)
+    return (
+        ids,
+        parse_sampling_params(request, ds_attrs),
+        parse_other_params(request, ds_attrs),
+    )
 
 
 # ----------------------------------------------------------------------------

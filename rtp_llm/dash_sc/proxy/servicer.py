@@ -11,12 +11,14 @@ import logging
 
 import grpc
 
-from rtp_llm.dash_sc.codec import build_parameter_error_response, parse_sampling_params
+from rtp_llm.dash_sc.codec import (
+    build_parameter_error_response,
+    parse_max_new_tokens_for_proxy,
+)
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy.access_record import ForwardAccessRecord
 from rtp_llm.dash_sc.proxy.service_route import create_service_discovery_from_env
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
-
 
 _FORWARD_CHANNEL_OPTS: list[tuple[str, int]] = [
     ("grpc.keepalive_time_ms", 30000),
@@ -39,16 +41,11 @@ def _is_stream_done(resp: predict_v2_pb2.ModelStreamInferResponse) -> bool:
 
 
 def _invalid_max_new_tokens_message(request) -> str | None:
-    sampling = parse_sampling_params(request)
-    if sampling.max_new_tokens > 0:
+    max_new_tokens, from_completion_alias = parse_max_new_tokens_for_proxy(request)
+    if max_new_tokens > 0:
         return None
-    param_name = "max_completion_tokens" if getattr(
-        sampling, "max_new_tokens_from_completion_alias", False
-    ) else "max_new_tokens"
-    return (
-        f"invalid {param_name}: {sampling.max_new_tokens}; "
-        "must be greater than 0"
-    )
+    param_name = "max_completion_tokens" if from_completion_alias else "max_new_tokens"
+    return f"invalid {param_name}: {max_new_tokens}; " "must be greater than 0"
 
 
 class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):

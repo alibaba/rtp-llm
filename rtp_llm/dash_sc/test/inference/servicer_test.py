@@ -18,7 +18,7 @@ import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, ThinkingMode
-from rtp_llm.dash_sc.codec import OtherParams, SamplingParams
+from rtp_llm.dash_sc.codec import DashScParameterError, OtherParams, SamplingParams
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     build_think_runtime,
@@ -1750,6 +1750,60 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(responses), 1)
         _assert_parameter_error_response(self, responses[0], "max_new_tokens")
 
+    async def test_bad_structural_tag_shape_returns_parameter_error(
+        self,
+    ) -> None:
+        tag = {}
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["tool_call_structural_tag"].string_param = json.dumps(
+            [tag], ensure_ascii=False
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(self, responses[0], "tool_call_structural_tag")
+
+    async def test_parser_type_error_is_not_masked_as_parameter_error(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer.parse_dash_sc_grpc_request",
+            side_effect=TypeError("parser bug"),
+        ):
+            with self.assertRaisesRegex(TypeError, "parser bug"):
+                await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 0)
+
+    async def test_explicit_parameter_error_is_returned_before_enqueue(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer.parse_dash_sc_grpc_request",
+            side_effect=DashScParameterError("bad parameter"),
+        ):
+            responses = await _drain(
+                servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+            )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(self, responses[0], "bad parameter")
+
     async def test_openai_compat_max_new_tokens_negative_uses_default(
         self,
     ) -> None:
@@ -1960,6 +2014,41 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             {"type": "json_schema", "json_schema": {"schema": schema}},
         )
         self.assertIsNone(generate_config.json_schema)
+
+    async def test_dash_generation_tool_call_structural_tag_reaches_generate_config(
+        self,
+    ) -> None:
+        tag = {
+            "format": {
+                "type": "triggered_tags",
+                "triggers": ["<｜DSML｜invoke"],
+                "tags": [
+                    {
+                        "type": "tag",
+                        "begin": '<｜DSML｜invoke name="get_weather">',
+                        "content": {
+                            "type": "json_schema",
+                            "json_schema": {"type": "object"},
+                        },
+                        "end": "</｜DSML｜invoke>",
+                    }
+                ],
+            }
+        }
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["tool_call_structural_tag"].string_param = json.dumps(
+            tag, ensure_ascii=False
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertEqual(json.loads(generate_config.structural_tag), tag)
+        self.assertIsNone(generate_config.response_format)
+        self.assertFalse(generate_config.json_format)
 
     async def test_dash_generation_budget_aliases_without_enable_thinking_are_adaptive(
         self,

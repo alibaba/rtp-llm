@@ -31,6 +31,7 @@ py_library(
         "proxy/service_route.py",
         "proxy/servicer.py",
         "server.py",
+        "structural_tag.py",
         "think.py",
     ],
     data = [":grpc_client_scripts"],
