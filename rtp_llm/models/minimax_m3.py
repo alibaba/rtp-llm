@@ -803,10 +803,11 @@ class MiniMaxM3(DeepSeekV2):
         else:
             local_tokens = int(sparse_cfg.get("sparse_local_tokens", 0))
             local_blocks = (local_tokens + block_size - 1) // block_size + 1
+        idx_head_dim = int(sparse_cfg["sparse_index_dim"])
         config.msa_sparse_config = {
             "sparse_layer_ids": sparse_layer_ids,
             "disable_value_layer_ids": sorted(disable_value_layer_ids),
-            "idx_head_dim": int(sparse_cfg["sparse_index_dim"]),
+            "idx_head_dim": idx_head_dim,
             "num_idx_heads": int(sparse_cfg["sparse_num_index_heads"]),
             "topk_blocks": int(sparse_cfg["sparse_topk_blocks"]),
             "block_size": block_size,
@@ -814,6 +815,16 @@ class MiniMaxM3(DeepSeekV2):
             "local_blocks": local_blocks,
             "score_type": str(sparse_cfg.get("sparse_score_type", "max")),
         }
+        # PD-compatible idx_K: when M3_IDX_PAGED is set, tell the C++ cache
+        # config to enlarge the MHA scale region of the main paged pool so the
+        # BF16 idx_K can be stored there (addressed by the same block table and
+        # transferred with the main K/V under PD separation). We deliberately do
+        # NOT set ``attn_config.is_sparse`` here: that flag flips the pool to the
+        # MLA layout (BlockPoolConfigHelper: is_mla = use_mla || is_sparse) which
+        # would break M3's MHA main-K/V paging. ``indexer_head_dim`` alone drives
+        # the scale-region sizing in SingleConfigCreator without touching is_mla.
+        if os.environ.get("M3_IDX_PAGED", "0") == "1":
+            config.attn_config.indexer_head_dim = idx_head_dim
         logging.info("minimax-m3 MSA sparse config: %s", config.msa_sparse_config)
 
     @staticmethod

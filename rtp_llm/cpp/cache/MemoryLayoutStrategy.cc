@@ -201,8 +201,11 @@ std::vector<BlockInfo> MemoryLayoutStrategy::convertIndexToBuffer(int layer_id, 
 std::vector<BlockInfo>
 MemoryLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
     // Hybrid attention models are not support asymmetric TP, thus transfer the whole kvache blocks
-    if (config_.is_mla || config_.enable_hybrid_attention) {
-        // For MLA models and hybrid attention models, use the same logic as the simpler convertIndexToBuffer function
+    if (config_.is_mla || config_.enable_hybrid_attention || config_.transfer_whole_block) {
+        // For MLA / hybrid attention models, and any model using opaque whole-block
+        // PD transfer (transfer_whole_block, e.g. MiniMax-M3 MSA), return the whole
+        // KV block (+ whole scale block) instead of k/v half splits, so the keys and
+        // sizes match the opaque store side (kv_/kv_scale_) and round-trip cleanly.
         return createBasicBlockInfo(layer_id, block_id);
     }
 

@@ -331,6 +331,14 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("slot_mapping"),
                   py::arg("kv_cache_dtype"),
                   py::arg("scale"));
+
+    rtp_ops_m.def("mha_kv_write_cache",
+                  &rtp_llm::mha_kv_write_cache,
+                  "MHA/GQA main K/V paged write by physical slot mapping (CP-shard aware, -1 skips)",
+                  py::arg("k"),
+                  py::arg("v"),
+                  py::arg("kv_cache"),
+                  py::arg("slot_mapping"));
 }
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {

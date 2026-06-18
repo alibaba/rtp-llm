@@ -147,9 +147,21 @@ class CPFlashInferImpl(FMHAImplBase):
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         if attn_inputs.is_prefill and attn_inputs.cache_store_inputs:
+            # WriteCacheStoreOp consumes prefix_lengths on the CPU (the C++
+            # runtimeWriteCacheStore dereferences prefix_lengths_host[batch_id]
+            # on the host). attn_inputs.prefix_lengths is kept device-resident
+            # at the model boundary, so passing it straight through dereferences
+            # a CUDA pointer on the host and segfaults. Prefer the pinned-host
+            # mirror prepared by prepareWriteCacheParams, falling back to an
+            # explicit .cpu() copy.
+            prefix_lengths_cpu = getattr(
+                attn_inputs.cache_store_inputs, "prefix_lengths_host", None
+            )
+            if prefix_lengths_cpu is None or not prefix_lengths_cpu.numel():
+                prefix_lengths_cpu = attn_inputs.prefix_lengths.cpu()
             self.write_cache_store_impl = WriteCacheStoreOp(
                 attn_inputs.context_parallel_info.prefill_actual_input_lengths_cpu,
-                attn_inputs.prefix_lengths,
+                prefix_lengths_cpu,
                 attn_inputs.kv_cache_block_id_host,
                 attn_inputs.cache_store_inputs,
             )

@@ -47,6 +47,14 @@ struct MemoryLayoutConfig {
     bool enable_kv_scale         = false;
     bool enable_hybrid_attention = false;
 
+    // When true, PD cache transfer treats each paged block as a single opaque
+    // chunk (whole KV block + whole scale block) instead of splitting it into
+    // k_/v_ (and k_scale_/v_scale_) halves. Mirrors the MLA/DSV4 opaque path so
+    // models whose physical layout is not k/v-split-friendly (e.g. MiniMax-M3
+    // MSA, whose scale slot holds a single BF16 idx_K cache) round-trip cleanly
+    // during prefill->decode transfer. Driven by CacheConfig.use_opaque_kv_cache_store.
+    bool transfer_whole_block = false;
+
     bool hasScale() const {
         return enable_kv_scale && kv_scale_pool_size_bytes > 0;
     }

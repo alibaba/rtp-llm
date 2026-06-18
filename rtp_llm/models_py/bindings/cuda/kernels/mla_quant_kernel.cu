@@ -1077,4 +1077,117 @@ void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_l
     }
 }
 
+// MHA/GQA main K/V paged write. One CUDA block per token; threads stride over
+// the flattened (head, head_dim) span and copy both K and V into the HND paged
+// pool [num_blocks, 2, num_kv_heads, page_size, head_dim]. slot_idx < 0 skips.
+template<typename scalar_t>
+__global__ void mha_kv_write_cache_kernel(const scalar_t* __restrict__ k,             // [num_tokens, H, D]
+                                          const scalar_t* __restrict__ v,             // [num_tokens, H, D]
+                                          scalar_t* __restrict__ kv_cache,            // [B, 2, H, P, D]
+                                          const int64_t* __restrict__ slot_mapping,   // [num_tokens]
+                                          const int num_kv_heads,
+                                          const int page_size,
+                                          const int head_dim) {
+    const int64_t token_idx = blockIdx.x;
+    const int64_t slot_idx  = slot_mapping[token_idx];
+    // NOTE: slot_idx can be -1 for non-owned (CP page-RR) or padded tokens.
+    if (slot_idx < 0) {
+        return;
+    }
+    const int64_t block_idx   = slot_idx / page_size;
+    const int64_t page_offset = slot_idx % page_size;
+
+    const int64_t hd          = static_cast<int64_t>(num_kv_heads) * head_dim;
+    const int64_t stride_page = head_dim;
+    const int64_t stride_head = static_cast<int64_t>(page_size) * head_dim;
+    const int64_t stride_kv   = static_cast<int64_t>(num_kv_heads) * page_size * head_dim;
+    const int64_t stride_blk  = 2 * stride_kv;
+
+    const int64_t k_base   = block_idx * stride_blk + 0 * stride_kv + page_offset * stride_page;
+    const int64_t v_base   = block_idx * stride_blk + 1 * stride_kv + page_offset * stride_page;
+    const int64_t src_base = token_idx * hd;
+
+    for (int64_t i = threadIdx.x; i < hd; i += blockDim.x) {
+        const int64_t h       = i / head_dim;
+        const int64_t d       = i % head_dim;
+        const int64_t dst_off = h * stride_head + d;
+        kv_cache[k_base + dst_off] = k[src_base + i];
+        kv_cache[v_base + dst_off] = v[src_base + i];
+    }
+}
+
+void mha_kv_write_cache(torch::Tensor&       k,             // [num_tokens, num_kv_heads, head_dim]
+                        torch::Tensor&       v,             // [num_tokens, num_kv_heads, head_dim]
+                        torch::Tensor&       kv_cache,      // [num_blocks, 2, num_kv_heads, page_size, head_dim]
+                        const torch::Tensor& slot_mapping) {  // [num_tokens] int64
+    TORCH_CHECK(kv_cache.dim() == 5,
+                "mha_kv_write_cache: kv_cache must be 5-D [num_blocks,2,num_kv_heads,page_size,head_dim], got dim ",
+                kv_cache.dim());
+    TORCH_CHECK(kv_cache.size(1) == 2, "mha_kv_write_cache: kv_cache.size(1) must be 2 (k/v), got ", kv_cache.size(1));
+    TORCH_CHECK(k.dim() == 3 && v.dim() == 3, "mha_kv_write_cache: k/v must be 3-D [num_tokens,num_kv_heads,head_dim]");
+    TORCH_CHECK(slot_mapping.dim() == 1, "mha_kv_write_cache: slot_mapping must be 1-D [num_tokens]");
+    TORCH_CHECK(slot_mapping.scalar_type() == torch::kInt64, "mha_kv_write_cache: slot_mapping must be int64");
+    TORCH_CHECK(k.is_contiguous() && v.is_contiguous(), "mha_kv_write_cache: k/v must be contiguous");
+    TORCH_CHECK(kv_cache.is_contiguous(), "mha_kv_write_cache: kv_cache must be contiguous");
+    TORCH_CHECK(slot_mapping.is_contiguous(), "mha_kv_write_cache: slot_mapping must be contiguous");
+    TORCH_CHECK(k.scalar_type() == kv_cache.scalar_type() && v.scalar_type() == kv_cache.scalar_type(),
+                "mha_kv_write_cache: k/v/kv_cache dtype must match");
+    TORCH_CHECK(k.device() == slot_mapping.device() && k.device() == kv_cache.device(),
+                "mha_kv_write_cache: k, kv_cache and slot_mapping must be on the same device");
+
+    const int num_tokens   = static_cast<int>(k.size(0));
+    const int num_kv_heads = static_cast<int>(kv_cache.size(2));
+    const int page_size    = static_cast<int>(kv_cache.size(3));
+    const int head_dim     = static_cast<int>(kv_cache.size(4));
+    TORCH_CHECK(k.size(1) == num_kv_heads && k.size(2) == head_dim, "mha_kv_write_cache: k shape mismatch with kv_cache");
+    TORCH_CHECK(v.size(1) == num_kv_heads && v.size(2) == head_dim, "mha_kv_write_cache: v shape mismatch with kv_cache");
+    TORCH_CHECK(slot_mapping.size(0) >= num_tokens,
+                "mha_kv_write_cache: slot_mapping size ",
+                slot_mapping.size(0),
+                " < num_tokens ",
+                num_tokens);
+    if (num_tokens == 0) {
+        return;
+    }
+
+    const c10::cuda::CUDAGuard device_guard(kv_cache.device());
+    const cudaStream_t         stream = c10::cuda::getCurrentCUDAStream();
+
+    const int64_t hd      = static_cast<int64_t>(num_kv_heads) * head_dim;
+    const int     threads = static_cast<int>(std::min<int64_t>(hd, 1024));
+    dim3          grid(num_tokens);
+    dim3          block(threads);
+
+    if (k.scalar_type() == torch::kBFloat16) {
+        mha_kv_write_cache_kernel<__nv_bfloat16><<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(k.data_ptr()),
+            reinterpret_cast<const __nv_bfloat16*>(v.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(kv_cache.data_ptr()),
+            slot_mapping.data_ptr<int64_t>(),
+            num_kv_heads,
+            page_size,
+            head_dim);
+    } else if (k.scalar_type() == torch::kHalf) {
+        mha_kv_write_cache_kernel<__half><<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(k.data_ptr()),
+            reinterpret_cast<const __half*>(v.data_ptr()),
+            reinterpret_cast<__half*>(kv_cache.data_ptr()),
+            slot_mapping.data_ptr<int64_t>(),
+            num_kv_heads,
+            page_size,
+            head_dim);
+    } else if (k.scalar_type() == torch::kFloat) {
+        mha_kv_write_cache_kernel<float><<<grid, block, 0, stream>>>(
+            reinterpret_cast<const float*>(k.data_ptr()),
+            reinterpret_cast<const float*>(v.data_ptr()),
+            reinterpret_cast<float*>(kv_cache.data_ptr()),
+            slot_mapping.data_ptr<int64_t>(),
+            num_kv_heads,
+            page_size,
+            head_dim);
+    } else {
+        TORCH_CHECK(false, "mha_kv_write_cache: unsupported dtype ", k.scalar_type());
+    }
+}
+
 }  // namespace rtp_llm

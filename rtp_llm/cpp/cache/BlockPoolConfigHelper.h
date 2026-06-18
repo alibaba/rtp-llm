@@ -188,6 +188,8 @@ private:
         cfg.dtype                   = spec->dtype;
         cfg.local_head_num_kv       = spec->local_head_num_kv;
         cfg.enable_hybrid_attention = enable_hybrid_attention;
+        // Opaque PD transfer (whole-block) — see MemoryLayoutConfig::transfer_whole_block.
+        cfg.transfer_whole_block = cache_config.use_opaque_kv_cache_store;
         // Scale 3D layout for MLA and indexer; KV 3D only for MLA (concat_and_cache_mla)
         cfg.is_mla             = cache_config.use_mla || cache_config.is_sparse;
         cfg.use_mla            = cache_config.use_mla;
