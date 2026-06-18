@@ -15,10 +15,6 @@ from .qwen_tokenizer import QWenTokenizer, QWenV2Tokenizer
 
 # from .starcoder_tokenizer import StarcoderTokenizer
 
-if platform.processor() != "aarch64":
-    from .internvl_tokenizer import InternVLTokenizer
-    from .minicpmv_embedding_tokenizer import MiniCPMVEmbeddingTokenizer
-
 from rtp_llm.utils.import_util import has_internal_source
 
 if has_internal_source():

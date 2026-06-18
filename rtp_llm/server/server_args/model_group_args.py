@@ -7,22 +7,6 @@ def init_model_group_args(parser, model_args):
     ##############################################################################################################
     model_group = parser.add_argument_group("Model Configuration")
     model_group.add_argument(
-        "--extra_data_path",
-        env_name="EXTRA_DATA_PATH",
-        bind_to=(model_args, "extra_data_path"),
-        type=str,
-        default="",
-        help="额外的数据路径",
-    )
-    model_group.add_argument(
-        "--local_extra_data_path",
-        env_name="LOCAL_EXTRA_DATA_PATH",
-        bind_to=(model_args, "local_extra_data_path"),
-        type=str,
-        default="",
-        help="本地额外数据路径",
-    )
-    model_group.add_argument(
         "--tokenizer_path",
         env_name="TOKENIZER_PATH",
         bind_to=(model_args, "tokenizer_path"),

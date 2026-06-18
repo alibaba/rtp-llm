@@ -213,6 +213,7 @@ std::string MoeConfig::to_string() const {
         << "use_deepep_internode: " << use_deepep_internode << "\n"
         << "use_deepep_low_latency: " << use_deepep_low_latency << "\n"
         << "use_deepep_p2p_low_latency: " << use_deepep_p2p_low_latency << "\n"
+        << "use_mori_ep: " << use_mori_ep << "\n"
         << "fake_balance_expert: " << fake_balance_expert << "\n"
         << "hack_moe_expert: " << hack_moe_expert << "\n"
         << "deep_ep_num_sm: " << deep_ep_num_sm << "\n"

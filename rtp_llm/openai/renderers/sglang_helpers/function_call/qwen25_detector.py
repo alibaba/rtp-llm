@@ -83,14 +83,24 @@ class Qwen25Detector(BaseFormatDetector):
         Streaming incremental parsing for Qwen 2.5 tool calls.
         Uses base class implementation with buffering to handle partial end tokens.
         """
-        # Qwen uses independent <tool_call>...</tool_call> blocks, not JSON arrays.
-        # Between blocks, strip whitespace so base class can detect the next <tool_call>.
+        # Qwen uses independent <tool_call>...</tool_call> blocks. Between
+        # blocks, the buffer may carry a stale end-token (possibly without
+        # its leading newline if the prior atomic emission consumed it)
+        # followed by whitespace; strip it so the base class can detect
+        # the next <tool_call>.
         if self.current_tool_id > 0 and not self.current_tool_name_sent:
             combined = self._buffer + new_text
             tool_tag = "<tool_call>"
             if tool_tag in combined:
                 tag_pos = combined.find(tool_tag)
-                if combined[:tag_pos].strip() == "":
+                end_token_variants = [self.eot_token, self.eot_token[1:]]
+                prefix = combined[:tag_pos]
+                stripped = prefix
+                for variant in end_token_variants:
+                    if variant and variant in stripped:
+                        stripped = stripped.replace(variant, "", 1)
+                        break
+                if stripped.strip() == "":
                     self._buffer = ""
                     new_text = combined[tag_pos:]
 

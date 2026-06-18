@@ -1,5 +1,8 @@
 from typing import Dict, List, Union
 
+from smoke.case_runner import CaseRunner
+from smoke.task_info import TaskInfo, TaskStates
+
 from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
 from rtp_llm.test.smoke.case_runner import CaseRunner
 from rtp_llm.test.smoke.task_info import TaskInfo, TaskStates
@@ -471,6 +474,7 @@ class VitSeperationCaseRunner(CaseRunner):
 
         vit_envs["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids[llm_gpu_size:])
         vit_envs["VIT_SEPARATION"] = "1"
+        vit_envs["ROLE_TYPE"] = "VIT"
         vit_envs["MODEL_SERVICE_CONFIG"] = service_route.model_dump_json()
         server_configs = [
             {

@@ -60,7 +60,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
             self.weight_style = WeightStyle.TRT_ENGINE
         if self._exist(weight_keys, "layers.0.input_layernorm.weight"):
             self.model_prefix = ""
-        self.transformer_prefix = self.prefix + self.model_prefix
+        self.transformer_prefix = self.model_prefix + self.prefix
         logging.info(f"weight_style: {self.weight_style}")
 
     def _get_weight_info(self):
@@ -311,7 +311,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 ),
                 AtomicWeight(
                     W.lm_head,
-                    [CkptWeightInfo(self.prefix + "lm_head.weight", identity)],
+                    [CkptWeightInfo("lm_head.weight", identity)],
                     identity,
                 ),
                 AtomicWeight(
@@ -349,7 +349,7 @@ class QWenV2(QWen):
         # <|im_start|> and <|im_end|>
         config.special_tokens.stop_words_id_list = [[151645], [151644]]
 
-        cls._from_hf(config, ckpt_path)
+        QWenV2._from_hf(config, ckpt_path)
         assert (
             config.attn_config.head_num > 0
             and config.attn_config.kv_head_num > 0

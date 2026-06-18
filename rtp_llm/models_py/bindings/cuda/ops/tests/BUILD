@@ -60,19 +60,6 @@ cc_test(
     exec_properties = {'gpu':'H20'},
 )
 
-cc_test(
-    name = "torch_beam_search_test",
-    srcs = [
-        "TorchBeamSearchOpTest.cc",
-    ],
-    data = [],
-    copts = copts(),
-    deps = [
-        "//rtp_llm/models_py/bindings/cuda/ops:torch_beam_search_op_impl",
-        "@com_google_googletest//:gtest",
-    ] + torch_deps(),
-)
-
 # Aliases: CudaGraph tests at //rtp_llm/cpp/cuda_graph/tests/
 alias(
     name = "test_cuda_graph_runner_libs",

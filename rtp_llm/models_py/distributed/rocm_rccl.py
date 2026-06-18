@@ -522,19 +522,37 @@ def hipgraph_capture_all_reduce(
     ):
         try:
             from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
+                _trtllm_comm_manager,
                 allreduce as trtllm_allreduce,
             )
-            device_id = torch.cuda.current_device()
-            return trtllm_allreduce(
-                allreduce_in=tensor,
-                group=process_group,
-                device_id=device_id,
-            )
-        except Exception as exc:
+            # Size guard: fall through to NCCL when input exceeds the
+            # workspace `data_` capacity. Without this check,
+            # CommWorkspace::get_comm_data's gpuMemcpyAsync would write
+            # past the end of `data_` and corrupt neighbouring device
+            # allocations.
+            if (
+                tensor.numel() * tensor.element_size()
+                <= _trtllm_comm_manager.dist_env.max_size_in_bytes
+            ):
+                device_id = torch.cuda.current_device()
+                return trtllm_allreduce(
+                    allreduce_in=tensor,
+                    group=process_group,
+                    device_id=device_id,
+                )
+        except ImportError as exc:
+            if not _trtllm_fallback_warned:
+                logging.warning(
+                    "trtllm_allreduce import failed in graph capture mode, "
+                    "fallback to ncclAllReduce (further warnings suppressed): %s", exc,
+                )
+                _trtllm_fallback_warned = True
+        except RuntimeError as exc:
             if not _trtllm_fallback_warned:
                 logging.warning(
                     "trtllm_allreduce failed in graph capture mode, "
-                    "fallback to ncclAllReduce (further warnings suppressed): %s", exc,
+                    "fallback to ncclAllReduce (further warnings suppressed): %s",
+                    exc, exc_info=True,
                 )
                 _trtllm_fallback_warned = True
 

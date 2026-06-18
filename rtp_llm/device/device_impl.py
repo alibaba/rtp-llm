@@ -892,16 +892,38 @@ class RocmImpl(GpuImpl):
         from aiter.ops.shuffle import shuffle_weight
 
         is_gate = name in [W.moe_w1, W.moe_s1]
-        do_shuffle = name in [W.moe_w1, W.moe_w2]
-        if x.dim() == 2:
+        do_weight_shuffle = name in [W.moe_w1, W.moe_w2]
+        do_fp4_scale_shuffle = name in [W.moe_s1, W.moe_s2]
+
+        original_ndim = x.dim()
+        if original_ndim == 2:
             x = x.unsqueeze(-1)
         x_ = (
             self.cat_0([x[:, x.shape[1] // 2 :, :], x[:, : x.shape[1] // 2, :]], dim=1)
             if is_gate
             else x
         )  # swap from [up, gate] to [gate, up]
-        if do_shuffle:
+
+        if do_weight_shuffle:
             x_ = shuffle_weight(x_, (16, 16))
+
+        # Quark MXFP4 stores MoE scales as uint8 E8M0 blocks. Detect that
+        # directly from the actual tensor instead of relying on the startup
+        # quantization string, which can be empty on ckpt auto-detect paths.
+        is_mxfp4_scale = do_fp4_scale_shuffle and x_.dtype == torch.uint8
+        if is_mxfp4_scale:
+            if not self._is_gfx950():
+                raise RuntimeError(
+                    "Quark MXFP4 MoE scale shuffle requires gfx950 (MI355)."
+                )
+            from aiter.utility.fp4_utils import e8m0_shuffle
+            if x_.dim() == 3:
+                s0, s1, _ = x_.shape
+                x_ = e8m0_shuffle(x_.contiguous().view(s0 * s1, -1)).view(s0, s1, -1)
+            else:
+                x_ = e8m0_shuffle(x_)
+            if original_ndim == 2:
+                x_ = x_.squeeze(-1)
         return x_
 
     def maybe_rewrite_weight_by_key(

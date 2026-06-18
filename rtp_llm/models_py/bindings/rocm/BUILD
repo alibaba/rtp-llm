@@ -13,6 +13,34 @@ cc_library(
 )
 
 cc_library(
+    name = "rocprim_shims",
+    hdrs = [
+        "rocprim_shims.h",
+    ],
+    deps = [
+        ":rocm_types_hdr",
+        "@local_config_rocm//rocm:rocm_headers",
+        "@local_config_rocm//rocm:hip",
+    ],
+    copts = rocm_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "hipcub_shims",
+    hdrs = [
+        "hipcub_shims.h",
+    ],
+    deps = [
+        ":rocprim_shims",
+        "@local_config_rocm//rocm:rocm_headers",
+        "@local_config_rocm//rocm:hip",
+    ],
+    copts = rocm_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "rocm_host_utils",
     srcs = [
         "hip_host_utils.cc",
@@ -84,6 +112,8 @@ cc_library(
         "hip_host_utils.h",
         "cuda_shims.h",
         "amd_bfloat16.h",
+        "rocprim_shims.h",
+        "hipcub_shims.h",
     ]),
     copts = rocm_copts(),
     deps = torch_deps() + [
@@ -94,6 +124,7 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",
         "//rtp_llm/models_py/bindings/rocm/kernels:rocm_trtllm_allreduce_fusion",
+        "//rtp_llm/models_py/bindings/common/kernels:kernels_moe",
     ],
 )
 

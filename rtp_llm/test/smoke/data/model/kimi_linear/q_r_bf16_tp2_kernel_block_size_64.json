@@ -26,7 +26,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "当然可以！以下是围绕“英语听力方法”主题提出的几个有深度、启发性的问题，适合用于课堂讨论、自我反思或教学研究：\n\n---\n\n### **1. 输入与理解的关系**\n> “在英语听力中，‘听懂’是否一定意味着‘理解’？请结合你的学习经验，谈谈你对‘可理解输入（comprehensible input）’这一概念的理解。”\n\n---\n\n### **2. 精听与泛听的平衡**\n> “你认为精听",
+                            "content": "当然可以！以下是围绕“英语听力方法”主题提出的几个有深度、启发性的问题，适合用于课堂讨论、自我反思或教学研究：\n\n---\n\n### 一、方法类问题\n1. **你通常如何训练英语听力？你觉得自己最有效的方法是什么？为什么？**  \n2. **你是否尝试过“精听”和“泛听”结合的方法？你觉得哪种对你帮助更大？**  \n3. **你是否使用过“听写”或“跟读”练习？这些方法",
                             "reasoning_content": null,
                             "function_call": null,
                             "tool_calls": null,
@@ -92,9 +92,7 @@
                 "response_batch": [
                     {
                         "response": "\n\nCAP theorem states that a distributed system can only",
-                        "response_alternatives": [
-                            "\n\nCAP theorem states that any distributed system can guarantee"
-                        ],
+                        "response_alternatives": null,
                         "hidden_states": null,
                         "logits": null,
                         "loss": null,
@@ -126,9 +124,7 @@
                     },
                     {
                         "response": "\n\nCAP theorem states that a distributed system can only",
-                        "response_alternatives": [
-                            "\n\nCAP theorem states that any distributed system can guarantee"
-                        ],
+                        "response_alternatives": null,
                         "hidden_states": null,
                         "logits": null,
                         "loss": null,
@@ -160,9 +156,7 @@
                     },
                     {
                         "response": "\n\nCAP theorem states that a distributed system can only",
-                        "response_alternatives": [
-                            "\n\nCAP theorem states that any distributed system can guarantee"
-                        ],
+                        "response_alternatives": null,
                         "hidden_states": null,
                         "logits": null,
                         "loss": null,

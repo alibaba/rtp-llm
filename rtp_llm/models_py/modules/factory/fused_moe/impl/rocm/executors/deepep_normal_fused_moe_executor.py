@@ -33,6 +33,10 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
         # ROCm executor doesn't have specific conditions beyond router checks
         pass
 
+    @property
+    def topk_ids_dtype(self) -> torch.dtype:
+        return torch.int32
+
     def __init__(
         self,
         config: MoEConfigAdapter,
@@ -47,7 +51,8 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
         self.w13_weight = weights[W.moe_w1]
         self.w2_weight = weights[W.moe_w2]
 
-        self.num_experts = config.expert_num
+        # Use actual local expert count from weight shape, not global config
+        self.num_experts = self.w13_weight.shape[0]
 
     def parse_sorted_ids(self, sorted_ids: torch.Tensor):
         arr_uint32 = sorted_ids.cpu().numpy().view(np.uint32)
@@ -164,14 +169,8 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
         block_size = self.get_block_size(M, topk, self.num_experts)
 
         # === 构建 local_expert_mask（用于 EP）===
-        expert_mask = torch.zeros(self.num_experts, dtype=torch.int32, device=device)
-        num_experts_per_partition = self.num_experts // self.ep_size
-        if self.ep_size > 1:
-            expert_mask[0:num_experts_per_partition] = 1
-        else:
-            start = self.ep_rank * num_experts_per_partition
-            end = start + num_experts_per_partition
-            expert_mask[start:end] = 1
+        # Dispatch 已经将全局专家 ID 映射为本地 ID，所有本地专家都是活跃的
+        expert_mask = torch.ones(self.num_experts, dtype=torch.int32, device=device)
 
         # === MoE Sorting ===
         (
@@ -189,6 +188,13 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
             block_size=block_size,
             expert_mask=expert_mask,
         )
+
+        # In EP mode (ep_size > 1), the router handles weighting in _combine,
+        # so skip kernel-side weighting. In non-EP mode, the kernel must
+        # apply router weights since there's no external combiner.
+        # Per aiter convention, ck_moe_stage1 never applies weighting —
+        # only ck_moe_stage2 does.
+        routed_weights = sorted_weights if self.ep_size <= 1 else None
 
         # === Stage 1: Up/Gate Projection + Activation ===
         a2 = torch.empty((M, topk, inter_dim // 2), dtype=dtype, device=device)
@@ -209,11 +215,10 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
             w1_scale=fc1_scale,
             a1_scale=a1_scale,
             block_m=block_size,
-            sorted_weights=sorted_weights if apply_router_weight_on_input else None,
         )
 
-        # Reshape for stage2
-        a2 = a2.view(M, topk, -1)
+        # Reshape for stage2: [M, topk, inter_dim//2] -> [M*topk, inter_dim//2]
+        a2 = a2.view(-1, a2.shape[-1])
 
         # === Stage 2: Down Projection + Weighted Combine ===
         fc2_scale = None
@@ -232,7 +237,7 @@ class FusedMoeExecutor(FusedMoeExpertExecutor):
             w2_scale=fc2_scale,
             a2_scale=a2_scale,
             block_m=block_size,
-            sorted_weights=sorted_weights if not apply_router_weight_on_input else None,
+            sorted_weights=routed_weights,
         )
 
         return CombineForwardPayload(fused_expert_output=moe_buf)

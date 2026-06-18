@@ -1,5 +1,6 @@
 import copy
 import functools
+import logging
 import re
 from typing import Any, Dict, List, Optional, Union
 
@@ -17,6 +18,7 @@ from rtp_llm.model_loader.linear_attn_weight import (
     W8A8Fp8PerChannelLinearAttnAtomicWeight,
 )
 from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.tensor_source import StackSplitTensorSource
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
@@ -37,11 +39,11 @@ from rtp_llm.utils.model_weight import (
     sp_head_gemm_a8,
     sp_head_s_gemm_a8_channel,
     sp_id,
+    sp_moe_neg1,
+    sp_moe_w1,
     sp_neg1,
     stack_,
     stack_moe_w1,
-    sp_moe_w1,
-    sp_moe_neg1
 )
 from rtp_llm.utils.util import check_with_info
 
@@ -67,15 +69,15 @@ def _ckpt_base_matches_quant_exclude(
 ) -> bool:
     """
     Check if the checkpoint module path template matches any entry in the quantization exclude list.
-    
+
     Args:
-        base_name_template: A template string representing the module path, where '{i}' 
+        base_name_template: A template string representing the module path, where '{i}'
                             acts as a placeholder for the layer index (e.g., 'model.layers.{i}.mlp.gate_proj').
-        exclude_modules: A set of concrete module paths that are excluded from quantization 
+        exclude_modules: A set of concrete module paths that are excluded from quantization
                          (e.g., {'model.layers.0.mlp.gate_proj', 'model.layers.1.mlp.gate_proj'}).
-    
+
     Returns:
-        True if the template (with '{i}' replaced by a wildcard for digits) matches any 
+        True if the template (with '{i}' replaced by a wildcard for digits) matches any
         concrete path in 'exclude_modules'.
     """
     if not exclude_modules:
@@ -133,6 +135,7 @@ def cast_to_fp8(x: torch.Tensor):
     """Convert tensor to FP8 format."""
     return x.to(torch.float8_e4m3fn)
 
+
 def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Per-channel FP8 quantization.
@@ -141,7 +144,10 @@ def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
     Returns:
         tuple[torch.Tensor, torch.Tensor]: Quantized tensor and channel-wise scales
     """
-    assert x.dim() in [2, 3], f"weight dim=2 or dim=3 supported, but got shape {x.shape}"
+    assert x.dim() in [
+        2,
+        3,
+    ], f"weight dim=2 or dim=3 supported, but got shape {x.shape}"
     if x.dim() == 3:
         channel_max = x.abs().amax(dim=-1, keepdim=True).clamp(1e-4)
         scales = (channel_max / FP8_E4M3_MAX).to(torch.float32)
@@ -155,6 +161,19 @@ def per_channel_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
     # Quantize the tensor
     quantized = (x / scales).to(torch.float8_e4m3fn)
     return (quantized.T).contiguous(), (scales.T).contiguous()
+
+
+def per_channel_cast_to_fp8_expert(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-channel FP8 quantization for a single 2D expert slice [D0, D1].
+    Uses per-row (dim=-1) reduction, matching the 3D stacked path semantics."""
+    assert x.dim() == 2, f"expected 2D expert tensor, got shape {x.shape}"
+    channel_max = x.abs().amax(dim=-1, keepdim=True).clamp(1e-4)
+    scales = (channel_max / FP8_E4M3_MAX).to(torch.float32)
+    quantized = (x / scales).to(torch.float8_e4m3fn)
+    return quantized.contiguous(), scales.contiguous()
+
 
 def gemm_channel_fp8_gpt_style_tp_strategy():
     gemm_channel_fp8_weight_tp_strategy: Dict[str, Any] = {
@@ -245,7 +264,8 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
         cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
         if not quant_config.is_quanted() or not isinstance(
-            quant_config, (Fp8PerChannelCompressedQuantConfig, Fp8PerChannelQuarkQuantConfig)
+            quant_config,
+            (Fp8PerChannelCompressedQuantConfig, Fp8PerChannelQuarkQuantConfig),
         ):
             return False
         name = src_weight_info.name
@@ -641,6 +661,7 @@ class PerChannelFp8Weight(CompositeWeight, QuantWeight):
 
         return processed_res
 
+
 class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
     """
     LoadQuantPerChannelFp8Weight class for dynamic per-channel FP8 quantization.
@@ -682,7 +703,8 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
         scale_name = self.w8a8_weight_list.get(src_weight_info.name)
         scale = None
         if scale_name:
-            scale_params = copy.deepcopy(params)
+            # shallow copy is safe: params values are simple types (str, dtype, bool)
+            scale_params = params.copy()
             scale_params["name"] = scale_name
             scale: AtomicWeight = create_w8a8_fp8_per_channel_weight(
                 src_weight_info, **scale_params
@@ -695,6 +717,166 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
         )
         self.kernel = kernel
         self.scale = scale
+
+    def get_tensor_names(
+        self, layer_id: Optional[int], load_config: LoadConfig
+    ) -> set[str]:
+        return self.kernel.get_tensor_names(layer_id, load_config)
+
+    def _load_moe_inline_quant(
+        self,
+        tensor_source,
+        layer_id: Optional[int],
+        device: str,
+        load_config: LoadConfig,
+    ):
+        """Load MoE weights with inline per-expert FP8 quantization.
+
+        Pre-allocates FP8 + scale storage and quantizes each expert individually,
+        avoiding materializing the full BF16 stacked tensor on GPU.
+
+        If tensor_source is a TensorCollector with pre-quantized FP8 data
+        (from inline quantization during fastsafetensors loading), the already-
+        quantized tensors and scales are used directly without re-quantization.
+        """
+        kernel = self.kernel
+        convert_type = (
+            kernel.data_type
+            if kernel.data_type is not None
+            else load_config.compute_dtype
+        )
+        selected_experts = load_config.get_selected_experts(
+            layer_id, kernel.config.expert_num
+        )
+        num_experts = len(selected_experts)
+
+        if kernel.stacked_ckpt_keys and tensor_source.has_tensor(
+            kernel.weights[0].tensor_name(layer_id)
+        ):
+            tensor_source = StackSplitTensorSource(
+                tensor_source, kernel._build_split_config(layer_id, load_config)
+            )
+        ckpt_weights = (
+            kernel._get_expert_weights() if kernel.stacked_ckpt_keys else kernel.weights
+        )
+        num_ckpt = len(ckpt_weights)
+
+        is_w1 = kernel._process_fun_name == "stack_moe_w1"
+        if kernel._process_fun_name not in (
+            "stack_moe_w1",
+            "transpose_stack_moe_w1",
+            "stack_",
+        ):
+            return None
+
+        first_name, first_tensor = kernel._load_expert_tensor(
+            ckpt_weights[0], layer_id, selected_experts[0], tensor_source, convert_type
+        )
+        if first_tensor.dim() != 2:
+            return None
+
+        dim0, dim1 = first_tensor.shape
+        gpu_device = (
+            device if isinstance(device, torch.device) else torch.device(device)
+        )
+
+        has_prequant = hasattr(tensor_source, "has_prequantized_scale")
+
+        if is_w1:
+            fp8_out = torch.empty(
+                [num_experts, dim0 * 2, dim1],
+                dtype=torch.float8_e4m3fn,
+                device=gpu_device,
+            )
+            scale_out = torch.empty(
+                [num_experts, dim0 * 2, 1], dtype=torch.float32, device=gpu_device
+            )
+            for cw_idx, ckpt_weight in enumerate(ckpt_weights):
+                row_offset = cw_idx * dim0
+                for local_idx, expert_id in enumerate(selected_experts):
+                    name, t = kernel._load_expert_tensor(
+                        ckpt_weight,
+                        layer_id,
+                        expert_id,
+                        tensor_source,
+                        convert_type,
+                        first_name=first_name,
+                        first_tensor=first_tensor,
+                    )
+                    if has_prequant and tensor_source.has_prequantized_scale(name):
+                        fp8_out[local_idx, row_offset : row_offset + dim0].copy_(t)
+                        scale_out[local_idx, row_offset : row_offset + dim0].copy_(
+                            tensor_source.get_scale(name)
+                        )
+                    else:
+                        q, s = per_channel_cast_to_fp8_expert(t.to(gpu_device))
+                        fp8_out[local_idx, row_offset : row_offset + dim0].copy_(q)
+                        scale_out[local_idx, row_offset : row_offset + dim0].copy_(s)
+                        del q, s
+                    del t
+            first_tensor = None
+        else:
+            fp8_out = torch.empty(
+                [num_experts, dim0, dim1], dtype=torch.float8_e4m3fn, device=gpu_device
+            )
+            scale_out = torch.empty(
+                [num_experts, dim0, 1], dtype=torch.float32, device=gpu_device
+            )
+            assert num_ckpt == 1, f"stack_ expects 1 ckpt_weight, got {num_ckpt}"
+            ckpt_weight = ckpt_weights[0]
+            for local_idx, expert_id in enumerate(selected_experts):
+                name, t = kernel._load_expert_tensor(
+                    ckpt_weight,
+                    layer_id,
+                    expert_id,
+                    tensor_source,
+                    convert_type,
+                    first_name=first_name,
+                    first_tensor=first_tensor,
+                )
+                if has_prequant and tensor_source.has_prequantized_scale(name):
+                    fp8_out[local_idx].copy_(t)
+                    scale_out[local_idx].copy_(tensor_source.get_scale(name))
+                else:
+                    q, s = per_channel_cast_to_fp8_expert(t.to(gpu_device))
+                    fp8_out[local_idx].copy_(q)
+                    scale_out[local_idx].copy_(s)
+                    del q, s
+                del t
+            first_tensor = None
+
+        if kernel._process_fun_name == "transpose_stack_moe_w1":
+            # Swap upper/lower halves (gate/up reorder).
+            # Avoid torch.cat on FP8 tensors directly — ROCm does not support it.
+            # Instead pre-allocate and copy_ each half into swapped positions.
+            half = fp8_out.shape[1] // 2
+            swapped_fp8 = torch.empty_like(fp8_out)
+            swapped_fp8[:, :half, :].copy_(fp8_out[:, half:, :])
+            swapped_fp8[:, half:, :].copy_(fp8_out[:, :half, :])
+            fp8_out = swapped_fp8
+
+            swapped_scale = torch.empty_like(scale_out)
+            swapped_scale[:, :half, :].copy_(scale_out[:, half:, :])
+            swapped_scale[:, half:, :].copy_(scale_out[:, :half, :])
+            scale_out = swapped_scale
+
+        used_prequant = (
+            has_prequant
+            and any(
+                tensor_source.has_prequantized_scale(
+                    ckpt_weights[0].name.format(
+                        i=str(layer_id), i_1=str((layer_id or 0) + 1), expert_id=str(eid)
+                    )
+                )
+                for eid in selected_experts[:1]
+            )
+        )
+        logging.info(
+            f"inline MoE FP8 quant: {self.kernel.name} layer={layer_id} "
+            f"experts={num_experts} shape={list(fp8_out.shape)} "
+            f"prequantized={used_prequant}"
+        )
+        return {self.kernel.name: fp8_out, self.scale.name: scale_out}
 
     def _load_raw_tensor(
         self,
@@ -709,6 +891,13 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
         This method implements dynamic per-channel quantization similar to vLLM's PTPC
         but with channel-wise granularity instead of token-wise.
         """
+        if isinstance(self.kernel, MoeAtomicWeight) and self.scale is not None:
+            result = self._load_moe_inline_quant(
+                database, layer_id, device, load_config
+            )
+            if result is not None:
+                return result
+
         # Load the original weight tensor
         kernel = self.kernel._load_raw_tensor(database, layer_id, device, load_config)
 

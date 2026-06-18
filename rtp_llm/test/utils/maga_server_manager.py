@@ -97,13 +97,12 @@ class MagaServerManager(object):
             return None
 
     def wait_sever_done(self, timeout: int = 1600):
-        # currently we can not check vit server health, assume it is ready, xieshui will fix it
-        if int(self._env_args.get("VIT_SEPARATION", "0")) == 1:
-            return True
-
         from rtp_llm.utils.util import wait_sever_done
 
-        # Health check uses START_PORT (self._port); when VIT_SEPARATION==1 we return True above
+        # Health check uses START_PORT (self._port). The VIT server (VIT_SEPARATION==1)
+        # exposes /health on its http port only after its preprocess engine and gRPC
+        # server finish initializing, so it goes through the same readiness probe as the
+        # LLM server instead of being assumed ready.
         result = wait_sever_done(self._server_process, int(self._port), timeout)
         if not result:
             rc = self._server_process.poll() if self._server_process else None
@@ -242,7 +241,6 @@ class MagaServerManager(object):
             cwd=cwd_path,
         )
         self._server_process = p
-
         return self.wait_sever_done(timeout)
 
     def stop_server(self):

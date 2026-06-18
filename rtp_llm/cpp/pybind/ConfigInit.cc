@@ -1,4 +1,5 @@
 #define PYBIND11_DETAILED_ERROR_MESSAGES
+#include "rtp_llm/cpp/multimodal_processor/MultimodalInputClass.h"
 #include "rtp_llm/cpp/pybind/common/blockUtil.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
@@ -18,9 +19,80 @@
 namespace py = pybind11;
 using namespace rtp_llm;
 
+void registerMultimodal(const py::module& m) {
+    pybind11::class_<MultimodalInput>(m, "MultimodalInput")
+        .def(pybind11::init<std::string, int32_t, torch::Tensor, MMPreprocessConfig>(),
+             py::arg("url"),
+             py::arg("mm_type"),
+             py::arg("tensor"),
+             py::arg("mm_preprocess_config"))
+        .def_readwrite("url", &MultimodalInput::url)
+        .def_readwrite("mm_type", &MultimodalInput::mm_type)
+        .def_readwrite("tensor", &MultimodalInput::tensor)
+        .def_readwrite("mm_preprocess_config", &MultimodalInput::mm_preprocess_config)
+        .def("to_string", &MultimodalInput::to_string)
+        .def("cache_key", &MultimodalInput::cache_key)
+        .def(pybind11::pickle(
+            [](const MultimodalInput& m) {  // __getstate__
+                return py::make_tuple(m.url, m.mm_type, m.tensor, m.mm_preprocess_config);
+            },
+            [](py::tuple t) {  // __setstate__
+                return MultimodalInput(t[0].cast<std::string>(),
+                                       t[1].cast<int32_t>(),
+                                       t[2].cast<torch::Tensor>(),
+                                       t[3].cast<MMPreprocessConfig>());
+            }));
+    pybind11::class_<MMPreprocessConfig>(m, "MMPreprocessConfig")
+        .def(pybind11::
+                 init<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, std::vector<float>, int32_t>(),
+             py::arg("width"),
+             py::arg("height"),
+             py::arg("min_pixels"),
+             py::arg("max_pixels"),
+             py::arg("fps"),
+             py::arg("min_frames"),
+             py::arg("max_frames"),
+             py::arg("crop_positions"),
+             py::arg("mm_timeout_ms"))
+        .def_readwrite("width", &MMPreprocessConfig::width)
+        .def_readwrite("height", &MMPreprocessConfig::height)
+        .def_readwrite("min_pixels", &MMPreprocessConfig::min_pixels)
+        .def_readwrite("max_pixels", &MMPreprocessConfig::max_pixels)
+        .def_readwrite("fps", &MMPreprocessConfig::fps)
+        .def_readwrite("min_frames", &MMPreprocessConfig::min_frames)
+        .def_readwrite("max_frames", &MMPreprocessConfig::max_frames)
+        .def_readwrite("crop_positions", &MMPreprocessConfig::crop_positions)
+        .def_readwrite("mm_timeout_ms", &MMPreprocessConfig::mm_timeout_ms)
+        .def("to_string", &MMPreprocessConfig::to_string)
+        .def(pybind11::pickle(
+            [](const MMPreprocessConfig& m) {  // __getstate__
+                return py::make_tuple(m.width,
+                                      m.height,
+                                      m.min_pixels,
+                                      m.max_pixels,
+                                      m.fps,
+                                      m.min_frames,
+                                      m.max_frames,
+                                      m.crop_positions,
+                                      m.mm_timeout_ms);
+            },
+            [](py::tuple t) {  // __setstate__
+                return MMPreprocessConfig(t[0].cast<int32_t>(),
+                                          t[1].cast<int32_t>(),
+                                          t[2].cast<int32_t>(),
+                                          t[3].cast<int32_t>(),
+                                          t[4].cast<int32_t>(),
+                                          t[5].cast<int32_t>(),
+                                          t[6].cast<int32_t>(),
+                                          t[7].cast<std::vector<float>>(),
+                                          t[8].cast<int32_t>());
+            }));
+}
+
 PYBIND11_MODULE(libth_transformer_config, m) {
     // Register get_block_cache_keys function
     registerCommon(m);
+    registerMultimodal(m);
 
     // Register enums
     py::enum_<RoleType>(m, "RoleType")
@@ -566,6 +638,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("use_deepep_internode", &MoeConfig::use_deepep_internode)
         .def_readwrite("use_deepep_low_latency", &MoeConfig::use_deepep_low_latency)
         .def_readwrite("use_deepep_p2p_low_latency", &MoeConfig::use_deepep_p2p_low_latency)
+        .def_readwrite("use_mori_ep", &MoeConfig::use_mori_ep)
         .def_readwrite("fake_balance_expert", &MoeConfig::fake_balance_expert)
         .def_readwrite("hack_moe_expert", &MoeConfig::hack_moe_expert)
         .def_readwrite("deep_ep_num_sm", &MoeConfig::deep_ep_num_sm)
@@ -581,6 +654,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.use_deepep_internode,
                                       self.use_deepep_low_latency,
                                       self.use_deepep_p2p_low_latency,
+                                      self.use_mori_ep,
                                       self.fake_balance_expert,
                                       self.hack_moe_expert,
                                       self.deep_ep_num_sm,
@@ -590,7 +664,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.moe_strategy);
             },
             [](py::tuple t) {
-                if (t.size() != 11)
+                if (t.size() != 12)
                     throw std::runtime_error("Invalid state!");
                 MoeConfig c;
                 try {
@@ -598,13 +672,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_deepep_internode       = t[1].cast<bool>();
                     c.use_deepep_low_latency     = t[2].cast<bool>();
                     c.use_deepep_p2p_low_latency = t[3].cast<bool>();
-                    c.fake_balance_expert        = t[4].cast<bool>();
-                    c.hack_moe_expert            = t[5].cast<bool>();
-                    c.deep_ep_num_sm             = t[6].cast<int>();
-                    c.masked_max_token_num       = t[7].cast<int>();
-                    c.use_all_gather             = t[8].cast<bool>();
-                    c.ll_num_max_token           = t[9].cast<int>();
-                    c.moe_strategy               = t[10].cast<std::string>();
+                    c.use_mori_ep                = t[4].cast<bool>();
+                    c.fake_balance_expert        = t[5].cast<bool>();
+                    c.hack_moe_expert            = t[6].cast<bool>();
+                    c.deep_ep_num_sm             = t[7].cast<int>();
+                    c.masked_max_token_num       = t[8].cast<int>();
+                    c.use_all_gather             = t[9].cast<bool>();
+                    c.ll_num_max_token           = t[10].cast<int>();
+                    c.moe_strategy               = t[11].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("MoeConfig unpickle error: ") + e.what());
                 }
@@ -875,7 +950,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("FP8Quant", QuantMethod::FP8Quant)
         .value("FP8PTPC", QuantMethod::FP8PTPC)
         .value("W4A8INT4PTPC", QuantMethod::W4A8INT4PTPC)
-        .value("ModelOptFP4", QuantMethod::ModelOptFP4);
+        .value("ModelOptFP4", QuantMethod::ModelOptFP4)
+        .value("QuarkMXFP4", QuantMethod::QuarkMXFP4);
 
     // Register QuantAlgo
     py::class_<QuantAlgo>(m, "QuantAlgo")
@@ -891,6 +967,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("isFp8PTPC", &QuantAlgo::isFp8PTPC)
         .def("isW4a8Int4PTPC", &QuantAlgo::isW4a8Int4PTPC)
         .def("isModelOptFP4", &QuantAlgo::isModelOptFP4)
+        .def("isQuarkMXFP4", &QuantAlgo::isQuarkMXFP4)
         .def("isQuant", &QuantAlgo::isQuant)
         .def("isGroupwise", &QuantAlgo::isGroupwise)
         .def("getQuantMethod", &QuantAlgo::getQuantMethod)

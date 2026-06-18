@@ -1,5 +1,6 @@
 #include <memory>
 #include <chrono>
+#include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -15,8 +16,8 @@ using namespace std;
 namespace rtp_llm {
 
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
-                                  py::object                                    mm_process_engine,
-                                  std::unique_ptr<ProposeModelEngineInitParams> propose_params) {
+                                  std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                                  py::object                                    mm_process_engine) {
     meta_.reset(new RpcServerRuntimeMeta());
     maga_init_params_ = maga_init_params;
     weight_manager_   = maga_init_params.weight_manager;
@@ -38,18 +39,14 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                                 "running engine init with gil held may cause program hang, please check");
         engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
     }
-    if (!mm_process_engine.is_none()) {
-        auto vit_separation = maga_init_params.vit_config.vit_separation;
-        if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
-            mm_processor_.reset(new RemoteMultimodalProcessor(mm_process_engine,
-                                                              maga_init_params.model_config_.mm_model_config,
+    if (maga_init_params.model_config_.mm_model_config.is_multimodal) {
+        if (mm_process_engine.is_none()) {
+            mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
                                                               maga_init_params.model_config_.max_seq_len));
-        } else if (vit_separation == VitSeparation::VIT_SEPARATION_LOCAL) {
+        } else {
             mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
                                                              maga_init_params.model_config_.mm_model_config,
                                                              maga_init_params.model_config_.max_seq_len));
-        } else {
-            return grpc::Status(grpc::StatusCode::INTERNAL, "invalid vit separation value in config");
         }
     }
 
@@ -159,8 +156,9 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
                                                 const GenerateInputPB*                 request,
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
     RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
-    AtomicGuard request_guard(onflight_requests_);
-    auto        request_id = request->request_id();
+    c10::InferenceMode inference_guard(true);
+    AtomicGuard        request_guard(onflight_requests_);
+    auto               request_id = request->request_id();
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
@@ -191,8 +189,9 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
                                                const BatchGenerateInputPB* request,
                                                BatchGenerateOutputsPB*     response) {
     RTP_LLM_PROFILE_SCOPE("rpc.batch_generate_call");
-    AtomicGuard request_guard(onflight_requests_);
-    const int   batch_size = request->inputs_size();
+    c10::InferenceMode inference_guard(true);
+    AtomicGuard        request_guard(onflight_requests_);
+    const int          batch_size = request->inputs_size();
     RTP_LLM_LOG_INFO("receive batch generate request, batch_size=%d", batch_size);
 
     if (batch_size == 0) {

@@ -57,6 +57,7 @@ class TrtllmDistEnv:
     ) -> None:
         self.group = group
         self.device_id = device_id
+        self.max_size_in_bytes = max_size_in_bytes
         self.rank = dist.get_rank(group=self.group)
         self.world_size = dist.get_world_size(group=self.group)
         self.handle = None
