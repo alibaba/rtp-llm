@@ -24,6 +24,16 @@ py_test(
 )
 
 py_test(
+    name = "backend_manager_test",
+    srcs = ["backend_manager_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/server:server",
+    ],
+    tags = ["manual"],
+)
+
+py_test(
     name = "schedule_meta_test",
     srcs = ["schedule_meta_test.py"],
     deps = [

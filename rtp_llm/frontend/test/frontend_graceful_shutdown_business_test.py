@@ -181,6 +181,53 @@ class FrontendGracefulShutdownBusinessTest(unittest.TestCase):
         self.assertIn("data:second", stream_lines)
         self.assertTrue(frontend_server.close_called.is_set())
 
+    def test_streaming_request_finishes_after_direct_sigterm_pre_stop(self):
+        port = get_free_port()
+        server, frontend_server = self.build_server(port, chunk_delay=0.5)
+        server_thread = threading.Thread(target=server.run, daemon=True)
+        server_thread.start()
+        self.wait_until_ready(port)
+
+        stream_lines = []
+        stream_error = []
+
+        def read_stream():
+            try:
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/",
+                    data=json.dumps({"prompt": "hello", "stream": True}).encode(
+                        "utf-8"
+                    ),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    for raw_line in response:
+                        line = raw_line.decode("utf-8").strip()
+                        if line:
+                            stream_lines.append(line)
+            except Exception as e:
+                stream_error.append(e)
+
+        stream_thread = threading.Thread(target=read_stream)
+        stream_thread.start()
+        self.assertTrue(frontend_server.first_chunk_sent.wait(timeout=5))
+
+        with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "0.2"}):
+            server.handle_exit(signal.SIGTERM, None)
+            self.assertTrue(server.shutdown_manager.is_unavailable())
+            self.assertFalse(server.shutdown_manager.is_draining())
+
+        stream_thread.join(timeout=10)
+        server_thread.join(timeout=10)
+
+        self.assertFalse(stream_thread.is_alive())
+        self.assertFalse(server_thread.is_alive())
+        self.assertEqual(stream_error, [])
+        self.assertIn("data:first", stream_lines)
+        self.assertIn("data:second", stream_lines)
+        self.assertTrue(frontend_server.close_called.is_set())
+
 
 if __name__ == "__main__":
     unittest.main()
