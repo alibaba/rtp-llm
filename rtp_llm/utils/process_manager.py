@@ -14,8 +14,15 @@ STOP_TIMEOUT_MS_ENV = "RTP_LLM_STOP_TIMEOUT_MS"
 DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV = (
     "RTP_LLM_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS"
 )
+BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV = "RTP_LLM_BACKEND_POST_FRONTEND_DRAIN_SECONDS"
+FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV = "FRONTEND_PRE_STOP_DRAIN_SECONDS"
+DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
+PRE_STOP_DRAIN_SIGNAL_ENV = "RTP_LLM_PRE_STOP_DRAIN_SIGNAL"
+PRE_STOP_DRAIN_SIGNAL_DISABLED_VALUE = "0"
+PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 600
 DEFAULT_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS = 60.0
+DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS = 120.0
 
 
 class ProcessManager:
@@ -52,6 +59,7 @@ class ProcessManager:
         )
         self._deferred_sigterm_seen = False
         self._deferred_sigterm_timer: Optional[threading.Timer] = None
+        self._used_pre_stop_drain_signal = False
 
         # Health check related attributes
         self.health_check_processes: List[Process] = []
@@ -81,8 +89,11 @@ class ProcessManager:
         if not self._defer_first_sigterm or signum != signal.SIGTERM:
             return False
         if self._deferred_sigterm_seen:
-            logging.info("Process manager received second SIGTERM, shutting down now")
-            return False
+            logging.info(
+                "Process manager ignoring duplicate SIGTERM while waiting for "
+                "parent-staged backend shutdown"
+            )
+            return True
 
         self._deferred_sigterm_seen = True
         delay_s = self._deferred_sigterm_delay_seconds()
@@ -154,24 +165,52 @@ class ProcessManager:
             self.process_groups[shutdown_group].extend(processes)
 
     def _terminate_process_list(
-        self, processes: List[Process], group_name: str, force_immediate: bool = False
+        self,
+        processes: List[Process],
+        group_name: str,
+        force_immediate: bool = False,
+        signum: signal.Signals = signal.SIGTERM,
     ):
         for proc in processes:
             if proc.is_alive():
                 logging.info(
-                    f"Sending SIGTERM to {group_name} process {proc.name} pid={proc.pid}"
+                    f"Sending {signal.Signals(signum).name} to {group_name} "
+                    f"process {proc.name} pid={proc.pid}"
                 )
-                proc.terminate()
+                self._signal_process(proc, signum)
                 if force_immediate and proc.is_alive():
                     time.sleep(0.05)
                     if proc.is_alive():
+                        sig_name = signal.Signals(signum).name
                         logging.info(
-                            f"Sending immediate second SIGTERM to {group_name} "
+                            f"Sending immediate second {sig_name} to {group_name} "
                             f"process {proc.name} pid={proc.pid}"
                         )
-                        proc.terminate()
+                        self._signal_process(proc, signum)
             else:
                 logging.info(f"proc.name [{proc.name}] pid[{proc.pid}] is not alived")
+
+    def _signal_process(self, proc: Process, signum: signal.Signals):
+        if signum == signal.SIGTERM:
+            proc.terminate()
+            return
+        if signum == self._pre_stop_signal():
+            try:
+                if getattr(proc, "pid", None) is not None:
+                    os.kill(proc.pid, signum)
+            except (OSError, ProcessLookupError):
+                pass
+            return
+        try:
+            # multiprocessing.Process has no portable send_signal() helper before
+            # Python 3.14.  Only use os.kill for real started child processes;
+            # tests often use lightweight fakes with synthetic pids.
+            if getattr(proc, "_popen", None) is not None:
+                os.kill(proc.pid, signum)
+            else:
+                proc.terminate()
+        except (OSError, ProcessLookupError):
+            pass
 
     def _wait_process_list_exit(
         self,
@@ -287,10 +326,13 @@ class ProcessManager:
         Non-staged mode (post-crash all-stop): SIGTERM everyone at once.
         """
         logging.info(f"Sending SIGTERM (drain_timeout={drain_timeout}s)")
+        self._used_pre_stop_drain_signal = False
         drain_deadline = self._make_deadline(drain_timeout)
 
         if staged and self.process_groups:
             dependency_lost = self._sigterm_and_drain_groups(drain_deadline)
+            if not dependency_lost:
+                self._linger_before_deferred_group_shutdown(drain_deadline)
             self._sigterm_deferred_groups()
             if not dependency_lost:
                 deferred_processes = self._processes_for_groups(self.DEFERRED_GROUPS)
@@ -384,6 +426,26 @@ class ProcessManager:
     def _sigterm_and_drain_groups(self, drain_deadline: Optional[float]) -> bool:
         """SIGTERM non-deferred groups; wait for drainable ones to drain."""
         dependency_lost = False
+        pre_stop_groups: List[str] = []
+        for group_name in self.shutdown_group_order:
+            if group_name in self.DEFERRED_GROUPS:
+                continue
+            group_processes = self.process_groups.get(group_name, [])
+            use_pre_stop_signal = (
+                group_name in self.DRAIN_GROUPS
+                and self._pre_stop_drain_signal_enabled()
+                and self._pre_stop_signal() is not None
+            )
+            if use_pre_stop_signal:
+                self._send_pre_stop_drain_signal(group_processes, group_name)
+                self._used_pre_stop_drain_signal = True
+                pre_stop_groups.append(group_name)
+
+        if pre_stop_groups and self._wait_pre_stop_drain_signal_window(
+            pre_stop_groups, drain_deadline
+        ):
+            dependency_lost = True
+
         for group_name in self.shutdown_group_order:
             if group_name in self.DEFERRED_GROUPS:
                 continue
@@ -406,15 +468,166 @@ class ProcessManager:
                     dependency_lost = True
         return dependency_lost
 
+    def _linger_before_deferred_group_shutdown(self, drain_deadline: Optional[float]):
+        if self._used_pre_stop_drain_signal:
+            return
+        linger_s = self._backend_post_frontend_drain_seconds()
+        if linger_s <= 0:
+            return
+        if not self._processes_for_groups(self.DRAIN_GROUPS):
+            return
+        if not self._processes_for_groups(self.DEFERRED_GROUPS):
+            return
+        remaining = self._remaining_timeout(drain_deadline)
+        if remaining is not None:
+            linger_s = min(linger_s, remaining)
+        if linger_s <= 0:
+            return
+        logging.info(
+            "Waiting %.3fs before backend shutdown so route/service-discovery "
+            "state can converge after frontend drain",
+            linger_s,
+        )
+        time.sleep(linger_s)
+
+    @staticmethod
+    def _backend_post_frontend_drain_seconds() -> float:
+        # Route/master state convergence tends to track the pre-stop drain
+        # window, so reuse that value unless operators set a dedicated linger.
+        for env_key in (
+            BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV,
+            FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
+            DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV,
+        ):
+            raw = os.environ.get(env_key, "")
+            if not raw:
+                continue
+            try:
+                return max(0.0, float(raw))
+            except ValueError:
+                return DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS
+        return DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS
+
+    @staticmethod
+    def _pre_stop_drain_signal_enabled() -> bool:
+        if os.environ.get(PRE_STOP_DRAIN_SIGNAL_ENV, "1").strip() == (
+            PRE_STOP_DRAIN_SIGNAL_DISABLED_VALUE
+        ):
+            return False
+        return bool(
+            os.environ.get(FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV, "").strip()
+            or os.environ.get(DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV, "").strip()
+        )
+
+    @staticmethod
+    def _pre_stop_signal() -> Optional[signal.Signals]:
+        return getattr(signal, "SIGUSR1", None)
+
+    def _send_pre_stop_drain_signal(self, processes: List[Process], group_name: str):
+        pre_stop_signal = self._pre_stop_signal()
+        if pre_stop_signal is None:
+            return
+        logging.info(
+            "Sending %s to %s process group for pre-stop drain",
+            signal.Signals(pre_stop_signal).name,
+            group_name,
+        )
+        self._terminate_process_list(
+            processes,
+            group_name,
+            signum=pre_stop_signal,
+        )
+
+    def _wait_pre_stop_drain_signal_window(
+        self, group_names: List[str], drain_deadline: Optional[float]
+    ) -> bool:
+        window_s = self._pre_stop_drain_signal_window_seconds(drain_deadline)
+        if window_s <= 0:
+            return False
+
+        group_label = ",".join(group_names)
+        deadline = time.time() + window_s
+        logging.info(
+            "Waiting %.3fs after pre-stop drain signal for %s route/service-discovery "
+            "state to converge",
+            window_s,
+            group_label,
+        )
+        while time.time() < deadline:
+            alive_pids = []
+            for group_name in group_names:
+                alive_pids.extend(
+                    p.pid
+                    for p in self.process_groups.get(group_name, [])
+                    if p.is_alive()
+                )
+            if not alive_pids:
+                logging.info(
+                    "%s process groups exited during pre-stop drain signal window",
+                    group_label,
+                )
+                return False
+            if self._dependency_group_lost(
+                self.DEFERRED_GROUPS,
+                group_label,
+                alive_pids,
+            ):
+                return True
+            time.sleep(min(self.monitor_interval, max(0.0, deadline - time.time())))
+        return False
+
+    def _pre_stop_drain_signal_window_seconds(
+        self, drain_deadline: Optional[float]
+    ) -> float:
+        window_s = self._backend_post_frontend_drain_seconds()
+        if window_s <= 0:
+            return 0.0
+        remaining = self._remaining_timeout(drain_deadline)
+        if remaining is None:
+            return window_s
+
+        headroom_s = self._pre_stop_drain_headroom_seconds(remaining)
+        max_window_s = max(0.0, remaining - headroom_s)
+        clamped_window_s = min(window_s, max_window_s)
+        if clamped_window_s < window_s:
+            logging.info(
+                "Clamp pre-stop drain signal window from %.3fs to %.3fs "
+                "(remaining_shutdown_budget=%.3fs, headroom=%.3fs)",
+                window_s,
+                clamped_window_s,
+                remaining,
+                headroom_s,
+            )
+        return clamped_window_s
+
+    @staticmethod
+    def _pre_stop_drain_headroom_seconds(shutdown_timeout: float) -> float:
+        raw = os.environ.get(PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV, "")
+        if raw:
+            try:
+                return max(0.0, float(raw))
+            except ValueError:
+                logging.warning(
+                    "Invalid %s=%r, using default pre-stop drain headroom",
+                    PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV,
+                    raw,
+                )
+        return min(60.0, max(1.0, float(shutdown_timeout) * 0.10))
+
     def _sigterm_deferred_groups(self):
-        """SIGTERM deferred groups (backend); outer monitor loop polls."""
+        """Signal deferred groups (backend); outer monitor loop polls.
+
+        Backend children intentionally ignore repeated SIGTERM while deferring
+        cgroup-wide shutdown noise.  The parent uses SIGINT as the explicit
+        staged shutdown signal once frontend/ingress drain is complete.
+        """
         for group_name in self.shutdown_group_order:
             if group_name not in self.DEFERRED_GROUPS:
                 continue
             self._terminate_process_list(
                 self.process_groups.get(group_name, []),
                 group_name,
-                force_immediate=True,
+                signum=signal.SIGINT,
             )
 
     def _force_kill_processes(self):
