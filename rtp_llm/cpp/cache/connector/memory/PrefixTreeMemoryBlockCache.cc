@@ -375,6 +375,21 @@ std::vector<CacheKeyType> PrefixTreeMemoryBlockCache::cacheKeys() const {
     return keys;
 }
 
+std::vector<CacheKeyType> PrefixTreeMemoryBlockCache::cacheKeysUnorderedForStatus() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::vector<CacheKeyType>           keys;
+    keys.reserve(nodes_.size());
+    for (const auto& [key, node] : nodes_) {
+        for (const auto& state : node.kinds) {
+            if (state.has_value && !state.detached) {
+                keys.push_back(key);
+                break;
+            }
+        }
+    }
+    return keys;
+}
+
 size_t PrefixTreeMemoryBlockCache::size() const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     size_t count = 0;
