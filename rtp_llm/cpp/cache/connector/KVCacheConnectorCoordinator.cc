@@ -33,9 +33,9 @@ bool isCpCompactFixedGroup(const CacheConfig& cache_config, int group_id, int cp
     return row_tokens > 0 && row_tokens == cache_config.seq_size_per_block * static_cast<size_t>(cp_size);
 }
 
-bool isCompactFullBlockList(const KVCacheResource& source,
+bool isCompactFullBlockList(const KVCacheResource&  source,
                             const BlockIndicesType& src_blocks,
-                            const CacheKeysType& selected_keys) {
+                            const CacheKeysType&    selected_keys) {
     return src_blocks.size() <= selected_keys.size() || src_blocks.size() < source.cacheKeys().size();
 }
 
@@ -529,6 +529,13 @@ std::vector<CacheKeyType> KVCacheConnectorCoordinator::memoryCacheKeys() const {
         return {};
     }
     return memory_connector_->cacheKeys();
+}
+
+std::vector<CacheKeyType> KVCacheConnectorCoordinator::memoryCacheKeysForStatus() const {
+    if (!memory_connector_) {
+        return {};
+    }
+    return memory_connector_->cacheKeysForStatus();
 }
 
 }  // namespace rtp_llm
