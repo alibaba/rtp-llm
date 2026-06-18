@@ -156,13 +156,24 @@ class BackendManager(object):
         if isinstance(self.engine, BaseEngine):
             engine = self.engine
             self.engine = None
+            engine_stop_error = None
             try:
                 logging.info("stopping backend engine before unmounting nfs paths")
                 engine.stop()
                 logging.info("backend engine stopped")
+            except Exception as e:
+                engine_stop_error = e
+                logging.exception("engine stop failed during backend shutdown")
             finally:
-                _nfs_manager.unmount_all()
-                logging.info("all nfs paths unmounted")
+                try:
+                    _nfs_manager.unmount_all()
+                    logging.info("all nfs paths unmounted")
+                except Exception:
+                    logging.exception("nfs unmount failed during backend shutdown")
+                    if engine_stop_error is None:
+                        raise
+            if engine_stop_error is not None:
+                raise engine_stop_error
 
     def ready(self):
         if isinstance(self.engine, BaseEngine):

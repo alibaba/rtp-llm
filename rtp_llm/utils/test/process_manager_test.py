@@ -13,6 +13,9 @@ from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_ENV,
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
     DEFER_FIRST_SIGTERM_VALUE,
+    FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
+    PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV,
+    PRE_STOP_DRAIN_SIGNAL_ENV,
     ProcessManager,
     SHUTDOWN_TIMEOUT_ENV,
     STOP_TIMEOUT_MS_ENV,
@@ -1021,6 +1024,147 @@ class TestFailureShutdownPaths(unittest.TestCase):
 
         self.assertEqual([name for name, _ in events], ["frontend", "backend"])
         self.assertGreaterEqual(events[1][1] - events[0][1], 0.04)
+
+    def test_pre_stop_signal_drains_frontend_before_sigterm(self):
+        events = []
+
+        class FakeProcess:
+            def __init__(self, name):
+                self.name = name
+                self.pid = 100 + len(events)
+                self._alive = True
+                self._popen = object() if name == "frontend" else None
+
+            def is_alive(self):
+                return self._alive
+
+            @property
+            def exitcode(self):
+                return None if self._alive else 0
+
+            def terminate(self):
+                events.append((self.name, signal.SIGTERM))
+                self._alive = False
+
+        frontend_proc = FakeProcess("frontend")
+        backend_proc = FakeProcess("backend")
+        self.manager.monitor_interval = 0.005
+        self.manager.add_process(frontend_proc, shutdown_group="frontend")
+        self.manager.add_process(backend_proc, shutdown_group="backend")
+
+        def fake_kill(pid, sig):
+            if pid == frontend_proc.pid:
+                events.append(("frontend", sig))
+
+        with patch("os.kill", side_effect=fake_kill), patch.dict(
+            os.environ,
+            {
+                FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV: "0.02",
+                BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV: "0.02",
+            },
+        ):
+            self.manager._terminate_processes(drain_timeout=1)
+
+        self.assertEqual(
+            events,
+            [
+                ("frontend", signal.SIGUSR1),
+                ("frontend", signal.SIGTERM),
+                ("backend", signal.SIGTERM),
+            ],
+        )
+
+    def test_pre_stop_signal_sent_to_all_drain_groups_before_sigterm(self):
+        events = []
+
+        class FakeProcess:
+            _next_pid = 100
+
+            def __init__(self, name):
+                type(self)._next_pid += 1
+                self.name = name
+                self.pid = type(self)._next_pid
+                self._alive = True
+                self._popen = object() if name in ("frontend", "ingress") else None
+
+            def is_alive(self):
+                return self._alive
+
+            @property
+            def exitcode(self):
+                return None if self._alive else 0
+
+            def terminate(self):
+                events.append((self.name, signal.SIGTERM))
+                self._alive = False
+
+        frontend_proc = FakeProcess("frontend")
+        ingress_proc = FakeProcess("ingress")
+        backend_proc = FakeProcess("backend")
+        self.manager.monitor_interval = 0.005
+        self.manager.add_process(frontend_proc, shutdown_group="frontend")
+        self.manager.add_process(ingress_proc, shutdown_group="ingress")
+        self.manager.add_process(backend_proc, shutdown_group="backend")
+
+        def fake_kill(pid, sig):
+            if pid == frontend_proc.pid:
+                events.append(("frontend", sig))
+            if pid == ingress_proc.pid:
+                events.append(("ingress", sig))
+
+        with patch("os.kill", side_effect=fake_kill), patch.dict(
+            os.environ,
+            {
+                FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV: "0.02",
+                BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV: "0.02",
+            },
+        ):
+            self.manager._terminate_processes(drain_timeout=1)
+
+        self.assertEqual(
+            events,
+            [
+                ("frontend", signal.SIGUSR1),
+                ("ingress", signal.SIGUSR1),
+                ("frontend", signal.SIGTERM),
+                ("ingress", signal.SIGTERM),
+                ("backend", signal.SIGTERM),
+            ],
+        )
+
+    def test_pre_stop_signal_can_be_disabled(self):
+        frontend = _FakeProc("frontend", dies_on_terminate=True)
+        self.manager.add_process(frontend, shutdown_group="frontend")
+        signals = []
+
+        with patch(
+            "os.kill", side_effect=lambda pid, sig: signals.append(sig)
+        ), patch.dict(
+            os.environ,
+            {
+                FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV: "0.02",
+                PRE_STOP_DRAIN_SIGNAL_ENV: "0",
+            },
+        ):
+            self.manager._terminate_processes(drain_timeout=1)
+
+        self.assertNotIn(signal.SIGUSR1, signals)
+
+    def test_pre_stop_signal_window_reserves_shutdown_headroom(self):
+        self.manager.shutdown_timeout = 10
+        with patch.dict(
+            os.environ,
+            {
+                FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV: "10",
+                PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV: "2",
+            },
+        ):
+            window_s = self.manager._pre_stop_drain_signal_window_seconds(
+                time.time() + 10
+            )
+
+        self.assertGreater(window_s, 7.0)
+        self.assertLessEqual(window_s, 8.0)
 
     def test_backend_linger_is_clamped_to_shutdown_deadline(self):
         frontend = _FakeProc("frontend")
