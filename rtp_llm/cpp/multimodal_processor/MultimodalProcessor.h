@@ -1,5 +1,6 @@
 #pragma once
 
+#include <utility>
 #include <vector>
 #include <torch/python.h>
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
@@ -15,15 +16,21 @@ namespace py = pybind11;
 namespace rtp_llm {
 
 struct ExpandedOutput {
-    torch::Tensor expanded_ids;
-    torch::Tensor token_type_ids;
-    torch::Tensor text_tokens_mask;
-    torch::Tensor locs;
-    ExpandedOutput(torch::Tensor expanded_ids     = {},
-                   torch::Tensor token_type_ids   = {},
-                   torch::Tensor text_tokens_mask = {},
-                   torch::Tensor locs             = {}):
-        expanded_ids(expanded_ids), token_type_ids(token_type_ids), text_tokens_mask(text_tokens_mask), locs(locs) {}
+    torch::Tensor                            expanded_ids;
+    torch::Tensor                            token_type_ids;
+    torch::Tensor                            text_tokens_mask;
+    torch::Tensor                            locs;
+    std::vector<std::pair<int32_t, int32_t>> source_locs;
+    ExpandedOutput(torch::Tensor                            expanded_ids     = {},
+                   torch::Tensor                            token_type_ids   = {},
+                   torch::Tensor                            text_tokens_mask = {},
+                   torch::Tensor                            locs             = {},
+                   std::vector<std::pair<int32_t, int32_t>> source_locs      = {}):
+        expanded_ids(expanded_ids),
+        token_type_ids(token_type_ids),
+        text_tokens_mask(text_tokens_mask),
+        locs(locs),
+        source_locs(std::move(source_locs)) {}
 };
 
 class MultimodalProcessor {

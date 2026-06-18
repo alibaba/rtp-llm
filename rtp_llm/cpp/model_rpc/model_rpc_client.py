@@ -255,8 +255,8 @@ def trans_embedding_inputs(input_py: GenerateInput, input_pb: GenerateInputPB):
     input_embeddings_pb = input_pb.input_embeddings
 
     # 转换 embeddings
-    tensor_pbs = [trans_from_tensor(emb) for emb in embedding_inputs.embeddings]
-    input_embeddings_pb.embeddings.extend(tensor_pbs)
+    for emb in embedding_inputs.embeddings:
+        input_embeddings_pb.embeddings.add().CopyFrom(trans_from_tensor(emb))
 
     # 转换 embedding_locs
     input_embeddings_pb.embedding_locs.extend(embedding_inputs.embedding_locs)

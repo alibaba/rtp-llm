@@ -122,6 +122,11 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         int         length     = stream->inputLength();
         int         batchSize  = stream->batchSize();
         const auto& mm_feature = stream->multimodalFeature();
+        if (stream->embeddingInput()->input_embeddings.has_value()) {
+            gathered_input_embeddings.emplace_back(stream->embeddingInput()->input_embeddings.value());
+            gathered_input_embeddings_locs.push_back(token_idx);
+        }
+
         if (mm_feature.has_value()) {
             for (const auto& feature : mm_feature.value().features) {
                 gathered_mm_features.emplace_back(feature);
@@ -137,10 +142,6 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
                    text_token_mask.numel() * sizeof(int));
         }
 
-        if (stream->embeddingInput()->input_embeddings.has_value()) {
-            gathered_input_embeddings.emplace_back(stream->embeddingInput()->input_embeddings.value().cpu());
-            gathered_input_embeddings_locs.push_back(token_idx);
-        }
         memcpy(
             merged_tokens + (int)token_idx, stream->embeddingInput()->token_ids.data_ptr(), length * sizeof(int32_t));
         memcpy(merged_token_type_ids + (int)token_idx,

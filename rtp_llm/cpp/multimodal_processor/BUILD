@@ -30,6 +30,7 @@ cc_library(
     ]),
     deps = [
         ":multimodal_types",
+        "//rtp_llm/cpp/engine_base/stream:input_embeddings_utils",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/embedding_engine:embedding_engine",
         "//rtp_llm/cpp/pybind:py_utils",
