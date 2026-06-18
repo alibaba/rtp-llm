@@ -434,6 +434,10 @@ class ForwardAccessRecord:
         self.backend_addr = addr
         if self.backend_call_start_ts is None:
             self.backend_call_start_ts = time.time()
+        self.backend_done_ts = None
+        self.backend_exc_type = None
+        self.backend_rpc_code = None
+        self.backend_rpc_detail = None
 
     def capture_backend_response_chunk(self, resp) -> Optional[ForwardFrameStats]:
         """Capture backend frame. Returns stats for reuse in capture_response_chunk."""

@@ -57,6 +57,9 @@ class BackendAddr:
     def grpc_target(self) -> str:
         return f"{self.ip}:{self.grpc_port}"
 
+    def matches_any(self, targets: set[str]) -> bool:
+        return self.http_target in targets or self.grpc_target in targets
+
 
 class IpPortListServiceDiscovery:
     def __init__(self, address: str):
@@ -65,8 +68,16 @@ class IpPortListServiceDiscovery:
             raise RuntimeError(f"{SERVICE_ROUTE_TYPE_IP_PORT_LIST} address is empty")
         self._addrs = tuple(BackendAddr.from_http_target(addr) for addr in addrs)
 
-    def resolve(self) -> Optional[BackendAddr]:
-        return self._addrs[random.randrange(len(self._addrs))]
+    def resolve(
+        self, excluded_targets: Optional[set[str]] = None
+    ) -> Optional[BackendAddr]:
+        excluded_targets = excluded_targets or set()
+        candidates = [
+            addr for addr in self._addrs if not addr.matches_any(excluded_targets)
+        ]
+        if not candidates:
+            return None
+        return candidates[random.randrange(len(candidates))]
 
 
 class VipServerServiceDiscovery:
@@ -83,16 +94,34 @@ class VipServerServiceDiscovery:
             raise RuntimeError(f"{SERVICE_ROUTE_TYPE_VIPSERVER} address is empty")
         self._resolver = resolver or _resolve_vipserver_host
 
-    def resolve(self) -> Optional[BackendAddr]:
+    def resolve(
+        self, excluded_targets: Optional[set[str]] = None
+    ) -> Optional[BackendAddr]:
+        excluded_targets = excluded_targets or set()
         try:
-            host = self._resolver(self._domain)
-            if host is None:
+            hosts = self._resolver(self._domain)
+            if hosts is None:
                 logging.warning(
                     "[DashScGrpc] vipserver resolved no host: domain=%s",
                     self._domain,
                 )
                 return None
-            return BackendAddr.from_host(host)
+            if not isinstance(hosts, (list, tuple)):
+                hosts = [hosts]
+            candidates = []
+            for host in hosts:
+                addr = BackendAddr.from_host(host)
+                if not addr.matches_any(excluded_targets):
+                    candidates.append(addr)
+            if not candidates:
+                logging.warning(
+                    "[DashScGrpc] vipserver resolved only excluded hosts: "
+                    "domain=%s excluded=%s",
+                    self._domain,
+                    sorted(excluded_targets),
+                )
+                return None
+            return candidates[random.randrange(len(candidates))]
         except Exception as e:
             logging.warning(
                 "[DashScGrpc] vipserver resolve failed: domain=%s error=%s",
@@ -113,6 +142,6 @@ def create_service_discovery_from_env():
 
 
 def _resolve_vipserver_host(domain: str) -> Optional[Any]:
-    from rtp_llm.vipserver.vip_client import get_one_validate_host
+    from rtp_llm.vipserver.vip_client import get_host_list_by_domain
 
-    return get_one_validate_host(domain)
+    return get_host_list_by_domain(domain)

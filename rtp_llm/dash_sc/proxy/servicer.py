@@ -7,7 +7,9 @@ or async generator so the whole proxy path stays on a single asyncio event loop.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 
 import grpc
 
@@ -27,6 +29,8 @@ _FORWARD_CHANNEL_OPTS: list[tuple[str, int]] = [
     ("grpc.http2.max_pings_without_data", 0),
 ]
 _CHANNEL_CLEANUP_INTERVAL_S = 60
+PROXY_RETRY_ON_UNAVAILABLE_ENV = "DASH_SC_PROXY_RETRY_ON_UNAVAILABLE"
+DEFAULT_PROXY_RETRY_ON_UNAVAILABLE = 3
 
 
 def _is_stream_done(resp: predict_v2_pb2.ModelStreamInferResponse) -> bool:
@@ -48,6 +52,74 @@ def _invalid_max_new_tokens_message(request) -> str | None:
     return f"invalid {param_name}: {max_new_tokens}; " "must be greater than 0"
 
 
+def _proxy_retry_on_unavailable() -> int:
+    raw = os.environ.get(PROXY_RETRY_ON_UNAVAILABLE_ENV, "")
+    if not raw:
+        return DEFAULT_PROXY_RETRY_ON_UNAVAILABLE
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logging.warning(
+            "[DashScGrpc] invalid %s=%r, using default=%s",
+            PROXY_RETRY_ON_UNAVAILABLE_ENV,
+            raw,
+            DEFAULT_PROXY_RETRY_ON_UNAVAILABLE,
+        )
+        return DEFAULT_PROXY_RETRY_ON_UNAVAILABLE
+
+
+def _is_retryable_forward_error(exc: BaseException) -> bool:
+    if isinstance(exc, asyncio.CancelledError):
+        return False
+    if isinstance(exc, grpc.RpcError):
+        try:
+            if exc.code() == grpc.StatusCode.UNAVAILABLE:
+                return True
+        except Exception:
+            pass
+    text = str(exc)
+    return (
+        "StatusCode.UNAVAILABLE" in text
+        or "grpc_status:14" in text
+        or "recvmsg:Connection timed out" in text
+        or "Socket closed" in text
+        or "connection reset" in text
+    )
+
+
+class _ReplayableRequestStream:
+    """Replay client request frames when a zero-response forward attempt fails."""
+
+    def __init__(self, first_request, request_iter):
+        self._buffer = [first_request]
+        self._request_iter = request_iter
+        self._source_exhausted = False
+
+    def iter(self):
+        async def gen():
+            idx = 0
+            while idx < len(self._buffer):
+                yield self._buffer[idx]
+                idx += 1
+            if self._source_exhausted:
+                return
+            async for req in self._request_iter:
+                self._buffer.append(req)
+                idx += 1
+                yield req
+            self._source_exhausted = True
+
+        return gen()
+
+    async def close(self) -> None:
+        try:
+            aclose = getattr(self._request_iter, "aclose", None)
+            if aclose is not None:
+                await aclose()
+        except Exception:
+            pass
+
+
 class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
     """Pure transparent proxy (grpc.aio) across discovered downstream addrs."""
 
@@ -57,6 +129,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             cleanup_interval=_CHANNEL_CLEANUP_INTERVAL_S,
         )
         self._discovery = create_service_discovery_from_env()
+        self._retry_on_unavailable = _proxy_retry_on_unavailable()
         logging.info("[DashScGrpc] DashScProxyServicer configured")
 
     async def open(self) -> None:
@@ -90,32 +163,65 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             yield build_parameter_error_response(str(first_request.id), invalid_message)
             return
 
-        async def validated_request_iter():
-            yield first_request
-            async for req in request_iter:
-                yield req
+        replayable_requests = _ReplayableRequestStream(first_request, request_iter)
+        excluded_targets: set[str] = set()
+        last_error: BaseException | None = None
+        attempt = 0
 
-        route_addr = self._discovery.resolve()
-        if route_addr is None:
-            msg = "service discovery returned no forward backend"
-            logging.warning("[DashScGrpc] proxy discovery unavailable: %s", msg)
-            await context.abort(grpc.StatusCode.UNAVAILABLE, msg)
-            return
-
-        grpc_target = route_addr.grpc_target
         try:
-            channel = await self._channel_pool.get(grpc_target)
-        except RuntimeError as e:
-            msg = f"forward channel pool unavailable for backend {grpc_target}"
-            logging.warning("[DashScGrpc] proxy channel unavailable: %s: %s", msg, e)
-            await context.abort(grpc.StatusCode.UNAVAILABLE, msg)
-            return
+            while True:
+                route_addr = self._discovery.resolve(excluded_targets)
+                if route_addr is None:
+                    if last_error is not None:
+                        raise last_error
+                    msg = "service discovery returned no forward backend"
+                    logging.warning("[DashScGrpc] proxy discovery unavailable: %s", msg)
+                    await context.abort(grpc.StatusCode.UNAVAILABLE, msg)
+                    return
 
-        stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
-        async for resp in self._forward(
-            stub, grpc_target, validated_request_iter(), context
-        ):
-            yield resp
+                grpc_target = route_addr.grpc_target
+                try:
+                    channel = await self._channel_pool.get(grpc_target)
+                except RuntimeError as e:
+                    msg = f"forward channel pool unavailable for backend {grpc_target}"
+                    logging.warning("[DashScGrpc] proxy channel unavailable: %s: %s", msg, e)
+                    await context.abort(grpc.StatusCode.UNAVAILABLE, msg)
+                    return
+
+                stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
+                yielded_response = False
+                try:
+                    async for resp in self._forward(
+                        stub, grpc_target, replayable_requests.iter(), context
+                    ):
+                        yielded_response = True
+                        yield resp
+                    return
+                except BaseException as e:
+                    last_error = e
+                    if (
+                        yielded_response
+                        or attempt >= self._retry_on_unavailable
+                        or not _is_retryable_forward_error(e)
+                    ):
+                        raise
+                    excluded_targets.add(route_addr.http_target)
+                    excluded_targets.add(route_addr.grpc_target)
+                    await self._channel_pool.discard(grpc_target)
+                    attempt += 1
+                    logging.warning(
+                        "[DashScGrpc] retrying proxy forward after zero-response "
+                        "backend error: attempt=%s/%s failed_backend=%s "
+                        "excluded=%s error=%s",
+                        attempt,
+                        self._retry_on_unavailable,
+                        grpc_target,
+                        sorted(excluded_targets),
+                        e,
+                    )
+                    await asyncio.sleep(min(0.2, 0.05 * attempt))
+        finally:
+            await replayable_requests.close()
 
     async def _forward(self, stub, addr: str, request_iterator, context):
 

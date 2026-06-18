@@ -104,6 +104,20 @@ class GrpcHostChannelPool:
 
         return entry.channel
 
+    async def discard(self, target: str) -> None:
+        """
+        Remove and close a cached channel after an RPC-level failure.
+
+        The next ``get(target)`` will create a fresh channel. This is intentionally
+        scoped to one target so callers can eject a stale service-discovery entry
+        without disturbing healthy peers.
+        """
+        entry = None
+        async with self._lock:
+            entry = self._channels.pop(target, None)
+        if entry is not None:
+            await self._close_entries([entry])
+
     # ---------- background cleanup ----------
 
     async def _cleanup_loop(self):

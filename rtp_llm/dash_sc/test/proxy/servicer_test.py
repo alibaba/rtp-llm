@@ -18,7 +18,11 @@ import grpc
 
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.proxy.access_record import ForwardAccessRecord
-from rtp_llm.dash_sc.proxy.service_route import BackendAddr, VipServerServiceDiscovery
+from rtp_llm.dash_sc.proxy.service_route import (
+    BackendAddr,
+    IpPortListServiceDiscovery,
+    VipServerServiceDiscovery,
+)
 from rtp_llm.dash_sc.proxy.service_route_config import (
     LEGACY_FORWARD_ENV_KEY,
     SERVICE_ROUTE_ENV_KEY,
@@ -84,6 +88,14 @@ class _FakeChannel:
 
     async def close(self):
         self.closed = True
+
+
+class _FakeUnavailable(grpc.RpcError):
+    def code(self):
+        return grpc.StatusCode.UNAVAILABLE
+
+    def details(self):
+        return "recvmsg:Connection timed out"
 
 
 async def _drain(aiter):
@@ -235,6 +247,34 @@ class ServiceRouteConfigTest(unittest.TestCase):
             any("vipserver resolve failed" in msg for msg in logs.output),
             logs.output,
         )
+
+    def test_ip_port_discovery_skips_excluded_targets(self) -> None:
+        discovery = IpPortListServiceDiscovery("10.0.0.1:8096;10.0.0.2:8096")
+
+        addr = discovery.resolve({"10.0.0.1:8104"})
+
+        self.assertIsNotNone(addr)
+        assert addr is not None
+        self.assertEqual(addr.grpc_target, "10.0.0.2:8104")
+        self.assertIsNone(
+            discovery.resolve({"10.0.0.1:8104", "10.0.0.2:8104"})
+        )
+
+    def test_vipserver_discovery_skips_excluded_targets(self) -> None:
+        fake_hosts = [
+            MagicMock(ip="10.0.0.1", port=8096),
+            MagicMock(ip="10.0.0.2", port=8096),
+        ]
+        discovery = VipServerServiceDiscovery(
+            "com.example.svc",
+            resolver=lambda _domain: fake_hosts,
+        )
+
+        addr = discovery.resolve({"10.0.0.1:8104"})
+
+        self.assertIsNotNone(addr)
+        assert addr is not None
+        self.assertEqual(addr.grpc_target, "10.0.0.2:8104")
 
     def test_servicer_reads_service_route_env(self) -> None:
         os.environ[SERVICE_ROUTE_ENV_KEY] = (
@@ -477,6 +517,94 @@ class BufferFirstTokenTest(unittest.IsolatedAsyncioTestCase):
             ):
                 collected.append(r)
         self.assertEqual(collected, [])
+
+
+class ZeroResponseRetryTest(unittest.IsolatedAsyncioTestCase):
+    """Proxy retries stale downstream frontends only before sending a response."""
+
+    async def asyncSetUp(self) -> None:
+        self.created_channels: dict[str, _FakeChannel] = {}
+
+        def make_channel(addr, **_kwargs):
+            channel = _FakeChannel(addr)
+            self.created_channels[addr] = channel
+            return channel
+
+        self.channel_patcher = patch(
+            "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
+            side_effect=make_channel,
+        )
+        self.channel_patcher.start()
+        self.servicer = _make_servicer(["10.0.0.1:8096", "10.0.0.2:8096"])
+        self.servicer._retry_on_unavailable = 1
+
+    async def asyncTearDown(self) -> None:
+        await self.servicer.close()
+        self.channel_patcher.stop()
+        patcher = getattr(self.servicer, "_retry_stub_patcher", None)
+        if patcher is not None:
+            patcher.stop()
+
+    async def test_retry_zero_response_unavailable_on_next_backend(self) -> None:
+        first_stub = MagicMock()
+        second_stub = MagicMock()
+
+        async def failing_stream():
+            raise _FakeUnavailable()
+            yield  # pragma: no cover
+
+        first_stub.ModelStreamInfer.return_value = failing_stream()
+        second_stub.ModelStreamInfer.return_value = _AsyncIter([_make_response()])
+        stubs = {
+            "10.0.0.1:8104": first_stub,
+            "10.0.0.2:8104": second_stub,
+        }
+        patcher = patch(
+            "rtp_llm.dash_sc.proto.predict_v2_pb2_grpc.GRPCInferenceServiceStub",
+            side_effect=lambda channel: stubs[channel.addr],
+        )
+        patcher.start()
+        self.servicer._retry_stub_patcher = patcher
+
+        with patch(
+            "rtp_llm.dash_sc.proxy.service_route.random.randrange",
+            side_effect=[0, 0],
+        ):
+            responses = await _drain(
+                self.servicer.ModelStreamInfer(
+                    _request_gen(_make_request("req1")), MagicMock()
+                )
+            )
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(first_stub.ModelStreamInfer.call_count, 1)
+        self.assertEqual(second_stub.ModelStreamInfer.call_count, 1)
+        self.assertTrue(self.created_channels["10.0.0.1:8104"].closed)
+
+    async def test_does_not_retry_after_response_was_yielded(self) -> None:
+        stub = MagicMock()
+
+        async def stream_then_fail():
+            yield _make_response()
+            raise _FakeUnavailable()
+
+        stub.ModelStreamInfer.return_value = stream_then_fail()
+        patcher = patch(
+            "rtp_llm.dash_sc.proto.predict_v2_pb2_grpc.GRPCInferenceServiceStub",
+            return_value=stub,
+        )
+        patcher.start()
+        self.servicer._retry_stub_patcher = patcher
+
+        collected = []
+        with self.assertRaises(_FakeUnavailable):
+            async for resp in self.servicer.ModelStreamInfer(
+                _request_gen(_make_request("req1")), MagicMock()
+            ):
+                collected.append(resp)
+
+        self.assertEqual(len(collected), 1)
+        self.assertEqual(stub.ModelStreamInfer.call_count, 1)
 
 
 class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
