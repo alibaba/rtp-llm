@@ -88,6 +88,7 @@ public:
     std::optional<CacheItem> popOldestEvictable(CacheBlockKind kind, CacheBackingType backing_type);
     std::vector<CacheItem>   popOldestStateOrChainEvictable(CacheBackingType backing_type);
     std::vector<CacheKeyType> cacheKeys() const;
+    std::vector<CacheKeyType> cacheKeysUnorderedForStatus() const;
     size_t size() const;
 
 private:
