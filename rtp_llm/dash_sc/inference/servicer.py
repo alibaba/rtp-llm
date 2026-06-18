@@ -71,6 +71,7 @@ _DEBUG_SCORE_TOKEN_LABELS = {
     128822: "</think>",
 }
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
+_PRE_VISIBLE_ROUTE_RETRY_LIMIT = 2
 
 
 def _exception_metric_code(error_code: Any) -> str:
@@ -387,6 +388,29 @@ async def _close_async_stream_if_possible(stream: Any, tag: str) -> None:
         logging.warning("[DashScGrpc] [%s] phase-1 stream close failed: %s", tag, e)
 
 
+def _pd_route_retry_limit(backend_visitor: Any, generate_input: GenerateInput) -> int:
+    limit_fn = getattr(backend_visitor, "_pd_route_retry_limit", None)
+    if callable(limit_fn):
+        return max(0, int(limit_fn(generate_input)))
+    return max(0, int(getattr(backend_visitor, "pd_route_retry_on_unavailable", 0)))
+
+
+def _is_retryable_route_rpc_error(backend_visitor: Any, e: BaseException) -> bool:
+    checker = getattr(backend_visitor, "_is_retryable_route_rpc_error", None)
+    if callable(checker):
+        return bool(checker(e))
+    return False
+
+
+def _pre_visible_route_retry_limit(
+    backend_visitor: Any, generate_input: GenerateInput
+) -> int:
+    return min(
+        _PRE_VISIBLE_ROUTE_RETRY_LIMIT,
+        _pd_route_retry_limit(backend_visitor, generate_input),
+    )
+
+
 def _phase2_max_new_tokens_for_completion_alias(
     sampling: SamplingParams,
     generate_think_token_num: Optional[int],
@@ -594,6 +618,7 @@ async def iter_real_model_stream_infer(
     think_runtime: Optional[_ThinkRuntime] = None,
     phase2_request_id_factory: Optional[Callable[[], int]] = None,
     access_agg: Any = None,
+    _pre_visible_retry_attempt: int = 0,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -636,6 +661,54 @@ async def iter_real_model_stream_infer(
     matched_echo_ids = _matched_echo_prefix_ids(input_ids_list, echo_prefix_ids)
     should_echo = bool(matched_echo_ids)
     echoed = False
+    emitted_upstream_response = False
+    phase2_pre_visible_retry_exhausted = False
+    generate_input: Optional[GenerateInput] = None
+
+    async def _pre_visible_retry_stream(
+        e: BaseException,
+    ) -> Optional[AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]]:
+        if (
+            generate_input is None
+            or emitted_upstream_response
+            or phase2_pre_visible_retry_exhausted
+        ):
+            return None
+        retry_limit = _pre_visible_route_retry_limit(backend_visitor, generate_input)
+        if (
+            _pre_visible_retry_attempt >= retry_limit
+            or not _is_retryable_route_rpc_error(backend_visitor, e)
+        ):
+            return None
+        next_attempt = _pre_visible_retry_attempt + 1
+        logging.warning(
+            "[DashScGrpc] [%s] retrying whole request before first "
+            "client-visible response after retryable route/RPC error, "
+            "attempt=%s/%s, error=%s",
+            tag,
+            next_attempt,
+            retry_limit,
+            e,
+        )
+        await asyncio.sleep(min(0.2, 0.05 * next_attempt))
+        return iter_real_model_stream_infer(
+            request,
+            input_ids_list,
+            sampling,
+            other,
+            backend_visitor,
+            rtp_llm_request_id=rtp_llm_request_id,
+            echo_prefix_ids=echo_prefix_ids,
+            extra_stop_word_ids=extra_stop_word_ids,
+            invocation_metadata=invocation_metadata,
+            tokenizer=tokenizer,
+            generate_env_config=generate_env_config,
+            think_runtime=think_runtime,
+            phase2_request_id_factory=phase2_request_id_factory,
+            access_agg=access_agg,
+            _pre_visible_retry_attempt=next_attempt,
+        )
+
     try:
         generate_config = sampling.to_generate_config(other=other)
         generate_config.trace_id = trace_str
@@ -701,7 +774,6 @@ async def iter_real_model_stream_infer(
         )
         cumulative_sent_ids: list[int] = []
         generate_think_token_num: Optional[int] = None
-        emitted_upstream_response = False
         generate_input = _make_generate_input(
             request_id=rtp_llm_request_id,
             input_ids_list=input_ids_list,
@@ -904,6 +976,7 @@ async def iter_real_model_stream_infer(
             )
         if chunk_idx == 0:
             logging.warning("[DashScGrpc] [%s] empty outputs_list", tag)
+            emitted_upstream_response = True
             yield predict_v2_pb2.ModelStreamInferResponse(
                 error_message="empty outputs_list from backend",
             )
@@ -996,19 +1069,12 @@ async def iter_real_model_stream_infer(
                 return phase2_config, phase2_tag, phase2_generate_input, phase2_stream
 
             def _phase2_retry_limit(phase2_generate_input: GenerateInput) -> int:
-                limit_fn = getattr(backend_visitor, "_pd_route_retry_limit", None)
-                if callable(limit_fn):
-                    return int(limit_fn(phase2_generate_input))
-                return max(
-                    0,
-                    int(getattr(backend_visitor, "pd_route_retry_on_unavailable", 0)),
+                return _pre_visible_route_retry_limit(
+                    backend_visitor, phase2_generate_input
                 )
 
             def _is_retryable_phase2_error(e: BaseException) -> bool:
-                checker = getattr(backend_visitor, "_is_retryable_route_rpc_error", None)
-                if callable(checker):
-                    return bool(checker(e))
-                return False
+                return _is_retryable_route_rpc_error(backend_visitor, e)
 
             async def _iter_phase2_responses(
                 phase2_config: Any,
@@ -1195,6 +1261,7 @@ async def iter_real_model_stream_infer(
                 Optional[predict_v2_pb2.ModelStreamInferResponse],
                 AsyncIterator[predict_v2_pb2.ModelStreamInferResponse],
             ]:
+                nonlocal phase2_pre_visible_retry_exhausted
                 attempt = 0
                 while True:
                     phase2_responses, phase2_generate_input = (
@@ -1212,6 +1279,7 @@ async def iter_real_model_stream_infer(
                             attempt >= retry_limit
                             or not _is_retryable_phase2_error(e)
                         ):
+                            phase2_pre_visible_retry_exhausted = True
                             raise
                         attempt += 1
                         logging.warning(
@@ -1251,6 +1319,14 @@ async def iter_real_model_stream_infer(
                 if phase2_responses is not None:
                     await phase2_responses.aclose()
     except FtRuntimeException as e:
+        retry_stream = await _pre_visible_retry_stream(e)
+        if retry_stream is not None:
+            try:
+                async for resp in retry_stream:
+                    yield resp
+            finally:
+                await _close_async_stream_if_possible(retry_stream, tag)
+            return
         if e.exception_type == ExceptionType.GENERATE_TIMEOUT:
             logging.warning("[DashScGrpc] [%s] generate timeout: %s", tag, e)
             yield build_finish_reason_done_response(
@@ -1284,6 +1360,14 @@ async def iter_real_model_stream_infer(
                 error_message=f"{type(e).__name__}: {e}"
             )
     except Exception as e:
+        retry_stream = await _pre_visible_retry_stream(e)
+        if retry_stream is not None:
+            try:
+                async for resp in retry_stream:
+                    yield resp
+            finally:
+                await _close_async_stream_if_possible(retry_stream, tag)
+            return
         logging.exception("[DashScGrpc] [%s] enqueue failed: %s", tag, e)
         # Prefix with exception class name so access-log _classify_error_message
         # maps it to a bounded error_code tag (e.g. BACKEND_RuntimeError).

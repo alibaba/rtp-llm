@@ -1296,6 +1296,225 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("close:phase2", events)
         self.assertEqual(events.count("close:phase2"), 1)
 
+    async def test_pre_visible_phase2_budget_exhaustion_does_not_replay_phase1(
+        self,
+    ) -> None:
+        """Phase-2 has its own pre-visible retry budget; once exhausted, do not
+        replay phase-1 thinking work as a whole-request retry.
+        """
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1, 99], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        events: list[str] = []
+        visitor = _RecordingMultiStreamVisitor(
+            [
+                _RecordingAsyncStream("phase1", [phase1], events),
+                _RecordingAsyncStream(
+                    "phase2_fail_1",
+                    [],
+                    events,
+                    raise_after=0,
+                    error=FtRuntimeException(
+                        ExceptionType.CONNECT_FAILED, "stale phase2 route 1"
+                    ),
+                ),
+                _RecordingAsyncStream(
+                    "phase2_fail_2",
+                    [],
+                    events,
+                    raise_after=0,
+                    error=FtRuntimeException(
+                        ExceptionType.CONNECT_FAILED, "stale phase2 route 2"
+                    ),
+                ),
+            ],
+            events,
+        )
+        visitor._pd_route_retry_limit = lambda _input: 1
+        visitor._is_retryable_route_rpc_error = lambda _e: True
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200 + visitor.enqueue_called,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 3)
+        self.assertEqual(
+            events,
+            [
+                "enqueue:1",
+                "next:phase1",
+                "close:phase1",
+                "enqueue:2",
+                "next:phase2_fail_1",
+                "close:phase2_fail_1",
+                "enqueue:3",
+                "next:phase2_fail_2",
+                "close:phase2_fail_2",
+            ],
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertIn("stale phase2 route 2", chunks[0].error_message)
+
+    async def test_pre_visible_phase1_route_error_retries_whole_request(
+        self,
+    ) -> None:
+        """A retryable phase-1 route/RPC error before any visible response can
+        restart the whole request and hide the failed attempt from clients.
+        """
+        req = self._minimal_request()
+        retry_success = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        events: list[str] = []
+        visitor = _RecordingMultiStreamVisitor(
+            [
+                _RecordingAsyncStream(
+                    "phase1_fail",
+                    [],
+                    events,
+                    raise_after=0,
+                    error=FtRuntimeException(
+                        ExceptionType.CONNECT_FAILED, "stale phase1 route"
+                    ),
+                ),
+                _RecordingAsyncStream("phase1_retry", [retry_success], events),
+            ],
+            events,
+        )
+        visitor._pd_route_retry_limit = lambda _input: 1
+        visitor._is_retryable_route_rpc_error = lambda _e: True
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200 + visitor.enqueue_called,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 2)
+        self.assertEqual(
+            events,
+            [
+                "enqueue:1",
+                "next:phase1_fail",
+                "enqueue:2",
+                "next:phase1_retry",
+                "next:phase1_retry",
+            ],
+        )
+        self.assertEqual([_gen_ids(chunk) for chunk in chunks], [[20]])
+
+    async def test_pre_visible_whole_request_retry_caps_backend_budget(
+        self,
+    ) -> None:
+        """DashSc whole-request retries are capped at two even if the backend
+        visitor reports a larger retry budget.
+        """
+        req = self._minimal_request()
+        events: list[str] = []
+        visitor = _RecordingMultiStreamVisitor(
+            [
+                _RecordingAsyncStream(
+                    "fail_1",
+                    [],
+                    events,
+                    raise_after=0,
+                    error=FtRuntimeException(
+                        ExceptionType.CONNECT_FAILED, "stale route 1"
+                    ),
+                ),
+                _RecordingAsyncStream(
+                    "fail_2",
+                    [],
+                    events,
+                    raise_after=0,
+                    error=FtRuntimeException(
+                        ExceptionType.CONNECT_FAILED, "stale route 2"
+                    ),
+                ),
+                _RecordingAsyncStream(
+                    "fail_3",
+                    [],
+                    events,
+                    raise_after=0,
+                    error=FtRuntimeException(
+                        ExceptionType.CONNECT_FAILED, "stale route 3"
+                    ),
+                ),
+            ],
+            events,
+        )
+        visitor._pd_route_retry_limit = lambda _input: 5
+        visitor._is_retryable_route_rpc_error = lambda _e: True
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [7, 8, 128821],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=100,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                phase2_request_id_factory=lambda: 200 + visitor.enqueue_called,
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 3)
+        self.assertEqual(
+            events,
+            [
+                "enqueue:1",
+                "next:fail_1",
+                "enqueue:2",
+                "next:fail_2",
+                "enqueue:3",
+                "next:fail_3",
+            ],
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertIn("stale route 3", chunks[0].error_message)
+
     async def test_terminate_phase2_route_retry_disabled_after_prior_phase1_yield(
         self,
     ) -> None:
