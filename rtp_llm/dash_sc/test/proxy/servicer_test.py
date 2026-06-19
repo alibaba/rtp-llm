@@ -16,8 +16,8 @@ from unittest.mock import MagicMock, patch
 
 import grpc
 
+from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.proto import predict_v2_pb2
-from rtp_llm.dash_sc.proxy.access_record import ForwardAccessRecord
 from rtp_llm.dash_sc.proxy.service_route import BackendAddr, VipServerServiceDiscovery
 from rtp_llm.dash_sc.proxy.service_route_config import (
     LEGACY_FORWARD_ENV_KEY,
@@ -53,6 +53,17 @@ def _make_response() -> predict_v2_pb2.ModelStreamInferResponse:
     out.datatype = "INT32"
     out.shape.append(1)
     infer.raw_output_contents.append(struct.pack("<i", 42))
+    return resp
+
+
+def _make_finished_response() -> predict_v2_pb2.ModelStreamInferResponse:
+    resp = predict_v2_pb2.ModelStreamInferResponse()
+    infer = resp.infer_response
+    out = infer.outputs.add()
+    out.name = "finished"
+    out.datatype = "BOOL"
+    out.shape.append(1)
+    infer.raw_output_contents.append(b"\x01")
     return resp
 
 
@@ -501,18 +512,18 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         _stop_mock_stub(self.servicer)
         self.channel_patcher.stop()
 
-    def _ctx_with_record(self) -> tuple[MagicMock, ForwardAccessRecord]:
-        import time as _time
+    def _ctx(self) -> MagicMock:
+        # The servicer now owns record creation: ``ModelStreamInfer`` calls
+        # ``GrpcAccessRecord.create(context, ...)`` at its top and attaches the
+        # record to the context. Tests inspect that servicer-built record via
+        # ``_record_of(ctx)`` after the call (no pre-attached record to orphan).
+        return MagicMock()
 
-        record = ForwardAccessRecord(
-            method="/x.Svc/M",
-            stream_type="bidi_stream",
-            peer="",
-            start_ts=_time.time(),
-        )
-        ctx = MagicMock()
-        record.attach_to_context(ctx)
-        return ctx, record
+    @staticmethod
+    def _record_of(ctx) -> GrpcAccessRecord:
+        record = GrpcAccessRecord.from_context(ctx)
+        assert record is not None, "servicer did not attach an access record"
+        return record
 
     def _make_resp(self, tag: str) -> predict_v2_pb2.ModelStreamInferResponse:
         resp = _make_response()
@@ -532,23 +543,81 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         self.mock_stub.ModelStreamInfer.return_value = _AsyncIter(
             [self._make_resp("a")]
         )
-        ctx, record = self._ctx_with_record()
+        ctx = self._ctx()
 
         await _drain(
             self.servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
         )
-        self.assertEqual(record.backend_addr, "10.0.0.2:8104")
+        self.assertEqual(self._record_of(ctx).backend_addr, "10.0.0.2:8104")
 
     async def test_backend_resp_count_tracks_upstream_frames(self) -> None:
         self._patch_addr(0)
         chunks = [self._make_resp("a"), self._make_resp("b"), self._make_resp("c")]
         self.mock_stub.ModelStreamInfer.return_value = _AsyncIter(chunks)
-        ctx, record = self._ctx_with_record()
+        ctx = self._ctx()
 
         await _drain(
             self.servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
         )
-        self.assertEqual(record.backend_resp_count, 3)
+        self.assertEqual(self._record_of(ctx).backend_resp_count, 3)
+
+    async def test_forward_summary_omits_raw_token_payload(self) -> None:
+        # no-structured-payload contract: the forwarder logs a forward_summary
+        # line and must never carry token ids or frontend-only statistics.
+        self._patch_addr(0)
+        self.mock_stub.ModelStreamInfer.return_value = _AsyncIter(
+            [self._make_resp("a")]
+        )
+        ctx = self._ctx()
+
+        await _drain(
+            self.servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
+        )
+        payload = self._record_of(ctx).build_record(None, None)
+        self.assertEqual(payload["capture_mode"], "forward_summary")
+        for field in (
+            "latency_ttft_ms",
+            "latency_tpot_ms",
+            "first_token_ts_epoch_ms",
+            "input_token_len",
+            "backend_input_token_len",
+            "output_token_len",
+            "finish_reason",
+            "finished",
+            "terminal_seen",
+            "prompt_cached_token_num",
+            "token_frame_count",
+            "empty_frame_count",
+            "finished_only_frame_count",
+            "multi_token_frame_count",
+            "max_tokens_per_frame",
+            "generate_config",
+            "generate_config_role_addrs",
+            "input_ids",
+            "generated_ids",
+            "repetition_monitor_impl",
+            "repetition_monitor_available",
+            "repetition_monitor_unavailable_reason",
+            "tool_call_loop_impl",
+            "tool_call_loop_error",
+        ):
+            self.assertNotIn(field, payload)
+
+    async def test_finished_frame_marks_terminal_without_struct_stats(self) -> None:
+        self._patch_addr(0)
+        self.mock_stub.ModelStreamInfer.return_value = _AsyncIter(
+            [_make_response(), _make_finished_response()]
+        )
+        ctx = self._ctx()
+
+        await _drain(
+            self.servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
+        )
+        record = self._record_of(ctx)
+        payload = record.build_record(None, None)
+        self.assertTrue(record.terminal_seen)
+        self.assertIsNotNone(payload["finished_ts_epoch_ms"])
+        self.assertNotIn("terminal_seen", payload)
 
     async def test_stage_waiting_first_on_immediate_downstream_error(self) -> None:
         self._patch_addr(0)
@@ -561,12 +630,13 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
             yield  # pragma: no cover
 
         self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
-        ctx, record = self._ctx_with_record()
+        ctx = self._ctx()
 
         with self.assertRaises(FakeRpcError):
             await _drain(
                 self.servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
             )
+        record = self._record_of(ctx)
         self.assertEqual(record.buffered_stage, "waiting_first")
         self.assertEqual(record.backend_resp_count, 0)
 
@@ -575,11 +645,12 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         self.mock_stub.ModelStreamInfer.return_value = _AsyncIter(
             [self._make_resp("only")]
         )
-        ctx, record = self._ctx_with_record()
+        ctx = self._ctx()
 
         out = await _drain(
             self.servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
         )
+        record = self._record_of(ctx)
         self.assertEqual(len(out), 1)
         self.assertEqual(record.buffered_stage, "flushed_first")
         self.assertEqual(record.backend_resp_count, 1)
@@ -589,11 +660,12 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         self.mock_stub.ModelStreamInfer.return_value = _AsyncIter(
             [self._make_resp("a"), self._make_resp("b"), self._make_resp("c")]
         )
-        ctx, record = self._ctx_with_record()
+        ctx = self._ctx()
 
         await _drain(
             self.servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
         )
+        record = self._record_of(ctx)
         self.assertEqual(record.buffered_stage, "flushed_both")
         self.assertEqual(record.backend_resp_count, 3)
 
@@ -611,7 +683,7 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
             raise FakeRpcError("downstream cut after token 1")
 
         self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
-        ctx, record = self._ctx_with_record()
+        ctx = self._ctx()
 
         got: list[str] = []
         with self.assertRaises(FakeRpcError):
@@ -619,6 +691,7 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
                 _request_gen(_make_request("req1")), ctx
             ):
                 got.append(r.infer_response.id)
+        record = self._record_of(ctx)
         self.assertEqual(got, ["a"])
         self.assertEqual(record.buffered_stage, "flushed_first_on_exception")
         self.assertEqual(record.backend_resp_count, 1)
@@ -636,7 +709,7 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
             raise FakeRpcError("downstream cut after token 1")
 
         self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
-        ctx, record = self._ctx_with_record()
+        ctx = self._ctx()
 
         gen = self.servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
         # Consume first frame.
@@ -646,7 +719,9 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         # which inside our ``yield buffered`` reads as ``athrow()``.
         with self.assertRaises(BaseException):
             await gen.athrow(RuntimeError("client gone"))
-        self.assertEqual(record.buffered_stage, "dropped_buffered_on_exception")
+        self.assertEqual(
+            self._record_of(ctx).buffered_stage, "dropped_buffered_on_exception"
+        )
 
 
 class MetadataPropagationTest(unittest.IsolatedAsyncioTestCase):
@@ -1073,17 +1148,11 @@ class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
 
         self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
 
-        import time as _time
-
-        ctx = MagicMock()
-        record = ForwardAccessRecord(
-            method="/x.Svc/M", stream_type="bidi_stream", peer="", start_ts=_time.time()
-        )
-        record.attach_to_context(ctx)
-
+        # ``ModelStreamInfer`` creates + attaches its own record at the top, so
+        # the test only needs a bare context here.
         collected = []
         async for resp in self.servicer.ModelStreamInfer(
-            _request_gen(_make_request("req1")), ctx
+            _request_gen(_make_request("req1")), MagicMock()
         ):
             collected.append(resp)
         outer_ts = loop.time()
