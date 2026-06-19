@@ -1,4 +1,4 @@
-# xgrammar built from source (mlc-ai/xgrammar @ v0.1.32). Mirrors what
+# xgrammar built from source (mlc-ai/xgrammar @ v0.2.2). Mirrors what
 # xgrammar's CMakeLists does:
 #   file(GLOB_RECURSE cpp/*.cc EXCLUDE cpp/nanobind/*)
 #   add_library(xgrammar STATIC ${SOURCES})

@@ -78,11 +78,11 @@ def git_deps():
         ],
     )
 
-    # xgrammar v0.1.32 — init_submodules=True for 3rdparty/dlpack header.
+    # xgrammar v0.2.2 — init_submodules=True for 3rdparty/dlpack header.
     new_git_repository(
         name = "xgrammar",
         remote = "https://github.com/mlc-ai/xgrammar.git",
-        commit = "62e13551b9b63251114894c5ee638564b160dd48",  # v0.1.32
+        commit = "4d145cc13d878c751ebeed36af1c013074be76bc",  # v0.2.2
         init_submodules = True,
         build_file = str(Label("@rtp_llm//3rdparty/xgrammar:xgrammar.BUILD")),
     )
