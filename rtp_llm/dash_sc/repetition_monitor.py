@@ -173,10 +173,10 @@ def detect_tool_call_loop(
 class RequestRepetitionMonitor:
     """Request-scoped facade used by dash-sc access logging.
 
-    The access-log interceptor owns transport and serialization. This object owns
+    The access-log emit layer owns transport and serialization. This object owns
     the tool-call loop detector, native availability state, and the flat fields
     emitted into the access log. Keeping that boundary explicit prevents the
-    interceptor from depending on pybind wrapper details.
+    access-log layer from depending on pybind wrapper details.
     """
 
     def __init__(

@@ -177,13 +177,17 @@ class DashScShutdownManager:
             return True
 
 
-async def _create_proxy_servicer_on_loop() -> DashScProxyServicer:
+async def _create_proxy_servicer_on_loop(
+    *,
+    rank_id: Optional[int] = None,
+    server_id: str = "",
+) -> DashScProxyServicer:
     """Construct proxy servicer inside the running asyncio owner loop.
 
     Outbound ``grpc.aio.Channel`` objects are event-loop affine, but the shared
     channel cache builds them lazily when a request first uses an address.
     """
-    return DashScProxyServicer()
+    return DashScProxyServicer(rank_id=rank_id, server_id=server_id)
 
 
 def _derive_echo_prefix_ids(generate_env_config: Any, base_tok: Any) -> List[int]:
@@ -458,7 +462,6 @@ class DashScApp:
 
     def start(self, ready_pipe_writer=None) -> None:
         servicer: Any = None
-        repetition_monitor_config = RequestRepetitionMonitorConfig()
         try:
             port = self.server_config.dash_sc_grpc_server_port
             is_proxy = _is_proxy_mode_enabled()
@@ -523,12 +526,18 @@ class DashScApp:
                     tokenizer=base_tok,
                     generate_env_config=self.py_env_configs.generate_env_config,
                     think_runtime=think_runtime,
+                    rank_id=self.server_config.rank_id,
+                    repetition_monitor_config=repetition_monitor_config,
                 )
 
             loop = self._start_enqueue_loop()
             if is_proxy:
                 fut = asyncio.run_coroutine_threadsafe(
-                    _create_proxy_servicer_on_loop(), loop
+                    _create_proxy_servicer_on_loop(
+                        rank_id=self.server_config.rank_id,
+                        server_id=self.server_config.frontend_server_id,
+                    ),
+                    loop,
                 )
                 try:
                     servicer = fut.result(timeout=_PROXY_SERVICER_STARTUP_TIMEOUT_S)
@@ -536,10 +545,10 @@ class DashScApp:
                     fut.cancel()
                     raise
 
-            # Register py_rtp_* metrics so the access-log interceptor's kmonitor.report
+            # Register py_rtp_* metrics so ``grpc_metrics``' kmonitor.report
             # calls find their metric objects. Idempotent — matches FrontendServer.__init__
             # so dashboards/alerts see gRPC and HTTP paths under the same metric family
-            # (split via the ``protocol`` tag the interceptor injects).
+            # (split via the ``protocol`` tag ``grpc_metrics`` injects).
             kmonitor.init()
 
             logging.info(
@@ -558,7 +567,6 @@ class DashScApp:
                 log_path=get_log_path(),
                 backup_count=self.py_env_configs.profiling_debug_logging_config.log_file_backup_count,
                 rank_id=self.server_config.rank_id,
-                repetition_monitor_config=repetition_monitor_config,
             )
             logging.info("[DashScApp] gRPC server bound on port %s", port)
         except BaseException as e:

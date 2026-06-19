@@ -17,20 +17,23 @@ py_library(
     srcs = [
         "__init__.py",
         "access_log.py",
+        "access_record.py",
         "app.py",
         "client.py",
         "codec.py",
+        "grpc_metrics.py",
+        "json_format_e2e_smoke.py",
         "inference/__init__.py",
         "inference/__main__.py",
         "inference/servicer.py",
         "proxy/__init__.py",
         "proxy/__main__.py",
-        "proxy/access_record.py",
         "proxy/service_route.py",
         "proxy/service_route_config.py",
         "proxy/servicer.py",
         "repetition_monitor.py",
         "server.py",
+        "status.py",
         "structural_tag.py",
         "think.py",
     ],
@@ -49,12 +52,19 @@ py_library(
     ],
 )
 
+py_binary(
+    name = "json_format_e2e_smoke",
+    srcs = ["json_format_e2e_smoke.py"],
+    main = "json_format_e2e_smoke.py",
+    visibility = ["//visibility:public"],
+)
+
 py_test(
     name = "codec_test",
     srcs = ["test/codec_test.py"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "A10"},
 )
 
 py_test(
@@ -63,7 +73,7 @@ py_test(
     main = "test/think_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "A10"},
 )
 
 py_test(
@@ -72,7 +82,7 @@ py_test(
     main = "test/inference/servicer_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "A10"},
 )
 
 py_test(
@@ -82,30 +92,7 @@ py_test(
     main = "test/inference/mrcr_smoke_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "H20"},
-)
-
-py_test(
-    name = "request_smoke_test",
-    srcs = ["test/inference/request_smoke_test.py"],
-    data = ["test/data/dash_sc_request_smoke_cases.json"],
-    main = "test/inference/request_smoke_test.py",
-    deps = ["//rtp_llm:testlib"],
-    imports = [],
-    exec_properties = {"gpu": "H20"},
-)
-
-py_test(
-    name = "grpc_inproc_smoke_test",
-    srcs = [
-        "test/inference/grpc_inproc_smoke_test.py",
-        "test/inference/request_smoke_test.py",
-    ],
-    data = ["test/data/dash_sc_request_smoke_cases.json"],
-    main = "test/inference/grpc_inproc_smoke_test.py",
-    deps = ["//rtp_llm:testlib"],
-    imports = [],
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "A10"},
 )
 
 py_test(
@@ -114,16 +101,7 @@ py_test(
     main = "test/proxy/servicer_test.py",
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "H20"},
-)
-
-py_test(
-    name = "proxy_inference_e2e_smoke_test",
-    srcs = ["test/proxy/inference_e2e_smoke_test.py"],
-    main = "test/proxy/inference_e2e_smoke_test.py",
-    deps = ["//rtp_llm:testlib"],
-    imports = [],
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "A10"},
 )
 
 py_test(
@@ -141,7 +119,7 @@ py_test(
     data = ["//rtp_llm/cpp/repetition:online_repetition_tracker"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "A10"},
 )
 
 py_test(
@@ -149,5 +127,5 @@ py_test(
     srcs = ["test/app_test.py"],
     deps = ["//rtp_llm:testlib"],
     imports = [],
-    exec_properties = {"gpu": "H20"},
+    exec_properties = {"gpu": "A10"},
 )

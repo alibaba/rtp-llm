@@ -83,14 +83,18 @@ class CreateProxyServicerOnLoopTest(TestCase):
         created_loops = []
         sentinel = object()
 
-        def fake_servicer():
+        def fake_servicer(**kwargs):
             created_loops.append(asyncio.get_running_loop())
+            self.assertEqual(kwargs, {"rank_id": 7, "server_id": "42"})
             return sentinel
 
         async def run():
             with patch.object(bg_app, "DashScProxyServicer", side_effect=fake_servicer):
                 loop = asyncio.get_running_loop()
-                servicer = await _create_proxy_servicer_on_loop()
+                servicer = await _create_proxy_servicer_on_loop(
+                    rank_id=7,
+                    server_id="42",
+                )
             return loop, servicer
 
         loop, servicer = asyncio.run(run())
@@ -237,7 +241,9 @@ class PreStopDrainSecondsTest(TestCase):
             app._shutdown_manager,
             "wait_for_no_active_requests",
             return_value=False,
-        ) as wait_for_no_active, patch("rtp_llm.dash_sc.app.time.sleep") as sleep:
+        ) as wait_for_no_active, patch(
+            "rtp_llm.dash_sc.app.time.sleep"
+        ) as sleep:
             app._sleep_before_stop_for_drain()
 
         wait_for_no_active.assert_not_called()

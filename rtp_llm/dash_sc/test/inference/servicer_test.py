@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import logging
 import struct
 import unittest
 from unittest.mock import MagicMock, patch
@@ -18,6 +19,8 @@ import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr
+from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
+from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import DashScParameterError, OtherParams, SamplingParams
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
@@ -327,10 +330,13 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 e.rtp_error_code = int(ExceptionType.MASTER_NO_AVAILABLE_WORKER)
                 raise e
 
-        class _AccessAgg:
-            backend_error_code = None
-
-        access_agg = _AccessAgg()
+        access_agg = GrpcAccessRecord(
+            method="ModelStreamInfer",
+            stream_type="bidi_stream",
+            peer="",
+            start_ts=0.0,
+            raw_mode=False,
+        )
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
@@ -1513,6 +1519,18 @@ class _FakeGrpcContext:
     async def send_initial_metadata(self, metadata):
         self.initial_metadata.append(tuple(metadata))
 
+    def peer(self):
+        return "ipv4:1.2.3.4:5678"
+
+    def code(self):
+        return None
+
+    def is_active(self):
+        return True
+
+    def details(self):
+        return ""
+
 
 class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
     def _valid_infer_request(self) -> predict_v2_pb2.ModelInferRequest:
@@ -1535,6 +1553,140 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             for i in range(len(infer.outputs))
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [142])
+
+    async def test_access_log_records_input_and_generated_ids(self) -> None:
+        # Frontend struct path: the emitted access line carries the real token
+        # ids, proving they travel servicer -> capture -> emit end to end.
+        out = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1, reuse_len=2),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        with patch.object(
+            logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
+        ) as info:
+            await _drain(
+                servicer.ModelStreamInfer(
+                    _areq_iter([self._valid_infer_request()]), _FakeGrpcContext()
+                )
+            )
+        payload = json.loads(info.call_args.args[0])
+        self.assertEqual(payload["component_role"], "frontend")
+        self.assertEqual(payload["input_ids"], [42])
+        self.assertEqual(payload["generated_ids"], [9])
+        self.assertEqual(payload["backend_input_token_len"], 1)
+        self.assertEqual(payload["output_token_len"], 1)
+        self.assertEqual(payload["prompt_cached_token_num"], 2)
+
+    async def test_access_log_records_generate_config_role_addrs(self) -> None:
+        role_addrs = [
+            RoleAddr(
+                role=RoleType.PREFILL,
+                ip="10.0.0.1",
+                http_port=8080,
+                grpc_port=8081,
+            ),
+            RoleAddr(
+                role=RoleType.DECODE,
+                ip="10.0.0.2",
+                http_port=9080,
+                grpc_port=9081,
+            ),
+        ]
+        out = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1, reuse_len=0, role_addrs=role_addrs),
+        )
+
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        with patch.object(
+            logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
+        ) as info:
+            await _drain(
+                servicer.ModelStreamInfer(
+                    _areq_iter([self._valid_infer_request()]), _FakeGrpcContext()
+                )
+            )
+
+        payload = json.loads(info.call_args.args[0])
+        phase1 = payload["generate_config_role_addrs"]["phase1"]
+        self.assertEqual(phase1[0]["role"], "PREFILL")
+        self.assertEqual(phase1[1]["role"], "DECODE")
+        self.assertEqual(phase1[0]["grpc_port"], 8081)
+
+    async def test_empty_request_stream_marks_request_done(self) -> None:
+        servicer = DashScInferenceServicer(backend_visitor=None)
+        with patch.object(
+            logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
+        ) as info:
+            responses = await _drain(
+                servicer.ModelStreamInfer(_areq_iter([]), _FakeGrpcContext())
+            )
+
+        self.assertEqual(responses, [])
+        payload = json.loads(info.call_args.args[0])
+        self.assertEqual(payload["req_count"], 0)
+        self.assertEqual(payload["request_read_status"], "eof")
+        self.assertIsNotNone(payload["request_end_ts_epoch_ms"])
+
+    async def test_debug_score_param_is_control_only(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["dash_sc_debug_score_token_ids"].string_param = "1,2"
+
+        with patch.object(
+            logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
+        ) as info:
+            responses = await _drain(
+                servicer.ModelStreamInfer(_areq_iter([req]), _FakeGrpcContext())
+            )
+
+        self.assertEqual(len(responses), 1)
+        self.assertFalse(visitor.last_generate_input.generate_config.return_logits)
+        payload = json.loads(info.call_args.args[0])
+        self.assertEqual(
+            payload["request_controls"]["parameters"]["dash_sc_debug_score_token_ids"],
+            "1,2",
+        )
+
+    async def test_access_log_emitted_before_rpc_done_metric(self) -> None:
+        # 铁律: log first, metrics second — a kmonitor hiccup in report_frontend_rpc_done
+        # must never delay or drop the access line, so the finally block must
+        # call emit_access_log strictly before report_frontend_rpc_done.
+        servicer = DashScInferenceServicer(backend_visitor=None)
+        order = MagicMock()
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer.emit_access_log",
+            order.emit_access_log,
+        ), patch(
+            "rtp_llm.dash_sc.inference.servicer.report_frontend_rpc_done",
+            order.report_frontend_rpc_done,
+        ):
+            await _drain(
+                servicer.ModelStreamInfer(
+                    _areq_iter([self._valid_infer_request()]), _FakeGrpcContext()
+                )
+            )
+        self.assertEqual(
+            [c[0] for c in order.mock_calls],
+            ["emit_access_log", "report_frontend_rpc_done"],
+        )
 
     async def test_missing_input_ids_error(self) -> None:
         servicer = DashScInferenceServicer(backend_visitor=None)
