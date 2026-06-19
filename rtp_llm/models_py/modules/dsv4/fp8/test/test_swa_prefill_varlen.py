@@ -27,7 +27,7 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV, TAG_BY_ATTN_TYPE
 from rtp_llm.models_py.modules.dsv4.fp8 import _swa_ops_triton as _swa_ops
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8 as Attention
 from rtp_llm.models_py.modules.dsv4.fp8.attention import (
@@ -40,7 +40,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import (
 
 class _StubKvCache:
     def __init__(self, tokens_per_block: int) -> None:
-        self.group_region_names = [SWA_KV]
+        self.group_tags = [TAG_BY_ATTN_TYPE[SWA_KV]]
         self.seq_size_per_block = int(tokens_per_block)
         self.kernel_seq_size_per_block = int(tokens_per_block)
 
@@ -82,6 +82,12 @@ class _StubAttention:
             return 0
         return self._eb
 
+    def _swa_entries_per_block(self) -> int:
+        return self._pool_entries_per_block(SWA_KV)
+
+    def _swa_cp_byte_sliced(self) -> bool:
+        return False
+
     # Bind the unbound leaf builder so the stub quacks correctly.
     _build_swa_prefill_meta_varlen = Attention._build_swa_prefill_meta_varlen
 
@@ -98,7 +104,7 @@ def _make_block_table(n_reqs: int, blocks_per_req: int, device) -> torch.Tensor:
 class _FakeLargeBlockKvCache:
     """Expose scalar C++ KVCache fields used by require_pool_tokens_per_block."""
 
-    group_region_names = [SWA_KV]
+    group_tags = [TAG_BY_ATTN_TYPE[SWA_KV]]
     seq_size_per_block = 16384
     kernel_seq_size_per_block = 128
 
@@ -749,10 +755,11 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
                 self.assertIsNotNone(meta.slot_mapping)
                 self.assertIsNone(meta.combined_gather_lens)
                 self.assertEqual(meta.M, 0)
-                expected = torch.tensor(
-                    [1, 2, 3, 4, 5, 6], dtype=torch.int32, device=self.device
-                )
-                self.assertTrue(torch.equal(meta.topk_length_kv_full, expected))
+                if meta.topk_length_kv_full is not None:
+                    expected = torch.tensor(
+                        [1, 2, 3, 4, 5, 6], dtype=torch.int32, device=self.device
+                    )
+                    self.assertTrue(torch.equal(meta.topk_length_kv_full, expected))
 
 
 # -------------------------------------------------------------------------

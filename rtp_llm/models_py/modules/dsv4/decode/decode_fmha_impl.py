@@ -39,6 +39,9 @@ from rtp_llm.models_py.modules.dsv4.decode.decode_attn_metadata import (
     allocate_decode_metadata,
     update_decode_metadata_in_place,
 )
+from rtp_llm.models_py.modules.dsv4.attn_type import TAG_BY_ATTN_TYPE
+
+_ATTN_TYPE_BY_TAG = {tag: attn_type for attn_type, tag in TAG_BY_ATTN_TYPE.items()}
 
 
 @dataclass
@@ -64,13 +67,13 @@ class DSv4DecodeFmhaImplConfig:
     # If empty, the legacy register_buffer-only path is used.
     paged_pool_specs: Dict[int, Tuple[int, int, int]] = field(default_factory=dict)
 
-    # Snapshot of ``kv_cache.group_region_names`` (framework-owned group
-    # ordering, one attn_type per entry). Position = group id. ``prepare``
+    # Snapshot of ``kv_cache.group_tags`` (framework-owned group
+    # ordering, one semantic tag per entry). Position = group id. ``prepare``
     # iterates this to index ``attn_inputs.kv_cache_kernel_block_id_device_by_group``
     # without needing a live ``kv_cache`` (the CUDA-graph replay path
     # doesn't hand one in). Static for the allocator's lifetime, so
     # snapshot-at-construct is safe.
-    group_region_names: List[int] = field(default_factory=list)
+    group_tags: List[str] = field(default_factory=list)
 
 
 class DSv4DecodeFmhaImpl:
@@ -143,7 +146,7 @@ class DSv4DecodeFmhaImpl:
         # Phase 2: pull per-attn_type block_tables from the framework's
         # by_group list. Empty paged_pool_specs ⇒ skip (legacy path).
         paged_block_tables: Optional[Dict[int, torch.Tensor]] = None
-        if self._paged_entries_per_block and self.config.group_region_names:
+        if self._paged_entries_per_block and self.config.group_tags:
             by_group = getattr(
                 attn_inputs,
                 "kv_cache_kernel_block_id_device_by_group",
@@ -151,9 +154,12 @@ class DSv4DecodeFmhaImpl:
             )
             if by_group is not None and len(by_group) > 0:
                 paged_block_tables = {}
-                # Position IS the group id; entry IS the attn_type (int).
-                for group_id, attn_type in enumerate(self.config.group_region_names):
+                # Position IS the group id; entry IS the semantic tag.
+                for group_id, tag in enumerate(self.config.group_tags):
                     if group_id >= len(by_group):
+                        continue
+                    attn_type = _ATTN_TYPE_BY_TAG.get(str(tag))
+                    if attn_type is None:
                         continue
                     if attn_type not in self.config.paged_pool_specs:
                         continue

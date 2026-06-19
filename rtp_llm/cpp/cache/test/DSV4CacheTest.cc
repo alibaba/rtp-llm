@@ -32,6 +32,8 @@ constexpr uint32_t kDsv4TokensPerBlock    = 128;
 constexpr uint32_t kDsv4KvEntryBytes      = 1024;
 constexpr uint32_t kDsv4IndexerEntryBytes = 256;
 constexpr uint32_t kDsv4Fp8KvEntryBytes   = 584;
+const std::vector<std::string> kDsv4Tags = {
+    "csa_kv", "hca_kv", "indexer_kv", "indexer_state", "csa_state", "hca_state", "swa_kv"};
 
 class DSV4CacheTestEnvironment: public ::testing::Environment {
 public:
@@ -174,14 +176,12 @@ TEST(HybridPoolConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
     ASSERT_EQ(config.global_layer_ids[6], std::vector<int>({0}));
     ASSERT_EQ(config.layer_to_group_id.size(), 1u);
     EXPECT_EQ(config.layer_to_group_id[0], 6);
-    ASSERT_EQ(config.layer_region_to_group_id.size(), 1u);
-    EXPECT_EQ(config.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::SWA_KV)], 6);
     ASSERT_EQ(config.group_tags.size(), 7u);
     EXPECT_EQ(config.group_tags[6], "swa_kv");
     EXPECT_EQ(config.groupIdForLayerTag(0, "swa_kv"), 6);
 }
 
-TEST(HybridPoolConfigCreatorTest, Dsv4SpecOrderDoesNotAffectLegacyGroupOrder) {
+TEST(HybridPoolConfigCreatorTest, Dsv4SpecOrderDoesNotAffectFixedGroupOrder) {
     auto mc = makeFlashModelConfig();
     for (auto& layer_specs : mc.kv_cache_specs) {
         std::reverse(layer_specs.second.begin(), layer_specs.second.end());
@@ -190,16 +190,7 @@ TEST(HybridPoolConfigCreatorTest, Dsv4SpecOrderDoesNotAffectLegacyGroupOrder) {
     ParallelismConfig pc;
     auto config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
 
-    const std::vector<KVCacheRegionName> expected_regions = {KVCacheRegionName::CSA_KV,
-                                                             KVCacheRegionName::HCA_KV,
-                                                             KVCacheRegionName::INDEXER_KV,
-                                                             KVCacheRegionName::INDEXER_STATE,
-                                                             KVCacheRegionName::CSA_STATE,
-                                                             KVCacheRegionName::HCA_STATE,
-                                                             KVCacheRegionName::SWA_KV};
-    const std::vector<std::string> expected_tags = {
-        "csa_kv", "hca_kv", "indexer_kv", "indexer_state", "csa_state", "hca_state", "swa_kv"};
-    EXPECT_EQ(config.group_region_names, expected_regions);
+    const auto& expected_tags = kDsv4Tags;
     EXPECT_EQ(config.group_tags, expected_tags);
 
     ASSERT_EQ(config.cache_specs.size(), expected_tags.size());
@@ -210,30 +201,24 @@ TEST(HybridPoolConfigCreatorTest, Dsv4SpecOrderDoesNotAffectLegacyGroupOrder) {
         EXPECT_EQ(config.cache_specs[gid]->layers, config.global_layer_ids[gid]) << "gid=" << gid;
     }
 
-    EXPECT_EQ(config.layer_region_to_group_id[2][static_cast<size_t>(KVCacheRegionName::CSA_KV)], 0);
-    EXPECT_EQ(config.layer_region_to_group_id[3][static_cast<size_t>(KVCacheRegionName::HCA_KV)], 1);
-    EXPECT_EQ(config.layer_region_to_group_id[2][static_cast<size_t>(KVCacheRegionName::INDEXER_KV)], 2);
-    EXPECT_EQ(config.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::SWA_KV)], 6);
     EXPECT_EQ(config.groupIdForLayerTag(2, "csa_kv"), 0);
     EXPECT_EQ(config.groupIdForLayerTag(3, "hca_kv"), 1);
     EXPECT_EQ(config.groupIdForLayerTag(0, "swa_kv"), 6);
 }
 
-TEST(CacheConfigTest, FromLayerSpecsBuildsTagAndRegionTopology) {
+TEST(CacheConfigTest, FromLayerSpecsBuildsTagAndGroupTopology) {
     CacheConfig config;
     config.layer_num     = 3;
     config.layer_all_num = 3;
 
     auto swa_spec = std::make_shared<DSV4StateSpec>();
     swa_spec->tag = "swa";
-    swa_spec->cache_type = KVCacheRegionName::SWA_KV;
     swa_spec->state_dim = 1;
     swa_spec->entries_per_block = 1;
     swa_spec->store_dtype = DataType::TYPE_UINT8;
     swa_spec->dtype = DataType::TYPE_UINT8;
     auto csa_spec = std::make_shared<DSV4KVSpec>();
     csa_spec->tag = "csa";
-    csa_spec->cache_type = KVCacheRegionName::CSA_KV;
     csa_spec->entry_elems = 1;
     csa_spec->entries_per_block = 1;
     csa_spec->compression_ratio = 1;
@@ -247,13 +232,9 @@ TEST(CacheConfigTest, FromLayerSpecsBuildsTagAndRegionTopology) {
     config.fromLayerSpecs(layer_specs);
 
     EXPECT_EQ(config.group_tags, std::vector<std::string>({"swa", "csa"}));
-    EXPECT_EQ(config.group_region_names,
-              std::vector<KVCacheRegionName>({KVCacheRegionName::SWA_KV, KVCacheRegionName::CSA_KV}));
-    EXPECT_EQ(config.layer_region_to_group_id[1][static_cast<size_t>(KVCacheRegionName::SWA_KV)], 0);
-    EXPECT_EQ(config.layer_region_to_group_id[1][static_cast<size_t>(KVCacheRegionName::CSA_KV)], 1);
     EXPECT_EQ(config.groupIdForLayerTag(1, "swa"), 0);
     EXPECT_EQ(config.groupIdForLayerTag(1, "csa"), 1);
-    EXPECT_EQ(config.layer_to_group_id[1], 0);
+    EXPECT_EQ(config.layer_to_group_id[1], 1);
     EXPECT_EQ(config.layer_to_group_ids[1], std::vector<int>({0, 1}));
 }
 
@@ -323,7 +304,7 @@ TEST(CacheConfigTest, FromLayerSpecsRejectsEmptyTag) {
     EXPECT_THROW(config.fromLayerSpecs(layer_specs), std::exception);
 }
 
-TEST(CacheConfigTest, FromLayerSpecsRejectsDuplicateLayerRegionRoutes) {
+TEST(CacheConfigTest, FromLayerSpecsAllowsDifferentLayerTags) {
     CacheConfig config;
     config.layer_num     = 1;
     config.layer_all_num = 1;
@@ -335,7 +316,8 @@ TEST(CacheConfigTest, FromLayerSpecsRejectsDuplicateLayerRegionRoutes) {
 
     LayerKVCacheSpecs layer_specs;
     layer_specs[0] = {spec0, spec1};
-    EXPECT_THROW(config.fromLayerSpecs(layer_specs), std::exception);
+    EXPECT_NO_THROW(config.fromLayerSpecs(layer_specs));
+    EXPECT_EQ(config.layer_to_group_ids[0].size(), 2u);
 }
 
 TEST(HybridPoolConfigCreatorTest, Dsv4ModelProvidedAlignmentPropagatesToCacheSpecs) {
@@ -367,38 +349,33 @@ TEST(HybridPoolConfigCreatorTest, Dsv4ModelProvidedAlignmentPropagatesToCacheSpe
     EXPECT_EQ(swa_kv->block_size_alignment_min_entries, 256u);
 }
 
-TEST(HybridPoolConfigCreatorTest, Dsv4TagRegionRoutesAreConsistent) {
+TEST(HybridPoolConfigCreatorTest, Dsv4TagRoutesAreConsistent) {
     ParallelismConfig pc;
     auto              config =
         HybridPoolConfigCreator::createConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
 
-    auto expect_route = [&](int layer_id, const std::string& tag, KVCacheRegionName region, int expected_gid) {
-        ASSERT_LT(static_cast<size_t>(layer_id), config.layer_region_to_group_id.size());
-        const int region_gid =
-            config.layer_region_to_group_id[static_cast<size_t>(layer_id)][static_cast<size_t>(region)];
-        EXPECT_EQ(region_gid, expected_gid) << "layer=" << layer_id << " tag=" << tag;
-        EXPECT_EQ(config.groupIdForLayerTag(layer_id, tag), region_gid) << "layer=" << layer_id << " tag=" << tag;
+    auto expect_route = [&](int layer_id, const std::string& tag, int expected_gid) {
+        EXPECT_EQ(config.groupIdForLayerTag(layer_id, tag), expected_gid) << "layer=" << layer_id << " tag=" << tag;
     };
 
     // Flash DSV4 test config uses layers 2,4,... as CSA and 3,5,... as HCA; 0/1 are SWA-only.
-    expect_route(2, "csa_kv", KVCacheRegionName::CSA_KV, 0);
-    expect_route(2, "indexer_kv", KVCacheRegionName::INDEXER_KV, 2);
-    expect_route(2, "indexer_state", KVCacheRegionName::INDEXER_STATE, 3);
-    expect_route(2, "csa_state", KVCacheRegionName::CSA_STATE, 4);
-    expect_route(2, "swa_kv", KVCacheRegionName::SWA_KV, 6);
+    expect_route(2, "csa_kv", 0);
+    expect_route(2, "indexer_kv", 2);
+    expect_route(2, "indexer_state", 3);
+    expect_route(2, "csa_state", 4);
+    expect_route(2, "swa_kv", 6);
 
-    expect_route(3, "hca_kv", KVCacheRegionName::HCA_KV, 1);
-    expect_route(3, "hca_state", KVCacheRegionName::HCA_STATE, 5);
-    expect_route(3, "swa_kv", KVCacheRegionName::SWA_KV, 6);
+    expect_route(3, "hca_kv", 1);
+    expect_route(3, "hca_state", 5);
+    expect_route(3, "swa_kv", 6);
 
-    expect_route(0, "swa_kv", KVCacheRegionName::SWA_KV, 6);
+    expect_route(0, "swa_kv", 6);
     EXPECT_THROW(config.groupIdForLayerTag(0, "csa_kv"), std::exception);
     EXPECT_THROW(config.groupIdForLayerTag(0, "hca_kv"), std::exception);
 
     auto mtp_config =
         HybridPoolConfigCreator::createConfig(makeFlashMtpModelConfig(), pc, makeDsv4KvCacheConfig(), true, 0);
     ASSERT_EQ(mtp_config.groupIdForLayerTag(0, "swa_kv"), 6);
-    ASSERT_EQ(mtp_config.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::SWA_KV)], 6);
 }
 
 TEST(HybridPoolConfigCreatorTest, Dsv4GroupPoliciesMatchLegacyBehavior) {
@@ -406,22 +383,22 @@ TEST(HybridPoolConfigCreatorTest, Dsv4GroupPoliciesMatchLegacyBehavior) {
     auto              config =
         HybridPoolConfigCreator::createConfig(makeFlashModelConfig(), pc, makeDsv4KvCacheConfig(), false, 0);
 
-    ASSERT_EQ(config.group_policies.size(), config.group_region_names.size());
-    auto expect_policy = [&](KVCacheRegionName region,
+    ASSERT_EQ(config.group_policies.size(), config.group_tags.size());
+    auto expect_policy = [&](const std::string& tag,
                              CacheReusePolicy reuse_policy,
                              CacheEvictPolicy evict_policy,
                              int active_tail_blocks) {
-        auto it = std::find(config.group_region_names.begin(), config.group_region_names.end(), region);
-        ASSERT_NE(it, config.group_region_names.end()) << cacheRegionName(region);
-        const auto gid = static_cast<size_t>(std::distance(config.group_region_names.begin(), it));
-        EXPECT_EQ(config.group_policies[gid].reuse_policy, reuse_policy) << cacheRegionName(region);
-        EXPECT_EQ(config.group_policies[gid].evict_policy, evict_policy) << cacheRegionName(region);
-        EXPECT_EQ(config.group_policies[gid].active_tail_blocks, active_tail_blocks) << cacheRegionName(region);
+        auto it = std::find(config.group_tags.begin(), config.group_tags.end(), tag);
+        ASSERT_NE(it, config.group_tags.end()) << tag;
+        const auto gid = static_cast<size_t>(std::distance(config.group_tags.begin(), it));
+        EXPECT_EQ(config.group_policies[gid].reuse_policy, reuse_policy) << tag;
+        EXPECT_EQ(config.group_policies[gid].evict_policy, evict_policy) << tag;
+        EXPECT_EQ(config.group_policies[gid].active_tail_blocks, active_tail_blocks) << tag;
     };
 
-    expect_policy(KVCacheRegionName::HCA_STATE, CacheReusePolicy::NON_REUSABLE, CacheEvictPolicy::CHAIN, 1);
-    expect_policy(KVCacheRegionName::SWA_KV, CacheReusePolicy::REUSABLE, CacheEvictPolicy::INDEPENDENT, 2);
-    expect_policy(KVCacheRegionName::CSA_STATE, CacheReusePolicy::REUSABLE, CacheEvictPolicy::INDEPENDENT, 2);
+    expect_policy("hca_state", CacheReusePolicy::NON_REUSABLE, CacheEvictPolicy::INDEPENDENT, 1);
+    expect_policy("swa_kv", CacheReusePolicy::REUSABLE, CacheEvictPolicy::INDEPENDENT, 2);
+    expect_policy("csa_state", CacheReusePolicy::REUSABLE, CacheEvictPolicy::INDEPENDENT, 2);
 }
 
 TEST(HybridPoolConfigCreatorTest, Dsv4SpecsMissingFailsFastWithoutRatioFallback) {
@@ -680,8 +657,7 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolCo
     ASSERT_EQ(config.cache_specs.size(), 2u);
     EXPECT_LT(config.cache_specs[0]->block_size_bytes(), config.cache_specs[1]->block_size_bytes());
     EXPECT_EQ(config.group_block_nums.size(), 2u);
-    EXPECT_EQ(config.group_region_names,
-              std::vector<KVCacheRegionName>({KVCacheRegionName::DEFAULT, KVCacheRegionName::DEFAULT}));
+    EXPECT_EQ(config.group_tags, std::vector<std::string>({"full", "linear"}));
 }
 
 TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolSplitsFullAndSwaSpecs) {
@@ -735,7 +711,7 @@ TEST(HybridConfigCreatorTest, HybridAttentionTypesMustCoverAllLayers) {
 // ============================================================
 
 TEST(DSV4KVCacheSpecTest, KVSpecFromPoolSpec) {
-    DSV4KVSpec spec(KVCacheRegionName::CSA_KV,
+    DSV4KVSpec spec("csa_kv",
                     kDsv4Fp8KvEntryBytes,
                     64,
                     DataType::TYPE_UINT8,
@@ -746,11 +722,11 @@ TEST(DSV4KVCacheSpecTest, KVSpecFromPoolSpec) {
     EXPECT_EQ(spec.block_size(), 64u * kDsv4Fp8KvEntryBytes);
     EXPECT_EQ(spec.natural_block_size_bytes(), 64u * kDsv4Fp8KvEntryBytes * 1u);  // uint8 = 1 byte
     EXPECT_EQ(spec.block_size_bytes(), 37440u);
-    EXPECT_EQ(spec.cache_type, KVCacheRegionName::CSA_KV);
+    EXPECT_EQ(spec.tag, "csa_kv");
     EXPECT_EQ(spec.entry_elems, kDsv4Fp8KvEntryBytes);
     EXPECT_EQ(spec.entries_per_block, 64u);
 
-    DSV4KVSpec hca_spec(KVCacheRegionName::HCA_KV,
+    DSV4KVSpec hca_spec("hca_kv",
                         kDsv4Fp8KvEntryBytes,
                         2,
                         DataType::TYPE_UINT8,
@@ -762,7 +738,7 @@ TEST(DSV4KVCacheSpecTest, KVSpecFromPoolSpec) {
 }
 
 TEST(DSV4KVCacheSpecTest, SWAFp8StateSpecUsesPaddedPhysicalBlockSize) {
-    DSV4StateSpec spec(KVCacheRegionName::SWA_KV,
+    DSV4StateSpec spec("swa_kv",
                        kDsv4Fp8KvEntryBytes,
                        kDsv4TokensPerBlock,
                        DataType::TYPE_UINT8,
@@ -774,31 +750,31 @@ TEST(DSV4KVCacheSpecTest, SWAFp8StateSpecUsesPaddedPhysicalBlockSize) {
     EXPECT_EQ(spec.block_size(), kDsv4TokensPerBlock * kDsv4Fp8KvEntryBytes);
     EXPECT_EQ(spec.natural_block_size_bytes(), kDsv4TokensPerBlock * kDsv4Fp8KvEntryBytes);
     EXPECT_EQ(spec.block_size_bytes(), 74880u);
-    EXPECT_EQ(spec.cache_type, KVCacheRegionName::SWA_KV);
+    EXPECT_EQ(spec.tag, "swa_kv");
 }
 
 TEST(DSV4KVCacheSpecTest, StateSpecFloat32) {
-    DSV4StateSpec spec(KVCacheRegionName::CSA_STATE, 2048, 8, DataType::TYPE_FP32, kDsv4TokensPerBlock);
+    DSV4StateSpec spec("csa_state", 2048, 8, DataType::TYPE_FP32, kDsv4TokensPerBlock);
 
     EXPECT_EQ(spec.block_size(), 8u * 2048u);
     EXPECT_EQ(spec.block_size_bytes(), 8u * 2048u * 4u);  // float32 = 4 bytes
-    EXPECT_EQ(spec.cache_type, KVCacheRegionName::CSA_STATE);
+    EXPECT_EQ(spec.tag, "csa_state");
     EXPECT_EQ(spec.state_dim, 2048u);
 }
 
 TEST(DSV4KVCacheSpecTest, IndexerKVSpec) {
-    DSV4KVSpec spec(KVCacheRegionName::INDEXER_KV, 132, 64, DataType::TYPE_UINT8, kDsv4TokensPerBlock);
+    DSV4KVSpec spec("indexer_kv", 132, 64, DataType::TYPE_UINT8, kDsv4TokensPerBlock);
 
     EXPECT_EQ(spec.block_size(), 64u * 132u);
     EXPECT_EQ(spec.block_size_bytes(), 64u * 132u);
-    EXPECT_EQ(spec.cache_type, KVCacheRegionName::INDEXER_KV);
+    EXPECT_EQ(spec.tag, "indexer_kv");
 }
 
 TEST(DSV4KVCacheSpecTest, HCAStateSpec) {
-    DSV4StateSpec spec(KVCacheRegionName::HCA_STATE, 1024, 128, DataType::TYPE_FP32, kDsv4TokensPerBlock);
+    DSV4StateSpec spec("hca_state", 1024, 128, DataType::TYPE_FP32, kDsv4TokensPerBlock);
 
     EXPECT_EQ(spec.block_size_bytes(), 128u * 1024u * 4u);
-    EXPECT_EQ(spec.cache_type, KVCacheRegionName::HCA_STATE);
+    EXPECT_EQ(spec.tag, "hca_state");
 }
 
 // ============================================================
@@ -1163,8 +1139,8 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
 
     EXPECT_EQ(config.layer_to_group_id[43], 6);
     EXPECT_EQ(config.layer_to_group_id[44], 6);
-    EXPECT_EQ(config.layer_region_to_group_id[43][static_cast<size_t>(KVCacheRegionName::SWA_KV)], 6);
-    EXPECT_EQ(config.layer_region_to_group_id[44][static_cast<size_t>(KVCacheRegionName::SWA_KV)], 6);
+    EXPECT_EQ(config.groupIdForLayerTag(43, "swa_kv"), 6);
+    EXPECT_EQ(config.groupIdForLayerTag(44, "swa_kv"), 6);
 
     EXPECT_EQ(config.global_layer_ids[6].size(), 45u);
     EXPECT_EQ(config.mtp_sub_configs[0]->global_layer_ids[6], std::vector<int>({43}));
@@ -1205,7 +1181,7 @@ TEST(HybridPoolConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
     // Pool 6: SWA_KV (window=128, overlap=0) → R=130, same as HCA_STATE
     auto* swa_kv = dynamic_cast<DSV4StateSpec*>(config.cache_specs[6].get());
     ASSERT_NE(swa_kv, nullptr);
-    EXPECT_EQ(swa_kv->cache_type, KVCacheRegionName::SWA_KV);
+    EXPECT_EQ(swa_kv->tag, "swa_kv");
     EXPECT_EQ(swa_kv->entries_per_block, 130u);
 }
 
@@ -1266,10 +1242,9 @@ TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2ExpandsFixedAndSwaSl
         auto* decode_spec  = dynamic_cast<DSV4StateSpec*>(decode_config.cache_specs[gid].get());
         ASSERT_NE(prefill_spec, nullptr) << "gid=" << gid;
         ASSERT_NE(decode_spec, nullptr) << "gid=" << gid;
-        EXPECT_EQ(decode_spec->cache_type, prefill_spec->cache_type) << "gid=" << gid;
+        EXPECT_EQ(decode_spec->tag, prefill_spec->tag) << "gid=" << gid;
         const auto expected_entries = prefill_spec->entries_per_block * cp_size;
-        EXPECT_EQ(decode_spec->entries_per_block, expected_entries)
-            << "gid=" << gid << " region=" << static_cast<int>(decode_spec->cache_type);
+        EXPECT_EQ(decode_spec->entries_per_block, expected_entries) << "gid=" << gid << " tag=" << decode_spec->tag;
     }
     auto* prefill_swa = dynamic_cast<DSV4StateSpec*>(prefill_config.cache_specs[6].get());
     auto* decode_swa  = dynamic_cast<DSV4StateSpec*>(decode_config.cache_specs[6].get());
@@ -1324,8 +1299,7 @@ TEST(HybridPoolConfigCreatorTest, DecodeExplicitPrefillCpSizeHandlesDp16) {
         ASSERT_NE(prefill_spec, nullptr) << "gid=" << gid;
         ASSERT_NE(decode_spec, nullptr) << "gid=" << gid;
         const auto expected_entries = prefill_spec->entries_per_block * cp_size;
-        EXPECT_EQ(decode_spec->entries_per_block, expected_entries)
-            << "gid=" << gid << " region=" << static_cast<int>(decode_spec->cache_type);
+        EXPECT_EQ(decode_spec->entries_per_block, expected_entries) << "gid=" << gid << " tag=" << decode_spec->tag;
         EXPECT_EQ(prefill_config.group_seq_size_per_block[gid], kDsv4TokensPerBlock * cp_size) << "gid=" << gid;
         EXPECT_EQ(decode_config.group_seq_size_per_block[gid], kDsv4TokensPerBlock * cp_size) << "gid=" << gid;
     }
@@ -1361,9 +1335,9 @@ TEST(CacheConfigTest, DSV4NonMtpSpConfigDoesNotInflateRing) {
 }
 
 TEST(HybridPoolConfigCreatorTest, BlockIdConsistencyAcrossGroups) {
-    // DSV4 has multiple cache regions per logical layer. The config must expose
-    // every region's group id for the layer so model/runtime code can request the
-    // correct region by KVCacheRegionName.
+    // DSV4 has multiple semantic cache tags per logical layer. The config must expose
+    // every tag's group id for the layer so model/runtime code can request the
+    // correct group by tag.
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     auto              config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
@@ -1451,7 +1425,7 @@ TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
                           config.layer_to_group_id,
                           config.kernelBlocksPerKvBlock(),
                           config.group_types,
-                          config.layer_region_to_group_id);
+                          config.layer_to_group_ids);
     batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
 
     auto cti            = std::make_shared<CompleteTokenIds>(1, 1, seq_len + spb, spb);
@@ -1608,11 +1582,11 @@ TEST_F(DSV4AllocatorTest, KVBlockStrideIsMaxAcrossGroups) {
 
 TEST_F(DSV4AllocatorTest, HCAStateIsExcludedFromReuseCachePolicy) {
     auto config = makeDSV4AllocatorConfig();
-    ASSERT_EQ(config.group_region_names.size(), 7u);
-    ASSERT_EQ(config.group_policies.size(), config.group_region_names.size());
+    ASSERT_EQ(config.group_tags.size(), 7u);
+    ASSERT_EQ(config.group_policies.size(), config.group_tags.size());
 
-    for (size_t gid = 0; gid < config.group_region_names.size(); ++gid) {
-        if (gid == 5) {
+    for (size_t gid = 0; gid < config.group_tags.size(); ++gid) {
+        if (config.group_tags[gid] == "hca_state") {
             EXPECT_EQ(config.group_policies[gid].reuse_policy, CacheReusePolicy::NON_REUSABLE)
                 << "HCA_STATE should skip reuse cache";
         } else {
@@ -2173,8 +2147,8 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitHcaStateCapa
     auto              config    = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
     config.block_num            = 40;
     config.group_block_nums.assign(config.groupNums(), config.block_num);
-    for (size_t gid = 0; gid < config.group_region_names.size(); ++gid) {
-        if (config.group_region_names[gid] == KVCacheRegionName::HCA_STATE) {
+    for (size_t gid = 0; gid < config.group_tags.size(); ++gid) {
+        if (config.group_tags[gid] == "hca_state") {
             config.group_block_nums[gid] = 11;
         }
     }

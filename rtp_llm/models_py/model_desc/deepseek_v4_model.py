@@ -1061,8 +1061,8 @@ class DeepSeekV4Model(GptModelBase):
         # Snapshot framework's group ordering — CUDA-graph replay path
         # inside the impl's ``prepare`` has no live kv_cache, so carry
         # the list in the config. Position IS the group id.
-        group_region_names_snapshot = (
-            [int(t) for t in (self.kv_cache.group_region_names or [])]
+        group_tags_snapshot = (
+            [str(t) for t in (self.kv_cache.group_tags or [])]
             if self.kv_cache is not None
             else []
         )
@@ -1083,7 +1083,7 @@ class DeepSeekV4Model(GptModelBase):
             ],
             index_topk=int(self._v4_args.index_topk),
             paged_pool_specs=paged_pool_specs,
-            group_region_names=group_region_names_snapshot,
+            group_tags=group_tags_snapshot,
         )
         cfg = _DecodeFmhaImplConfig(**cfg_kwargs)
         impl = _DecodeFmhaImpl(

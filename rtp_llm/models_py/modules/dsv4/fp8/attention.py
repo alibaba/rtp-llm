@@ -74,40 +74,8 @@ from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.utils.memory import dispose_tensor
-from rtp_llm.ops.compute_ops import KVCacheRegionName, rtp_llm_ops
-
-
-# int attn_type id → pybind11 ``KVCacheRegionName`` enum.  The
-# ``KVCache::getLayerCache`` pybind11 overload takes ``(int, KVCacheRegionName)``
-# — passing a raw Python int for the second arg raises TypeError which the
-# ``except`` clauses in ``_pool_view`` / ``_pool_entries_per_block`` swallow,
-# collapsing the pool read to None (and eventually the continuation-prefill
-# ``_gather_kv_cache_dense_from_pool`` assert).  Map ints → enums up front so
-# the pybind dispatch succeeds.  Mirrors
-# ``prefill/forward.py::DSv4WriteCacheStoreOp._ATTN_TYPE_ENUM_BY_INT``.
-def _build_attn_type_enum_map() -> Dict[int, "KVCacheRegionName"]:
-    from rtp_llm.models_py.modules.dsv4.attn_type import (
-        CSA_KV,
-        CSA_STATE,
-        HCA_KV,
-        HCA_STATE,
-        INDEXER_KV,
-        INDEXER_STATE,
-        SWA_KV,
-    )
-
-    return {
-        CSA_KV: KVCacheRegionName.CSA_KV,
-        HCA_KV: KVCacheRegionName.HCA_KV,
-        INDEXER_KV: KVCacheRegionName.INDEXER_KV,
-        INDEXER_STATE: KVCacheRegionName.INDEXER_STATE,
-        CSA_STATE: KVCacheRegionName.CSA_STATE,
-        HCA_STATE: KVCacheRegionName.HCA_STATE,
-        SWA_KV: KVCacheRegionName.SWA_KV,
-    }
-
-
-_ATTN_TYPE_ENUM_BY_INT: Dict[int, KVCacheRegionName] = _build_attn_type_enum_map()
+from rtp_llm.models_py.modules.dsv4.attn_type import TAG_BY_ATTN_TYPE
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 # Phase E1 (dsv4_kvcache_native_refactor_plan.md §9): route prefill
@@ -1143,15 +1111,15 @@ class AttentionFP8(nn.Module):
         spec = self._pool_spec.get(attn_type)
         if spec is None:
             return None
-        attn_type_enum = _ATTN_TYPE_ENUM_BY_INT.get(attn_type)
-        if attn_type_enum is None:
+        attn_type_tag = TAG_BY_ATTN_TYPE.get(attn_type)
+        if attn_type_tag is None:
             return None
         # Polymorphic probe: build_paged_pool_specs sweeps every attn_type
         # across every layer.  C++ raises "Layer X does not own attention
         # type Y" for layers that don't own this region — catching it tells
         # the caller to skip.  Not defensive bloat.
         try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_enum)
+            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_tag)
         except RuntimeError:
             return None
         base = layer_kv.kv_cache_base
@@ -1191,11 +1159,11 @@ class AttentionFP8(nn.Module):
         spec = self._pool_spec.get(attn_type)
         if spec is None:
             return None
-        attn_type_enum = _ATTN_TYPE_ENUM_BY_INT.get(attn_type)
-        if attn_type_enum is None:
+        attn_type_tag = TAG_BY_ATTN_TYPE.get(attn_type)
+        if attn_type_tag is None:
             return None
         try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_enum)
+            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_tag)
         except RuntimeError:
             return None
         base = layer_kv.kv_cache_base
@@ -1221,11 +1189,11 @@ class AttentionFP8(nn.Module):
     def _pool_raw_u8(self, attn_type: int) -> Optional[torch.Tensor]:
         if self._kv_cache is None:
             return None
-        attn_type_enum = _ATTN_TYPE_ENUM_BY_INT.get(attn_type)
-        if attn_type_enum is None:
+        attn_type_tag = TAG_BY_ATTN_TYPE.get(attn_type)
+        if attn_type_tag is None:
             return None
         try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_enum)
+            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_tag)
         except RuntimeError:
             return None
         base = layer_kv.kv_cache_base
@@ -1259,12 +1227,12 @@ class AttentionFP8(nn.Module):
         spec = self._pool_spec.get(attn_type)
         if spec is None:
             return 0
-        attn_type_enum = _ATTN_TYPE_ENUM_BY_INT.get(attn_type)
-        if attn_type_enum is None:
+        attn_type_tag = TAG_BY_ATTN_TYPE.get(attn_type)
+        if attn_type_tag is None:
             return 0
         # Polymorphic probe — see _pool_view for rationale.
         try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_enum)
+            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type_tag)
         except RuntimeError:
             return 0
         base = layer_kv.kv_cache_base

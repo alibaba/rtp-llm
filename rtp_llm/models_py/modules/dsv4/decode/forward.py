@@ -33,10 +33,13 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
     INDEXER_KV,
     INDEXER_STATE,
     SWA_KV,
+    TAG_BY_ATTN_TYPE,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
+
+_ATTN_TYPE_BY_TAG = {tag: attn_type for attn_type, tag in TAG_BY_ATTN_TYPE.items()}
 
 
 def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
@@ -53,10 +56,10 @@ def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
     ksb = int(getattr(kv_cache, "kernel_seq_size_per_block", 0))
     if ksb <= 0:
         spb = int(getattr(kv_cache, "seq_size_per_block", 0))
-        grp = getattr(kv_cache, "group_region_names", None)
+        grp = getattr(kv_cache, "group_tags", None)
         raise RuntimeError(
             "DSV4 KVCache.kernel_seq_size_per_block is %d (expected >0). "
-            "seq_size_per_block=%d, group_region_names=%r." % (ksb, spb, grp)
+            "seq_size_per_block=%d, group_tags=%r." % (ksb, spb, grp)
         )
     return ksb
 
@@ -206,19 +209,21 @@ def build_metadata_eager(
     paged_tokens_per_block: Dict[int, int] = {}
     if paged_pool_specs:
         by_group = getattr(attn, "kv_cache_kernel_block_id_device_by_group", None)
-        group_region_names = (
-            getattr(kv_cache, "group_region_names", None)
+        group_tags = (
+            getattr(kv_cache, "group_tags", None)
             if kv_cache is not None
             else None
         )
-        if by_group is not None and len(by_group) > 0 and group_region_names:
+        if by_group is not None and len(by_group) > 0 and group_tags:
             # Walk the framework's group list: position IS the group id,
-            # entry IS the attn_type. Keep the group only if the decode
+            # entry IS the semantic tag. Keep the group only if the decode
             # impl asked for it via paged_pool_specs.
-            for group_id, attn_type_enum in enumerate(group_region_names):
+            for group_id, tag in enumerate(group_tags):
                 if group_id >= len(by_group):
                     continue
-                attn_type = int(attn_type_enum)
+                attn_type = _ATTN_TYPE_BY_TAG.get(str(tag))
+                if attn_type is None:
+                    continue
                 spec = paged_pool_specs.get(attn_type)
                 if spec is None:
                     continue

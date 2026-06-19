@@ -529,7 +529,7 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
                                   config_.layer_to_group_id,
                                   config_.kernelBlocksPerKvBlock(),
                                   config_.group_types,
-                                  config_.layer_region_to_group_id);
+                                  config_.layer_to_group_ids);
 
     CacheKeysType                 selected_keys;
     BlockDependenciesType         selected_dependencies;

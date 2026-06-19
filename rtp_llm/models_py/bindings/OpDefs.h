@@ -4,7 +4,9 @@
 #include <pybind11/stl.h>
 #include <pybind11/embed.h>
 #include <torch/extension.h>
+#include <algorithm>
 #include <cstdint>
+#include <map>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
@@ -29,7 +31,7 @@ struct LayerKVCache {
     int                        seq_size_per_block = 0;
     int                        layer_id           = -1;
     int                        group_id           = -1;
-    rtp_llm::KVCacheRegionName region_name        = rtp_llm::KVCacheRegionName::DEFAULT;
+    std::string                tag;
 };
 
 // Whole-model KV cache holding tensors for all layers.
@@ -48,16 +50,13 @@ struct KVCache {
 
     // Per-layer attention type (CacheGroupType::FULL or LINEAR).
     std::vector<rtp_llm::CacheGroupType>    layer_group_types;
-    std::vector<rtp_llm::KVCacheRegionName> group_region_names;
+    std::vector<rtp_llm::CacheGroupType>    group_types;
+    std::vector<std::string>                group_tags;
     std::vector<int>                        group_seq_size_per_block;
-    std::vector<std::vector<int>>           layer_region_to_group_id;
-    std::vector<std::vector<torch::Tensor>> kv_cache_base_by_layer_region;
-    std::vector<std::vector<torch::Tensor>> kv_scale_base_by_layer_region;
-
-    // Flat version of kv_cache_base_by_layer_region for pybind11 compatibility.
-    // Layout: [layer_0_type_0, layer_0_type_1, ..., layer_0_type_7, layer_1_type_0, ...]
-    // Size = layer_num * REGION_COUNT (8). Use region_name_count=8 to index.
-    std::vector<torch::Tensor> kv_cache_base_by_layer_region_flat;
+    std::vector<std::vector<int>>           layer_to_group_ids;
+    std::vector<std::map<std::string, int>> layer_tag_to_group_id;
+    std::vector<std::vector<torch::Tensor>> kv_cache_base_by_layer_group;
+    std::vector<std::vector<torch::Tensor>> kv_scale_base_by_layer_group;
 
     LayerKVCache getLayerCache(int idx) {
         LayerKVCache layer_cache;
@@ -123,13 +122,15 @@ struct KVCache {
                 }
             }
         }
-        const auto layer  = static_cast<size_t>(idx);
-        const auto region = static_cast<size_t>(rtp_llm::KVCacheRegionName::DEFAULT);
-        if (!layer_region_to_group_id.empty() && layer < layer_region_to_group_id.size()
-            && region < layer_region_to_group_id[layer].size()) {
-            layer_cache.group_id = layer_region_to_group_id[layer][region];
+        const auto layer = static_cast<size_t>(idx);
+        if (!layer_to_group_ids.empty() && layer < layer_to_group_ids.size()
+            && layer_to_group_ids[layer].size() == 1) {
+            layer_cache.group_id = layer_to_group_ids[layer].front();
         } else {
             layer_cache.group_id = 0;
+        }
+        if (layer_cache.group_id >= 0 && static_cast<size_t>(layer_cache.group_id) < group_tags.size()) {
+            layer_cache.tag = group_tags[static_cast<size_t>(layer_cache.group_id)];
         }
         return layer_cache;
     }
@@ -142,87 +143,87 @@ struct KVCache {
         return seq_size_per_block;
     }
 
-    LayerKVCache getLayerCache(int idx, rtp_llm::KVCacheRegionName region_name) {
-        if (region_name == rtp_llm::KVCacheRegionName::DEFAULT || kv_cache_base_by_layer_region.empty()) {
-            auto layer_cache        = getLayerCache(idx);
-            layer_cache.region_name = region_name;
-            return layer_cache;
-        }
-
+    LayerKVCache getLayerCacheByGroup(int idx, int gid) {
         const auto layer = static_cast<size_t>(idx);
-        const auto attn  = static_cast<size_t>(region_name);
-        if (idx < 0 || layer >= kv_cache_base_by_layer_region.size()) {
+        if (idx < 0 || layer >= kv_cache_base_by_layer_group.size()) {
             throw std::runtime_error("Invalid layer index: " + std::to_string(idx));
         }
-        if (attn >= kv_cache_base_by_layer_region[layer].size()) {
-            throw std::runtime_error("Invalid KV cache attention type: " + std::to_string(attn));
+        if (gid < 0 || static_cast<size_t>(gid) >= kv_cache_base_by_layer_group[layer].size()) {
+            throw std::runtime_error("Invalid KV cache group id: " + std::to_string(gid));
         }
-        if (!layer_region_to_group_id.empty()
-            && (layer >= layer_region_to_group_id.size() || attn >= layer_region_to_group_id[layer].size()
-                || layer_region_to_group_id[layer][attn] < 0)) {
-            throw std::runtime_error("Layer " + std::to_string(idx) + " does not own KV cache attention type "
-                                     + std::to_string(attn));
+        if (!layer_to_group_ids.empty()) {
+            if (layer >= layer_to_group_ids.size()
+                || std::find(layer_to_group_ids[layer].begin(), layer_to_group_ids[layer].end(), gid)
+                       == layer_to_group_ids[layer].end()) {
+                throw std::runtime_error("Layer " + std::to_string(idx) + " does not own KV cache group "
+                                         + std::to_string(gid));
+            }
         }
 
-        auto base = kv_cache_base_by_layer_region[layer][attn];
+        auto base = kv_cache_base_by_layer_group[layer][static_cast<size_t>(gid)];
         if (!base.defined()) {
-            throw std::runtime_error("Missing KV cache tensor for layer " + std::to_string(idx) + ", region name "
-                                     + std::to_string(attn));
+            throw std::runtime_error("Missing KV cache tensor for layer " + std::to_string(idx) + ", group "
+                                     + std::to_string(gid));
         }
 
         LayerKVCache layer_cache;
         layer_cache.layer_id      = idx;
-        layer_cache.group_id      = layer_region_to_group_id.empty() ? -1 : layer_region_to_group_id[layer][attn];
-        layer_cache.region_name   = region_name;
-        const bool is_full_region = !rtp_llm::isDsv4FixedRegion(region_name);
+        layer_cache.group_id      = gid;
+        if (static_cast<size_t>(gid) < group_tags.size()) {
+            layer_cache.tag = group_tags[static_cast<size_t>(gid)];
+        }
+        const bool is_full_group = gid >= 0 && static_cast<size_t>(gid) < group_types.size()
+                                       && group_types[static_cast<size_t>(gid)] == rtp_llm::CacheGroupType::FULL;
         layer_cache.seq_size_per_block =
-            is_full_region && kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block :
-                                                              groupSeqSizePerBlock(layer_cache.group_id);
+            is_full_group && kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block :
+                                                             groupSeqSizePerBlock(layer_cache.group_id);
         layer_cache.kv_cache_base = base;
-        if (!kv_scale_base_by_layer_region.empty() && layer < kv_scale_base_by_layer_region.size()
-            && attn < kv_scale_base_by_layer_region[layer].size()) {
-            layer_cache.kv_scale_base = kv_scale_base_by_layer_region[layer][attn];
+        if (!kv_scale_base_by_layer_group.empty() && layer < kv_scale_base_by_layer_group.size()
+            && static_cast<size_t>(gid) < kv_scale_base_by_layer_group[layer].size()) {
+            layer_cache.kv_scale_base = kv_scale_base_by_layer_group[layer][static_cast<size_t>(gid)];
         }
         return layer_cache;
     }
 
+    LayerKVCache getLayerCache(int idx, const std::string& tag) {
+        const auto layer = static_cast<size_t>(idx);
+        if (idx < 0 || layer >= layer_tag_to_group_id.size()) {
+            throw std::runtime_error("Invalid layer index for cache tag lookup: " + std::to_string(idx));
+        }
+        const auto it = layer_tag_to_group_id[layer].find(tag);
+        if (it == layer_tag_to_group_id[layer].end() || it->second < 0) {
+            throw std::runtime_error("Layer " + std::to_string(idx) + " does not own KV cache tag " + tag);
+        }
+        const int gid = it->second;
+        if (gid < 0 || static_cast<size_t>(gid) >= group_tags.size()) {
+            throw std::runtime_error("KV cache tag " + tag + " maps to invalid group " + std::to_string(gid));
+        }
+        return getLayerCacheByGroup(idx, gid);
+    }
+
     std::vector<LayerKVCache> getLayerCaches(int idx) {
-        if (layer_region_to_group_id.empty() || group_region_names.empty()) {
+        if (layer_to_group_ids.empty() || group_tags.empty()) {
             return {getLayerCache(idx)};
         }
         const auto layer = static_cast<size_t>(idx);
-        if (idx < 0 || layer >= layer_region_to_group_id.size()) {
+        if (idx < 0 || layer >= layer_to_group_ids.size()) {
             throw std::runtime_error("Invalid layer index: " + std::to_string(idx));
         }
 
         std::vector<LayerKVCache> layer_caches;
-        const auto&               layer_groups = layer_region_to_group_id[layer];
-        for (size_t gid = 0; gid < group_region_names.size(); ++gid) {
-            const auto region_name = group_region_names[gid];
-            const auto region      = static_cast<size_t>(region_name);
-            if (region >= layer_groups.size() || layer_groups[region] != static_cast<int>(gid)) {
-                continue;
-            }
-            layer_caches.push_back(getLayerCache(idx, region_name));
+        for (int gid : layer_to_group_ids[layer]) {
+            layer_caches.push_back(getLayerCacheByGroup(idx, gid));
         }
         return layer_caches;
     }
 
     // Return raw [total_blocks, stride_bytes] tensor for a specific pool,
     // without MHA reshape. Used by DSV4 gather/scatter which needs raw uint8 access.
-    torch::Tensor getRawPoolTensor(int layer_id, rtp_llm::KVCacheRegionName region_name) {
-        if (kv_cache_base_by_layer_region.empty()) {
-            throw std::runtime_error("kv_cache_base_by_layer_region is empty");
+    torch::Tensor getRawPoolTensor(int layer_id, const std::string& tag) {
+        if (kv_cache_base_by_layer_group.empty()) {
+            throw std::runtime_error("kv_cache_base_by_layer_group is empty");
         }
-        const auto layer = static_cast<size_t>(layer_id);
-        const auto attn  = static_cast<size_t>(region_name);
-        if (layer_id < 0 || layer >= kv_cache_base_by_layer_region.size()) {
-            throw std::runtime_error("Invalid layer index: " + std::to_string(layer_id));
-        }
-        if (attn >= kv_cache_base_by_layer_region[layer].size()) {
-            throw std::runtime_error("Invalid region name: " + std::to_string(attn));
-        }
-        return kv_cache_base_by_layer_region[layer][attn];
+        return getLayerCache(layer_id, tag).kv_cache_base;
     }
 };
 
@@ -239,7 +240,6 @@ struct PyCacheStoreInputs {
     torch::Tensor            request_id;
     torch::Tensor            request_pd_separation;
     torch::Tensor            kv_cache_layer_to_group;
-    torch::Tensor            kv_cache_layer_region_to_group;
     torch::Tensor            kv_cache_group_types;
     std::vector<std::string> cache_keys;  // [context_batch_size]
     // Pinned-host mirrors of device length tensors for cache store consumption.

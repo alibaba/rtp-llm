@@ -26,10 +26,8 @@ struct CacheConfig {
     std::vector<CacheGroupType>    group_types;    // for hybrid attention
     std::vector<CacheGroupPolicy>  group_policies;
     std::vector<CacheGroupType>    layer_group_types;
-    std::vector<KVCacheRegionName> group_region_names;        // group id -> cache identity
-    std::vector<std::string>       group_tags;                // group id -> semantic cache tag
-    std::vector<std::vector<int>>  layer_to_group_ids;        // layer id -> all group ids needed by the layer
-    std::vector<std::vector<int>>  layer_region_to_group_id;  // layer id -> region name id -> group id
+    std::vector<std::string>       group_tags;          // group id -> semantic cache tag
+    std::vector<std::vector<int>>  layer_to_group_ids;  // layer id -> all group ids needed by the layer
     std::vector<std::map<std::string, int>> layer_tag_to_group_id;  // layer id -> semantic tag -> group id
     std::vector<int>               layer_to_group_id;
     std::vector<int>               layer_to_block_stride_bytes;
@@ -142,24 +140,29 @@ struct CacheConfig {
         return group_ids;
     }
 
-    static CacheGroupType inferGroupType(const KVCacheSpecPtr& spec, KVCacheRegionName region_name) {
+    static CacheGroupType inferGroupType(const KVCacheSpecPtr& spec) {
         if (spec && spec->lifecycle != CacheGroupType::FULL) {
             return spec->lifecycle;
-        }
-        if (region_name == KVCacheRegionName::SWA_KV || isStateRegion(region_name)) {
-            return CacheGroupType::SWA;
         }
         return spec->type == KVCacheSpecType::LinearAttention ? CacheGroupType::LINEAR : CacheGroupType::FULL;
     }
 
-    static KVCacheRegionName inferRegionName(const KVCacheSpecPtr& spec) {
-        return spec ? spec->regionName() : KVCacheRegionName::DEFAULT;
+    static CacheGroupPolicy cacheGroupPolicyForSpec(const KVCacheSpecPtr& spec, CacheGroupType group_type) {
+        CacheGroupPolicy policy = defaultCacheGroupPolicy(group_type);
+        if (spec && spec->is_state_cache) {
+            policy.evict_policy = CacheEvictPolicy::INDEPENDENT;
+        }
+        if (spec && spec->skip_prefix_reuse) {
+            policy.reuse_policy         = CacheReusePolicy::NON_REUSABLE;
+            policy.active_tail_blocks   = 1;
+            policy.validate_tail_blocks = false;
+        }
+        return policy;
     }
 
     void fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&             specs,
                           const std::vector<std::vector<int>>&          layers_by_group,
                           const std::vector<CacheGroupType>&            types,
-                          const std::vector<KVCacheRegionName>&         regions = {},
                           const std::vector<std::string>&               tags    = {}) {
         const size_t group_num = specs.size();
         RTP_LLM_CHECK_WITH_INFO(group_num > 0, "CacheConfig::fromGroupedSpecs requires at least one cache spec");
@@ -170,10 +173,6 @@ struct CacheConfig {
         RTP_LLM_CHECK_WITH_INFO(types.size() == group_num,
                                 "CacheConfig::fromGroupedSpecs group type count %zu != spec count %zu",
                                 types.size(),
-                                group_num);
-        RTP_LLM_CHECK_WITH_INFO(regions.empty() || regions.size() == group_num,
-                                "CacheConfig::fromGroupedSpecs region count %zu != spec count %zu",
-                                regions.size(),
                                 group_num);
         RTP_LLM_CHECK_WITH_INFO(tags.empty() || tags.size() == group_num,
                                 "CacheConfig::fromGroupedSpecs tag count %zu != spec count %zu",
@@ -186,7 +185,6 @@ struct CacheConfig {
         layer_ids.clear();
         group_types.clear();
         group_policies.clear();
-        group_region_names.clear();
         group_tags.clear();
 
         cache_specs.reserve(group_num);
@@ -194,27 +192,17 @@ struct CacheConfig {
         layer_ids.reserve(group_num);
         group_types.reserve(group_num);
         group_policies.reserve(group_num);
-        group_region_names.reserve(group_num);
         group_tags.reserve(group_num);
 
         layer_to_group_id.assign(layer_num, -1);
         layer_to_group_ids.assign(layer_num, std::vector<int>());
         layer_group_types.assign(layer_num, CacheGroupType::FULL);
 
-        const size_t region_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
-        layer_region_to_group_id.assign(layer_num, std::vector<int>(region_count, -1));
         layer_tag_to_group_id.assign(layer_num, std::map<std::string, int>());
 
         for (size_t gid = 0; gid < group_num; ++gid) {
             const auto& spec = specs[gid];
             RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheConfig::fromGroupedSpecs got null spec at group %zu", gid);
-
-            const auto region_name = regions.empty() ? inferRegionName(spec) : regions[gid];
-            const auto region_id   = static_cast<size_t>(region_name);
-            RTP_LLM_CHECK_WITH_INFO(region_id < region_count,
-                                    "CacheConfig::fromGroupedSpecs invalid region id %zu for group %zu",
-                                    region_id,
-                                    gid);
 
             std::string tag = tags.empty() ? spec->tag : tags[gid];
             if (tag.empty() && group_num == 1) {
@@ -231,8 +219,7 @@ struct CacheConfig {
             global_layer_ids.push_back(layers_by_group[gid]);
             layer_ids.push_back(layers_by_group[gid]);
             group_types.push_back(types[gid]);
-            group_region_names.push_back(region_name);
-            group_policies.push_back(cacheGroupPolicyForLegacyRegion(types[gid], region_name));
+            group_policies.push_back(cacheGroupPolicyForSpec(stored_spec, types[gid]));
             group_tags.push_back(tag);
 
             std::vector<bool> seen_layer(static_cast<size_t>(layer_num), false);
@@ -250,27 +237,24 @@ struct CacheConfig {
                 seen_layer[layer] = true;
 
                 layer_to_group_ids[layer].push_back(static_cast<int>(gid));
-                const int current_region_gid = layer_region_to_group_id[layer][region_id];
-                RTP_LLM_CHECK_WITH_INFO(current_region_gid < 0 || current_region_gid == static_cast<int>(gid),
-                                        "CacheConfig::fromGroupedSpecs layer %d region %zu maps to both group %d and %zu",
+                const auto current_tag_gid = layer_tag_to_group_id[layer].find(tag);
+                RTP_LLM_CHECK_WITH_INFO(current_tag_gid == layer_tag_to_group_id[layer].end()
+                                            || current_tag_gid->second == static_cast<int>(gid),
+                                        "CacheConfig::fromGroupedSpecs layer %d tag %s maps to both group %d and %zu",
                                         layer_id,
-                                        region_id,
-                                        current_region_gid,
+                                        tag.c_str(),
+                                        current_tag_gid == layer_tag_to_group_id[layer].end() ? -1 :
+                                                                                                  current_tag_gid->second,
                                         gid);
-                layer_region_to_group_id[layer][region_id] = static_cast<int>(gid);
-                layer_tag_to_group_id[layer][tag]          = static_cast<int>(gid);
-                if (region_name == KVCacheRegionName::DEFAULT) {
+                layer_tag_to_group_id[layer][tag] = static_cast<int>(gid);
+                if (tag == "default") {
                     layer_to_group_id[layer] = static_cast<int>(gid);
                     layer_group_types[layer] = types[gid];
                 }
             }
         }
 
-        const auto swa_region_id = static_cast<size_t>(KVCacheRegionName::SWA_KV);
         for (size_t layer = 0; layer < static_cast<size_t>(layer_num); ++layer) {
-            if (layer_to_group_id[layer] < 0 && swa_region_id < layer_region_to_group_id[layer].size()) {
-                layer_to_group_id[layer] = layer_region_to_group_id[layer][swa_region_id];
-            }
             if (layer_to_group_id[layer] < 0 && !layer_to_group_ids[layer].empty()) {
                 layer_to_group_id[layer] = layer_to_group_ids[layer].back();
             }
@@ -294,7 +278,6 @@ struct CacheConfig {
         std::vector<KVCacheSpecPtr> specs;
         std::vector<std::vector<int>> layers_by_group;
         std::vector<CacheGroupType> types;
-        std::vector<KVCacheRegionName> regions;
         std::vector<std::string> tags;
         std::map<std::string, size_t> group_key_to_group;
 
@@ -336,9 +319,7 @@ struct CacheConfig {
                     group_key_to_group.emplace(group_key.str(), gid);
                     specs.push_back(spec);
                     layers_by_group.emplace_back();
-                    const auto region_name = inferRegionName(spec);
-                    regions.push_back(region_name);
-                    types.push_back(inferGroupType(spec, region_name));
+                    types.push_back(inferGroupType(spec));
                     tags.push_back(tag);
                     group_it = group_key_to_group.find(group_key.str());
                 }
@@ -346,7 +327,7 @@ struct CacheConfig {
             }
         }
 
-        fromGroupedSpecs(specs, layers_by_group, types, regions, tags);
+        fromGroupedSpecs(specs, layers_by_group, types, tags);
     }
 
     void finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
@@ -449,15 +430,6 @@ struct CacheConfig {
         for (size_t i = 0; i < group_types.size(); ++i) {
             os << static_cast<int>(group_types[i]);
             if (i + 1 < group_types.size()) {
-                os << ",";
-            }
-        }
-        os << "]\n";
-        OUTPUT_FIELD_EXPR("group_region_names.size()", group_region_names.size());
-        os << indent1 << "group_region_names=[";
-        for (size_t i = 0; i < group_region_names.size(); ++i) {
-            os << static_cast<int>(group_region_names[i]);
-            if (i + 1 < group_region_names.size()) {
                 os << ",";
             }
         }

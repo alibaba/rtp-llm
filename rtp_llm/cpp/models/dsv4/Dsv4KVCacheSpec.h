@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <numeric>
+#include <utility>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
@@ -33,15 +34,14 @@ inline size_t alignDsv4Fp8KvBlockBytes(size_t natural, size_t extra_multiple = 1
 // FP8 mode: 584B per KV entry, 132B per Indexer entry — see constants above.
 // Each entry contains the full KV for one compressed token (one KV head).
 struct DSV4KVSpec: public OpaqueKVCacheSpec {
-    KVCacheRegionName cache_type = KVCacheRegionName::DEFAULT;
-    uint32_t          compression_ratio           = 1;
+    uint32_t compression_ratio = 1;
 
     DSV4KVSpec() {
         type      = KVCacheSpecType::OpaqueKV;
         lifecycle = CacheGroupType::FULL;
     }
 
-    DSV4KVSpec(KVCacheRegionName cache_region,
+    DSV4KVSpec(std::string       cache_tag,
                uint32_t          entry_elements,
                uint32_t          block_entries,
                DataType          storage_dtype,
@@ -49,7 +49,7 @@ struct DSV4KVSpec: public OpaqueKVCacheSpec {
                uint32_t          cache_compression_ratio = 1,
                size_t            block_size_alignment    = 0)
         : DSV4KVSpec() {
-        cache_type        = cache_region;
+        tag               = std::move(cache_tag);
         entry_elems       = entry_elements;
         entries_per_block = block_entries;
         compression_ratio = cache_compression_ratio;
@@ -66,15 +66,10 @@ struct DSV4KVSpec: public OpaqueKVCacheSpec {
         return std::make_shared<DSV4KVSpec>(*this);
     }
 
-    KVCacheRegionName regionName() const override {
-        return cache_type;
-    }
-
 protected:
     std::string fingerprintExtra() const override {
         std::ostringstream os;
-        os << ";dsv4kv.cache_type=" << static_cast<int>(cache_type)
-           << ";dsv4kv.compression_ratio=" << compression_ratio
+        os << ";dsv4kv.compression_ratio=" << compression_ratio
            << opaqueFingerprintExtra("dsv4kv");
         return os.str();
     }
@@ -84,7 +79,6 @@ public:
         std::ostringstream os;
         os << std::string(indent, ' ') << "DSV4KVSpec{\n";
         os << commonDebugString(indent);
-        os << std::string(indent + 2, ' ') << "cache_type=" << static_cast<int>(cache_type) << "\n";
         os << std::string(indent + 2, ' ') << "entry_elems=" << entry_elems << "\n";
         os << std::string(indent + 2, ' ') << "entries_per_block=" << entries_per_block << "\n";
         os << std::string(indent + 2, ' ') << "compression_ratio=" << compression_ratio << "\n";
@@ -100,25 +94,23 @@ public:
 // prefix cache. The K/V split is a placeholder for state pools because state is
 // an opaque blob.
 struct DSV4StateSpec: public OpaqueKVCacheSpec {
-    KVCacheRegionName cache_type = KVCacheRegionName::DEFAULT;
-    uint32_t&         state_dim;
+    uint32_t& state_dim;
 
     DSV4StateSpec(): state_dim(entry_elems) {
         type      = KVCacheSpecType::OpaqueState;
         lifecycle = CacheGroupType::SWA;
     }
 
-    DSV4StateSpec(const DSV4StateSpec& other): OpaqueKVCacheSpec(other), cache_type(other.cache_type), state_dim(entry_elems) {}
+    DSV4StateSpec(const DSV4StateSpec& other): OpaqueKVCacheSpec(other), state_dim(entry_elems) {}
 
     DSV4StateSpec& operator=(const DSV4StateSpec& other) {
         if (this != &other) {
             OpaqueKVCacheSpec::operator=(other);
-            cache_type = other.cache_type;
         }
         return *this;
     }
 
-    DSV4StateSpec(KVCacheRegionName cache_region,
+    DSV4StateSpec(std::string       cache_tag,
                   uint32_t          state_elements,
                   uint32_t          block_entries,
                   DataType          storage_dtype,
@@ -129,7 +121,7 @@ struct DSV4StateSpec: public OpaqueKVCacheSpec {
                   bool              state_cache                    = true,
                   bool              skip_reuse                     = false)
         : DSV4StateSpec() {
-        cache_type        = cache_region;
+        tag               = std::move(cache_tag);
         state_dim         = state_elements;
         entries_per_block = block_entries;
         store_dtype               = storage_dtype;
@@ -149,14 +141,10 @@ struct DSV4StateSpec: public OpaqueKVCacheSpec {
         return std::make_shared<DSV4StateSpec>(*this);
     }
 
-    KVCacheRegionName regionName() const override {
-        return cache_type;
-    }
-
 protected:
     std::string fingerprintExtra() const override {
         std::ostringstream os;
-        os << ";dsv4state.cache_type=" << static_cast<int>(cache_type) << opaqueFingerprintExtra("dsv4state");
+        os << opaqueFingerprintExtra("dsv4state");
         return os.str();
     }
 
@@ -165,7 +153,6 @@ public:
         std::ostringstream os;
         os << std::string(indent, ' ') << "DSV4StateSpec{\n";
         os << commonDebugString(indent);
-        os << std::string(indent + 2, ' ') << "cache_type=" << static_cast<int>(cache_type) << "\n";
         os << std::string(indent + 2, ' ') << "state_dim=" << state_dim << "\n";
         os << std::string(indent + 2, ' ') << "entries_per_block=" << entries_per_block << "\n";
         os << std::string(indent + 2, ' ') << "block_size_bytes_override=" << block_size_bytes_override << "\n";

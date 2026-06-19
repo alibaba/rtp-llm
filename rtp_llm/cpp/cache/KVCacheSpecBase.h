@@ -106,10 +106,6 @@ struct KVCacheSpec {
 
     virtual KVCacheSpecPtr clone() const = 0;
 
-    virtual KVCacheRegionName regionName() const {
-        return KVCacheRegionName::DEFAULT;
-    }
-
     std::string fingerprint() const {
         std::ostringstream os;
         os << "tag=" << tag << ";type=" << static_cast<int>(type) << ";dtype=" << static_cast<int>(dtype)

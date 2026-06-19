@@ -210,30 +210,17 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         }
 
         kv_cache.layer_group_types             = layout.layer_group_types;
-        kv_cache.group_region_names            = layout.group_region_names;
+        kv_cache.group_types                   = layout.group_types;
+        kv_cache.group_tags                    = layout.group_tags;
         kv_cache.group_seq_size_per_block.clear();
         kv_cache.group_seq_size_per_block.reserve(layout.group_seq_size_per_block.size());
         for (auto value : layout.group_seq_size_per_block) {
             kv_cache.group_seq_size_per_block.push_back(static_cast<int>(value));
         }
-        kv_cache.layer_region_to_group_id      = layout.layer_region_to_group_id;
-        kv_cache.kv_cache_base_by_layer_region = layout.layers_to_kv_buffer_ptrs_by_attn;
-        kv_cache.kv_scale_base_by_layer_region = layout.layers_to_scale_buffer_ptrs_by_attn;
-
-        // Flatten by_attn into a 1D vector for pybind11 compatibility
-        // Layout: [layer_0_type_0, ..., layer_0_type_7, layer_1_type_0, ...]
-        {
-            const size_t attn_count = static_cast<size_t>(rtp_llm::KVCacheRegionName::REGION_COUNT);
-            const size_t num_layers = layout.layers_to_kv_buffer_ptrs_by_attn.size();
-            kv_cache.kv_cache_base_by_layer_region_flat.resize(num_layers * attn_count);
-            for (size_t l = 0; l < num_layers; ++l) {
-                for (size_t a = 0; a < attn_count && a < layout.layers_to_kv_buffer_ptrs_by_attn[l].size(); ++a) {
-                    auto& t = layout.layers_to_kv_buffer_ptrs_by_attn[l][a];
-                    kv_cache.kv_cache_base_by_layer_region_flat[l * attn_count + a] =
-                        t.defined() ? t : torch::empty({0});
-                }
-            }
-        }
+        kv_cache.layer_to_group_ids            = layout.layer_to_group_ids;
+        kv_cache.layer_tag_to_group_id         = layout.layer_tag_to_group_id;
+        kv_cache.kv_cache_base_by_layer_group  = layout.layers_to_kv_buffer_ptrs_by_group;
+        kv_cache.kv_scale_base_by_layer_group  = layout.layers_to_scale_buffer_ptrs_by_group;
 
         init_resources.kv_cache = kv_cache;
     }

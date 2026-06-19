@@ -161,7 +161,6 @@ void appendGroup(CacheConfig&            config,
                  const std::vector<int>& layer_ids,
                  CacheGroupType          group_type,
                  KVCacheSpecPtr          spec,
-                 KVCacheRegionName       region_name = KVCacheRegionName::DEFAULT,
                  std::string             tag = "") {
     if (layer_ids.empty()) {
         return;
@@ -173,8 +172,7 @@ void appendGroup(CacheConfig&            config,
     config.layer_ids.push_back(layer_ids);
     config.cache_specs.push_back(spec);
     config.group_types.push_back(group_type);
-    config.group_region_names.push_back(region_name);
-    config.group_policies.push_back(cacheGroupPolicyForLegacyRegion(group_type, region_name));
+    config.group_policies.push_back(CacheConfig::cacheGroupPolicyForSpec(spec, group_type));
     config.group_tags.push_back(std::move(tag));
 }
 
@@ -260,7 +258,6 @@ void populateHybridAttentionGroups(CacheConfig&             config,
     config.layer_ids.clear();
     config.group_types.clear();
     config.group_policies.clear();
-    config.group_region_names.clear();
     config.group_tags.clear();
 
     auto full_spec   = getHybridSpecByTag(model_config, "full");
@@ -326,10 +323,9 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     auto specs           = config.cache_specs;
     auto layers_by_group = config.layer_ids;
     auto types           = config.group_types;
-    auto regions         = config.group_region_names;
     auto tags            = config.group_tags;
     auto policies        = config.group_policies;
-    config.fromGroupedSpecs(specs, layers_by_group, types, regions, tags);
+    config.fromGroupedSpecs(specs, layers_by_group, types, tags);
     if (policies.size() == config.group_policies.size()) {
         config.group_policies = std::move(policies);
     }

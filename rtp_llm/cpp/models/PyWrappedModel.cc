@@ -28,32 +28,6 @@ using namespace std;
 
 namespace rtp_llm {
 
-static torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayout>& layout_opt) {
-    if (!layout_opt.has_value() || layout_opt->layer_region_to_group_id.empty()) {
-        return torch::Tensor();
-    }
-    const auto&   mapping    = layout_opt->layer_region_to_group_id;
-    const int64_t layer_num  = static_cast<int64_t>(mapping.size());
-    int64_t       region_num = 0;
-    for (const auto& row : mapping) {
-        region_num = std::max<int64_t>(region_num, static_cast<int64_t>(row.size()));
-    }
-    if (layer_num <= 0 || region_num <= 0) {
-        return torch::Tensor();
-    }
-
-    auto tensor =
-        torch::full({layer_num, region_num}, -1, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
-    auto* data = tensor.data_ptr<int32_t>();
-    for (int64_t layer = 0; layer < layer_num; ++layer) {
-        for (int64_t region = 0; region < static_cast<int64_t>(mapping[static_cast<size_t>(layer)].size()); ++region) {
-            data[layer * region_num + region] =
-                static_cast<int32_t>(mapping[static_cast<size_t>(layer)][static_cast<size_t>(region)]);
-        }
-    }
-    return tensor;
-}
-
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
     if (tensor.device().is_cuda()) {
         return tensor;
@@ -441,7 +415,6 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
 
         torch::Tensor kv_cache_layer_to_group =
             inputs.kv_cache_layer_to_group.defined() ? inputs.kv_cache_layer_to_group : torch::Tensor();
-        torch::Tensor kv_cache_layer_region_to_group = layerRegionToGroupTensor(kv_cache_layer_layout_);
         torch::Tensor kv_cache_group_types =
             inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types : torch::Tensor();
         PyCacheStoreInputs cache_store_inputs{
@@ -450,7 +423,6 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             inputs.request_id,
             inputs.request_pd_separation,
             kv_cache_layer_to_group,
-            kv_cache_layer_region_to_group,
             kv_cache_group_types,
             transVectorToString(cache_keys_vec),
             input_lengths_host,

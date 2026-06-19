@@ -10,7 +10,6 @@ from . import rtp_llm_ops
 __all__: list[str] = [
     "BertEmbeddingInputs",
     "CacheGroupType",
-    "KVCacheRegionName",
     "LayerKVCache",
     "KVCache",
     "ParamsBase",
@@ -116,44 +115,6 @@ class CacheGroupType:
     @property
     def value(self) -> int: ...
 
-class KVCacheRegionName:
-    """
-    Members:
-
-      DEFAULT
-      CSA_KV
-      HCA_KV
-      INDEXER_KV
-      INDEXER_STATE
-      CSA_STATE
-      HCA_STATE
-      SWA_KV
-    """
-
-    DEFAULT: typing.ClassVar[KVCacheRegionName]
-    CSA_KV: typing.ClassVar[KVCacheRegionName]
-    HCA_KV: typing.ClassVar[KVCacheRegionName]
-    INDEXER_KV: typing.ClassVar[KVCacheRegionName]
-    INDEXER_STATE: typing.ClassVar[KVCacheRegionName]
-    CSA_STATE: typing.ClassVar[KVCacheRegionName]
-    HCA_STATE: typing.ClassVar[KVCacheRegionName]
-    SWA_KV: typing.ClassVar[KVCacheRegionName]
-    __members__: typing.ClassVar[dict[str, KVCacheRegionName]]
-    def __eq__(self, other: typing.Any) -> bool: ...
-    def __getstate__(self) -> int: ...
-    def __hash__(self) -> int: ...
-    def __index__(self) -> int: ...
-    def __init__(self, value: int) -> None: ...
-    def __int__(self) -> int: ...
-    def __ne__(self, other: typing.Any) -> bool: ...
-    def __repr__(self) -> str: ...
-    def __setstate__(self, state: int) -> None: ...
-    def __str__(self) -> str: ...
-    @property
-    def name(self) -> str: ...
-    @property
-    def value(self) -> int: ...
-
 class LayerKVCache:
     """Per-layer KV cache view. Returned by KVCache.get_layer_cache()."""
 
@@ -187,9 +148,15 @@ class LayerKVCache:
         """
 
     @property
-    def region_name(self) -> KVCacheRegionName:
+    def group_id(self) -> int:
         """
-        KV cache attention type
+        KV cache group id
+        """
+
+    @property
+    def tag(self) -> str:
+        """
+        KV cache semantic tag
         """
 
 class KVCache:
@@ -205,20 +172,25 @@ class KVCache:
     kv_lora_rank: int
     rope_head_dim: int
     layer_group_types: list[CacheGroupType]
-    group_region_names: list[KVCacheRegionName]
-    layer_region_to_group_id: list[list[int]]
-    kv_cache_base_by_layer_region: list[list[torch.Tensor]]
-    kv_cache_base_by_layer_region_flat: list[torch.Tensor]
-    kv_scale_base_by_layer_region: list[list[torch.Tensor]]
+    group_types: list[CacheGroupType]
+    group_tags: list[str]
+    group_seq_size_per_block: list[int]
+    layer_to_group_ids: list[list[int]]
+    layer_tag_to_group_id: list[dict[str, int]]
+    kv_cache_base_by_layer_group: list[list[torch.Tensor]]
+    kv_scale_base_by_layer_group: list[list[torch.Tensor]]
     def __init__(self) -> None: ...
     @typing.overload
     def get_layer_cache(self, arg0: int) -> LayerKVCache:
         """Return the legacy/default per-layer LayerKVCache for the given global layer id."""
         ...
     @typing.overload
-    def get_layer_cache(self, arg0: int, arg1: KVCacheRegionName) -> LayerKVCache:
-        """Return a raw per-layer LayerKVCache for the given global layer id and KV cache attention type."""
+    def get_layer_cache(self, arg0: int, arg1: str) -> LayerKVCache:
+        """Return a raw per-layer LayerKVCache for the given global layer id and semantic KV cache tag."""
         ...
+    def get_layer_cache_by_group(self, arg0: int, arg1: int) -> LayerKVCache: ...
+    def get_layer_caches(self, arg0: int) -> list[LayerKVCache]: ...
+    def get_raw_pool_tensor(self, arg0: int, arg1: str) -> torch.Tensor: ...
 
 class ParamsBase:
     def __init__(self) -> None: ...

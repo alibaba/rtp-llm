@@ -20,8 +20,7 @@ std::vector<size_t> blockPositionsForCacheTransfer(size_t         block_num,
                                                    bool           use_hybrid,
                                                    CacheGroupType group_type,
                                                    bool           hybrid_full_from_begin) {
-    auto capability =
-        cacheGroupTransferCapability(group_type, cacheGroupPolicyForLegacyRegion(group_type, KVCacheRegionName::DEFAULT));
+    auto capability = cacheGroupTransferCapability(group_type, defaultCacheGroupPolicy(group_type));
     return blockPositionsForCacheTransfer(
         block_num, reuse_block_size, use_hybrid, capability, hybrid_full_from_begin);
 }
@@ -54,8 +53,7 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_l
                                                           CacheGroupType group_type,
                                                           int            cp_rank,
                                                           int            cp_size) {
-    auto capability =
-        cacheGroupTransferCapability(group_type, cacheGroupPolicyForLegacyRegion(group_type, KVCacheRegionName::DEFAULT));
+    auto capability = cacheGroupTransferCapability(group_type, defaultCacheGroupPolicy(group_type));
     return buildCacheStoreBlockPlan(total_logical_blocks, reuse_block_size, use_hybrid, capability, cp_rank, cp_size);
 }
 
@@ -105,10 +103,10 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t                
     return plan;
 }
 
-std::string layerRegionCacheTransferKey(size_t request_id, size_t layer_id, KVCacheRegionName region_name) {
+std::string layerTagCacheTransferKey(size_t request_id, size_t layer_id, const std::string& tag) {
     auto key = std::to_string(request_id) + "-" + std::to_string(layer_id);
-    if (region_name != KVCacheRegionName::DEFAULT) {
-        key += "-" + std::to_string(static_cast<int>(region_name));
+    if (!tag.empty() && tag != "default") {
+        key += "-tag-" + tag;
     }
     return key;
 }

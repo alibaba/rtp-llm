@@ -68,10 +68,10 @@ public:
 
 private:
     struct LayerRegionSlot {
-        int               layer_id{-1};
-        KVCacheRegionName region_name{KVCacheRegionName::DEFAULT};
-        int               group_id{-1};
-        size_t            stride_bytes{0};
+        int         layer_id{-1};
+        std::string tag;
+        int         group_id{-1};
+        size_t      stride_bytes{0};
     };
     struct CopyInfoPerKey {
         CacheKeyType              cache_key{0};
@@ -165,6 +165,7 @@ private:
                                                    const std::vector<LayerRegionSlot>& slots,
                                                    size_t                              key_index) const;
     bool                         usePrefixTreeMemoryCache() const;
+    CacheGroupPolicy             groupPolicyForSlot(const LayerRegionSlot& slot) const;
     CacheBlockKind               kindForSlot(const LayerRegionSlot& slot) const;
     bool                         kindRequiredAt(const LayerAttnBlockIds&            layer_attn_block_ids,
                                                 const std::vector<LayerRegionSlot>& slots,

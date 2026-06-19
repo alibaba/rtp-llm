@@ -32,7 +32,6 @@ struct DSV4LayerSets {
 
 struct DSV4PoolDesc {
     std::string             tag;
-    KVCacheRegionName       region_name;
     const std::vector<int>* layer_ids;
     uint32_t                entry_elems;
     uint32_t                entries_per_block;
@@ -46,19 +45,18 @@ struct DSV4PoolDesc {
 };
 
 struct ExpectedDSV4Spec {
-    const char*       tag;
-    KVCacheRegionName region_name;
-    bool              is_paged;
+    const char* tag;
+    bool        is_paged;
 };
 
 constexpr std::array<ExpectedDSV4Spec, kDsv4PoolNum> kExpectedDsv4Specs = {
-    ExpectedDSV4Spec{"csa_kv", KVCacheRegionName::CSA_KV, true},
-    ExpectedDSV4Spec{"hca_kv", KVCacheRegionName::HCA_KV, true},
-    ExpectedDSV4Spec{"indexer_kv", KVCacheRegionName::INDEXER_KV, true},
-    ExpectedDSV4Spec{"indexer_state", KVCacheRegionName::INDEXER_STATE, false},
-    ExpectedDSV4Spec{"csa_state", KVCacheRegionName::CSA_STATE, false},
-    ExpectedDSV4Spec{"hca_state", KVCacheRegionName::HCA_STATE, false},
-    ExpectedDSV4Spec{"swa_kv", KVCacheRegionName::SWA_KV, false},
+    ExpectedDSV4Spec{"csa_kv", true},
+    ExpectedDSV4Spec{"hca_kv", true},
+    ExpectedDSV4Spec{"indexer_kv", true},
+    ExpectedDSV4Spec{"indexer_state", false},
+    ExpectedDSV4Spec{"csa_state", false},
+    ExpectedDSV4Spec{"hca_state", false},
+    ExpectedDSV4Spec{"swa_kv", false},
 };
 
 using DSV4SpecMap = std::map<std::string, KVCacheSpecPtr>;
@@ -105,7 +103,7 @@ bool isPrefillCpSliced(const ParallelismConfig& parallelism_config) {
 
 uint32_t maybeAdjustFixedEntriesForCpSharding(uint32_t                 entries,
                                               const ParallelismConfig& parallelism_config,
-                                              KVCacheRegionName        region_name) {
+                                              const char*              tag) {
     const auto cp_size = fixedRegionCpSize(parallelism_config);
     if (cp_size <= 1) {
         return entries;
@@ -116,10 +114,9 @@ uint32_t maybeAdjustFixedEntriesForCpSharding(uint32_t                 entries,
     const auto ring_capacity_entries = alignUpToMultiple(entries, cp_size);
     const bool prefill_sliced        = isPrefillCpSliced(parallelism_config);
     const auto entries_per_block     = prefill_sliced ? ring_capacity_entries / cp_size : ring_capacity_entries;
-    RTP_LLM_LOG_INFO("DSV4 fixed/SWA CP sharding region=%s(%d) min_entries=%u ring_capacity_entries=%u "
+    RTP_LLM_LOG_INFO("DSV4 fixed/SWA CP sharding tag=%s min_entries=%u ring_capacity_entries=%u "
                      "entries_per_block=%u cp_size=%u prefill_sliced=%d expanded=%d role=%d",
-                     cacheRegionName(region_name),
-                     static_cast<int>(region_name),
+                     tag,
                      entries,
                      ring_capacity_entries,
                      entries_per_block,
@@ -385,17 +382,15 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
                                              const ParallelismConfig& parallelism_config,
                                              int                      gen_num_per_cycle) {
     const uint32_t csa_state_eb =
-        maybeAdjustFixedEntriesForCpSharding(computeStateRing(kCsaCompressRatio, kCsaOverlap, gen_num_per_cycle),
-                                             parallelism_config,
-                                             KVCacheRegionName::CSA_STATE);
+        maybeAdjustFixedEntriesForCpSharding(
+            computeStateRing(kCsaCompressRatio, kCsaOverlap, gen_num_per_cycle), parallelism_config, "csa_state");
     const uint32_t hca_state_eb =
-        maybeAdjustFixedEntriesForCpSharding(computeStateRing(kHcaCompressRatio, kHcaOverlap, gen_num_per_cycle),
-                                             parallelism_config,
-                                             KVCacheRegionName::HCA_STATE);
+        maybeAdjustFixedEntriesForCpSharding(
+            computeStateRing(kHcaCompressRatio, kHcaOverlap, gen_num_per_cycle), parallelism_config, "hca_state");
     const uint32_t indexer_state_eb = maybeAdjustFixedEntriesForCpSharding(
         computeStateRing(kIndexerCompressRatio, kIndexerOverlap, gen_num_per_cycle),
         parallelism_config,
-        KVCacheRegionName::INDEXER_STATE);
+        "indexer_state");
     // SWA_KV ring = window + MTP draft slack, sized like the HCA state ring.
     // Without the +gen_num_per_cycle slack, a decode step's later draft writes
     // wrap onto ring slots still inside earlier tokens' SWA window -> MTP garble.
@@ -409,9 +404,7 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
     const uint32_t fixed_cp_size = fixedRegionCpSize(parallelism_config);
     const uint32_t fixed_tokens_per_block =
         fixed_cp_size > 1 ? physical_tokens_per_block * fixed_cp_size : physical_tokens_per_block;
-    auto paged_desc = [&](const char* tag,
-                           KVCacheRegionName region,
-                           const std::vector<int>* layers) -> DSV4PoolDesc {
+    auto paged_desc = [&](const char* tag, const std::vector<int>* layers) -> DSV4PoolDesc {
         const auto& decl             = specForTag(spec_decls, tag);
         const auto  compression_ratio = dsv4SpecCompressionRatio(decl);
         const auto  entry_elems       = dsv4SpecEntryElems(decl);
@@ -422,7 +415,6 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
                                 compression_ratio,
                                 kernel_tokens_per_block);
         return {tag,
-                region,
                 layers,
                 entry_elems,
                 kernel_tokens_per_block / compression_ratio,
@@ -436,7 +428,6 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
                 0};
     };
     auto fixed_desc = [&](const char* tag,
-                          KVCacheRegionName region,
                           const std::vector<int>* layers,
                           uint32_t entries_per_block,
                           uint32_t tokens_per_block,
@@ -446,7 +437,6 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
         const auto  alignment   = dsv4SpecBlockSizeBytesAlignment(decl);
         const auto  min_entries = dsv4SpecBlockAlignmentMinEntries(decl);
         return {tag,
-                region,
                 layers,
                 entry_elems,
                 entries_per_block,
@@ -456,29 +446,27 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
                 false,
                 block_size_bytes_override,
                 alignment > 0 ? alignment :
-                                (region == KVCacheRegionName::SWA_KV && entry_elems == DSV4_FP8_KV_ENTRY_BYTES
+                                (std::string(tag) == "swa_kv" && entry_elems == DSV4_FP8_KV_ENTRY_BYTES
                                      ? DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES
                                      : 0),
                 min_entries > 0 ? min_entries : DSV4_SWA_WINDOW_ENTRIES};
     };
 
     return {
-        paged_desc("csa_kv", KVCacheRegionName::CSA_KV, &sets.csa_layers),
-        paged_desc("hca_kv", KVCacheRegionName::HCA_KV, &sets.hca_layers),
-        paged_desc("indexer_kv", KVCacheRegionName::INDEXER_KV, &sets.csa_layers),
-        fixed_desc("indexer_state", KVCacheRegionName::INDEXER_STATE, &sets.csa_layers, indexer_state_eb,
-                   fixed_tokens_per_block),
-        fixed_desc("csa_state", KVCacheRegionName::CSA_STATE, &sets.csa_layers, csa_state_eb, fixed_tokens_per_block),
-        fixed_desc("hca_state", KVCacheRegionName::HCA_STATE, &sets.hca_layers, hca_state_eb, fixed_tokens_per_block),
-        fixed_desc("swa_kv", KVCacheRegionName::SWA_KV, &sets.all_layers, swa_kv_eb, fixed_tokens_per_block,
-                   swa_kv_block_size_bytes_override),
+        paged_desc("csa_kv", &sets.csa_layers),
+        paged_desc("hca_kv", &sets.hca_layers),
+        paged_desc("indexer_kv", &sets.csa_layers),
+        fixed_desc("indexer_state", &sets.csa_layers, indexer_state_eb, fixed_tokens_per_block),
+        fixed_desc("csa_state", &sets.csa_layers, csa_state_eb, fixed_tokens_per_block),
+        fixed_desc("hca_state", &sets.hca_layers, hca_state_eb, fixed_tokens_per_block),
+        fixed_desc("swa_kv", &sets.all_layers, swa_kv_eb, fixed_tokens_per_block, swa_kv_block_size_bytes_override),
     };
 }
 
 KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool) {
     KVCacheSpecPtr spec;
     if (pool.is_paged) {
-        spec = std::make_shared<DSV4KVSpec>(pool.region_name,
+        spec = std::make_shared<DSV4KVSpec>(pool.tag,
                                             pool.entry_elems,
                                             pool.entries_per_block,
                                             pool.store_dtype,
@@ -486,18 +474,29 @@ KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool) {
                                             pool.compression_ratio,
                                             pool.block_size_bytes_alignment);
     } else {
-        spec = std::make_shared<DSV4StateSpec>(pool.region_name,
+        const bool is_non_reusable_state = pool.tag == "hca_state";
+        spec = std::make_shared<DSV4StateSpec>(pool.tag,
                                                pool.entry_elems,
                                                pool.entries_per_block,
                                                pool.store_dtype,
                                                pool.tokens_per_block,
                                                pool.block_size_bytes_override,
                                                pool.block_size_bytes_alignment,
-                                               pool.block_alignment_min_entries);
+                                               pool.block_alignment_min_entries,
+                                               /*state_cache=*/true,
+                                               /*skip_reuse=*/is_non_reusable_state);
     }
     spec->tag    = pool.tag;
     spec->layers = *pool.layer_ids;
     return spec;
+}
+
+CacheGroupPolicy dsv4PolicyForTag(const KVCacheSpecPtr& spec, CacheGroupType group_type, uint32_t hca_state_blocks) {
+    CacheGroupPolicy policy = CacheConfig::cacheGroupPolicyForSpec(spec, group_type);
+    if (spec && spec->tag == "hca_state") {
+        policy.explicit_block_num = hca_state_blocks;
+    }
+    return policy;
 }
 
 }  // namespace
@@ -565,7 +564,6 @@ void Dsv4CachePlanBuilder::applyConfig(CacheConfig&             config,
     config.layer_ids.clear();
     config.group_types.clear();
     config.group_policies.clear();
-    config.group_region_names.clear();
     config.group_tags.clear();
     config.group_seq_size_per_block.clear();
     config.group_seq_size_per_block.reserve(pools.size());
@@ -574,18 +572,16 @@ void Dsv4CachePlanBuilder::applyConfig(CacheConfig&             config,
     config.layer_ids.reserve(pools.size());
     config.group_types.reserve(pools.size());
     config.group_policies.reserve(pools.size());
-    config.group_region_names.reserve(pools.size());
     config.group_tags.reserve(pools.size());
     for (size_t gid = 0; gid < pools.size(); ++gid) {
         const auto& pool = pools[gid];
         auto        spec = makeDSV4Spec(pool);
 
-        RTP_LLM_LOG_INFO("DSV4 pool desc gid=%zu region=%s(%d) type=%s layer_count=%zu entry_elems=%u "
+        RTP_LLM_LOG_INFO("DSV4 pool desc gid=%zu tag=%s type=%s layer_count=%zu entry_elems=%u "
                          "entries_per_block=%u tokens_per_block=%u physical_tokens_per_block=%u "
                          "prefill_cp_fixed_sliced=%d",
                          gid,
-                         cacheRegionName(pool.region_name),
-                         static_cast<int>(pool.region_name),
+                         pool.tag.c_str(),
                          pool.is_paged ? "FULL" : "SWA/FIXED",
                          pool.layer_ids->size(),
                          pool.entry_elems,
@@ -600,12 +596,8 @@ void Dsv4CachePlanBuilder::applyConfig(CacheConfig&             config,
         config.layer_ids.push_back(*pool.layer_ids);
         const auto group_type = pool.is_paged ? CacheGroupType::FULL : CacheGroupType::SWA;
         config.group_types.push_back(group_type);
-        config.group_region_names.push_back(pool.region_name);
-        auto policy = cacheGroupPolicyForLegacyRegion(group_type, pool.region_name);
-        if (pool.region_name == KVCacheRegionName::HCA_STATE) {
-            policy.explicit_block_num = kv_cache_config.dsv4_hca_state_pool_blocks;
-        }
-        config.group_policies.push_back(policy);
+        config.group_policies.push_back(
+            dsv4PolicyForTag(spec, group_type, kv_cache_config.dsv4_hca_state_pool_blocks));
         config.group_tags.push_back(pool.tag);
     }
 }

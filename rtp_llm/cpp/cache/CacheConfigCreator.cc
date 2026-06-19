@@ -333,14 +333,6 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     config.layer_to_group_id.resize(total_layer_num, 0);
     config.layer_group_types.resize(total_layer_num, CacheGroupType::FULL);
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(total_layer_num), 0);
-    const size_t region_name_count = static_cast<size_t>(KVCacheRegionName::REGION_COUNT);
-    if (!config.layer_region_to_group_id.empty()) {
-        const size_t prev = config.layer_region_to_group_id.size();
-        config.layer_region_to_group_id.resize(static_cast<size_t>(total_layer_num));
-        for (size_t l = prev; l < static_cast<size_t>(total_layer_num); ++l) {
-            config.layer_region_to_group_id[l].assign(region_name_count, -1);
-        }
-    }
     if (!config.layer_tag_to_group_id.empty()) {
         config.layer_tag_to_group_id.resize(static_cast<size_t>(total_layer_num));
     }
@@ -393,14 +385,6 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 if (!config.layer_to_group_ids.empty()
                     && static_cast<size_t>(global_layer_id) < config.layer_to_group_ids.size()) {
                     config.layer_to_group_ids[static_cast<size_t>(global_layer_id)].push_back(target_gid);
-                }
-                if (!config.layer_region_to_group_id.empty()
-                    && static_cast<size_t>(global_layer_id) < config.layer_region_to_group_id.size()
-                    && g < propose_config.group_region_names.size()) {
-                    const auto region = static_cast<size_t>(propose_config.group_region_names[g]);
-                    if (region < config.layer_region_to_group_id[static_cast<size_t>(global_layer_id)].size()) {
-                        config.layer_region_to_group_id[static_cast<size_t>(global_layer_id)][region] = target_gid;
-                    }
                 }
                 if (!config.layer_tag_to_group_id.empty()
                     && static_cast<size_t>(global_layer_id) < config.layer_tag_to_group_id.size()

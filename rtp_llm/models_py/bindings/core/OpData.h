@@ -179,7 +179,6 @@ struct CacheStoreInputs {
     torch::Tensor host_kv_cache_offset;
 
     torch::Tensor kv_cache_layer_to_group_host;
-    torch::Tensor kv_cache_layer_region_to_group_host;
     torch::Tensor kv_cache_group_types_host;  // 0 -> LINEAR, 1 -> FULL.
 
     size_t context_batch_size = 0;
@@ -197,8 +196,9 @@ struct CacheStoreInputs {
     bool                     warmup;
     bool                     use_opaque_kv_cache_store = false;
 
-    int               layer_id    = 0;
-    KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
+    int         layer_id = 0;
+    int         group_id = 0;
+    std::string tag;
 
     // CP-page-RR sharding context. ``cp_size > 1`` means FULL groups have
     // their kv_cache_offset compacted to ``ceil(total/cp_size)`` per rank;

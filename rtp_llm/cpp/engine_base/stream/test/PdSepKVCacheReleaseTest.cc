@@ -157,9 +157,9 @@ public:
 void fillDsv4RegionBytes(const std::shared_ptr<KVCacheManager>& manager,
                          int                                    block_id,
                          int                                    layer_id,
-                         KVCacheRegionName                      region_name,
+                         int                                    group_id,
                          uint8_t                                value) {
-    auto parts = manager->convertIndexToBuffer(block_id, layer_id, region_name);
+    auto parts = manager->convertIndexToBuffer(block_id, layer_id, group_id);
     ASSERT_EQ(parts.size(), 1u);
     auto device = torch::from_blob(
         parts[0].addr, {(int64_t)parts[0].size_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
@@ -171,9 +171,9 @@ void fillDsv4RegionBytes(const std::shared_ptr<KVCacheManager>& manager,
 void expectDsv4RegionBytes(const std::shared_ptr<KVCacheManager>& manager,
                            int                                    block_id,
                            int                                    layer_id,
-                           KVCacheRegionName                      region_name,
+                           int                                    group_id,
                            uint8_t                                value) {
-    auto parts = manager->convertIndexToBuffer(block_id, layer_id, region_name);
+    auto parts = manager->convertIndexToBuffer(block_id, layer_id, group_id);
     ASSERT_EQ(parts.size(), 1u);
     auto device = torch::from_blob(
         parts[0].addr, {(int64_t)parts[0].size_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
@@ -181,12 +181,28 @@ void expectDsv4RegionBytes(const std::shared_ptr<KVCacheManager>& manager,
     const auto* ptr  = host.data_ptr<uint8_t>();
     for (size_t i = 0; i < parts[0].size_bytes; ++i) {
         ASSERT_EQ(ptr[i], value) << "byte=" << i << " layer=" << layer_id << " block=" << block_id
-                                 << " region=" << static_cast<int>(region_name);
+                                 << " group=" << group_id;
     }
 }
 
 uint8_t dsv4PdPattern(int layer_id, int gid, size_t block_pos) {
     return static_cast<uint8_t>(17 + layer_id * 19 + gid * 11 + block_pos);
+}
+
+size_t expectedDsv4StoredBlocks(const CacheConfig& config, int layer_num, int block_num, size_t reuse_block_size) {
+    size_t expected = 0;
+    for (int layer_id = 0; layer_id < layer_num; ++layer_id) {
+        for (int gid : config.layer_to_group_ids[layer_id]) {
+            expected += blockPositionsForCacheTransfer(block_num,
+                                                       reuse_block_size,
+                                                       true,
+                                                       cacheGroupTransferCapability(config.group_types[gid],
+                                                                                    config.group_policies[gid]),
+                                                       /*hybrid_full_from_begin=*/true)
+                            .size();
+        }
+    }
+    return expected;
 }
 
 torch::Tensor blockIdsTensor(const BatchKVCacheResourcePtr& resource, int gid) {
@@ -201,7 +217,8 @@ CacheStoreInputs makeSingleBlockWriteInputs(const std::string& cache_key_string,
                                             int                kv_stride,
                                             int                kv_scale_stride,
                                             bool               use_opaque_kv_cache_store,
-                                            KVCacheRegionName  region_name) {
+                                            int                group_id,
+                                            const std::string& tag) {
     CacheStoreInputs inputs;
     inputs.input_lengths_host        = torch::tensor({tokens_per_block}, torch::kInt32);
     inputs.prefix_lengths_host       = torch::tensor({0}, torch::kInt32);
@@ -220,7 +237,8 @@ CacheStoreInputs makeSingleBlockWriteInputs(const std::string& cache_key_string,
     inputs.warmup                    = false;
     inputs.use_opaque_kv_cache_store = use_opaque_kv_cache_store;
     inputs.layer_id                  = 0;
-    inputs.region_name               = region_name;
+    inputs.group_id                  = group_id;
+    inputs.tag                       = tag;
     return inputs;
 }
 
@@ -625,9 +643,13 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
         if (gid < 3) {
             EXPECT_FALSE(isNullBlockIdx(blocks[0])) << "paged group " << gid;
         } else {
-            EXPECT_TRUE(isNullBlockIdx(blocks[0])) << "tail group " << gid << " should keep only tail blocks";
-            EXPECT_FALSE(isNullBlockIdx(blocks[2])) << "tail group " << gid;
-            EXPECT_FALSE(isNullBlockIdx(blocks[3])) << "tail group " << gid;
+            const int active_tail_blocks = config.group_policies[gid].active_tail_blocks;
+            const int tail_begin         = std::max<int>(0, static_cast<int>(blocks.size()) - active_tail_blocks);
+            for (int block_idx = 0; block_idx < static_cast<int>(blocks.size()); ++block_idx) {
+                const bool expect_tail = block_idx >= tail_begin;
+                EXPECT_EQ(isNullBlockIdx(blocks[block_idx]), !expect_tail)
+                    << "tail group " << gid << " block " << block_idx;
+            }
         }
     }
 
@@ -736,7 +758,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
                              config.layer_to_group_id,
                              config.kernelBlocksPerKvBlock(),
                              config.group_types,
-                             config.layer_region_to_group_id);
+                             config.layer_to_group_ids);
         return resource;
     };
     auto makeCompleteTokens = [spb, block_num](int max_seq_len) {
@@ -772,17 +794,20 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            auto region_name = config.group_region_names[gid];
-            auto positions   = blockPositionsForCacheTransfer(
-                block_num, /*reuse_block_size=*/0, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
+            auto positions   = blockPositionsForCacheTransfer(block_num,
+                                                             /*reuse_block_size=*/0,
+                                                             true,
+                                                             cacheGroupTransferCapability(config.group_types[gid],
+                                                                                          config.group_policies[gid]),
+                                                             /*hybrid_full_from_begin=*/true);
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
                 auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(prefill_block_id)) << "prefill gid=" << gid << " pos=" << block_pos;
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id)) << "decode gid=" << gid << " pos=" << block_pos;
                 fillDsv4RegionBytes(
-                    prefill_manager, prefill_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
-                fillDsv4RegionBytes(decode_manager, decode_block_id, layer_id, region_name, 0xEE);
+                    prefill_manager, prefill_block_id, layer_id, gid, dsv4PdPattern(layer_id, gid, block_pos));
+                fillDsv4RegionBytes(decode_manager, decode_block_id, layer_id, gid, 0xEE);
             }
         }
     }
@@ -792,15 +817,6 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
                                                   {(int64_t)config.layer_to_group_id.size()},
                                                   torch::TensorOptions(torch::kInt32))
                                      .clone();
-    std::vector<int32_t> layer_region_to_group_flat;
-    for (const auto& row : config.layer_region_to_group_id) {
-        layer_region_to_group_flat.insert(layer_region_to_group_flat.end(), row.begin(), row.end());
-    }
-    auto layer_region_to_group_tensor = torch::from_blob(layer_region_to_group_flat.data(),
-                                                         {(int64_t)config.layer_region_to_group_id.size(),
-                                                          (int64_t)config.layer_region_to_group_id[0].size()},
-                                                         torch::TensorOptions(torch::kInt32))
-                                            .clone();
     std::vector<int32_t> group_types;
     for (auto group_type : config.group_types) {
         group_types.push_back(static_cast<int32_t>(group_type));
@@ -813,17 +829,16 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     auto layout      = prefill_manager->getMainModelCacheLayerLayout();
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            auto region_name = config.group_region_names[gid];
-            auto region_idx  = static_cast<size_t>(region_name);
-            ASSERT_TRUE(layout.layers_to_kv_buffer_ptrs_by_attn[layer_id][region_idx].defined())
-                << "layer=" << layer_id << " region=" << region_idx;
+            auto tag = config.group_tags[gid];
+            auto group_idx  = static_cast<size_t>(gid);
+            ASSERT_TRUE(layout.layers_to_kv_buffer_ptrs_by_group[layer_id][group_idx].defined())
+                << "layer=" << layer_id << " region=" << group_idx;
 
             CacheStoreInputs inputs;
             inputs.input_lengths_host                  = torch::tensor({block_num * spb}, torch::kInt32);
             inputs.prefix_lengths_host                 = torch::tensor({0}, torch::kInt32);
             inputs.host_kv_cache_offset                = blockIdsTensor(prefill_resource, gid);
             inputs.kv_cache_layer_to_group_host        = layer_to_group_tensor;
-            inputs.kv_cache_layer_region_to_group_host = layer_region_to_group_tensor;
             inputs.kv_cache_group_types_host           = group_types_tensor;
             inputs.context_batch_size                  = 1;
             inputs.decoder_batch_size                  = 0;
@@ -839,15 +854,17 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
             inputs.warmup                              = false;
             inputs.use_opaque_kv_cache_store           = config.use_opaque_kv_cache_store;
             inputs.layer_id                            = layer_id;
-            inputs.region_name                         = region_name;
+            inputs.group_id                            = gid;
+            inputs.tag                                 = tag;
 
             KvCacheInfo kv_cache_info;
-            kv_cache_info.kv_cache_buffer = layout.layers_to_kv_buffer_ptrs_by_attn[layer_id][region_idx];
+            kv_cache_info.kv_cache_buffer = layout.layers_to_kv_buffer_ptrs_by_group[layer_id][group_idx];
             runtimeWriteCacheStore(inputs, kv_cache_info, /*mla_kvcache=*/false, cache_store);
         }
     }
     ASSERT_EQ(cache_store->store_request_keys_.size(), 10u);
-    ASSERT_EQ(cache_store->stored_blocks_.size(), 26u);
+    ASSERT_EQ(cache_store->stored_blocks_.size(),
+              expectedDsv4StoredBlocks(config, /*layer_num=*/4, block_num, /*reuse_block_size=*/0));
 
     EngineInitParams params;
     params.model_id                 = model_id;
@@ -879,14 +896,17 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     EXPECT_EQ(cache_store->load_request_keys_.size(), 10u);
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            auto region_name = config.group_region_names[gid];
-            auto positions   = blockPositionsForCacheTransfer(
-                block_num, /*reuse_block_size=*/0, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
+            auto positions   = blockPositionsForCacheTransfer(block_num,
+                                                             /*reuse_block_size=*/0,
+                                                             true,
+                                                             cacheGroupTransferCapability(config.group_types[gid],
+                                                                                          config.group_policies[gid]),
+                                                             /*hybrid_full_from_begin=*/true);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));
                 expectDsv4RegionBytes(
-                    decode_manager, decode_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
+                    decode_manager, decode_block_id, layer_id, gid, dsv4PdPattern(layer_id, gid, block_pos));
             }
         }
     }
@@ -909,7 +929,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
                              config.layer_to_group_id,
                              config.kernelBlocksPerKvBlock(),
                              config.group_types,
-                             config.layer_region_to_group_id);
+                             config.layer_to_group_ids);
         return resource;
     };
     auto makeCompleteTokens = [spb, block_num](int max_seq_len) {
@@ -945,17 +965,20 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            auto region_name = config.group_region_names[gid];
-            auto positions   = blockPositionsForCacheTransfer(
-                block_num, /*reuse_block_size=*/0, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
+            auto positions   = blockPositionsForCacheTransfer(block_num,
+                                                             /*reuse_block_size=*/0,
+                                                             true,
+                                                             cacheGroupTransferCapability(config.group_types[gid],
+                                                                                          config.group_policies[gid]),
+                                                             /*hybrid_full_from_begin=*/true);
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
                 auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(prefill_block_id)) << "prefill gid=" << gid << " pos=" << block_pos;
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id)) << "decode gid=" << gid << " pos=" << block_pos;
                 fillDsv4RegionBytes(
-                    prefill_manager, prefill_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
-                fillDsv4RegionBytes(decode_manager, decode_block_id, layer_id, region_name, 0xEE);
+                    prefill_manager, prefill_block_id, layer_id, gid, dsv4PdPattern(layer_id, gid, block_pos));
+                fillDsv4RegionBytes(decode_manager, decode_block_id, layer_id, gid, 0xEE);
             }
         }
     }
@@ -965,15 +988,6 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
                                                   {(int64_t)config.layer_to_group_id.size()},
                                                   torch::TensorOptions(torch::kInt32))
                                      .clone();
-    std::vector<int32_t> layer_region_to_group_flat;
-    for (const auto& row : config.layer_region_to_group_id) {
-        layer_region_to_group_flat.insert(layer_region_to_group_flat.end(), row.begin(), row.end());
-    }
-    auto layer_region_to_group_tensor = torch::from_blob(layer_region_to_group_flat.data(),
-                                                         {(int64_t)config.layer_region_to_group_id.size(),
-                                                          (int64_t)config.layer_region_to_group_id[0].size()},
-                                                         torch::TensorOptions(torch::kInt32))
-                                            .clone();
     std::vector<int32_t> group_types;
     for (auto group_type : config.group_types) {
         group_types.push_back(static_cast<int32_t>(group_type));
@@ -986,10 +1000,10 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     auto layout      = prefill_manager->getMainModelCacheLayerLayout();
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            auto region_name = config.group_region_names[gid];
-            auto region_idx  = static_cast<size_t>(region_name);
-            ASSERT_TRUE(layout.layers_to_kv_buffer_ptrs_by_attn[layer_id][region_idx].defined())
-                << "layer=" << layer_id << " region=" << region_idx;
+            auto tag        = config.group_tags[gid];
+            auto group_idx  = static_cast<size_t>(gid);
+            ASSERT_TRUE(layout.layers_to_kv_buffer_ptrs_by_group[layer_id][group_idx].defined())
+                << "layer=" << layer_id << " group=" << group_idx;
 
             torch_ext::PyCacheStoreInputs inputs;
             inputs.context_batch_size             = 1;
@@ -997,7 +1011,6 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
             inputs.request_id                     = torch::tensor({request_id}, torch::kInt64);
             inputs.request_pd_separation          = torch::tensor({true}, torch::kBool);
             inputs.kv_cache_layer_to_group        = layer_to_group_tensor;
-            inputs.kv_cache_layer_region_to_group = layer_region_to_group_tensor;
             inputs.kv_cache_group_types           = group_types_tensor;
             inputs.cache_keys                     = cache_key_strings;
             inputs.input_lengths_host             = torch::tensor({block_num * spb}, torch::kInt32);
@@ -1014,11 +1027,11 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
             inputs.cache_store                    = cache_store;
 
             torch_ext::LayerKVCache layer_cache;
-            layer_cache.kv_cache_base      = layout.layers_to_kv_buffer_ptrs_by_attn[layer_id][region_idx];
+            layer_cache.kv_cache_base      = layout.layers_to_kv_buffer_ptrs_by_group[layer_id][group_idx];
             layer_cache.seq_size_per_block = config.group_types[gid] == CacheGroupType::FULL ? kernel_spb : spb;
             layer_cache.layer_id           = layer_id;
             layer_cache.group_id           = gid;
-            layer_cache.region_name        = region_name;
+            layer_cache.tag                = tag;
 
             WriteCacheStoreOp(inputs.input_lengths_host,
                               inputs.prefix_lengths_host,
@@ -1028,8 +1041,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
         }
     }
 
-    const auto first_csa_key =
-        "kv_" + makeCacheKey(model_id, cache_key_strings[0], /*layer_id=*/2, KVCacheRegionName::CSA_KV);
+    const auto first_csa_key = "kv_" + makeCacheKey(model_id, cache_key_strings[0], /*layer_id=*/2, "csa_kv");
     ASSERT_NE(cache_store->stored_blocks_.find(first_csa_key), cache_store->stored_blocks_.end());
     EXPECT_EQ(cache_store->stored_blocks_[first_csa_key].size(),
               config.group_kv_block_stride_bytes[static_cast<size_t>(0)]);
@@ -1062,14 +1074,17 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            auto region_name = config.group_region_names[gid];
-            auto positions   = blockPositionsForCacheTransfer(
-                block_num, /*reuse_block_size=*/0, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
+            auto positions   = blockPositionsForCacheTransfer(block_num,
+                                                             /*reuse_block_size=*/0,
+                                                             true,
+                                                             cacheGroupTransferCapability(config.group_types[gid],
+                                                                                          config.group_policies[gid]),
+                                                             /*hybrid_full_from_begin=*/true);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));
                 expectDsv4RegionBytes(
-                    decode_manager, decode_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
+                    decode_manager, decode_block_id, layer_id, gid, dsv4PdPattern(layer_id, gid, block_pos));
             }
         }
     }
@@ -1092,7 +1107,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
                              config.layer_to_group_id,
                              config.kernelBlocksPerKvBlock(),
                              config.group_types,
-                             config.layer_region_to_group_id);
+                             config.layer_to_group_ids);
         return resource;
     };
     auto makeCompleteTokens = [spb, block_num](int max_seq_len) {
@@ -1128,17 +1143,20 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            auto region_name = config.group_region_names[gid];
-            auto positions   = blockPositionsForCacheTransfer(
-                block_num, reuse_num, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
+            auto positions   = blockPositionsForCacheTransfer(block_num,
+                                                             reuse_num,
+                                                             true,
+                                                             cacheGroupTransferCapability(config.group_types[gid],
+                                                                                          config.group_policies[gid]),
+                                                             /*hybrid_full_from_begin=*/true);
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
                 auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(prefill_block_id)) << "prefill gid=" << gid << " pos=" << block_pos;
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id)) << "decode gid=" << gid << " pos=" << block_pos;
                 fillDsv4RegionBytes(
-                    prefill_manager, prefill_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
-                fillDsv4RegionBytes(decode_manager, decode_block_id, layer_id, region_name, 0xEE);
+                    prefill_manager, prefill_block_id, layer_id, gid, dsv4PdPattern(layer_id, gid, block_pos));
+                fillDsv4RegionBytes(decode_manager, decode_block_id, layer_id, gid, 0xEE);
             }
         }
     }
@@ -1148,15 +1166,6 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
                                                   {(int64_t)config.layer_to_group_id.size()},
                                                   torch::TensorOptions(torch::kInt32))
                                      .clone();
-    std::vector<int32_t> layer_region_to_group_flat;
-    for (const auto& row : config.layer_region_to_group_id) {
-        layer_region_to_group_flat.insert(layer_region_to_group_flat.end(), row.begin(), row.end());
-    }
-    auto layer_region_to_group_tensor = torch::from_blob(layer_region_to_group_flat.data(),
-                                                         {(int64_t)config.layer_region_to_group_id.size(),
-                                                          (int64_t)config.layer_region_to_group_id[0].size()},
-                                                         torch::TensorOptions(torch::kInt32))
-                                            .clone();
     std::vector<int32_t> group_types;
     for (auto group_type : config.group_types) {
         group_types.push_back(static_cast<int32_t>(group_type));
@@ -1169,17 +1178,16 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     auto layout      = prefill_manager->getMainModelCacheLayerLayout();
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            auto region_name = config.group_region_names[gid];
-            auto region_idx  = static_cast<size_t>(region_name);
-            ASSERT_TRUE(layout.layers_to_kv_buffer_ptrs_by_attn[layer_id][region_idx].defined())
-                << "layer=" << layer_id << " region=" << region_idx;
+            auto tag        = config.group_tags[gid];
+            auto group_idx  = static_cast<size_t>(gid);
+            ASSERT_TRUE(layout.layers_to_kv_buffer_ptrs_by_group[layer_id][group_idx].defined())
+                << "layer=" << layer_id << " group=" << group_idx;
 
             CacheStoreInputs inputs;
             inputs.input_lengths_host                  = torch::tensor({(block_num - reuse_num) * spb}, torch::kInt32);
             inputs.prefix_lengths_host                 = torch::tensor({reuse_num * spb}, torch::kInt32);
             inputs.host_kv_cache_offset                = blockIdsTensor(prefill_resource, gid);
             inputs.kv_cache_layer_to_group_host        = layer_to_group_tensor;
-            inputs.kv_cache_layer_region_to_group_host = layer_region_to_group_tensor;
             inputs.kv_cache_group_types_host           = group_types_tensor;
             inputs.context_batch_size                  = 1;
             inputs.decoder_batch_size                  = 0;
@@ -1195,15 +1203,17 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
             inputs.warmup                              = false;
             inputs.use_opaque_kv_cache_store           = config.use_opaque_kv_cache_store;
             inputs.layer_id                            = layer_id;
-            inputs.region_name                         = region_name;
+            inputs.group_id                            = gid;
+            inputs.tag                                 = tag;
 
             KvCacheInfo kv_cache_info;
-            kv_cache_info.kv_cache_buffer = layout.layers_to_kv_buffer_ptrs_by_attn[layer_id][region_idx];
+            kv_cache_info.kv_cache_buffer = layout.layers_to_kv_buffer_ptrs_by_group[layer_id][group_idx];
             runtimeWriteCacheStore(inputs, kv_cache_info, /*mla_kvcache=*/false, cache_store);
         }
     }
     ASSERT_EQ(cache_store->store_request_keys_.size(), 10u);
-    ASSERT_EQ(cache_store->stored_blocks_.size(), 26u);
+    ASSERT_EQ(cache_store->stored_blocks_.size(),
+              expectedDsv4StoredBlocks(config, /*layer_num=*/4, block_num, reuse_num));
 
     EngineInitParams params;
     params.model_id                 = model_id;
@@ -1235,14 +1245,17 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     EXPECT_EQ(cache_store->load_request_keys_.size(), 10u);
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            auto region_name = config.group_region_names[gid];
-            auto positions   = blockPositionsForCacheTransfer(
-                block_num, reuse_num, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
+            auto positions   = blockPositionsForCacheTransfer(block_num,
+                                                             reuse_num,
+                                                             true,
+                                                             cacheGroupTransferCapability(config.group_types[gid],
+                                                                                          config.group_policies[gid]),
+                                                             /*hybrid_full_from_begin=*/true);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));
                 expectDsv4RegionBytes(
-                    decode_manager, decode_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
+                    decode_manager, decode_block_id, layer_id, gid, dsv4PdPattern(layer_id, gid, block_pos));
             }
         }
     }
@@ -1274,7 +1287,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
                          config.layer_to_group_id,
                          config.kernelBlocksPerKvBlock(),
                          config.group_types,
-                         config.layer_region_to_group_id);
+                         config.layer_to_group_ids);
 
     auto input              = std::make_shared<GenerateInput>();
     input->input_ids        = torch::arange(input_length, torch::kInt32);
@@ -1351,7 +1364,8 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
         inputs.warmup                    = false;
         inputs.use_opaque_kv_cache_store = false;
         inputs.layer_id                  = layer_id;
-        inputs.region_name               = KVCacheRegionName::DEFAULT;
+        inputs.group_id                  = 0;
+        inputs.tag                       = "";
         inputs.pre_created_event         = event;
 
         KvCacheInfo kv_cache_info;
@@ -1386,8 +1400,8 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvBuffe
     auto kv_buffer  = torch::empty({2, kv_stride}, kv_options);
     kv_buffer[1].fill_(static_cast<uint8_t>(123));
 
-    auto inputs = makeSingleBlockWriteInputs(
-        cache_key_string, request_id_val, spb, kv_stride, 0, true, KVCacheRegionName::CSA_STATE);
+    auto inputs =
+        makeSingleBlockWriteInputs(cache_key_string, request_id_val, spb, kv_stride, 0, true, 0, "csa_state");
 
     KvCacheInfo kv_cache_info;
     kv_cache_info.kv_cache_buffer = kv_buffer;
@@ -1395,7 +1409,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvBuffe
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     runtimeWriteCacheStore(inputs, kv_cache_info, /*mla_kvcache=*/false, cache_store);
 
-    const auto key = "kv_" + makeCacheKey(0, cache_key_string, 0, KVCacheRegionName::CSA_STATE);
+    const auto key = "kv_" + makeCacheKey(0, cache_key_string, 0, "csa_state");
     auto       it  = cache_store->stored_blocks_.find(key);
     ASSERT_NE(it, cache_store->stored_blocks_.end());
     ASSERT_EQ(it->second.size(), static_cast<size_t>(kv_stride));
@@ -1421,8 +1435,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuSplitKv
     block.slice(0, 0, kv_half).fill_(static_cast<uint8_t>(17));
     block.slice(0, kv_half, kv_stride).fill_(static_cast<uint8_t>(29));
 
-    auto inputs = makeSingleBlockWriteInputs(
-        cache_key_string, request_id_val, spb, kv_stride, 0, false, KVCacheRegionName::DEFAULT);
+    auto inputs = makeSingleBlockWriteInputs(cache_key_string, request_id_val, spb, kv_stride, 0, false, 0, "");
 
     KvCacheInfo kv_cache_info;
     kv_cache_info.kv_cache_buffer = kv_buffer;
@@ -1430,7 +1443,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuSplitKv
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     runtimeWriteCacheStore(inputs, kv_cache_info, /*mla_kvcache=*/false, cache_store);
 
-    const auto cache_key = makeCacheKey(0, cache_key_string, 0, KVCacheRegionName::DEFAULT);
+    const auto cache_key = makeCacheKey(0, cache_key_string, 0);
     const auto k_key     = "k_" + cache_key;
     const auto v_key     = "v_" + cache_key;
     auto       k_it      = cache_store->stored_blocks_.find(k_key);
@@ -1464,8 +1477,8 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvScale
     kv_buffer[1].fill_(static_cast<uint8_t>(41));
     kv_scale_buffer[1].fill_(static_cast<uint8_t>(73));
 
-    auto inputs = makeSingleBlockWriteInputs(
-        cache_key_string, request_id_val, spb, kv_stride, scale_stride, true, KVCacheRegionName::CSA_STATE);
+    auto inputs =
+        makeSingleBlockWriteInputs(cache_key_string, request_id_val, spb, kv_stride, scale_stride, true, 0, "csa_state");
 
     KvCacheInfo kv_cache_info;
     kv_cache_info.kv_cache_buffer = kv_buffer;
@@ -1474,7 +1487,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvScale
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     runtimeWriteCacheStore(inputs, kv_cache_info, /*mla_kvcache=*/false, cache_store);
 
-    const auto scale_key = "kv_scale_" + makeCacheKey(0, cache_key_string, 0, KVCacheRegionName::CSA_STATE);
+    const auto scale_key = "kv_scale_" + makeCacheKey(0, cache_key_string, 0, "csa_state");
     auto       scale_it  = cache_store->stored_blocks_.find(scale_key);
     ASSERT_NE(scale_it, cache_store->stored_blocks_.end());
     ASSERT_EQ(scale_it->second.size(), static_cast<size_t>(scale_stride));
