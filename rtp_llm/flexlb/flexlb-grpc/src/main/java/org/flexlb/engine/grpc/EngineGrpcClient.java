@@ -2,6 +2,7 @@ package org.flexlb.engine.grpc;
 
 import com.google.protobuf.MessageLite;
 import io.grpc.ManagedChannel;
+import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.internal.GrpcUtil;
 import io.grpc.netty.NettyChannelBuilder;
@@ -110,10 +111,16 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
 
     private boolean isConnectionBrokenError(StatusRuntimeException e) {
         String message = e.getMessage();
+        if (e.getStatus().getCode() == Status.Code.UNAVAILABLE) {
+            return true;
+        }
         return message != null &&
                (message.contains("end-of-stream mid-frame") ||
                 message.contains("Connection reset") ||
                 message.contains("Broken pipe") ||
+                message.contains("Connection timed out") ||
+                message.contains("recvmsg:Connection timed out") ||
+                message.contains("Socket closed") ||
                 message.contains("http2 exception") ||
                 message.contains("Incomplete header block fragment"));
     }

@@ -456,8 +456,11 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             if buffered is not None:
                 _set_stage("dropped_buffered_on_exception")
             raise
-        except BaseException:
+        except BaseException as e:
             if buffered is not None:
+                if _is_retryable_forward_error(e):
+                    _set_stage("dropped_buffered_retryable_exception")
+                    raise
                 _set_stage("dropped_buffered_on_exception")
                 try:
                     yield buffered

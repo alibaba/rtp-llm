@@ -586,6 +586,7 @@ class ZeroResponseRetryTest(unittest.IsolatedAsyncioTestCase):
 
         async def stream_then_fail():
             yield _make_response()
+            yield _make_response()
             raise _FakeUnavailable()
 
         stub.ModelStreamInfer.return_value = stream_then_fail()
@@ -603,8 +604,44 @@ class ZeroResponseRetryTest(unittest.IsolatedAsyncioTestCase):
             ):
                 collected.append(resp)
 
-        self.assertEqual(len(collected), 1)
+        self.assertEqual(len(collected), 2)
         self.assertEqual(stub.ModelStreamInfer.call_count, 1)
+
+    async def test_retries_buffered_first_response_unavailable(self) -> None:
+        first_stub = MagicMock()
+        second_stub = MagicMock()
+
+        async def first_stream():
+            yield _make_response()
+            raise _FakeUnavailable()
+
+        first_stub.ModelStreamInfer.return_value = first_stream()
+        second_stub.ModelStreamInfer.return_value = _AsyncIter([_make_response()])
+        stubs = {
+            "10.0.0.1:8104": first_stub,
+            "10.0.0.2:8104": second_stub,
+        }
+        patcher = patch(
+            "rtp_llm.dash_sc.proto.predict_v2_pb2_grpc.GRPCInferenceServiceStub",
+            side_effect=lambda channel: stubs[channel.addr],
+        )
+        patcher.start()
+        self.servicer._retry_stub_patcher = patcher
+
+        with patch(
+            "rtp_llm.dash_sc.proxy.service_route.random.randrange",
+            side_effect=[0, 0],
+        ):
+            responses = await _drain(
+                self.servicer.ModelStreamInfer(
+                    _request_gen(_make_request("req1")), MagicMock()
+                )
+            )
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(first_stub.ModelStreamInfer.call_count, 1)
+        self.assertEqual(second_stub.ModelStreamInfer.call_count, 1)
+        self.assertTrue(self.created_channels["10.0.0.1:8104"].closed)
 
 
 class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):

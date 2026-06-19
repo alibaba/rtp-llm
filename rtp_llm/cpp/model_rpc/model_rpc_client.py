@@ -509,6 +509,7 @@ class ModelRpcClient(object):
                 elif e.code() == StatusCode.CANCELLED:
                     raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, details)
                 elif e.code() == StatusCode.UNAVAILABLE:
+                    await self._channel_pool.discard(target_address)
                     lower_details = details.lower()
                     if (
                         "socket closed" in lower_details
