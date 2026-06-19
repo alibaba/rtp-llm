@@ -2,6 +2,7 @@
 
 import logging
 import os
+from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -923,6 +924,9 @@ class IndexerOp(nn.Module):
         precomputed_ke: torch.Tensor,
         precomputed_lengths: torch.Tensor,
         precomputed_topk_off: torch.Tensor,
+        kv_cache_sharded: bool = False,
+        cp_size: int = 1,
+        cp_rank: int = 0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute TopK indices for ragged attention (prefill phase) with context parallel
@@ -1003,13 +1007,71 @@ class IndexerOp(nn.Module):
                     _tensor_summary(weights_sq0),
                 )
 
-        rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-            self._kv_cache_blocks(kv_cache),
-            k_fp8,
-            k_scale,
-            block_table,
-            cu_kv_seqlens_global,
-        )
+        if kv_cache_sharded and int(cp_size) > 1:
+            from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
+
+            per_req_total_kv_lens = (
+                cu_kv_seqlens_global[1:].to(torch.int64)
+                - cu_kv_seqlens_global[:-1].to(torch.int64)
+            ).contiguous()
+            cp_ctx = SimpleNamespace(cp_size=int(cp_size), cp_rank=int(cp_rank))
+            plan = asm.build_indexer_cp_chunk_plan(
+                cp_ctx=cp_ctx,
+                per_req_total_kv_lens=per_req_total_kv_lens,
+                block_size=self.blocksize,
+                device=device,
+                owner_block_size=self.blocksize,
+            )
+            local_k = torch.zeros(
+                (plan.total_local_T, self.index_head_dim),
+                dtype=k_fp8.dtype,
+                device=device,
+            )
+            local_s = torch.zeros(
+                (plan.total_local_T, k_scale.shape[-1]),
+                dtype=k_scale.dtype,
+                device=device,
+            )
+            if plan.total_actual_local_T > 0:
+                actual_k = torch.empty(
+                    (plan.total_actual_local_T, self.index_head_dim),
+                    dtype=k_fp8.dtype,
+                    device=device,
+                )
+                actual_s = torch.empty(
+                    (plan.total_actual_local_T, k_scale.shape[-1]),
+                    dtype=k_scale.dtype,
+                    device=device,
+                )
+                rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                    self._kv_cache_blocks(kv_cache),
+                    actual_k,
+                    actual_s,
+                    block_table,
+                    asm.build_actual_local_cu_kv_seqlens(plan),
+                )
+                asm.copy_actual_indexer_k_to_padded(
+                    plan=plan,
+                    actual_k_quant=actual_k,
+                    actual_k_scale=actual_s,
+                    padded_k_quant=local_k,
+                    padded_k_scale=local_s,
+                )
+            asm.assemble_indexer_k(
+                plan=plan,
+                local_k_quant=local_k,
+                local_k_scale=local_s,
+                out_k_quant=k_fp8,
+                out_k_scale=k_scale,
+            )
+        else:
+            rtp_llm_ops.cp_gather_indexer_k_quant_cache(
+                self._kv_cache_blocks(kv_cache),
+                k_fp8,
+                k_scale,
+                block_table,
+                cu_kv_seqlens_global,
+            )
         kv_fp8_full = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
 
         def run_part_logits_topk(
