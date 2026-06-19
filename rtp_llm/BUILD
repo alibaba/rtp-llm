@@ -488,6 +488,8 @@ py_library(
         "//rtp_llm/dash_sc:dash_sc_grpc_server",
         ":openai_api",
         ":lora",
+        ":models",
+        ":async_model",
         ":sdk",
         ":frontend",
         ":embedding",
