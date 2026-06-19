@@ -38,8 +38,10 @@ private:
                                       const std::vector<std::vector<int>>& full_groups,
                                       const KVCacheSpecPtr&                linear_spec,
                                       const KVCacheSpecPtr&                full_spec);
-    static void
-    setupPhysicalSizes(CacheConfig& config, const KVCacheSpecPtr& full_spec, const KVCacheSpecPtr& linear_spec);
+    static void setupPhysicalSizes(CacheConfig&          config,
+                                   const ModelConfig&    model_config,
+                                   const KVCacheSpecPtr& full_spec,
+                                   const KVCacheSpecPtr& linear_spec);
     static void setupLayerToGroupMapping(CacheConfig& config);
 };
 

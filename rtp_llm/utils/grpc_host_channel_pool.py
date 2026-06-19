@@ -29,7 +29,9 @@ class GrpcHostChannelPool:
         """
         :param options: aio.insecure_channel 的 gRPC options
         """
-        self._options = options or []
+        self._options = list(options or [])
+        if not any(key == "grpc.enable_http_proxy" for key, _ in self._options):
+            self._options.append(("grpc.enable_http_proxy", 0))
         self._channels: Dict[str, GrpcHostChannel] = {}
         self._closed_channels: List[GrpcHostChannel] = []
         self._lock = asyncio.Lock()

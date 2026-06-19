@@ -140,6 +140,7 @@ void HybridConfigCreator::setupCacheConfigSpecs(CacheConfig&                    
 }
 
 void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
+                                             const ModelConfig&    model_config,
                                              const KVCacheSpecPtr& full_spec,
                                              const KVCacheSpecPtr& linear_spec) {
     // Decide the physical KV block/scale sizes by taking max between full and linear specs.
@@ -153,8 +154,13 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
     config.kv_block_stride_bytes = full_kv_block_stride_bytes;
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
     config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    if (!config.use_mla && model_config.attn_config.indexer_head_dim > 0) {
+        const auto indexer_dim           = static_cast<size_t>(model_config.attn_config.indexer_head_dim);
+        config.kv_scale_stride_bytes     = indexer_dim * 2 * full_spec->seq_size_per_block;
+        config.use_opaque_kv_cache_store = true;
+    }
+    config.kv_scale_size_bytes = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
+    config.block_size_bytes    = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 }
 
 void HybridConfigCreator::setupLayerToGroupMapping(CacheConfig& config) {
@@ -193,7 +199,7 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     HybridConfigCreator::setupCacheConfigSpecs(config, linear_groups, full_groups, linear_spec, full_spec);
 
     // Setup physical sizes
-    HybridConfigCreator::setupPhysicalSizes(config, full_spec, linear_spec);
+    HybridConfigCreator::setupPhysicalSizes(config, model_config, full_spec, linear_spec);
 
     // Setup layer to group mapping
     HybridConfigCreator::setupLayerToGroupMapping(config);

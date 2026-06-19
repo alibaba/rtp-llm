@@ -145,7 +145,7 @@ size_t kernelBlocksPerKvBlockForGroup(const CacheConfig& config, size_t group_id
     return is_full ? config.kernelBlocksPerKvBlock() : 1;
 }
 
-void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
+void setupIndependentPoolSizes(CacheConfig& config, const ModelConfig& model_config, bool is_mtp) {
     config.use_independent_block_pools = true;
     const auto group_num               = static_cast<size_t>(config.groupNums());
     config.group_block_nums.resize(group_num, 0);
@@ -168,9 +168,15 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
         const auto& spec = config.cache_specs[gid];
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", gid);
-        const auto   layer_count                = static_cast<uint32_t>(config.global_layer_ids[gid].size());
-        const size_t kernel_kv_stride           = spec->block_size_bytes();
-        const auto   kernel_scale               = spec->scale_block_size_bytes();
+        const auto   layer_count      = static_cast<uint32_t>(config.global_layer_ids[gid].size());
+        const size_t kernel_kv_stride = spec->block_size_bytes();
+        auto         kernel_scale     = spec->scale_block_size_bytes();
+        if (!config.use_mla && model_config.attn_config.indexer_head_dim > 0
+            && config.group_types[gid] == CacheGroupType::FULL) {
+            const auto indexer_dim           = static_cast<size_t>(model_config.attn_config.indexer_head_dim);
+            kernel_scale                     = indexer_dim * 2 * spec->seq_size_per_block;
+            config.use_opaque_kv_cache_store = true;
+        }
         const size_t group_bpk                  = kernelBlocksPerKvBlockForGroup(config, gid);
         const size_t kv_stride                  = kernel_kv_stride * group_bpk;
         const size_t scale_stride               = kernel_scale * group_bpk;
@@ -295,7 +301,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     RTP_LLM_CHECK_WITH_INFO(!config.cache_specs.empty(), "hybrid-pool config produced no cache specs");
     setupGroupCounts(config);
     populateDefaultRegionMappings(config);
-    setupIndependentPoolSizes(config, is_mtp);
+    setupIndependentPoolSizes(config, model_config, is_mtp);
     if (!model_config.attn_config.layer_compress_ratios.empty()) {
         config.dsv4_fixed_pool_blocks     = kv_cache_config.dsv4_fixed_pool_blocks;
         config.dsv4_hca_state_pool_blocks = kv_cache_config.dsv4_hca_state_pool_blocks;

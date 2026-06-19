@@ -8,6 +8,12 @@ import grpc
 from google.protobuf.json_format import MessageToDict
 
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
+
+GRPC_CHANNEL_OPTIONS = [
+    ("grpc.max_metadata_size", 1024 * 1024 * 1024),
+    ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
+    ("grpc.enable_http_proxy", 0),
+]
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc as pb2_grpc
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
@@ -32,9 +38,7 @@ class GrpcClientWrapper:
         if self.channel is None or self.stub is None:
             self.channel = grpc.aio.insecure_channel(
                 self.address,
-                options=[
-                    ("grpc.max_metadata_size", 1024 * 1024 * 1024),
-                ],
+                options=GRPC_CHANNEL_OPTIONS,
             )
             self.stub = RpcServiceStub(self.channel)
 
@@ -43,9 +47,7 @@ class GrpcClientWrapper:
         if address not in self._dp_channels or self._dp_stubs.get(address) is None:
             self._dp_channels[address] = grpc.aio.insecure_channel(
                 address,
-                options=[
-                    ("grpc.max_metadata_size", 1024 * 1024 * 1024),
-                ],
+                options=GRPC_CHANNEL_OPTIONS,
             )
             self._dp_stubs[address] = RpcServiceStub(self._dp_channels[address])
 
