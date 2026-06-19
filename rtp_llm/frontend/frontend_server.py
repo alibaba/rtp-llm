@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
 from typing import Any, Callable, Dict, Union
@@ -37,6 +38,37 @@ from rtp_llm.utils.time_util import current_time_ms
 from rtp_llm.utils.util import check_with_info
 
 USAGE_HEADER = "USAGE"
+NON_STREAM_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_NON_STREAM_RETRY_ON_UNAVAILABLE"
+DEFAULT_NON_STREAM_RETRY_ON_UNAVAILABLE = 3
+
+
+def _non_stream_retry_on_unavailable() -> int:
+    raw = os.environ.get(NON_STREAM_RETRY_ON_UNAVAILABLE_ENV, "")
+    if not raw:
+        return DEFAULT_NON_STREAM_RETRY_ON_UNAVAILABLE
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logging.warning(
+            "Invalid %s=%r, using default=%s",
+            NON_STREAM_RETRY_ON_UNAVAILABLE_ENV,
+            raw,
+            DEFAULT_NON_STREAM_RETRY_ON_UNAVAILABLE,
+        )
+        return DEFAULT_NON_STREAM_RETRY_ON_UNAVAILABLE
+
+
+def _is_retryable_non_stream_error(e: BaseException) -> bool:
+    if isinstance(e, asyncio.CancelledError):
+        return False
+    text = str(e)
+    return (
+        "StatusCode.UNAVAILABLE" in text
+        or "grpc_status:14" in text
+        or "recvmsg:Connection timed out" in text
+        or "Socket closed" in text
+        or "connection reset" in text
+    )
 
 
 class FrontendServer(object):
@@ -468,16 +500,39 @@ class FrontendServer(object):
             return StreamingResponse(
                 self.stream_response(req, res), media_type="text/event-stream"
             )
-        async for x in res:
-            if await raw_request.is_disconnected():
-                # Abort the request if the client disconnects.
-                await res.aclose()
-                raise asyncio.CancelledError("client disconnects")
+        attempt = 0
+        max_attempts = _non_stream_retry_on_unavailable()
+        while True:
+            try:
+                async for x in res:
+                    if await raw_request.is_disconnected():
+                        # Abort the request if the client disconnects.
+                        await res.aclose()
+                        raise asyncio.CancelledError("client disconnects")
 
-        complete_response = await self._collect_complete_response_and_record_access_log(
-            req, res
-        )
-        return ORJSONResponse(content=complete_response)
+                complete_response = (
+                    await self._collect_complete_response_and_record_access_log(
+                        req, res
+                    )
+                )
+                return ORJSONResponse(content=complete_response)
+            except BaseException as e:
+                try:
+                    await res.aclose()
+                except Exception:
+                    pass
+                if attempt >= max_attempts or not _is_retryable_non_stream_error(e):
+                    raise
+                attempt += 1
+                logging.warning(
+                    "Retrying non-streaming inference after retryable backend error, "
+                    "request_id=%s attempt=%s/%s error=%s",
+                    req.get(request_id_field_name),
+                    attempt,
+                    max_attempts,
+                    e,
+                )
+                res = await self._call_generate_with_report(generate_call)
 
     def tokenize(self, req: str | Dict[str, Any]):
         try:

@@ -45,7 +45,27 @@ class FakeFrontendWorker(object):
         return False
 
 
+class RetryOnceFrontendWorker(FakeFrontendWorker):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def inference(self, prompt: str, *args: Any, **kwargs: Any):
+        self.calls += 1
+        response_generator = self._retry_once_inference(prompt, self.calls)
+        return CompleteResponseAsyncGenerator(
+            response_generator, CompleteResponseAsyncGenerator.get_last_value
+        )
+
+    async def _retry_once_inference(self, prompt: str, call: int):
+        if call == 1:
+            raise RuntimeError("StatusCode.UNAVAILABLE recvmsg:Connection timed out")
+        yield FakePipelinResponse(res=prompt)
+
+
 class FakeRawRequest(object):
+    headers = {}
+
     async def is_disconnected(self):
         return False
 
@@ -83,6 +103,17 @@ class FrontendServerTest(TestCase):
         self.assertEqual(
             res.body.decode("utf-8"), '{"res":"hello"}', res.body.decode("utf-8")
         )
+
+    def test_non_streaming_retries_retryable_backend_error(self):
+        self.frontend_server._frontend_worker = RetryOnceFrontendWorker()
+        loop = asyncio.new_event_loop()
+        res = loop.run_until_complete(
+            self._async_run(req={"prompt": "hello"}, raw_request=FakeRawRequest())
+        )
+        self.assertEqual(
+            res.body.decode("utf-8"), '{"res":"hello"}', res.body.decode("utf-8")
+        )
+        self.assertEqual(self.frontend_server._frontend_worker.calls, 2)
 
     def test_encode(self):
         res = self.frontend_server.tokenizer_encode('{"prompt": "b c d e"}')
