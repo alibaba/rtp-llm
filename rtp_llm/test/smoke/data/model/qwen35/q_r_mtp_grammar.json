@@ -1,7 +1,8 @@
 {
     "model_type": "qwen35_moe",
     "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
-    "_comment": "MTP + grammar (no reasoning). Concurrent smoke drives regex/json_schema under concurrency_limit; xgrammar must be active from the first output token because thinking is disabled (enable_thinking=false + server think_mode=0). Do not mix with q_r_mtp_grammar_reasoning.json — that case enables thinking and keeps grammar in passthrough until </think>. grammar_constraint_only=true: validate constraints only, no byte-equal golden.",
+    "grammar_constraint_only": true,
+    "_comment": "MTP + grammar (no reasoning). Concurrent smoke drives regex/json_schema under concurrency_limit; xgrammar must be active from the first output token because thinking is disabled (enable_thinking=false + server think_mode=0). Do not mix with q_r_mtp_grammar_reasoning.json — that case enables thinking and keeps grammar in passthrough until </think>. grammar_constraint_only=true: only verify each actual content satisfies the response_format constraint; the OpenaiComparer copies non-deterministic content/reasoning_content/timing fields from actual to expect when constraint passes.",
     "query_result": [
         {
             "endpoint": "/v1/chat/completions",
@@ -278,6 +279,111 @@
                 },
                 "extra_outputs": null
             }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "I need to log a customer support incident. The customer is Maria Lopez, contact +1-415-555-0142, ticket from 2026-04-12. They reported that the mobile app crashes when uploading photos larger than 20MB on iOS. Severity is high — affects checkout. Tag this with the right product area and an action plan."
+                    }
+                ],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "support_incident",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "ticket_id": {
+                                    "type": "string",
+                                    "pattern": "^TKT-[0-9]{6}$"
+                                },
+                                "reported_on": {
+                                    "type": "string",
+                                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                                },
+                                "severity": {
+                                    "type": "string",
+                                    "enum": ["low", "medium", "high", "critical"]
+                                },
+                                "product_area": {
+                                    "type": "string",
+                                    "enum": ["checkout", "search", "auth", "media", "notifications"]
+                                },
+                                "customer": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {
+                                            "type": "string",
+                                            "maxLength": 60
+                                        },
+                                        "phone": {
+                                            "type": "string",
+                                            "pattern": "^\\+[0-9]{1,3}-[0-9]{3}-[0-9]{3}-[0-9]{4}$"
+                                        }
+                                    },
+                                    "required": ["name", "phone"],
+                                    "additionalProperties": false
+                                },
+                                "actions": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 3,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "owner": {
+                                                "type": "string",
+                                                "enum": ["mobile", "backend", "qa", "infra"]
+                                            },
+                                            "summary": {
+                                                "type": "string",
+                                                "maxLength": 80
+                                            }
+                                        },
+                                        "required": ["owner", "summary"],
+                                        "additionalProperties": false
+                                    }
+                                }
+                            },
+                            "required": ["ticket_id", "reported_on", "severity", "product_area", "customer", "actions"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "max_tokens": 512,
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "stream": false,
+                "extra_configs": {
+                    "chat_template_kwargs": {
+                        "enable_thinking": false
+                    }
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "{}",
+                            "reasoning_content": null
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "total_tokens": 0,
+                    "completion_tokens": 0
+                },
+                "aux_info": null,
+                "_comment": "constraint_only — content/usage/aux_info filled in from actual when schema validates"
+            },
+            "_comment": "complex_schema (no-thinking, MTP) — nested object + enum × 3 + pattern × 3 + bounded array. Prompt is a natural-language ticket description that does NOT mention 'JSON' or any schema field. Without xgrammar masking the model will: (1) prefix with explanation/markdown fence, (2) hallucinate ticket_id format, (3) emit free-text severity ('Severe', 'major'), (4) skip the nested phone pattern, (5) drop required actions[] or exceed maxItems=3. Each of those is rejected by jsonschema.validate. This case fails open under any grammar bug that lets a single token escape the mask."
         }
     ]
 }

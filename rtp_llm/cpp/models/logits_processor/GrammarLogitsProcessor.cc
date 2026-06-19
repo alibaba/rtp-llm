@@ -5,6 +5,7 @@
 #include <limits>
 
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorException.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -12,10 +13,6 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#if USING_CUDA
-#include <ATen/cuda/CUDAContext.h>
-#include "rtp_llm/cpp/models/logits_processor/grammar_kernels/xgrammar_kernels.h"
-#endif
 
 namespace rtp_llm {
 
@@ -29,47 +26,49 @@ enum class VerifyRowState {
 
 }  // namespace
 
-GrammarLogitsProcessor::GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher>    matcher,
-                                               int64_t                               eos_token_id,
-                                               LogitsProcessorFactory::ErrorReporter error_reporter):
-    matcher_(std::move(matcher)), eos_token_id_(eos_token_id) {
-    if (error_reporter) {
-        setErrorReporter(std::move(error_reporter));
-    }
-}
+GrammarLogitsProcessor::GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher, int64_t eos_token_id):
+    matcher_(std::move(matcher)), eos_token_id_(eos_token_id) {}
 
 GrammarLogitsProcessor::~GrammarLogitsProcessor() = default;
 
-GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::getDeviceMaskState(const c10::Device& device,
-                                                                                   bool stream_lock_held) {
+GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::getDeviceMaskState(const c10::Device& device) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     last_mask_device_ = device;
 
-    if (device_mask_state_.has_value() && device_mask_state_->token_len == accepted_token_len_) {
-        return *device_mask_state_;
+    if (device_mask_state_.mode != DeviceMaskMode::UNSET && device_mask_state_.token_len == accepted_token_len_
+        && device_mask_state_.device == device) {
+        return device_mask_state_;
     }
 
-    device_mask_state_ = buildDeviceMaskStateLocked(device, stream_lock_held);
-    return *device_mask_state_;
+    device_mask_state_ = buildDeviceMaskStateLocked(device);
+    return device_mask_state_;
 }
 
-GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::buildDeviceMaskStateLocked(const c10::Device& device,
-                                                                                           bool stream_lock_held) {
+GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::buildDeviceMaskStateLocked(const c10::Device& device) {
     DeviceMaskState state;
     state.token_len = accepted_token_len_;
+    state.device    = device;
 
-    if (!matcher_ || matcher_->finished()) {
-        state.mode = DeviceMaskMode::Skip;
+    if (!matcher_) {
+        state.mode = DeviceMaskMode::NOOP;
+        return state;
+    }
+    if (matcher_->finished()) {
+        state.mode = DeviceMaskMode::FINISHED;
         return state;
     }
     if (matcher_->isTerminated()) {
-        state.mode = DeviceMaskMode::ForceEOS;
+        state.mode = DeviceMaskMode::TERMINATED;
+        return state;
+    }
+    if (matcher_->isPassthroughForMask()) {
+        state.mode = DeviceMaskMode::PASSTHROUGH;
         return state;
     }
 
     const int32_t grammar_vocab_size = matcher_->vocabSize();
     if (grammar_vocab_size <= 0) {
-        state.mode = DeviceMaskMode::Skip;
+        state.mode = DeviceMaskMode::NOOP;
         return state;
     }
 
@@ -86,31 +85,16 @@ GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::buildDeviceMaskS
     DLTensor dl = makeSingleRowBitmaskView(bitmask.data_ptr<int32_t>(), words, dl_shape);
     if (!matcher_->fillBitmask(&dl, 0)) {
         // Indeterminate matcher state: finish + report instead of allowing schema-illegal output.
-        reported_error_.store(true, std::memory_order_relaxed);
         matcher_->markFinished();
-        reportErrorViaReporter(ErrorCode::EXECUTION_EXCEPTION,
-                               "grammar matcher fillBitmask failed; matcher state corrupted",
-                               stream_lock_held);
-        state.mode = DeviceMaskMode::Skip;
-        return state;
+        throw LogitsProcessorException(ErrorCode::GRAMMAR_FILL_BITMASK_FAILED,
+                                       "grammar matcher fillBitmask failed; matcher state corrupted");
     }
 
+    state.mode               = DeviceMaskMode::MASK;
     state.grammar_vocab_size = grammar_vocab_size;
-#if USING_CUDA
-    if (device.is_cuda()) {
-        if (!reusable_bitmask_gpu_.defined() || reusable_bitmask_gpu_.size(1) < words
-            || reusable_bitmask_gpu_.device() != device) {
-            reusable_bitmask_gpu_ = torch::empty({1, words}, bitmask.options().device(device));
-        }
-        reusable_bitmask_gpu_.copy_(bitmask, /*non_blocking=*/true);
-        state.packed_bitmask = reusable_bitmask_gpu_.narrow(1, 0, words);
-        state.mode           = DeviceMaskMode::Mask;
-        return state;
-    }
-#endif
 
     if (!reusable_vocab_mask_cpu_.defined() || reusable_vocab_mask_cpu_.size(0) < grammar_vocab_size) {
-        auto mask_options        = torch::TensorOptions().dtype(torch::kBool);
+        auto mask_options        = torch::TensorOptions().dtype(torch::kBool).pinned_memory(device.is_cuda());
         reusable_vocab_mask_cpu_ = torch::empty({grammar_vocab_size}, mask_options);
     }
     auto           vocab_mask  = reusable_vocab_mask_cpu_.narrow(0, 0, grammar_vocab_size);
@@ -121,7 +105,6 @@ GrammarLogitsProcessor::DeviceMaskState GrammarLogitsProcessor::buildDeviceMaskS
         mask_ptr[token_id] = !bitmaskAllowsToken(bitmask_ptr, words_sz, token_id);
     }
 
-    state.mode = DeviceMaskMode::Mask;
     publishMaskToDevice(state, vocab_mask, device);
     return state;
 }
@@ -138,31 +121,20 @@ void GrammarLogitsProcessor::publishMaskToDevice(DeviceMaskState&   state,
 }
 
 void GrammarLogitsProcessor::applyDeviceMaskState(const torch::Tensor& logits, const DeviceMaskState& state) {
-    if (state.mode == DeviceMaskMode::Skip) {
-        return;
+    switch (state.mode) {
+        case DeviceMaskMode::UNSET:
+        case DeviceMaskMode::NOOP:
+        case DeviceMaskMode::FINISHED:
+            return;
+        case DeviceMaskMode::TERMINATED:
+            forceToken(logits, eos_token_id_);
+            return;
+        case DeviceMaskMode::PASSTHROUGH:
+            maskToken(logits, eos_token_id_);
+            return;
+        case DeviceMaskMode::MASK:
+            break;
     }
-    if (state.mode == DeviceMaskMode::ForceEOS) {
-        forceToken(logits, eos_token_id_);
-        return;
-    }
-    // DeviceMaskMode::Mask
-
-#if USING_CUDA
-    if (state.packed_bitmask.defined() && logits.is_cuda()) {
-        auto logits_2d = logits.unsqueeze(0);
-        invokeApplyXGrammarBitmaskInplace(logits_2d,
-                                          state.packed_bitmask,
-                                          static_cast<int64_t>(state.grammar_vocab_size),
-                                          at::cuda::getCurrentCUDAStream().stream());
-        // Tail [grammar_vocab, model_vocab) must be -inf to match CPU path.
-        const int64_t model_vocab   = logits.size(0);
-        const int64_t grammar_vocab = static_cast<int64_t>(state.grammar_vocab_size);
-        if (grammar_vocab > 0 && model_vocab > grammar_vocab) {
-            logits.narrow(0, grammar_vocab, model_vocab - grammar_vocab).fill_(BaseLogitsProcessor::neg_inf);
-        }
-        return;
-    }
-#endif
 
     if (!state.vocab_mask.defined()) {
         return;
@@ -191,6 +163,13 @@ void GrammarLogitsProcessor::forceToken(const torch::Tensor& logits, int64_t tok
     logits[token_id] = 0.0f;
 }
 
+void GrammarLogitsProcessor::maskToken(const torch::Tensor& logits, int64_t token_id) {
+    if (token_id < 0 || token_id >= logits.size(0)) {
+        return;
+    }
+    logits[token_id] = BaseLogitsProcessor::neg_inf;
+}
+
 void GrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
     if (!matcher_) {
         return;
@@ -211,8 +190,7 @@ void GrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_i
     }
 
     auto logits = inputs.logits.narrow(0, start_idx, 1);
-    // Sampler::forward() runs without holding the stream's mutex_; reporter must take the lock.
-    auto state = getDeviceMaskState(logits.device(), /*stream_lock_held=*/false);
+    auto state  = getDeviceMaskState(logits.device());
     applyDeviceMaskState(logits[0], state);
 }
 
@@ -239,62 +217,44 @@ void GrammarLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32
 
     RTP_LLM_PROFILE_SCOPE("grammar.acceptToken");
 
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        // Single-pass: accept until matcher rejects, terminates, or EOS post-terminal.
-        // updateStatus runs with the stream mutex_ already held — reporter uses the
-        // no-lock variant so buildDeviceMaskStateLocked below doesn't self-deadlock.
-        for (int32_t tok : tokens) {
-            if (matcher_->isTerminated()) {
-                matcher_->markFinished();
-                if (tok == static_cast<int32_t>(eos_token_id_)) {
-                    accepted_token_len_ = matcher_->numAcceptedTokens() + 1;  // EOS not fed to matcher
-                } else {
-                    reportErrorViaReporter(ErrorCode::INVALID_PARAMS,
-                                           "grammar received non-EOS token after terminal state",
-                                           /*stream_lock_held=*/true);
-                    return;
-                }
-                break;
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    // Single-pass: accept until matcher rejects, terminates, or EOS post-terminal.
+    for (int32_t tok : tokens) {
+        if (matcher_->isTerminated()) {
+            matcher_->markFinished();
+            if (tok == static_cast<int32_t>(eos_token_id_)) {
+                accepted_token_len_ = matcher_->numAcceptedTokens() + 1;  // EOS not fed to matcher
+            } else {
+                throw LogitsProcessorException(ErrorCode::GRAMMAR_NON_EOS_AFTER_TERMINAL,
+                                               "grammar received non-EOS token after terminal state");
             }
-            if (!matcher_->acceptToken(tok)) {
-                reported_error_.store(true, std::memory_order_relaxed);
-                matcher_->markFinished();
-                reportErrorViaReporter(ErrorCode::INVALID_PARAMS,
-                                       "grammar commit error: parser rejected token " + std::to_string(tok),
-                                       /*stream_lock_held=*/true);
-                return;
-            }
-            accepted_token_len_ = matcher_->numAcceptedTokens();
+            break;
         }
-        device_mask_state_ = buildDeviceMaskStateLocked(last_mask_device_.value_or(c10::Device(c10::DeviceType::CPU)),
-                                                        /*stream_lock_held=*/true);
+        if (!matcher_->acceptToken(tok)) {
+            matcher_->markFinished();
+            throw LogitsProcessorException(ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN,
+                                           "grammar commit error: parser rejected token " + std::to_string(tok));
+        }
+        accepted_token_len_ = matcher_->numAcceptedTokens();
     }
+    device_mask_state_ = buildDeviceMaskStateLocked(last_mask_device_.value_or(c10::Device(c10::DeviceType::CPU)));
 }
 
 void GrammarLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& /* src_batch_indices */) {}
 
 bool GrammarLogitsProcessor::isSpecVerifyEligible() const {
-    return matcher_ != nullptr && !reported_error_.load(std::memory_order_relaxed);
+    return matcher_ != nullptr;
 }
 
 int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) {
     if (!matcher_ || request.propose_step <= 0 || request.bitmask_cpu_out == nullptr) {
-        return request.propose_step;
-    }
-    if (reported_error_.load(std::memory_order_relaxed)) {
-        return 0;
+        return static_cast<int>(request.propose_step);
     }
     if (request.bitmask_size_int32 < static_cast<size_t>((request.vocab_size + 31) / 32)) {
-        RTP_LLM_LOG_WARNING("[grammar] tryAcceptAndFillBitmask: bitmask buffer too small "
-                            "(words=%zu vocab=%zu); skipping verify",
-                            request.bitmask_size_int32,
-                            request.vocab_size);
-        reported_error_.store(true, std::memory_order_relaxed);
-        reportErrorViaReporter(ErrorCode::EXECUTION_EXCEPTION,
-                               "grammar MTP verify: bitmask buffer smaller than model vocab",
-                               /*stream_lock_held=*/false);
-        return 0;
+        throw LogitsProcessorException(ErrorCode::GRAMMAR_BITMASK_BUFFER_TOO_SMALL,
+                                       "grammar MTP verify: bitmask buffer smaller than model vocab (words="
+                                           + std::to_string(request.bitmask_size_int32)
+                                           + ", vocab=" + std::to_string(request.vocab_size) + ")");
     }
     std::lock_guard<std::mutex> lock(state_mutex_);
     // Don't short-circuit terminated here: row[0] must be filled EOS-only first or
@@ -309,35 +269,21 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
     {
         const int32_t grammar_vocab_size = matcher_->vocabSize();
         if (grammar_vocab_size > 0 && SpecLogitsProcessor::bitmaskWordCount(grammar_vocab_size) > W) {
-            RTP_LLM_LOG_WARNING("[grammar] tryAcceptAndFillBitmask: grammar vocab (%d) exceeds "
-                                "model vocab bitmask (%zu words); reporting stream error",
-                                grammar_vocab_size,
-                                W);
-            reported_error_.store(true, std::memory_order_relaxed);
             matcher_->markFinished();
-            reportErrorViaReporter(ErrorCode::EXECUTION_EXCEPTION,
-                                   "grammar vocab exceeds model vocab in MTP verify (grammar="
-                                       + std::to_string(grammar_vocab_size) + ", model_words=" + std::to_string(W)
-                                       + ")",
-                                   /*stream_lock_held=*/false);
-            return 0;
+            throw LogitsProcessorException(
+                ErrorCode::GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB,
+                "grammar vocab exceeds model vocab in MTP verify (grammar=" + std::to_string(grammar_vocab_size)
+                    + ", model_words=" + std::to_string(W) + ")");
         }
     }
 
     // forceTokenInBitmask asserts on out-of-range token_id; surface eos misconfiguration
     // as a stream error here instead of crashing the worker on the first verify row.
     if (eos_token_id_ < 0 || static_cast<size_t>(eos_token_id_ / 32) >= W) {
-        RTP_LLM_LOG_WARNING("[grammar] tryAcceptAndFillBitmask: eos_token_id (%ld) out of bitmask range "
-                            "(words=%zu); reporting stream error",
-                            static_cast<long>(eos_token_id_),
-                            W);
-        reported_error_.store(true, std::memory_order_relaxed);
         matcher_->markFinished();
-        reportErrorViaReporter(ErrorCode::EXECUTION_EXCEPTION,
-                               "grammar MTP verify: eos_token_id (" + std::to_string(eos_token_id_)
-                                   + ") out of model vocab bitmask (words=" + std::to_string(W) + ")",
-                               /*stream_lock_held=*/false);
-        return 0;
+        throw LogitsProcessorException(ErrorCode::GRAMMAR_EOS_OUT_OF_VOCAB,
+                                       "grammar MTP verify: eos_token_id (" + std::to_string(eos_token_id_)
+                                           + ") out of model vocab bitmask (words=" + std::to_string(W) + ")");
     }
 
     auto fill_row = [&](int32_t* row) -> VerifyRowState {
@@ -351,6 +297,12 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
             forceTokenInBitmask(row, W, eos_token_id_);
             return VerifyRowState::Terminated;
         }
+        if (matcher_->isPassthroughForMask()) {
+            // Reasoning passthrough: keep allow-all but suppress EOS so spec verify
+            // doesn't accept a draft EOS that would prematurely close the stream.
+            clearTokenFromBitmask(row, W, eos_token_id_);
+            return VerifyRowState::Active;
+        }
 
         const int32_t grammar_vocab_size = matcher_->vocabSize();
         const size_t  grammar_words      = SpecLogitsProcessor::bitmaskWordCount(grammar_vocab_size);
@@ -358,12 +310,8 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
         int64_t  dl_shape[2];
         DLTensor dl = makeSingleRowBitmaskView(row, static_cast<int32_t>(grammar_words), dl_shape);
         if (!matcher_->fillBitmask(&dl, 0)) {
-            reported_error_.store(true, std::memory_order_relaxed);
             matcher_->markFinished();
             forceTokenInBitmask(row, W, eos_token_id_);
-            reportErrorViaReporter(ErrorCode::EXECUTION_EXCEPTION,
-                                   "grammar matcher fillBitmask failed during MTP verify; matcher state corrupted",
-                                   /*stream_lock_held=*/false);
             return VerifyRowState::Finished;
         }
         clearBitmaskTokenRange(row, W, grammar_vocab_size, static_cast<int64_t>(request.vocab_size));
@@ -377,17 +325,8 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
         }
         matcher_->restoreReasoner(reasoner_snapshot);
     };
-    auto fail_with = [&](std::string what) {
-        rollback_provisional();
-        matcher_->markFinished();
-        reported_error_.store(true, std::memory_order_relaxed);
-        if (request.bitmask_cpu_out != nullptr && request.bitmask_size_int32 > 0) {
-            forceTokenInBitmask(request.bitmask_cpu_out, W, eos_token_id_);
-        }
-        reportErrorViaReporter(ErrorCode::EXECUTION_EXCEPTION,
-                               "grammar MTP verify exception: " + std::move(what),
-                               /*stream_lock_held=*/false);
-    };
+
+    std::string verify_exception_what;
 
     try {
         for (int offset = 0; offset <= P; ++offset) {
@@ -414,15 +353,22 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
             ++accepted_prefix;
         }
     } catch (const std::exception& e) {
-        fail_with(e.what());
-        return 0;
+        verify_exception_what = e.what();
     } catch (...) {
-        fail_with("unknown");
-        return 0;
+        verify_exception_what = "unknown";
     }
-    // Verify never accumulates state on the matcher; commit happens via updateStatus.
+
     rollback_provisional();
-    return cap;
+
+    if (!verify_exception_what.empty()) {
+        matcher_->markFinished();
+        if (request.bitmask_cpu_out != nullptr && request.bitmask_size_int32 > 0) {
+            forceTokenInBitmask(request.bitmask_cpu_out, W, eos_token_id_);
+        }
+        throw LogitsProcessorException(ErrorCode::GRAMMAR_VERIFY_EXCEPTION,
+                                       "grammar MTP verify exception: " + verify_exception_what);
+    }
+    return static_cast<int>(cap);
 }
 
 }  // namespace rtp_llm

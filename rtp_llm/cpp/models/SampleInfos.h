@@ -63,8 +63,8 @@ public:
 
     std::vector<at::Generator> generator;
 
-    // MTP verify: int32 packed bitmask [batch * (propose_step + 1), bitmask_words];
-    // bit=1 allowed. defined() iff this batch is a spec-verify batch.
+    // MTP verify: bool dense disallow mask [batch * (propose_step + 1), vocab_size];
+    // true = disallow. defined() iff this batch is a spec-verify batch.
     torch::Tensor                      spec_vocab_mask_gpu;
     torch::Tensor                      spec_cap_gpu;
     std::vector<SpecLogitsProcessorId> spec_applied_processors;

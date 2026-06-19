@@ -411,6 +411,8 @@ class CaseRunner(object):
         for q_idx, q_r in enumerate(qr_array):
             q_r["_taskinfo_rel_path"] = task_info.taskinfo_rel_path
             q_r["_query_idx"] = q_idx
+            if task_info.grammar_constraint_only:
+                q_r["grammar_constraint_only"] = True
             tracer = Tracer()
             request_endpoint = self._resolve_endpoint(q_r, task_endpoint)
             try:

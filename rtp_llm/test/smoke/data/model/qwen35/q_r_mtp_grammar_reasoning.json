@@ -1,6 +1,7 @@
 {
     "model_type": "qwen35_moe",
     "model_path": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "grammar_constraint_only": true,
     "_comment": "MTP + grammar + reasoning (sequential, thinking ON). Pairs with q_r_mtp_grammar.json (thinking OFF) and q_r_mtp_grammar_reasoning_concurrent.json (thinking ON + concurrency). Each axis has had a real bug in living memory: (1) MTP rollback non-reasoning active_steps formula bug; (2) ReasonerGrammarObject per-stream tokens_after_think_end reset (GrammarManager.cc:473-474); (3) MTP prefill bonus token T0 must be accepted into matcher; (4) grammar fork/DFS in spec decoding. With reasoning enabled, the matcher is in 'free-accept' (mask off) until </think> is seen, then locks onto the schema. Under MTP this means: the spec engine drafts N tokens including possibly </think>, the matcher must transition state synchronously, AND rollback must use the reasoning-mode active_steps formula. If any of those four breaks, the output is either non-JSON or never closes <think>. grammar_constraint_only=true because reasoning_content is model-version-dependent.",
     "query_result": [
         {

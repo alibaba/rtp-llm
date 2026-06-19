@@ -1045,10 +1045,17 @@ MtpExecutor::buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& str
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
             auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(processor);
             if (spec_processor) {
+                std::weak_ptr<GenerateStream>     stream_weak = stream;
+                SpecLogitsVerifyRunner::ErrorSink sink        = [stream_weak](ErrorCode code, const std::string& msg) {
+                    if (auto s = stream_weak.lock()) {
+                        s->reportError(code, msg);
+                    }
+                };
                 task.active.push_back({spec_processor,
                                        stream_idx,
                                        processor_idx,
-                                       static_cast<uint64_t>(stream->streamId())});
+                                       static_cast<uint64_t>(stream->streamId()),
+                                       std::move(sink)});
             }
             ++processor_idx;
         }

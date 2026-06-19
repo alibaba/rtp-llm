@@ -3,6 +3,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -11,6 +12,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorException.h"
 #include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/PrefixToCandidateTokens.h"
 #include "rtp_llm/cpp/models/logits_processor/ReasoningGrammarLogitsProcessor.h"
@@ -26,12 +28,6 @@ namespace {
 
 std::mutex                       g_grammar_backend_mutex;
 std::shared_ptr<XGrammarBackend> g_grammar_backend;
-
-void reportError(const LogitsProcessorFactory::ErrorReporter& reporter, ErrorCode code, const std::string& msg) {
-    if (reporter) {
-        reporter(code, msg, /*stream_lock_held=*/false);
-    }
-}
 
 GrammarKeyCpp keyFromGenerateConfig(const GenerateConfig& config) {
     // Fixed priority json_schema > regex > ebnf > structural_tag silently drops the
@@ -60,14 +56,12 @@ GrammarKeyCpp keyFromGenerateConfig(const GenerateConfig& config) {
     return {};
 }
 
-// Compile + matcher creation, given an already-resolved GrammarKeyCpp. Works
-// off the pre-parsed key so the factory can validate response_format once for
-// both the in-think and plain-grammar paths.
+// Compile + matcher creation, given an already-resolved GrammarKeyCpp. On any
+// failure throws LogitsProcessorException; on success returns the matcher.
 std::shared_ptr<RtpGrammarMatcher> compileMatcherFromKey(XGrammarBackend&                backend,
                                                          const GrammarKeyCpp&            key,
                                                          bool                            require_reasoning,
-                                                         std::optional<std::vector<int>> think_end_token_ids,
-                                                         const LogitsProcessorFactory::ErrorReporter& error_reporter) {
+                                                         std::optional<std::vector<int>> think_end_token_ids) {
     // Lightweight size caps (xgrammar already validates schema/regex content).
     constexpr size_t kMaxJsonSchemaSize = 1024 * 1024;  // 1 MiB
     constexpr size_t kMaxRegexEbnfSize  = 64 * 1024;    // 64 KiB
@@ -79,69 +73,58 @@ std::shared_ptr<RtpGrammarMatcher> compileMatcherFromKey(XGrammarBackend&       
         // rejects them too, and caching the rejection per-key would let N distinct
         // huge blobs inflate memory before LRU evicts them. The user already gets
         // INVALID_PARAMS; on retry this size check rejects in O(1) without cache.
-        reportError(
-            error_reporter, ErrorCode::INVALID_PARAMS, "Failed to compile " + key.key_type + " grammar: " + detail);
-        return nullptr;
+        throw LogitsProcessorException(ErrorCode::INVALID_PARAMS,
+                                       "Failed to compile " + key.key_type + " grammar: " + detail);
     }
 
     CompileResult result;
     try {
         result = backend.getOrCompile(key);
     } catch (const std::exception& e) {
-        reportError(error_reporter, ErrorCode::INVALID_PARAMS, std::string("grammar compile error: ") + e.what());
-        return nullptr;
+        throw LogitsProcessorException(ErrorCode::INVALID_PARAMS,
+                                       std::string("grammar compile error: ") + e.what());
     }
     if (!result.compiled) {
         const std::string err = result.error_message.empty() ? "unknown compile error" : result.error_message;
-        reportError(
-            error_reporter, ErrorCode::INVALID_PARAMS, "Failed to compile " + key.key_type + " grammar: " + err);
-        return nullptr;
+        throw LogitsProcessorException(ErrorCode::INVALID_PARAMS,
+                                       "Failed to compile " + key.key_type + " grammar: " + err);
     }
 
     const bool                         terminate_without_stop_token = key.key_type == "json";
     std::shared_ptr<RtpGrammarMatcher> matcher                      = backend.createMatcher(
         result.compiled, require_reasoning, std::move(think_end_token_ids), terminate_without_stop_token);
     if (!matcher) {
-        reportError(error_reporter, ErrorCode::INVALID_PARAMS, "grammar matcher install failed");
-        return nullptr;
+        throw LogitsProcessorException(ErrorCode::INVALID_PARAMS, "grammar matcher install failed");
     }
     return matcher;
 }
 
-BaseLogitsProcessorPtr createGrammarProcessor(const std::shared_ptr<XGrammarBackend>&      backend,
-                                              const std::shared_ptr<GenerateInput>&        input,
-                                              const GrammarKeyCpp&                         key,
-                                              int64_t                                      eos_token_id,
-                                              const LogitsProcessorFactory::ErrorReporter& error_reporter) {
+BaseLogitsProcessorPtr createGrammarProcessor(const std::shared_ptr<XGrammarBackend>& backend,
+                                              const std::shared_ptr<GenerateInput>&   input,
+                                              const GrammarKeyCpp&                    key,
+                                              int64_t                                 eos_token_id) {
     if (!input || !input->generate_config || key.empty()) {
         return nullptr;
     }
     auto& config = *input->generate_config;
     if (!backend) {
-        reportError(error_reporter,
-                    ErrorCode::INVALID_PARAMS,
-                    "structured output requested but constraint backend is disabled "
-                    "(check engine startup logs: tokenizer info empty or backend init failed).");
-        return nullptr;
+        throw LogitsProcessorException(ErrorCode::INVALID_PARAMS,
+                                       "structured output requested but constraint backend is disabled "
+                                       "(check engine startup logs: tokenizer info empty or backend init failed).");
     }
 
     const bool                      require_reasoning = config.in_think_mode;
     std::optional<std::vector<int>> think_end_token_ids;
     if (require_reasoning) {
         if (config.end_think_token_ids.empty()) {
-            reportError(error_reporter,
-                        ErrorCode::INVALID_PARAMS,
-                        "structured output with in_think_mode requires non-empty end_think_token_ids");
-            return nullptr;
+            throw LogitsProcessorException(
+                ErrorCode::INVALID_PARAMS,
+                "structured output with in_think_mode requires non-empty end_think_token_ids");
         }
         think_end_token_ids = config.end_think_token_ids;
     }
 
-    auto matcher =
-        compileMatcherFromKey(*backend, key, require_reasoning, std::move(think_end_token_ids), error_reporter);
-    if (!matcher) {
-        return nullptr;
-    }
+    auto matcher = compileMatcherFromKey(*backend, key, require_reasoning, std::move(think_end_token_ids));
 
     if (require_reasoning) {
         return std::make_shared<ReasoningGrammarLogitsProcessor>(std::move(matcher),
@@ -149,10 +132,9 @@ BaseLogitsProcessorPtr createGrammarProcessor(const std::shared_ptr<XGrammarBack
                                                                  config.max_thinking_tokens,
                                                                  config.begin_think_token_ids,
                                                                  config.end_think_token_ids,
-                                                                 input->inputLength(),
-                                                                 error_reporter);
+                                                                 input->inputLength());
     }
-    return std::make_shared<GrammarLogitsProcessor>(std::move(matcher), eos_token_id, error_reporter);
+    return std::make_shared<GrammarLogitsProcessor>(std::move(matcher), eos_token_id);
 }
 
 }  // namespace
@@ -175,8 +157,7 @@ std::vector<BaseLogitsProcessorPtr>
 LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
                                                int32_t                        init_batch_size,
                                                int32_t                        max_batch_size,
-                                               int64_t                        eos_token_id,
-                                               const ErrorReporter&           error_reporter) {
+                                               int64_t                        eos_token_id) {
     std::vector<BaseLogitsProcessorPtr> result;
 
     auto& config = *generate_input->generate_config;
@@ -190,20 +171,17 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
 
     if (!grammar_key.empty()) {
         if (config.hasNumBeams() || config.num_return_sequences > 1) {
-            reportError(error_reporter,
-                        ErrorCode::INVALID_PARAMS,
-                        "grammar-constrained decoding does not support beam search or "
-                        "num_return_sequences > 1");
-        } else {
-            std::shared_ptr<XGrammarBackend> backend;
-            {
-                std::lock_guard<std::mutex> lock(g_grammar_backend_mutex);
-                backend = g_grammar_backend;
-            }
-            if (auto grammar_processor =
-                    createGrammarProcessor(backend, generate_input, grammar_key, eos_token_id, error_reporter)) {
-                result.push_back(std::move(grammar_processor));
-            }
+            throw LogitsProcessorException(ErrorCode::INVALID_PARAMS,
+                                           "grammar-constrained decoding does not support beam search or "
+                                           "num_return_sequences > 1");
+        }
+        std::shared_ptr<XGrammarBackend> backend;
+        {
+            std::lock_guard<std::mutex> lock(g_grammar_backend_mutex);
+            backend = g_grammar_backend;
+        }
+        if (auto grammar_processor = createGrammarProcessor(backend, generate_input, grammar_key, eos_token_id)) {
+            result.push_back(std::move(grammar_processor));
         }
     }
 

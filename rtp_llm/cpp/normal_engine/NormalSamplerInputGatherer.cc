@@ -203,9 +203,19 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
                                                           bool                          score_batch) const {
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
     std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, score_batch, idx = 0](auto& stream) mutable {
-        const auto stream_id = static_cast<uint64_t>(stream->streamId());
+        const auto                    stream_id   = static_cast<uint64_t>(stream->streamId());
+        std::weak_ptr<GenerateStream> stream_weak = stream;
+        // Sink keeps logits_processor decoupled from GenerateStream (avoids the
+        // logits_processor → stream → logits_processor Bazel cycle).
+        auto make_sink = [stream_weak]() {
+            return LogitsProcessorStates::ErrorSink([stream_weak](ErrorCode code, const std::string& msg) {
+                if (auto s = stream_weak.lock()) {
+                    s->reportError(code, msg);
+                }
+            });
+        };
         if (score_batch) {
-            const int score_len = static_cast<int>(stream->scoreLen());
+            const int score_len     = static_cast<int>(stream->scoreLen());
             size_t    processor_idx = 0;
             for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
                 if (!processor || processor->isStateful()) {
@@ -213,7 +223,7 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
                     continue;
                 }
                 for (int i = 0; i < score_len; ++i) {
-                    state_ptr->insert(processor, idx + i, idx + i + 1, stream_id, processor_idx);
+                    state_ptr->insert(processor, idx + i, idx + i + 1, stream_id, processor_idx, make_sink());
                 }
                 ++processor_idx;
             }
@@ -222,7 +232,12 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
             size_t processor_idx = 0;
             for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
                 if (processor) {
-                    state_ptr->insert(processor, idx, idx + stream->currentBatchSize(), stream_id, processor_idx);
+                    state_ptr->insert(processor,
+                                      idx,
+                                      idx + stream->currentBatchSize(),
+                                      stream_id,
+                                      processor_idx,
+                                      make_sink());
                 }
                 ++processor_idx;
             }

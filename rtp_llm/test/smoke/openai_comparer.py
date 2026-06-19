@@ -1,5 +1,7 @@
 import copy
 import json
+import logging
+import re
 from typing import Any, Dict, List, Optional, Union
 import os
 import torch
@@ -212,6 +214,77 @@ class OpenaiComparer(BaseComparer):
         lines.append("")
         lines.append("=" * 60)
         return "\n".join(lines)
+
+    def _maybe_rewrite_expect_result(
+        self,
+        smoke_response: Union[ChatCompletionResponse, ChatCompletionStreamResponse],
+        expect_result: Union[ChatCompletionResponse, ChatCompletionStreamResponse],
+        query_info: ChatCompletionRequest,
+    ) -> None:
+        """For grammar smoke cases marked grammar_constraint_only=true: when each
+        actual choice's content satisfies query.response_format, copy the
+        non-deterministic fields (content, reasoning_content, timing, role_addrs)
+        from actual into expect so byte-eq compare passes. If the constraint
+        fails, leave expect untouched so the diff exposes the real bug.
+        """
+        if not self.qr_info.get("grammar_constraint_only"):
+            return
+        if self.is_stream:
+            return  # streaming smoke for grammar isn't used today; keep simple
+        response_format = self.qr_info["query"].get("response_format")
+        if not response_format:
+            return
+        try:
+            self._validate_response_format(smoke_response, response_format)
+        except Exception as e:
+            logging.warning(
+                "[grammar_constraint_only] constraint check failed: %s", e
+            )
+            return  # expect_result stays untouched; compare_result will diff
+        # constraint passed → mirror non-deterministic fields from actual to expect
+        if len(expect_result.choices) != len(smoke_response.choices):
+            return
+        for i, actual_choice in enumerate(smoke_response.choices):
+            expect_choice = expect_result.choices[i]
+            expect_choice.message.content = actual_choice.message.content
+            expect_choice.message.reasoning_content = (
+                actual_choice.message.reasoning_content
+            )
+        expect_result.created = smoke_response.created
+        # Constraint-only intentionally skips byte-eq on usage / aux_info — they
+        # vary by prompt (input_len, prompt_tokens), hardware (cost_time), and
+        # scheduler (role_addrs). All constraint signal lives in
+        # choices[*].message.content, which is validated above.
+        expect_result.usage = smoke_response.usage
+        expect_result.aux_info = smoke_response.aux_info
+
+    @staticmethod
+    def _validate_response_format(
+        response: ChatCompletionResponse, response_format: Dict[str, Any]
+    ) -> None:
+        rf_type = response_format.get("type")
+        for idx, choice in enumerate(response.choices):
+            content = choice.message.content
+            if content is None:
+                raise ValueError(f"choice[{idx}].message.content is None")
+            if rf_type == "json_schema":
+                schema = (response_format.get("json_schema") or {}).get("schema")
+                if not schema:
+                    raise ValueError("response_format.json_schema.schema missing")
+                import jsonschema
+                jsonschema.validate(json.loads(content), schema)
+            elif rf_type == "regex":
+                pattern = response_format.get("pattern")
+                if not pattern:
+                    raise ValueError("response_format.pattern missing")
+                if not re.fullmatch(pattern, content):
+                    raise ValueError(
+                        f"choice[{idx}] content {content!r} does not match {pattern!r}"
+                    )
+            else:
+                raise ValueError(
+                    f"grammar_constraint_only does not support type={rf_type}"
+                )
 
     def compare_result(
         self,

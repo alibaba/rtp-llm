@@ -296,11 +296,11 @@ int64_t ThinkModeLogitsProcessor::acceptedTokenLen() const {
 
 int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) {
     if (!spec_eligible_ || request.propose_step <= 0 || request.bitmask_cpu_out == nullptr) {
-        return request.propose_step;
+        return static_cast<int>(request.propose_step);
     }
     auto snapshot = std::atomic_load_explicit(&spec_snapshot_, std::memory_order_acquire);
     if (!snapshot || !snapshot->eligible)
-        return request.propose_step;
+        return static_cast<int>(request.propose_step);
 
     StreamThinkInfo state = snapshot->info.copy();
     int             cap   = request.propose_step;
@@ -354,7 +354,7 @@ int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorR
         }
         commitToken(state, draft_token);
     }
-    return cap;
+    return static_cast<int>(cap);
 }
 
 ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,

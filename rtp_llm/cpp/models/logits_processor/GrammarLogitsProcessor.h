@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -11,23 +10,15 @@
 #include <ATen/ATen.h>
 #include <dlpack/dlpack.h>
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
-#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
-#include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
-#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
-class RtpGrammarMatcher;
-class GenerateInput;
-struct SamplerInputs;
-
 class GrammarLogitsProcessor: public BaseLogitsProcessor, public SpecLogitsProcessor {
 public:
-    explicit GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher>    matcher,
-                                    int64_t                               eos_token_id   = 0,
-                                    LogitsProcessorFactory::ErrorReporter error_reporter = {});
+    explicit GrammarLogitsProcessor(std::shared_ptr<RtpGrammarMatcher> matcher,
+                                    int64_t                            eos_token_id = 0);
 
     ~GrammarLogitsProcessor() override;
 
@@ -47,45 +38,49 @@ public:
     }
 
 private:
-    // Skip:     no-op (matcher absent / finished / vocab=0 — caller leaves logits untouched).
-    // ForceEOS: matcher terminated; force EOS in logits.
-    // Mask:     real bitmask present; apply to logits.
+    // Drives applyDeviceMaskState. Mirrors RtpGrammarMatcher's lifecycle so the
+    // mode alone determines the action — no second lookup against the matcher.
+    //   UNSET        : never built (initial / cache miss); next call must build.
+    //   NOOP         : matcher absent or grammar vocab=0 — leave logits alone.
+    //   MASK         : real bitmask present; apply to logits.
+    //   PASSTHROUGH  : reasoning-passthrough segment — only suppress EOS.
+    //   TERMINATED   : matcher reached terminal state — force EOS.
+    //   FINISHED     : matcher finalized (post-terminal commit / hard error) —
+    //                  leave logits alone; commit path will surface end-of-stream.
     enum class DeviceMaskMode {
-        Skip,
-        ForceEOS,
-        Mask,
+        UNSET,
+        NOOP,
+        MASK,
+        PASSTHROUGH,
+        TERMINATED,
+        FINISHED,
     };
 
     struct DeviceMaskState {
-        DeviceMaskMode mode      = DeviceMaskMode::Skip;
+        DeviceMaskMode mode      = DeviceMaskMode::UNSET;
         int64_t        token_len = -1;
-        torch::Tensor  vocab_mask;
-        torch::Tensor  packed_bitmask;
+        c10::Device    device    = c10::Device(c10::DeviceType::CPU);
+        torch::Tensor  vocab_mask;  // [grammar_vocab_size] bool, true=disallow
         int32_t        grammar_vocab_size = 0;
     };
 
-    // stream_lock_held: true when the caller already holds the GenerateStream's mutex_
-    // (e.g. updateStatus path); false otherwise (process / spec verify paths). Plumbed
-    // through to reportErrorViaReporter so the reporter picks the matching reportError
-    // variant — passing the wrong value self-deadlocks since std::mutex is non-recursive.
-    DeviceMaskState getDeviceMaskState(const c10::Device& device, bool stream_lock_held);
-    DeviceMaskState buildDeviceMaskStateLocked(const c10::Device& device, bool stream_lock_held);
+    DeviceMaskState getDeviceMaskState(const c10::Device& device);
+    DeviceMaskState buildDeviceMaskStateLocked(const c10::Device& device);
     void            publishMaskToDevice(DeviceMaskState& state, torch::Tensor vocab_mask, const c10::Device& device);
     void            applyDeviceMaskState(const torch::Tensor& logits, const DeviceMaskState& state);
     void            forceToken(const torch::Tensor& logits, int64_t token_id);
+    void            maskToken(const torch::Tensor& logits, int64_t token_id);
 
     std::shared_ptr<RtpGrammarMatcher> matcher_;
 
-    mutable std::mutex            state_mutex_;
-    std::atomic_bool              reported_error_{false};
-    int64_t                       eos_token_id_       = 0;
-    int64_t                       accepted_token_len_ = 0;
-    std::optional<c10::Device>     last_mask_device_;
-    std::optional<DeviceMaskState> device_mask_state_;
-    torch::Tensor reusable_bitmask_cpu_;
-    torch::Tensor reusable_bitmask_gpu_;
-    torch::Tensor reusable_vocab_mask_cpu_;
-    int32_t       reusable_mask_words_ = 0;
+    mutable std::mutex         state_mutex_;
+    int64_t                    eos_token_id_       = 0;
+    int64_t                    accepted_token_len_ = 0;
+    std::optional<c10::Device> last_mask_device_;
+    DeviceMaskState            device_mask_state_{};
+    torch::Tensor              reusable_bitmask_cpu_;
+    torch::Tensor              reusable_vocab_mask_cpu_;
+    int32_t                    reusable_mask_words_ = 0;
 };
 
 }  // namespace rtp_llm

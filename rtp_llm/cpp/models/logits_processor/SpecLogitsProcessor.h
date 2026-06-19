@@ -25,7 +25,10 @@ public:
 
     virtual bool isSpecVerifyEligible() const = 0;
 
-    // Must not mutate committed state. Returns accept cap in [0, propose_step].
+    // Must not mutate committed state. Returns the accept cap in
+    // [0, propose_step]. On failure, throws LogitsProcessorException carrying
+    // the GRAMMAR_* code; SpecLogitsVerifyRunner's try/catch routes it to the
+    // owning stream's error sink.
     virtual int tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) = 0;
 
     static size_t bitmaskWordCount(size_t vocab_size) {

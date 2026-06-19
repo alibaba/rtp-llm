@@ -53,6 +53,7 @@ cc_library(
     name = "logits_processor",
     hdrs = [
         "logits_processor/BaseLogitsProcessor.h",
+        "logits_processor/LogitsProcessorException.h",
         "logits_processor/SpecLogitsProcessor.h",
         "logits_processor/MultiSeqLogitsProcessor.h",
         "logits_processor/LogitsProcessorStates.h",
@@ -92,7 +93,6 @@ cc_library(
     ] + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
-            "//rtp_llm/cpp/models/logits_processor/grammar_kernels:xgrammar_kernels",
         ],
         "@//:using_rocm": [],
         "//conditions:default": [],

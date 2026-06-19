@@ -10,7 +10,9 @@
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorException.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 #include <gtest/gtest.h>
 
@@ -68,6 +70,23 @@ ProcessorBundle makeProcessor(XGrammarBackend& backend, const std::string& regex
                                                                       /*require_reasoning=*/false,
                                                                       /*think_end_token_ids=*/std::nullopt,
                                                                       /*terminate_without_stop_token=*/true);
+    auto proc = std::make_shared<GrammarLogitsProcessor>(matcher);
+    return {std::move(proc), std::move(matcher)};
+}
+
+// Reasoning-enabled matcher: starts in passthrough (think body) until the
+// think_end sequence is matched. Used to exercise the PASSTHROUGH fill_row
+// branch added when state-machine semantics were aligned with dsv4.
+ProcessorBundle makeReasoningProcessor(XGrammarBackend& backend, const std::string& regex) {
+    auto compiled = backend.compileNow({"regex", regex}).compiled;
+    EXPECT_TRUE(compiled);
+    // Single-byte think_end token 'z' (id 122) so passthrough exits on a
+    // single accepted token; chosen to be disjoint from {a,b,x,eos}.
+    std::shared_ptr<RtpGrammarMatcher> matcher = backend.createMatcher(compiled,
+                                                                      /*require_reasoning=*/true,
+                                                                      /*think_end_token_ids=*/std::vector<int>{'z'},
+                                                                      /*terminate_without_stop_token=*/true);
+    matcher->initReasoning(/*in_think_body=*/true);
     auto proc = std::make_shared<GrammarLogitsProcessor>(matcher);
     return {std::move(proc), std::move(matcher)};
 }
@@ -223,9 +242,48 @@ TEST(GrammarLogitsProcessorTest, RollsBackProvisionalAccepts) {
     req.bitmask_size_int32 = words;
     req.vocab_size         = 128;
 
-    const int cap1 = proc->tryAcceptAndFillBitmask(req);
-    const int cap2 = proc->tryAcceptAndFillBitmask(req);
-    EXPECT_EQ(cap1, cap2) << "state must be unchanged across calls (rollback)";
+    const int r1 = proc->tryAcceptAndFillBitmask(req);
+    const int r2 = proc->tryAcceptAndFillBitmask(req);
+    EXPECT_EQ(r1, r2) << "state must be unchanged across calls (rollback)";
+}
+
+// While the matcher is in reasoning passthrough (parser frozen), fill_row must
+// keep rows at allow-all but suppress EOS — a draft EOS otherwise gets accepted
+// and prematurely closes the stream. Verify that:
+//   - rows are allow-all for non-EOS tokens
+//   - EOS is masked out across rows
+//   - cap stops at the first EOS in the draft chain
+TEST(GrammarLogitsProcessorTest, PassthroughRowsAllowAllExceptEos) {
+    XGrammarBackend backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    auto            proc = makeReasoningProcessor(backend, "ab");
+    ASSERT_TRUE(proc.matcher->isPassthroughForMask())
+        << "reasoning matcher must start in passthrough before think_end";
+
+    const int            propose_step = 3;
+    const size_t         words        = SpecLogitsProcessor::bitmaskWordCount(128);
+    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words, 0);
+    // 'x' / 'a' / EOS / 'b' — all should be allowed by passthrough except EOS,
+    // which forces cap == 2.
+    std::vector<int32_t> draft{kX, kA, kEos, kB};
+
+    SpecLogitsProcessorRequest req;
+    req.draft_tokens       = draft.data();
+    req.propose_step       = propose_step;
+    req.bitmask_cpu_out    = bm.data();
+    req.bitmask_size_int32 = words;
+    req.vocab_size         = 128;
+
+    const int cap = proc->tryAcceptAndFillBitmask(req);
+    EXPECT_EQ(cap, 2) << "draft[2]=EOS is masked in passthrough → cap stops at 2";
+
+    for (int row = 0; row < propose_step; ++row) {
+        EXPECT_TRUE(rowAllows(bm, words, row, kA)) << "row " << row << " must allow 'a'";
+        EXPECT_TRUE(rowAllows(bm, words, row, kB)) << "row " << row << " must allow 'b'";
+        EXPECT_TRUE(rowAllows(bm, words, row, kX)) << "row " << row << " must allow 'x'";
+        EXPECT_FALSE(rowAllows(bm, words, row, kEos)) << "row " << row << " must mask EOS in passthrough";
+    }
+    EXPECT_TRUE(proc.matcher->isPassthroughForMask())
+        << "verify must roll back: matcher still in passthrough";
 }
 
 TEST(GrammarLogitsProcessorTest, VerifyCapIsDraftRejectIndex) {
@@ -245,6 +303,34 @@ TEST(GrammarLogitsProcessorTest, VerifyCapIsDraftRejectIndex) {
     req.vocab_size         = 128;
 
     EXPECT_EQ(proc->tryAcceptAndFillBitmask(req), 0);
+}
+
+// Buffer-undersize invariant: a bitmask buffer narrower than ceil(vocab/32)
+// must surface as GRAMMAR_BITMASK_BUFFER_TOO_SMALL rather than corrupting the
+// caller's heap.
+TEST(GrammarLogitsProcessorTest, RejectsUndersizedBitmaskBuffer) {
+    XGrammarBackend backend(makeAsciiTokenizerInfoJson(), defaultOptions());
+    auto            proc = makeProcessor(backend, "ab");
+
+    const int            propose_step = 1;
+    // Allocate a deliberately too-small buffer for vocab=128 (needs 4 words).
+    const size_t         words = 1;
+    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words, 0);
+    std::vector<int32_t> draft{kA};
+
+    SpecLogitsProcessorRequest req;
+    req.draft_tokens       = draft.data();
+    req.propose_step       = propose_step;
+    req.bitmask_cpu_out    = bm.data();
+    req.bitmask_size_int32 = words;
+    req.vocab_size         = 128;
+
+    try {
+        (void)proc->tryAcceptAndFillBitmask(req);
+        FAIL() << "expected LogitsProcessorException on undersized bitmask buffer";
+    } catch (const LogitsProcessorException& e) {
+        EXPECT_EQ(e.code(), ErrorCode::GRAMMAR_BITMASK_BUFFER_TOO_SMALL);
+    }
 }
 
 }  // namespace rtp_llm

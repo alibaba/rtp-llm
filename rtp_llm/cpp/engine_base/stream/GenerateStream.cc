@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorException.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
 
@@ -87,15 +88,22 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
-    // Sync factories (e.g. grammar) may surface schema/compile errors via this reporter
-    // before the stream finishes constructing, so we route through reportEvent (which
-    // takes mutex_) and ignore any stream_lock_held=true caller during ctor.
-    LogitsProcessorFactory::ErrorReporter ctor_reporter =
-        [this](ErrorCode code, const std::string& msg, bool /*stream_lock_held*/) {
-            generate_status_->reportEvent(StreamEvents::Error, code, msg);
-        };
-    logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
-        generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id, ctor_reporter);
+    // Sync factories (e.g. grammar) may surface schema/compile errors. Surface
+    // them on the stream via reportEvent (which takes mutex_); the stream is
+    // still under construction here so no other thread can race.
+    try {
+        logits_processor_list_ = LogitsProcessorFactory::createLogitsProcessors(
+            generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
+    } catch (const LogitsProcessorException& e) {
+        generate_status_->reportEvent(StreamEvents::Error, e.code(), e.what());
+    } catch (const std::exception& e) {
+        generate_status_->reportEvent(StreamEvents::Error,
+                                      ErrorCode::EXECUTION_EXCEPTION,
+                                      std::string("logits processor build exception: ") + e.what());
+    } catch (...) {
+        generate_status_->reportEvent(
+            StreamEvents::Error, ErrorCode::EXECUTION_EXCEPTION, "logits processor build unknown exception");
+    }
 
     if (generateConfig()->random_seed.has_value()) {
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -996,7 +1004,22 @@ void GenerateStream::updateLogitProcessorStatus(const torch::Tensor& new_tokens,
         if (stateful_only && !p->isStateful()) {
             continue;
         }
-        p->updateStatus(new_tokens, num_new_tokens);
+        // updateStatus is invoked under mutex_ (via the calling stream path);
+        // route any error through the lock-held variant so we don't re-enter it.
+        try {
+            p->updateStatus(new_tokens, num_new_tokens);
+        } catch (const LogitsProcessorException& e) {
+            reportErrorWithoutLock(e.code(), e.what());
+            return;
+        } catch (const std::exception& e) {
+            reportErrorWithoutLock(ErrorCode::EXECUTION_EXCEPTION,
+                                   std::string("logits processor updateStatus exception: ") + e.what());
+            return;
+        } catch (...) {
+            reportErrorWithoutLock(ErrorCode::EXECUTION_EXCEPTION,
+                                   "logits processor updateStatus unknown exception");
+            return;
+        }
     }
 }
 

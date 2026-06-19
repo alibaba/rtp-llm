@@ -2,7 +2,11 @@
 
 #include <algorithm>
 
+#include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorException.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
@@ -30,16 +34,16 @@ void SpecLogitsVerifyRunner::ensureBuffersFit(size_t total_streams,
     const int64_t B    = static_cast<int64_t>(total_streams);
     const int64_t P    = static_cast<int64_t>(propose_step);
     const int64_t rows = B * (P + 1);
+    const int64_t V    = static_cast<int64_t>(vocab_size);
     const int64_t W    = static_cast<int64_t>(bitmask_words);
-    (void)vocab_size;
 
-    auto cpu_i32    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
-    auto pinned_i32 = cpu_i32.pinned_memory(true);
+    auto cpu_i32     = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
+    auto pinned_i32  = cpu_i32.pinned_memory(true);
+    auto pinned_bool = torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU).pinned_memory(true);
 
     if (!draft_tokens_cpu_.defined() || draft_tokens_cpu_.numel() < B * P) {
         draft_tokens_cpu_ = torch::empty({B, P}, pinned_i32);
     }
-    // Pinned: merged_bitmask_cpu_ is the H2D source; pageable source strips non_blocking.
     if (!processor_bitmask_cpu_.defined() || processor_bitmask_cpu_.numel() < (P + 1) * W) {
         processor_bitmask_cpu_ = torch::empty({P + 1, W}, pinned_i32);
     }
@@ -53,23 +57,17 @@ void SpecLogitsVerifyRunner::ensureBuffersFit(size_t total_streams,
     if (!spec_cap_cpu_.defined() || spec_cap_cpu_.numel() < B) {
         spec_cap_cpu_ = torch::empty({B}, pinned_i32);
     }
-    // torch::kCUDA aliases the HIP device on ROCm builds, so the same code
-    // path allocates correctly on both platforms; only the apply-side differs
-    // (CUDA kernel vs ROCm torch-op fallback).
-    auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto cuda_i32  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto cuda_bool = torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA);
     if (!spec_cap_gpu_.defined() || spec_cap_gpu_.numel() < B) {
         spec_cap_gpu_ = torch::empty({B}, cuda_i32);
     }
-    if (!merged_bitmask_gpu_.defined() || merged_bitmask_gpu_.numel() < rows * W) {
-        merged_bitmask_gpu_ = torch::empty({rows, W}, cuda_i32);
-        // Mirror the CPU-realloc branch above: post-realloc invariant is
-        // (buffer == allow-all) ∧ (tracking == ∅). When CPU/GPU sizes diverge
-        // after a prior CUDA OOM, the CPU buffer can hold dirty rows; clearing
-        // tracking without re-filling would strand them on the new GPU.
-        std::fill_n(merged_bitmask_cpu_.data_ptr<int32_t>(),
-                    merged_bitmask_cpu_.numel(),
-                    SpecLogitsProcessor::kBitmaskAllowAll);
-        merged_bitmask_gpu_.copy_(merged_bitmask_cpu_.narrow(0, 0, rows).narrow(1, 0, W));
+    if (!disallow_mask_cpu_.defined() || disallow_mask_cpu_.size(0) < rows || disallow_mask_cpu_.size(1) < V) {
+        disallow_mask_cpu_ = torch::zeros({rows, V}, pinned_bool);
+        last_active_stream_rows_.clear();
+    }
+    if (!disallow_mask_gpu_.defined() || disallow_mask_gpu_.size(0) < rows || disallow_mask_gpu_.size(1) < V) {
+        disallow_mask_gpu_ = torch::zeros({rows, V}, cuda_bool);
         last_active_stream_rows_.clear();
     }
 }
@@ -94,6 +92,14 @@ void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task)
     dst.copy_(draft_i32);
 }
 
+void SpecLogitsVerifyRunner::unpackRowToBoolDisallow(size_t row, size_t vocab_size, size_t bitmask_words) {
+    const auto* bits = merged_bitmask_cpu_.data_ptr<int32_t>() + row * bitmask_words;
+    auto*       out  = disallow_mask_cpu_.data_ptr<bool>() + row * disallow_mask_cpu_.size(1);
+    for (size_t token = 0; token < vocab_size; ++token) {
+        out[token] = !bitmaskAllowsToken(bits, bitmask_words, static_cast<int32_t>(token));
+    }
+}
+
 SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const LaunchTask& task) {
     RTP_LLM_PROFILE_SCOPE("spec_logits_verify_runner.build_inline");
     LaunchResult result;
@@ -110,16 +116,13 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
     RTP_LLM_CHECK_WITH_INFO(B > 0 && P > 0 && V > 0, "invalid MTP spec logits verify task");
 
     ensureBuffersFit(B, P, V, W);
-    // Defer the O(B*P) draft-token D2H until at least one processor is eligible.
     bool draft_tokens_materialized = false;
 
-    // Sparse-row: keep untouched rows allow-all, reset prev-call rows + fill this-call rows.
-    auto  merged = merged_bitmask_cpu_.narrow(0, 0, static_cast<int64_t>(rows)).narrow(1, 0, static_cast<int64_t>(W));
     auto* merged_base        = merged_bitmask_cpu_.data_ptr<int32_t>();
-    const size_t row_words   = (P + 1) * W;
+    const size_t row_words   = static_cast<size_t>(P + 1) * W;
     const size_t buffer_rows = static_cast<size_t>(merged_bitmask_cpu_.size(0)) / static_cast<size_t>(P + 1);
 
-    // Reset prev-call active rows; rows past B keep their allow-all state.
+    // Reset prev-call active rows (packed allow-all). Bool unpack happens after AND merge below.
     std::vector<size_t> rows_to_reset;
     rows_to_reset.reserve(last_active_stream_rows_.size());
     for (size_t prev : last_active_stream_rows_) {
@@ -152,8 +155,37 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
         request.bitmask_size_int32 = W;
         request.vocab_size         = V;
 
-        int cap = item.processor->tryAcceptAndFillBitmask(request);
-        cap     = std::max(0, std::min(cap, P));
+        int cap = 0;
+        try {
+            cap = std::max(0, std::min(item.processor->tryAcceptAndFillBitmask(request), P));
+        } catch (const LogitsProcessorException& e) {
+            RTP_LLM_LOG_WARNING("spec verify: stream_id=%llu processor_idx=%zu reported %s",
+                                static_cast<unsigned long long>(item.stream_id),
+                                item.processor_idx,
+                                e.what());
+            if (item.error_sink) {
+                item.error_sink(e.code(), e.what());
+            }
+            cap = 0;
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("spec verify: stream_id=%llu processor_idx=%zu unexpected exception: %s",
+                                static_cast<unsigned long long>(item.stream_id),
+                                item.processor_idx,
+                                e.what());
+            if (item.error_sink) {
+                item.error_sink(ErrorCode::EXECUTION_EXCEPTION,
+                                std::string("spec verify exception: ") + e.what());
+            }
+            cap = 0;
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("spec verify: stream_id=%llu processor_idx=%zu unknown exception",
+                                static_cast<unsigned long long>(item.stream_id),
+                                item.processor_idx);
+            if (item.error_sink) {
+                item.error_sink(ErrorCode::EXECUTION_EXCEPTION, "spec verify unknown exception");
+            }
+            cap = 0;
+        }
 
         auto* merged_row = merged_base + item.stream_idx * row_words;
         bitwiseAndBitmaskInplace(merged_row, proc_mask.data_ptr<int32_t>(), row_words);
@@ -163,37 +195,34 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
         this_active_rows.push_back(item.stream_idx);
     }
 
+    auto upload_row_bool = [&](size_t stream_row) {
+        const size_t row_begin = stream_row * static_cast<size_t>(P + 1);
+        for (size_t r = row_begin; r < row_begin + static_cast<size_t>(P + 1); ++r) {
+            unpackRowToBoolDisallow(r, V, W);
+        }
+        auto cpu_slice = disallow_mask_cpu_.narrow(0, row_begin, P + 1).narrow(1, 0, V);
+        auto gpu_slice = disallow_mask_gpu_.narrow(0, row_begin, P + 1).narrow(1, 0, V);
+        gpu_slice.copy_(cpu_slice, /*non_blocking=*/true);
+    };
+
     if (!applied_processor) {
-        // Sync prev-call rows back to GPU allow-all before bailing.
+        // Sync prev-call rows back to GPU allow-all (false) before bailing.
         last_active_stream_rows_.clear();
-        if (!rows_to_reset.empty()) {
-            for (size_t row : rows_to_reset) {
-                auto cpu_slice = merged_bitmask_cpu_.narrow(0, row * (P + 1), P + 1).narrow(1, 0, W);
-                auto gpu_slice = merged_bitmask_gpu_.narrow(0, row * (P + 1), P + 1).narrow(1, 0, W);
-                gpu_slice.copy_(cpu_slice, /*non_blocking=*/true);
-            }
+        for (size_t row : rows_to_reset) {
+            upload_row_bool(row);
         }
         return {};
     }
 
     auto cap_cpu  = spec_cap_cpu_.narrow(0, 0, static_cast<int64_t>(B));
-    auto mask_gpu = merged_bitmask_gpu_.narrow(0, 0, static_cast<int64_t>(rows)).narrow(1, 0, static_cast<int64_t>(W));
+    auto mask_gpu = disallow_mask_gpu_.narrow(0, 0, static_cast<int64_t>(rows)).narrow(1, 0, static_cast<int64_t>(V));
     auto cap_gpu  = spec_cap_gpu_.narrow(0, 0, static_cast<int64_t>(B));
 
-    // Upload only changed rows; H2D stays O(active streams), not O(B*(P+1)).
-    // torch::kCUDA aliases the HIP device on ROCm so this works on both
-    // platforms; consumers (CUDA kernel vs ROCm torch-op fallback) decide how
-    // to apply the packed bitmask.
-    auto upload_row = [&](size_t row) {
-        auto cpu_slice = merged_bitmask_cpu_.narrow(0, row * (P + 1), P + 1).narrow(1, 0, W);
-        auto gpu_slice = merged_bitmask_gpu_.narrow(0, row * (P + 1), P + 1).narrow(1, 0, W);
-        gpu_slice.copy_(cpu_slice, /*non_blocking=*/true);
-    };
     for (size_t row : rows_to_reset) {
-        upload_row(row);
+        upload_row_bool(row);
     }
     for (size_t row : this_active_rows) {
-        upload_row(row);
+        upload_row_bool(row);
     }
     cap_gpu.copy_(cap_cpu, /*non_blocking=*/true);
 
@@ -202,8 +231,9 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
     result.spec_vocab_mask_gpu       = mask_gpu;
     result.spec_cap_gpu              = cap_gpu;
     result.has_active_processor      = true;
-    result.spec_vocab_mask_cpu_owner = merged;
-    result.spec_cap_cpu_owner        = cap_cpu;
+    result.spec_vocab_mask_cpu_owner = disallow_mask_cpu_.narrow(0, 0, static_cast<int64_t>(rows))
+                                            .narrow(1, 0, static_cast<int64_t>(V));
+    result.spec_cap_cpu_owner = cap_cpu;
     return result;
 }
 

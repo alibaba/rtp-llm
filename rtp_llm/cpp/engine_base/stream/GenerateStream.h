@@ -460,25 +460,6 @@ public:
         return logits_processor_list_;
     }
 
-    // Must be called after make_shared so shared_from_this() is valid.
-    void initProcessorStreamRefs() {
-        std::weak_ptr<GenerateStream> weak     = shared_from_this();
-        auto                          reporter = [weak](ErrorCode code, const std::string& msg, bool stream_lock_held) {
-            if (auto s = weak.lock()) {
-                if (stream_lock_held) {
-                    s->reportErrorWithoutLock(code, msg);
-                } else {
-                    s->reportError(code, msg);
-                }
-            }
-        };
-        for (auto& p : logits_processor_list_) {
-            if (p) {
-                p->setErrorReporter(reporter);
-            }
-        }
-    }
-
     at::Generator getGenerator() {
         return generator_;
     }
