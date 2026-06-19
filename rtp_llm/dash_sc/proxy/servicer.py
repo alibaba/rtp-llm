@@ -8,16 +8,24 @@ or async generator so the whole proxy path stays on a single asyncio event loop.
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 import grpc
 
+from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
+from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
     build_parameter_error_response,
     parse_max_new_tokens_for_proxy,
 )
+from rtp_llm.dash_sc.grpc_metrics import (
+    report_arrival,
+    report_chunk,
+    report_forwarder_rpc_done,
+)
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
-from rtp_llm.dash_sc.proxy.access_record import ForwardAccessRecord
 from rtp_llm.dash_sc.proxy.service_route import create_service_discovery_from_env
+from rtp_llm.dash_sc.structural_tag import maybe_force_at_least_one_on_request_proto
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
 _FORWARD_CHANNEL_OPTS: list[tuple[str, int]] = [
@@ -51,12 +59,28 @@ def _invalid_max_new_tokens_message(request) -> str | None:
 class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
     """Pure transparent proxy (grpc.aio) across discovered downstream addrs."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        rank_id: Optional[int] = None,
+        server_id: str = "",
+    ):
         self._channel_pool = GrpcHostChannelPool(
             options=_FORWARD_CHANNEL_OPTS,
             cleanup_interval=_CHANNEL_CLEANUP_INTERVAL_S,
         )
         self._discovery = create_service_discovery_from_env()
+        # Access-log identity, injected at construction (``DashScApp`` owns the
+        # rank/server identity). The two ids are the only state the log + metric
+        # projections need; ``server_id`` arrives as the snowflake string,
+        # coerced to ``Optional[int]`` once here. The kmonitor tag dict is
+        # memoized per (rank, server) in ``grpc_metrics``, so the per-chunk hot
+        # path never re-stringifies them. Tool-call repetition detection is
+        # intentionally NOT wired in: it lives only on the frontend inference
+        # path; the transparent proxy keeps a forward summary without loop
+        # detection.
+        self._rank_id = rank_id
+        self._server_id = to_optional_int(server_id)
         logging.info("[DashScGrpc] DashScProxyServicer configured")
 
     async def open(self) -> None:
@@ -71,62 +95,136 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         """
         await self._channel_pool.close()
 
+    def _record_and_report_chunk(self, record: GrpcAccessRecord, resp) -> None:
+        """Capture the frame and fan out per-chunk metrics (records, no log)."""
+        is_first, now = record.record_response_chunk(resp)
+        if _is_stream_done(resp):
+            record.mark_terminal(now=now)
+        report_chunk(
+            record,
+            rank_id=self._rank_id,
+            server_id=self._server_id,
+            is_first=is_first,
+            now=now,
+        )
+
     async def ModelStreamInfer(self, request_iterator, context):
-        request_iter = request_iterator.__aiter__()
+        # Self-managed access-log lifecycle (the shared interceptor is gone).
+        # Create/arrival/query go first — before any inbound frame — so a
+        # frame-less RPC (peer closed before sending) still reports arrival and
+        # produces an access line via the ``finally`` below.
+        record = GrpcAccessRecord.create(
+            context,
+            "ModelStreamInfer",
+            "bidi_stream",
+            raw_mode=True,
+        )
+        emit_query_log(record, rank_id=self._rank_id, server_id=self._server_id)
+        report_arrival(rank_id=self._rank_id, server_id=self._server_id)
+        exc: Optional[BaseException] = None
         try:
-            first_request = await request_iter.__anext__()
-        except StopAsyncIteration:
-            return
-
-        invalid_message = _invalid_max_new_tokens_message(first_request)
-        if invalid_message is not None:
-            logging.warning("[DashScGrpc] proxy parameter error: %s", invalid_message)
+            request_iter = request_iterator.__aiter__()
             try:
-                aclose = getattr(request_iter, "aclose", None)
-                if aclose is not None:
-                    await aclose()
-            except Exception:
-                pass
-            yield build_parameter_error_response(str(first_request.id), invalid_message)
-            return
-
-        async def validated_request_iter():
-            yield first_request
-            async for req in request_iter:
-                yield req
-
-        route_addr = self._discovery.resolve()
-        if route_addr is None:
-            msg = "service discovery returned no forward backend"
-            logging.warning("[DashScGrpc] proxy discovery unavailable: %s", msg)
-            await context.abort(grpc.StatusCode.UNAVAILABLE, msg)
-            return
-
-        grpc_target = route_addr.grpc_target
-        try:
-            channel = await self._channel_pool.get(grpc_target)
-        except RuntimeError as e:
-            msg = f"forward channel pool unavailable for backend {grpc_target}"
-            logging.warning("[DashScGrpc] proxy channel unavailable: %s: %s", msg, e)
-            await context.abort(grpc.StatusCode.UNAVAILABLE, msg)
-            return
-
-        stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
-        async for resp in self._forward(
-            stub, grpc_target, validated_request_iter(), context
-        ):
-            yield resp
-
-    async def _forward(self, stub, addr: str, request_iterator, context):
-
-        # Grab the forward access record (installed by the access-log
-        # interceptor) so proxy-path diagnostics land inline on the access log.
-        access_record = ForwardAccessRecord.from_context(context)
-        if access_record is not None:
+                first_request = await request_iter.__anext__()
+            except StopAsyncIteration:
+                record.mark_request_done("eof")
+                return
+            record.req_count = 1
             try:
-                access_record.mark_backend_call_start(addr)
-            except Exception:
-                pass
+                maybe_force_at_least_one_on_request_proto(first_request)
+            except Exception as e:
+                logging.warning(
+                    "[DashScGrpc] force_at_least_one mutation failed: %s", e
+                )
+            record.record_request_frame(first_request)
+
+            invalid_message = _invalid_max_new_tokens_message(first_request)
+            if invalid_message is not None:
+                record.mark_request_done("eof")
+                logging.warning(
+                    "[DashScGrpc] proxy parameter error: %s", invalid_message
+                )
+                try:
+                    aclose = getattr(request_iter, "aclose", None)
+                    if aclose is not None:
+                        await aclose()
+                except Exception:
+                    pass
+                resp = build_parameter_error_response(
+                    str(first_request.id), invalid_message
+                )
+                self._record_and_report_chunk(record, resp)
+                yield resp
+                return
+
+            async def validated_request_iter():
+                status = "eof"
+                try:
+                    yield first_request
+                    async for req in request_iter:
+                        record.req_count += 1
+                        yield req
+                except BaseException:
+                    status = "error"
+                    raise
+                finally:
+                    record.mark_request_done(status)
+
+            route_addr = self._discovery.resolve()
+            if route_addr is None:
+                record.mark_request_done("eof")
+                msg = "service discovery returned no forward backend"
+                logging.warning("[DashScGrpc] proxy discovery unavailable: %s", msg)
+                await context.abort(grpc.StatusCode.UNAVAILABLE, msg)
+                return
+
+            grpc_target = route_addr.grpc_target
+            try:
+                channel = await self._channel_pool.get(grpc_target)
+            except RuntimeError as e:
+                record.mark_request_done("eof")
+                msg = f"forward channel pool unavailable for backend {grpc_target}"
+                logging.warning(
+                    "[DashScGrpc] proxy channel unavailable: %s: %s", msg, e
+                )
+                await context.abort(grpc.StatusCode.UNAVAILABLE, msg)
+                return
+
+            stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
+            async for resp in self._forward(
+                stub, grpc_target, validated_request_iter(), context, record
+            ):
+                self._record_and_report_chunk(record, resp)
+                yield resp
+        except BaseException as e:
+            exc = e
+            raise
+        finally:
+            end_ts = record.resolve_status(context, exc)
+            # Log first, metrics second — a kmonitor hiccup must never delay or
+            # drop the access record (user-mandated ordering).
+            emit_access_log(
+                record,
+                rank_id=self._rank_id,
+                server_id=self._server_id,
+                end_ts=end_ts,
+            )
+            report_forwarder_rpc_done(
+                record,
+                rank_id=self._rank_id,
+                server_id=self._server_id,
+                status=record.status,
+            )
+
+    async def _forward(
+        self,
+        stub,
+        addr: str,
+        request_iterator,
+        context,
+        access_record: GrpcAccessRecord,
+    ):
+        access_record.mark_backend_call_start(addr)
 
         # Propagate client-sent metadata to the downstream stub so that
         # correlation headers (``x-dashscope-request-id`` / ``x-request-id``
@@ -141,12 +239,8 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         try:
             upstream_iter = stub.ModelStreamInfer(request_iterator, metadata=md)
         except BaseException as e:
-            if access_record is not None:
-                try:
-                    access_record.mark_backend_error(e)
-                    access_record.mark_backend_done()
-                except Exception:
-                    pass
+            access_record.mark_backend_error(e)
+            access_record.mark_backend_done()
             raise
 
         # Cancel propagation under grpc.aio is implicit: when the inbound RPC
@@ -155,31 +249,18 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         # the ``async for`` over ``upstream_iter`` and cancels the downstream
         # aio call automatically. No ``context.add_callback`` plumbing needed.
 
-        if access_record is not None:
+        async def counting_response_iter():
+            try:
+                async for resp in upstream_iter:
+                    access_record.capture_backend_response_chunk(resp)
+                    yield resp
+            except BaseException as e:
+                access_record.mark_backend_error(e)
+                raise
+            finally:
+                access_record.mark_backend_done()
 
-            async def counting_response_iter():
-                try:
-                    async for resp in upstream_iter:
-                        try:
-                            access_record.capture_backend_response_chunk(resp)
-                        except Exception:
-                            pass
-                        yield resp
-                except BaseException as e:
-                    try:
-                        access_record.mark_backend_error(e)
-                    except Exception:
-                        pass
-                    raise
-                finally:
-                    try:
-                        access_record.mark_backend_done()
-                    except Exception:
-                        pass
-
-            downstream_iter = counting_response_iter()
-        else:
-            downstream_iter = upstream_iter
+        downstream_iter = counting_response_iter()
 
         # Explicit aclose() wrapping: when the RPC generator is aclose()'d by
         # grpc.aio (client disconnect) or athrow()'d by a handler, the
@@ -205,14 +286,10 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     try:
                         yield resp
                     except BaseException:
-                        if access_record is not None:
-                            try:
-                                if access_record.buffered_stage == "waiting_second":
-                                    access_record.buffered_stage = (
-                                        "dropped_buffered_on_exception"
-                                    )
-                            except Exception:
-                                pass
+                        if access_record.buffered_stage == "waiting_second":
+                            access_record.buffered_stage = (
+                                "dropped_buffered_on_exception"
+                            )
                         raise
             finally:
                 try:
