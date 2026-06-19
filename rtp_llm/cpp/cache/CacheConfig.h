@@ -112,10 +112,40 @@ struct CacheConfig {
                                 layer_tag_to_group_id.size());
         const auto& tag_to_group = layer_tag_to_group_id[static_cast<size_t>(layer_id)];
         const auto  it           = tag_to_group.find(tag);
-        return it == tag_to_group.end() ? -1 : it->second;
+        RTP_LLM_CHECK_WITH_INFO(it != tag_to_group.end(),
+                                "CacheConfig::groupIdForLayerTag missing tag=%s for layer_id=%d",
+                                tag.c_str(),
+                                layer_id);
+        return it->second;
+    }
+
+    int groupIdFor(int layer_id) const {
+        RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layer_to_group_ids.size(),
+                                "CacheConfig::groupIdFor invalid layer_id=%d, layer_to_group_ids.size=%zu",
+                                layer_id,
+                                layer_to_group_ids.size());
+        const auto& group_ids = layer_to_group_ids[static_cast<size_t>(layer_id)];
+        RTP_LLM_CHECK_WITH_INFO(group_ids.size() == 1,
+                                "CacheConfig::groupIdFor requires exactly one cache tag for layer_id=%d, got %zu",
+                                layer_id,
+                                group_ids.size());
+        return group_ids.front();
+    }
+
+    const std::vector<int>& groupIdsForLayer(int layer_id) const {
+        RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layer_to_group_ids.size(),
+                                "CacheConfig::groupIdsForLayer invalid layer_id=%d, layer_to_group_ids.size=%zu",
+                                layer_id,
+                                layer_to_group_ids.size());
+        const auto& group_ids = layer_to_group_ids[static_cast<size_t>(layer_id)];
+        RTP_LLM_CHECK_WITH_INFO(!group_ids.empty(), "CacheConfig::groupIdsForLayer missing layer_id=%d", layer_id);
+        return group_ids;
     }
 
     static CacheGroupType inferGroupType(const KVCacheSpecPtr& spec, KVCacheRegionName region_name) {
+        if (spec && spec->lifecycle != CacheGroupType::FULL) {
+            return spec->lifecycle;
+        }
         if (region_name == KVCacheRegionName::SWA_KV || isStateRegion(region_name)) {
             return CacheGroupType::SWA;
         }
@@ -175,7 +205,6 @@ struct CacheConfig {
         layer_region_to_group_id.assign(layer_num, std::vector<int>(region_count, -1));
         layer_tag_to_group_id.assign(layer_num, std::map<std::string, int>());
 
-        std::map<std::string, std::string> tag_fingerprints;
         for (size_t gid = 0; gid < group_num; ++gid) {
             const auto& spec = specs[gid];
             RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheConfig::fromGroupedSpecs got null spec at group %zu", gid);
@@ -194,16 +223,6 @@ struct CacheConfig {
             RTP_LLM_CHECK_WITH_INFO(!tag.empty(),
                                     "CacheConfig::fromGroupedSpecs requires non-empty tag for cache spec %zu",
                                     gid);
-            const auto fingerprint = spec->fingerprint();
-            const auto fp_it       = tag_fingerprints.find(tag);
-            if (fp_it == tag_fingerprints.end()) {
-                tag_fingerprints.emplace(tag, fingerprint);
-            } else {
-                RTP_LLM_CHECK_WITH_INFO(fp_it->second == fingerprint,
-                                        "CacheConfig::fromGroupedSpecs tag=%s has multiple physical prototypes",
-                                        tag.c_str());
-            }
-
             auto stored_spec = spec->clone();
             stored_spec->tag = tag;
             stored_spec->layers = layers_by_group[gid];
@@ -277,8 +296,7 @@ struct CacheConfig {
         std::vector<CacheGroupType> types;
         std::vector<KVCacheRegionName> regions;
         std::vector<std::string> tags;
-        std::map<std::string, size_t> tag_to_group;
-        std::map<std::string, std::string> tag_fingerprints;
+        std::map<std::string, size_t> group_key_to_group;
 
         for (uint32_t layer_id = 0; layer_id < layer_num; ++layer_id) {
             const auto layer_it = layer_specs.find(static_cast<int64_t>(layer_id));
@@ -305,27 +323,24 @@ struct CacheConfig {
                                         layer_id,
                                         tag.c_str());
 
-                const auto fingerprint = spec->fingerprint();
-                const auto fp_it = tag_fingerprints.find(tag);
-                if (fp_it == tag_fingerprints.end()) {
-                    tag_fingerprints.emplace(tag, fingerprint);
-                } else {
-                    RTP_LLM_CHECK_WITH_INFO(fp_it->second == fingerprint,
-                                            "CacheConfig::fromLayerSpecs tag=%s has multiple physical prototypes",
-                                            tag.c_str());
-                }
+                const auto signature = spec->physicalSignature();
+                std::ostringstream group_key;
+                group_key << tag << "|block=" << signature.block_size_bytes
+                          << "|scale=" << signature.scale_block_size_bytes
+                          << "|lifecycle=" << static_cast<int>(signature.lifecycle_type)
+                          << "|dtype=" << static_cast<int>(signature.dtype);
 
-                auto group_it = tag_to_group.find(tag);
-                if (group_it == tag_to_group.end()) {
+                auto group_it = group_key_to_group.find(group_key.str());
+                if (group_it == group_key_to_group.end()) {
                     const size_t gid = specs.size();
-                    tag_to_group.emplace(tag, gid);
+                    group_key_to_group.emplace(group_key.str(), gid);
                     specs.push_back(spec);
                     layers_by_group.emplace_back();
                     const auto region_name = inferRegionName(spec);
                     regions.push_back(region_name);
                     types.push_back(inferGroupType(spec, region_name));
                     tags.push_back(tag);
-                    group_it = tag_to_group.find(tag);
+                    group_it = group_key_to_group.find(group_key.str());
                 }
                 layers_by_group[group_it->second].push_back(static_cast<int>(layer_id));
             }

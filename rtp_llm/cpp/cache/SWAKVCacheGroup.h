@@ -20,8 +20,7 @@ public:
         linear_step_(linear_step),
         policy_(policy) {}
 
-    MatchResult match(const CacheKeysType& cache_keys) override;
-    MatchResult matchSingleKey(CacheKeyType cache_key) const;
+    MatchResult matchSingleKey(CacheKeyType cache_key) const override;
     bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) override;
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     void free(const BlockIndicesType& block_indices) override;
@@ -32,6 +31,12 @@ public:
                                  int  reserve_step,
                                  int  reuse_blocks_len,
                                  bool reuse_enabled = false) const override;
+    bool           isCpShardable() const override { return false; }
+    bool           prefixReusable() const override { return false; }
+    bool           hasSparseSlots() const override { return true; }
+    bool           hasKernelBlockSubdiv() const override { return false; }
+    bool           transferTailBlocks() const override { return true; }
+    bool           cpCompactTailBlocks() const override { return true; }
 
 private:
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;

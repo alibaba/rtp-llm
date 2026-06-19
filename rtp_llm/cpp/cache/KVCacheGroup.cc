@@ -80,6 +80,20 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
     return true;
 }
 
+MatchResult KVCacheGroup::match(const CacheKeysType& cache_keys) {
+    return matchPrefix(cache_keys);
+}
+
+MatchResult KVCacheGroup::matchPrefix(const CacheKeysType& /*cache_keys*/) const {
+    RTP_LLM_FAIL("KVCacheGroup gid=%d does not support prefix matching", group_id_);
+    return {};
+}
+
+MatchResult KVCacheGroup::matchSingleKey(CacheKeyType /*cache_key*/) const {
+    RTP_LLM_FAIL("KVCacheGroup gid=%d does not support single-key matching", group_id_);
+    return {};
+}
+
 size_t KVCacheGroup::freeBlocksNum() const {
     return block_pool_->freeBlocksNum();
 }
@@ -124,6 +138,38 @@ KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id, int partition_cou
 
 void KVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
     block_pool_->requestReference(new_block_indices);
+}
+
+bool KVCacheGroup::isCpShardable() const {
+    return true;
+}
+
+bool KVCacheGroup::prefixReusable() const {
+    return true;
+}
+
+bool KVCacheGroup::hasSparseSlots() const {
+    return false;
+}
+
+bool KVCacheGroup::hasKernelBlockSubdiv() const {
+    return true;
+}
+
+bool KVCacheGroup::transferTailBlocks() const {
+    return false;
+}
+
+bool KVCacheGroup::cpCompactTailBlocks() const {
+    return false;
+}
+
+bool KVCacheGroup::isReservable() const {
+    return true;
+}
+
+bool KVCacheGroup::usesPinnedCpuBacking() const {
+    return false;
 }
 
 }  // namespace rtp_llm

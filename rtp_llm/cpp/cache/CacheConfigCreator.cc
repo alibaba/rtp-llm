@@ -47,18 +47,15 @@ size_t nonExplicitDsv4IndependentPoolHbmBytes(const CacheConfig& config) {
     if (!config.use_typed_cache_regions) {
         return 0;
     }
-    RTP_LLM_CHECK_WITH_INFO(!config.group_region_names.empty(),
-                            "typed cache config requires group_region_names for independent pool sizing");
-    RTP_LLM_CHECK_WITH_INFO(
-        config.group_region_names.size() == config.group_block_size_bytes.size(),
-        "typed cache config requires group_region_names.size(%zu) == group_block_size_bytes.size(%zu)",
-        config.group_region_names.size(),
-        config.group_block_size_bytes.size());
+    RTP_LLM_CHECK_WITH_INFO(config.cache_specs.size() == config.group_block_size_bytes.size(),
+                            "typed cache config requires cache_specs.size(%zu) == group_block_size_bytes.size(%zu)",
+                            config.cache_specs.size(),
+                            config.group_block_size_bytes.size());
 
     size_t bytes = 0;
-    for (size_t gid = 0; gid < config.group_region_names.size(); ++gid) {
-        const auto region = config.group_region_names[gid];
-        if (!isDsv4FixedRegion(region)) {
+    for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
+        const auto& spec = config.cache_specs[gid];
+        if (spec == nullptr || !spec->isFixedCache()) {
             continue;
         }
         if (!config.usesExplicitIndependentBlocks(gid)) {

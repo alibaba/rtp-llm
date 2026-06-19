@@ -20,9 +20,8 @@ public:
 	        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, shared_cache, metrics_reporter),
 	        linear_step_(linear_step) {}
 
-    MatchResult match(const CacheKeysType& cache_keys) override;
     // Match a single cache key (used by Hybrid allocator to do right-to-left joint matching).
-    MatchResult matchSingleKey(CacheKeyType cache_key) const;
+    MatchResult matchSingleKey(CacheKeyType cache_key) const override;
     bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) override;
 
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
@@ -35,6 +34,11 @@ public:
                                  int  reuse_blocks_len,
                                  bool reuse_enabled = false) const override;
     bool           shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const;
+    bool           isCpShardable() const override { return false; }
+    bool           prefixReusable() const override { return false; }
+    bool           hasSparseSlots() const override { return true; }
+    bool           hasKernelBlockSubdiv() const override { return false; }
+    bool           transferTailBlocks() const override { return true; }
 
 private:
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;

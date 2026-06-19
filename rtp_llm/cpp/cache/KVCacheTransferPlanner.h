@@ -8,8 +8,23 @@
 
 namespace rtp_llm {
 
+struct CacheGroupTransferCapability {
+    bool   prefix_reusable        = true;
+    bool   transfer_tail_blocks   = false;
+    bool   cp_shardable           = true;
+    bool cp_compact_tail_blocks = false;
+    size_t tail_block_count   = 0;
+};
+
+CacheGroupTransferCapability cacheGroupTransferCapability(CacheGroupType group_type, CacheGroupPolicy policy);
+
 std::vector<size_t> blockPositionsForCacheTransfer(
     size_t block_num, size_t reuse_block_size, bool use_hybrid, CacheGroupType group_type, bool hybrid_full_from_begin);
+std::vector<size_t> blockPositionsForCacheTransfer(size_t                             block_num,
+                                                   size_t                             reuse_block_size,
+                                                   bool                               use_hybrid,
+                                                   CacheGroupTransferCapability        capability,
+                                                   bool                               hybrid_full_from_begin);
 
 std::string layerRegionCacheTransferKey(size_t request_id, size_t layer_id, KVCacheRegionName region_name);
 
@@ -48,5 +63,11 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_l
                                                           CacheGroupType group_type,
                                                           int            cp_rank,
                                                           int            cp_size);
+std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t                      total_logical_blocks,
+                                                          size_t                      reuse_block_size,
+                                                          bool                        use_hybrid,
+                                                          CacheGroupTransferCapability capability,
+                                                          int                         cp_rank,
+                                                          int                         cp_size);
 
 }  // namespace rtp_llm

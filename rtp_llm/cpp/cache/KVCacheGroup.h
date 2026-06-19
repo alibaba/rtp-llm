@@ -44,7 +44,9 @@ public:
     // Allocate blocks for `seq_len` tokens; appends new IDs to `block_ids` via BlockIds::add().
     virtual bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     // TODO, match的时候热度不增加，最终匹配成功的时候再去增加热度。
-    virtual MatchResult match(const CacheKeysType& cache_keys)                                                   = 0;
+    virtual MatchResult match(const CacheKeysType& cache_keys);
+    virtual MatchResult matchPrefix(const CacheKeysType& cache_keys) const;
+    virtual MatchResult matchSingleKey(CacheKeyType cache_key) const;
     virtual void        free(const BlockIndicesType& block_indices)                                              = 0;
     virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
@@ -64,6 +66,15 @@ public:
     bool   ensureFreeBlocks(int need_blocks);
     int    seqSizePerBlock() const;
     int    group_id() const;
+
+    virtual bool isCpShardable() const;
+    virtual bool prefixReusable() const;
+    virtual bool hasSparseSlots() const;
+    virtual bool hasKernelBlockSubdiv() const;
+    virtual bool transferTailBlocks() const;
+    virtual bool cpCompactTailBlocks() const;
+    virtual bool isReservable() const;
+    virtual bool usesPinnedCpuBacking() const;
 
 protected:
     LayerIdsType      layer_ids_;

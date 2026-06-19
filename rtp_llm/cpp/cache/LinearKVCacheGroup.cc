@@ -87,12 +87,6 @@ MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     return result;
 }
 
-MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
-    (void)cache_keys;
-    RTP_LLM_CHECK_WITH_INFO(false, "SWA should not call match, use matchSingleKey instead");
-    return {};
-}
-
 bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
     const int step               = std::max(1, linear_step_);
     const int current_blocks_len = static_cast<int>(block_ids.blocksNum());

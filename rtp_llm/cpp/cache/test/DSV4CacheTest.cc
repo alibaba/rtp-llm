@@ -257,7 +257,7 @@ TEST(CacheConfigTest, FromLayerSpecsBuildsTagAndRegionTopology) {
     EXPECT_EQ(config.layer_to_group_ids[1], std::vector<int>({0, 1}));
 }
 
-TEST(CacheConfigTest, FromLayerSpecsRejectsSameTagWithDifferentPrototype) {
+TEST(CacheConfigTest, FromLayerSpecsGroupsSameTagWithDifferentPhysicalSignatureSeparately) {
     CacheConfig config;
     config.layer_num     = 2;
     config.layer_all_num = 2;
@@ -265,14 +265,22 @@ TEST(CacheConfigTest, FromLayerSpecsRejectsSameTagWithDifferentPrototype) {
     auto spec0 = std::make_shared<MHAKVCacheSpec>();
     spec0->tag = "dup";
     spec0->size_per_head = 16;
+    spec0->dtype = DataType::TYPE_FP16;
     auto spec1 = std::make_shared<MHAKVCacheSpec>();
     spec1->tag = "dup";
     spec1->size_per_head = 32;
+    spec1->dtype = DataType::TYPE_FP16;
 
     LayerKVCacheSpecs layer_specs;
     layer_specs[0] = {spec0};
     layer_specs[1] = {spec1};
-    EXPECT_THROW(config.fromLayerSpecs(layer_specs), std::exception);
+    config.fromLayerSpecs(layer_specs);
+
+    ASSERT_EQ(config.group_tags, std::vector<std::string>({"dup", "dup"}));
+    ASSERT_EQ(config.layer_to_group_ids[0], std::vector<int>({0}));
+    ASSERT_EQ(config.layer_to_group_ids[1], std::vector<int>({1}));
+    EXPECT_EQ(config.groupIdForLayerTag(0, "dup"), 0);
+    EXPECT_EQ(config.groupIdForLayerTag(1, "dup"), 1);
 }
 
 TEST(CacheConfigTest, FromLayerSpecsRejectsDuplicateLayerTag) {
@@ -384,8 +392,8 @@ TEST(HybridPoolConfigCreatorTest, Dsv4TagRegionRoutesAreConsistent) {
     expect_route(3, "swa_kv", KVCacheRegionName::SWA_KV, 6);
 
     expect_route(0, "swa_kv", KVCacheRegionName::SWA_KV, 6);
-    EXPECT_EQ(config.groupIdForLayerTag(0, "csa_kv"), -1);
-    EXPECT_EQ(config.groupIdForLayerTag(0, "hca_kv"), -1);
+    EXPECT_THROW(config.groupIdForLayerTag(0, "csa_kv"), std::exception);
+    EXPECT_THROW(config.groupIdForLayerTag(0, "hca_kv"), std::exception);
 
     auto mtp_config =
         HybridPoolConfigCreator::createConfig(makeFlashMtpModelConfig(), pc, makeDsv4KvCacheConfig(), true, 0);

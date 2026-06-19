@@ -215,10 +215,8 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         config.group_kv_block_stride_bytes[gid] = kv_stride;
         config.group_kv_scale_stride_bytes[gid] = scale_stride;
         config.group_block_size_bytes[gid]      = static_cast<size_t>(layer_count) * (kv_stride + scale_stride);
-        const auto region =
-            gid < config.group_region_names.size() ? config.group_region_names[gid] : KVCacheRegionName::DEFAULT;
-        const bool is_state = isStateRegion(region);
-        const auto type     = gid < config.group_types.size() ? config.group_types[gid] : CacheGroupType::FULL;
+        const auto type     = gid < config.group_types.size() ? config.group_types[gid] : spec->lifecycle;
+        const bool is_state = spec->is_state_cache;
         if (!is_state && type == CacheGroupType::FULL) {
             total_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
             total_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;

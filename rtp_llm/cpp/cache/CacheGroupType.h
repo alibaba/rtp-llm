@@ -108,7 +108,7 @@ inline bool isDsv4FixedRegion(KVCacheRegionName region_name) {
 
 inline CacheGroupPolicy cacheGroupPolicyForLegacyRegion(CacheGroupType group_type, KVCacheRegionName region_name) {
     CacheGroupPolicy policy;
-    policy.active_tail_blocks = group_type == CacheGroupType::SWA ? 2 : 0;
+    policy.active_tail_blocks = group_type == CacheGroupType::LINEAR ? 1 : (group_type == CacheGroupType::SWA ? 2 : 0);
     if (isDsv4FixedRegion(region_name) && region_name != KVCacheRegionName::HCA_STATE) {
         policy.evict_policy = CacheEvictPolicy::INDEPENDENT;
     }

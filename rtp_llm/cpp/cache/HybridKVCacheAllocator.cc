@@ -35,25 +35,24 @@ inline int cpVirtualBlockSize(const std::shared_ptr<CPSlotMapper>& mapper, int b
     return (mapper && mapper->isSharded()) ? mapper->virtualBlockSize() : block_size;
 }
 
-// Per-group gate: only paged FULL groups are RR-sharded by changing the
-// sequence length fed into their allocator. Fixed/SWA groups use their own
-// group seq_size_per_block, which may already be CP-compact.
-inline bool cpShardThisGroup(const std::shared_ptr<CPSlotMapper>& mapper, CacheGroupType group_type) {
-    return mapper && mapper->isSharded() && group_type == CacheGroupType::FULL;
-}
-
 inline bool containsGroupId(const std::vector<int>& group_ids, int gid) {
     return std::find(group_ids.begin(), group_ids.end(), gid) != group_ids.end();
 }
 
-inline int
-cpEffectiveSeqLenForGroup(const std::shared_ptr<CPSlotMapper>& mapper, CacheGroupType group_type, int seq_len) {
-    return cpShardThisGroup(mapper, group_type) ? mapper->effectiveSeqLenForAlloc(seq_len) : seq_len;
+inline bool cpShardThisGroup(const std::shared_ptr<CPSlotMapper>& mapper, const KVCacheGroupPtr& group) {
+    return mapper && mapper->isSharded() && group && group->isCpShardable();
 }
 
-inline int
-cpVirtualBlockSizeForGroup(const std::shared_ptr<CPSlotMapper>& mapper, CacheGroupType group_type, int block_size) {
-    return cpShardThisGroup(mapper, group_type) ? mapper->virtualBlockSize() : block_size;
+inline int cpEffectiveSeqLenForGroup(const std::shared_ptr<CPSlotMapper>& mapper,
+                                     const KVCacheGroupPtr&               group,
+                                     int                                  seq_len) {
+    return cpShardThisGroup(mapper, group) ? mapper->effectiveSeqLenForAlloc(seq_len) : seq_len;
+}
+
+inline int cpVirtualBlockSizeForGroup(const std::shared_ptr<CPSlotMapper>& mapper,
+                                      const KVCacheGroupPtr&               group,
+                                      int                                  block_size) {
+    return cpShardThisGroup(mapper, group) ? mapper->virtualBlockSize() : block_size;
 }
 
 inline size_t groupSeqSize(const CacheConfig& config, int gid, size_t fallback) {
@@ -85,8 +84,8 @@ bool HybridKVCacheAllocator::skipReuseCacheGroup(int gid) const {
 }
 
 bool HybridKVCacheAllocator::cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const {
-    if (!mapper || !mapper->isSharded() || gid < 0 || static_cast<size_t>(gid) >= config_.group_types.size()
-        || config_.group_types[static_cast<size_t>(gid)] != CacheGroupType::SWA) {
+    if (!mapper || !mapper->isSharded() || gid < 0 || static_cast<size_t>(gid) >= kv_cache_groups_.size()
+        || !kv_cache_groups_[static_cast<size_t>(gid)]->cpCompactTailBlocks()) {
         return false;
     }
     const auto row_tokens = groupSeqSize(config_, gid, seqSizePerBlock());
@@ -127,9 +126,7 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         std::vector<BlockIndicesType> candidate_swa_tail_blocks(swa_group_ids_.size());
         for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
             const int gid      = linear_group_ids_[i];
-            auto* linear_group = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
-            RTP_LLM_CHECK_WITH_INFO(linear_group != nullptr, "group %d is not LinearKVCacheGroup", gid);
-            auto result = linear_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
+            auto result = kv_cache_groups_[static_cast<size_t>(gid)]->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
             if (result.block_indices.empty()) {
                 all_tail_groups_matched = false;
                 break;
@@ -141,12 +138,10 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         }
         for (size_t i = 0; i < swa_group_ids_.size(); ++i) {
             const int gid       = swa_group_ids_[i];
-            auto*     swa_group = dynamic_cast<SWAKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
-            RTP_LLM_CHECK_WITH_INFO(swa_group != nullptr, "group %d is not SWAKVCacheGroup", gid);
             if (skipReuseCacheGroup(gid)) {
                 continue;
             }
-            auto result = swa_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
+            auto result = kv_cache_groups_[static_cast<size_t>(gid)]->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
             if (result.block_indices.empty()) {
                 all_tail_groups_matched = false;
                 break;
@@ -213,7 +208,9 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     // reuse_unit_tokens is computed against the canonical (paged FULL) group's
     // block_size: cache_keys reuse only happens for paged groups so virtual block
     // size = canonical block_size * cp_size; non-paged groups don't enter reuse.
-    const int reuse_unit_tokens = cpVirtualBlockSizeForGroup(cp_mapper, CacheGroupType::FULL, seqSizePerBlock());
+    const KVCacheGroupPtr reuse_group =
+        full_group_ids_.empty() ? KVCacheGroupPtr{} : kv_cache_groups_[static_cast<size_t>(full_group_ids_.front())];
+    const int reuse_unit_tokens = cpVirtualBlockSizeForGroup(cp_mapper, reuse_group, seqSizePerBlock());
 
     const auto&                   cache_keys         = kv_resource->cacheKeys(0);
     int64_t                       match_cost_time_us = 0;
@@ -265,10 +262,8 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     }
     for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
         auto&      block_ids_0   = kv_resource->mutableBlockIds(0, gid);
-        const auto group_type    = static_cast<size_t>(gid) < config_.group_types.size() ?
-                                       config_.group_types[static_cast<size_t>(gid)] :
-                                       CacheGroupType::FULL;
-        const int  group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, group_type, common_seq_len);
+        const int  group_seq_len =
+            cpEffectiveSeqLenForGroup(cp_mapper, kv_cache_groups_[static_cast<size_t>(gid)], common_seq_len);
         if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
                 block_ids_0, group_seq_len, malloc_info.reuse_cache, 0)) {
             rollbackInitMalloc(*kv_resource, referenced_blocks, original_sizes);
@@ -306,10 +301,8 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     for (int b = 0; b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
             auto&      block_ids     = kv_resource->mutableBlockIds(b, gid);
-            const auto group_type    = static_cast<size_t>(gid) < config_.group_types.size() ?
-                                           config_.group_types[static_cast<size_t>(gid)] :
-                                           CacheGroupType::FULL;
-            const int  group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_seq_len);
+            const int group_seq_len =
+                cpEffectiveSeqLenForGroup(cp_mapper, kv_cache_groups_[static_cast<size_t>(gid)], raw_seq_len);
             if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
                     block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step)) {
                 all_success  = false;
@@ -474,7 +467,7 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
             if (static_cast<size_t>(gid) >= config_.group_types.size() && group_type != CacheGroupType::FULL) {
                 continue;
             }
-            const bool           gp_sharded    = cpShardThisGroup(cp_mapper, group_type);
+            const bool gp_sharded = cpShardThisGroup(cp_mapper, kv_cache_groups_[static_cast<size_t>(gid)]);
             const bool           compact_swa   = cpCompactSwaGroup(gid, cp_mapper);
             const bool           use_cp_keys   = cp_active && (gp_sharded || compact_swa);
             const CacheKeysType& src_keys      = use_cp_keys ? cp_keys : full_keys;
@@ -484,7 +477,8 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
             if (src_keys.empty()) {
                 continue;
             }
-            const int    group_seq_size  = cpVirtualBlockSizeForGroup(cp_mapper, group_type, raw_group_seq);
+            const int group_seq_size =
+                cpVirtualBlockSizeForGroup(cp_mapper, kv_cache_groups_[static_cast<size_t>(gid)], raw_group_seq);
             const size_t full_blocks_num = token_len / static_cast<size_t>(group_seq_size);
             const size_t n               = std::min(src_keys.size(), full_blocks_num);
             const auto&  blocks          = kv_cache_resource->blocks(batch_id, gid);
@@ -699,11 +693,9 @@ int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
     int common_blocks_total = 0;
     int extra_blocks_total  = 0;
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
-        const auto group_type       = static_cast<size_t>(gid) < config_.group_types.size() ?
-                                          config_.group_types[static_cast<size_t>(gid)] :
-                                          CacheGroupType::FULL;
-        const int  group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_common_seq_len);
-        const int  group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_seq_len);
+        const auto group            = kv_cache_groups_[static_cast<size_t>(gid)];
+        const int  group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, group, raw_common_seq_len);
+        const int  group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, group, raw_seq_len);
         const auto need             = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(
             group_common_seq, group_seq_len, reserve_step, reuse_blocks_len, reuse_enabled);
         common_blocks_total += need.common_blocks;
@@ -723,13 +715,11 @@ void HybridKVCacheAllocator::checkCPShardedMallocResult(const MallocInfo& malloc
 
     for (int batch_id = 0; batch_id < kv_resource->batchSize(); ++batch_id) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            const auto group_type = static_cast<size_t>(gid) < config_.group_types.size() ?
-                                        config_.group_types[static_cast<size_t>(gid)] :
-                                        CacheGroupType::FULL;
-            if (!cpShardThisGroup(cp_slot_mapper_, group_type)) {
+            const auto group = kv_cache_groups_[static_cast<size_t>(gid)];
+            if (!cpShardThisGroup(cp_slot_mapper_, group)) {
                 continue;
             }
-            const int effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, group_type, seq_len);
+            const int effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, group, seq_len);
             const int expected_blocks =
                 kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(effective_seq_len, 0, reserve_step);
             const int actual_blocks = kv_resource->blocksNum(batch_id, gid);
@@ -756,10 +746,8 @@ int HybridKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr&
                                                   int                            reserve_step) const {
     int need_blocks = 0;
     for (int gid = 0; gid < batch_kv_cache_resource->groupNums(); ++gid) {
-        const auto group_type = static_cast<size_t>(gid) < config_.group_types.size() ?
-                                    config_.group_types[static_cast<size_t>(gid)] :
-                                    CacheGroupType::FULL;
-        const int effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, group_type, seq_len);
+        const int effective_seq_len =
+            cpEffectiveSeqLenForGroup(cp_slot_mapper_, kv_cache_groups_[static_cast<size_t>(gid)], seq_len);
         const int cur_blocks        = batch_kv_cache_resource->blocksNum(0, gid);
         need_blocks +=
             kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(effective_seq_len, cur_blocks, reserve_step);

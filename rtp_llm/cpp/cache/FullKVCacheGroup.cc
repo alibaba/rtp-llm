@@ -41,7 +41,7 @@ bool FullKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reus
     return true;
 }
 
-MatchResult FullKVCacheGroup::match(const CacheKeysType& cache_keys) {
+MatchResult FullKVCacheGroup::matchPrefix(const CacheKeysType& cache_keys) const {
     MatchResult final_result;
 
     if (!shared_cache_) {

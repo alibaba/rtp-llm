@@ -24,7 +24,10 @@ struct LinearKVCacheSpec: public KVCacheSpec {
     DataType ssm_state_dtype   = DataType::TYPE_BF16;
     DataType conv_state_dtype  = DataType::TYPE_BF16;
 
-    LinearKVCacheSpec() = default;
+    LinearKVCacheSpec() {
+        type      = KVCacheSpecType::LinearAttention;
+        lifecycle = CacheGroupType::LINEAR;
+    }
 
     LinearKVCacheSpec(const AttentionConfigs&      attn_config,
                       const ParallelismConfig&     parallelism_config,
@@ -52,6 +55,7 @@ struct LinearKVCacheSpec: public KVCacheSpec {
                                 linear_config.linear_value_head_dim);
 
         type               = KVCacheSpecType::LinearAttention;
+        lifecycle          = CacheGroupType::LINEAR;
         local_head_num_kv  = static_cast<uint32_t>(std::max(
             1,
             (linear_config.linear_num_value_heads > 1) ?

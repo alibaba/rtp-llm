@@ -4,19 +4,38 @@
 
 namespace rtp_llm {
 
+CacheGroupTransferCapability cacheGroupTransferCapability(CacheGroupType group_type, CacheGroupPolicy policy) {
+    CacheGroupTransferCapability capability;
+    capability.prefix_reusable =
+        group_type == CacheGroupType::FULL && policy.reuse_policy == CacheReusePolicy::REUSABLE;
+    capability.cp_shardable         = group_type == CacheGroupType::FULL;
+    capability.tail_block_count     = policy.active_tail_blocks > 0 ? static_cast<size_t>(policy.active_tail_blocks) : 0;
+    capability.transfer_tail_blocks = capability.tail_block_count > 0;
+    capability.cp_compact_tail_blocks = capability.transfer_tail_blocks && group_type == CacheGroupType::SWA;
+    return capability;
+}
+
 std::vector<size_t> blockPositionsForCacheTransfer(size_t         block_num,
                                                    size_t         reuse_block_size,
                                                    bool           use_hybrid,
                                                    CacheGroupType group_type,
                                                    bool           hybrid_full_from_begin) {
+    auto capability =
+        cacheGroupTransferCapability(group_type, cacheGroupPolicyForLegacyRegion(group_type, KVCacheRegionName::DEFAULT));
+    return blockPositionsForCacheTransfer(
+        block_num, reuse_block_size, use_hybrid, capability, hybrid_full_from_begin);
+}
+
+std::vector<size_t> blockPositionsForCacheTransfer(size_t                      block_num,
+                                                   size_t                      reuse_block_size,
+                                                   bool                        use_hybrid,
+                                                   CacheGroupTransferCapability capability,
+                                                   bool                        hybrid_full_from_begin) {
     std::vector<size_t> block_pos_list;
     block_pos_list.reserve(block_num);
-    if (use_hybrid && block_num > 0 && group_type == CacheGroupType::LINEAR) {
-        block_pos_list.push_back(block_num - 1);
-        return block_pos_list;
-    }
-    if (use_hybrid && block_num > 0 && group_type == CacheGroupType::SWA) {
-        const size_t start = block_num > 2 ? block_num - 2 : 0;
+    if (use_hybrid && block_num > 0 && capability.transfer_tail_blocks) {
+        const size_t tail_count = std::max<size_t>(1, capability.tail_block_count);
+        const size_t start      = block_num > tail_count ? block_num - tail_count : 0;
         for (size_t block_pos = start; block_pos < block_num; ++block_pos) {
             block_pos_list.push_back(block_pos);
         }
@@ -35,14 +54,26 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_l
                                                           CacheGroupType group_type,
                                                           int            cp_rank,
                                                           int            cp_size) {
+    auto capability =
+        cacheGroupTransferCapability(group_type, cacheGroupPolicyForLegacyRegion(group_type, KVCacheRegionName::DEFAULT));
+    return buildCacheStoreBlockPlan(total_logical_blocks, reuse_block_size, use_hybrid, capability, cp_rank, cp_size);
+}
+
+std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t                      total_logical_blocks,
+                                                          size_t                      reuse_block_size,
+                                                          bool                        use_hybrid,
+                                                          CacheGroupTransferCapability capability,
+                                                          int                         cp_rank,
+                                                          int                         cp_size) {
     std::vector<CacheStoreBlockPair> plan;
 
-    const bool sharded_full        = (cp_size > 1) && (group_type == CacheGroupType::FULL);
-    const bool compact_swa_by_cp   = (cp_size > 1) && (group_type == CacheGroupType::SWA);
+    const bool sharded_full      = (cp_size > 1) && capability.cp_shardable;
+    const bool compact_swa_by_cp = (cp_size > 1) && capability.cp_compact_tail_blocks;
     if (compact_swa_by_cp) {
         const size_t cp_size_t        = static_cast<size_t>(cp_size);
         const size_t canonical_blocks = (total_logical_blocks + cp_size_t - 1) / cp_size_t;
-        const size_t start = use_hybrid ? (canonical_blocks > 2 ? canonical_blocks - 2 : 0) :
+        const size_t tail_count = std::max<size_t>(1, capability.tail_block_count);
+        const size_t start = use_hybrid ? (canonical_blocks > tail_count ? canonical_blocks - tail_count : 0) :
                                           std::min(reuse_block_size, canonical_blocks);
         plan.reserve(canonical_blocks - start);
         for (size_t compact_idx = start; compact_idx < canonical_blocks; ++compact_idx) {
@@ -53,7 +84,7 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_l
     }
 
     auto positions = blockPositionsForCacheTransfer(
-        total_logical_blocks, reuse_block_size, use_hybrid, group_type, /*hybrid_full_from_begin=*/true);
+        total_logical_blocks, reuse_block_size, use_hybrid, capability, /*hybrid_full_from_begin=*/true);
 
     plan.reserve(positions.size());
 

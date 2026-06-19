@@ -17,7 +17,7 @@ public:
 	        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, shared_cache, metrics_reporter) {}
 
     bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) override;
-    MatchResult match(const CacheKeysType& cache_keys) override;
+    MatchResult matchPrefix(const CacheKeysType& cache_keys) const override;
     void        free(const BlockIndicesType& block_indices) override;
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     int  needBlocksNum(int seq_len, int current_blocks = 0, int reserve_step = 0) const override;
