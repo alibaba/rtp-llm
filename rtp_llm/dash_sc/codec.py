@@ -560,6 +560,7 @@ class OtherParams:
     """Non-sampling knobs carried alongside ``input_ids`` (filled by ``parse_other_params``)."""
 
     return_input_ids: bool = False
+    is_streaming: bool = True
     enable_thinking: bool | None = None
     max_new_think_tokens: int | None = None
     timeout_ms: int | None = None
@@ -637,7 +638,7 @@ class SamplingParams:
             stop_words_list=self.stop_words_list_py(),
             max_thinking_tokens=max_thinking_tokens,
             return_input_ids=return_input_ids,
-            is_streaming=True,
+            is_streaming=other.is_streaming if other is not None else True,
             response_format=self.response_format,
             json_format=self.json_format,
             structural_tag=self.structural_tag,
@@ -794,6 +795,27 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
                     return_input_ids = vf != 0.0
 
     ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
+    is_streaming = _parse_optional_parameter_bool(request, "stream")
+    if is_streaming is None:
+        inp, raw = _find_input_raw(request, "stream")
+        if inp is not None and raw:
+            if inp.datatype == "BOOL":
+                is_streaming = raw[0] != 0
+            else:
+                v = _parse_optional_scalar_int(request, "stream")
+                if v is not None:
+                    is_streaming = v != 0
+    if is_streaming is None:
+        is_streaming = _parse_optional_bool(
+            _lookup_ds_request_control(ds_attrs, "stream")
+        )
+    if is_streaming is None:
+        is_streaming = _parse_optional_bool(
+            _lookup_ds_request_control(ds_attrs, "streaming")
+        )
+    if is_streaming is None:
+        is_streaming = True
+
     enable_thinking = _parse_optional_bool(
         _lookup_ds_request_control(ds_attrs, "x-ds-llm-thinking")
     )
@@ -845,6 +867,7 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
 
     return OtherParams(
         return_input_ids=return_input_ids,
+        is_streaming=is_streaming,
         enable_thinking=enable_thinking,
         max_new_think_tokens=max_new_think_tokens,
         timeout_ms=timeout_ms,

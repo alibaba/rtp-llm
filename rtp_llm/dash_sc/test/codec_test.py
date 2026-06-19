@@ -759,6 +759,18 @@ class DashScGrpcRequestTest(TestCase):
         op = parse_other_params(req)
         self.assertFalse(op.return_input_ids)
 
+    def test_parse_other_params_stream_false(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["stream"].bool_param = False
+        op = parse_other_params(req)
+        self.assertFalse(op.is_streaming)
+
+    def test_parse_other_params_stream_false_from_tensor(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "stream", "BOOL", [1], b"\x00")
+        op = parse_other_params(req)
+        self.assertFalse(op.is_streaming)
+
     def test_parse_other_params_thinking_controls(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["ds_header_attributes"].string_param = json.dumps(
@@ -843,6 +855,10 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(gc.max_thinking_tokens, 128)
         self.assertEqual(gc.stop_words_list, [[42]])
         self.assertTrue(gc.return_input_ids)
+        self.assertTrue(gc.is_streaming)
+
+        gc = sp.to_generate_config(other=OtherParams(is_streaming=False))
+        self.assertFalse(gc.is_streaming)
 
 
 class BuildStreamResponseFromGenerateOutputsTest(TestCase):
