@@ -112,10 +112,24 @@ torch::Tensor TRTPagedPrefillOp::forward(const torch::Tensor&                   
     bool          use_fp8_fmha  = kv_block_array.cache_type == KvCacheDataType::FP8;
     float*        attention_output_orig_quant_scale = use_fp8_fmha ? static_scale_.data_ptr<float>() : nullptr;
 
-    trt_v2_runner_->runTrtV2FmhaPaged(input.data_ptr(),
+    // The paged FMHA runner is built with dataType == dataTypeOut == E4M3 when the KV
+    // cache is FP8 (see TrtV2FmhaRunner::createMHARunnerFixedParams), so it reads an FP8
+    // query and writes FP8 output. Convert Q in / output out exactly like
+    // TRTNormalPrefillOp; without this the kernel reinterprets BF16 bytes as FP8 -> inf.
+    torch::Tensor tmp_fmha_input, tmp_fmha_output;
+    void*         fmha_input_ptr  = input.data_ptr();
+    void*         fmha_output_ptr = output.data_ptr();
+    if (use_fp8_fmha) {
+        tmp_fmha_input  = input.to(torch::kFloat8_e4m3fn);
+        tmp_fmha_output = output.to(torch::kFloat8_e4m3fn);
+        fmha_input_ptr  = tmp_fmha_input.data_ptr();
+        fmha_output_ptr = tmp_fmha_output.data_ptr();
+    }
+
+    trt_v2_runner_->runTrtV2FmhaPaged(fmha_input_ptr,
                                       params->cu_seqlens.data_ptr(),
                                       params->cu_kv_seqlens.data_ptr(),
-                                      output.data_ptr(),
+                                      fmha_output_ptr,
                                       reinterpret_cast<uint32_t*>(tiled_counter.data_ptr()),
                                       attention_output_orig_quant_scale,
                                       batch_size,  // batch_size,
@@ -124,6 +138,10 @@ torch::Tensor TRTPagedPrefillOp::forward(const torch::Tensor&                   
                                       token_num,
                                       params->context_total_kv_length,  // token_num_kv,
                                       kv_block_array);
+
+    if (use_fp8_fmha) {
+        output = tmp_fmha_output.to(output.dtype());
+    }
 
     return output;
 }
