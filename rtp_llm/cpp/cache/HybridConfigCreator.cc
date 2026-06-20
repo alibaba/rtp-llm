@@ -108,7 +108,9 @@ KVCacheSpecPtr HybridConfigCreator::createLinearAttentionSpec(const ModelConfig&
                                                               rtp_llm::DataType        dtype) {
     auto linear_spec = std::make_shared<LinearKVCacheSpec>(
         model_config.attn_config, parallelism_config, model_config.linear_attention_config);
-    linear_spec->dtype = dtype;
+    // Linear attention stores SSM/conv states in BF16, not quantized KV pairs.
+    // Use ssm_state_dtype instead of the global FP8 cache dtype.
+    linear_spec->dtype = linear_spec->ssm_state_dtype;
     return linear_spec;
 }
 
