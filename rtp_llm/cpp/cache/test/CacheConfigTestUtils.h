@@ -8,10 +8,11 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/models/dsv4/Dsv4KVCacheSpec.h"
+#include "rtp_llm/cpp/models/dsv4/Dsv4CacheLayout.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
@@ -25,13 +26,13 @@ inline KVCacheSpecPtr makeDsv4Spec(const std::string& tag,
                                     uint32_t           compression_ratio = 1) {
     KVCacheSpecPtr spec;
     if (kind == "compressed_kv") {
-        auto kv_spec               = std::make_shared<DSV4KVSpec>();
+        auto kv_spec               = std::make_shared<CompressedKVCacheSpec>();
         kv_spec->entry_elems       = entry_elems;
         kv_spec->compression_ratio = compression_ratio;
         kv_spec->store_dtype       = dtype;
         spec                       = kv_spec;
     } else {
-        auto state_spec        = std::make_shared<DSV4StateSpec>();
+        auto state_spec        = std::make_shared<FixedStateCacheSpec>();
         state_spec->state_dim  = entry_elems;
         state_spec->store_dtype = dtype;
         spec                   = state_spec;

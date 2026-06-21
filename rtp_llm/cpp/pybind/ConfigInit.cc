@@ -10,7 +10,6 @@
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
-#include "rtp_llm/cpp/models/dsv4/Dsv4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/model_utils/RopeCache.h"
 #include "pybind11/pybind11.h"
@@ -1572,24 +1571,25 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ssm_state_dtype", &LinearKVCacheSpec::ssm_state_dtype)
         .def_readwrite("conv_state_dtype", &LinearKVCacheSpec::conv_state_dtype);
 
-    py::class_<DSV4KVSpec, KVCacheSpec, std::shared_ptr<DSV4KVSpec>>(m, "DSV4KVSpec")
+    py::class_<CompressedKVCacheSpec, KVCacheSpec, std::shared_ptr<CompressedKVCacheSpec>>(
+        m, "CompressedKVCacheSpec")
         .def(py::init<>())
-        .def_readwrite("entry_elems", &DSV4KVSpec::entry_elems)
-        .def_readwrite("entries_per_block", &DSV4KVSpec::entries_per_block)
-        .def_readwrite("compression_ratio", &DSV4KVSpec::compression_ratio)
-        .def_readwrite("store_dtype", &DSV4KVSpec::store_dtype)
-        .def_readwrite("block_size_bytes_alignment", &DSV4KVSpec::block_size_bytes_alignment);
+        .def_readwrite("entry_elems", &CompressedKVCacheSpec::entry_elems)
+        .def_readwrite("entries_per_block", &CompressedKVCacheSpec::entries_per_block)
+        .def_readwrite("compression_ratio", &CompressedKVCacheSpec::compression_ratio)
+        .def_readwrite("store_dtype", &CompressedKVCacheSpec::store_dtype)
+        .def_readwrite("block_size_bytes_alignment", &CompressedKVCacheSpec::block_size_bytes_alignment);
 
-    py::class_<DSV4StateSpec, KVCacheSpec, std::shared_ptr<DSV4StateSpec>>(m, "DSV4StateSpec")
+    py::class_<FixedStateCacheSpec, KVCacheSpec, std::shared_ptr<FixedStateCacheSpec>>(m, "FixedStateCacheSpec")
         .def(py::init<>())
         .def_property("state_dim",
-                      [](const DSV4StateSpec& spec) { return spec.state_dim; },
-                      [](DSV4StateSpec& spec, uint32_t value) { spec.state_dim = value; })
-        .def_readwrite("entries_per_block", &DSV4StateSpec::entries_per_block)
-        .def_readwrite("store_dtype", &DSV4StateSpec::store_dtype)
-        .def_readwrite("block_size_bytes_override", &DSV4StateSpec::block_size_bytes_override)
-        .def_readwrite("block_size_bytes_alignment", &DSV4StateSpec::block_size_bytes_alignment)
-        .def_readwrite("block_size_alignment_min_entries", &DSV4StateSpec::block_size_alignment_min_entries);
+                      [](const FixedStateCacheSpec& spec) { return spec.state_dim; },
+                      [](FixedStateCacheSpec& spec, uint32_t value) { spec.state_dim = value; })
+        .def_readwrite("entries_per_block", &FixedStateCacheSpec::entries_per_block)
+        .def_readwrite("store_dtype", &FixedStateCacheSpec::store_dtype)
+        .def_readwrite("block_size_bytes_override", &FixedStateCacheSpec::block_size_bytes_override)
+        .def_readwrite("block_size_bytes_alignment", &FixedStateCacheSpec::block_size_bytes_alignment)
+        .def_readwrite("block_size_alignment_min_entries", &FixedStateCacheSpec::block_size_alignment_min_entries);
 
     // Register ModelConfig
     py::class_<ModelConfig>(m, "ModelConfig")

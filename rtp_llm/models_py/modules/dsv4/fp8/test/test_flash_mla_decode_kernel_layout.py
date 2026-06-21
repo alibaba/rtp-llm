@@ -43,8 +43,8 @@ def _make_padded_fp8_cache_3d(
 ) -> torch.Tensor:
     """Return ``[num_blocks, entries_per_block, 584]`` uint8 cache.
 
-    The storage row stride is aligned exactly like DSV4KVSpec /
-    DSV4StateSpec's FP8 block padding.  The logical entry stride remains 584B.
+    The storage row stride is aligned exactly like the generic DSV4 opaque
+    cache specs' FP8 block padding. The logical entry stride remains 584B.
     """
     stride_bytes = _align_up(entries_per_block * ENTRY_BYTES, TMA_STRIDE_BYTES)
     backing = torch.zeros((num_blocks, stride_bytes), dtype=torch.uint8, device=device)

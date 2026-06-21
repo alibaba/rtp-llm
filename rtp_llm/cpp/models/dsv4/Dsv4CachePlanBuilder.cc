@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/models/dsv4/Dsv4CachePlanBuilder.h"
 
-#include "rtp_llm/cpp/models/dsv4/Dsv4KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
+#include "rtp_llm/cpp/models/dsv4/Dsv4CacheLayout.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -160,59 +161,42 @@ const KVCacheSpec& specForTag(const DSV4SpecMap& specs, const char* tag) {
 }
 
 bool isDsv4PagedSpec(const KVCacheSpec& spec) {
-    return dynamic_cast<const DSV4KVSpec*>(&spec) != nullptr;
+    return spec.type == KVCacheSpecType::OpaqueKV;
+}
+
+const OpaqueKVCacheSpec& dsv4OpaqueSpec(const KVCacheSpec& spec) {
+    const auto* opaque_spec = dynamic_cast<const OpaqueKVCacheSpec*>(&spec);
+    RTP_LLM_CHECK_WITH_INFO(opaque_spec != nullptr,
+                            "DSV4 kv_cache spec tag=%s must be a generic opaque spec",
+                            spec.tag.c_str());
+    return *opaque_spec;
 }
 
 uint32_t dsv4SpecEntryElems(const KVCacheSpec& spec) {
-    if (const auto* kv_spec = dynamic_cast<const DSV4KVSpec*>(&spec)) {
-        return kv_spec->entry_elems;
-    }
-    if (const auto* state_spec = dynamic_cast<const DSV4StateSpec*>(&spec)) {
-        return state_spec->state_dim;
-    }
-    RTP_LLM_CHECK_WITH_INFO(false, "DSV4 kv_cache spec tag=%s has unsupported concrete type", spec.tag.c_str());
-    return 0;
+    return dsv4OpaqueSpec(spec).entry_elems;
 }
 
 uint32_t dsv4SpecCompressionRatio(const KVCacheSpec& spec) {
-    const auto* kv_spec = dynamic_cast<const DSV4KVSpec*>(&spec);
+    const auto* kv_spec = dynamic_cast<const CompressedKVCacheSpec*>(&spec);
     RTP_LLM_CHECK_WITH_INFO(kv_spec != nullptr,
-                            "DSV4 kv_cache spec tag=%s must be DSV4KVSpec to have compression_ratio",
+                            "DSV4 kv_cache spec tag=%s must be CompressedKVCacheSpec to have compression_ratio",
                             spec.tag.c_str());
     return kv_spec->compression_ratio;
 }
 
 DataType dsv4SpecStoreDtype(const KVCacheSpec& spec) {
-    if (const auto* kv_spec = dynamic_cast<const DSV4KVSpec*>(&spec)) {
-        return kv_spec->store_dtype;
-    }
-    if (const auto* state_spec = dynamic_cast<const DSV4StateSpec*>(&spec)) {
-        return state_spec->store_dtype;
-    }
-    RTP_LLM_CHECK_WITH_INFO(false, "DSV4 kv_cache spec tag=%s has unsupported concrete type", spec.tag.c_str());
-    return DataType::TYPE_INVALID;
+    return dsv4OpaqueSpec(spec).store_dtype;
 }
 
 size_t dsv4SpecBlockSizeBytesAlignment(const KVCacheSpec& spec) {
-    if (const auto* kv_spec = dynamic_cast<const DSV4KVSpec*>(&spec)) {
-        return kv_spec->block_size_bytes_alignment;
-    }
-    if (const auto* state_spec = dynamic_cast<const DSV4StateSpec*>(&spec)) {
-        return state_spec->block_size_bytes_alignment;
-    }
-    RTP_LLM_CHECK_WITH_INFO(false, "DSV4 kv_cache spec tag=%s has unsupported concrete type", spec.tag.c_str());
-    return 0;
+    return dsv4OpaqueSpec(spec).block_size_bytes_alignment;
 }
 
 uint32_t dsv4SpecBlockAlignmentMinEntries(const KVCacheSpec& spec) {
-    if (dynamic_cast<const DSV4KVSpec*>(&spec) != nullptr) {
+    if (spec.type == KVCacheSpecType::OpaqueKV) {
         return 0;
     }
-    if (const auto* state_spec = dynamic_cast<const DSV4StateSpec*>(&spec)) {
-        return state_spec->block_size_alignment_min_entries;
-    }
-    RTP_LLM_CHECK_WITH_INFO(false, "DSV4 kv_cache spec tag=%s has unsupported concrete type", spec.tag.c_str());
-    return 0;
+    return dsv4OpaqueSpec(spec).block_size_alignment_min_entries;
 }
 
 KVCacheSpecPtr makeFallbackDsv4Decl(const char* tag, const ExpectedDSV4Spec& expected, const ModelConfig& model_config) {
@@ -224,13 +208,13 @@ KVCacheSpecPtr makeFallbackDsv4Decl(const char* tag, const ExpectedDSV4Spec& exp
 
     KVCacheSpecPtr spec;
     if (expected.is_paged) {
-        auto kv_spec               = std::make_shared<DSV4KVSpec>();
+        auto kv_spec               = std::make_shared<CompressedKVCacheSpec>();
         kv_spec->entry_elems       = std::string(tag) == "indexer_kv" ? indexer_entry_elems : kv_entry_elems;
         kv_spec->compression_ratio = std::string(tag) == "hca_kv" ? kHcaCompressRatio : kCsaCompressRatio;
         kv_spec->store_dtype       = DataType::TYPE_UINT8;
         spec                       = kv_spec;
     } else {
-        auto state_spec        = std::make_shared<DSV4StateSpec>();
+        auto state_spec        = std::make_shared<FixedStateCacheSpec>();
         state_spec->store_dtype = std::string(tag) == "swa_kv" ? DataType::TYPE_UINT8 : DataType::TYPE_FP32;
         if (std::string(tag) == "indexer_state") {
             state_spec->state_dim = 4 * indexer_head_dim;
@@ -466,25 +450,25 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
 KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool) {
     KVCacheSpecPtr spec;
     if (pool.is_paged) {
-        spec = std::make_shared<DSV4KVSpec>(pool.tag,
-                                            pool.entry_elems,
-                                            pool.entries_per_block,
-                                            pool.store_dtype,
-                                            pool.tokens_per_block,
-                                            pool.compression_ratio,
-                                            pool.block_size_bytes_alignment);
+        spec = std::make_shared<CompressedKVCacheSpec>(pool.tag,
+                                                       pool.entry_elems,
+                                                       pool.entries_per_block,
+                                                       pool.store_dtype,
+                                                       pool.tokens_per_block,
+                                                       pool.compression_ratio,
+                                                       pool.block_size_bytes_alignment);
     } else {
         const bool is_non_reusable_state = pool.tag == "hca_state";
-        spec = std::make_shared<DSV4StateSpec>(pool.tag,
-                                               pool.entry_elems,
-                                               pool.entries_per_block,
-                                               pool.store_dtype,
-                                               pool.tokens_per_block,
-                                               pool.block_size_bytes_override,
-                                               pool.block_size_bytes_alignment,
-                                               pool.block_alignment_min_entries,
-                                               /*state_cache=*/true,
-                                               /*skip_reuse=*/is_non_reusable_state);
+        spec = std::make_shared<FixedStateCacheSpec>(pool.tag,
+                                                     pool.entry_elems,
+                                                     pool.entries_per_block,
+                                                     pool.store_dtype,
+                                                     pool.tokens_per_block,
+                                                     pool.block_size_bytes_override,
+                                                     pool.block_size_bytes_alignment,
+                                                     pool.block_alignment_min_entries,
+                                                     /*state_cache=*/true,
+                                                     /*skip_reuse=*/is_non_reusable_state);
     }
     spec->tag    = pool.tag;
     spec->layers = *pool.layer_ids;

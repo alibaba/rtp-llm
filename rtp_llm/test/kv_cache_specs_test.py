@@ -8,9 +8,9 @@ from rtp_llm.models.deepseek_v4 import (
 )
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3NextBase
 from rtp_llm.ops import (
-    DSV4KVSpec,
-    DSV4StateSpec,
+    CompressedKVCacheSpec,
     DataType,
+    FixedStateCacheSpec,
     HybridAttentionType,
     KVCacheSpecType,
     KvCacheDataType,
@@ -105,8 +105,8 @@ class KVCacheSpecsTest(TestCase):
         self.assertEqual([spec.tag for spec in layer_specs[4]], ["swa_kv"])
 
         specs = _by_tag(layer_specs)
-        self.assertIsInstance(specs["csa_kv"], DSV4KVSpec)
-        self.assertIsInstance(specs["indexer_state"], DSV4StateSpec)
+        self.assertIsInstance(specs["csa_kv"], CompressedKVCacheSpec)
+        self.assertIsInstance(specs["indexer_state"], FixedStateCacheSpec)
         self.assertTrue(
             all(specs[tag].dtype == DataType.TYPE_UINT8 for tag in ["csa_kv", "hca_kv", "indexer_kv", "swa_kv"])
         )

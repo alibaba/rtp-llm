@@ -5,7 +5,8 @@
 #include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/models/dsv4/Dsv4KVCacheSpec.h"
+#include "rtp_llm/cpp/models/dsv4/Dsv4CacheLayout.h"
+#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -41,8 +42,8 @@ private:
     bool        had_value_ = false;
 };
 
-std::shared_ptr<DSV4StateSpec> makeDsv4StateSpec(const std::string& tag, int seq_size_per_block) {
-    return std::make_shared<DSV4StateSpec>(tag,
+std::shared_ptr<FixedStateCacheSpec> makeDsv4StateSpec(const std::string& tag, int seq_size_per_block) {
+    return std::make_shared<FixedStateCacheSpec>(tag,
                                            /*state_elements=*/1024,
                                            /*block_entries=*/128,
                                            DataType::TYPE_FP32,

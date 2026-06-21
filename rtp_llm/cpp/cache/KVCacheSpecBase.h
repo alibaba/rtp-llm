@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -105,6 +106,14 @@ struct KVCacheSpec {
     }
 
     virtual KVCacheSpecPtr clone() const = 0;
+
+    virtual std::vector<BlockInfo> sliceBlockForPeer(std::vector<BlockInfo> parts,
+                                                     size_t                 cp_size,
+                                                     size_t                 peer_idx) const {
+        (void)cp_size;
+        (void)peer_idx;
+        return parts;
+    }
 
     std::string fingerprint() const {
         std::ostringstream os;
