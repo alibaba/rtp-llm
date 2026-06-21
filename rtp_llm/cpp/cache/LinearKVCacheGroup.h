@@ -16,8 +16,9 @@ public:
 	                       int                          group_id,
 	                       int                          linear_step  = 0,
 	                       SharedBlockCache*            shared_cache = nullptr,
-	                       const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-	        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, shared_cache, metrics_reporter),
+	                       const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr,
+	                       CacheGroupPolicy             policy       = CacheGroupPolicy{}):
+	        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, shared_cache, metrics_reporter),
 	        linear_step_(linear_step) {}
 
     // Match a single cache key (used by Hybrid allocator to do right-to-left joint matching).

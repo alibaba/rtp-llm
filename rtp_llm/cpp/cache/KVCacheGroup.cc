@@ -106,6 +106,22 @@ int KVCacheGroup::group_id() const {
     return group_id_;
 }
 
+const CacheGroupPolicy& KVCacheGroup::policy() const {
+    return policy_;
+}
+
+CacheReusePolicy KVCacheGroup::reusePolicy() const {
+    return policy_.reuse_policy;
+}
+
+CacheEvictPolicy KVCacheGroup::evictPolicy() const {
+    return policy_.evict_policy;
+}
+
+size_t KVCacheGroup::activeTailBlocks() const {
+    return policy_.active_tail_blocks > 0 ? static_cast<size_t>(policy_.active_tail_blocks) : 0;
+}
+
 std::unordered_map<int, torch::Tensor> KVCacheGroup::allLayerCacheBase() const {
     return global_layer_to_kv_tensors;
 }
@@ -145,7 +161,7 @@ bool KVCacheGroup::isCpShardable() const {
 }
 
 bool KVCacheGroup::prefixReusable() const {
-    return true;
+    return policy_.reuse_policy == CacheReusePolicy::REUSABLE;
 }
 
 bool KVCacheGroup::hasSparseSlots() const {
@@ -157,7 +173,7 @@ bool KVCacheGroup::hasKernelBlockSubdiv() const {
 }
 
 bool KVCacheGroup::transferTailBlocks() const {
-    return false;
+    return activeTailBlocks() > 0;
 }
 
 bool KVCacheGroup::cpCompactTailBlocks() const {

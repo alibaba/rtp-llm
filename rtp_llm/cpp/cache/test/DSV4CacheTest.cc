@@ -235,6 +235,7 @@ TEST(CacheConfigTest, FromLayerSpecsBuildsTagAndGroupTopology) {
     EXPECT_EQ(config.group_tags, std::vector<std::string>({"swa", "csa"}));
     EXPECT_EQ(config.groupIdForLayerTag(1, "swa"), 0);
     EXPECT_EQ(config.groupIdForLayerTag(1, "csa"), 1);
+    EXPECT_THROW((void)config.groupIdFor(1), std::exception);
     EXPECT_EQ(config.layer_to_group_id[1], -1);
     EXPECT_EQ(config.layer_to_group_ids[1], std::vector<int>({0, 1}));
 }
@@ -1545,7 +1546,7 @@ TEST_F(DSV4AllocatorTest, AddressLookupAllGroups) {
     for (int gid = 0; gid < 7; gid++) {
         ASSERT_FALSE(config.global_layer_ids[gid].empty()) << "group " << gid << " has no layers";
         int  layer_id = config.global_layer_ids[gid][0];
-        auto addr     = allocator->convertIndexToAddr(layer_id, /*block_id=*/1);
+        auto addr     = allocator->convertIndexToAddr(layer_id, gid, /*block_id=*/1);
         EXPECT_NE(addr.kv_addr, nullptr) << "null kv_addr for group " << gid << " layer " << layer_id;
     }
 }
@@ -1574,7 +1575,7 @@ TEST_F(DSV4AllocatorTest, ConvertIndexToBufferAllGroups) {
     // convertIndexToBuffer should work for layers in each of the 7 groups
     for (int gid = 0; gid < 7; gid++) {
         int  layer_id = config.global_layer_ids[gid][0];
-        auto buf      = allocator->convertIndexToBuffer(layer_id, /*block_id=*/1);
+        auto buf      = allocator->convertIndexToBuffer(layer_id, gid, /*block_id=*/1);
         ASSERT_FALSE(buf.empty()) << "empty buffer for group " << gid;
         EXPECT_NE(buf[0].addr, nullptr) << "null addr for group " << gid;
     }
@@ -1700,7 +1701,7 @@ TEST_F(DSV4AllocatorTest, FlashAddressLookupAllGroups) {
     for (int gid = 0; gid < 7; gid++) {
         ASSERT_FALSE(config.global_layer_ids[gid].empty()) << "Flash group " << gid << " has no layers";
         int  layer_id = config.global_layer_ids[gid][0];
-        auto addr     = allocator->convertIndexToAddr(layer_id, /*block_id=*/1);
+        auto addr     = allocator->convertIndexToAddr(layer_id, gid, /*block_id=*/1);
         EXPECT_NE(addr.kv_addr, nullptr) << "Flash null kv_addr for group " << gid;
     }
 }

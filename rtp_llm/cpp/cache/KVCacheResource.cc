@@ -160,10 +160,10 @@ void KVCacheResource::initGroups(int                                  group_num,
                                         layer_to_group_ids.size(),
                                         layer_num);
                 const auto& dense_groups = layer_to_group_ids[static_cast<size_t>(i)];
-                RTP_LLM_CHECK_WITH_INFO(!dense_groups.empty(),
-                                        "KVCacheResource::initGroups: empty group ids for layer %d",
-                                        i);
-                gid = dense_groups.back();
+                if (dense_groups.size() != 1) {
+                    continue;
+                }
+                gid = dense_groups.front();
             }
             RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < group_num,
                                     "KVCacheResource::initGroups: invalid group id %d for layer %d (group_num=%d)",

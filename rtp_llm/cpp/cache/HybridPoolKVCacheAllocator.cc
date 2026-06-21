@@ -117,21 +117,19 @@ bool HybridPoolKVCacheAllocator::doInit() {
 
         const auto& ids  = config_.global_layer_ids[static_cast<size_t>(gid)];
         auto        spec = config_.cache_specs[static_cast<size_t>(gid)];
+        const auto  policy = config_.policyForGroup(static_cast<size_t>(gid));
 
         KVCacheGroupPtr group;
         if (group_type == CacheGroupType::LINEAR) {
             group = std::make_shared<LinearKVCacheGroup>(
-                ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw, metrics_reporter_);
+                ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw, metrics_reporter_, policy);
             linear_group_ids_.push_back(gid);
         } else if (group_type == CacheGroupType::SWA) {
-            const auto policy = static_cast<size_t>(gid) < config_.group_policies.size() ?
-                                    config_.group_policies[static_cast<size_t>(gid)] :
-                                    CacheGroupPolicy{};
             group = std::make_shared<SWAKVCacheGroup>(
                 ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw, metrics_reporter_, policy);
             swa_group_ids_.push_back(gid);
         } else {
-            group = std::make_shared<FullKVCacheGroup>(ids, spec, group_pool, gid, shared_cache_raw, metrics_reporter_);
+            group = std::make_shared<FullKVCacheGroup>(ids, spec, group_pool, gid, shared_cache_raw, metrics_reporter_, policy);
             full_group_ids_.push_back(gid);
         }
 
@@ -153,11 +151,7 @@ int HybridPoolKVCacheAllocator::defaultGroupIdForLayer(int layer_id) const {
     if (layer_id < 0 || static_cast<size_t>(layer_id) >= config_.layer_to_group_id.size()) {
         RTP_LLM_FAIL("invalid layer_id=%d", layer_id);
     }
-    int gid = config_.layer_to_group_id[static_cast<size_t>(layer_id)];
-    if (gid < 0 && static_cast<size_t>(layer_id) < config_.layer_to_group_ids.size()
-        && !config_.layer_to_group_ids[static_cast<size_t>(layer_id)].empty()) {
-        gid = config_.layer_to_group_ids[static_cast<size_t>(layer_id)].back();
-    }
+    const int gid = config_.groupIdFor(layer_id);
     RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < static_cast<int>(kv_cache_groups_.size()),
                             "invalid default group id %d for layer %d",
                             gid,
@@ -221,7 +215,14 @@ CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     }
 
     for (size_t layer_id = 0; layer_id < static_cast<size_t>(config_.layer_all_num); ++layer_id) {
-        const int  gid           = defaultGroupIdForLayer(static_cast<int>(layer_id));
+        if (layer_id >= config_.layer_to_group_ids.size() || config_.layer_to_group_ids[layer_id].size() != 1) {
+            continue;
+        }
+        const int  gid           = config_.layer_to_group_ids[layer_id][0];
+        RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < static_cast<int>(kv_cache_groups_.size()),
+                                "invalid single-tag group id %d for layer %zu",
+                                gid,
+                                layer_id);
         const auto layer_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerCacheBase();
         const auto scale_tensors = kv_cache_groups_[static_cast<size_t>(gid)]->allLayerScaleCacheBase();
         auto       it            = layer_tensors.find(static_cast<int>(layer_id));

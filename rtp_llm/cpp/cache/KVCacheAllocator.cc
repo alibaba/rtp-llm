@@ -398,6 +398,10 @@ std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots()
     return {};
 }
 
+std::vector<int> KVCacheAllocator::independentEvictionGroupIds() const {
+    return {};
+}
+
 void KVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
     if (block_pool_) {
         block_pool_->regUserMr(model_id, std::move(cache_store));

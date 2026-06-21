@@ -79,8 +79,18 @@ BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) 
 }  // namespace
 
 bool HybridKVCacheAllocator::skipReuseCacheGroup(int gid) const {
-    return gid >= 0 && static_cast<size_t>(gid) < config_.group_policies.size()
-           && config_.group_policies[static_cast<size_t>(gid)].reuse_policy == CacheReusePolicy::NON_REUSABLE;
+    return gid >= 0 && static_cast<size_t>(gid) < kv_cache_groups_.size()
+           && kv_cache_groups_[static_cast<size_t>(gid)]->reusePolicy() == CacheReusePolicy::NON_REUSABLE;
+}
+
+std::vector<int> HybridKVCacheAllocator::independentEvictionGroupIds() const {
+    std::vector<int> group_ids;
+    for (size_t gid = 0; gid < kv_cache_groups_.size(); ++gid) {
+        if (kv_cache_groups_[gid]->evictPolicy() == CacheEvictPolicy::INDEPENDENT) {
+            group_ids.push_back(static_cast<int>(gid));
+        }
+    }
+    return group_ids;
 }
 
 bool HybridKVCacheAllocator::cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const {

@@ -1168,9 +1168,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConvertIndexToAddrByTagRoutesToCorrec
     // The two tags live in different pools, so their addresses cannot alias.
     EXPECT_NE(addr_csa.kv_addr, addr_swa.kv_addr);
 
-    // Default access for csa_layer follows layer_to_group_id (=6, SWA pool).
-    auto addr_default = allocator->convertIndexToAddr(csa_layer, /*block_id=*/1);
-    EXPECT_EQ(addr_default.kv_addr, addr_swa.kv_addr);
+    // Default single-group access is ambiguous for multi-tag layers.
+    EXPECT_DEATH((void)allocator->convertIndexToAddr(csa_layer, /*block_id=*/1), "");
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConvertIndexToBufferByTagAndPartition) {
@@ -1208,7 +1207,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4AllLayerCacheBaseHasPerGroupTensors) 
     ASSERT_EQ(layout.layers_to_kv_buffer_ptrs_by_group.size(), static_cast<size_t>(config.layer_all_num));
 
     for (size_t l = 0; l < static_cast<size_t>(config.layer_all_num); ++l) {
-        EXPECT_TRUE(layout.layers_to_kv_buffer_ptrs[l].defined());
+        EXPECT_FALSE(layout.layers_to_kv_buffer_ptrs[l].defined())
+            << "multi-tag DSV4 layer should not publish a legacy single-group tensor";
         const auto& swa_t = layout.layers_to_kv_buffer_ptrs_by_group[l][6];
         EXPECT_TRUE(swa_t.defined()) << "layer " << l << " missing SWA_KV tensor";
     }

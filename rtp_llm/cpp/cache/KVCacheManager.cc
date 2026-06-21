@@ -168,15 +168,6 @@ bool KVCacheManager::init() {
     const bool enable_independent_group_eviction = kv_cache_config_.enable_memory_cache
                                                   && kv_cache_config_.enable_prefix_tree_memory_cache
                                                   && kv_cache_config_.enable_independent_group_eviction;
-    std::vector<int> independent_eviction_group_ids;
-    if (enable_independent_group_eviction) {
-        for (size_t gid = 0; gid < config_.group_policies.size(); ++gid) {
-            if (config_.group_policies[gid].evict_policy == CacheEvictPolicy::INDEPENDENT) {
-                independent_eviction_group_ids.push_back(static_cast<int>(gid));
-            }
-        }
-    }
-    shared_cache->setIndependentGroupEviction(enable_independent_group_eviction, independent_eviction_group_ids);
 
     const bool is_hybrid = config_.groupNums() > 1;
     if (config_.use_independent_block_pools) {
@@ -202,6 +193,8 @@ bool KVCacheManager::init() {
     allocator_->setSharedBlockCache(shared_cache);
     allocator_->setCPSlotMapper(cp_slot_mapper_);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
+    shared_cache->setIndependentGroupEviction(enable_independent_group_eviction,
+                                              allocator_->independentEvictionGroupIds());
 
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);

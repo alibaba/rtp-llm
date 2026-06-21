@@ -20,101 +20,11 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/models_py/bindings/core/OpData.h"
 
 namespace rtp_llm {
 
-bool KVCacheAllocator::init() {
-    return doInit();
-}
-
-MallocResult KVCacheAllocator::malloc(const MallocInfo&) {
-    return {false, 0};
-}
-
-MallocResult KVCacheAllocator::initMalloc(const MallocInfo&) {
-    return {false, 0};
-}
-
-BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, int, int block_id) const {
-    return convertIndexToAddr(layer_id, block_id);
-}
-
-std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(int layer_id, int, int block_id) const {
-    return convertIndexToBuffer(layer_id, block_id);
-}
-
-std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(
-    int layer_id, int, int block_id, int partition_count, int partition_id) const {
-    return convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
-}
-
-void KVCacheAllocator::blockCopy(int, int) {}
-void KVCacheAllocator::blockBatchCopy(const std::vector<BlockIdPair>&) {}
-void KVCacheAllocator::blockBatchCopy(const BlockIdPair*, const BlockIdPair*) {}
-void KVCacheAllocator::blockBatchCopy(const torch::Tensor&) {}
-void KVCacheAllocator::regUserMr(size_t, std::shared_ptr<CacheStore>) {}
-
-int64_t KVCacheAllocator::getMrCostTimeMs() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::freeBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::availableBlocksNum() const {
-    return 0;
-}
-
-BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t) {
-    return nullptr;
-}
-
-void KVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr&) {}
-
-size_t KVCacheAllocator::requestRefBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::connectorRefBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::blockCacheRefBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::notInUseBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::availableTokensNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::totalTokensNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::totalBlocksNum() const {
-    return 0;
-}
-
-size_t KVCacheAllocator::maxAvailableTokensNum() const {
-    return 0;
-}
-
-KVCacheTokenCapacity KVCacheAllocator::tokenCapacity(size_t) const {
-    return {};
-}
-
-std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots() const {
-    return {};
-}
-
-uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t, int local_layer_id) const {
-    return static_cast<uint32_t>(local_layer_id);
-}
+void execBatchCopy(const BatchCopyParams&) {}
 
 }  // namespace rtp_llm
 

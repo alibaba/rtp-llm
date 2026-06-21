@@ -93,14 +93,19 @@ struct CacheConfig {
     }
 
     uint32_t explicitIndependentBlocks(size_t gid) const {
-        if (gid >= group_policies.size()) {
-            return 0;
-        }
-        return group_policies[gid].explicit_block_num;
+        return policyForGroup(gid).explicit_block_num;
     }
 
     bool usesExplicitIndependentBlocks(size_t gid) const {
         return explicitIndependentBlocks(gid) > 0;
+    }
+
+    CacheGroupPolicy policyForGroup(size_t gid) const {
+        if (gid < group_policies.size()) {
+            return group_policies[gid];
+        }
+        const auto group_type = gid < group_types.size() ? group_types[gid] : CacheGroupType::FULL;
+        return defaultCacheGroupPolicy(group_type);
     }
 
     int groupIdForLayerTag(int layer_id, const std::string& tag) const {

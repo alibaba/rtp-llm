@@ -688,11 +688,15 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
     auto layerGroupIds = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
         std::vector<int> layer_gids;
-        if (use_hybrid && layer_id < cfg.layer_to_group_ids.size() && !cfg.layer_to_group_ids[layer_id].empty()) {
+        if (use_hybrid) {
+            RTP_LLM_CHECK_WITH_INFO(layer_id < cfg.layer_to_group_ids.size(),
+                                    "hybrid cache layer %zu missing layer_to_group_ids, size=%zu",
+                                    layer_id,
+                                    cfg.layer_to_group_ids.size());
+            RTP_LLM_CHECK_WITH_INFO(!cfg.layer_to_group_ids[layer_id].empty(),
+                                    "hybrid cache layer %zu has empty layer_to_group_ids",
+                                    layer_id);
             layer_gids = cfg.layer_to_group_ids[layer_id];
-        } else if (use_hybrid && layer_id < cfg.layer_to_group_id.size()) {
-            const int mapped = cfg.layer_to_group_id[layer_id];
-            layer_gids.push_back(mapped >= 0 ? mapped : 0);
         } else {
             layer_gids.push_back(0);
         }
@@ -707,8 +711,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     auto groupTag = [](const CacheConfig& cfg, size_t gid) -> std::string {
         return gid < cfg.group_tags.size() ? cfg.group_tags[gid] : std::string("group_") + std::to_string(gid);
     };
-    auto groupPolicy = [](const CacheConfig& cfg, CacheGroupType group_type, size_t gid) {
-        return gid < cfg.group_policies.size() ? cfg.group_policies[gid] : defaultCacheGroupPolicy(group_type);
+    auto groupPolicy = [](const CacheConfig& cfg, CacheGroupType, size_t gid) {
+        return cfg.policyForGroup(gid);
     };
     auto isCpSlicedFixedGroup = [](CacheGroupType group_type) {
         return group_type == CacheGroupType::SWA;
@@ -762,19 +766,22 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                      CacheGroupType     group_type,
                                      size_t             gid) {
         const auto policy = groupPolicy(cfg, group_type, gid);
-        const auto capability = cacheGroupTransferCapability(group_type, policy);
+        const size_t tail_block_count     = policy.active_tail_blocks > 0 ? static_cast<size_t>(policy.active_tail_blocks) : 0;
+        const bool   transfer_tail_blocks = tail_block_count > 0;
         if (!is_page_level_rr || !isCpSlicedFixedGroup(group_type) || load_context.prefill_cp_size <= 1) {
             return blockPositionsForCacheTransfer(block_num,
                                                   load_context.reuse_block_size,
                                                   cfg_use_hybrid,
-                                                  capability,
+                                                  transfer_tail_blocks,
+                                                  tail_block_count,
                                                   /*hybrid_full_from_begin=*/true);
         }
         if (isCompactFixedBlockTable(cfg, gid)) {
             return blockPositionsForCacheTransfer(block_num,
                                                   load_context.reuse_block_size,
                                                   cfg_use_hybrid,
-                                                  capability,
+                                                  transfer_tail_blocks,
+                                                  tail_block_count,
                                                   /*hybrid_full_from_begin=*/true);
         }
 
@@ -785,7 +792,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         const size_t cp_size        = static_cast<size_t>(load_context.prefill_cp_size);
         const size_t compact_blocks = (block_num + cp_size - 1) / cp_size;
         const size_t reuse_blocks   = static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0));
-        const size_t tail_count = std::max<size_t>(1, capability.tail_block_count);
+        const size_t tail_count = std::max<size_t>(1, tail_block_count);
         const size_t start      = cfg_use_hybrid ? (compact_blocks > tail_count ? compact_blocks - tail_count : 0) :
                                                    std::min(reuse_blocks, compact_blocks);
         block_pos_list.reserve(compact_blocks - start);

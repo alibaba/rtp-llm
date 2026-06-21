@@ -28,11 +28,13 @@ public:
                  KVCacheSpecPtr      kvcache_spec,
                  BlockPoolPtr        block_pool,
                  int                 group_id,
+                 CacheGroupPolicy    policy       = CacheGroupPolicy{},
                  SharedBlockCache*   shared_cache = nullptr,
                  const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
         layer_ids_(layer_ids),
         kvcache_spec_(std::move(kvcache_spec)),
         block_pool_(block_pool),
+        policy_(policy),
         shared_cache_(shared_cache),
         metrics_reporter_(metrics_reporter),
         group_id_(group_id),
@@ -66,6 +68,10 @@ public:
     bool   ensureFreeBlocks(int need_blocks);
     int    seqSizePerBlock() const;
     int    group_id() const;
+    const CacheGroupPolicy& policy() const;
+    CacheReusePolicy        reusePolicy() const;
+    CacheEvictPolicy        evictPolicy() const;
+    size_t                  activeTailBlocks() const;
 
     virtual bool isCpShardable() const;
     virtual bool prefixReusable() const;
@@ -80,6 +86,7 @@ protected:
     LayerIdsType      layer_ids_;
     KVCacheSpecPtr    kvcache_spec_;
     BlockPoolPtr      block_pool_;
+    CacheGroupPolicy  policy_;
     SharedBlockCache* shared_cache_ = nullptr;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
     int               group_id_     = 0;

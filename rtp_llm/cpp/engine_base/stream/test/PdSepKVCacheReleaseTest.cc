@@ -189,17 +189,26 @@ uint8_t dsv4PdPattern(int layer_id, int gid, size_t block_pos) {
     return static_cast<uint8_t>(17 + layer_id * 19 + gid * 11 + block_pos);
 }
 
+std::vector<size_t> dsv4BlockPositionsForCacheTransfer(const CacheConfig& config,
+                                                       int                gid,
+                                                       size_t             block_num,
+                                                       size_t             reuse_block_size) {
+    const auto& policy = config.group_policies[static_cast<size_t>(gid)];
+    const size_t tail_block_count =
+        policy.active_tail_blocks > 0 ? static_cast<size_t>(policy.active_tail_blocks) : 0;
+    return blockPositionsForCacheTransfer(block_num,
+                                          reuse_block_size,
+                                          true,
+                                          tail_block_count > 0,
+                                          tail_block_count,
+                                          /*hybrid_full_from_begin=*/true);
+}
+
 size_t expectedDsv4StoredBlocks(const CacheConfig& config, int layer_num, int block_num, size_t reuse_block_size) {
     size_t expected = 0;
     for (int layer_id = 0; layer_id < layer_num; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            expected += blockPositionsForCacheTransfer(block_num,
-                                                       reuse_block_size,
-                                                       true,
-                                                       cacheGroupTransferCapability(config.group_types[gid],
-                                                                                    config.group_policies[gid]),
-                                                       /*hybrid_full_from_begin=*/true)
-                            .size();
+            expected += dsv4BlockPositionsForCacheTransfer(config, gid, block_num, reuse_block_size).size();
         }
     }
     return expected;
@@ -794,12 +803,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            auto positions   = blockPositionsForCacheTransfer(block_num,
-                                                             /*reuse_block_size=*/0,
-                                                             true,
-                                                             cacheGroupTransferCapability(config.group_types[gid],
-                                                                                          config.group_policies[gid]),
-                                                             /*hybrid_full_from_begin=*/true);
+            auto positions   = dsv4BlockPositionsForCacheTransfer(config, gid, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
                 auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
@@ -896,12 +900,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     EXPECT_EQ(cache_store->load_request_keys_.size(), 10u);
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            auto positions   = blockPositionsForCacheTransfer(block_num,
-                                                             /*reuse_block_size=*/0,
-                                                             true,
-                                                             cacheGroupTransferCapability(config.group_types[gid],
-                                                                                          config.group_policies[gid]),
-                                                             /*hybrid_full_from_begin=*/true);
+            auto positions   = dsv4BlockPositionsForCacheTransfer(config, gid, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));
@@ -965,12 +964,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            auto positions   = blockPositionsForCacheTransfer(block_num,
-                                                             /*reuse_block_size=*/0,
-                                                             true,
-                                                             cacheGroupTransferCapability(config.group_types[gid],
-                                                                                          config.group_policies[gid]),
-                                                             /*hybrid_full_from_begin=*/true);
+            auto positions   = dsv4BlockPositionsForCacheTransfer(config, gid, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
                 auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
@@ -1074,12 +1068,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            auto positions   = blockPositionsForCacheTransfer(block_num,
-                                                             /*reuse_block_size=*/0,
-                                                             true,
-                                                             cacheGroupTransferCapability(config.group_types[gid],
-                                                                                          config.group_policies[gid]),
-                                                             /*hybrid_full_from_begin=*/true);
+            auto positions   = dsv4BlockPositionsForCacheTransfer(config, gid, block_num, /*reuse_block_size=*/0);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));
@@ -1143,12 +1132,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            auto positions   = blockPositionsForCacheTransfer(block_num,
-                                                             reuse_num,
-                                                             true,
-                                                             cacheGroupTransferCapability(config.group_types[gid],
-                                                                                          config.group_policies[gid]),
-                                                             /*hybrid_full_from_begin=*/true);
+            auto positions   = dsv4BlockPositionsForCacheTransfer(config, gid, block_num, reuse_num);
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
                 auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
@@ -1245,12 +1229,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     EXPECT_EQ(cache_store->load_request_keys_.size(), 10u);
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
-            auto positions   = blockPositionsForCacheTransfer(block_num,
-                                                             reuse_num,
-                                                             true,
-                                                             cacheGroupTransferCapability(config.group_types[gid],
-                                                                                          config.group_policies[gid]),
-                                                             /*hybrid_full_from_begin=*/true);
+            auto positions   = dsv4BlockPositionsForCacheTransfer(config, gid, block_num, reuse_num);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));

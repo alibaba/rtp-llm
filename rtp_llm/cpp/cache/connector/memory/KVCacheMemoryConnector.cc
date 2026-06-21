@@ -194,7 +194,10 @@ void KVCacheMemoryConnector::initBlockPool() {
     const auto slots = layerTagSlots();
     const bool prefix_tree_requested = kv_cache_config_.enable_prefix_tree_memory_cache;
     const bool prefix_tree_supported = supportsTypedPrefixCacheLayout(slots);
+    const bool typed_opaque_layout   = cache_config_.use_typed_cache_regions && cache_config_.use_opaque_kv_cache_store;
     use_prefix_tree_memory_cache_    = prefix_tree_requested && prefix_tree_supported;
+    RTP_LLM_CHECK_WITH_INFO(use_prefix_tree_memory_cache_ || !prefix_tree_requested || !typed_opaque_layout,
+                            "typed opaque prefix-tree memory cache requested but unsupported by this layout/config");
     RTP_LLM_CHECK_WITH_INFO(use_prefix_tree_memory_cache_ || !prefix_tree_requested
                                 || kv_cache_config_.enable_legacy_memory_connector_fallback,
                             "prefix-tree memory cache requested but unsupported by this layout/config and legacy "
@@ -497,9 +500,7 @@ std::vector<KVCacheMemoryConnector::LayerTagSlot> KVCacheMemoryConnector::layerT
                 if (gid < 0) {
                     continue;
                 }
-                const auto policy = static_cast<size_t>(gid) < cache_config_.group_policies.size() ?
-                                        cache_config_.group_policies[static_cast<size_t>(gid)] :
-                                        CacheGroupPolicy{};
+                const auto policy = cache_config_.policyForGroup(static_cast<size_t>(gid));
                 if (policy.reuse_policy == CacheReusePolicy::NON_REUSABLE) {
                     has_typed_slot = true;
                     continue;
@@ -798,10 +799,7 @@ CacheGroupPolicy KVCacheMemoryConnector::groupPolicyForSlot(const LayerTagSlot& 
     if (slot.group_id < 0 || static_cast<size_t>(slot.group_id) >= cache_config_.group_types.size()) {
         return CacheGroupPolicy{};
     }
-    if (static_cast<size_t>(slot.group_id) < cache_config_.group_policies.size()) {
-        return cache_config_.group_policies[static_cast<size_t>(slot.group_id)];
-    }
-    return defaultCacheGroupPolicy(cache_config_.group_types[static_cast<size_t>(slot.group_id)]);
+    return cache_config_.policyForGroup(static_cast<size_t>(slot.group_id));
 }
 
 bool KVCacheMemoryConnector::kindRequiredAt(const LayerAttnBlockIds&            layer_attn_block_ids,
@@ -1614,6 +1612,12 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& request, 
         response.set_success(true);
         reportCopyMetrics(true, timer.done_us(), copy_direction);
         return true;
+    }
+    if (cache_config_.use_typed_cache_regions && cache_config_.use_opaque_kv_cache_store) {
+        RTP_LLM_LOG_WARNING("typed opaque memory copy failed and legacy fallback is disabled for typed layout");
+        response.set_success(false);
+        reportCopyMetrics(false, timer.done_us(), copy_direction);
+        return false;
     }
     if (has_typed_slots && tryCopyCacheWithBatchedMemoryCopy(request, copy_direction, slots)) {
         response.set_success(true);
