@@ -680,10 +680,11 @@ async def iter_real_model_stream_infer(
     tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)
     runtime = think_runtime if think_runtime is not None else _ThinkRuntime()
     logging.debug(
-        "[DashScGrpc] [%s] real infer start: model_name=%s input_len=%s sampling=%s",
+        "[DashScGrpc] [%s] real infer start: model_name=%s input_len=%s structural_tag=%s sampling=%s",
         tag,
         request.model_name,
         len(input_ids_list),
+        getattr(sampling, "structural_tag", None),
         sampling,
     )
     matched_echo_ids = _matched_echo_prefix_ids(input_ids_list, echo_prefix_ids)
