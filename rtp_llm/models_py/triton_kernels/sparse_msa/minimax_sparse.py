@@ -4,6 +4,24 @@ from typing import Optional
 
 import torch
 
+try:
+    from rtp_llm.ops.compute_ops import (
+        cuda_graph_capture_forward_enabled,
+        cuda_graph_warmup_forward_enabled,
+    )
+except ImportError:
+
+    def cuda_graph_capture_forward_enabled() -> bool:
+        return False
+
+    def cuda_graph_warmup_forward_enabled() -> bool:
+        return False
+
+
+def _cuda_graph_forward_active() -> bool:
+    return cuda_graph_capture_forward_enabled() or cuda_graph_warmup_forward_enabled()
+
+
 from .common.index import topk_index_reduce
 from .decode.flash_with_topk_idx import flash_decode_with_topk_idx
 from .decode.topk_sparse import flash_decode_with_gqa_share_sparse
@@ -13,7 +31,6 @@ from .prefill.topk_bt_fused import (
     flash_prefill_with_trtllm_gen,
 )
 from .prefill.topk_sparse import flash_prefill_with_gqa_share_sparse
-
 
 # trtllm-gen's sparse-decode kernel launches with grid_dim_x = total_q *
 # num_kv_heads. The CUDA grid_dim_x hardware cap is 2**16 - 1 = 65535, so a
@@ -29,7 +46,9 @@ def minimax_sparse_prefill(
     sink: Optional[torch.Tensor],  # [num_q_heads, qk_head_dim]
     idx_q: torch.Tensor,  # [total_extend_tokens, num_idx_heads, idx_head_dim]
     idx_k_cache: torch.Tensor,  # [max_slots, 1, idx_head_dim] (paged index)
-    idx_v_cache: Optional[torch.Tensor],  # [max_slots, 1, idx_head_dim] (paged index); None when disable_index_value
+    idx_v_cache: Optional[
+        torch.Tensor
+    ],  # [max_slots, 1, idx_head_dim] (paged index); None when disable_index_value
     idx_sink: Optional[torch.Tensor],  # [num_idx_heads, idx_head_dim]
     req_to_token: torch.Tensor,  # [max_reqs, max_kv_len]
     slot_ids: torch.Tensor,  # [batch_size, ]
@@ -74,14 +93,24 @@ def minimax_sparse_prefill(
     if use_trtllm:
         sm_scale_v = sm_scale if sm_scale is not None else q.shape[-1] ** -0.5
         o = flash_prefill_with_trtllm_gen(
-            q=q, k_cache=k_cache, v_cache=v_cache,
-            idx_q=idx_q, idx_k_cache=idx_k_cache,
-            req_to_token=req_to_token, slot_ids=slot_ids,
-            cu_seqlens=cu_seqlens, seq_lens=seq_lens, prefix_lens=prefix_lens,
-            max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
-            block_size_k=block_size_k, topk=topk,
-            init_blocks=init_blocks, local_blocks=local_blocks,
-            sm_scale=sm_scale_v, workspace=workspace,
+            q=q,
+            k_cache=k_cache,
+            v_cache=v_cache,
+            idx_q=idx_q,
+            idx_k_cache=idx_k_cache,
+            req_to_token=req_to_token,
+            slot_ids=slot_ids,
+            cu_seqlens=cu_seqlens,
+            seq_lens=seq_lens,
+            prefix_lens=prefix_lens,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            block_size_k=block_size_k,
+            topk=topk,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+            sm_scale=sm_scale_v,
+            workspace=workspace,
             score_type=score_type,
         )
         return None, o
@@ -89,11 +118,7 @@ def minimax_sparse_prefill(
     # Slower path: fused topk_bt_fused step 1+2 emitting topk_idx + legacy
     # triton step 3 sparse attention. Avoids the second kernel launch in the
     # original 3-stage flow but keeps the triton sparse_fwd kernel.
-    use_fused = (
-        idx_group_size == 1
-        and disable_index_value
-        and idx_sink is None
-    )
+    use_fused = idx_group_size == 1 and disable_index_value and idx_sink is None
     if use_fused:
         idx_o, topk_idx = flash_prefill_with_fused_topk_index(
             idx_q=idx_q,
@@ -166,7 +191,9 @@ def minimax_sparse_decode(
     idx_q: torch.Tensor,  # [batch_size, num_idx_heads, idx_head_dim], num_idx_heads >= num_kv_heads
     idx_sink: Optional[torch.Tensor],  # [num_idx_heads, idx_head_dim]
     idx_k_cache: torch.Tensor,  # [max_slots, 1, idx_head_dim] (paged)
-    idx_v_cache: Optional[torch.Tensor],  # [max_slots, 1, idx_head_dim] (paged); None when disable_index_value
+    idx_v_cache: Optional[
+        torch.Tensor
+    ],  # [max_slots, 1, idx_head_dim] (paged); None when disable_index_value
     req_to_token: torch.Tensor,  # [max_reqs, max_kv_len]
     slot_ids: torch.Tensor,  # [batch_size, ]
     seq_lens: torch.Tensor,  # [batch_size, ]
@@ -204,18 +231,30 @@ def minimax_sparse_decode(
         and idx_sink is None
         and sink is None
         and batch <= 1
+        and not _cuda_graph_forward_active()
     )
     if use_trtllm:
         sm_scale_v = sm_scale if sm_scale is not None else q.shape[-1] ** -0.5
         o = flash_prefill_with_trtllm_gen(
-            q=q, k_cache=k_cache, v_cache=v_cache,
-            idx_q=idx_q, idx_k_cache=idx_k_cache,
-            req_to_token=req_to_token, slot_ids=slot_ids,
-            cu_seqlens=cu_seqlens, seq_lens=seq_lens, prefix_lens=prefix_lens,
-            max_seqlen_q=1, max_seqlen_k=max_seqlen,
-            block_size_k=block_size_k, topk=topk,
-            init_blocks=init_blocks, local_blocks=local_blocks,
-            sm_scale=sm_scale_v, workspace=workspace, score_type=score_type,
+            q=q,
+            k_cache=k_cache,
+            v_cache=v_cache,
+            idx_q=idx_q,
+            idx_k_cache=idx_k_cache,
+            req_to_token=req_to_token,
+            slot_ids=slot_ids,
+            cu_seqlens=cu_seqlens,
+            seq_lens=seq_lens,
+            prefix_lens=prefix_lens,
+            max_seqlen_q=1,
+            max_seqlen_k=max_seqlen,
+            block_size_k=block_size_k,
+            topk=topk,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+            sm_scale=sm_scale_v,
+            workspace=workspace,
+            score_type=score_type,
         )
         return None, o
 

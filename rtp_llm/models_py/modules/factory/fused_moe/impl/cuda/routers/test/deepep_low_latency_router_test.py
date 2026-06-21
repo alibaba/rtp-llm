@@ -47,7 +47,7 @@ def _init_router(
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(world_size))
     os.environ["ACCL_DISPATCH_NUM_WARP_GROUPS"] = "4"
     os.environ["ACCL_COMBINE_NUM_WARP_GROUPS"] = "4"
-    os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
+    os.environ.setdefault("ACCL_LOW_LATENCY_OPTIMIZE", "1")
     os.environ["ACCL_TOPO_FIX"] = "1"
     os.environ["ACCL_LOAD_BALANCE"] = "1"
     # init params
@@ -117,6 +117,7 @@ def _init_router(
         arpc_config=py_env.arpc_config,
         grpc_config=py_env.grpc_config,
         dash_sc_grpc_config=py_env.dash_sc_grpc_config,
+        grammar_config=py_env.grammar_config,
         load_config=py_env.load_config,
     )
     init_deepep_wrapper(engine_config, model_config)

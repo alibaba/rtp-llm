@@ -86,3 +86,33 @@ class CudaMxfp8EpNormalStrategy(MoeStrategy):
             executor_class=Mxfp8DeepepExecutor,
             quant_config=quant_config,
         )
+
+
+class CudaMxfp8EpLowLatencyStrategy(MoeStrategy):
+    """MXFP8 1x32 MoE via DeepEP low-latency dispatch/combine."""
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        resolver = MoeConfigResolver()
+        checker.check(resolver.get_quant_method(config) == "MXFP8")
+        checker.check(config.moe_strategy in ("mxfp8", "mxfp8_ep_low_latency", "auto"))
+        checker.check(config.moe_config.use_deepep_moe)
+        checker.check(config.moe_config.use_deepep_low_latency)
+        checker.check(not resolver.use_all_gather(config))
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mxfp8_deepep_executor import (
+            Mxfp8LowLatencyExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_latency_router import (
+            DeepEpLowLatencyRouter,
+        )
+
+        # Dispatch BF16 activations. MXFP8 grouped GEMM quantizes activation
+        # internally with recipe=(1, 32), matching the weight scale layout.
+        quant_config = FusedMoEQuantConfig()
+        return StrategyAttributes(
+            router_class=DeepEpLowLatencyRouter,
+            executor_class=Mxfp8LowLatencyExecutor,
+            quant_config=quant_config,
+        )

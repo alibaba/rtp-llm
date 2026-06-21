@@ -24,12 +24,14 @@ Executor output (fed to normal combine)::
 Normal combine then sums partial results across ranks (no weight application).
 """
 
+import os
 from typing import Any, Dict, List, Optional
 
 import torch
 
 from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
     mxfp8_grouped_gemm,
+    mxfp8_grouped_gemm_masked,
     pack_mxfp8_scale,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -122,6 +124,8 @@ class Mxfp8DeepepExecutor(FusedMoeExpertExecutor):
         self._w1_sp = None
         self._w2_sp = None
         self._align = _contiguous_alignment()
+        if config.enable_cuda_graph:
+            self._packed_scales()
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
@@ -267,3 +271,121 @@ class Mxfp8DeepepExecutor(FusedMoeExpertExecutor):
         ep_gather(down, topk_ids, topk_weights, output_index, gather_out)
 
         return CombineForwardPayload(fused_expert_output=gather_out)
+
+
+class Mxfp8LowLatencyExecutor(Mxfp8DeepepExecutor):
+    """MXFP8 executor for DeepEP low-latency masked dispatch.
+
+    Low-latency dispatch returns per-expert padded tensors of shape
+    [E_local, M, K]. MXFP8 grouped GEMM consumes contiguous grouped layout, so
+    flatten the already grouped expert dimension, run the two MXFP8 GEMMs, and
+    reshape back for low_latency_combine().
+    """
+
+    @property
+    def topk_ids_dtype(self) -> torch.dtype:
+        return torch.int64
+
+    def execute(
+        self,
+        payload: ExpertForwardPayload,
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+        extra_expert_args: Optional[dict[str, Any]],
+    ) -> CombineForwardPayload:
+        expert_x = payload.expert_x
+        assert expert_x.dim() == 3, "low-latency MXFP8 expects [E, M, K] expert_x"
+        E, M, K = expert_x.shape
+        assert E == self.E and K == self.K
+        assert (
+            expert_x.dtype == torch.bfloat16
+        ), "MXFP8 executor quantizes BF16 activations internally"
+        assert payload.expert_tokens_meta is not None
+        masked_m = payload.expert_tokens_meta.expert_num_tokens
+        assert masked_m is not None and len(masked_m) == self.E
+        expected_m = (
+            min(M, payload.expert_tokens_meta.expected_m)
+            if payload.expert_tokens_meta.expected_m is not None
+            else M
+        )
+
+        if is_swiglu_oai(activation):
+            alpha, limit = swiglu_oai_alpha_limit(extra_expert_args)
+        else:
+            alpha, limit = None, None
+
+        w1_sp, w2_sp = self._packed_scales()
+        # DeepEP LL valid rows are exactly masked_m[expert].  For CUDA Graph we
+        # cannot launch from a GPU max(masked_m), so the correctness bound must
+        # come from the fixed LL receive buffer, not from this rank's dynamic
+        # token count.  M is num_max_dispatch_tokens_per_rank * ep_size, i.e.
+        # the per-expert slot capacity returned by low_latency_dispatch.
+        top_k = (
+            int(payload.expert_topk_ids.shape[1])
+            if payload.expert_topk_ids is not None
+            else 1
+        )
+        quant_max_m = M
+        expected_m = max(expected_m, quant_max_m)
+        # If the fixed LL buffer already covers every routed assignment from
+        # this graph bucket, M is a safe total active-row capacity. This is the
+        # RTP-LLM decode path because server_config sizes ll_num_max_token by
+        # moe_k. Otherwise fall back to the DeepEP API upper bound M * top_k.
+        source_rows = (
+            int(payload.expert_topk_ids.shape[0])
+            if payload.expert_topk_ids is not None
+            else M
+        )
+        ep_size = max(1, int(getattr(self.config, "ep_size", 1)))
+        bucket_assignments = max(1, source_rows * ep_size * top_k)
+        active_row_capacity = M if bucket_assignments <= M else M * top_k
+        quant_max_active_rows = min(self.E * M, active_row_capacity)
+
+        from rtp_llm.models_py.triton_kernels.moe.mxfp8_kernels import (
+            mxfp8_build_active_rows,
+        )
+
+        active_row_experts, active_row_tokens, active_row_count = (
+            mxfp8_build_active_rows(
+                masked_m, self.E, quant_max_m, quant_max_active_rows
+            )
+        )
+        upgate = mxfp8_grouped_gemm_masked(
+            expert_x,
+            self.w1,
+            w1_sp,
+            masked_m,
+            expected_m,
+            quant_max_m=quant_max_m,
+            active_row_experts=active_row_experts,
+            active_row_tokens=active_row_tokens,
+            active_row_count=active_row_count,
+            quant_max_active_rows=quant_max_active_rows,
+        )
+        inter = self.N // 2
+        if alpha is not None and limit is not None:
+            act = swiglu_oai_torch(upgate, alpha, limit, gate_first=False).contiguous()
+        else:
+            act = torch.empty(E * M, inter, device=upgate.device, dtype=torch.bfloat16)
+            silu_and_mul(act, upgate.reshape(E * M, self.N).contiguous())
+            act = act.reshape(E, M, inter)
+        del upgate
+        down = mxfp8_grouped_gemm_masked(
+            act.contiguous(),
+            self.w2,
+            w2_sp,
+            masked_m,
+            expected_m,
+            quant_max_m=quant_max_m,
+            active_row_experts=active_row_experts,
+            active_row_tokens=active_row_tokens,
+            active_row_count=active_row_count,
+            quant_max_active_rows=quant_max_active_rows,
+        )
+        del act
+        # DeepEP low_latency_combine consumes only routed slots from the dispatch
+        # handle. Keep padded rows untouched; zeroing the full [E, M, H] buffer
+        # costs hundreds of microseconds in decode profiles.
+        return CombineForwardPayload(fused_expert_output=down)

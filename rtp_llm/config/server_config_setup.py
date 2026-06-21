@@ -961,6 +961,16 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     setup_jit_cache_envs(py_env_configs)
     fetch_model_files_to_local(py_env_configs)
     ll_num_max_token = py_env_configs.concurrency_config.concurrency_limit
+    if py_env_configs.role_config.role_type == RoleType.DECODE:
+        # DeepEP low-latency dispatch allocates per routed expert row.
+        model_config = getattr(py_env_configs, "model_config", None)
+        moe_k = getattr(model_config, "moe_k", 0) if model_config is not None else 0
+        if (
+            not moe_k
+            and getattr(py_env_configs.model_args, "model_type", "") == "minimax_m3"
+        ):
+            moe_k = 4
+        ll_num_max_token *= max(1, int(moe_k or 1))
     sp_type = py_env_configs.sp_config.type  # Get SpeculativeType enum value
     if py_env_configs.sp_config.type != SpeculativeType.NONE:
         ll_num_max_token *= py_env_configs.sp_config.gen_num_per_cycle + 1

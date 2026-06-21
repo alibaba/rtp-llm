@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Any, Dict, Optional, Tuple
 
@@ -67,11 +68,10 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         # NVFP4 path: dispatch sends packed uint8 tokens + fp8 scales (NVFP4).
         # Either path returns a tuple from low_latency_dispatch; the BF16 path
         # returns a single tensor and is selected by leaving both flags False.
-        # NB: BF16 dispatch templates are not compiled for every hidden_size
-        # (e.g. accl-ep ll_dispatch_opt1_hidden6144 only has fp8/nvfp4 specs),
-        # so make sure to pick one of these flags whenever the MoE weights are
-        # quantized — leaving both False on hidden=6144 gives "dispatch_func
-        # is NULL: missing template instantiation".
+        # Dispatch precision is controlled by this router quant_config,
+        # not by the storage format of the MoE weights. MiniMax-M3 MXFP8 uses
+        # an empty quant_config here so DeepEP moves BF16 activations; MXFP8
+        # quantization happens later inside the local expert GEMM executor.
         use_fp8_dispatch = (
             quant_config.is_quantized
             and quant_config.quant_dtype == torch.float8_e4m3fn
@@ -106,6 +106,19 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self._opt_level = int(os.environ.get("ACCL_LOW_LATENCY_OPTIMIZE", 1))
         self._handle: Optional[Tuple[Any, ...]] = None
         self._use_accl_ep = wrapper.use_accl_ep
+        dispatch_dtype = (
+            "FP8"
+            if self._use_fp8_dispatch
+            else ("NVFP4" if self._use_nvfp4_dispatch else "BF16")
+        )
+        logging.info(
+            "DeepEP low-latency dispatch mode: dtype=%s use_fp8=%s use_nvfp4=%s quantized=%s quant_dtype=%s",
+            dispatch_dtype,
+            self._use_fp8_dispatch,
+            self._use_nvfp4_dispatch,
+            quant_config.is_quantized,
+            quant_config.quant_dtype,
+        )
 
     @property
     def handle(self) -> Optional[Tuple[Any, ...]]:
@@ -168,12 +181,17 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             assert isinstance(expert_x, tuple), "expert_x should be a tuple"
             expert_x, expert_x_scale = expert_x[0], expert_x[1]
         else:
-            assert isinstance(expert_x, torch.Tensor), "expert_x should be a tensor"
+            assert isinstance(
+                expert_x, torch.Tensor
+            ), "BF16 DeepEP dispatch should return a tensor"
+            assert (
+                expert_x.dtype == torch.bfloat16
+            ), f"BF16 DeepEP dispatch expected torch.bfloat16 expert_x, got {expert_x.dtype}"
             expert_x = expert_x
             expert_x_scale = None
 
         # Return expert forward payload
-        return ExpertForwardPayload(
+        payload = ExpertForwardPayload(
             expert_x=expert_x,
             expert_x_scale=expert_x_scale,
             expert_x_origin_dtype=dispatch_args["x"].dtype,
@@ -184,6 +202,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
                 expert_num_tokens=expert_num_tokens,
             ),
         )
+        return payload
 
     def prepare(
         self,

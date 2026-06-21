@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any, Dict, NamedTuple, Optional
 
 import torch
@@ -29,6 +30,21 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 )
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
+
+try:
+    from rtp_llm.ops.compute_ops import (
+        cuda_graph_capture_forward_enabled,
+        cuda_graph_warmup_forward_enabled,
+    )
+except ImportError:
+
+    def cuda_graph_capture_forward_enabled() -> bool:
+        return False
+
+    def cuda_graph_warmup_forward_enabled() -> bool:
+        return False
+
+
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
 
@@ -63,6 +79,8 @@ class _FusedSharedExpertSentinel(nn.Module):
 
     def forward(self, *args, **kwargs):
         raise RuntimeError("shared expert is fused into MegaMoE")
+
+
 class _FusedFp8QuantParams(NamedTuple):
     group_size: int
     scale_ue8m0: bool
@@ -604,6 +622,7 @@ class GenericMoeDecoderLayer(nn.Module):
         clone._fuse_post_norm_quant_params = self._fuse_post_norm_quant_params
         clone._fuse_post_norm_quant_moe = self._fuse_post_norm_quant_moe
         clone._fuse_post_norm_quant_moe_params = self._fuse_post_norm_quant_moe_params
+        clone._is_msa_attn = self._is_msa_attn
         return clone
 
     def forward(
@@ -785,6 +804,26 @@ class GenericMoeModel(GptModelBase):
         self.norm = RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
+        self._cuda_graph_layers: Optional[nn.ModuleList] = None
+
+    def _layers_for_forward(self) -> nn.ModuleList:
+        use_cuda_graph_layers = (
+            cuda_graph_capture_forward_enabled() or cuda_graph_warmup_forward_enabled()
+        )
+        if not use_cuda_graph_layers:
+            return self.layers
+        if self._cuda_graph_layers is None:
+            self._cuda_graph_layers = nn.ModuleList(
+                [
+                    (
+                        layer.clone_for_cuda_graph()
+                        if hasattr(layer, "clone_for_cuda_graph")
+                        else layer
+                    )
+                    for layer in self.layers
+                ]
+            )
+        return self._cuda_graph_layers
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -812,7 +851,8 @@ class GenericMoeModel(GptModelBase):
 
         residual = torch.zeros_like(hidden_states)
         prev_topk_indices = None
-        for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
+        layers = self._layers_for_forward()
+        for i, decoder_layer in enumerate(layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)
             output = decoder_layer(
                 hidden_states,

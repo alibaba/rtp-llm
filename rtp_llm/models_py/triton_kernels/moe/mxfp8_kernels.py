@@ -96,3 +96,372 @@ def mxfp8_quant_act_triton(x: torch.Tensor):
         num_warps=4,
     )
     return q, s
+
+
+@triton.jit
+def _mxfp8_quant_act_masked_packed_kernel(
+    x_ptr,
+    q_ptr,
+    s_ptr,
+    masked_m_ptr,
+    x_stride_e,
+    x_stride_m,
+    x_stride_k,
+    q_stride_e,
+    q_stride_m,
+    q_stride_k,
+    s_stride_e,
+    s_stride_m,
+    s_stride_g,
+    K: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    GROUP: tl.constexpr,
+):
+    expert = tl.program_id(0).to(tl.int64)
+    token = tl.program_id(1).to(tl.int64)
+    packed_group = tl.program_id(2)
+    valid = token < tl.load(masked_m_ptr + expert)
+    # Most decode low-latency CTAs are padded rows because the graph-safe DeepEP
+    # buffer uses M=512 while each expert usually receives only a few tokens.
+    # Return before vector loads/reductions for those rows; the DeepGEMM masked
+    # kernel never consumes q/scale for token >= masked_m[expert].
+    if not valid:
+        return
+
+    offs = tl.arange(0, GROUP)
+    base_group = packed_group * 4
+    packed_scale: tl.int32 = 0
+
+    for g in tl.static_range(4):
+        group = base_group + g
+        cols = group * GROUP + offs
+        mask = cols < K
+        vals = tl.load(
+            x_ptr + expert * x_stride_e + token * x_stride_m + cols * x_stride_k,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        amax = tl.maximum(tl.max(tl.abs(vals), axis=0), 1e-20)
+        scale, exp_bits = _ue8m0_pow2_round(amax / FP8_MAX)
+        q_vals = vals / scale
+        q_vals = tl.minimum(tl.maximum(q_vals, -FP8_MAX), FP8_MAX)
+        tl.store(
+            q_ptr + expert * q_stride_e + token * q_stride_m + cols * q_stride_k,
+            q_vals.to(q_ptr.dtype.element_ty),
+            mask=mask,
+        )
+        packed_scale = packed_scale | (exp_bits.to(tl.int32) << (g * 8))
+
+    tl.store(
+        s_ptr + expert * s_stride_e + token * s_stride_m + packed_group * s_stride_g,
+        packed_scale,
+        mask=valid,
+    )
+
+
+@triton.jit
+def _mxfp8_build_active_expert_kernel(
+    masked_m_ptr,
+    active_expert_ptr,
+    active_count_ptr,
+    E: tl.constexpr,
+):
+    tl.store(active_count_ptr, 0)
+    for expert in tl.static_range(0, E):
+        count = tl.load(masked_m_ptr + expert)
+        if count > 0:
+            slot = tl.atomic_add(active_count_ptr, 1, sem="relaxed")
+            tl.store(active_expert_ptr + slot, expert)
+
+
+@triton.jit
+def _mxfp8_quant_act_active_expert_kernel(
+    x_ptr,
+    q_ptr,
+    s_ptr,
+    active_expert_ptr,
+    active_count_ptr,
+    masked_m_ptr,
+    x_stride_e,
+    x_stride_m,
+    x_stride_k,
+    q_stride_e,
+    q_stride_m,
+    q_stride_k,
+    s_stride_e,
+    s_stride_m,
+    s_stride_g,
+    K: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    GROUP: tl.constexpr,
+):
+    active_slot = tl.program_id(0)
+    token = tl.program_id(1).to(tl.int64)
+    packed_group = tl.program_id(2)
+    if active_slot >= tl.load(active_count_ptr):
+        return
+    expert = tl.load(active_expert_ptr + active_slot).to(tl.int64)
+    valid = token < tl.load(masked_m_ptr + expert)
+    if not valid:
+        return
+
+    offs = tl.arange(0, GROUP)
+    base_group = packed_group * 4
+    packed_scale: tl.int32 = 0
+
+    for g in tl.static_range(4):
+        group = base_group + g
+        cols = group * GROUP + offs
+        mask = cols < K
+        vals = tl.load(
+            x_ptr + expert * x_stride_e + token * x_stride_m + cols * x_stride_k,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        amax = tl.maximum(tl.max(tl.abs(vals), axis=0), 1e-20)
+        scale, exp_bits = _ue8m0_pow2_round(amax / FP8_MAX)
+        q_vals = vals / scale
+        q_vals = tl.minimum(tl.maximum(q_vals, -FP8_MAX), FP8_MAX)
+        tl.store(
+            q_ptr + expert * q_stride_e + token * q_stride_m + cols * q_stride_k,
+            q_vals.to(q_ptr.dtype.element_ty),
+            mask=mask,
+        )
+        packed_scale = packed_scale | (exp_bits.to(tl.int32) << (g * 8))
+
+    tl.store(
+        s_ptr + expert * s_stride_e + token * s_stride_m + packed_group * s_stride_g,
+        packed_scale,
+    )
+
+
+@triton.jit
+def _mxfp8_zero_i32_kernel(ptr):
+    tl.store(ptr, 0)
+
+
+@triton.jit
+def _mxfp8_build_active_row_kernel(
+    masked_m_ptr,
+    row_expert_ptr,
+    row_token_ptr,
+    row_count_ptr,
+    MAX_ACTIVE_ROWS: tl.constexpr,
+):
+    expert = tl.program_id(0)
+    token = tl.program_id(1)
+    if token < tl.load(masked_m_ptr + expert):
+        slot = tl.atomic_add(row_count_ptr, 1, sem="relaxed")
+        if slot < MAX_ACTIVE_ROWS:
+            tl.store(row_expert_ptr + slot, expert)
+            tl.store(row_token_ptr + slot, token)
+
+
+@triton.jit
+def _mxfp8_quant_act_active_row_kernel(
+    x_ptr,
+    q_ptr,
+    s_ptr,
+    row_expert_ptr,
+    row_token_ptr,
+    row_count_ptr,
+    masked_m_ptr,
+    x_stride_e,
+    x_stride_m,
+    x_stride_k,
+    q_stride_e,
+    q_stride_m,
+    q_stride_k,
+    s_stride_e,
+    s_stride_m,
+    s_stride_g,
+    K: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    GROUP: tl.constexpr,
+):
+    row_slot = tl.program_id(0)
+    packed_group = tl.program_id(1)
+    if row_slot >= tl.load(row_count_ptr):
+        return
+    expert = tl.load(row_expert_ptr + row_slot).to(tl.int64)
+    token = tl.load(row_token_ptr + row_slot).to(tl.int64)
+    if token >= tl.load(masked_m_ptr + expert):
+        return
+
+    offs = tl.arange(0, GROUP)
+    base_group = packed_group * 4
+    packed_scale: tl.int32 = 0
+
+    for g in tl.static_range(4):
+        group = base_group + g
+        cols = group * GROUP + offs
+        mask = cols < K
+        vals = tl.load(
+            x_ptr + expert * x_stride_e + token * x_stride_m + cols * x_stride_k,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        amax = tl.maximum(tl.max(tl.abs(vals), axis=0), 1e-20)
+        scale, exp_bits = _ue8m0_pow2_round(amax / FP8_MAX)
+        q_vals = vals / scale
+        q_vals = tl.minimum(tl.maximum(q_vals, -FP8_MAX), FP8_MAX)
+        tl.store(
+            q_ptr + expert * q_stride_e + token * q_stride_m + cols * q_stride_k,
+            q_vals.to(q_ptr.dtype.element_ty),
+            mask=mask,
+        )
+        packed_scale = packed_scale | (exp_bits.to(tl.int32) << (g * 8))
+
+    tl.store(
+        s_ptr + expert * s_stride_e + token * s_stride_m + packed_group * s_stride_g,
+        packed_scale,
+    )
+
+
+def mxfp8_build_active_experts(masked_m: torch.Tensor, E: int):
+    active_experts = torch.empty((E,), device=masked_m.device, dtype=torch.int32)
+    active_count = torch.empty((1,), device=masked_m.device, dtype=torch.int32)
+    _mxfp8_build_active_expert_kernel[(1,)](
+        masked_m,
+        active_experts,
+        active_count,
+        E=E,
+        num_warps=1,
+    )
+    return active_experts, active_count
+
+
+def mxfp8_build_active_rows(
+    masked_m: torch.Tensor, E: int, max_m: int, max_active_rows: int
+):
+    row_experts = torch.empty(
+        (max_active_rows,), device=masked_m.device, dtype=torch.int32
+    )
+    row_tokens = torch.empty(
+        (max_active_rows,), device=masked_m.device, dtype=torch.int32
+    )
+    row_count = torch.empty((1,), device=masked_m.device, dtype=torch.int32)
+    _mxfp8_zero_i32_kernel[(1,)](row_count, num_warps=1)
+    _mxfp8_build_active_row_kernel[(E, max_m)](
+        masked_m,
+        row_experts,
+        row_tokens,
+        row_count,
+        MAX_ACTIVE_ROWS=max_active_rows,
+        num_warps=1,
+    )
+    return row_experts, row_tokens, row_count
+
+
+def mxfp8_quant_act_masked_packed_triton(
+    x: torch.Tensor,
+    masked_m: torch.Tensor,
+    max_m: int | None = None,
+    active_experts: torch.Tensor | None = None,
+    active_count: torch.Tensor | None = None,
+    max_active_experts: int | None = None,
+    active_row_experts: torch.Tensor | None = None,
+    active_row_tokens: torch.Tensor | None = None,
+    active_row_count: torch.Tensor | None = None,
+    max_active_rows: int | None = None,
+):
+    """Masked MXFP8 quant for DeepEP low-latency [E, M, K] BF16 layout.
+
+    Returns fp8 activations [E, M, K] and packed int32 UE8M0 scales [E, M, K//128].
+    Only rows with token index < masked_m[expert] are read or written.
+    ``max_m`` may cap the launched token slots when the caller already has a
+    graph-safe upper bound such as DeepGEMM's ``expected_m``.
+    """
+    assert x.dim() == 3, f"expected [E, M, K], got {tuple(x.shape)}"
+    E, M, K = x.shape
+    assert K % (MX_BLOCK * 4) == 0, f"K={K} must be a multiple of {MX_BLOCK * 4}"
+    assert masked_m.numel() == E
+    q = torch.empty((E, M, K), device=x.device, dtype=torch.float8_e4m3fn)
+    scale_storage = torch.empty(
+        (E, K // (MX_BLOCK * 4), M), device=x.device, dtype=torch.int32
+    )
+    s_packed = scale_storage.transpose(1, 2)
+    active_m = M if max_m is None else max(0, min(M, int(max_m)))
+    if E == 0 or active_m == 0:
+        return q, s_packed
+    if (
+        active_row_experts is not None
+        and active_row_tokens is not None
+        and active_row_count is not None
+    ):
+        active_rows = (
+            E * active_m
+            if max_active_rows is None
+            else max(0, min(E * active_m, int(max_active_rows)))
+        )
+        grid = (active_rows, K // (MX_BLOCK * 4))
+        _mxfp8_quant_act_active_row_kernel[grid](
+            x,
+            q,
+            s_packed,
+            active_row_experts,
+            active_row_tokens,
+            active_row_count,
+            masked_m,
+            x.stride(0),
+            x.stride(1),
+            x.stride(2),
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            s_packed.stride(0),
+            s_packed.stride(1),
+            s_packed.stride(2),
+            K=K,
+            FP8_MAX=float(_FP8_E4M3_MAX),
+            GROUP=MX_BLOCK,
+            num_warps=1,
+        )
+    elif active_experts is not None and active_count is not None:
+        active_e = (
+            E if max_active_experts is None else max(0, min(E, int(max_active_experts)))
+        )
+        grid = (active_e, active_m, K // (MX_BLOCK * 4))
+        _mxfp8_quant_act_active_expert_kernel[grid](
+            x,
+            q,
+            s_packed,
+            active_experts,
+            active_count,
+            masked_m,
+            x.stride(0),
+            x.stride(1),
+            x.stride(2),
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            s_packed.stride(0),
+            s_packed.stride(1),
+            s_packed.stride(2),
+            K=K,
+            FP8_MAX=float(_FP8_E4M3_MAX),
+            GROUP=MX_BLOCK,
+            num_warps=1,
+        )
+    else:
+        grid = (E, active_m, K // (MX_BLOCK * 4))
+        _mxfp8_quant_act_masked_packed_kernel[grid](
+            x,
+            q,
+            s_packed,
+            masked_m,
+            x.stride(0),
+            x.stride(1),
+            x.stride(2),
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            s_packed.stride(0),
+            s_packed.stride(1),
+            s_packed.stride(2),
+            K=K,
+            FP8_MAX=float(_FP8_E4M3_MAX),
+            GROUP=MX_BLOCK,
+            num_warps=1,
+        )
+    return q, s_packed

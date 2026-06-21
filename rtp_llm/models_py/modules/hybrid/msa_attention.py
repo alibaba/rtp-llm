@@ -69,6 +69,21 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, al
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
+
+try:
+    from rtp_llm.ops.compute_ops import (
+        cuda_graph_capture_forward_enabled,
+        cuda_graph_warmup_forward_enabled,
+    )
+except ImportError:
+
+    def cuda_graph_capture_forward_enabled() -> bool:
+        return False
+
+    def cuda_graph_warmup_forward_enabled() -> bool:
+        return False
+
+
 from rtp_llm.utils.model_weight import W
 
 device_type = get_device_type()
@@ -776,9 +791,13 @@ class MSAAttention(nn.Module):
         self._rope_theta = attn_config.rope_config.base
         self._rope_interleave = False
         try:
+            self._cuda_graph_max_seq_len = int(attn_config.max_seq_len)
+            rope_cache_len = int(
+                attn_config.max_seq_len + attn_config.gen_num_per_cycle + 1
+            )
             rope_cache = get_rope_cache_once(
                 attn_config.rope_config,
-                attn_config.max_seq_len + attn_config.gen_num_per_cycle + 1,
+                rope_cache_len,
                 is_cuda=True,
                 interleave=self._rope_interleave,
             )
@@ -804,6 +823,19 @@ class MSAAttention(nn.Module):
         self._scratch_idx_k: Optional[torch.Tensor] = None
         # Allocated kernel slot span (anchors scratch sizing).
         self._scratch_slots = 0
+
+    @staticmethod
+    def _cuda_graph_forward_active() -> bool:
+        return (
+            cuda_graph_capture_forward_enabled() or cuda_graph_warmup_forward_enabled()
+        )
+
+    def _cuda_graph_max_kv(self, attn_inputs: PyAttentionInputs) -> int:
+        max_kv = int(self._cuda_graph_max_seq_len)
+        bt = self._physical_block_table(attn_inputs)
+        if isinstance(bt, torch.Tensor) and bt.dim() >= 2:
+            max_kv = min(max_kv, int(bt.shape[1]) * int(self.page_size))
+        return max(max_kv, 1)
 
     def _local_idx_heads(self) -> int:
         """Match SGLang's GQA-style sharding for sparse index-Q heads."""
@@ -917,6 +949,29 @@ class MSAAttention(nn.Module):
             raise RuntimeError("compact MSA gather scratch is not initialized")
         kv_lens, prefix, inlen = self._get_lengths(attn_inputs)
         bsz = int(kv_lens.numel())
+        if (not attn_inputs.is_prefill) and self._cuda_graph_forward_active():
+            max_kv = self._cuda_graph_max_kv(attn_inputs)
+            pos = torch.arange(max_kv, device=device, dtype=torch.int32)
+            row_offsets = (
+                torch.arange(bsz, device=device, dtype=torch.int32)[:, None] * max_kv
+            )
+            req_to_token = row_offsets + pos[None, :]
+            slot_ids = torch.arange(bsz, device=device, dtype=torch.int64)
+            positions = prefix.to(device=device, dtype=torch.int32)
+            batch_ids = torch.arange(bsz, device=device, dtype=torch.long)
+            write_slots = req_to_token[
+                batch_ids, prefix.to(device=device, dtype=torch.long)
+            ].to(torch.int64)
+            return (
+                req_to_token,
+                slot_ids,
+                kv_lens,
+                positions,
+                write_slots,
+                prefix,
+                inlen,
+            )
+
         max_kv = int(kv_lens.max().item())
         pos = torch.arange(max_kv, device=device, dtype=torch.int32)
         row_offsets = torch.arange(bsz, device=device, dtype=torch.int32)[
@@ -1245,10 +1300,15 @@ class MSAAttention(nn.Module):
         else:
             kpv, vpv = self._paged_main_views(kv_cache)
             p = self.page_size
-            max_kv = req_to_token.shape[1]
-            ar = torch.arange(max_kv, device=device, dtype=torch.int64)
-            mask = ar[None, :] < kv_lens.to(device=device, dtype=torch.int64)[:, None]
-            dst_full = req_to_token.to(torch.int64)[mask]
+            if (not attn_inputs.is_prefill) and self._cuda_graph_forward_active():
+                dst_full = req_to_token.reshape(-1).to(torch.int64)
+            else:
+                max_kv = req_to_token.shape[1]
+                ar = torch.arange(max_kv, device=device, dtype=torch.int64)
+                mask = (
+                    ar[None, :] < kv_lens.to(device=device, dtype=torch.int64)[:, None]
+                )
+                dst_full = req_to_token.to(torch.int64)[mask]
             gf = self._kernel_slots_to_paged(dst_full, attn_inputs)
             scratch_k[dst_full] = kpv[gf // p, gf % p]
             scratch_v[dst_full] = vpv[gf // p, gf % p]
@@ -1321,8 +1381,14 @@ class MSAAttention(nn.Module):
         #    exactly its physical slot (block*page + off), same mapping as K/V.
         if slot_mapping is None:
             slot_mapping = self._kernel_slots_to_paged(write_slots, attn_inputs)
-        valid = slot_mapping >= 0
-        scale_flat[slot_mapping[valid]] = idx_flat[valid]
+        graph_decode = (
+            not attn_inputs.is_prefill
+        ) and self._cuda_graph_forward_active()
+        if graph_decode and not self._kv_sharded:
+            scale_flat[slot_mapping] = idx_flat
+        else:
+            valid = slot_mapping >= 0
+            scale_flat[slot_mapping[valid]] = idx_flat[valid]
 
         # 2) build the transient scratch the MSA kernel reads.
         scratch_slots = int(self._scratch_slots)
@@ -1332,10 +1398,15 @@ class MSAAttention(nn.Module):
         if self._kv_sharded:
             idx_scratch[write_slots, 0] = idx_flat
         else:
-            max_kv = req_to_token.shape[1]
-            ar = torch.arange(max_kv, device=device, dtype=torch.int64)
-            mask = ar[None, :] < kv_lens.to(device=device, dtype=torch.int64)[:, None]
-            dst_full = req_to_token.to(torch.int64)[mask]
+            if graph_decode:
+                dst_full = req_to_token.reshape(-1).to(torch.int64)
+            else:
+                max_kv = req_to_token.shape[1]
+                ar = torch.arange(max_kv, device=device, dtype=torch.int64)
+                mask = (
+                    ar[None, :] < kv_lens.to(device=device, dtype=torch.int64)[:, None]
+                )
+                dst_full = req_to_token.to(torch.int64)[mask]
             gf = self._kernel_slots_to_paged(dst_full, attn_inputs)
             idx_scratch[dst_full, 0] = scale_flat[gf]
         self._scratch_idx_k = idx_scratch
@@ -2083,12 +2154,16 @@ class MSAAttention(nn.Module):
         # --- addressing (req_to_token / slot_ids / positions / write slots) ---
         if self.cp_enabled:
             alloc_kv_lens, _, _ = self._get_lengths(attn_inputs)
+            if (not attn_inputs.is_prefill) and self._cuda_graph_forward_active():
+                max_kv = self._cuda_graph_max_kv(attn_inputs)
+            else:
+                max_kv = int(alloc_kv_lens.max().item())
             self._ensure_gather_scratch(
                 kv_cache,
                 device,
                 k.dtype,
                 bsz=int(alloc_kv_lens.numel()),
-                max_kv=int(alloc_kv_lens.max().item()),
+                max_kv=max_kv,
             )
             (
                 req_to_token,
@@ -2156,7 +2231,10 @@ class MSAAttention(nn.Module):
         main_k = self._scratch_k
         main_v = self._scratch_v
         idx_kc = self._scratch_idx_k
-        max_seqlen_k = int(kv_lens.max().item())
+        if (not attn_inputs.is_prefill) and self._cuda_graph_forward_active():
+            max_seqlen_k = int(req_to_token.shape[1])
+        else:
+            max_seqlen_k = int(kv_lens.max().item())
         if attn_inputs.is_prefill:
             cu_seqlens = attn_inputs.cu_seqlens[: slot_ids.numel() + 1].to(torch.int32)
             seq_lens = kv_lens.to(torch.int32)

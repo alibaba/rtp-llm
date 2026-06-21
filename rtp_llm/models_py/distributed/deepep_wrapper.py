@@ -40,9 +40,7 @@ except ImportError as _deep_ep_import_err:
             )
 
         def __init_subclass__(cls, **kwargs):
-            raise NotImplementedError(
-                "deep_ep is not available in this build."
-            )
+            raise NotImplementedError("deep_ep is not available in this build.")
 
         @classmethod
         def get_low_latency_rdma_size_hint(cls, *args, **kwargs):
@@ -54,6 +52,25 @@ except ImportError as _deep_ep_import_err:
 
     DeepEPBuffer = _DeepEPUnavailable  # type: ignore[assignment,misc]
     DeepEPConfig = _DeepEPUnavailable  # type: ignore[assignment,misc]
+
+
+def _ensure_low_latency_qp_depth(ll_num_max_token_per_rank: int) -> None:
+    required_qp_depth = max(1024, (int(ll_num_max_token_per_rank) + 1) * 2)
+    current_qp_depth_raw = os.environ.get("NVSHMEM_QP_DEPTH", "1024")
+    try:
+        current_qp_depth = int(current_qp_depth_raw)
+    except ValueError:
+        current_qp_depth = 1024
+    if current_qp_depth < required_qp_depth:
+        os.environ["NVSHMEM_QP_DEPTH"] = str(required_qp_depth)
+        logging.info(
+            "Raise NVSHMEM_QP_DEPTH from %s to %s for DeepEP low-latency "
+            "num_max_dispatch_tokens_per_rank=%s",
+            current_qp_depth_raw,
+            required_qp_depth,
+            ll_num_max_token_per_rank,
+        )
+
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
@@ -216,8 +233,9 @@ class DeepepWrapperConfig:
         ll_num_max_token_per_rank = (ll_num_max_token + tp_size - 1) // tp_size
         # deepgemm masked with max_m < 64 get incorrect result, related: https://github.com/deepseek-ai/DeepGEMM/issues/268
         is_quantized = quant_config is not None and quant_config.is_quanted()
-        is_block_quantized = (
-            quant_config is not None and quant_config.get_method() == "FP8_PER_BLOCK"
+        is_block_quantized = quant_config is not None and quant_config.get_method() in (
+            "FP8_PER_BLOCK",
+            "MXFP8",
         )
         is_per_act_token = quant_config is not None and quant_config.get_method() in (
             "FP8_PER_TENSOR_COMPRESSED",
@@ -227,7 +245,12 @@ class DeepepWrapperConfig:
         is_per_group_fp4 = (
             quant_config is not None and quant_config.get_method() == "modelopt_fp4"
         )
-        if not is_quantized or is_block_quantized or is_per_group_fp4:
+        is_mxfp8_quantized = (
+            quant_config is not None and quant_config.get_method() == "MXFP8"
+        )
+        if is_mxfp8_quantized:
+            matched_tokens = [128]
+        elif not is_quantized or is_block_quantized or is_per_group_fp4:
             matched_tokens = [128] if allow_mnnvl() else [64, 128]
         elif is_per_act_token:
             matched_tokens = [
@@ -556,6 +579,8 @@ class DeepEPWrapper:
             config.expert_num,
         )
 
+        _ensure_low_latency_qp_depth(config.ll_num_max_token_per_rank)
+
         if config.local_rank == 0:
             print(
                 f"Allocating buffer size: {num_rdma_bytes / 1e6} MB, "
@@ -578,7 +603,12 @@ class DeepEPWrapper:
         }
 
         if self._use_accl_ep:
-            os.environ["ACCL_LOW_LATENCY_OPTIMIZE"] = "1"
+            os.environ.setdefault("ACCL_LOW_LATENCY_OPTIMIZE", "1")
+            # MiniMax-M3 decode CUDA Graph uses DeepEP low-latency with BF16
+            # activation payloads. Keep the ACCL-EP low-latency buffer default
+            # aligned with router use_fp8=False even when users bypass the
+            # checked launch scripts.
+            os.environ.setdefault("ACCL_LOW_LATENCY_BUFFER_FP8_OPT", "0")
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
             if allow_mnnvl():
                 init_kwargs["allow_mnnvl"] = True
@@ -605,6 +635,8 @@ class DeepEPWrapper:
             config.expert_num,
             num_m,
         )
+
+        _ensure_low_latency_qp_depth(config.ll_num_max_token_per_rank)
 
         if config.local_rank == 0:
             print(
@@ -681,7 +713,10 @@ def init_deepep_wrapper(
 
     ll_num_max_token_per_rank = 0
     if engine_config.moe_config.use_deepep_low_latency:
-        ll_num_max_token = engine_config.runtime_config.max_generate_batch_size
+        ll_num_max_token = (
+            getattr(engine_config.moe_config, "ll_num_max_token", 0)
+            or engine_config.runtime_config.max_generate_batch_size
+        )
         if engine_config.sp_config.type != SpeculativeType.NONE:
             ll_num_max_token *= engine_config.sp_config.gen_num_per_cycle + 1
         ll_num_max_token_per_rank = (

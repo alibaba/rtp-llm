@@ -15,6 +15,7 @@ import torch
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     fp8_fp4_gemm_nt,
     m_grouped_fp8_fp4_gemm_nt_contiguous,
+    m_grouped_fp8_fp4_gemm_nt_masked,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
     sgl_per_token_group_quant_fp8,
@@ -176,6 +177,83 @@ def mxfp8_grouped_gemm(
             (weight_e4m3, weight_scale_packed),
             out,
             m_indices,
+            recipe_a=(1, MX_BLOCK),
+            recipe_b=(1, MX_BLOCK),
+            disable_ue8m0_cast=True,
+        )
+    return out
+
+
+def _mxfp8_quant_act_tma(
+    x: torch.Tensor, masked_m: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert x.dim() >= 2, f"expected at least 2D activation, got {x.shape}"
+    K = x.shape[-1]
+    assert K % MX_BLOCK == 0, f"K={K} must be a multiple of {MX_BLOCK}"
+    assert x.is_contiguous(), "input must be contiguous"
+    return sgl_per_token_group_quant_fp8(
+        x,
+        group_size=MX_BLOCK,
+        scale_ue8m0=True,
+        column_major_scales=True,
+        scale_tma_aligned=True,
+        masked_m=masked_m,
+    )
+
+
+def mxfp8_grouped_gemm_masked(
+    x: torch.Tensor,
+    weight_e4m3: torch.Tensor,
+    weight_scale_packed: torch.Tensor,
+    masked_m: torch.Tensor,
+    expected_m: int,
+    out_dtype: torch.dtype = torch.bfloat16,
+    quant_max_m: Optional[int] = None,
+    active_experts: Optional[torch.Tensor] = None,
+    active_count: Optional[torch.Tensor] = None,
+    quant_max_active_experts: Optional[int] = None,
+    active_row_experts: Optional[torch.Tensor] = None,
+    active_row_tokens: Optional[torch.Tensor] = None,
+    active_row_count: Optional[torch.Tensor] = None,
+    quant_max_active_rows: Optional[int] = None,
+) -> torch.Tensor:
+    assert x.dim() == 3, f"expected [E, M, K], got {tuple(x.shape)}"
+    E, M, K = x.shape
+    assert E == weight_e4m3.shape[0]
+    N = weight_e4m3.shape[1]
+
+    # DeepEP low-latency dispatch gives BF16 [E, M, K]. Keep the communication
+    # path BF16, then quantize only for the MXFP8 weight GEMM. Only rows below
+    # masked_m[expert] are guaranteed valid/readable in the low-latency buffer,
+    # so the quantizer must not flatten and read padded rows.
+    from rtp_llm.models_py.triton_kernels.moe.mxfp8_kernels import (
+        mxfp8_quant_act_masked_packed_triton,
+    )
+
+    # Quantization must cover every row that masked_m may expose. expected_m is
+    # a DeepGEMM tuning hint, not a correctness upper bound; use the caller's
+    # graph-safe token-count bound when available.
+    a_q, a_s_packed = mxfp8_quant_act_masked_packed_triton(
+        x,
+        masked_m,
+        max_m=quant_max_m,
+        active_experts=active_experts,
+        active_count=active_count,
+        max_active_experts=quant_max_active_experts,
+        active_row_experts=active_row_experts,
+        active_row_tokens=active_row_tokens,
+        active_row_count=active_row_count,
+        max_active_rows=quant_max_active_rows,
+    )
+
+    out = torch.empty(E, M, N, device=x.device, dtype=out_dtype)
+    with torch.cuda.device(x.device):
+        m_grouped_fp8_fp4_gemm_nt_masked(
+            (a_q, a_s_packed),
+            (weight_e4m3, weight_scale_packed),
+            out,
+            masked_m,
+            expected_m,
             recipe_a=(1, MX_BLOCK),
             recipe_b=(1, MX_BLOCK),
             disable_ue8m0_cast=True,
