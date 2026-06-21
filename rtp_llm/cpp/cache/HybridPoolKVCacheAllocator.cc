@@ -153,7 +153,11 @@ int HybridPoolKVCacheAllocator::defaultGroupIdForLayer(int layer_id) const {
     if (layer_id < 0 || static_cast<size_t>(layer_id) >= config_.layer_to_group_id.size()) {
         RTP_LLM_FAIL("invalid layer_id=%d", layer_id);
     }
-    const int gid = config_.layer_to_group_id[static_cast<size_t>(layer_id)];
+    int gid = config_.layer_to_group_id[static_cast<size_t>(layer_id)];
+    if (gid < 0 && static_cast<size_t>(layer_id) < config_.layer_to_group_ids.size()
+        && !config_.layer_to_group_ids[static_cast<size_t>(layer_id)].empty()) {
+        gid = config_.layer_to_group_ids[static_cast<size_t>(layer_id)].back();
+    }
     RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < static_cast<int>(kv_cache_groups_.size()),
                             "invalid default group id %d for layer %d",
                             gid,

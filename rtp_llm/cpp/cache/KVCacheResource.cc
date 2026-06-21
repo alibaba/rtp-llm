@@ -154,6 +154,17 @@ void KVCacheResource::initGroups(int                                  group_num,
         layer_block_ids.resize(layer_num);
         for (int i = 0; i < layer_num; ++i) {
             int gid = layer_to_group_id.empty() ? 0 : layer_to_group_id[i];
+            if (gid < 0 && !layer_to_group_ids.empty()) {
+                RTP_LLM_CHECK_WITH_INFO(layer_to_group_ids.size() >= static_cast<size_t>(layer_num),
+                                        "KVCacheResource::initGroups: layer_to_group_ids size %zu < layer_num %d",
+                                        layer_to_group_ids.size(),
+                                        layer_num);
+                const auto& dense_groups = layer_to_group_ids[static_cast<size_t>(i)];
+                RTP_LLM_CHECK_WITH_INFO(!dense_groups.empty(),
+                                        "KVCacheResource::initGroups: empty group ids for layer %d",
+                                        i);
+                gid = dense_groups.back();
+            }
             RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < group_num,
                                     "KVCacheResource::initGroups: invalid group id %d for layer %d (group_num=%d)",
                                     gid,

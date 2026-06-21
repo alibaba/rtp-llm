@@ -247,21 +247,19 @@ struct CacheConfig {
                                                                                                   current_tag_gid->second,
                                         gid);
                 layer_tag_to_group_id[layer][tag] = static_cast<int>(gid);
-                if (tag == "default") {
-                    layer_to_group_id[layer] = static_cast<int>(gid);
-                    layer_group_types[layer] = types[gid];
-                }
             }
         }
 
         for (size_t layer = 0; layer < static_cast<size_t>(layer_num); ++layer) {
-            if (layer_to_group_id[layer] < 0 && !layer_to_group_ids[layer].empty()) {
-                layer_to_group_id[layer] = layer_to_group_ids[layer].back();
-            }
-            RTP_LLM_CHECK_WITH_INFO(layer_to_group_id[layer] >= 0,
+            RTP_LLM_CHECK_WITH_INFO(!layer_to_group_ids[layer].empty(),
                                     "CacheConfig::fromGroupedSpecs missing group mapping for layer %zu",
                                     layer);
-            const auto gid = static_cast<size_t>(layer_to_group_id[layer]);
+            if (layer_to_group_ids[layer].size() == 1) {
+                layer_to_group_id[layer] = layer_to_group_ids[layer].front();
+            } else {
+                layer_to_group_id[layer] = -1;
+            }
+            const auto gid = static_cast<size_t>(layer_to_group_ids[layer].front());
             if (gid < group_types.size()) {
                 layer_group_types[layer] = group_types[gid];
             }

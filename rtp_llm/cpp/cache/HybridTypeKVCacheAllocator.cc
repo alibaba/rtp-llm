@@ -122,12 +122,24 @@ CacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {
     return layout;
 }
 
+int HybridTypeKVCacheAllocator::defaultGroupIdForLayer(int layer_id) const {
+    if (layer_id < 0 || static_cast<size_t>(layer_id) >= layer_to_group_id_.size()) {
+        RTP_LLM_FAIL("invalid layer_id=%d", layer_id);
+    }
+    int gid = layer_to_group_id_[static_cast<size_t>(layer_id)];
+    if (gid < 0 && static_cast<size_t>(layer_id) < config_.layer_to_group_ids.size()
+        && !config_.layer_to_group_ids[static_cast<size_t>(layer_id)].empty()) {
+        gid = config_.layer_to_group_ids[static_cast<size_t>(layer_id)].back();
+    }
+    RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < static_cast<int>(kv_cache_groups_.size()), "invalid group id mapping");
+    return gid;
+}
+
 BlockAddrInfo HybridTypeKVCacheAllocator::convertIndexToAddr(int layer_id, int block_id) const {
     if (layer_id < 0 || layer_id >= static_cast<int>(layer_to_group_id_.size())) {
         RTP_LLM_FAIL("convertIndexToAddr invalid layer_id=%d", layer_id);
     }
-    const int gid = layer_to_group_id_[static_cast<size_t>(layer_id)];
-    RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < static_cast<int>(kv_cache_groups_.size()), "invalid group id mapping");
+    const int gid = defaultGroupIdForLayer(layer_id);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, block_id);
 }
 
@@ -135,8 +147,7 @@ std::vector<BlockInfo> HybridTypeKVCacheAllocator::convertIndexToBuffer(int laye
     if (layer_id < 0 || layer_id >= static_cast<int>(layer_to_group_id_.size())) {
         RTP_LLM_FAIL("convertIndexToBuffer invalid layer_id=%d", layer_id);
     }
-    const int gid = layer_to_group_id_[static_cast<size_t>(layer_id)];
-    RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < static_cast<int>(kv_cache_groups_.size()), "invalid group id mapping");
+    const int gid = defaultGroupIdForLayer(layer_id);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(layer_id, block_id);
 }
 
@@ -147,8 +158,7 @@ std::vector<BlockInfo> HybridTypeKVCacheAllocator::convertIndexToBuffer(int laye
     if (layer_id < 0 || layer_id >= static_cast<int>(layer_to_group_id_.size())) {
         RTP_LLM_FAIL("convertIndexToBuffer(partition) invalid layer_id=%d", layer_id);
     }
-    const int gid = layer_to_group_id_[static_cast<size_t>(layer_id)];
-    RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < static_cast<int>(kv_cache_groups_.size()), "invalid group id mapping");
+    const int gid = defaultGroupIdForLayer(layer_id);
     return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(
         layer_id, block_id, partition_count, partition_id);
 }
