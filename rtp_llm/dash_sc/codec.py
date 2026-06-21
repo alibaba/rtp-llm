@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -20,9 +21,24 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.structural_tag import (
     DashScStructuralTagError,
     adapt_dashscope_tool_call_wrapper_to_tag,
+    force_at_least_one,
     structural_tag_from_response_format,
     validate_structural_tag_shape,
 )
+
+_FORCE_AT_LEAST_ONE_ENV_KEY = "DASH_SC_FORCE_STRUCTURAL_TAG_AT_LEAST_ONE"
+
+
+def _force_at_least_one_enabled() -> bool:
+    """Read env each call so toggling at runtime takes effect without restart.
+
+    The hot path serializes structural_tag once per request, so the extra getenv
+    is in the noise. Truthy values: "1" / "true" / "yes" / "on" (case-insensitive).
+    """
+    raw = os.environ.get(_FORCE_AT_LEAST_ONE_ENV_KEY, "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
 _INT32_MAX = 2_147_483_647
@@ -465,6 +481,13 @@ def _parse_grammar_controls(
             if structural_tag is None:
                 structural_tag = response_structural_tag
             response_format = None
+
+    # Env-gated override: force_at_least_one walks the structural_tag and only
+    # mutates ``triggered_tags`` / ``tags_with_separator`` nodes, so it's safe
+    # to call on any format — non-matching shapes (json_schema / regex / ebnf)
+    # are mechanical no-ops, no separate gate needed.
+    if structural_tag is not None and _force_at_least_one_enabled():
+        force_at_least_one(structural_tag)
 
     return (
         _jsonable_to_string(response_format),
