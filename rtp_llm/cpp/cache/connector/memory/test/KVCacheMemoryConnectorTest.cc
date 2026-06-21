@@ -23,6 +23,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/test/mock/TestRpcService.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
@@ -170,6 +171,30 @@ CacheConfig createDsv4TypedConnectorConfig() {
     add_tag(1, "indexer_state", 3);
     add_tag(1, "csa_state", 4);
     add_tag(1, "swa_kv", 6);
+
+    for (size_t gid = 0; gid < kDsv4PoolNum; ++gid) {
+        if (config.group_types[gid] == CacheGroupType::FULL) {
+            auto spec                = std::make_shared<CompressedKVCacheSpec>();
+            spec->tag                = config.group_tags[gid];
+            spec->type               = KVCacheSpecType::OpaqueKV;
+            spec->dtype              = DataType::TYPE_UINT8;
+            spec->store_dtype        = DataType::TYPE_UINT8;
+            spec->entry_elems        = static_cast<uint32_t>(config.group_kv_block_stride_bytes[gid]);
+            spec->entries_per_block  = 1;
+            spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);
+            config.cache_specs[gid]  = spec;
+        } else {
+            auto spec                = std::make_shared<FixedStateCacheSpec>();
+            spec->tag                = config.group_tags[gid];
+            spec->type               = KVCacheSpecType::OpaqueState;
+            spec->dtype              = DataType::TYPE_UINT8;
+            spec->store_dtype        = DataType::TYPE_UINT8;
+            spec->state_dim          = static_cast<uint32_t>(config.group_kv_block_stride_bytes[gid]);
+            spec->entries_per_block  = 1;
+            spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);
+            config.cache_specs[gid]  = spec;
+        }
+    }
 
     return config;
 }
@@ -1138,7 +1163,7 @@ TEST_F(KVCacheMemoryConnectorTest, mergePrefixExistingSlots_SupportsMixedMemoryA
     auto conn = std::make_shared<KVCacheMemoryConnector>(
         cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
     ASSERT_TRUE(conn->init());
-    auto slots = conn->layerRegionSlots();
+    auto slots = conn->layerTagSlots();
 
     auto run_case = [&](bool dst_disk, bool src_disk) {
         SCOPED_TRACE(std::string("dst_disk=") + (dst_disk ? "true" : "false") + " src_disk="
@@ -1270,7 +1295,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForRead_HandlesDiskPartial
     auto conn = std::make_shared<KVCacheMemoryConnector>(
         cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
     ASSERT_TRUE(conn->init());
-    auto slots = conn->layerRegionSlots();
+    auto slots = conn->layerTagSlots();
 
     auto make_resource = [&](CacheKeyType key, bool compressed_required, bool state_required) {
         auto res = std::make_shared<KVCacheResource>();
@@ -1437,7 +1462,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsPartialMe
 
     auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
     ASSERT_TRUE(conn->init());
-    auto slots = conn->layerRegionSlots();
+    auto slots = conn->layerTagSlots();
     ASSERT_NE(conn->state_swa_pool_, nullptr);
 
     auto make_mask = [&](int layer_id, int group_id) {
@@ -1555,7 +1580,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsDiskParti
     auto conn = std::make_shared<KVCacheMemoryConnector>(
         cfg, kv_cfg, makeParallelismConfig(), allocator_, server_addrs_, nullptr);
     ASSERT_TRUE(conn->init());
-    auto slots = conn->layerRegionSlots();
+    auto slots = conn->layerTagSlots();
     ASSERT_NE(conn->state_swa_pool_, nullptr);
     auto disk_pool = conn->diskPoolFor(CacheBlockKind::STATE_SWA_KV);
     ASSERT_NE(disk_pool, nullptr);
@@ -1679,7 +1704,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatchPrefixStopsWhenRequiredStateSwaMiss
     auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
     ASSERT_TRUE(conn->init());
     ASSERT_TRUE(conn->usePrefixTreeMemoryCache());
-    auto slots = conn->layerRegionSlots();
+    auto slots = conn->layerTagSlots();
 
     CacheKeysType cache_keys{83001, 83002, 83999};
     auto          resource = std::make_shared<KVCacheResource>();
@@ -1762,7 +1787,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndGroupSlots)
     conn->block_cache_ = std::make_shared<MemoryDiskBlockCache>();
     ASSERT_NO_THROW(conn->initBlockPool());
 
-    auto slots = conn->layerRegionSlots();
+    auto slots = conn->layerTagSlots();
     ASSERT_EQ(slots.size(), 2u);
     EXPECT_EQ(slots[0].layer_id, 0);
     EXPECT_EQ(slots[0].tag, "csa_kv");
@@ -1810,12 +1835,12 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_SkipsHCAStateSlots) {
     conn->block_cache_ = std::make_shared<MemoryDiskBlockCache>();
     ASSERT_NO_THROW(conn->initBlockPool());
 
-    auto slots = conn->layerRegionSlots();
+    auto slots = conn->layerTagSlots();
     ASSERT_EQ(slots.size(), 7u);
     for (const auto& slot : slots) {
         EXPECT_NE(slot.tag, "hca_state");
     }
-    EXPECT_TRUE(conn->isDsv4TypedCacheLayout(slots));
+    EXPECT_TRUE(conn->supportsTypedPrefixCacheLayout(slots));
 
     auto resource         = std::make_shared<KVCacheResource>();
     resource->cacheKeys() = {1001, 1002};
@@ -3668,7 +3693,7 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, BuildCopyPlanForWrite_SkipsIncomplete
     std::vector<std::vector<BlockIdxType>> swa_blocks{{NULL_BLOCK_IDX, 1, NULL_BLOCK_IDX},
                                                       {NULL_BLOCK_IDX, 2, NULL_BLOCK_IDX}};
     auto                                   res   = makeHybridResource(cfg, cache_keys, full_blocks, swa_blocks);
-    auto                                   slots = conn->layerRegionSlots();
+    auto                                   slots = conn->layerTagSlots();
 
     bool no_need_write = true;
     auto plan          = conn->buildCopyPlanForWrite(

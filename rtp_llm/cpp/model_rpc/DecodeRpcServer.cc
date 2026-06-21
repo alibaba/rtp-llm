@@ -7,7 +7,6 @@
 #include <exception>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
-#include "rtp_llm/cpp/models/dsv4/Dsv4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
@@ -732,31 +731,6 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
         return (static_cast<int>(block_pos) % load_context.prefill_cp_size) == peer_idx;
     };
-    auto cpFixedSliceBytes = [&](const CacheConfig& cfg, size_t gid) {
-        RTP_LLM_CHECK_WITH_INFO(gid < cfg.cache_specs.size(), "group id out of range for cache_specs: %zu", gid);
-        const auto& spec = cfg.cache_specs[gid];
-        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "null cache spec for group %zu", gid);
-        const auto* state_spec = dynamic_cast<const DSV4StateSpec*>(spec.get());
-        RTP_LLM_CHECK_WITH_INFO(state_spec != nullptr,
-                                "CP-sliced fixed DSV4 group %zu expects DSV4StateSpec, got %s",
-                                gid,
-                                spec->debugString().c_str());
-        const size_t cp_size = static_cast<size_t>(load_context.prefill_cp_size);
-        if (spec->tag == "swa_kv") {
-            const size_t full_block_bytes = state_spec->block_size_bytes();
-            RTP_LLM_CHECK_WITH_INFO(full_block_bytes % cp_size == 0,
-                                    "CP byte-sliced swa_kv block bytes %zu not divisible by cp_size %zu",
-                                    full_block_bytes,
-                                    cp_size);
-            return full_block_bytes / cp_size;
-        }
-        RTP_LLM_CHECK_WITH_INFO(state_spec->entries_per_block % cp_size == 0,
-                                "CP-sliced fixed group entries %u not divisible by cp_size %zu",
-                                state_spec->entries_per_block,
-                                cp_size);
-        const size_t local_entries = state_spec->entries_per_block / cp_size;
-        return local_entries * static_cast<size_t>(state_spec->state_dim) * getTypeSize(state_spec->store_dtype);
-    };
     auto sliceFixedDestinationForPeer = [&](std::vector<BlockInfo> parts,
                                             const CacheConfig&     cfg,
                                             size_t                 gid,
@@ -765,22 +739,12 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         if (!is_page_level_rr || !isCpSlicedFixedGroup(group_type) || load_context.prefill_cp_size <= 1) {
             return parts;
         }
-        RTP_LLM_CHECK_WITH_INFO(
-            parts.size() == 1, "Dsv4 fixed/SWA opaque block expects one part when CP-sliced, got %zu", parts.size());
-        auto& block = parts[0];
-        RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null DSV4 fixed/SWA block addr while slicing");
-        const size_t slice_bytes  = cpFixedSliceBytes(cfg, gid);
-        const size_t slice_offset = slice_bytes * static_cast<size_t>(peer_idx);
-        RTP_LLM_CHECK_WITH_INFO(slice_offset + slice_bytes <= block.size_bytes,
-                                "Dsv4 fixed/SWA slice [%zu, %zu) exceeds block bytes %zu (tag=%s, gid=%zu)",
-                                slice_offset,
-                                slice_offset + slice_bytes,
-                                block.size_bytes,
-                                groupTag(cfg, gid).c_str(),
-                                gid);
-        block.addr       = static_cast<void*>(static_cast<char*>(block.addr) + slice_offset);
-        block.size_bytes = slice_bytes;
-        return parts;
+        RTP_LLM_CHECK_WITH_INFO(gid < cfg.cache_specs.size(), "group id out of range for cache_specs: %zu", gid);
+        const auto& spec = cfg.cache_specs[gid];
+        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "null cache spec for group %zu", gid);
+        return spec->sliceBlockForPeer(std::move(parts),
+                                       static_cast<size_t>(load_context.prefill_cp_size),
+                                       static_cast<size_t>(peer_idx));
     };
     auto isCompactFixedBlockTable = [&](const CacheConfig& cfg, size_t gid) {
         const CacheGroupType group_type = groupType(cfg, true, gid);
