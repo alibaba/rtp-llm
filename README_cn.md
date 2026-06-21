@@ -61,8 +61,8 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 ```bash
 # Install rtp-llm
 cd rtp-llm
-# For cuda12 environment, please use requirements_torch_gpu_cuda12.txt
-pip3 install -r ./deps/requirements_torch_gpu_cuda12.txt
+# For cuda12 environment, install via pyproject extras
+pip3 install -e .[cuda12]
 # Use the corresponding whl from the release version, here's an example for the cuda11 version 0.1.0, for the cuda12 whl package please check the release page.
 pip3 install rtp_llm-0.1.9+cuda118-cp310-cp310-manylinux1_x86_64.whl
 # start http service
