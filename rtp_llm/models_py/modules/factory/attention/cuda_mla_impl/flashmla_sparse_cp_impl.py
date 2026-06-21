@@ -638,13 +638,17 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
 
-        if (
+        no_q_work = (
             topk is None
             or topk.numel() == 0
             or self.total_local_ids is None
             or self.total_local_ids.numel() == 0
-        ):
+        )
+        if no_q_work:
+            if self.kv_cache_sharded and self._gather is not None:
+                self._gather_sharded_kv_cache(kv_cache)
             return None
+
         assert q is not None and q.size(0) > 0
 
         use_identity_q = (
@@ -665,6 +669,34 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             return out0
         out = triton_kv_scatter(out0, self.total_local_ids, q.size(0))
         return out
+
+    def _gather_sharded_kv_cache(self, kv_cache) -> None:
+        ws = self._gather
+        assert ws is not None
+        assert self.sharded_local_kv_lens is not None
+        assert self.sharded_workspace_starts is not None
+        assert self.sharded_kv_restore_indices is not None
+        src = _as_uint8(kv_cache.kv_cache_base)
+        if src.ndim == 4:
+            src = src.squeeze(2)
+        local_fused = torch.empty(
+            (self.sharded_total_local_kv_len, ws.fused_kv.size(1)),
+            dtype=ws.fused_kv.dtype,
+            device=ws.fused_kv.device,
+        )
+        rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
+            src,
+            local_fused,
+            self.block_table.to(torch.int32),
+            self.sharded_local_kv_lens,
+            self.sharded_workspace_starts,
+            ws.batch_size,
+            self.sharded_total_local_kv_len,
+        )
+        gathered = all_gather(local_fused.contiguous(), group=Group.TP).reshape(
+            -1, local_fused.size(-1)
+        )
+        ws.fused_kv.copy_(gathered[self.sharded_kv_restore_indices])
 
     def _attend_with_kvcache(
         self,
@@ -708,32 +740,12 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         precomputed_req_ids (req id per global q token) for the offset lookup."""
         ws = self._gather
         assert ws is not None and self.precomputed_req_ids is not None
-        src = _as_uint8(kv_cache.kv_cache_base)
-        if src.ndim == 4:
-            src = src.squeeze(2)
         if self.kv_cache_sharded:
-            assert self.sharded_local_kv_lens is not None
-            assert self.sharded_workspace_starts is not None
-            assert self.sharded_kv_restore_indices is not None
-            local_fused = torch.empty(
-                (self.sharded_total_local_kv_len, ws.fused_kv.size(1)),
-                dtype=ws.fused_kv.dtype,
-                device=ws.fused_kv.device,
-            )
-            rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
-                src,
-                local_fused,
-                self.block_table.to(torch.int32),
-                self.sharded_local_kv_lens,
-                self.sharded_workspace_starts,
-                ws.batch_size,
-                self.sharded_total_local_kv_len,
-            )
-            gathered = all_gather(local_fused.contiguous(), group=Group.TP).reshape(
-                -1, local_fused.size(-1)
-            )
-            ws.fused_kv.copy_(gathered[self.sharded_kv_restore_indices])
+            self._gather_sharded_kv_cache(kv_cache)
         else:
+            src = _as_uint8(kv_cache.kv_cache_base)
+            if src.ndim == 4:
+                src = src.squeeze(2)
             rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
                 src,
                 ws.fused_kv,
