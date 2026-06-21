@@ -46,6 +46,7 @@ from rtp_llm.dash_sc.proxy.access_record import (
     rpc_code,
     rpc_details,
 )
+from rtp_llm.dash_sc.structural_tag import maybe_force_at_least_one_on_request_proto
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 
 DASH_SC_GRPC_ACCESS_LOGGER_NAME = "dash_sc_grpc_access_logger"
@@ -557,7 +558,19 @@ class DashScGrpcAccessLogInterceptor(grpc.ServerInterceptor):
     def _capture_first_request(
         self, access_record: ForwardAccessRecord, request
     ) -> None:
-        """Capture first request content for the end-of-RPC access log."""
+        """Capture first request content for the end-of-RPC access log.
+
+        Also the single point where the env-gated structural_tag
+        ``at_least_one`` override mutates the request proto so the same change
+        flows into both the access log and the downstream inference path
+        (``inner(request, ...)``) without a second parse round-trip.
+        """
+        try:
+            maybe_force_at_least_one_on_request_proto(request)
+        except Exception as e:
+            logging.warning(
+                "[DashScGrpc] force_at_least_one mutation failed: %s", e
+            )
         access_record.capture_request(request)
 
     def _wrap_unary_unary(self, inner, method, stream_type):
