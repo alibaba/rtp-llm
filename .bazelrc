@@ -157,10 +157,17 @@ build:cuda13 --copt=-Wno-narrowing
 # std::hardware_destructive_interference_size, which -Werror then promotes to a
 # hard error. The flag is C++-only, so use cxxopt (copt would break C files
 # like zlib's zutil.c). Suppress like the other third-party warnings above.
+#
+# IMPORTANT: only use the plain -Wno-interference-size form, NOT
+# -Wno-error=interference-size. Plain -Wno-<unknown> is silently accepted (just a
+# note) by older compilers, but -Wno-error=<unknown> is a HARD ERROR there. Some
+# build environments (e.g. the online image build) fall back to the al8 base gcc
+# 10, which has no -Winterference-size -> -Wno-error=interference-size aborts the
+# grpc compile. -Wno-interference-size already disables the warning entirely on
+# gcc-toolset-12, so -Werror has nothing left to promote -- the -Wno-error= form
+# was redundant.
 build:cuda13 --cxxopt=-Wno-interference-size
-build:cuda13 --cxxopt=-Wno-error=interference-size
 build:cuda13 --host_cxxopt=-Wno-interference-size
-build:cuda13 --host_cxxopt=-Wno-error=interference-size
 # cuda13 owns its own dep chain: torch 2.11+cu130, triton 3.6.0, dedicated
 # pip_gpu_cuda13_torch / torch_2.11_py310_cuda repos and a dedicated whl_deps
 # branch in arch_select.bzl.  Selects that need to treat cu13 the same as
