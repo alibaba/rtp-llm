@@ -57,6 +57,16 @@ def http_deps():
     )
 
     http_archive(
+        name = "torch_2.9_py310_cuda_arm",
+        sha256 = "37780eb80e4319d6e004ea9597353da0b3947681866d7adff4757ece164a5cd9",
+        urls = [
+            "https://download.pytorch.org/whl/cu129/torch-2.9.0%2Bcu129-cp310-cp310-manylinux_2_28_aarch64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
+    http_archive(
         name = "aiter",
         sha256 = "83c6bf067f94f8ca901a7d0526c51835c615feae9e9299f0371daef53e55bdd2",
         urls = [

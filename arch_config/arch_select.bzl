@@ -1,5 +1,6 @@
 # to wrapper target relate with different system config
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
+load("@pip_cuda12_arm_torch//:requirements.bzl", requirement_cuda12_arm="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
@@ -14,10 +15,9 @@ def requirement(names):
             name = name,
             deps = select({
                 "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
+                "@rtp_llm//:using_cuda12_arm": [requirement_cuda12_arm(name)],
                 "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
                 # Default falls through to cuda12_9 (the canonical x86 GPU build).
-                # CPU-only and ARM-CPU configs were removed; if you need them,
-                # restore the corresponding pip_parse + lockfile + select branch.
                 "//conditions:default": [requirement_gpu_cuda12_9(name)],
             }),
             visibility = ["//visibility:public"],
@@ -74,6 +74,11 @@ def torch_deps():
             "@torch_rocm//:torch_api",
             "@torch_rocm//:torch",
             "@torch_rocm//:torch_libs",
+        ],
+        "@rtp_llm//:using_cuda12_arm": [
+            "@torch_2.9_py310_cuda_arm//:torch_api",
+            "@torch_2.9_py310_cuda_arm//:torch",
+            "@torch_2.9_py310_cuda_arm//:torch_libs",
         ],
         "//conditions:default": [
             "@torch_2.8_py310_cuda//:torch_api",

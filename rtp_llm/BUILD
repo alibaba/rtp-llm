@@ -60,12 +60,12 @@ xft_dep = select({
 
 arch_dep = select({
     "@//:using_cuda12_arm": [],
-    "//conditions:default": [":decord", ":av"],
+    "//conditions:default": [":decord"],
 })
 
 arch_with_version_dep = select({
     "@//:using_cuda12_arm": [],
-    "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
+    "//conditions:default": ["decord==0.6.0"],
 })
 
 requirement([
@@ -102,7 +102,6 @@ requirement([
     "xfastertransformer_devel",
     "xfastertransformer_devel_icx",
     "decord",
-    "av",
     # add qwen agent package
     "pydantic",
     "json5",
