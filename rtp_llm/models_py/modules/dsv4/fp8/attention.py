@@ -2540,6 +2540,22 @@ class AttentionFP8(nn.Module):
             return False
         return True
 
+    def _cp_kv_cache_sharded(self, common: Optional[PrefillMeta] = None) -> bool:
+        cp_ctx = getattr(self, "_cp_ctx", None) or getattr(common, "cp_ctx", None)
+        return bool(getattr(cp_ctx, "kv_cache_sharded", False))
+
+    def _should_async_workspace_reads_for_prefill(self, common: PrefillMeta) -> bool:
+        """Whether workspace cache reads may use side-stream async restore.
+
+        This shares the main prefill-CP-overlap gate and only applies to the
+        page-rr / KV-cache-sharded path. With ``DSV4_PREFILL_CP_OVERLAP=0``,
+        workspace reads keep the original synchronous gather/restore/write
+        ordering even when ``--prefill_cp_kv_cache_sharded=1`` is set.
+        """
+        return self._should_overlap_cp_for_prefill(
+            common
+        ) and self._cp_kv_cache_sharded(common)
+
     def _get_cp_gather_stream(self, device: torch.device) -> torch.cuda.Stream:
         """Return the process-local serialized CP communication stream.
 
@@ -2784,13 +2800,19 @@ class AttentionFP8(nn.Module):
                     self.compressor.wait_prefill_gather(main_pending)
 
             with record_function_range("dsv4.fp8.attn.csa_overlap.indexer"):
+                indexer_post_stream = (
+                    _get_cp_post_gather_stream(x.device) if x.is_cuda else None
+                )
                 raw = self.indexer.forward_with_pending_nested(
                     x,
                     qkv.qr,
                     csa_meta.indexer_meta,
                     nested_pending,
                     before_gather_k=wait_main_before_indexer_k,
+                    cp_gather_stream=cp_stream,
+                    post_gather_stream=indexer_post_stream,
                 )
+                nested_pending = None
             if main_pending is not None:
                 with record_function_range(
                     "dsv4.fp8.attn.csa_overlap.finish_main_compressor"
@@ -3064,184 +3086,304 @@ class AttentionFP8(nn.Module):
             self._prefill_output_all_reduce(out)
             return out
 
+        async_workspace_reads = self._should_async_workspace_reads_for_prefill(common)
         with record_function_range("dsv4.fp8.attn.workspace.alloc"):
             workspace = torch.zeros(
                 (B, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device
             )
 
-        if wm.N > 0:
-            with record_function_range("dsv4.fp8.attn.workspace.gather_cmp"):
-                # Stage 5b: dispatch through the per-iteration reader. For
-                # non-CP / cp_size=1 / cold prefill this is a thin wrapper
-                # around the original ``dequantize_and_gather_k_cache``
-                # (LocalPoolReader). For CP-sharded reuse-hit prefill it
-                # gathers the prefix from peer ranks before dequant.
-                cmp_reader = (
-                    wm.cmp_reader if wm.cmp_reader is not None else LocalPoolReader()
-                )
-                cmp_reader.fill(
-                    out=workspace,
-                    k_cache=cmp_pool_3d,
-                    seq_lens=wm.cmp_seq_lens,
-                    gather_lens=None,
-                    block_table=wm.cmp_bt_int32,
-                    block_size=wm.cmp_eb,
-                    offset=0,
-                )
-        # SWA dequant only reads the cached prefix tail. The fresh new-K rows
-        # are already available as BF16 and are overlaid below; cold prefill
-        # does not need to read the SWA pool at all.
-        if common.any_cont:
-            with record_function_range("dsv4.fp8.attn.workspace.gather_swa_prefix"):
-                assert wm.swa_cache_slot_mapping is not None
-                if swa_byte_sliced:
-                    assert common.cp_ctx is not None
-                    assert wm.swa_cache_compaction is not None
-                    _swa_dq.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
-                        out=workspace,
-                        k_cache_raw=swa_pool_raw,
-                        slot_mapping=wm.swa_cache_slot_mapping,
-                        gather_lens=wm.swa_cache_gather_lens,
-                        offset=wm.N,
-                        full_entries_per_block=wm.swa_eb,
-                        cp_rank=int(common.cp_ctx.cp_rank),
-                        cp_size=int(common.cp_ctx.cp_size),
-                        compaction=wm.swa_cache_compaction,
+        cmp_pending = None
+        cmp_reader_for_pending = None
+        cmp_prepare_for_pending = None
+        swa_prefix_pending = None
+        try:
+            if wm.N > 0:
+                with record_function_range("dsv4.fp8.attn.workspace.gather_cmp"):
+                    # Stage 5b: dispatch through the per-iteration reader. For
+                    # non-CP / cp_size=1 / unsharded KV-cache this is a thin
+                    # wrapper around the original ``dequantize_and_gather_k_cache``
+                    # (LocalPoolReader). For CP-sharded KV-cache it gathers any
+                    # nonzero compressed-K range from peer ranks before dequant.
+                    cmp_reader = (
+                        wm.cmp_reader
+                        if wm.cmp_reader is not None
+                        else LocalPoolReader()
                     )
-                else:
-                    assert swa_pool_3d is not None
-                    _swa_dq.dequantize_and_gather_k_cache_slots(
-                        out=workspace,
-                        k_cache=swa_pool_3d,
-                        slot_mapping=wm.swa_cache_slot_mapping,
-                        gather_lens=wm.swa_cache_gather_lens,
-                        offset=wm.N,
+                    start_cmp = (
+                        getattr(cmp_reader, "start_fill_async", None)
+                        if async_workspace_reads
+                        else None
                     )
-
-        # BF16 overlay of freshly computed new K — single ``index_copy_``
-        # using the meta-precomputed ``new_k_slot_in_flat``. Avoids the FP8
-        # round-trip loss on tokens we just wrote, while keeping the hot
-        # path free of casts / gathers / per-request slicing.
-        with record_function_range("dsv4.fp8.attn.workspace.overlay_new_k"):
-            kv_bf16 = qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
-            workspace.view(B * wm.M, D).index_copy_(0, wm.new_k_slot_in_flat, kv_bf16)
-            # Free the kv_full storage before combine_topk + flash_mla_sparse_fwd.
-            # After the overlay, kv_full has no remaining consumer in this
-            # function or any caller; workspace attention now output-projects
-            # each FlashMLA chunk immediately after attention.
-            # The NamedTuple ref keeps it alive otherwise, costing ~1.1 GiB
-            # of peak overlap with the sparse-attn workspace at 1M ctx.
-            dispose_tensor(kv_bf16)
-            dispose_tensor(qkv.kv_full)
-
-        # combine_topk: HCA uses precomputed dense arange(N_max); CSA uses
-        # the runtime indexer output (raw compressed-pool offsets in [0, N_b)).
-        # Indexer output contract: ``[T_total, K] int32 contiguous`` (set in
-        # ``IndexerFP8.forward`` line 754 + ``view(out_shape)``); assert here
-        # so a contract drift surfaces as a loud crash instead of a silent
-        # per-layer ``squeeze``/``to``/``contiguous`` retag in the hot path.
-        if wm.dense_cmp_topk is not None:
-            cmp_topk = wm.dense_cmp_topk
-        else:
-            assert (
-                cmp_topk_runtime is not None
-            ), "CSA workspace path requires cmp_topk_runtime (indexer output)"
-            assert (
-                cmp_topk_runtime.dim() == 2
-                and cmp_topk_runtime.dtype == torch.int32
-                and cmp_topk_runtime.is_contiguous()
-            ), (
-                "cmp_topk_runtime contract violated: expected 2D int32 "
-                f"contiguous, got dim={cmp_topk_runtime.dim()} "
-                f"dtype={cmp_topk_runtime.dtype} contig={cmp_topk_runtime.is_contiguous()}"
-            )
-            cmp_topk = cmp_topk_runtime
-
-        if common.cp_on:
-            # Phase F2/Phase-2: kernel ``combine_topk_swa_indices`` derives
-            # per-Q-row ``pos = start_pos + token_idx_in_query`` assuming Q
-            # is a contiguous slice. Under zigzag CP each rank's Q rows
-            # have non-contiguous global positions, so use the CP fused
-            # kernel that consumes explicit positions directly.
-            assert common.cp_ctx is not None
-            cp_ctx_local = common.cp_ctx
-            legacy_prefix_length = int(cp_ctx_local.prefix_length)
-            combine_kwargs = dict(
-                topk_indices=cmp_topk,
-                global_positions=_flat_1d(cp_ctx_local.global_positions),
-                sp_int=legacy_prefix_length,
-                window_size=self.window_size,
-                compress_ratio=ratio,
-                topk=int(cmp_topk.shape[-1]),
-                M=wm.M,
-                N=wm.N,
-            )
-            assert common.req_id_per_token is not None
-            assert common.prefix_lengths is not None
-            combine_kwargs.update(
-                req_id_per_token=_flat_1d(common.req_id_per_token),
-                prefix_lengths=_flat_1d(common.prefix_lengths),
-            )
-            with record_function_range("dsv4.fp8.attn.workspace.combine_topk_cp"):
-                combined_indices, combined_lens = combine_topk_swa_indices_cp(
-                    **combine_kwargs
+                    prepare_cmp = (
+                        getattr(cmp_reader, "prepare_fill_async", None)
+                        if async_workspace_reads
+                        else None
+                    )
+                    if start_cmp is not None and prepare_cmp is not None:
+                        with record_function_range(
+                            "dsv4.fp8.attn.workspace.gather_cmp.prefetch_start"
+                        ):
+                            cmp_pending = start_cmp(
+                                out=workspace,
+                                k_cache=cmp_pool_3d,
+                                seq_lens=wm.cmp_seq_lens,
+                                gather_lens=None,
+                                block_table=wm.cmp_bt_int32,
+                                block_size=wm.cmp_eb,
+                                offset=0,
+                                stream=self._get_cp_gather_stream(qkv.q.device),
+                            )
+                        if cmp_pending is not None:
+                            cmp_reader_for_pending = cmp_reader
+                            cmp_prepare_for_pending = prepare_cmp
+                    if cmp_pending is None:
+                        cmp_reader.fill(
+                            out=workspace,
+                            k_cache=cmp_pool_3d,
+                            seq_lens=wm.cmp_seq_lens,
+                            gather_lens=None,
+                            block_table=wm.cmp_bt_int32,
+                            block_size=wm.cmp_eb,
+                            offset=0,
+                        )
+            # SWA dequant only reads the cached prefix tail. The fresh new-K rows
+            # are already available as BF16 and are overlaid below; cold prefill
+            # does not need to read the SWA pool at all.
+            if common.any_cont:
+                with record_function_range("dsv4.fp8.attn.workspace.gather_swa_prefix"):
+                    assert wm.swa_cache_slot_mapping is not None
+                    if swa_byte_sliced:
+                        assert common.cp_ctx is not None
+                        assert wm.swa_cache_compaction is not None
+                        if async_workspace_reads:
+                            with record_function_range(
+                                "dsv4.fp8.attn.workspace.gather_swa_prefix.prefetch_start"
+                            ):
+                                swa_prefix_pending = _swa_dq.start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                                    k_cache_raw=swa_pool_raw,
+                                    slot_mapping=wm.swa_cache_slot_mapping,
+                                    gather_lens=wm.swa_cache_gather_lens,
+                                    offset=wm.N,
+                                    full_entries_per_block=wm.swa_eb,
+                                    cp_rank=int(common.cp_ctx.cp_rank),
+                                    cp_size=int(common.cp_ctx.cp_size),
+                                    compaction=wm.swa_cache_compaction,
+                                    stream=self._get_cp_gather_stream(qkv.q.device),
+                                    profile_name=(
+                                        f"dsv4.cp.all_gather.L{self.layer_id:02d}"
+                                        ".swa_prefix"
+                                    ),
+                                )
+                        if swa_prefix_pending is None:
+                            _swa_dq.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                                out=workspace,
+                                k_cache_raw=swa_pool_raw,
+                                slot_mapping=wm.swa_cache_slot_mapping,
+                                gather_lens=wm.swa_cache_gather_lens,
+                                offset=wm.N,
+                                full_entries_per_block=wm.swa_eb,
+                                cp_rank=int(common.cp_ctx.cp_rank),
+                                cp_size=int(common.cp_ctx.cp_size),
+                                compaction=wm.swa_cache_compaction,
+                            )
+                    else:
+                        assert swa_pool_3d is not None
+                        _swa_dq.dequantize_and_gather_k_cache_slots(
+                            out=workspace,
+                            k_cache=swa_pool_3d,
+                            slot_mapping=wm.swa_cache_slot_mapping,
+                            gather_lens=wm.swa_cache_gather_lens,
+                            offset=wm.N,
+                        )
+            # BF16 overlay of freshly computed new K — single ``index_copy_``
+            # using the meta-precomputed ``new_k_slot_in_flat``. Avoids the FP8
+            # round-trip loss on tokens we just wrote, while keeping the hot
+            # path free of casts / gathers / per-request slicing.
+            with record_function_range("dsv4.fp8.attn.workspace.overlay_new_k"):
+                kv_bf16 = qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
+                workspace.view(B * wm.M, D).index_copy_(
+                    0, wm.new_k_slot_in_flat, kv_bf16
                 )
-        else:
-            with record_function_range("dsv4.fp8.attn.workspace.combine_topk"):
-                combined_indices, combined_lens = combine_topk_swa_indices(
+                # Free the kv_full storage before combine_topk + flash_mla_sparse_fwd.
+                # After the overlay, kv_full has no remaining consumer in this
+                # function or any caller; workspace attention now output-projects
+                # each FlashMLA chunk immediately after attention.
+                # The NamedTuple ref keeps it alive otherwise, costing ~1.1 GiB
+                # of peak overlap with the sparse-attn workspace at 1M ctx.
+                dispose_tensor(kv_bf16)
+                dispose_tensor(qkv.kv_full)
+
+            # combine_topk: HCA uses precomputed dense arange(N_max); CSA uses
+            # the runtime indexer output (raw compressed-pool offsets in [0, N_b)).
+            # Indexer output contract: ``[T_total, K] int32 contiguous`` (set in
+            # ``IndexerFP8.forward`` line 754 + ``view(out_shape)``); assert here
+            # so a contract drift surfaces as a loud crash instead of a silent
+            # per-layer ``squeeze``/``to``/``contiguous`` retag in the hot path.
+            if wm.dense_cmp_topk is not None:
+                cmp_topk = wm.dense_cmp_topk
+            else:
+                assert (
+                    cmp_topk_runtime is not None
+                ), "CSA workspace path requires cmp_topk_runtime (indexer output)"
+                assert (
+                    cmp_topk_runtime.dim() == 2
+                    and cmp_topk_runtime.dtype == torch.int32
+                    and cmp_topk_runtime.is_contiguous()
+                ), (
+                    "cmp_topk_runtime contract violated: expected 2D int32 "
+                    f"contiguous, got dim={cmp_topk_runtime.dim()} "
+                    f"dtype={cmp_topk_runtime.dtype} contig={cmp_topk_runtime.is_contiguous()}"
+                )
+                cmp_topk = cmp_topk_runtime
+
+            if common.cp_on:
+                # Phase F2/Phase-2: kernel ``combine_topk_swa_indices`` derives
+                # per-Q-row ``pos = start_pos + token_idx_in_query`` assuming Q
+                # is a contiguous slice. Under zigzag CP each rank's Q rows
+                # have non-contiguous global positions, so use the CP fused
+                # kernel that consumes explicit positions directly.
+                assert common.cp_ctx is not None
+                cp_ctx_local = common.cp_ctx
+                legacy_prefix_length = int(cp_ctx_local.prefix_length)
+                combine_kwargs = dict(
                     topk_indices=cmp_topk,
-                    query_start_loc=wm.qsl,
-                    seq_lens=wm.swa_seq_lens,
-                    gather_lens=wm.swa_gather_lens,
+                    global_positions=_flat_1d(cp_ctx_local.global_positions),
+                    sp_int=legacy_prefix_length,
                     window_size=self.window_size,
                     compress_ratio=ratio,
                     topk=int(cmp_topk.shape[-1]),
                     M=wm.M,
                     N=wm.N,
                 )
+                assert common.req_id_per_token is not None
+                assert common.prefix_lengths is not None
+                combine_kwargs.update(
+                    req_id_per_token=_flat_1d(common.req_id_per_token),
+                    prefix_lengths=_flat_1d(common.prefix_lengths),
+                )
+                with record_function_range("dsv4.fp8.attn.workspace.combine_topk_cp"):
+                    combined_indices, combined_lens = combine_topk_swa_indices_cp(
+                        **combine_kwargs
+                    )
+            else:
+                with record_function_range("dsv4.fp8.attn.workspace.combine_topk"):
+                    combined_indices, combined_lens = combine_topk_swa_indices(
+                        topk_indices=cmp_topk,
+                        query_start_loc=wm.qsl,
+                        seq_lens=wm.swa_seq_lens,
+                        gather_lens=wm.swa_gather_lens,
+                        window_size=self.window_size,
+                        compress_ratio=ratio,
+                        topk=int(cmp_topk.shape[-1]),
+                        M=wm.M,
+                        N=wm.N,
+                    )
 
-        # flash_mla_sparse_fwd is chunked along Q so each launch stays
-        # below ``DSV4_FLASH_MLA_SPARSE_Q_CHUNK`` rows. Sparse attention
-        # has no cross-Q dependency so chunking is bit-equal. Each chunk is
-        # immediately output-projected into the final contiguous [T, dim]
-        # buffer, avoiding the previous full [T, H, D] o3 allocation and copy.
-        # Disallow the historical "0 disables chunking" escape hatch here:
-        # this path's purpose is to avoid materializing full [T, H, D] attention.
-        kv_view = workspace.view(B * wm.M, 1, D)
-        indices_3d = combined_indices.unsqueeze(1)
-        q_chunk = dsv4_chunk_tokens_from_env(
-            "DSV4_FLASH_MLA_SPARSE_Q_CHUNK",
-            min_value=0,
-        )
-        s_q = qkv.q.shape[0]
-        out = torch.empty(s_q, self.dim, dtype=torch.bfloat16, device=qkv.q.device)
-        if q_chunk <= 0:
-            raise ValueError(
-                "DSV4_FLASH_MLA_SPARSE_Q_CHUNK must be positive for workspace "
-                "streaming output projection"
+            post_gather_stream = None
+            if cmp_pending is not None or swa_prefix_pending is not None:
+                post_gather_stream = _get_cp_post_gather_stream(qkv.q.device)
+
+            # Only the NCCL stage is pulled ahead. Local restore/dequant/scatter
+            # is queued after overlay/combine and must finish before FlashMLA
+            # reads workspace. The three writes target disjoint ranges
+            # (cmp [0:N), SWA prefix [N:N+P), fresh K [N+P:]); if this prepare
+            # point is moved earlier for more overlap, keep the Work.wait() call
+            # inside the post stream helper or gathered bytes can be read early.
+            if cmp_pending is not None:
+                assert cmp_reader_for_pending is not None
+                assert cmp_prepare_for_pending is not None
+                assert post_gather_stream is not None
+                with record_function_range(
+                    "dsv4.fp8.attn.workspace.gather_cmp.prefetch_prepare"
+                ):
+                    cmp_prepare_for_pending(
+                        cmp_pending,
+                        stream=post_gather_stream,
+                    )
+
+            if swa_prefix_pending is not None:
+                assert post_gather_stream is not None
+                with record_function_range(
+                    "dsv4.fp8.attn.workspace.gather_swa_prefix.prefetch_prepare"
+                ):
+                    _swa_dq.prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                        swa_prefix_pending,
+                        out=workspace,
+                        stream=post_gather_stream,
+                    )
+
+            # The post-stream restore/dequant for cmp + SWA prefix can run
+            # concurrently with the cmp wait_event below and with FlashMLA's
+            # launch-side bookkeeping. Drain both pendings only when the
+            # consumer is about to read workspace, so the prepare-side work
+            # actually has a window to overlap.
+            if cmp_pending is not None:
+                with record_function_range(
+                    "dsv4.fp8.attn.workspace.gather_cmp.prefetch_wait"
+                ):
+                    cmp_reader_for_pending.wait_fill_async(cmp_pending)
+                cmp_pending = None
+
+            if swa_prefix_pending is not None:
+                with record_function_range(
+                    "dsv4.fp8.attn.workspace.gather_swa_prefix.prefetch_wait"
+                ):
+                    _swa_dq.wait_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                        swa_prefix_pending
+                    )
+                swa_prefix_pending = None
+
+            # flash_mla_sparse_fwd is chunked along Q so each launch stays
+            # below ``DSV4_FLASH_MLA_SPARSE_Q_CHUNK`` rows. Sparse attention
+            # has no cross-Q dependency so chunking is bit-equal. Each chunk is
+            # immediately output-projected into the final contiguous [T, dim]
+            # buffer, avoiding the previous full [T, H, D] o3 allocation and copy.
+            # Disallow the historical "0 disables chunking" escape hatch here:
+            # this path's purpose is to avoid materializing full [T, H, D] attention.
+            kv_view = workspace.view(B * wm.M, 1, D)
+            indices_3d = combined_indices.unsqueeze(1)
+            q_chunk = dsv4_chunk_tokens_from_env(
+                "DSV4_FLASH_MLA_SPARSE_Q_CHUNK",
+                min_value=0,
             )
-        chunk_rows = min(q_chunk, s_q)
-        freqs_all = common.freqs_cis
-        for start in range(0, s_q, chunk_rows):
-            end = min(start + chunk_rows, s_q)
-            with record_function_range("dsv4.fp8.attn.workspace.flash_mla_sparse_fwd"):
-                o_part, _, _ = flash_mla_sparse_fwd(
-                    q=qkv.q[start:end],
-                    kv=kv_view,
-                    indices=indices_3d[start:end],
-                    sm_scale=self.softmax_scale,
-                    attn_sink=self.attn_sink,
-                    topk_length=combined_lens[start:end],
+            s_q = qkv.q.shape[0]
+            out = torch.empty(s_q, self.dim, dtype=torch.bfloat16, device=qkv.q.device)
+            if q_chunk <= 0:
+                raise ValueError(
+                    "DSV4_FLASH_MLA_SPARSE_Q_CHUNK must be positive for workspace "
+                    "streaming output projection"
                 )
-            with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
-                self._prefill_output_proj_into(
-                    o_part,
-                    freqs_all[start:end],
-                    out=out[start:end, :],
+            chunk_rows = min(q_chunk, s_q)
+            freqs_all = common.freqs_cis
+            for start in range(0, s_q, chunk_rows):
+                end = min(start + chunk_rows, s_q)
+                with record_function_range(
+                    "dsv4.fp8.attn.workspace.flash_mla_sparse_fwd"
+                ):
+                    o_part, _, _ = flash_mla_sparse_fwd(
+                        q=qkv.q[start:end],
+                        kv=kv_view,
+                        indices=indices_3d[start:end],
+                        sm_scale=self.softmax_scale,
+                        attn_sink=self.attn_sink,
+                        topk_length=combined_lens[start:end],
+                    )
+                with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
+                    self._prefill_output_proj_into(
+                        o_part,
+                        freqs_all[start:end],
+                        out=out[start:end, :],
+                    )
+                dispose_tensor(o_part)
+            self._prefill_output_all_reduce(out)
+            return out
+        finally:
+            if cmp_pending is not None and cmp_reader_for_pending is not None:
+                cmp_reader_for_pending.discard_fill_async(cmp_pending)
+            if swa_prefix_pending is not None:
+                _swa_dq.discard_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                    swa_prefix_pending
                 )
-            dispose_tensor(o_part)
-        self._prefill_output_all_reduce(out)
-        return out
 
     # _should_use_cp_raw_q_merge was inlined into _build_workspace_meta so the
     # gate evaluation (which performs 2 D2H syncs) runs once per (forward,
@@ -4296,8 +4438,10 @@ class AttentionFP8(nn.Module):
                 )
 
         # Stage 5b: pick compressed-K pool reader once per (forward, ratio).
-        # Non-CP / cp_size=1 / kv_cache_sharded=False / cold prefill all
-        # collapse to ``LocalPoolReader`` ⇒ zero overhead vs pre-Stage-5b.
+        # Non-CP / cp_size=1 / kv_cache_sharded=False collapse to
+        # ``LocalPoolReader``. With KV-cache sharding, any nonzero compressed-K
+        # length, including rows just written by this layer's compressor in a
+        # cold-prefill step, must be restored from CP shards.
         cp_ctx_local = getattr(self, "_cp_ctx", None)
         kv_cache_sharded = bool(getattr(cp_ctx_local, "kv_cache_sharded", False))
         per_req_total_kv_lens: Optional[torch.Tensor] = None

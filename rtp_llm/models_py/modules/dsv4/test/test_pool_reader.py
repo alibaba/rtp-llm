@@ -131,6 +131,14 @@ def _fake_cp_ctx(cp_size: int, cp_rank: int = 0):
     return ctx
 
 
+class _CountingWork:
+    def __init__(self):
+        self.wait_calls = 0
+
+    def wait(self):
+        self.wait_calls += 1
+
+
 def _rank_major_packed_payload(
     per_req: torch.Tensor, cp_size: int, block_size: int, total_local: int, D: int
 ) -> torch.Tensor:
@@ -221,6 +229,24 @@ def test_factory_sharded_uses_owner_block_size_for_restore_lengths():
     assert r.cfg.block_size == 2
     assert r.cfg.owner_block_size == 8
     assert r.cfg.total_local_kv == 8
+
+
+def test_factory_sharded_hca_uses_kernel_block_for_pool_and_seq_block_for_owner():
+    # Smoke page-rr shape: seq_size_per_block=256 and
+    # kernel_seq_size_per_block=128. For HCA ratio=128 this becomes
+    # owner_block_size=2 entries, while the compact pool block has 1 entry.
+    r = PR.make_compressed_k_pool_reader(
+        cp_ctx=_fake_cp_ctx(cp_size=2),
+        kv_cache_sharded=True,
+        per_req_total_kv_lens=torch.tensor([5], dtype=torch.int64),
+        block_size=1,
+        owner_block_size=2,
+    )
+    assert isinstance(r, PR.CPShardedPoolReader)
+    assert r.cfg.block_size == 1
+    assert r.cfg.owner_block_size == 2
+    assert r.cfg.total_local_kv == 4
+    assert r.cfg.restore_indices.numel() == 5
 
 
 def test_factory_missing_args_raises():
@@ -433,7 +459,13 @@ def test_cp_sharded_fill_uses_owner_block_size_for_restore_but_pool_block_for_ga
             seq_lens=per_req.to(torch.int32),
             gather_lens=None,
             block_table=torch.zeros(
-                (2, int((local_lens.max().item() + pool_block_size - 1) // pool_block_size)),
+                (
+                    2,
+                    int(
+                        (local_lens.max().item() + pool_block_size - 1)
+                        // pool_block_size
+                    ),
+                ),
                 dtype=torch.int32,
             ),
             block_size=pool_block_size,
@@ -449,6 +481,37 @@ def test_cp_sharded_fill_uses_owner_block_size_for_restore_but_pool_block_for_ga
             tag = req_id * 40 + token_idx + 1
             expected = torch.arange(tag, tag + D, dtype=torch.float32)
             assert torch.equal(out[req_id, 1 + token_idx], expected)
+
+
+def test_cp_sharded_async_waits_work_once_before_restore_enqueue():
+    cp_ctx = _fake_cp_ctx(cp_size=2, cp_rank=0)
+    per_req = torch.tensor([0], dtype=torch.int64)
+    reader = PR.CPShardedPoolReader(
+        PR.CPShardConfig(
+            cp_ctx=cp_ctx,
+            per_req_total_kv_lens=per_req,
+            restore_indices=torch.empty(0, dtype=torch.int64),
+            block_size=1,
+            total_local_kv=0,
+            owner_block_size=2,
+        )
+    )
+    work = _CountingWork()
+    handle = PR.CPShardedPoolReadHandle(
+        gathered=torch.empty((0, PR.ENTRY_BYTES), dtype=torch.uint8),
+        work=work,
+        completion_event=None,
+        stream=None,
+        out=torch.empty((1, 0, 1)),
+        seq_lens=torch.tensor([0], dtype=torch.int32),
+        offset=0,
+    )
+
+    reader._wait_fill_work_once(handle)
+    reader._wait_fill_work_once(handle)
+
+    assert work.wait_calls == 1
+    assert handle.work_waited is True
 
 
 def test_cp_sharded_fill_rejects_gather_lens():

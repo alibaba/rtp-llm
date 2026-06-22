@@ -196,6 +196,23 @@ class HCAOverlapGateTest(unittest.TestCase):
         with self._with_env("1"):
             self.assertTrue(layer._should_overlap_swa_kv_gather_for_prefill(common))
 
+    def test_workspace_read_async_requires_overlap_env_and_page_rr(self) -> None:
+        layer = _make_attention_stub(compress_ratio=128)
+        common = _make_common(cp_on=True, device=torch.device("cuda"))
+        common.cp_ctx.kv_cache_sharded = True
+        layer._cp_ctx = common.cp_ctx
+
+        with self._with_env("0"):
+            self.assertFalse(layer._should_async_workspace_reads_for_prefill(common))
+
+        common.cp_ctx.kv_cache_sharded = False
+        with self._with_env("1"):
+            self.assertFalse(layer._should_async_workspace_reads_for_prefill(common))
+
+        common.cp_ctx.kv_cache_sharded = True
+        with self._with_env("1"):
+            self.assertTrue(layer._should_async_workspace_reads_for_prefill(common))
+
 
 @unittest.skipUnless(torch.cuda.is_available(), "stream allocation requires CUDA")
 class HCAOverlapStreamCacheTest(unittest.TestCase):

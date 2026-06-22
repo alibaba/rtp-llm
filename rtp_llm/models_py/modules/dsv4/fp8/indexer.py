@@ -409,7 +409,10 @@ class IndexerFP8(PoolBackedModule):
         attention_inputs: _IndexerFP8PrefillMeta,
         k_quant_flat: torch.Tensor,
         k_scale_buf: torch.Tensor,
-    ) -> None:
+        *,
+        cp_gather_stream: Optional[Any] = None,
+        post_gather_stream: Optional[Any] = None,
+    ) -> Optional[Any]:
         """Fill prefill indexer-K buffers from the FP8 pool.
 
         Shared by ``forward`` and ``forward_with_pending_nested`` so the overlap
@@ -429,7 +432,7 @@ class IndexerFP8(PoolBackedModule):
                 attention_inputs.block_table_i32,
                 attention_inputs.cu_kv_seqlens,
             )
-            return
+            return None
 
         from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
 
@@ -472,6 +475,27 @@ class IndexerFP8(PoolBackedModule):
                 padded_k_quant=local_q,
                 padded_k_scale=local_s,
             )
+        if cp_gather_stream is not None and post_gather_stream is not None:
+            pending = asm.start_assemble_indexer_k_async(
+                plan=plan,
+                local_k_quant=local_q,
+                local_k_scale=local_s,
+                out_k_quant=k_quant_flat,
+                out_k_scale=k_scale_buf,
+                stream=cp_gather_stream,
+            )
+            if pending is not None:
+                try:
+                    asm.prepare_assemble_indexer_k_async(
+                        pending,
+                        stream=post_gather_stream,
+                    )
+                except Exception:
+                    with suppress(Exception):
+                        asm.discard_assemble_indexer_k_async(pending)
+                    raise
+                return pending
+
         asm.assemble_indexer_k(
             plan=plan,
             local_k_quant=local_q,
@@ -479,6 +503,24 @@ class IndexerFP8(PoolBackedModule):
             out_k_quant=k_quant_flat,
             out_k_scale=k_scale_buf,
         )
+        return None
+
+    @staticmethod
+    def _wait_prefill_k_cache_gather(pending: Optional[Any]) -> None:
+        if pending is None:
+            return
+        from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
+
+        asm.wait_assemble_indexer_k_async(pending)
+
+    @staticmethod
+    def _discard_prefill_k_cache_gather(pending: Optional[Any]) -> None:
+        if pending is None:
+            return
+        from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
+
+        with suppress(Exception):
+            asm.discard_assemble_indexer_k_async(pending)
 
     # --------------------------------------------------------------
     # Q-projection + RoPE helper (shared between prefill & decode)
@@ -987,6 +1029,8 @@ class IndexerFP8(PoolBackedModule):
         # Always passed (unused on non-CP) so there is one buffer-lifecycle
         # contract and no hidden ``None``/fallback-allocate. Do NOT make Optional.
         workspace: "PrefillWorkspace",
+        cp_gather_stream: Optional[Any] = None,
+        post_gather_stream: Optional[Any] = None,
     ) -> torch.Tensor:
         M = attention_inputs.M
         T = attention_inputs.T
@@ -1013,6 +1057,7 @@ class IndexerFP8(PoolBackedModule):
             self.compressor.freqs_cis = self.freqs_cis
 
         self._propagate_pool_to_nested()
+        indexer_k_pending = None
         try:
             with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
                 q = self._compute_indexer_q(qr, attention_inputs.freqs_cis_slice)
@@ -1048,14 +1093,13 @@ class IndexerFP8(PoolBackedModule):
                 )
                 # quant_block_size = head_dim*4/dst_scale.size(1) = 128*4/4 = 128.
                 k_scale_buf = torch.empty((T, 4), dtype=torch.uint8, device=x.device)
-                self._gather_prefill_k_cache(
+                indexer_k_pending = self._gather_prefill_k_cache(
                     attention_inputs,
                     k_quant_flat,
                     k_scale_buf,
+                    cp_gather_stream=cp_gather_stream,
+                    post_gather_stream=post_gather_stream,
                 )
-                # ``deep_gemm.fp8_mqa_logits`` expects k_scale as 1D fp32
-                # contig — view uint8 [T, 4] → fp32 [T, 1] → squeeze [T].
-                k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
 
             # Phase-3a part 3 fix: when ``_compute_indexer_q`` was given a
             # flat 2D qr it returns 3D ``[T, H, D]``; ``indexer_q_fp8_quant_fold``
@@ -1068,6 +1112,16 @@ class IndexerFP8(PoolBackedModule):
                 q_fp8, w_fold = indexer_q_fp8_quant_fold(
                     _as_bf16_contig(q_for_quant), _as_bf16_contig(w_for_quant)
                 )
+
+            if indexer_k_pending is not None:
+                with record_function_range(
+                    "dsv4.fp8.indexer.prefill.gather_k_cache.prefetch_wait"
+                ):
+                    self._wait_prefill_k_cache_gather(indexer_k_pending)
+                indexer_k_pending = None
+            # ``deep_gemm.fp8_mqa_logits`` expects k_scale as 1D fp32 contig:
+            # view uint8 [T, 4] → fp32 [T, 1] → squeeze [T].
+            k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
 
             q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
             w_score = w_fold.view(M, self.n_heads)
@@ -1107,6 +1161,7 @@ class IndexerFP8(PoolBackedModule):
 
             return out_buf.view(out_shape)
         finally:
+            self._discard_prefill_k_cache_gather(indexer_k_pending)
             self._clear_nested_pool()
 
     # --------------------------------------------------------------
@@ -1172,6 +1227,8 @@ class IndexerFP8(PoolBackedModule):
         attention_inputs: _IndexerFP8PrefillMeta,
         nested_pending: Optional[_CompressorPending],
         before_gather_k: Optional[Callable[[], None]] = None,
+        cp_gather_stream: Optional[Any] = None,
+        post_gather_stream: Optional[Any] = None,
     ) -> torch.Tensor:
         """Overlap-variant of :meth:`forward`.
 
@@ -1217,6 +1274,7 @@ class IndexerFP8(PoolBackedModule):
         # entered through this path without start_prefill_nested_compressor
         # (e.g. tests) still work.
         self._propagate_pool_to_nested()
+        indexer_k_pending = None
         try:
             with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
                 q = self._compute_indexer_q(qr, attention_inputs.freqs_cis_slice)
@@ -1248,12 +1306,13 @@ class IndexerFP8(PoolBackedModule):
                     device=x.device,
                 )
                 k_scale_buf = torch.empty((T, 4), dtype=torch.uint8, device=x.device)
-                self._gather_prefill_k_cache(
+                indexer_k_pending = self._gather_prefill_k_cache(
                     attention_inputs,
                     k_quant_flat,
                     k_scale_buf,
+                    cp_gather_stream=cp_gather_stream,
+                    post_gather_stream=post_gather_stream,
                 )
-                k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
 
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
@@ -1261,6 +1320,14 @@ class IndexerFP8(PoolBackedModule):
                 q_fp8, w_fold = indexer_q_fp8_quant_fold(
                     _as_bf16_contig(q_for_quant), _as_bf16_contig(w_for_quant)
                 )
+
+            if indexer_k_pending is not None:
+                with record_function_range(
+                    "dsv4.fp8.indexer.prefill.gather_k_cache.prefetch_wait"
+                ):
+                    self._wait_prefill_k_cache_gather(indexer_k_pending)
+                indexer_k_pending = None
+            k_scale_flat = k_scale_buf.view(torch.float32).squeeze(-1)
 
             q_score = q_fp8.view(M, self.n_heads, INDEXER_HEAD_DIM)
             w_score = w_fold.view(M, self.n_heads)
@@ -1296,4 +1363,5 @@ class IndexerFP8(PoolBackedModule):
 
             return out_buf.view(out_shape)
         finally:
+            self._discard_prefill_k_cache_gather(indexer_k_pending)
             self._clear_nested_pool()
