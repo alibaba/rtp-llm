@@ -98,20 +98,26 @@ def _get_effective_backends(fmha_config: FMHAConfig, is_prefill: bool) -> List[s
 def _get_blocked_backends(fmha_config: FMHAConfig) -> set:
     if not fmha_config.disable_attn_backends:
         return set()
-    return {
-        s.strip() for s in fmha_config.disable_attn_backends.split(",") if s.strip()
-    }
+    blocked = {s.strip() for s in fmha_config.disable_attn_backends.split(",") if s.strip()}
+    # Expand alias: "flashinfer" → also block "py_flashinfer" (the canonical NAME).
+    # This ensures the blocklist works in both auto and explicit backend modes.
+    if "flashinfer" in blocked:
+        blocked.add("py_flashinfer")
+    return blocked
 
 
 def _is_fmha_impl_disabled_legacy(impl_class: type, fmha_config: FMHAConfig) -> bool:
     """Legacy boolean flag check. Only called when effective_backend == "auto"."""
+    # Global FMHA switch: when false, disable all MHA implementations.
+    if not fmha_config.enable_fmha:
+        return True
     impl_class_name = impl_class.__name__
     if "XQA" in impl_class_name:
         return not fmha_config.enable_xqa
     elif impl_class_name == "TRTMHAImpl":
-        return not fmha_config.enable_trt_fmha
+        return not fmha_config.enable_trt_fmha or not fmha_config.enable_open_source_fmha
     elif impl_class_name == "TRTPagedMHAImpl":
-        return not fmha_config.enable_paged_trt_fmha
+        return not fmha_config.enable_paged_trt_fmha or not fmha_config.enable_open_source_fmha
     elif "FlashInfer" in impl_class_name or "Flashinfer" in impl_class_name:
         return fmha_config.disable_flash_infer
     elif (
@@ -189,8 +195,10 @@ def get_fmha_impl(
         name_to_impls.setdefault("flashinfer", []).extend(
             name_to_impls.get("py_flashinfer", [])
         )
-
-    # Validate explicit backend list / blocklist names early so typos fail-fast.
+    # Also expand the alias in the blocked set so auto mode honors it.
+    if "py_flashinfer" in blocked:
+        blocked.add("flashinfer")
+    # Rebuild known_names after alias expansion.
     known_names = registered_names | {"auto", "none", "flashinfer"}
     for backend_name in backends:
         if backend_name not in known_names:

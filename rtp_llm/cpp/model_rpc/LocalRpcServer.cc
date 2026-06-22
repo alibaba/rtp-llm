@@ -44,13 +44,20 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         const auto vit_separation = maga_init_params.vit_config.vit_separation;
         const auto role_type      = maga_init_params.pd_sep_config.role_type;
         const auto tp_rank        = maga_init_params.parallelism_config.tp_rank;
-        if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
+        // VIT_SEPARATION_REMOTE: always use RemoteMultimodalProcessor.
+        // VIT_SEPARATION_ROLE: only the VIT role process has a local
+        //   mm_process_engine; non-VIT roles (PREFILL/DECODE/etc.) must
+        //   use RemoteMultimodalProcessor to call the VIT process.
+        // VIT_SEPARATION_LOCAL: backend process has a local mm_process_engine.
+        const bool use_remote =
+            vit_separation == VitSeparation::VIT_SEPARATION_REMOTE
+            || (vit_separation == VitSeparation::VIT_SEPARATION_ROLE
+                && role_type != RoleType::VIT);
+        if (use_remote) {
             mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
                                                               maga_init_params.model_config_.max_seq_len));
         } else {
-            // VIT_SEPARATION_LOCAL / VIT_SEPARATION_ROLE both require a local
-            // mm_process_engine in the backend process.  If it is missing we
-            // must fail fast rather than silently falling back to remote RPC.
+            // Local mode (LOCAL or ROLE+VIT) requires mm_process_engine.
             if (mm_process_engine.is_none()) {
                 return grpc::Status(
                     grpc::StatusCode::INTERNAL,

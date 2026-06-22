@@ -27,6 +27,8 @@ from pathlib import Path
 from setuptools import Extension
 from setuptools import setup as setuptools_setup
 from setuptools.command.build_ext import build_ext
+from setuptools.command.build_py import build_py
+from setuptools.command.sdist import sdist
 
 # Force line-buffered stdout so prints appear in real-time in CI (no TTY)
 if hasattr(sys.stdout, "reconfigure"):
@@ -1627,6 +1629,26 @@ print(f"Building rtp-llm version: {version}")
 cmdclass = {"build_ext": BuildBazelExtension, "test": BazelTest}
 if BdistWheelWithPlatform is not None:
     cmdclass["bdist_wheel"] = BdistWheelWithPlatform
+
+
+class BuildPyWithProto(build_py):
+    """Ensure proto-generated *_pb2.py files exist before build_py copies them."""
+
+    def run(self):
+        ensure_proto_files_generated(get_project_root())
+        super().run()
+
+
+class SdistWithProto(sdist):
+    """Ensure proto-generated *_pb2.py files are included in sdist."""
+
+    def run(self):
+        ensure_proto_files_generated(get_project_root())
+        super().run()
+
+
+cmdclass["build_py"] = BuildPyWithProto
+cmdclass["sdist"] = SdistWithProto
 
 # Only invoke setuptools when running as a script (`python setup.py …`). PEP 517 / setuptools
 # imports this file to resolve ``dynamic_version`` / metadata; a top-level ``setup()`` call would

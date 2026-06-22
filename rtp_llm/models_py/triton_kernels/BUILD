@@ -20,6 +20,7 @@ py_library(
     deps = [
         ":common",
         ":fla",
+        "//rtp_llm/models_py/triton_kernels/autotune_cache:autotune_cache",
     ],
 )
 

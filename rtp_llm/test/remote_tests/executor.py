@@ -738,6 +738,25 @@ class RemoteExecutor:
         if op.error and op.error.code != 0:
             err_msg = f"LRO operation failed: code={op.error.code}, message={op.error.message!r}"
             log.error(err_msg)
+            # Classify the error: recoverable infra failures (worker setup,
+            # GPU Xid, etc.) should return exit_code=-1 with infra_category
+            # so the caller can failover/retry.  Non-recoverable errors are
+            # treated as normal test failures (exit_code=1).
+            status_message = op.error.message or ""
+            infra_category = self._classify_execute_response_infra(
+                exit_code=op.error.code,
+                status_code=op.error.code,
+                status_message=status_message,
+                stdout_raw=b"",
+                stderr_raw=err_msg.encode("utf-8"),
+            )
+            if infra_category is not None:
+                return ExecutionResult(
+                    exit_code=-1,
+                    stderr_raw=err_msg.encode("utf-8"),
+                    executor_endpoint=self.grpc_uri,
+                    infra_category=infra_category,
+                )
             return ExecutionResult(
                 exit_code=1,
                 stderr_raw=err_msg.encode("utf-8"),

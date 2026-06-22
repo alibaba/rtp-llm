@@ -1,7 +1,7 @@
 import ipaddress
 import logging
 import socket
-from typing import Dict
+from typing import Any, Dict
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -93,13 +93,26 @@ def _validate_url(url: str) -> str:
 
 
 class _SSRFAdapter(HTTPAdapter):
-    """requests adapter that pins connections to a validated IP address.
+    """requests adapter that pins TCP connections to a validated IP address.
 
     This closes the DNS-rebinding window: the hostname is resolved and its IP
     is validated before the connection is made, and the actual TCP connection
-    uses that IP while the HTTP Host header / HTTPS SNI stay with the original
-    host.
+    uses that IP while the HTTP Host header / HTTPS SNI / certificate
+    verification stay with the original host.
+
+    The URL is NOT rewritten — instead the connection pool's ``host`` is
+    overridden after creation so that urllib3 connects to the validated IP
+    while TLS uses the original hostname for SNI and ``assert_hostname``.
     """
+
+    @staticmethod
+    def _pin_connection(conn: Any, validated_ip: str, original_host: str, scheme: str):
+        """Override the pool's TCP target to *validated_ip* while keeping TLS
+        hostname set to *original_host*."""
+        conn.host = validated_ip
+        if scheme == "https":
+            conn.server_hostname = original_host
+            conn.assert_hostname = original_host
 
     def get_connection_with_tls_context(
         self,
@@ -109,11 +122,24 @@ class _SSRFAdapter(HTTPAdapter):
         cert: object = None,
     ):
         conn = super().get_connection_with_tls_context(request, verify, proxies, cert)
-        # request.url has been rewritten to the validated IP by send(); keep
-        # SNI / certificate hostname pinned to the original host name.
+        validated_ip = getattr(request, "_ssrf_validated_ip", None)
         original_host = getattr(request, "_ssrf_original_host", None)
-        if original_host and urlparse(request.url).scheme == "https":
-            conn.server_hostname = original_host
+        if validated_ip and original_host:
+            scheme = urlparse(request.url).scheme
+            self._pin_connection(conn, validated_ip, original_host, scheme)
+        return conn
+
+    def get_connection(self, url: str, proxies: object = None):
+        """Fallback for older requests versions (pre-2.32)."""
+        conn = super().get_connection(url, proxies)
+        parsed = urlparse(url)
+        original_host = parsed.hostname
+        if original_host:
+            try:
+                validated_ip = _resolve_and_validate_host(original_host)
+                self._pin_connection(conn, validated_ip, original_host, parsed.scheme)
+            except ValueError:
+                pass
         return conn
 
     def send(
@@ -126,22 +152,14 @@ class _SSRFAdapter(HTTPAdapter):
         proxies: object = None,
     ):
         parsed = urlparse(request.url)
-        original_host = parsed.hostname
-        validated_ip = _resolve_and_validate_host(original_host or "")
-        port = parsed.port
-        if port is not None:
-            new_netloc = f"[{validated_ip}]:{port}" if ":" in validated_ip else f"{validated_ip}:{port}"
-        else:
-            new_netloc = f"[{validated_ip}]" if ":" in validated_ip else validated_ip
-
-        original_url = request.url
-        request.url = parsed._replace(netloc=new_netloc).geturl()
-        request.headers["Host"] = original_host
+        original_host = str(parsed.hostname or "")
+        validated_ip = _resolve_and_validate_host(original_host)
+        # Store for get_connection_with_tls_context / get_connection.
+        # Do NOT rewrite request.url — keep the original hostname so that
+        # TLS SNI and certificate verification work correctly.
+        request._ssrf_validated_ip = validated_ip
         request._ssrf_original_host = original_host
-        try:
-            return super().send(request, stream, timeout, verify, cert, proxies)
-        finally:
-            request.url = original_url
+        return super().send(request, stream, timeout, verify, cert, proxies)
 
 
 def safe_request_get(url: str, headers: Dict[str, str], timeout: int = 10):
@@ -171,6 +189,7 @@ def safe_request_get(url: str, headers: Dict[str, str], timeout: int = 10):
         )
         if response.is_redirect:
             location = response.headers.get("Location", "")
+            response.close()
             if not location:
                 break
             next_url = urljoin(current_url, location)
