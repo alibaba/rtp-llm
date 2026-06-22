@@ -18,6 +18,8 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         self._orig_rccl_world_size = hr._rccl_world_size
         self._orig_rccl_lib = hr._rccl_lib
         self._orig_cache = dict(hr._hipgraph_allgather_outputs)
+        self._orig_ar_config = getattr(hr, "_rocm_ar_config", None)
+        self._orig_metadata_group_map = getattr(ct, "_metadata_group_map", {}).copy()
         hr._hipgraph_allgather_outputs.clear()
 
     def tearDown(self):
@@ -27,6 +29,11 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         hr._rccl_lib = self._orig_rccl_lib
         hr._hipgraph_allgather_outputs.clear()
         hr._hipgraph_allgather_outputs.update(self._orig_cache)
+        if self._orig_ar_config is not None:
+            hr._rocm_ar_config = self._orig_ar_config
+        if hasattr(ct, "_metadata_group_map"):
+            ct._metadata_group_map.clear()
+            ct._metadata_group_map.update(self._orig_metadata_group_map)
 
     def test_should_use_hipgraph_capture_rccl(self):
         hr._is_rocm_runtime = True
@@ -132,6 +139,37 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
             )
         bootstrap.assert_called_once_with(tp_group)
 
+    def test_configure_rocm_custom_ar_from_hw_config(self):
+        cfg = SimpleNamespace(
+            enable_rocm_vllm_custom_ar=True,
+            enable_rocm_quick_reduce=True,
+            rocm_quick_reduce_quantization="int6",
+        )
+
+        hr.configure_custom_ar_from_hw_config(cfg)
+
+        self.assertTrue(hr._rocm_ar_config.enable_vllm_custom_ar)
+        self.assertTrue(hr._rocm_ar_config.enable_quick_reduce)
+        self.assertEqual(hr._rocm_ar_config.quick_reduce_quantization, "INT6")
+
+    def test_prepare_comm_receives_metadata_group(self):
+        hr._is_rocm_runtime = True
+        parallelism_config = SimpleNamespace(tp_size=2, world_size=2)
+        tp_group = object()
+        tp_metadata_group = object()
+
+        with patch.object(
+            hr, "bootstrap_hipgraph_capture_rccl_comm_from_tp_group"
+        ) as bootstrap, patch.object(hr, "_init_optional_ar_backends") as init_optional:
+            hr.prepare_hipgraph_capture_rccl_comm_if_needed(
+                parallelism_config,
+                tp_group,
+                tp_metadata_group=tp_metadata_group,
+            )
+
+        bootstrap.assert_called_once_with(tp_group)
+        init_optional.assert_called_once_with(parallelism_config, tp_metadata_group)
+
     def test_all_gather_fail_fast_when_capture_has_no_rccl_comm(self):
         hr._is_rocm_runtime = True
         hr._rccl_comm = None
@@ -232,9 +270,12 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
 
         tensor = torch.zeros((4,), dtype=torch.float16)
         mock_group = object()
-        with patch.object(hr, "_is_hipgraph_capture_active", return_value=True), \
-             patch("torch.cuda.current_stream") as mock_stream, \
-             patch("rtp_llm.models_py.distributed.collective_torch._get_group", return_value=mock_group):
+        with patch.object(hr, "_is_hipgraph_capture_active", return_value=True), patch(
+            "torch.cuda.current_stream"
+        ) as mock_stream, patch(
+            "rtp_llm.models_py.distributed.collective_torch._get_group",
+            return_value=mock_group,
+        ):
             mock_stream.return_value.cuda_stream = 0
             result = ct.all_reduce(tensor, ct.Group.TP)
 
@@ -251,9 +292,12 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
 
         tensor = torch.zeros((2, 4), dtype=torch.bfloat16)
         mock_group = object()
-        with patch.object(hr, "_is_hipgraph_capture_active", return_value=True), \
-             patch("torch.cuda.current_stream") as mock_stream, \
-             patch("rtp_llm.models_py.distributed.collective_torch._get_group", return_value=mock_group):
+        with patch.object(hr, "_is_hipgraph_capture_active", return_value=True), patch(
+            "torch.cuda.current_stream"
+        ) as mock_stream, patch(
+            "rtp_llm.models_py.distributed.collective_torch._get_group",
+            return_value=mock_group,
+        ):
             mock_stream.return_value.cuda_stream = 0
             out = ct.all_gather(tensor, ct.Group.TP)
 
@@ -353,7 +397,10 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
             consume_capture=mock_consume,
             has_pending_capture=mock_has_pending,
         )
-        with patch.dict("sys.modules", {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": fake_module}):
+        with patch.dict(
+            "sys.modules",
+            {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": fake_module},
+        ):
             hr.finish_hipgraph_capture_session()
 
         mock_has_pending.assert_called_once()
@@ -367,7 +414,10 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
             consume_capture=mock_consume,
             has_pending_capture=mock_has_pending,
         )
-        with patch.dict("sys.modules", {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": fake_module}):
+        with patch.dict(
+            "sys.modules",
+            {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": fake_module},
+        ):
             hr.finish_hipgraph_capture_session()
 
         mock_has_pending.assert_called_once()
@@ -375,19 +425,26 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
 
     def test_finish_session_propagates_consume_error(self):
         """Runtime errors from consume_capture() propagate (not silenced)."""
-        mock_consume = unittest.mock.MagicMock(side_effect=RuntimeError("barrier timeout"))
+        mock_consume = unittest.mock.MagicMock(
+            side_effect=RuntimeError("barrier timeout")
+        )
         mock_has_pending = unittest.mock.MagicMock(return_value=True)
         fake_module = SimpleNamespace(
             consume_capture=mock_consume,
             has_pending_capture=mock_has_pending,
         )
-        with patch.dict("sys.modules", {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": fake_module}):
+        with patch.dict(
+            "sys.modules",
+            {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": fake_module},
+        ):
             with self.assertRaises(RuntimeError):
                 hr.finish_hipgraph_capture_session()
 
     def test_finish_session_tolerates_import_error(self):
         """ImportError (trt_allreduce unavailable) is silently handled."""
-        with patch.dict("sys.modules", {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": None}):
+        with patch.dict(
+            "sys.modules", {"rtp_llm.models_py.modules.base.rocm.trt_allreduce": None}
+        ):
             hr.finish_hipgraph_capture_session()
 
 

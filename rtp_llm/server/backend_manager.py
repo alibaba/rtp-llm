@@ -57,6 +57,7 @@ class BackendManager(object):
                 nccl_init_port=self._distributed_server.get_nccl_init_port(),
                 backend="nccl",
                 timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
+                hw_kernel_config=engine_config.hw_kernel_config,
             )
         world_info = get_world_info(
             self.py_env_configs.server_config,

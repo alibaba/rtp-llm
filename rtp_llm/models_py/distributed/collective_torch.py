@@ -34,7 +34,9 @@ class Group(Enum):
 # Global process group storage
 # Key can be Group enum or string (for multiple DP/TP groups)
 _group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
+_metadata_group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
 _parallelism_config: Optional[ParallelismConfig] = None
+_hw_kernel_config = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
 
 
@@ -44,6 +46,7 @@ def init_distributed_environment(
     nccl_init_port: int,
     backend: str = "nccl",
     timeout: Optional[int] = None,
+    hw_kernel_config=None,
 ):
     """Initialize distributed environment and create process groups.
 
@@ -60,7 +63,10 @@ def init_distributed_environment(
     Raises:
         RuntimeError: If already initialized and not destroyed
     """
-    global _group_map, _parallelism_config, _initialized
+    global _group_map, _parallelism_config, _hw_kernel_config, _initialized
+
+    _hw_kernel_config = hw_kernel_config
+    rocm_rccl.configure_custom_ar_from_hw_config(hw_kernel_config)
 
     # Check if already initialized (and not destroyed)
     if _initialized and torch.distributed.is_initialized():
@@ -72,7 +78,9 @@ def init_distributed_environment(
             _create_process_groups(parallelism_config, backend, timedelta(days=36500))
             _register_process_groups_to_cpp()
         if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
-            rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
+            rocm_rccl.prepare_comm_if_needed(
+                parallelism_config, _get_group(Group.TP), _get_tp_metadata_group()
+            )
         return
 
     assert backend in ["nccl"], "backend current only supports nccl"
@@ -94,7 +102,9 @@ def init_distributed_environment(
         _initialized = True
         _register_process_groups_to_cpp()
         if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
-            rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
+            rocm_rccl.prepare_comm_if_needed(
+                parallelism_config, _get_group(Group.TP), _get_tp_metadata_group()
+            )
         return
 
     logging.info(
@@ -128,8 +138,30 @@ def init_distributed_environment(
     _initialized = True
     _register_process_groups_to_cpp()
     if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
-        rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
+        rocm_rccl.prepare_comm_if_needed(
+            parallelism_config, _get_group(Group.TP), _get_tp_metadata_group()
+        )
     init_user_buffers_environment(parallelism_config)
+
+
+def _needs_tp_metadata_group() -> bool:
+    if _hw_kernel_config is None:
+        return False
+    return bool(
+        getattr(_hw_kernel_config, "enable_rocm_vllm_custom_ar", False)
+        or getattr(_hw_kernel_config, "enable_rocm_quick_reduce", False)
+    )
+
+
+def _get_tp_metadata_group():
+    if _parallelism_config is None:
+        return None
+    if _parallelism_config.tp_size <= 1:
+        return None
+    if _parallelism_config.world_size == _parallelism_config.tp_size:
+        return _metadata_group_map.get(Group.TP)
+    dp_rank = torch.distributed.get_rank() // _parallelism_config.tp_size
+    return _metadata_group_map.get(Group.TP.name + str(dp_rank))
 
 
 def _create_process_groups(
@@ -199,12 +231,34 @@ def _create_process_groups(
                         f"[rank: {world_rank}] Stored TP group with key: {group_key} {tp_group} with ranks: {tp_ranks}"
                     )
 
+                if _needs_tp_metadata_group():
+                    tp_metadata_group = torch.distributed.new_group(
+                        ranks=tp_ranks,
+                        backend="gloo",
+                        timeout=timedelta(days=36500),
+                    )
+                    if world_rank in tp_ranks:
+                        _metadata_group_map[group_key] = tp_metadata_group
+                        logging.info(
+                            f"[rank: {world_rank}] Stored TP metadata group "
+                            f"with key: {group_key} {tp_metadata_group} "
+                            f"with ranks: {tp_ranks}"
+                        )
+
                 init_symm_mem_communicator(tp_group)
 
                 # All ranks must wait for group creation to complete
                 torch.distributed.barrier()
     elif tp_size > 1 and world_size == tp_size:
         # Single TP group: WORLD is the TP group, init symm_mem for it
+        if _needs_tp_metadata_group():
+            tp_metadata_group = torch.distributed.new_group(
+                ranks=list(range(world_size)),
+                backend="gloo",
+                timeout=timedelta(days=36500),
+            )
+            _metadata_group_map[Group.TP] = tp_metadata_group
+            logging.info(f"[rank: {world_rank}] Stored TP metadata group for WORLD TP")
         init_symm_mem_communicator(torch.distributed.group.WORLD)
 
 
@@ -426,7 +480,7 @@ def destroy_distributed_environment():
     After calling this function, init_distributed_environment() can be called again
     to reinitialize the distributed environment.
     """
-    global _group_map, _parallelism_config, _initialized
+    global _group_map, _metadata_group_map, _parallelism_config, _hw_kernel_config, _initialized
 
     rank = torch.distributed.get_rank()
     logging.info(f"[rank: {rank}] Destroying distributed environment")
@@ -457,8 +511,10 @@ def destroy_distributed_environment():
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
     _group_map.clear()
+    _metadata_group_map.clear()
     logging.info(f"[rank: {rank}] Distributed environment destroyed")
     _parallelism_config = None
+    _hw_kernel_config = None
     _initialized = False
     gc.collect()
 
@@ -662,7 +718,10 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         dtype=input_tensor.dtype,
     )
     torch.distributed.reduce_scatter_tensor(
-        output_tensor, input_tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
+        output_tensor,
+        input_tensor,
+        op=torch.distributed.ReduceOp.SUM,
+        group=process_group,
     )
     return output_tensor
 

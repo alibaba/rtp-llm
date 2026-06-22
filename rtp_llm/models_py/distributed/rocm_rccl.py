@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
+from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import torch
@@ -61,6 +62,19 @@ _HipgraphAllGatherCacheKey = Tuple[Tuple[int, ...], torch.dtype, str, int]
 _hipgraph_allgather_outputs: Dict[_HipgraphAllGatherCacheKey, torch.Tensor] = {}
 
 
+@dataclass
+class RocmAllReduceConfig:
+    enable_vllm_custom_ar: bool = False
+    enable_quick_reduce: bool = False
+    quick_reduce_quantization: str = "FP"
+
+
+_rocm_ar_config = RocmAllReduceConfig()
+_optional_ar_backends_initialized = False
+_vllm_custom_ar_backend = None
+_quick_reduce_backend = None
+
+
 class _NcclUniqueId(ctypes.Structure):
     _fields_ = [("internal", ctypes.c_char * 128)]
 
@@ -68,6 +82,36 @@ class _NcclUniqueId(ctypes.Structure):
 def is_rocm_runtime() -> bool:
     """Whether the current torch runtime is ROCm/HIP."""
     return _is_rocm_runtime
+
+
+def configure_custom_ar_from_hw_config(hw_kernel_config) -> None:
+    global _rocm_ar_config
+
+    if hw_kernel_config is None:
+        _rocm_ar_config = RocmAllReduceConfig()
+        return
+
+    quantization = getattr(hw_kernel_config, "rocm_quick_reduce_quantization", "FP")
+    quantization = str(quantization).upper()
+    if quantization not in ("FP", "INT8", "INT6", "INT4"):
+        raise ValueError(f"Invalid ROCm QuickReduce quantization: {quantization}")
+
+    _rocm_ar_config = RocmAllReduceConfig(
+        enable_vllm_custom_ar=bool(
+            getattr(hw_kernel_config, "enable_rocm_vllm_custom_ar", False)
+        ),
+        enable_quick_reduce=bool(
+            getattr(hw_kernel_config, "enable_rocm_quick_reduce", False)
+        ),
+        quick_reduce_quantization=quantization,
+    )
+    logging.info(
+        "ROCm TP all-reduce config: enable_vllm_custom_ar=%s, "
+        "enable_quick_reduce=%s, quick_reduce_quantization=%s",
+        _rocm_ar_config.enable_vllm_custom_ar,
+        _rocm_ar_config.enable_quick_reduce,
+        _rocm_ar_config.quick_reduce_quantization,
+    )
 
 
 def _get_nccl_dtype(tensor: torch.Tensor) -> int:
@@ -204,7 +248,9 @@ def _get_rccl_runtime(
         raise RuntimeError(
             "RCCL library is not available for HIPGraph capture collectives"
         )
-    if (_rccl_comm is None or _rccl_comm.value is None) and not _is_hipgraph_capture_active():
+    if (
+        _rccl_comm is None or _rccl_comm.value is None
+    ) and not _is_hipgraph_capture_active():
         _ensure_rccl_comm_from_process_group(process_group)
     if _rccl_comm is None or _rccl_comm.value is None:
         raise RuntimeError(
@@ -270,6 +316,7 @@ def set_hipgraph_capture_nccl_comm(
         return
     _pre_init_trtllm_allreduce()
 
+
 def _pre_init_trtllm_allreduce(
     tp_group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> None:
@@ -287,6 +334,7 @@ def _pre_init_trtllm_allreduce(
         from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
             ensure_trtllm_comm_initialized,
         )
+
         if not torch.distributed.is_initialized():
             return
         if tp_group is None:
@@ -296,6 +344,7 @@ def _pre_init_trtllm_allreduce(
         logging.info("Pre-init trtllm_allreduce succeeded (device_id=%s)", device_id)
     except Exception as exc:
         logging.warning("Pre-init trtllm_allreduce failed (non-fatal): %s", exc)
+
 
 def _warmup_rccl_collectives(
     lib: ctypes.CDLL, comm: ctypes.c_void_p, world_size: int
@@ -310,23 +359,30 @@ def _warmup_rccl_collectives(
         nccl_float = _get_nccl_dtype(dummy_in)
 
         res = lib.ncclAllGather(
-            dummy_in.data_ptr(), ag_out.data_ptr(),
-            dummy_in.numel(), nccl_float, comm, stream,
+            dummy_in.data_ptr(),
+            ag_out.data_ptr(),
+            dummy_in.numel(),
+            nccl_float,
+            comm,
+            stream,
         )
         if res != _NCCL_SUCCESS:
             logging.warning("RCCL AllGather warmup returned error %d", res)
 
         res = lib.ncclAllReduce(
-            ar_out.data_ptr(), ar_out.data_ptr(),
-            ar_out.numel(), nccl_float, _NCCL_SUM, comm, stream,
+            ar_out.data_ptr(),
+            ar_out.data_ptr(),
+            ar_out.numel(),
+            nccl_float,
+            _NCCL_SUM,
+            comm,
+            stream,
         )
         if res != _NCCL_SUCCESS:
             logging.warning("RCCL AllReduce warmup returned error %d", res)
 
         torch.cuda.synchronize(device)
-        logging.info(
-            "RCCL collective warmup succeeded (world_size=%d)", world_size
-        )
+        logging.info("RCCL collective warmup succeeded (world_size=%d)", world_size)
     except Exception as e:
         logging.warning("RCCL collective warmup failed (non-fatal): %s", e)
 
@@ -404,6 +460,7 @@ def bootstrap_hipgraph_capture_rccl_comm_from_tp_group(
 def prepare_hipgraph_capture_rccl_comm_if_needed(
     parallelism_config: ParallelismConfig,
     tp_group: torch.distributed.ProcessGroup,
+    tp_metadata_group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> None:
     if not _is_rocm_runtime:
         return
@@ -414,6 +471,23 @@ def prepare_hipgraph_capture_rccl_comm_if_needed(
     # Pre-initialize trt_allreduce with the correct TP group so that
     # hipgraph_capture_all_reduce can use it during graph capture.
     _pre_init_trtllm_allreduce(tp_group)
+    _init_optional_ar_backends(parallelism_config, tp_metadata_group)
+
+
+def _init_optional_ar_backends(
+    parallelism_config: ParallelismConfig,
+    tp_metadata_group: Optional[torch.distributed.ProcessGroup],
+) -> None:
+    if not (
+        _rocm_ar_config.enable_vllm_custom_ar or _rocm_ar_config.enable_quick_reduce
+    ):
+        return
+    if tp_metadata_group is None:
+        logging.warning(
+            "ROCm optional TP all-reduce backends are enabled but no TP metadata "
+            "group is available"
+        )
+        return
 
 
 def enter_hipgraph_capture_mode(
@@ -468,11 +542,7 @@ def finish_hipgraph_capture_session() -> None:
 
 
 def should_use_hipgraph_capture_rccl(is_tp_group: bool) -> bool:
-    return (
-        _is_rocm_runtime
-        and is_tp_group
-        and _is_hipgraph_capture_active()
-    )
+    return _is_rocm_runtime and is_tp_group and _is_hipgraph_capture_active()
 
 
 def ensure_tp_rccl_comm_for_capture(is_tp_group: bool) -> None:
@@ -494,16 +564,22 @@ def _is_hidden_size_supported_for_trtllm(hidden_size: int) -> bool:
         from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
             ALLREDUCE_SUPPORTED_HIDDEN_SIZES,
         )
+
         return hidden_size in ALLREDUCE_SUPPORTED_HIDDEN_SIZES
     except Exception:
         return False
 
+
 def _is_trtllm_allreduce_ready() -> bool:
     try:
-        from rtp_llm.models_py.modules.base.rocm.trt_allreduce import is_trt_allreduce_ready
+        from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
+            is_trt_allreduce_ready,
+        )
+
         return is_trt_allreduce_ready()
     except ImportError:
         return False
+
 
 _trtllm_fallback_warned: bool = False
 
@@ -524,6 +600,7 @@ def hipgraph_capture_all_reduce(
             from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
                 allreduce as trtllm_allreduce,
             )
+
             device_id = torch.cuda.current_device()
             return trtllm_allreduce(
                 allreduce_in=tensor,
@@ -534,7 +611,8 @@ def hipgraph_capture_all_reduce(
             if not _trtllm_fallback_warned:
                 logging.warning(
                     "trtllm_allreduce failed in graph capture mode, "
-                    "fallback to ncclAllReduce (further warnings suppressed): %s", exc,
+                    "fallback to ncclAllReduce (further warnings suppressed): %s",
+                    exc,
                 )
                 _trtllm_fallback_warned = True
 
@@ -613,8 +691,11 @@ def set_capture_comm(nccl_comm_handle: int, world_size: int, rank: int) -> None:
 def prepare_comm_if_needed(
     parallelism_config: ParallelismConfig,
     tp_group: torch.distributed.ProcessGroup,
+    tp_metadata_group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> None:
-    prepare_hipgraph_capture_rccl_comm_if_needed(parallelism_config, tp_group)
+    prepare_hipgraph_capture_rccl_comm_if_needed(
+        parallelism_config, tp_group, tp_metadata_group
+    )
 
 
 def enter_capture_mode(
