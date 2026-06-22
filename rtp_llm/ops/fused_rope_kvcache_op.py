@@ -174,14 +174,21 @@ class FusedRopeKVCacheDecodeOp:
         self._dummy_scale: Optional[torch.Tensor] = None
 
     def _get_kv_scale(self, kv_cache: LayerKVCache) -> Optional[torch.Tensor]:
-        # FP8 KV cache uses direct cast (no dynamic scaling), so the kernel always writes
-        # scale = 1.0. The buffer here is an output target for the kernel, not a real scale.
+        # FP8 KV cache uses direct cast (no dynamic scaling): the RoPE kernel
+        # hardcodes s_max=128 in fused_rope_kvcache_kernel.cu, so the stored
+        # per-block scale is always 1.0 (see xqa.py XQAParams.kv_scale comment).
+        # Attention kernels treat the scale as 1.0 unconditionally —
+        # FlashInfer's k_scale/v_scale default to 1.0 and PyFlashinferDecodeImpl
+        # never passes them; TRTAttn only consumes the buffer pointer. So this
+        # buffer is a kernel pointer-arg / write-target, not a value-carrying scale.
         #
         # `is not None` is sufficient here: pybind11 maps an undefined C++ torch::Tensor to
         # Python None, and the cache allocator only stores defined tensors with numel > 0
-        # (see SingleTypeKVCacheAllocator::allLayerCacheBase). MHAKVCacheSpec guarantees
-        # FP8 dtype always has a scale buffer, so the dummy-scale branch below is purely
-        # defensive and unreachable under normal operation.
+        # (see SingleTypeKVCacheAllocator::allLayerCacheBase). In production
+        # MHAKVCacheSpec always allocates this buffer; the dummy-scale branch
+        # below is a functionally equivalent fallback for callers that build
+        # LayerKVCache by hand (e.g. bench scripts / unit tests) — values are
+        # 1.0 either way, so the two paths are numerically identical.
         if kv_cache.kv_scale_base is not None:
             return kv_cache.kv_scale_base
         if kv_cache.kv_cache_base.dtype == torch.float8_e4m3fn:

@@ -1,49 +1,31 @@
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional, Type
+from typing import Optional, Type
 
 import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.decode_attn_base import (
+    DecodeAttnImplBase,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.utils.arch import get_num_device_sms
-from rtp_llm.ops import (
-    AttentionConfigs,
-    FMHAConfig,
-    FMHAType,
-    KvCacheDataType,
-    ParallelismConfig,
-)
-from rtp_llm.ops.compute_ops import (
-    FusedRopeKVCacheDecodeOp,
-    LayerKVCache,
-    PyAttentionInputs,
-    XQAAttnOp,
-)
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, KvCacheDataType
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, XQAAttnOp
 
 # Constants
 DEFAULT_XQA_WORKSPACE_SIZE_MB = 248
 
 # Global workspace buffer pool
-_g_xqa_workspace_pool: list[torch.Tensor] = []
-_g_xqa_pool_lock = __import__("threading").Lock()
+_g_xqa_workspace_pool = common.WorkspaceBufferPool(DEFAULT_XQA_WORKSPACE_SIZE_MB)
 
 
 def get_xqa_workspace_buffer(device: str = "cuda") -> torch.Tensor:
-    with _g_xqa_pool_lock:
-        if _g_xqa_workspace_pool:
-            return _g_xqa_workspace_pool.pop()
-        else:
-            return torch.zeros(
-                DEFAULT_XQA_WORKSPACE_SIZE_MB * 1024 * 1024,
-                dtype=torch.uint8,
-                device=device,
-            )
+    return _g_xqa_workspace_pool.get(device)
 
 
 def release_xqa_workspace_buffer(buffer: torch.Tensor) -> None:
-    with _g_xqa_pool_lock:
-        _g_xqa_workspace_pool.append(buffer)
+    _g_xqa_workspace_pool.release(buffer)
 
 
 @dataclass
@@ -59,26 +41,7 @@ class XQAParams:
     o_scale: float = 1.0
 
 
-class XQAImpl(FMHAImplBase):
-
-    def __init__(
-        self,
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs,
-        parallelism_config: Optional[ParallelismConfig] = None,
-    ) -> None:
-        self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = XQAAttnOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
-
-        self.attn_inputs = attn_inputs
-
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
-        # C++ XQAParams.sequence_lengths shares storage with this tensor.
-        # Keep a reference so prepare_cuda_graph can update it in-place.
-        self._captured_seq_lens = attn_inputs.sequence_lengths
+class XQAImpl(DecodeAttnImplBase):
 
     @classmethod
     def support(
@@ -87,56 +50,33 @@ class XQAImpl(FMHAImplBase):
         fmha_impl = XQAAttnOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 
-    def forward(
-        self,
-        qkv: torch.Tensor,
-        kv_cache: Optional[LayerKVCache],
-        layer_idx: int = 0,
-    ) -> torch.Tensor:
-        if self.need_rope_kv_cache:
-            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
-        else:
-            fmha_input = qkv
+    # ─── DecodeAttnImplBase hooks ────────────────────────────────────────
 
-        common.apply_write_cache_store(
-            self.write_cache_store_impl, self.attn_inputs, kv_cache
-        )
+    def _create_fmha_impl(self, attn_configs, attn_inputs):
+        return XQAAttnOp(attn_configs)
 
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+    def _init_fmha_params(self, attn_inputs):
+        params = self.fmha_impl.prepare(attn_inputs)
+        # C++ XQAParams.sequence_lengths shares storage with this tensor.
+        # Keep a reference so _prepare_cuda_graph_impl can update it in-place.
+        self._captured_seq_lens = attn_inputs.sequence_lengths
+        return params
 
-    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        common.update_trt_params(
-            self.fmha_impl,
-            self.rope_kvcache_impl,
-            self.fmha_params,
-            self.rope_params,
-            attn_inputs,
-        )
-        # update_trt_params only copies kv_cache_offset. The TRT XQA kernel also
-        # reads sequence_lengths via the captured data_ptr(), so we must update
-        # the data in-place at the address recorded during CUDA graph capture.
+    def _prepare_cuda_graph_impl(self, attn_inputs):
+        # Update fmha kv_cache_offset in-place
+        new_fmha_params = self.fmha_impl.prepare(attn_inputs)
+        old_offset = self.fmha_params.kv_cache_offset
+        new_offset = new_fmha_params.kv_cache_offset
+        common.copy_kv_cache_offset(old_offset, new_offset)
+
+        # The TRT XQA kernel reads sequence_lengths via the captured data_ptr(),
+        # so we must update the data in-place at the address recorded during capture.
         new_seq_lens = attn_inputs.sequence_lengths
         n = min(self._captured_seq_lens.numel(), new_seq_lens.numel())
         self._captured_seq_lens[:n].copy_(new_seq_lens[:n], non_blocking=True)
 
 
-class XQADecodeImpl(FMHAImplBase):
-
-    def __init__(
-        self,
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs,
-        parallelism_config: Optional[ParallelismConfig] = None,
-    ) -> None:
-        self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = XQAWrapper(attn_configs, attn_inputs)
-        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
-
-        self.attn_inputs = attn_inputs
-
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+class XQADecodeImpl(DecodeAttnImplBase):
 
     @classmethod
     def support(
@@ -156,24 +96,15 @@ class XQADecodeImpl(FMHAImplBase):
             and attn_configs.kernel_tokens_per_block in [16, 32, 64, 128]
         )
 
-    def forward(
-        self,
-        qkv: torch.Tensor,
-        kv_cache: Optional[LayerKVCache],
-        layer_idx: int = 0,
-    ) -> torch.Tensor:
-        if self.need_rope_kv_cache:
-            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
-        else:
-            fmha_input = qkv
+    # ─── DecodeAttnImplBase hooks ────────────────────────────────────────
 
-        common.apply_write_cache_store(
-            self.write_cache_store_impl, self.attn_inputs, kv_cache
-        )
+    def _create_fmha_impl(self, attn_configs, attn_inputs):
+        return XQAWrapper(attn_configs, attn_inputs)
 
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+    def _init_fmha_params(self, attn_inputs):
+        return self.fmha_impl.prepare(attn_inputs)
 
-    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+    def _prepare_cuda_graph_impl(self, attn_inputs):
         self.fmha_impl.prepare_for_cuda_graph_replay(attn_inputs)
 
         new_fmha_params = self.fmha_impl.make_params(attn_inputs)
@@ -184,11 +115,6 @@ class XQADecodeImpl(FMHAImplBase):
         self.fmha_params.seq_lens = new_fmha_params.seq_lens
         self.fmha_params.batch_size = new_fmha_params.batch_size
         self.fmha_params.max_seq_len = new_fmha_params.max_seq_len
-
-        new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-        new_offset = new_rope_params.kv_cache_offset
-        old_offset = self.rope_params.kv_cache_offset
-        common.copy_kv_cache_offset(old_offset, new_offset)
 
 
 def _load_xqa_fn():
@@ -223,7 +149,9 @@ class XQAWrapper:
     ):
         self.config = config
         self.attn_inputs = attn_inputs
-        self.cu_qseqlens = attn_inputs.cu_seqlens
+        # NOTE: decode does NOT use attn_inputs.cu_seqlens (it is a zero placeholder in
+        # the decode branch of buildPyAttentionInputs); the real per-seq q geometry comes
+        # from attn_inputs.decode_cu_seqlens_host (see _compute_batch_geometry below).
         assert not self.attn_inputs.is_prefill, "XQA is not supported"
         self.workspace_buffer = get_xqa_workspace_buffer()
         self.semaphores = torch.zeros(8 * 1024 * 1024, dtype=torch.uint8, device="cuda")
@@ -250,33 +178,14 @@ class XQAWrapper:
     def __del__(self):
         release_xqa_workspace_buffer(self.workspace_buffer)
 
-    def support(self, attn_inputs: Any) -> bool:
-        group_size = self.config.head_num // self.config.kv_head_num
-        input_type_supported = self.config.dtype in [torch.bfloat16, torch.float16]
-        output_type_supported = self.config.dtype in [
-            torch.bfloat16,
-            torch.float16,
-            torch.float8_e4m3fn,
-        ]
-        group_size_supported = 1 <= group_size <= 16
-        head_dim_supported = self.config.size_per_head in [64, 128, 256]
-        page_size_supported = self.config.kernel_tokens_per_block in [16, 32, 64, 128]
-        return (
-            input_type_supported
-            and output_type_supported
-            and group_size_supported
-            and head_dim_supported
-            and page_size_supported
-        )
-
     def _compute_batch_geometry(self, attn_inputs: PyAttentionInputs) -> None:
-        cu_seqlens = attn_inputs.decode_cu_seqlens_host
-        seqlens = torch.diff(cu_seqlens).tolist()
+        cu_q_seqlens = attn_inputs.decode_cu_seqlens_host
+        q_lens = torch.diff(cu_q_seqlens).tolist()
         assert (
-            len(set(seqlens)) == 1
-        ), f"All sequences must have the same length for XQA, got lengths: {seqlens}"
-        self._q_len_per_req = seqlens[0]
-        self._batch_size = len(seqlens)
+            len(set(q_lens)) == 1
+        ), f"All sequences must have the same q_len for XQA, got lengths: {q_lens}"
+        self._q_len_per_req = q_lens[0]
+        self._batch_size = len(q_lens)
 
     def _compute_spec_mask(self, device: str = "cuda") -> None:
         q_len = self._q_len_per_req

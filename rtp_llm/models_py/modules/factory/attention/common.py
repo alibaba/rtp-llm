@@ -1,17 +1,44 @@
 """Common utilities for attention implementations.
 
 This module contains helper functions for FMHA implementations including:
+- Workspace buffer pooling
 - Cache store operations
 - Parameter updates for CUDA graph
 - KV cache offset management
 """
 
+import threading
 from typing import Any, Optional
 
 import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
+
+
+class WorkspaceBufferPool:
+    """Thread-safe pool of reusable GPU workspace buffers.
+
+    Each attention backend (XQA / TRT-LLM gen / FlashInfer) keeps its own pool
+    sized for that backend. Buffers are uint8 scratch space handed to kernels;
+    `get` reuses a pooled buffer or allocates one (outside the lock to minimize
+    contention), `release` returns it to the pool for the next instance.
+    """
+
+    def __init__(self, size_mb: int) -> None:
+        self._size_bytes = size_mb * 1024 * 1024
+        self._pool: list[torch.Tensor] = []
+        self._lock = threading.Lock()
+
+    def get(self, device: str = "cuda") -> torch.Tensor:
+        with self._lock:
+            if self._pool:
+                return self._pool.pop()
+        return torch.zeros(self._size_bytes, dtype=torch.uint8, device=device)
+
+    def release(self, buffer: torch.Tensor) -> None:
+        with self._lock:
+            self._pool.append(buffer)
 
 
 def reshape_paged_kv_cache(

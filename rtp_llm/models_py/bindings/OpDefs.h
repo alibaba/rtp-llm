@@ -158,54 +158,70 @@ struct PyContextParallelParams {
 };
 
 struct PyAttentionInputs {
-    bool          is_prefill{false};
-    bool          is_target_verify{false};
-    torch::Tensor prefix_lengths;
-    torch::Tensor sequence_lengths;
-    torch::Tensor input_lengths;
-    // Kernel-granularity block IDs for attention compute.
+    // ── Phase-affinity legend ────────────────────────────────────────────────
+    // Tags below mark which phase's attention kernels actually CONSUME each field
+    // on the standard MHA/MLA path:
+    //   [S] shared   - meaningful in both prefill and decode
+    //   [P] prefill  - decode leaves it empty/zero (built but unused there)
+    //   [D] decode   - prefill leaves it empty/zero (built but unused there)
+    // buildPyAttentionInputs() in PyWrappedModel.cc is the source of truth for how
+    // each field is populated per phase. NOTE: a few special paths populate some
+    // fields differently from these tags — speculative-decode target-verify
+    // (is_target_verify), linear-attention/mamba models (model_desc/qwen3_next.py),
+    // and CUDA-graph capture (cuda_graph_*.cc). See those sites for the exceptions.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    bool          is_prefill{false};        // [S] phase selector (true = prefill)
+    bool          is_target_verify{false};  // [S] spec-decode: this batch verifies draft tokens
+    torch::Tensor prefix_lengths;           // [P] reused-context length per seq (empty in decode)
+    torch::Tensor sequence_lengths;         // [D] past KV length per seq (empty in prefill)
+    torch::Tensor input_lengths;            // [S] tokens per seq (real in prefill, all-1 in decode)
+    // [S] Kernel-granularity block IDs for attention compute.
     // Shape: [group, batch, max_kernel_blocks] or [batch, max_kernel_blocks].
     torch::Tensor kv_cache_kernel_block_id_host;
     torch::Tensor kv_cache_kernel_block_id_device;
-    // Physical block IDs dedicated for cache store.
+    // [S] Physical block IDs dedicated for cache store.
     // Shape: [group, batch, max_blocks] or [batch, max_blocks].
     torch::Tensor kv_cache_block_id_host;
     torch::Tensor kv_cache_block_id_device;
-    // Hybrid cache support:
+    // [S] Hybrid cache support:
     // - kv_cache_kernel_block_id_*_by_group: vector of 2-D kernel block tables, each [batch, max_kernel_blocks].
     std::vector<torch::Tensor> kv_cache_kernel_block_id_host_by_group;
     std::vector<torch::Tensor> kv_cache_kernel_block_id_device_by_group;
     torch::Tensor              kv_cache_layer_to_group;
-    caffe2::TypeMeta           dtype;
-    // Cumulative sequence lengths for attention kernels (e.g. FusedRopeKVCacheDecodeOp).
+    caffe2::TypeMeta           dtype;  // [S] KV cache element type
+    // [P] Cumulative sequence lengths for variable-length packing in PREFILL
+    // (cu_seqlens = input_lengths.cumsum; consumed by FusedRopeKVCachePrefillOp / context FMHA).
+    // In decode these are zero placeholders — decode uses decode_cu_seqlens_* instead.
     // cu_seqlens lives on CUDA device; cu_seqlens_host is its pinned-memory CPU mirror
     // used for CUDA graph replay (write host → async copy to device, avoiding GPU-side fills).
     torch::Tensor cu_seqlens;
     torch::Tensor cu_seqlens_host;
     torch::Tensor cu_kv_seqlens;
-    torch::Tensor decode_cu_seqlens_host;
-    int           context_total_kv_length = 0;
-    int           total_tokens            = 0;
-    torch::Tensor padding_offset;
-    torch::Tensor combo_position_ids;
+    torch::Tensor decode_cu_seqlens_host;  // [D] arange(0..batch); diff() yields uniform decode q-len (XQA geometry)
+    int           context_total_kv_length = 0;  // [P] context KV token count (TRT context FMHA)
+    int           total_tokens            = 0;  // [P] total prefill tokens (cu_seqlens[batch])
+    torch::Tensor padding_offset;               // [P] per-token padding offset for prefill RoPE
+    torch::Tensor combo_position_ids;           // [S] RoPE position ids (both phases)
 
-    // for write cache store
+    // [P] for write cache store (PD-separation): write path is gated on is_prefill
+    // (see attention/common.py create_write_cache_store_impl / apply_write_cache_store).
     std::optional<PyCacheStoreInputs> cache_store_inputs;
 
-    std::optional<PyPrefillCudaGaphCopyParams> prefill_cuda_graph_copy_params;
-    bool                                       is_s_padded = false;
+    std::optional<PyPrefillCudaGaphCopyParams> prefill_cuda_graph_copy_params;  // [P] prefill cuda-graph copy params
+    bool is_s_padded = false;  // [P] TRT context FMHA s-padded (set on cuda-graph path)
     // Device-side mirrors of host tensors, managed by C++ for fused D2D copy in CUDA graph.
-    torch::Tensor prefix_lengths_d;
-    torch::Tensor sequence_lengths_plus_1_d;
-    torch::Tensor input_lengths_d;
-    torch::Tensor decode_cu_seqlens_d;
+    torch::Tensor prefix_lengths_d;           // [P] device mirror of prefix_lengths (also read by mamba/linear models)
+    torch::Tensor sequence_lengths_plus_1_d;  // [D] decode KV-len+1 (trtllm-gen / aiter / mamba decode)
+    torch::Tensor input_lengths_d;            // [S] device mirror of input_lengths
+    torch::Tensor decode_cu_seqlens_d;        // [D] device mirror of decode_cu_seqlens_host
 
-    // CUDA Graph mode flags
+    // [S] CUDA Graph mode flag
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
 
-    std::optional<PyContextParallelParams> context_parallel_info;
+    std::optional<PyContextParallelParams> context_parallel_info;  // [P] prefill context-parallel info
 
-    // Headwise attention config (Python dict or None).
+    // [S] Headwise attention config (Python dict or None).
     py::object headwise_config{py::none()};
 };
 

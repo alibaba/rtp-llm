@@ -7,10 +7,12 @@ import triton.language as tl
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm_100
+from rtp_llm.models_py.modules.factory.attention.decode_attn_base import (
+    DecodeAttnImplBase,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
-    FusedRopeKVCacheDecodeOp,
     FusedRopeKVCachePrefillOpQOut,
     LayerKVCache,
     PyAttentionInputs,
@@ -22,42 +24,15 @@ DEFAULT_TRT_WORKSPACE_SIZE_MB = (
 )
 
 # Global workspace buffer pool
-_g_trt_workspace_pool: list[torch.Tensor] = []
-_g_trt_pool_lock = __import__("threading").Lock()
+_g_trt_workspace_pool = common.WorkspaceBufferPool(DEFAULT_TRT_WORKSPACE_SIZE_MB)
 
 
 def get_trt_workspace_buffer(device: str = "cuda") -> torch.Tensor:
-    """Get a TRT workspace buffer from the pool.
-
-    This function manages a pool of workspace buffers to support multiple
-    concurrent instances while avoiding excessive memory allocation.
-
-    Args:
-        device: CUDA device to allocate buffer on (default: "cuda")
-
-    Returns:
-        Workspace buffer tensor of size DEFAULT_TRT_WORKSPACE_SIZE_MB
-    """
-    with _g_trt_pool_lock:
-        if _g_trt_workspace_pool:
-            return _g_trt_workspace_pool.pop()
-        else:
-            # No available buffer in pool, create a new one
-            return torch.zeros(
-                DEFAULT_TRT_WORKSPACE_SIZE_MB * 1024 * 1024,
-                dtype=torch.uint8,
-                device=device,
-            )
+    return _g_trt_workspace_pool.get(device)
 
 
 def release_trt_workspace_buffer(buffer: torch.Tensor) -> None:
-    """Release a TRT workspace buffer back to the pool.
-
-    Args:
-        buffer: The workspace buffer to release
-    """
-    with _g_trt_pool_lock:
-        _g_trt_workspace_pool.append(buffer)
+    _g_trt_workspace_pool.release(buffer)
 
 
 class FlashInferTRTLLMParams(object):
@@ -678,29 +653,7 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
             )
 
 
-class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
-
-    def __init__(
-        self,
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs,
-        parallelism_config: Optional[ParallelismConfig] = None,
-    ) -> None:
-        self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
-        self.attn_configs = attn_configs
-        self.attn_inputs = attn_inputs
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
-
-        self._cg = _init_decode_cg_params(
-            self.fmha_params.batch_size,
-            attn_inputs.kv_cache_kernel_block_id_device,
-            self.fmha_params.seq_lens,
-            self.rope_params.kv_cache_offset,
-        )
+class FlashInferTRTLLMDecodeImpl(DecodeAttnImplBase):
 
     @classmethod
     def support(
@@ -711,23 +664,22 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
         fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 
-    def forward(
-        self,
-        qkv: torch.Tensor,
-        kv_cache: Optional[LayerKVCache],
-        layer_idx: int,
-    ) -> torch.Tensor:
-        if self.need_rope_kv_cache:
-            fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
-        else:
-            fmha_input = qkv
+    # ─── DecodeAttnImplBase hooks ────────────────────────────────────────
 
-        common.apply_write_cache_store(
-            self.write_cache_store_impl, self.attn_inputs, kv_cache
+    def _create_fmha_impl(self, attn_configs, attn_inputs):
+        return FlashInferTRTLLMDecodeOp(attn_configs)
+
+    def _init_fmha_params(self, attn_inputs):
+        params = self.fmha_impl.prepare(attn_inputs)
+        self._cg = _init_decode_cg_params(
+            params.batch_size,
+            attn_inputs.kv_cache_kernel_block_id_device,
+            params.seq_lens,
+            self.rope_params.kv_cache_offset,
         )
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        return params
 
-    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+    def _prepare_cuda_graph_impl(self, attn_inputs):
         p = self._cg
         _prepare_cg_decode_kernel[p.grid](
             attn_inputs.sequence_lengths_plus_1_d,
@@ -739,3 +691,7 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
             p.total_bm,
             BLOCK_SIZE=p.BLOCK_SIZE,
         )
+
+    def _update_rope_offset(self, attn_inputs):
+        # kv_cache_offset is updated by the Triton kernel above; no extra copy needed.
+        pass

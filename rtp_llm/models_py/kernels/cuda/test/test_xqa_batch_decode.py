@@ -15,7 +15,6 @@ except ImportError:
     _FLASHINFER_AVAILABLE = False
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQADecodeImpl
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ModelConfig
 
 # RTP-LLM imports
@@ -405,39 +404,15 @@ class TestXQABatchDecode(unittest.TestCase):
         kv_cache = LayerKVCache()
         kv_cache.kv_cache_base = kv_cache_tensor
 
-        original_init = FMHAImplBase.__init__
-
-        def patched_init(
-            self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=True
-        ):
-            result = original_init(
-                self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=False
+        attn_configs.need_rope_kv_cache = False
+        xqa_impl = XQADecodeImpl(attn_configs, attn_inputs)
+        if kv_dtype == "fp8":
+            xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(
+                attn_inputs,
+                q_scale=q_scale * k_scale * sm_scale,
+                kv_scale=v_scale / o_scale,
+                o_scale=o_scale,
             )
-            self.rope_kvcache_impl = rope_kvcache_impl
-            return result
-
-        FMHAImplBase.__init__ = patched_init
-        try:
-            attn_configs.need_rope_kv_cache = False
-            xqa_impl = XQADecodeImpl(attn_configs, attn_inputs)
-            # Prepare fmha_params with scale parameters
-            if kv_dtype == "fp8":
-                xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(
-                    attn_inputs,
-                    q_scale=q_scale * k_scale * sm_scale,
-                    kv_scale=v_scale / o_scale,
-                    o_scale=o_scale,
-                )
-            else:
-                xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(attn_inputs)
-            xqa_impl.attn_inputs = attn_inputs
-
-            class DummyRopeParams:
-                pass
-
-            xqa_impl.rope_params = DummyRopeParams()
-        finally:
-            FMHAImplBase.__init__ = original_init
 
         output_4d = xqa_impl.forward(q, kv_cache).squeeze(1)
         output = output_4d.reshape(-1, output_4d.shape[2], output_4d.shape[3])
@@ -518,25 +493,8 @@ class TestXQABatchDecode(unittest.TestCase):
         attn_configs.kv_cache_dtype = KvCacheDataType.BASE
         attn_configs.dtype = DTYPE_MAP["bf16"]
 
-        original_init = FMHAImplBase.__init__
-
-        def patched_init(
-            self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=True
-        ):
-            original_init(
-                self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=False
-            )
-            self.rope_kvcache_impl = rope_kvcache_impl
-
-        FMHAImplBase.__init__ = patched_init
-        try:
-            attn_configs.need_rope_kv_cache = False
-            xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
-            xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(cap_inputs)
-            xqa_impl.attn_inputs = cap_inputs
-            xqa_impl.rope_params = xqa_impl.rope_kvcache_impl.prepare(cap_inputs)
-        finally:
-            FMHAImplBase.__init__ = original_init
+        attn_configs.need_rope_kv_cache = False
+        xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
 
         replay_kv_len = capture_kv_len + 5
         q_lens_rep, in_kv_lens_rep, seq_lens_rep = generate_seq_lens_decode(
@@ -663,25 +621,8 @@ class TestXQABatchDecode(unittest.TestCase):
         attn_configs.kv_cache_dtype = KvCacheDataType.BASE
         attn_configs.dtype = DTYPE_MAP["bf16"]
 
-        original_init = FMHAImplBase.__init__
-
-        def patched_init(
-            self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=True
-        ):
-            original_init(
-                self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=False
-            )
-            self.rope_kvcache_impl = rope_kvcache_impl
-
-        FMHAImplBase.__init__ = patched_init
-        try:
-            attn_configs.need_rope_kv_cache = False
-            xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
-            xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(cap_inputs)
-            xqa_impl.attn_inputs = cap_inputs
-            xqa_impl.rope_params = xqa_impl.rope_kvcache_impl.prepare(cap_inputs)
-        finally:
-            FMHAImplBase.__init__ = original_init
+        attn_configs.need_rope_kv_cache = False
+        xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
 
         # --- Replay phase: actual_batch < capture_batch ---
         for actual_batch_size in [1, 2, 5]:
@@ -871,25 +812,8 @@ class TestXQABatchDecode(unittest.TestCase):
         attn_configs.kv_cache_dtype = KvCacheDataType.BASE
         attn_configs.dtype = DTYPE_MAP["bf16"]
 
-        original_init = FMHAImplBase.__init__
-
-        def patched_init(
-            self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=True
-        ):
-            original_init(
-                self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=False
-            )
-            self.rope_kvcache_impl = rope_kvcache_impl
-
-        FMHAImplBase.__init__ = patched_init
-        try:
-            attn_configs.need_rope_kv_cache = False
-            xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
-            xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(cap_inputs)
-            xqa_impl.attn_inputs = cap_inputs
-            xqa_impl.rope_params = xqa_impl.rope_kvcache_impl.prepare(cap_inputs)
-        finally:
-            FMHAImplBase.__init__ = original_init
+        attn_configs.need_rope_kv_cache = False
+        xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
 
         # Pre-allocate fixed input/output buffers for graph capture
         q_cap, _, _ = create_query_tensor(q_lens_cap, num_qo_heads, head_dim, "bf16")
@@ -1064,25 +988,8 @@ class TestXQABatchDecode(unittest.TestCase):
         attn_configs.kv_cache_dtype = KvCacheDataType.BASE
         attn_configs.dtype = DTYPE_MAP["bf16"]
 
-        original_init = FMHAImplBase.__init__
-
-        def patched_init(
-            self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=True
-        ):
-            original_init(
-                self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=False
-            )
-            self.rope_kvcache_impl = rope_kvcache_impl
-
-        FMHAImplBase.__init__ = patched_init
-        try:
-            attn_configs.need_rope_kv_cache = False
-            xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
-            xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(cap_inputs)
-            xqa_impl.attn_inputs = cap_inputs
-            xqa_impl.rope_params = xqa_impl.rope_kvcache_impl.prepare(cap_inputs)
-        finally:
-            FMHAImplBase.__init__ = original_init
+        attn_configs.need_rope_kv_cache = False
+        xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
 
         q_cap, _, _ = create_query_tensor(q_lens_cap, num_qo_heads, head_dim, "bf16")
         kv_cache_layer = LayerKVCache()
@@ -1228,25 +1135,8 @@ class TestXQABatchDecode(unittest.TestCase):
         attn_configs.kv_cache_dtype = KvCacheDataType.BASE
         attn_configs.dtype = DTYPE_MAP["bf16"]
 
-        original_init = FMHAImplBase.__init__
-
-        def patched_init(
-            self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=True
-        ):
-            original_init(
-                self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=False
-            )
-            self.rope_kvcache_impl = rope_kvcache_impl
-
-        FMHAImplBase.__init__ = patched_init
-        try:
-            attn_configs.need_rope_kv_cache = False
-            xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
-            xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(cap_inputs)
-            xqa_impl.attn_inputs = cap_inputs
-            xqa_impl.rope_params = xqa_impl.rope_kvcache_impl.prepare(cap_inputs)
-        finally:
-            FMHAImplBase.__init__ = original_init
+        attn_configs.need_rope_kv_cache = False
+        xqa_impl = XQADecodeImpl(attn_configs, cap_inputs)
 
         # Pre-allocate fixed input/output buffers for graph capture
         q_cap, _, _ = create_query_tensor(q_lens_cap, num_qo_heads, head_dim, "bf16")
@@ -1462,29 +1352,8 @@ class TestXQABatchDecode(unittest.TestCase):
         attn_configs.kv_cache_dtype = KvCacheDataType.BASE
         attn_configs.dtype = q.dtype
 
-        original_init = FMHAImplBase.__init__
-
-        def patched_init(
-            self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=True
-        ):
-            original_init(
-                self, fmha_impl, rope_kvcache_impl, attn_inputs, init_params=False
-            )
-            self.rope_kvcache_impl = rope_kvcache_impl
-
-        FMHAImplBase.__init__ = patched_init
-        try:
-            attn_configs.need_rope_kv_cache = False
-            xqa_impl = XQADecodeImpl(attn_configs, attn_inputs)
-            xqa_impl.fmha_params = xqa_impl.fmha_impl.prepare(attn_inputs)
-            xqa_impl.attn_inputs = attn_inputs
-
-            class DummyRopeParams:
-                pass
-
-            xqa_impl.rope_params = DummyRopeParams()
-        finally:
-            FMHAImplBase.__init__ = original_init
+        attn_configs.need_rope_kv_cache = False
+        xqa_impl = XQADecodeImpl(attn_configs, attn_inputs)
 
         # Forward with 2D packed KV cache
         kv_cache_packed = LayerKVCache()
@@ -1497,16 +1366,7 @@ class TestXQABatchDecode(unittest.TestCase):
         kv_cache_normal = LayerKVCache()
         kv_cache_normal.kv_cache_base = kv_cache_5d
 
-        xqa_impl2 = XQADecodeImpl.__new__(XQADecodeImpl)
-        FMHAImplBase.__init__ = patched_init
-        try:
-            attn_configs.need_rope_kv_cache = False
-            xqa_impl2 = XQADecodeImpl(attn_configs, attn_inputs)
-            xqa_impl2.fmha_params = xqa_impl2.fmha_impl.prepare(attn_inputs)
-            xqa_impl2.attn_inputs = attn_inputs
-            xqa_impl2.rope_params = DummyRopeParams()
-        finally:
-            FMHAImplBase.__init__ = original_init
+        xqa_impl2 = XQADecodeImpl(attn_configs, attn_inputs)
 
         output_5d = xqa_impl2.forward(q, kv_cache_normal).squeeze(1)
         output_5d = output_5d.reshape(-1, output_5d.shape[2], output_5d.shape[3])

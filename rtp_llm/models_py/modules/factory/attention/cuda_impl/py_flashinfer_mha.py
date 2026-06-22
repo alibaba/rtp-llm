@@ -18,6 +18,9 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm_10
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     check_attention_inputs,
 )
+from rtp_llm.models_py.modules.factory.attention.decode_attn_base import (
+    DecodeAttnImplBase,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -39,30 +42,18 @@ from rtp_llm.ops.compute_ops import (
 # Constants
 DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
 
-# Global workspace buffer pool
-_g_py_flashinfer_workspace_pool: list[torch.Tensor] = []
-_g_py_flashinfer_pool_lock = __import__("threading").Lock()
+# Global workspace buffer pool (shared by decode + CP prefill impls that import these)
+_g_py_flashinfer_workspace_pool = common.WorkspaceBufferPool(
+    DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB
+)
 
 
 def get_py_flashinfer_workspace_buffer(device: str = "cuda") -> torch.Tensor:
-    """Get a PyFlashInfer workspace buffer from the pool.
-
-    This function manages workspace buffers to support multiple concurrent instances.
-    """
-    with _g_py_flashinfer_pool_lock:
-        if _g_py_flashinfer_workspace_pool:
-            return _g_py_flashinfer_workspace_pool.pop()
-    return torch.zeros(
-        DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB * 1024 * 1024,
-        dtype=torch.uint8,
-        device=device,
-    )
+    return _g_py_flashinfer_workspace_pool.get(device)
 
 
 def release_py_flashinfer_workspace_buffer(buffer: torch.Tensor) -> None:
-    """Release a PyFlashInfer workspace buffer back to the pool."""
-    with _g_py_flashinfer_pool_lock:
-        _g_py_flashinfer_workspace_pool.append(buffer)
+    _g_py_flashinfer_workspace_pool.release(buffer)
 
 
 class PyFlashinferPrefillPagedAttnOp(object):
@@ -777,36 +768,7 @@ class PyFlashinferDecodeAttnOp(object):
         return self.decode_wrapper.run(q, paged_kv_cache)
 
 
-class PyFlashinferDecodeImpl(FMHAImplBase):
-    def __init__(
-        self,
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs,
-        parallelism_config: Optional[ParallelismConfig] = None,
-    ) -> None:
-        # Create implementations
-        self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = PyFlashinferDecodeAttnOp(attn_configs, attn_inputs)
-        self.rope_impl = FusedRopeKVCacheDecodeOp(attn_configs)
-        self.attn_configs = attn_configs
-
-        # Store input info
-        self.attn_inputs = attn_inputs
-
-        self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
-        self.fmha_impl.set_params(self.fmha_params)
-        self.fmha_impl.prepare(attn_inputs)
-        self.rope_params = self.rope_impl.prepare(attn_inputs)
-        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
-
-    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
-        """Prepare FlashInfer/RoPE buffers and metadata for CUDA graph replay."""
-        self.fmha_impl.prepare_for_cuda_graph_replay(attn_inputs)
-        # Update rope params for correct position encoding during cuda graph replay
-        new_rope_params = self.rope_impl.prepare(attn_inputs)
-        common.copy_kv_cache_offset(
-            self.rope_params.kv_cache_offset, new_rope_params.kv_cache_offset
-        )
+class PyFlashinferDecodeImpl(DecodeAttnImplBase):
 
     def support_cuda_graph(self) -> bool:
         return True
@@ -817,20 +779,16 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
     ) -> bool:
         return not attn_configs.use_mla
 
-    def forward(
-        self,
-        qkv: torch.Tensor,
-        kv_cache: Optional[LayerKVCache],
-        layer_idx: int = 0,
-    ) -> torch.Tensor:
-        # Apply RoPE and KV Cache processing
-        if self.need_rope_kv_cache:
-            qkv = self.rope_impl.forward(qkv, kv_cache, self.rope_params)
+    # ─── DecodeAttnImplBase hooks ────────────────────────────────────────
 
-        # Apply write cache store if needed
-        common.apply_write_cache_store(
-            self.write_cache_store_impl, self.attn_inputs, kv_cache
-        )
+    def _create_fmha_impl(self, attn_configs, attn_inputs):
+        return PyFlashinferDecodeAttnOp(attn_configs, attn_inputs)
 
-        # Execute FMHA forward
-        return self.fmha_impl.forward(qkv, kv_cache, self.fmha_params)
+    def _init_fmha_params(self, attn_inputs):
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        self.fmha_impl.set_params(params)
+        self.fmha_impl.prepare(attn_inputs)
+        return params
+
+    def _prepare_cuda_graph_impl(self, attn_inputs):
+        self.fmha_impl.prepare_for_cuda_graph_replay(attn_inputs)
