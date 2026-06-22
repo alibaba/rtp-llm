@@ -38,8 +38,8 @@ def is_blackwell() -> bool:
 
 
 @functools.cache
-def is_blackwell_datacenter() -> bool:
-    """SM 10.x datacenter Blackwell only (B200/GB200, NOT consumer sm12x)."""
+def is_sm10x() -> bool:
+    """SM 10.x datacenter Blackwell (B200/GB200, NOT consumer sm12x)."""
     if not is_cuda():
         return False
     return get_sm()[0] == 10

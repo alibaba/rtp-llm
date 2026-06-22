@@ -14,7 +14,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_blackwell
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm10x
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     check_attention_inputs,
 )
@@ -81,6 +81,15 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.head_dim_vo = attn_configs.size_per_head
         self.page_size = attn_configs.kernel_tokens_per_block
         self.datatype = attn_configs.dtype
+        # KV cache may be quantized (FP8/INT8); plan() must be told the real
+        # stored dtype, otherwise flashinfer rejects FP8 KV against a BF16 plan.
+        self.kv_cache_dtype = attn_configs.kv_cache_dtype
+        if self.kv_cache_dtype == KvCacheDataType.INT8:
+            self.kv_datatype = torch.int8
+        elif self.kv_cache_dtype == KvCacheDataType.FP8:
+            self.kv_datatype = torch.float8_e4m3fn
+        else:  # BASE
+            self.kv_datatype = self.datatype
         self.max_seq_len = attn_configs.max_seq_len
         self.is_causal = attn_configs.is_causal
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
@@ -202,7 +211,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.page_size,
             causal=self.is_causal,
             q_data_type=self.datatype,
-            kv_data_type=self.datatype,
+            kv_data_type=self.kv_datatype,
         )
         return self.fmha_params
 
@@ -566,13 +575,19 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         """Check if paged prefill implementation is supported.
 
         Returns True if:
-        1. Not running on SM 10.0 (Blackwell) architecture
-        2. The underlying paged FMHA op supports the inputs
-        3. MhaRotaryEmbeddingOp supports the inputs
+        1. Not on SM10x datacenter Blackwell (trtllm-gen is preferred there).
+        2. The underlying paged FMHA op supports the inputs.
+        3. MhaRotaryEmbeddingOp supports the inputs.
+
+        NOTE: native FlashInfer ships sm_120a cubins and works on SM12x for
+        BF16/INT8/FP8 KV. (The FlashInfer fa2 bf16-q+fp8-kv paged-prefill kernel
+        itself is correct on sm120 — verified standalone, cos=1.0; the earlier
+        FP8 garbage was an RTP-LLM bug where KVCacheWriteOp wrote un-quantized
+        bf16 K/V into the e4m3 cache via append_paged_kv_cache, now fixed.)
         """
-        return not is_blackwell() and PyFlashinferPrefillPagedAttnOp.support(
-            attn_inputs
-        )
+        if is_sm10x():
+            return False
+        return PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
 
     def support_cuda_graph(self) -> bool:
         return True
