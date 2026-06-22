@@ -2,7 +2,6 @@ import json
 import os
 from typing import Any, Dict, Optional
 
-from transformers import AutoTokenizer
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
@@ -145,12 +144,12 @@ class DeepSeekVLV2(BaseModel):
 
     def load_tokenizer(self) -> None:
         super().load_tokenizer()
-        # The image token id must come from the actual tokenizer path, which is
-        # only available after model_config (and tokenizer_path) is fully populated
-        # by the loader. _create_config runs too early to see tokenizer_path.
-        tokenizer_path = self.model_config.tokenizer_path or self.model_config.ckpt_path
-        hf_tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-        image_id = hf_tokenizer.encode("<image>", add_special_tokens=False)[0]
+        # Reuse the tokenizer that BaseModel.load_tokenizer() already initialized
+        # and augmented with special tokens. Avoid creating a second AutoTokenizer
+        # from the same path, which may not have the <image> special token added.
+        image_id = getattr(self.tokenizer, "image_token_id", None)
+        if image_id is None:
+            image_id = self.tokenizer.encode("<image>", add_special_tokens=False)[0]
         self.model_config.mm_related_params.special_token_ids.update(
             {"ignore_token_index": -100, "image_token_index": image_id}
         )

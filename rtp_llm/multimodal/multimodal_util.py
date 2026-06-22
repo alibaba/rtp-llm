@@ -171,36 +171,35 @@ def get_bytes_io_from_url(url: str, download_headers: str = ""):
     Args:
         url: URL to fetch from.
         download_headers: JSON string containing HTTP headers. If empty, uses default headers.
+
+    The cache stores immutable bytes instead of a shared BytesIO so concurrent
+    callers cannot race on a mutable cursor.
     """
 
-    cached_res = url_data_cache_.check_cache(url)
-    if cached_res is None:
+    cached_bytes = url_data_cache_.check_cache(url)
+    if cached_bytes is None:
         headers = _get_http_heads(download_headers)
         try:
             if url.startswith("http") or url.startswith("https"):
                 response = request_get(url, headers)
                 if response.status_code == 200:
-                    res = BytesIO(response.content)
+                    cached_bytes = response.content
                 else:
                     raise Exception(
                         f"download failed, error code: {response.status_code}"
                     )
             elif url.startswith("oss"):
-                res = get_bytes_io_from_oss_path(url)
+                cached_bytes = get_bytes_io_from_oss_path(url).getvalue()
             elif get_base64_prefix(url) > 0:
-                res = BytesIO(base64.b64decode(url[get_base64_prefix(url) :]))
+                cached_bytes = base64.b64decode(url[get_base64_prefix(url) :])
             else:
                 # treat url as local path
                 with open(url, "rb") as fh:
-                    buf = BytesIO(fh.read())
-                res = buf
+                    cached_bytes = fh.read()
         except Exception as e:
             raise Exception(f"download and load {url} error, exception {e}")
-        url_data_cache_.insert_cache(url, res)
-        return res
-    else:
-        cached_res.seek(0)
-        return cached_res
+        url_data_cache_.insert_cache(url, cached_bytes)
+    return BytesIO(cached_bytes)
 
 
 class MMDataCache(object):

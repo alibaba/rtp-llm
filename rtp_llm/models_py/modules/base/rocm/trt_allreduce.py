@@ -68,9 +68,11 @@ class TrtllmDistEnv:
         torch.cuda.set_device(self.device_id)
 
         if self.world_size == 1:
+            self.disabled = True
             return
 
         if self.world_size not in self._SUPPORTED_WORLD_SIZES:
+            self.disabled = True
             return
 
         try:

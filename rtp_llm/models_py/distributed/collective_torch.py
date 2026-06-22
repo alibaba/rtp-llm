@@ -466,6 +466,19 @@ def destroy_distributed_environment():
     except Exception as e:
         logging.warning(f"Failed to close symm_mem communicator: {e}")
 
+    # Release MoriEP singleton resources before destroying process groups so
+    # subsequent re-initialization starts from a clean state.
+    try:
+        from rtp_llm.models_py.distributed.moriep_wrapper import MoriEPWrapper
+
+        if MoriEPWrapper.is_initialized():
+            instance = MoriEPWrapper.get_instance()
+            if instance is not None:
+                instance.reset_op()
+            MoriEPWrapper.reset()
+    except Exception as e:
+        logging.warning(f"Failed to reset MoriEP wrapper: {e}")
+
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
     _group_map.clear()

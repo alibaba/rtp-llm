@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
+#include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
 
 using namespace std;
@@ -40,10 +41,24 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
     }
     if (maga_init_params.model_config_.mm_model_config.is_multimodal) {
-        if (mm_process_engine.is_none()) {
+        const auto vit_separation = maga_init_params.vit_config.vit_separation;
+        const auto role_type      = maga_init_params.pd_sep_config.role_type;
+        const auto tp_rank        = maga_init_params.parallelism_config.tp_rank;
+        if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
             mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
                                                               maga_init_params.model_config_.max_seq_len));
         } else {
+            // VIT_SEPARATION_LOCAL / VIT_SEPARATION_ROLE both require a local
+            // mm_process_engine in the backend process.  If it is missing we
+            // must fail fast rather than silently falling back to remote RPC.
+            if (mm_process_engine.is_none()) {
+                return grpc::Status(
+                    grpc::StatusCode::INTERNAL,
+                    "Local multimodal processing requires mm_process_engine "
+                    "(vit_separation=" + std::to_string(static_cast<int>(vit_separation))
+                    + ", role=" + std::to_string(static_cast<int>(role_type))
+                    + ", tp_rank=" + std::to_string(tp_rank) + ")");
+            }
             mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
                                                              maga_init_params.model_config_.mm_model_config,
                                                              maga_init_params.model_config_.max_seq_len));

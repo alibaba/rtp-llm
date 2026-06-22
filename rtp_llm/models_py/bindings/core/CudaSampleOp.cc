@@ -205,6 +205,15 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
         }
     }
 
+    // Save the distribution that was actually used for sampling before
+    // return_original_all_probs overwrites output_all_probs_t with the raw
+    // (unfiltered) distribution.  cum_log_probs must be updated with the
+    // sampling distribution, not the original all-probs distribution.
+    torch::Tensor sampling_probs_t = probs_t;
+    if (need_renorm_probs && output_all_probs_t.defined()) {
+        sampling_probs_t = output_all_probs_t;
+    }
+
     if (params.return_original_all_probs && output_all_probs_t.defined()) {
         top_k_renorm_probs(probs_t, output_all_probs_t, std::nullopt, 1 << 30, (int64_t)cur_stream);
     }
@@ -214,7 +223,7 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
         // [batch_size]
         auto cum_log_probs_t = params.cum_log_probs.value();
         // [batch_size]
-        auto token_probs_t     = output_all_probs_t.gather(1, samples_t.transpose(1, 0).to(torch::kLong)).squeeze(1);
+        auto token_probs_t     = sampling_probs_t.gather(1, samples_t.transpose(1, 0).to(torch::kLong)).squeeze(1);
         auto token_probs_t_log = token_probs_t.log();
         cum_log_probs_t.add_(token_probs_t_log.to(cum_log_probs_t.device()));
     }
@@ -457,6 +466,11 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [&](auto t) { return std::abs(t) < 1e-7 ? 1.0 : t; });
 
     // 6. Sample
+    // filtered_probs is the normalized distribution used for sampling.  In the
+    // top_k==1 fast path it is just probs_t (softmaxed logits); in the filtered
+    // sampling path it is top_k/top_p filtered and renormalized.  It is declared
+    // outside the branches so the cum_log_probs update below can use it.
+    torch::Tensor filtered_probs = probs_t;
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens);
@@ -471,7 +485,6 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         // torch::multinomial is well-tested and handles all cases correctly.
         //
         // Apply top_k filtering if needed
-        auto filtered_probs = probs_t;
         bool has_top_k      = !std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t <= 0; });
         if (has_top_k) {
             for (int64_t b = 0; b < (int64_t)batch_size; b++) {

@@ -35,11 +35,7 @@ def remap_to_local_ids(
     local_start: int,
     local_end: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if dispatch_ids.dim() != 1 or dispatch_weights.dim() != 1:
-        raise ValueError(
-            f"dispatch_ids and dispatch_weights must be 1-D, got shapes "
-            f"{list(dispatch_ids.shape)} and {list(dispatch_weights.shape)}"
-        )
+    original_shape = dispatch_ids.shape
     if dispatch_ids.shape != dispatch_weights.shape:
         raise ValueError(
             f"dispatch_ids shape {list(dispatch_ids.shape)} must match "
@@ -88,5 +84,9 @@ def remap_to_local_ids(
         N,
         BLOCK_SIZE=BLOCK_SIZE,
     )
+
+    if local_ids.shape != original_shape:
+        local_ids = local_ids.view(original_shape)
+        local_weights = local_weights.view(original_shape)
 
     return local_ids, local_weights
