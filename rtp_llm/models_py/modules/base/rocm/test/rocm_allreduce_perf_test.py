@@ -2,7 +2,7 @@ import argparse
 import socket
 import sys
 from dataclasses import asdict
-from typing import List
+from typing import List, Optional
 
 import torch
 import torch.distributed as dist
@@ -102,6 +102,7 @@ def setup_distributed(rank: int, world_size: int, port: int) -> None:
         init_method=f"tcp://127.0.0.1:{port}",
         world_size=world_size,
         rank=rank,
+        device_id=torch.device(f"cuda:{rank}"),
     )
 
 
@@ -171,20 +172,170 @@ def ok_row(backend: str, args, shape, times: List[float]) -> ResultRow:
     )
 
 
+def skip_row(backend: str, args, shape, note: str) -> ResultRow:
+    return ResultRow(
+        backend=backend,
+        dtype=args.dtype_label,
+        target=shape.target,
+        shape=shape.shape_label,
+        bytes=shape.actual_bytes,
+        status="SKIP",
+        avg_us=None,
+        p50_us=None,
+        p90_us=None,
+        min_us=None,
+        max_us=None,
+        algbw_GBps=None,
+        note=note,
+    )
+
+
+def fail_row(backend: str, args, shape, note: str) -> ResultRow:
+    return ResultRow(
+        backend=backend,
+        dtype=args.dtype_label,
+        target=shape.target,
+        shape=shape.shape_label,
+        bytes=shape.actual_bytes,
+        status="FAIL",
+        avg_us=None,
+        p50_us=None,
+        p90_us=None,
+        min_us=None,
+        max_us=None,
+        algbw_GBps=None,
+        note=note,
+    )
+
+
+def assert_close_to_ref(
+    backend_name: str, out: Optional[torch.Tensor], ref: torch.Tensor
+) -> Optional[str]:
+    if out is None:
+        return f"{backend_name} returned None"
+    try:
+        torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
+        return None
+    except AssertionError:
+        max_abs = (out - ref).abs().max().item()
+        return f"{backend_name} correctness failed max_abs={max_abs:.6g}"
+
+
 def worker(rank: int, world_size: int, port: int, args, return_dict) -> None:
     setup_distributed(rank, world_size, port)
+    metadata_group = None
     rows: List[ResultRow] = []
+    trt_env = None
+    trt_supported_hidden_sizes = frozenset()
+    trt_init_note = None
+    vllm_custom = None
+    vllm_init_note = None
     try:
+        needs_metadata_group = any(
+            spec.name == "vllm_custom" for spec in args.backend_specs
+        )
+        if needs_metadata_group:
+            metadata_group = dist.new_group(
+                ranks=list(range(world_size)),
+                backend="gloo",
+            )
+        if any(spec.name == "trt" for spec in args.backend_specs):
+            try:
+                from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
+                    ALLREDUCE_SUPPORTED_HIDDEN_SIZES,
+                    TrtllmDistEnv,
+                )
+
+                trt_supported_hidden_sizes = ALLREDUCE_SUPPORTED_HIDDEN_SIZES
+                trt_env = TrtllmDistEnv(group=dist.group.WORLD, device_id=rank)
+            except Exception as exc:
+                trt_init_note = f"TRT init failed: {exc}"
+        if any(spec.name == "vllm_custom" for spec in args.backend_specs):
+            try:
+                from rtp_llm.models_py.modules.base.rocm.vllm_custom_allreduce import (
+                    RocmVllmCustomAllReduce,
+                )
+
+                vllm_custom = RocmVllmCustomAllReduce(metadata_group, device=rank)
+            except Exception as exc:
+                vllm_init_note = f"vLLM custom init failed: {exc}"
         for shape in args.bench_shapes:
             inp = make_input(rank, shape, args.dtype_value)
             for backend in args.backend_specs:
-                if backend.name != "rccl":
+                if backend.name == "rccl":
+                    times = time_backend(rccl_all_reduce, inp, args.warmup, args.iters)
+                    rows.append(ok_row(backend.name, args, shape, times))
                     continue
-                times = time_backend(rccl_all_reduce, inp, args.warmup, args.iters)
-                rows.append(ok_row(backend.name, args, shape, times))
+
+                if backend.name == "trt":
+                    if trt_init_note is not None:
+                        rows.append(skip_row(backend.name, args, shape, trt_init_note))
+                        continue
+                    if shape.hidden_size not in trt_supported_hidden_sizes:
+                        rows.append(
+                            skip_row(
+                                backend.name, args, shape, "hidden size unsupported"
+                            )
+                        )
+                        continue
+                    if trt_env is None or trt_env.handle is None:
+                        rows.append(
+                            skip_row(backend.name, args, shape, "TRT init disabled")
+                        )
+                        continue
+
+                    ref = rccl_all_reduce(inp)
+
+                    def trt_fn(tensor):
+                        out = torch.empty_like(tensor)
+                        trt_env.allreduce_op(tensor, out)
+                        return out
+
+                    if not args.disable_correctness_check:
+                        error = assert_close_to_ref(backend.name, trt_fn(inp), ref)
+                        if error is not None:
+                            rows.append(fail_row(backend.name, args, shape, error))
+                            continue
+                    times = time_backend(trt_fn, inp, args.warmup, args.iters)
+                    rows.append(ok_row(backend.name, args, shape, times))
+                    continue
+
+                if backend.name == "vllm_custom":
+                    if vllm_init_note is not None:
+                        rows.append(skip_row(backend.name, args, shape, vllm_init_note))
+                        continue
+                    if vllm_custom is None or getattr(vllm_custom, "disabled", True):
+                        rows.append(
+                            skip_row(
+                                backend.name,
+                                args,
+                                shape,
+                                "vLLM custom init disabled",
+                            )
+                        )
+                        continue
+                    if not vllm_custom.should_custom_ar(inp):
+                        rows.append(skip_row(backend.name, args, shape, "ineligible"))
+                        continue
+
+                    ref = rccl_all_reduce(inp)
+
+                    def vllm_fn(tensor):
+                        return vllm_custom.custom_all_reduce(tensor)
+
+                    if not args.disable_correctness_check:
+                        error = assert_close_to_ref(backend.name, vllm_fn(inp), ref)
+                        if error is not None:
+                            rows.append(fail_row(backend.name, args, shape, error))
+                            continue
+                    times = time_backend(vllm_fn, inp, args.warmup, args.iters)
+                    rows.append(ok_row(backend.name, args, shape, times))
+                    continue
         return_dict[rank] = [asdict(row) for row in rows]
     finally:
-        cleanup_distributed()
+        if vllm_custom is not None:
+            vllm_custom.close()
+        cleanup_distributed(metadata_group)
 
 
 def run_distributed(args) -> List[ResultRow]:
