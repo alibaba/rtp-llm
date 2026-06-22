@@ -584,39 +584,73 @@ def _is_trtllm_allreduce_ready() -> bool:
 _trtllm_fallback_warned: bool = False
 
 
-def hipgraph_capture_all_reduce(
+def _try_quick_reduce_all_reduce(
     tensor: torch.Tensor,
     process_group: Optional[torch.distributed.ProcessGroup] = None,
-) -> torch.Tensor:
-    """Allreduce during HIPGraph capture. Tries trt_allreduce first, falls back to ncclAllReduce."""
+) -> Optional[torch.Tensor]:
+    if not _rocm_ar_config.enable_quick_reduce:
+        return None
+    backend = _quick_reduce_backend
+    if backend is None:
+        return None
+    if not backend.should_quick_allreduce(tensor):
+        return None
+    return backend.quick_all_reduce(tensor)
+
+
+def _try_vllm_custom_all_reduce(
+    tensor: torch.Tensor,
+    process_group: Optional[torch.distributed.ProcessGroup] = None,
+) -> Optional[torch.Tensor]:
+    if not _rocm_ar_config.enable_vllm_custom_ar:
+        return None
+    backend = _vllm_custom_ar_backend
+    if backend is None:
+        return None
+    if not backend.should_custom_ar(tensor):
+        return None
+    return backend.custom_all_reduce(tensor)
+
+
+def _try_trt_all_reduce(
+    tensor: torch.Tensor,
+    process_group: Optional[torch.distributed.ProcessGroup] = None,
+) -> Optional[torch.Tensor]:
     global _trtllm_fallback_warned
 
-    if (
+    if not (
         process_group is not None
         and _is_hidden_size_supported_for_trtllm(tensor.shape[-1])
         and _is_trtllm_allreduce_ready()
     ):
-        try:
-            from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
-                allreduce as trtllm_allreduce,
-            )
+        return None
 
-            device_id = torch.cuda.current_device()
-            return trtllm_allreduce(
-                allreduce_in=tensor,
-                group=process_group,
-                device_id=device_id,
-            )
-        except Exception as exc:
-            if not _trtllm_fallback_warned:
-                logging.warning(
-                    "trtllm_allreduce failed in graph capture mode, "
-                    "fallback to ncclAllReduce (further warnings suppressed): %s",
-                    exc,
-                )
-                _trtllm_fallback_warned = True
+    try:
+        from rtp_llm.models_py.modules.base.rocm.trt_allreduce import (
+            allreduce as trtllm_allreduce,
+        )
 
-    # Fallback to raw RCCL ncclAllReduce.
+        device_id = torch.cuda.current_device()
+        return trtllm_allreduce(
+            allreduce_in=tensor,
+            group=process_group,
+            device_id=device_id,
+        )
+    except Exception as exc:
+        if not _trtllm_fallback_warned:
+            logging.warning(
+                "trtllm_allreduce failed in graph capture mode, "
+                "fallback to ncclAllReduce (further warnings suppressed): %s",
+                exc,
+            )
+            _trtllm_fallback_warned = True
+        return None
+
+
+def _rccl_all_reduce_inplace(
+    tensor: torch.Tensor,
+    process_group: Optional[torch.distributed.ProcessGroup] = None,
+) -> torch.Tensor:
     lib, rccl_comm = _get_rccl_runtime(process_group)
     nccl_result = lib.ncclAllReduce(
         tensor.data_ptr(),
@@ -630,6 +664,28 @@ def hipgraph_capture_all_reduce(
     if nccl_result != _NCCL_SUCCESS:
         raise RuntimeError(f"ncclAllReduce failed with error code {nccl_result}")
     return tensor
+
+
+def hipgraph_capture_all_reduce(
+    tensor: torch.Tensor,
+    process_group: Optional[torch.distributed.ProcessGroup] = None,
+) -> torch.Tensor:
+    """Allreduce during HIPGraph capture. Tries custom backends before RCCL."""
+    if _rocm_ar_config.enable_quick_reduce:
+        out = _try_quick_reduce_all_reduce(tensor, process_group)
+        if out is not None:
+            return out
+
+    if _rocm_ar_config.enable_vllm_custom_ar:
+        out = _try_vllm_custom_all_reduce(tensor, process_group)
+        if out is not None:
+            return out
+
+    out = _try_trt_all_reduce(tensor, process_group)
+    if out is not None:
+        return out
+
+    return _rccl_all_reduce_inplace(tensor, process_group)
 
 
 def hipgraph_capture_all_gather(

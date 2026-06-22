@@ -191,6 +191,91 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         fake_lib.ncclAllGather.return_value = all_gather_ret
         return fake_lib
 
+    def test_capture_all_reduce_uses_quick_reduce_before_custom_and_trt(self):
+        hr._is_rocm_runtime = True
+        hr._rccl_comm = ctypes.c_void_p(999)
+        hr._rccl_world_size = 2
+        hr._rccl_lib = self._make_fake_lib(all_reduce_ret=0)
+        hr._rocm_ar_config = hr.RocmAllReduceConfig(
+            enable_vllm_custom_ar=True,
+            enable_quick_reduce=True,
+            quick_reduce_quantization="INT8",
+        )
+        tensor = torch.zeros((8,), dtype=torch.float16)
+        qr_out = torch.ones_like(tensor)
+
+        with patch.object(
+            hr, "_try_quick_reduce_all_reduce", return_value=qr_out
+        ) as qr, patch.object(
+            hr, "_try_vllm_custom_all_reduce", return_value=None
+        ) as custom, patch.object(
+            hr, "_try_trt_all_reduce", return_value=None
+        ) as trt:
+            result = hr.hipgraph_capture_all_reduce(tensor, process_group=object())
+
+        self.assertIs(result, qr_out)
+        qr.assert_called_once()
+        custom.assert_not_called()
+        trt.assert_not_called()
+
+    def test_capture_all_reduce_uses_custom_when_quick_reduce_disabled(self):
+        hr._is_rocm_runtime = True
+        hr._rccl_comm = ctypes.c_void_p(999)
+        hr._rccl_world_size = 2
+        hr._rccl_lib = self._make_fake_lib(all_reduce_ret=0)
+        hr._rocm_ar_config = hr.RocmAllReduceConfig(
+            enable_vllm_custom_ar=True,
+            enable_quick_reduce=False,
+            quick_reduce_quantization="FP",
+        )
+        tensor = torch.zeros((8,), dtype=torch.float16)
+        custom_out = torch.ones_like(tensor)
+
+        with patch.object(
+            hr, "_try_quick_reduce_all_reduce", return_value=None
+        ) as qr, patch.object(
+            hr, "_try_vllm_custom_all_reduce", return_value=custom_out
+        ) as custom, patch.object(
+            hr, "_try_trt_all_reduce", return_value=None
+        ) as trt:
+            result = hr.hipgraph_capture_all_reduce(tensor, process_group=object())
+
+        self.assertIs(result, custom_out)
+        qr.assert_not_called()
+        custom.assert_called_once()
+        trt.assert_not_called()
+
+    def test_capture_all_reduce_falls_back_to_trt_then_rccl(self):
+        hr._is_rocm_runtime = True
+        hr._rccl_comm = ctypes.c_void_p(999)
+        hr._rccl_world_size = 2
+        fake_lib = self._make_fake_lib(all_reduce_ret=0)
+        hr._rccl_lib = fake_lib
+        hr._rocm_ar_config = hr.RocmAllReduceConfig(
+            enable_vllm_custom_ar=False,
+            enable_quick_reduce=False,
+            quick_reduce_quantization="FP",
+        )
+        tensor = torch.zeros((8,), dtype=torch.float16)
+
+        with patch.object(
+            hr, "_try_quick_reduce_all_reduce", return_value=None
+        ) as qr, patch.object(
+            hr, "_try_vllm_custom_all_reduce", return_value=None
+        ) as custom, patch.object(
+            hr, "_try_trt_all_reduce", return_value=None
+        ) as trt, patch(
+            "torch.cuda.current_stream"
+        ) as mock_stream:
+            mock_stream.return_value.cuda_stream = 0
+            result = hr.hipgraph_capture_all_reduce(tensor, process_group=object())
+
+        self.assertIs(result, tensor)
+        qr.assert_not_called()
+        custom.assert_not_called()
+        trt.assert_called_once()
+        fake_lib.ncclAllReduce.assert_called_once()
+
     def test_capture_all_reduce_calls_rccl_and_succeeds(self):
         """hipgraph_capture_all_reduce calls ncclAllReduce with correct args."""
         hr._is_rocm_runtime = True
