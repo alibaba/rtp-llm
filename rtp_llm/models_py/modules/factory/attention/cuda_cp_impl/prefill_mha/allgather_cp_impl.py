@@ -71,6 +71,21 @@ class PCPAllGatherAttnOp:
         self.prefill_cp_rank = parallelism_config.tp_rank
         self.prefill_cp_size = parallelism_config.tp_size
 
+        # CP page-RR KV sharding geometry (mirrors MSAAttention / DeviceData::props):
+        #   sharded = prefill_cp enabled AND kv_cache_sharded AND raw tp_size>1.
+        # When sharded, each rank's local pool / block table only holds the
+        # 1/cp_size physical blocks it owns, so writing the full all-gathered
+        # sequence with FlashInfer append_paged_kv_cache (which has no -1 skip and
+        # reads the full block table) would index past the sharded block table.
+        # In that case we route the local-pool write through the sharding-aware
+        # C++ writer (mha_kv_write_cache) + cp_kv_slot_mapping (non-owned -> -1).
+        cp_cfg = parallelism_config.prefill_cp_config
+        self._kv_sharded = bool(
+            getattr(cp_cfg, "kv_cache_sharded", False) and self.prefill_cp_size > 1
+        )
+        self._cp_size = self.prefill_cp_size if self._kv_sharded else 1
+        self._cp_rank = self.prefill_cp_rank if self._kv_sharded else 0
+
         self.seq_size_per_block = (
             attn_configs.kernel_tokens_per_block or attn_configs.tokens_per_block
         )
@@ -96,6 +111,15 @@ class PCPAllGatherAttnOp:
                 ),
             },
         }
+
+    def _physical_block_table(self) -> torch.Tensor:
+        """Physical paged-cache block table (per-rank, CP-RR compact under
+        sharding). Same table GLM5/DSV4/MSA use for paged cache I/O — addresses
+        physical pages, not the (possibly token-level) kernel block table."""
+        phys = getattr(self.attn_inputs, "kv_cache_block_id_device", None)
+        if isinstance(phys, torch.Tensor) and phys.numel() > 0:
+            return phys
+        return self.attn_inputs.kv_cache_kernel_block_id_device
 
     def support(self, attention_inputs: PyAttentionInputs) -> bool:
         return attention_inputs.is_prefill
@@ -217,26 +241,61 @@ class PCPAllGatherAttnOp:
         append_k, append_v = cast_kv_for_cache_append(
             restore_k, restore_v, kv_cache, self.attn_configs.kv_cache_dtype
         )
-        append_paged_kv_cache(
-            append_key=append_k,
-            append_value=append_v,
-            batch_indices=batch_indices,
-            positions=positions,
-            paged_kv_cache=kv_cache_tensor,
-            kv_indices=params.page_indice_d,
-            kv_indptr=params.decode_page_indptr_d,
-            kv_last_page_len=params.paged_kv_last_page_len_d,
-            kv_layout="HND",
-        )
-        fill_fp8_kv_cache_scale(
-            kv_cache,
-            params,
-            batch_indices,
-            positions,
-            num_kv_heads=self.num_kv_heads,
-            page_size=self.seq_size_per_block,
-            kv_cache_dtype=self.attn_configs.kv_cache_dtype,
-        )
+        if self._kv_sharded:
+            # CP page-RR sharded: the local block table only holds this rank's
+            # 1/cp_size owned blocks. Map each all-gathered token to its physical
+            # slot via cp_kv_slot_mapping (non-owned / out-of-capacity -> -1) and
+            # write through the C++ writer, which skips -1 slots. This stores
+            # exactly this rank's owned page-RR shard, matching the MSA layers and
+            # what decode's per-rank pool reader expects.
+            from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
+                cp_kv_slot_mapping,
+            )
+            from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+            bt = self._physical_block_table().to(torch.int64)
+            slot_mapping = cp_kv_slot_mapping(
+                positions.to(torch.int64),
+                bt,
+                batch_indices.to(torch.int64),
+                self.seq_size_per_block,  # tokens_per_block
+                self.seq_size_per_block,  # kv_eb (entries per block, ratio=1)
+                1,                        # ratio (uncompressed MHA/GQA K/V)
+                self._cp_size,
+                self._cp_rank,
+                owner_tokens_per_block=self.seq_size_per_block,
+            )
+            rtp_llm_ops.mha_kv_write_cache(
+                append_k.contiguous(),
+                append_v.contiguous(),
+                kv_cache_tensor,
+                slot_mapping,
+            )
+        else:
+            append_paged_kv_cache(
+                append_key=append_k,
+                append_value=append_v,
+                batch_indices=batch_indices,
+                positions=positions,
+                paged_kv_cache=kv_cache_tensor,
+                kv_indices=params.page_indice_d,
+                kv_indptr=params.decode_page_indptr_d,
+                kv_last_page_len=params.paged_kv_last_page_len_d,
+                kv_layout="HND",
+            )
+            # FP8 scale init only applies to the FlashInfer append path; the
+            # sharded path's params.page_indice_d is full-length (would index past
+            # the sharded block table), so it must not be used here. M3 uses a
+            # bf16 paged pool (FP8_KV_CACHE=0) where this is a no-op anyway.
+            fill_fp8_kv_cache_scale(
+                kv_cache,
+                params,
+                batch_indices,
+                positions,
+                num_kv_heads=self.num_kv_heads,
+                page_size=self.seq_size_per_block,
+                kv_cache_dtype=self.attn_configs.kv_cache_dtype,
+            )
 
         q0 = torch.index_select(q_reshaped, 0, self.q0_idx).contiguous()
         q1 = torch.index_select(q_reshaped, 0, self.q1_idx).contiguous()
