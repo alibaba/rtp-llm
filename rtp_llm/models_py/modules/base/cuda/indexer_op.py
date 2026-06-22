@@ -958,7 +958,9 @@ class IndexerOp(nn.Module):
             layer's top-k object.
         """
         device = q_fp8.device
-        if total_local_ids is None or int(total_local_ids.numel()) == 0:
+        has_local_ids = total_local_ids is not None and int(total_local_ids.numel()) > 0
+        sharded_cp_kv = kv_cache_sharded and int(cp_size) > 1
+        if not has_local_ids and not sharded_cp_kv:
             return torch.empty((0, self.index_topk), dtype=torch.int32, device=device)
 
         total_kv_tokens = num_kv_tokens
@@ -966,8 +968,12 @@ class IndexerOp(nn.Module):
 
         weights_sq = weights.squeeze(-1)
 
-        q0 = q_fp8[total_local_ids].contiguous()
-        weights_sq0 = weights_sq[total_local_ids].contiguous()
+        if has_local_ids:
+            q0 = q_fp8[total_local_ids].contiguous()
+            weights_sq0 = weights_sq[total_local_ids].contiguous()
+        else:
+            q0 = q_fp8[:0].contiguous()
+            weights_sq0 = weights_sq[:0].contiguous()
 
         # Full KV from cache (KV not split).
         k_fp8 = torch.empty(
@@ -1007,7 +1013,7 @@ class IndexerOp(nn.Module):
                     _tensor_summary(weights_sq0),
                 )
 
-        if kv_cache_sharded and int(cp_size) > 1:
+        if sharded_cp_kv:
             from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
 
             per_req_total_kv_lens = (
@@ -1072,6 +1078,8 @@ class IndexerOp(nn.Module):
                 block_table,
                 cu_kv_seqlens_global,
             )
+        if not has_local_ids:
+            return torch.empty((0, self.index_topk), dtype=torch.int32, device=device)
         kv_fp8_full = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
 
         def run_part_logits_topk(
