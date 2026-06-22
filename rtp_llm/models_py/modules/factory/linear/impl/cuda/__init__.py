@@ -25,9 +25,16 @@ if is_cuda():
         LinearFactory.register(CudaFp4GEMMLinear)
 
     if is_sm12x():
-        from .fp8_vllm_blockwise_sm120_linear import CudaFp8VllmBlockwiseLinear
+        try:
+            from .fp8_vllm_blockwise_sm120_linear import CudaFp8VllmBlockwiseLinear
 
-        LinearFactory.register(CudaFp8VllmBlockwiseLinear)
+            LinearFactory.register(CudaFp8VllmBlockwiseLinear)
+        except ImportError as e:
+            logger.warning(
+                "CudaFp8VllmBlockwiseLinear unavailable on sm12x: %s; "
+                "FP8_PER_BLOCK will fall back to other registered backends.",
+                e,
+            )
 
     LinearFactory.register(CudaFp8PerTensorLinear)
     LinearFactory.register(CudaFp8GEMMLinear)
