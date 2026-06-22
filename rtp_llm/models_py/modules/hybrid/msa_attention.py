@@ -661,12 +661,30 @@ class MSAAttention(nn.Module):
     _cp_shared_meta: Optional[Dict[str, Any]] = None
 
     @classmethod
-    def _get_trtllm_workspace(cls, device: torch.device) -> torch.Tensor:
+    def _get_trtllm_workspace(cls, device: torch.device):
         ws = cls._trtllm_workspace.get(device)
         if ws is None:
             ws = torch.zeros(256 * 1024 * 1024, dtype=torch.uint8, device=device)
             cls._trtllm_workspace[device] = ws
         return ws
+
+    def _maybe_trtllm_workspace(self, device: torch.device):
+        """Workspace for the trtllm-gen MSA fast path, or None to force the Triton path.
+
+        The trtllm-gen mega-kernel emits page ids as ``pid_h * num_pages + block_idx``
+        with no per-block offset, i.e. it assumes the MSA side cache is a single
+        physically-contiguous slice. Only the CP path (_build_compact_addressing)
+        produces that layout; the non-CP path addresses the side cache through the
+        scattered paged block table, which the kernel would misread -> corruption.
+        So the trtllm fast path is only valid when CP is enabled. The
+        M3_DISABLE_TRTLLM_GEN=1 escape hatch additionally forces the Triton path
+        (e.g. on boxes whose flashinfer build lacks the M3 trtllm-gen cubin).
+        """
+        if not self.cp_enabled:
+            return None
+        if __import__("os").environ.get("M3_DISABLE_TRTLLM_GEN", "0") == "1":
+            return None
+        return MSAAttention._get_trtllm_workspace(device)
 
     def __init__(
         self,
@@ -1683,7 +1701,7 @@ class MSAAttention(nn.Module):
             local_blocks=self.local_blocks,
             score_type=self.score_type,
             disable_index_value=self.disable_index_value,
-            workspace=MSAAttention._get_trtllm_workspace(device),
+            workspace=self._maybe_trtllm_workspace(device),
         )
 
         output = self.o_proj(o.reshape(local_tokens, -1).contiguous())
@@ -2263,7 +2281,7 @@ class MSAAttention(nn.Module):
                 local_blocks=self.local_blocks,
                 score_type=self.score_type,
                 disable_index_value=self.disable_index_value,
-                workspace=MSAAttention._get_trtllm_workspace(device),
+                workspace=self._maybe_trtllm_workspace(device),
             )
         else:
             seq_lens = kv_lens.to(torch.int32)
@@ -2321,7 +2339,7 @@ class MSAAttention(nn.Module):
                 local_blocks=self.local_blocks,
                 score_type=self.score_type,
                 disable_index_value=self.disable_index_value,
-                workspace=MSAAttention._get_trtllm_workspace(device),
+                workspace=self._maybe_trtllm_workspace(device),
                 cu_seqlens=decode_cu_seqlens,
                 prefix_lens=prefix_lens.to(torch.int32),
             )
