@@ -214,6 +214,11 @@ class ForwardAccessRecord:
     # success). Kept here so a successful gRPC status can still be classified as
     # a backend failure when the payload says so.
     error_message: Optional[str] = None
+    # Optional structured backend code propagated by the real dash-sc servicer.
+    # When present it keeps framework ERROR_QPS aligned with HTTP frontend tags
+    # such as "8400_MASTER_NO_AVAILABLE_WORKER"; otherwise we fall back to the
+    # bounded protocol/transport buckets below.
+    backend_error_code: Optional[str] = None
     status: str = "OK"
     status_detail: Optional[str] = None
     # Exception-path diagnostics.
@@ -438,6 +443,7 @@ class ForwardAccessRecord:
             "status": self.status,
             "status_detail": self.status_detail,
             "error_message": self.error_message,
+            "backend_error_code": self.backend_error_code,
             "exc_type": self.exc_type,
             "context_code": self.context_code,
             "context_active": self.context_active,

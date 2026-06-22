@@ -261,11 +261,18 @@ class BackendRPCServerVisitor:
 
         kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
         if not input.generate_config.role_addrs:
-            raise FtRuntimeException(
+            route_error = FtRuntimeException(
                 ExceptionType.ROUTE_ERROR,
                 "request_id=%s no backend role addresses found after routing"
                 % input.request_id,
             )
+            if (
+                master_route_result is not None
+                and not master_route_result.is_ok
+                and master_route_result.error_code is not None
+            ):
+                route_error.rtp_error_code = master_route_result.error_code
+            raise route_error
 
     def check_sp_supported(self, input: GenerateInput):
         if not self.sp_config or not self.sp_config.model_type:
