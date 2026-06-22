@@ -1,15 +1,24 @@
 import argparse
+import socket
 import sys
+from dataclasses import asdict
+from typing import List
 
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 from rocm_allreduce_perf_lib import (
     DEFAULT_BACKENDS,
     MB,
+    ResultRow,
     format_result_header,
+    format_result_row,
     generate_shapes,
     parse_backends,
     parse_int_csv,
     parse_shapes,
+    summarize_us,
+    write_results_json,
 )
 
 DEFAULT_BYTE_TARGETS = (
@@ -80,6 +89,132 @@ def parse_args(argv):
     return args
 
 
+def find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def setup_distributed(rank: int, world_size: int, port: int) -> None:
+    torch.cuda.set_device(rank)
+    dist.init_process_group(
+        backend="nccl",
+        init_method=f"tcp://127.0.0.1:{port}",
+        world_size=world_size,
+        rank=rank,
+    )
+
+
+def cleanup_distributed(metadata_group=None) -> None:
+    try:
+        if dist.is_initialized():
+            dist.barrier()
+            torch.cuda.synchronize()
+    except Exception:
+        pass
+    try:
+        if metadata_group is not None:
+            dist.destroy_process_group(metadata_group)
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
+def make_input(rank: int, shape, dtype: torch.dtype) -> torch.Tensor:
+    torch.manual_seed(20260622 + rank)
+    return torch.randn(shape.shape, device=f"cuda:{rank}", dtype=dtype)
+
+
+def rccl_all_reduce(inp: torch.Tensor) -> torch.Tensor:
+    out = inp.clone()
+    dist.all_reduce(out, group=dist.group.WORLD)
+    return out
+
+
+def time_backend(fn, inp: torch.Tensor, warmup: int, iters: int) -> List[float]:
+    for _ in range(warmup):
+        fn(inp)
+    torch.cuda.synchronize()
+    dist.barrier()
+
+    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+    for idx in range(iters):
+        start_events[idx].record()
+        fn(inp)
+        end_events[idx].record()
+    torch.cuda.synchronize()
+    dist.barrier()
+    return [
+        start_events[idx].elapsed_time(end_events[idx]) * 1000.0 for idx in range(iters)
+    ]
+
+
+def ok_row(backend: str, args, shape, times: List[float]) -> ResultRow:
+    summary = summarize_us(times)
+    avg_seconds = summary["avg_us"] / 1_000_000.0
+    algbw = shape.actual_bytes / avg_seconds / 1_000_000_000.0
+    return ResultRow(
+        backend=backend,
+        dtype=args.dtype_label,
+        target=shape.target,
+        shape=shape.shape_label,
+        bytes=shape.actual_bytes,
+        status="OK",
+        avg_us=summary["avg_us"],
+        p50_us=summary["p50_us"],
+        p90_us=summary["p90_us"],
+        min_us=summary["min_us"],
+        max_us=summary["max_us"],
+        algbw_GBps=algbw,
+        note="",
+    )
+
+
+def worker(rank: int, world_size: int, port: int, args, return_dict) -> None:
+    setup_distributed(rank, world_size, port)
+    rows: List[ResultRow] = []
+    try:
+        for shape in args.bench_shapes:
+            inp = make_input(rank, shape, args.dtype_value)
+            for backend in args.backend_specs:
+                if backend.name != "rccl":
+                    continue
+                times = time_backend(rccl_all_reduce, inp, args.warmup, args.iters)
+                rows.append(ok_row(backend.name, args, shape, times))
+        return_dict[rank] = [asdict(row) for row in rows]
+    finally:
+        cleanup_distributed()
+
+
+def run_distributed(args) -> List[ResultRow]:
+    if not torch.cuda.is_available():
+        raise RuntimeError("ROCm/CUDA is not available")
+    if torch.cuda.device_count() < args.world_size:
+        raise RuntimeError(
+            f"requires {args.world_size} GPUs, found {torch.cuda.device_count()}"
+        )
+    port = find_free_port()
+    ctx = mp.get_context("spawn")
+    manager = ctx.Manager()
+    return_dict = manager.dict()
+    procs = [
+        ctx.Process(
+            target=worker, args=(rank, args.world_size, port, args, return_dict)
+        )
+        for rank in range(args.world_size)
+    ]
+    for proc in procs:
+        proc.start()
+    for proc in procs:
+        proc.join(timeout=300)
+    for proc in procs:
+        if proc.exitcode != 0:
+            raise RuntimeError(f"rank process exited with code {proc.exitcode}")
+    rank0_rows = return_dict.get(0, [])
+    return [ResultRow(**row) for row in rank0_rows]
+
+
 def main(argv=None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.world_size < 2:
@@ -93,7 +228,26 @@ def main(argv=None) -> int:
         for shape in args.bench_shapes:
             print(f"DRY-RUN {shape.target} {shape.shape_label} {shape.actual_bytes}")
         return 0
-    raise RuntimeError("distributed benchmark worker is absent")
+    rows = run_distributed(args)
+    print(format_result_header())
+    for row in rows:
+        print(format_result_row(row))
+    write_results_json(
+        args={
+            "backends": args.backends,
+            "world_size": args.world_size,
+            "dtype": args.dtype,
+            "hidden_sizes": args.hidden_sizes,
+            "one_token_hidden_size": args.one_token_hidden_size,
+            "max_bytes_mb": args.max_bytes_mb,
+            "byte_targets": args.byte_targets,
+            "shapes": args.shapes,
+            "warmup": args.warmup,
+            "iters": args.iters,
+        },
+        rows=rows,
+    )
+    return 0
 
 
 if __name__ == "__main__":
