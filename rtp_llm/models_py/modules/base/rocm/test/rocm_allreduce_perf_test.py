@@ -58,6 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument("--quick-reduce-min-size-mb", type=int, default=None)
     parser.add_argument("--quick-reduce-max-size-mb", type=int, default=None)
+    parser.add_argument(
+        "--quick-reduce-quantization-min-size-kb", type=int, default=None
+    )
     parser.add_argument("--disable-correctness-check", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -221,6 +224,27 @@ def assert_close_to_ref(
         return f"{backend_name} correctness failed max_abs={max_abs:.6g}"
 
 
+def quick_reduce_tolerance(backend_name: str):
+    return {
+        "quick_reduce_fp": (1e-2, 1e-2),
+        "quick_reduce_int8": (8e-2, 8e-2),
+        "quick_reduce_int6": (2e-1, 2e-1),
+        "quick_reduce_int4": (1.0, 1.0),
+    }[backend_name]
+
+
+def assert_quick_reduce_close(
+    backend_name: str, out: torch.Tensor, ref: torch.Tensor
+) -> Optional[str]:
+    rtol, atol = quick_reduce_tolerance(backend_name)
+    try:
+        torch.testing.assert_close(out, ref, rtol=rtol, atol=atol)
+        return None
+    except AssertionError:
+        max_abs = (out - ref).abs().max().item()
+        return f"{backend_name} correctness failed max_abs={max_abs:.6g}"
+
+
 def worker(rank: int, world_size: int, port: int, args, return_dict) -> None:
     setup_distributed(rank, world_size, port)
     metadata_group = None
@@ -230,9 +254,12 @@ def worker(rank: int, world_size: int, port: int, args, return_dict) -> None:
     trt_init_note = None
     vllm_custom = None
     vllm_init_note = None
+    quick_reduce_managers = {}
+    quick_reduce_init_notes = {}
     try:
         needs_metadata_group = any(
-            spec.name == "vllm_custom" for spec in args.backend_specs
+            spec.name == "vllm_custom" or spec.quantization is not None
+            for spec in args.backend_specs
         )
         if needs_metadata_group:
             metadata_group = dist.new_group(
@@ -259,6 +286,34 @@ def worker(rank: int, world_size: int, port: int, args, return_dict) -> None:
                 vllm_custom = RocmVllmCustomAllReduce(metadata_group, device=rank)
             except Exception as exc:
                 vllm_init_note = f"vLLM custom init failed: {exc}"
+        quick_reduce_specs = [
+            spec for spec in args.backend_specs if spec.quantization is not None
+        ]
+        if quick_reduce_specs:
+            try:
+                from rtp_llm.models_py.modules.base.rocm.quick_reduce import (
+                    RocmQuickReduce,
+                )
+
+                for spec in quick_reduce_specs:
+                    try:
+                        quick_reduce_managers[spec.name] = RocmQuickReduce(
+                            metadata_group,
+                            device=rank,
+                            quantization=spec.quantization,
+                            min_size_mb=args.quick_reduce_min_size_mb,
+                            max_size_mb=args.quick_reduce_max_size_mb,
+                            quantization_min_size_kb=args.quick_reduce_quantization_min_size_kb,
+                        )
+                    except Exception as exc:
+                        quick_reduce_init_notes[spec.name] = (
+                            f"QuickReduce init failed: {exc}"
+                        )
+            except Exception as exc:
+                for spec in quick_reduce_specs:
+                    quick_reduce_init_notes[spec.name] = (
+                        f"QuickReduce import failed: {exc}"
+                    )
         for shape in args.bench_shapes:
             inp = make_input(rank, shape, args.dtype_value)
             for backend in args.backend_specs:
@@ -331,8 +386,52 @@ def worker(rank: int, world_size: int, port: int, args, return_dict) -> None:
                     times = time_backend(vllm_fn, inp, args.warmup, args.iters)
                     rows.append(ok_row(backend.name, args, shape, times))
                     continue
+
+                if backend.quantization is not None:
+                    if backend.name in quick_reduce_init_notes:
+                        rows.append(
+                            skip_row(
+                                backend.name,
+                                args,
+                                shape,
+                                quick_reduce_init_notes[backend.name],
+                            )
+                        )
+                        continue
+                    manager = quick_reduce_managers.get(backend.name)
+                    if manager is None or getattr(manager, "disabled", True):
+                        rows.append(
+                            skip_row(
+                                backend.name,
+                                args,
+                                shape,
+                                "QuickReduce init disabled",
+                            )
+                        )
+                        continue
+                    if not manager.should_quick_allreduce(inp):
+                        rows.append(skip_row(backend.name, args, shape, "ineligible"))
+                        continue
+
+                    ref = rccl_all_reduce(inp)
+
+                    def quick_reduce_fn(tensor):
+                        return manager.quick_all_reduce(tensor)
+
+                    if not args.disable_correctness_check:
+                        error = assert_quick_reduce_close(
+                            backend.name, quick_reduce_fn(inp), ref
+                        )
+                        if error is not None:
+                            rows.append(fail_row(backend.name, args, shape, error))
+                            continue
+                    times = time_backend(quick_reduce_fn, inp, args.warmup, args.iters)
+                    rows.append(ok_row(backend.name, args, shape, times))
+                    continue
         return_dict[rank] = [asdict(row) for row in rows]
     finally:
+        for manager in quick_reduce_managers.values():
+            manager.close()
         if vllm_custom is not None:
             vllm_custom.close()
         cleanup_distributed(metadata_group)
@@ -395,6 +494,9 @@ def main(argv=None) -> int:
             "shapes": args.shapes,
             "warmup": args.warmup,
             "iters": args.iters,
+            "quick_reduce_min_size_mb": args.quick_reduce_min_size_mb,
+            "quick_reduce_max_size_mb": args.quick_reduce_max_size_mb,
+            "quick_reduce_quantization_min_size_kb": args.quick_reduce_quantization_min_size_kb,
         },
         rows=rows,
     )
