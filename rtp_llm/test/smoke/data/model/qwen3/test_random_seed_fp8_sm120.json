@@ -39,7 +39,7 @@
             },
             "result": {
                 "response": [
-                    " I know that Flask has a built-in ORM,",
+                    " I know that Django North is a database migration tool",
                     " Can anyone provide the one with the cleanest code"
                 ],
                 "iter_count": 10,
