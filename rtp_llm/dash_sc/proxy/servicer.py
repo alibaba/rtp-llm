@@ -25,7 +25,6 @@ from rtp_llm.dash_sc.grpc_metrics import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy.service_route import create_service_discovery_from_env
-from rtp_llm.dash_sc.structural_tag import maybe_force_at_least_one_on_request_proto
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
 _FORWARD_CHANNEL_OPTS: list[tuple[str, int]] = [
@@ -130,12 +129,6 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 record.mark_request_done("eof")
                 return
             record.req_count = 1
-            try:
-                maybe_force_at_least_one_on_request_proto(first_request)
-            except Exception as e:
-                logging.warning(
-                    "[DashScGrpc] force_at_least_one mutation failed: %s", e
-                )
             record.record_request_frame(first_request)
 
             invalid_message = _invalid_max_new_tokens_message(first_request)

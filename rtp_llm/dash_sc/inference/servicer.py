@@ -49,7 +49,6 @@ from rtp_llm.dash_sc.grpc_metrics import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
-from rtp_llm.dash_sc.structural_tag import maybe_force_at_least_one_on_request_proto
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
 from rtp_llm.server.request_headers import (
@@ -518,11 +517,10 @@ async def iter_real_model_stream_infer(
     tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)
     runtime = think_runtime if think_runtime is not None else _ThinkRuntime()
     logging.debug(
-        "[DashScGrpc] [%s] real infer start: model_name=%s input_len=%s structural_tag=%s sampling=%s",
+        "[DashScGrpc] [%s] real infer start: model_name=%s input_len=%s sampling=%s",
         tag,
         request.model_name,
         len(input_ids_list),
-        getattr(sampling, "structural_tag", None),
         sampling,
     )
     matched_echo_ids = _matched_echo_prefix_ids(input_ids_list, echo_prefix_ids)
@@ -1291,13 +1289,6 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             first_request = True
             async for request in request_iterator:
                 record.req_count += 1
-                if record.req_count == 1:
-                    try:
-                        maybe_force_at_least_one_on_request_proto(request)
-                    except Exception as e:
-                        logging.warning(
-                            "[DashScGrpc] force_at_least_one mutation failed: %s", e
-                        )
                 logging.debug(
                     "[DashScGrpc] ModelInferRequest: id=%s model_name=%s",
                     request.id,
