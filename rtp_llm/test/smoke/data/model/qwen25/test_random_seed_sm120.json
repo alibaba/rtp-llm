@@ -18,10 +18,10 @@
             "result": {
                 "response_batch": [
                     {
-                        "response": " In Django, nested JSON fields are generally achieved with"
+                        "response": " In Django, I would use `reverse`, in"
                     },
                     {
-                        "response": " In Django, nested JSON fields are generally achieved with"
+                        "response": " In Django, I would use `reverse`, in"
                     }
                 ]
             }
@@ -39,8 +39,8 @@
             },
             "result": {
                 "response": [
-                    " In my project, I have two models:\n\n``",
-                    " Flask lacks the comprehensive, active official documentation and documentation"
+                    " In my project, I have two models:\n\nIn",
+                    " Flask lacks the comprehensive, clean solutions provided by Django"
                 ],
                 "iter_count": 10,
                 "finished": true
