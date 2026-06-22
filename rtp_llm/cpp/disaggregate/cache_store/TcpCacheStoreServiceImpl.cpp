@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImpl.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <torch/torch.h>
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImplContext.h"
@@ -13,10 +14,12 @@ TcpCacheStoreServiceImpl::TcpCacheStoreServiceImpl(
     const kmonitor::MetricsReporterPtr&              metrics_reporter,
     const std::shared_ptr<TimerManager>&             timer_manager,
     const std::shared_ptr<LockedBlockBufferManager>& locked_block_buffer_manager,
-    const std::shared_ptr<TcpClient>&                tcp_client):
+    const std::shared_ptr<TcpClient>&                tcp_client,
+    int                                              device_id):
     CacheStoreServiceImpl(
         memory_util, request_block_buffer_store, metrics_reporter, timer_manager, locked_block_buffer_manager),
-    tcp_client_(tcp_client) {}
+    tcp_client_(tcp_client),
+    device_id_(device_id) {}
 
 void TcpCacheStoreServiceImpl::loadImpl(::google::protobuf::RpcController* controller,
                                         const ::CacheLoadRequest*          request,
@@ -82,7 +85,7 @@ void TcpCacheStoreServiceImpl::transferImpl(::google::protobuf::RpcController*  
                                             ::google::protobuf::Closure*                         done,
                                             const std::vector<std::shared_ptr<BlockBuffer>>&     local_blocks,
                                             const std::vector<std::shared_ptr<BlockBufferInfo>>& remote_blocks) {
-    auto connection = tcp_client_->getTransferConnection(request->client_ip(), request->client_port());
+    auto connection = tcp_client_->getTransferConnection(request->client_ip(), request->client_port(), device_id_);
     auto context    = std::make_shared<CacheTransferServiceImplContext>(
         request, response, done, local_blocks, remote_blocks, locked_block_buffer_manager_, memory_util_, connection);
     context->run();
@@ -92,6 +95,8 @@ void TcpCacheStoreServiceImpl::blockReadImpl(::google::protobuf::RpcController* 
                                              const ::BlockReadRequest*          request,
                                              BlockReadResponse*                 response,
                                              ::google::protobuf::Closure*       done) {
+    pinThreadToDeviceOnce(device_id_);
+
     for (int i = 0; i < request->blocks_size(); i++) {
         auto& block_info   = request->blocks(i);
         auto  block_buffer = request_block_buffer_store_->findUserBuffer(block_info.key());

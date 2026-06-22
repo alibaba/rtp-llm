@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpBlockReadClosure.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <torch/torch.h>
 
@@ -12,13 +13,15 @@ TcpBlockReadClosure::TcpBlockReadClosure(const std::vector<std::shared_ptr<Block
                                          TransferConnection::ReadDoneCallback                 callback,
                                          BlockReadRequest*                                    request,
                                          BlockReadResponse*                                   response,
-                                         arpc::ANetRPCController*                             controller):
+                                         arpc::ANetRPCController*                             controller,
+                                         int                                                  device_id):
     local_blocks_(local_blocks),
     remote_blocks_(remote_blocks),
     callback_(callback),
     request_(request),
     response_(response),
-    controller_(controller) {}
+    controller_(controller),
+    device_id_(device_id) {}
 
 TcpBlockReadClosure::~TcpBlockReadClosure() {
     delete request_;
@@ -27,6 +30,8 @@ TcpBlockReadClosure::~TcpBlockReadClosure() {
 }
 
 void TcpBlockReadClosure::Run() {
+    pinThreadToDeviceOnce(device_id_);
+
     if (controller_->Failed()) {
         RTP_LLM_LOG_WARNING("tcp transfer connection read failed, error is %s", controller_->ErrorText().c_str());
         end(false, CacheStoreUtil::fromArpcErrorCode(controller_->GetErrorCode()));
