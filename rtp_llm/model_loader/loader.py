@@ -393,6 +393,7 @@ class ModelLoader:
 
         _inline_count = 0
         _total_count = 0
+        _completed_count = 0
         for key, loaded_tensor in all_tensors:
             if key not in tensor_to_weight_map:
                 continue
@@ -444,13 +445,16 @@ class ModelLoader:
                     else:
                         model_weights.set_global_weight(name, tensor)
                 weight_info.collector.clear()
+                _completed_count += 1
                 if inline_fp8:
-                    # Avoid empty_cache on every completed weight; only flush when
-                    # reserved memory is high to reduce allocator fragmentation.
+                    # Avoid empty_cache/gc.collect on every completed weight; only
+                    # flush when reserved memory is high, and throttle gc.collect()
+                    # by completed weight count to reduce loading overhead.
                     device_props = torch.cuda.get_device_properties(torch.cuda.current_device())
                     if torch.cuda.memory_reserved() > device_props.total_memory * 0.85:
                         torch.cuda.empty_cache()
-                    gc.collect()
+                    if _completed_count % 100 == 0:
+                        gc.collect()
 
         _fallback_count = 0
         for weight_info in weight_info_list:

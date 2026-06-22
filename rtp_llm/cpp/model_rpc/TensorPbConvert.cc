@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 
+#include <limits>
 #include <stdexcept>
 
 namespace rtp_llm {
@@ -58,6 +59,13 @@ torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
 
     int64_t numel = 1;
     for (auto dim : shape) {
+        if (dim < 0) {
+            throw std::runtime_error("TensorPB shape dimension must be non-negative, got "
+                                     + std::to_string(dim));
+        }
+        if (dim != 0 && numel > std::numeric_limits<int64_t>::max() / dim) {
+            throw std::runtime_error("TensorPB shape numel overflow");
+        }
         numel *= dim;
     }
 

@@ -683,10 +683,11 @@ def reduce_scatter(
     """
     process_group = _get_group(group)
     world_size = torch.distributed.get_world_size(process_group)
-    assert input_tensor.shape[0] % world_size == 0, (
-        f"reduce_scatter: input dim 0 ({input_tensor.shape[0]}) "
-        f"must be divisible by world_size ({world_size})"
-    )
+    if input_tensor.shape[0] % world_size != 0:
+        raise ValueError(
+            f"reduce_scatter: input dim 0 ({input_tensor.shape[0]}) "
+            f"must be divisible by world_size ({world_size})"
+        )
     chunk_size = input_tensor.shape[0] // world_size
     expected_shape = [chunk_size] + list(input_tensor.shape[1:])
     if output_tensor is None:

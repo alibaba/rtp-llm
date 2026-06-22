@@ -98,7 +98,7 @@ class MultimodalInput:
         self.url = url
         self.mm_type = mm_type
         self.mm_preprocess_config = mm_preprocess_config or MMPreprocessConfig()
-        self.tensor = tensor or torch.empty(1)
+        self.tensor = tensor if tensor is not None else torch.empty(1)
 
 
 class IgraphItemKeyCountMismatchError(Exception):

@@ -38,13 +38,16 @@ def get_mla_impl(
             continue
 
         cos_sin_cache = weight.get_global_weight_or_none(W.rope_cos_sin_cache)
+        # Short-circuit before touching cu_kv_seqlens when CP is enabled to avoid
+        # an unnecessary GPU->CPU sync on the hot prefill routing path.
+        cp_enabled = (
+            parallelism_config is not None
+            and parallelism_config.prefill_cp_config.is_enabled()
+        )
         use_fast_path = (
             attn_inputs.is_prefill
+            and not cp_enabled
             and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
-            # TODO: support fast path for cp prefill
-            and not (
-                parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
-            )
         )
         # Skip sparse MLA if fast path is enabled
         if use_fast_path and impl.is_sparse():

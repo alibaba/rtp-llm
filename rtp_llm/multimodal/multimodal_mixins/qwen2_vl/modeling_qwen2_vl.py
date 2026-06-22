@@ -1,5 +1,6 @@
 import logging
 import math
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -168,6 +169,7 @@ class VisionAttention(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor = None,
+        max_seqlen: Optional[int] = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = (
@@ -216,6 +218,7 @@ class VisionFlashAttention2(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor = None,
+        max_seqlen: Optional[int] = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = (
@@ -227,7 +230,8 @@ class VisionFlashAttention2(nn.Module):
         q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
 
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+        if max_seqlen is None:
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         attn_output = flash_attn_varlen_func(
             q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen
         ).reshape(seq_length, -1)
@@ -247,6 +251,7 @@ class VisionSdpaAttention(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor = None,
+        max_seqlen: Optional[int] = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = (
@@ -304,10 +309,14 @@ class Qwen2VLVisionBlock(nn.Module):
         )
 
     def forward(self, hidden_states, cu_seqlens, rotary_pos_emb) -> torch.Tensor:
+        # Pre-compute max_seqlen once on the host side and pass it down so each
+        # flash-attention layer does not trigger its own GPU->CPU sync.
+        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             cu_seqlens=cu_seqlens,
             rotary_pos_emb=rotary_pos_emb,
+            max_seqlen=max_seqlen,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states

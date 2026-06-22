@@ -89,7 +89,7 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> ExpertForwardPayload:
-        logging.info(
+        logging.debug(
             f"[MoriEpIntranodeRouter] prepare called, tokens={a1.shape[0]}, ep_rank={self.ep_rank}"
         )
         if a1_scale is not None or a2_scale is not None:

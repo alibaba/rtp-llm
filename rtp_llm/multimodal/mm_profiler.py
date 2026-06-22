@@ -215,8 +215,6 @@ class MMProfiler:
             # then drop _lock before doing any long work (yield / profiler setup).
             with self._lock:
                 bail_out = not (self._armed and self._session_id == session_id)
-                if not bail_out:
-                    self._active_profile_count += 1
 
             if bail_out:
                 yield
@@ -233,6 +231,11 @@ class MMProfiler:
                 profile_memory=cfg.get("profile_memory", True),
                 with_stack=cfg.get("with_stack", True),
             )
+
+            # Only bump the active counter after the profiler is successfully
+            # created. If profile() raises, we must not leak the count.
+            with self._lock:
+                self._active_profile_count += 1
 
             try:
                 with prof:

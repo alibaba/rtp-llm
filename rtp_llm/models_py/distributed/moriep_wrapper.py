@@ -76,12 +76,13 @@ class MoriEPWrapperConfig:
             block_num = 80
 
         torch_dtype = to_torch_dtype(model_config.data_type)
-        assert parallelism_config.ep_size == parallelism_config.world_size, (
-            f"MoriEP currently requires ep_size == world_size "
-            f"(TP×EP/DP co-existence is not yet supported), "
-            f"got ep_size={parallelism_config.ep_size}, "
-            f"world_size={parallelism_config.world_size}"
-        )
+        if parallelism_config.ep_size != parallelism_config.world_size:
+            raise ValueError(
+                f"MoriEP currently requires ep_size == world_size "
+                f"(TP×EP/DP co-existence is not yet supported), "
+                f"got ep_size={parallelism_config.ep_size}, "
+                f"world_size={parallelism_config.world_size}"
+            )
         if model_config.expert_num % parallelism_config.ep_size != 0:
             raise ValueError(
                 f"expert_num must be divisible by ep_size for MORI EP, "

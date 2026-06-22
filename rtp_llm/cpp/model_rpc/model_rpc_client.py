@@ -488,8 +488,6 @@ class ModelRpcClient(object):
             f"request: [{input_py.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
         )
 
-        input_pb = trans_input(input_py)
-
         try:
             # Select target address
             target_address = address_list[input_py.request_id % len(address_list)]

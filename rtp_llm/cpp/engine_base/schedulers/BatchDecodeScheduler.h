@@ -9,6 +9,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <list>
+#include <unordered_set>
 
 namespace rtp_llm {
 
@@ -203,9 +204,14 @@ public:
             new_streams.remove_if([](const auto& s) { return s->getStatus() == StreamState::FINISHED; });
             running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
             // 从waiting_streams_中移除已调度的stream
+            // Use a set + single remove_if to avoid O(batch_size * waiting_size)
+            std::unordered_set<GenerateStream*> scheduled_ptrs;
             for (auto& stream : new_streams) {
-                waiting_streams_.remove(stream);
+                scheduled_ptrs.insert(stream.get());
             }
+            waiting_streams_.remove_if([&](const GenerateStreamPtr& s) {
+                return scheduled_ptrs.count(s.get()) > 0;
+            });
         }
     }
 

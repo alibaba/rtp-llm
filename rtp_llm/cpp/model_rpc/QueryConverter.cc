@@ -226,7 +226,7 @@ void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, co
     }
 }
 
-MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_pb) {
+ErrorResult<MultimodalOutput> QueryConverter::transMMOutput(const MultimodalOutputPB* output_pb) {
     torch::Tensor mm_embedding        = transTensor(output_pb->multimodal_embedding()), mm_position_id;
     bool          contain_pos         = output_pb->has_multimodal_pos_id();
     bool          contain_extra_input = output_pb->multimodal_extra_input_size() > 0;
@@ -239,16 +239,24 @@ MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_
         split_sizes.push_back(split_size);
     }
     const int64_t split_total = std::accumulate(split_sizes.begin(), split_sizes.end(), int64_t{0});
-    RTP_LLM_CHECK_WITH_INFO(!split_sizes.empty() && split_total == mm_embedding.size(0),
-                            "split_sizes sum=%ld does not match mm_embedding.size(0)=%ld",
-                            split_total,
-                            mm_embedding.size(0));
+    if (split_sizes.empty()) {
+        return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
+                         "remote multimodal response has empty split_size");
+    }
+    if (split_total != mm_embedding.size(0)) {
+        return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
+                         "split_sizes sum=" + std::to_string(split_total)
+                             + " does not match mm_embedding.size(0)="
+                             + std::to_string(mm_embedding.size(0)));
+    }
     mm_output.mm_features = mm_embedding.split(split_sizes, 0);
     if (contain_pos) {
-        RTP_LLM_CHECK_WITH_INFO(split_total == mm_position_id.size(0),
-                                "split_sizes sum=%ld does not match mm_position_id.size(0)=%ld",
-                                split_total,
-                                mm_position_id.size(0));
+        if (split_total != mm_position_id.size(0)) {
+            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
+                             "split_sizes sum=" + std::to_string(split_total)
+                                 + " does not match mm_position_id.size(0)="
+                                 + std::to_string(mm_position_id.size(0)));
+        }
         mm_output.mm_position_ids = mm_position_id.split(split_sizes, 0);
     }
 
