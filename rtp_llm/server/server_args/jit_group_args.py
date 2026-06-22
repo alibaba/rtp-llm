@@ -27,11 +27,3 @@ def init_jit_group_args(parser, jit_config):
         default=30,
         help="JIT远程cache启动预热超时时间，单位秒",
     )
-    jit_group.add_argument(
-        "--jit_sync_interval_s",
-        env_name="JIT_SYNC_INTERVAL_S",
-        bind_to=(jit_config, "jit_sync_interval_s"),
-        type=float,
-        default=300,
-        help="JIT远程cache后台同步间隔，单位秒；小于等于0时仅退出时同步",
-    )

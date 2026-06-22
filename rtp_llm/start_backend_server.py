@@ -26,35 +26,13 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
-from rtp_llm.utils.jit_cache_manager import ensure_jit_cache_run_id
+from rtp_llm.utils.jit_cache_manager import JitCacheManager, ensure_jit_cache_run_id
 from rtp_llm.utils.process_manager import ProcessManager
 
 setup_logging()
 
-JIT_CACHE_COMPONENT_ENVS = {
-    "flashinfer": "FLASHINFER_WORKSPACE_BASE",
-    "triton": "TRITON_CACHE_DIR",
-    "triton_autotune": "TRITON_AUTOTUNE_CONFIG_DIR",
-    "deep_gemm": "DG_JIT_CACHE_DIR",
-    "torch_extensions": "TORCH_EXTENSIONS_DIR",
-}
-
-
-def bootstrap_local_jit_cache(py_env_configs: PyEnvConfigs):
-    local_root = os.path.expanduser(py_env_configs.jit_config.local_jit_cache_dir)
-    os.makedirs(local_root, exist_ok=True)
-    for component, env_name in JIT_CACHE_COMPONENT_ENVS.items():
-        component_dir = os.path.join(local_root, component)
-        os.makedirs(component_dir, exist_ok=True)
-        os.environ[env_name] = component_dir
-    os.environ["TRITON_AUTOTUNE_CACHE_MODE"] = "cached"
-    os.environ["LOCAL_JIT_CACHE_DIR"] = local_root
-    logging.info("local JIT cache root: %s", local_root)
-
 
 def prepare_jit_cache(py_env_configs: PyEnvConfigs):
-    from rtp_llm.utils.jit_cache_manager import JitCacheManager
-
     manager = JitCacheManager(py_env_configs.jit_config)
     manager.bootstrap_env()
     manager.prepare()
@@ -119,8 +97,6 @@ def local_rank_start(
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
         jit_cache_manager = prepare_jit_cache(py_env_configs)
-        if jit_cache_manager is None:
-            bootstrap_local_jit_cache(py_env_configs)
         start_time = time.time()
         from rtp_llm.server.backend_manager import BackendManager
 
@@ -476,6 +452,7 @@ def start_backend_server(
     setproctitle("rtp_llm_backend_server")
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
+
     ensure_jit_cache_run_id()
 
     clear_jit_filelock()

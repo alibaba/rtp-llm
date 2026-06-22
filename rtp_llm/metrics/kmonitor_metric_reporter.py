@@ -87,6 +87,10 @@ class GaugeMetrics(Enum):
     VIT_IMAGE_PROCESSOR_RT_US_METRIC = "rtp_llm_vit_image_processor_rt_us"
     VIT_RESIZED_PIXEL_COUNT_METRIC = "rtp_llm_vit_resized_pixel_count"
 
+    # jit cache
+    JIT_CACHE_REMOTE_USAGE_METRIC = "py_rtp_jit_cache_remote_usage"
+    JIT_CACHE_LOCAL_USAGE_METRIC = "py_rtp_jit_cache_local_usage"
+
 
 class MetricReporter(object):
     def __init__(self, kmonitor: Any):
