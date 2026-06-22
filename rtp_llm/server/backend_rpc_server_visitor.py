@@ -505,13 +505,22 @@ class BackendRPCServerVisitor:
 
         async def stream_with_aux_info():
             attempt = 0
+            is_streaming = bool(getattr(input.generate_config, "is_streaming", False))
             while True:
                 yielded_output = False
                 try:
                     stream = await route_and_enqueue(attempt)
-                    async for output in stream:
+                    if is_streaming:
+                        async for output in stream:
+                            yielded_output = True
+                            yield output
+                    else:
+                        buffered_outputs = []
+                        async for output in stream:
+                            buffered_outputs.append(output)
                         yielded_output = True
-                        yield output
+                        for output in buffered_outputs:
+                            yield output
                     return
                 except BaseException as e:
                     set_aux_info(e)
