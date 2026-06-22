@@ -234,6 +234,7 @@ markers = [
     "SM100: (deprecated) use gpu(type='SM100')",
     "SM100_ARM: (deprecated) use gpu(type='SM100_ARM')",
     "MI308X: (deprecated) use gpu(type='MI308X')",
+    "MI308X_ROCM7: (deprecated) use gpu(type='MI308X_ROCM7')",
 
     # Test type markers
     "smoke: smoke tests",

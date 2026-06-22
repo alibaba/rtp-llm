@@ -32,10 +32,16 @@ def request_get(url, headers):
             from rtp_llm.utils.ssrf_check import safe_request_get
 
             REQUEST_GET = safe_request_get
-        except ImportError:
-            REQUEST_GET = lambda url, headers: requests.get(
-                url, stream=True, headers=headers, timeout=10
-            )
+        except ImportError as e:
+            # Fail-closed: do NOT fall back to bare requests.get without SSRF
+            # protection.  Missing the security module means URL validation is
+            # unavailable, which is a deployment error that must be fixed rather
+            # than silently bypassed.
+            raise ImportError(
+                f"rtp_llm.utils.ssrf_check is required for safe URL downloading "
+                f"but could not be imported: {e}. "
+                f"Please ensure the ssrf_check module is installed."
+            ) from e
     return REQUEST_GET(url, headers)
 
 

@@ -97,7 +97,7 @@ class Conversation:
                         preprocess_configs.append(
                             get_preprocess_config(content_part.preprocess_config)
                             if content_part.preprocess_config
-                            else MMPreprocessConfig()
+                            else MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
                         )
                         now_prompt = "<image>\n" + now_prompt
                     else:

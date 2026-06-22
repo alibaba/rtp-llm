@@ -222,6 +222,7 @@ struct MoeConfig {
     bool        use_deepep_internode       = false;
     bool        use_deepep_low_latency     = true;
     bool        use_deepep_p2p_low_latency = false;
+    bool        use_mori_ep                = false;
     bool        fake_balance_expert        = false;
     bool        hack_moe_expert            = false;
     int         deep_ep_num_sm             = 0;

@@ -318,11 +318,14 @@ class MMWorkItem:
         # proto3 default for unset int is 0; treat <= 0 as "not set" and fall back to the
         # caller-provided default (which comes from VitConfig.mm_timeout_ms, always initialized
         # at server startup via --mm_timeout_ms / MM_TIMEOUT_MS env, default 120000ms).
-        # Use the maximum timeout across the whole batch so a single strict request is honored.
-        per_request_timeout = max(
-            (mm_input.mm_preprocess_config.mm_timeout_ms for mm_input in self.mm_inputs),
-            default=0,
-        )
+        # Use the minimum positive timeout across the batch so a single strict request
+        # is not silently widened by a more lenient sibling.
+        positive_timeouts = [
+            mm_input.mm_preprocess_config.mm_timeout_ms
+            for mm_input in self.mm_inputs
+            if mm_input.mm_preprocess_config.mm_timeout_ms > 0
+        ]
+        per_request_timeout = min(positive_timeouts) if positive_timeouts else 0
         self.mm_timeout_ms = (
             per_request_timeout if per_request_timeout > 0 else mm_timeout_ms
         )

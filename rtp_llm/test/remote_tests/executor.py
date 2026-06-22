@@ -13,9 +13,19 @@ from typing import Callable, Dict, List, Optional
 import grpc
 from google.protobuf import duration_pb2
 
-from . import bytestream_pb2 as bs_pb2
-from . import remote_execution_pb2 as re_pb2
-from . import remote_execution_pb2_grpc as re_grpc
+# Proto modules are generated at build time.  In a source-only checkout they
+# may not exist yet — provide a clear error rather than a bare ImportError.
+try:
+    from . import bytestream_pb2 as bs_pb2
+    from . import remote_execution_pb2 as re_pb2
+    from . import remote_execution_pb2_grpc as re_grpc
+except ImportError as _proto_err:
+    raise ImportError(
+        f"remote_tests proto modules not found: {_proto_err}. "
+        "Run the proto generation step (e.g. `python -m grpc_tools.protoc` "
+        "or the project build system) before importing remote_tests, "
+        "or ensure generated files are included in the wheel/distribution."
+    ) from _proto_err
 from .action_cache_client import _encode_varint
 from .cas_client import CASClient
 from .endpoint_info import (
@@ -781,6 +791,37 @@ class RemoteExecutor:
         worker_ip = extract_remote_worker_ip(out_txt)
         status_code = resp.status.code if resp.HasField("status") else None
         status_message = resp.status.message if resp.HasField("status") else None
+
+        # Fail-closed: if the REAPI response status is non-OK, treat the
+        # execution as a failure regardless of exit_code.  Without this an
+        # infrastructure error (e.g. deadline exceeded, resource exhausted)
+        # could be silently treated as a passing test.
+        if status_code is not None and status_code != 0:
+            err_msg = (
+                f"REAPI Execute returned non-OK status: code={status_code}, "
+                f"message={status_message!r}"
+            ).encode("utf-8")
+            return ExecutionResult(
+                exit_code=1,
+                stdout_raw=out_raw,
+                stderr_raw=err_raw + b"\n" + err_msg,
+                stdout_digest=r.stdout_digest if r.stdout_digest.hash else None,
+                stderr_digest=r.stderr_digest if r.stderr_digest.hash else None,
+                output_files=output_files,
+                worker_host_ip=worker_ip,
+                metadata_worker=meta_worker or None,
+                cached_result=resp.cached_result,
+                response_status_code=status_code,
+                response_status_message=status_message,
+                infra_category=self._classify_execute_response_infra(
+                    exit_code=1,
+                    status_code=status_code,
+                    status_message=status_message,
+                    stdout_raw=out_raw,
+                    stderr_raw=err_raw,
+                ),
+            )
+
         infra_category = self._classify_execute_response_infra(
             exit_code=r.exit_code,
             status_code=status_code,

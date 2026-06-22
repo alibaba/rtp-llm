@@ -454,6 +454,18 @@ def destroy_distributed_environment():
     if rocm_rccl.is_available_runtime():
         rocm_rccl.destroy_capture_comm()
 
+    # Close symmetric memory communicator before destroying process groups.
+    # Must happen before destroy_process_group() because PyTorch does NOT clean
+    # up _symmetric_memory globals, leaving stale IPC handles that corrupt
+    # the CUDA address space for subsequent re-initialization.
+    try:
+        from rtp_llm.models_py.distributed.symm_mem import _symm_mem_comm
+
+        if _symm_mem_comm is not None:
+            _symm_mem_comm.close()
+    except Exception as e:
+        logging.warning(f"Failed to close symm_mem communicator: {e}")
+
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
     _group_map.clear()

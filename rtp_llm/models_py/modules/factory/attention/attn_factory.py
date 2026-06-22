@@ -33,11 +33,18 @@ def get_mla_impl(
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
             continue
+        # Check parallelism config support (e.g. CP filtering)
+        if not impl.support_parallelism_config(parallelism_config):
+            continue
 
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
         use_fast_path = (
             attn_inputs.is_prefill
             and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
+            # TODO: support fast path for cp prefill
+            and not (
+                parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
+            )
         )
         # Skip sparse MLA if fast path is enabled
         if use_fast_path and impl.is_sparse():
@@ -59,6 +66,7 @@ def get_mla_impl(
             quant_config=quant_config,
             max_seq_len=max_seq_len,
             is_cuda_graph=is_cuda_graph,
+            parallelism_config=parallelism_config,
         )
         if not is_cuda_graph or instance.support_cuda_graph():
             return instance
@@ -228,6 +236,7 @@ class AttnImplFactory(object):
         attn_configs = model_config.getAttentionConfigs(
             parallelism_config.get_attn_tp_size()
         )
+        attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
         instance = fmha_impl_method(

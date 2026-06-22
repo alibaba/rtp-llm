@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include <atomic>
+#include <map>
 #include <mutex>
 #include <condition_variable>
 #include <list>
@@ -136,23 +137,35 @@ public:
         // 清理 waiting_streams_ 中有错误的 stream
         waiting_streams_.remove_if([](const auto& s) { return s->hasError(); });
 
-        std::list<GenerateStreamPtr> new_streams;
-        ReturnAllProbsMode           batch_return_all_probs_mode = ReturnAllProbsMode::NONE;
-        for (auto it = waiting_streams_.begin(); it != waiting_streams_.end(); it++) {
-            // 先检查是否有错误，避免错误请求占用资源
-            if (!(*it)->hasError()) {
-                // ReturnAllProbsMode isolation: DEFAULT and ORIGINAL must not be mixed in one batch.
-                // NONE streams can join any batch. See FIFOScheduler::evaluateWaitingStreams.
-                auto stream_return_all_probs = (*it)->getReturnAllProbs();
-                if (stream_return_all_probs != ReturnAllProbsMode::NONE) {
-                    if (batch_return_all_probs_mode == ReturnAllProbsMode::NONE) {
-                        batch_return_all_probs_mode = stream_return_all_probs;
-                    } else if (stream_return_all_probs != batch_return_all_probs_mode) {
-                        continue;
-                    }
-                }
-                new_streams.push_back(*it);
+        // Group streams by ReturnAllProbsMode to avoid mixing DEFAULT and ORIGINAL
+        // in one batch.  NONE streams can join any group.
+        std::map<ReturnAllProbsMode, std::list<GenerateStreamPtr>> mode_groups;
+        for (auto& s : waiting_streams_) {
+            if (!s->hasError()) {
+                mode_groups[s->getReturnAllProbs()].push_back(s);
             }
+        }
+
+        // Select the group that can fill batch_size_.  Prefer the group with the
+        // most streams to avoid starvation.  If none can fill a full batch, pick
+        // the largest and schedule a smaller batch (better than blocking forever).
+        ReturnAllProbsMode           selected_mode = ReturnAllProbsMode::NONE;
+        size_t                       max_count     = 0;
+        for (auto& [mode, streams] : mode_groups) {
+            if (streams.size() > max_count) {
+                max_count     = streams.size();
+                selected_mode = mode;
+            }
+        }
+
+        if (max_count == 0) {
+            return;
+        }
+
+        std::list<GenerateStreamPtr> new_streams;
+        auto& group = mode_groups[selected_mode];
+        for (auto& s : group) {
+            new_streams.push_back(s);
             if (new_streams.size() >= batch_size_) {
                 break;
             }

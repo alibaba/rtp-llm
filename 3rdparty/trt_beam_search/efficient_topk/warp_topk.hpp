@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cassert>
 #include <functional>
+#include <mutex>
 #include <type_traits>
 #include <unordered_map>
 
@@ -599,12 +600,18 @@ template<template<int, bool, typename, typename> class WarpSortClass, typename T
 void calc_launch_parameter_by_occupancy(IdxT k, int* block_size, int* min_grid_size) {
     // Cache occupancy-derived launch parameters per k. The occupancy API is expensive
     // and the result only depends on k for a given template instantiation.
+    // Protected by a mutex because this function can be called concurrently from
+    // multiple host threads.
+    static std::mutex cache_mutex;
     static std::unordered_map<IdxT, std::pair<int, int>> occupancy_cache;
-    auto it = occupancy_cache.find(k);
-    if (it != occupancy_cache.end()) {
-        *block_size    = it->second.first;
-        *min_grid_size = it->second.second;
-        return;
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        auto it = occupancy_cache.find(k);
+        if (it != occupancy_cache.end()) {
+            *block_size    = it->second.first;
+            *min_grid_size = it->second.second;
+            return;
+        }
     }
 
     auto func = find_block_kernel<true, WarpSortClass, T, IdxT>(k);
@@ -612,7 +619,10 @@ void calc_launch_parameter_by_occupancy(IdxT k, int* block_size, int* min_grid_s
         return calc_smem_size_for_block_wide<T, IdxT>(bs / Utils::WARP_SIZE, k);
     };
     HIP_CHECK(hipOccupancyMaxPotentialBlockSizeVariableSMem(min_grid_size, block_size, func, calc_smem));
-    occupancy_cache.emplace(k, std::make_pair(*block_size, *min_grid_size));
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        occupancy_cache.emplace(k, std::make_pair(*block_size, *min_grid_size));
+    }
 }
 
 template<template<int, bool, typename, typename> class WarpSortClass>

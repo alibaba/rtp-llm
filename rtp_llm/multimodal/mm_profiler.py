@@ -116,6 +116,11 @@ class MMProfiler:
             self._armed = False
             self._stop_requested = True
 
+            # Wait for any profile_request that is still running inside the
+            # profiler context to finish BEFORE reading its trace/averages.
+            while self._active_profile_count > 0:
+                self._active_cv.wait()
+
             profiled = self._profiled_count
             target = self._target_count
             averages = self._last_averages
@@ -125,11 +130,6 @@ class MMProfiler:
             # we clear _finished below) can't repoint _output_path before we
             # write summary/ops files. Use the local copy for all I/O.
             output_path = self._session_output_path
-
-            # Wait for any profile_request that is still running inside the
-            # profiler context to finish before we read its trace/averages.
-            while self._active_profile_count > 0:
-                self._active_cv.wait()
 
         if averages is not None:
             summary_file = os.path.join(output_path, "summary.txt")
@@ -198,12 +198,14 @@ class MMProfiler:
         """
         with self._lock:
             want_profile = self._armed and self._profiled_count < self._target_count
-            if not want_profile:
-                yield
-                return
-            session_id = self._session_id
-            output_path = self._session_output_path
-            request_idx = self._profiled_count
+            if want_profile:
+                session_id = self._session_id
+                output_path = self._session_output_path
+                request_idx = self._profiled_count
+
+        if not want_profile:
+            yield
+            return
 
         # Wait for the single-profile slot (CUPTI requires serialized profilers).
         self._profile_slot.acquire()
@@ -212,10 +214,13 @@ class MMProfiler:
             # have changed while we were waiting.  Decide bail vs. profile under _lock,
             # then drop _lock before doing any long work (yield / profiler setup).
             with self._lock:
-                if not (self._armed and self._session_id == session_id):
-                    yield
-                    return
-                self._active_profile_count += 1
+                bail_out = not (self._armed and self._session_id == session_id)
+                if not bail_out:
+                    self._active_profile_count += 1
+
+            if bail_out:
+                yield
+                return
 
             activities = [torch.profiler.ProfilerActivity.CPU]
             if torch.cuda.is_available():

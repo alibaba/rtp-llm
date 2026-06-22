@@ -122,6 +122,10 @@ class XQADecodeImpl(FMHAImplBase):
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
+        # C++ XQAParams.sequence_lengths shares storage with this tensor.
+        # Keep a reference so prepare_cuda_graph can update it in-place.
+        self._captured_seq_lens = attn_inputs.sequence_lengths
+
     @classmethod
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
@@ -159,6 +163,13 @@ class XQADecodeImpl(FMHAImplBase):
         self.fmha_params.seq_lens = new_fmha_params.seq_lens
         self.fmha_params.batch_size = new_fmha_params.batch_size
         self.fmha_params.max_seq_len = new_fmha_params.max_seq_len
+
+        # update_trt_params only copies kv_cache_offset. The TRT XQA kernel also
+        # reads sequence_lengths via the captured data_ptr(), so we must update
+        # the data in-place at the address recorded during CUDA graph capture.
+        new_seq_lens = attn_inputs.sequence_lengths
+        n = min(self._captured_seq_lens.numel(), new_seq_lens.numel())
+        self._captured_seq_lens[:n].copy_(new_seq_lens[:n], non_blocking=True)
 
         new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         new_offset = new_rope_params.kv_cache_offset
