@@ -182,15 +182,27 @@ def _flash_attn_fwd_with_block_score_kernel(
     diag_start = (prefix_len + pid_q * BLOCK_SIZE_Q) // BLOCK_SIZE_K * BLOCK_SIZE_K
     hi = min(seq_len, prefix_len + (pid_q + 1) * BLOCK_SIZE_Q)
     for i in tl.range(0, hi, BLOCK_SIZE_K):
-        # paged load K via req_to_token: pos -> slot -> k_cache
+        # paged load K via req_to_token: pos -> slot -> k_cache.
+        # Paged KV blocks are contiguous within a page (page size == block_size),
+        # so we only need BLOCKS_PER_K_BLOCK slot *bases* per K-tile, then add the
+        # intra-block offset. This replaces the per-token req_to_token gather plus
+        # a per-element int64 modulo (which dominated the loop, ~34% of runtime at
+        # 65k ctx) with a few scalar loads and a contiguous, coalesced K load.
+        # Mirrors vLLM/SGLang's MiniMax-M3 indexer page-table load.
         pos = i + off_k
         pos_mask = pos < seq_len
-        slots = tl.load(
-            req_to_token_ptr + sid * stride_r2t_b + pos,
-            mask=pos_mask,
+        blk_pos = i + off_bpk * block_size
+        bases = tl.load(
+            req_to_token_ptr + sid * stride_r2t_b + blk_pos,
+            mask=blk_pos < seq_len,
             other=0,
         ).to(tl.int64)
-        slots = (slots + max_slots) % max_slots  # safety against negative
+        bases = tl.where(bases < 0, bases + max_slots, bases)
+        slots = tl.reshape(
+            bases[:, None] + tl.arange(0, block_size)[None, :],
+            (BLOCK_SIZE_K,),
+            can_reorder=False,
+        )
         # k shape: [BLOCK_SIZE_KD, BLOCK_SIZE_K] (transposed for tl.dot)
         k = tl.load(
             k_cache_ptr
