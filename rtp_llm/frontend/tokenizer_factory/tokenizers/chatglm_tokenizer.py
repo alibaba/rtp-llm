@@ -69,17 +69,6 @@ class ChatGLMV5Tokenizer(BaseTokenizer):
             unk_token="<|endoftext|>",
         )
 
-    @property
-    def stop_words_id_list(self):
-        return [
-            self.tokenizer.encode("<|user|>", add_special_tokens=False),
-            self.tokenizer.encode("<|observation|>", add_special_tokens=False),
-        ]
-
-    @property
-    def stop_words_str_list(self):
-        return ["<|user|>", "<|observation|>"]
-
 
 register_tokenizer(["chatglm2", "chat_glm_2"], ChatGLMV2Tokenizer)
 register_tokenizer(["chatglm3", "chat_glm_3"], ChatGLMV3Tokenizer)
