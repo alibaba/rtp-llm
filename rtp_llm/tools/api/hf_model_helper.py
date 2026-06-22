@@ -110,6 +110,14 @@ class HfStyleModelInfo:
                     )
         return None
 
+    _DTYPE_BYTES = {
+        "F64": 8, "I64": 8,
+        "F32": 4, "U32": 4, "I32": 4,
+        "F16": 2, "BF16": 2, "U16": 2, "I16": 2,
+        "F8_E4M3": 1, "F8_E5M2": 1, "F8_E8M0": 1,
+        "I8": 1, "U8": 1, "BOOL": 1,
+    }
+
     def _calculate_model_parameters(self) -> Tuple[Optional[int], Optional[int]]:
         param_count = None
         total_size = None
@@ -117,11 +125,7 @@ class HfStyleModelInfo:
         if self.model_info and self.model_info.safetensors:
             param_count = self.model_info.safetensors.total
             total_size = sum(
-                (
-                    count * 2
-                    if weight_type in ["FP16", "BF16", "FP32", "FP32", "INT8", "F16"]
-                    else count
-                )
+                count * self._DTYPE_BYTES.get(weight_type, 2)
                 for weight_type, count in self.model_info.safetensors.parameters.items()
             )
         elif self.meta_info_file and os.path.exists(self.meta_info_file):
@@ -145,14 +149,52 @@ class HfStyleModelInfo:
         )
         return param_count, total_size
 
+    _MODEL_TYPE_MAP = {
+        "deepseek_v2": "deepseek2",
+        "deepseek_v3": "deepseek3",
+        "deepseek_v4": "deepseek3",
+        "qwen3_5_moe": "qwen35_moe",
+        "qwen3_5": "qwen35_dense",
+    }
+
+    @staticmethod
+    def _fuzzy_match_architecture(config: dict) -> Optional[str]:
+        architectures = config.get("architectures", [])
+        if not architectures:
+            return None
+        architecture = architectures[0]
+        _SUFFIX_SWAPS = [
+            ("ForCausalLM", "ForConditionalGeneration"),
+            ("ForConditionalGeneration", "ForCausalLM"),
+        ]
+        for old_suffix, new_suffix in _SUFFIX_SWAPS:
+            if architecture.endswith(old_suffix):
+                alt = architecture[: -len(old_suffix)] + new_suffix
+                ft_type = ModelDict.get_ft_model_type_by_hf_architectures(alt)
+                if ft_type:
+                    return ft_type
+        return None
+
+    @classmethod
+    def _resolve_ft_model_type(cls, config: dict) -> Optional[str]:
+        ft_type = ModelDict.get_ft_model_type_by_config(config)
+        if ft_type:
+            return ft_type
+        ft_type = cls._fuzzy_match_architecture(config)
+        if ft_type:
+            return ft_type
+        hf_model_type = config.get("model_type", "")
+        if hf_model_type:
+            return cls._MODEL_TYPE_MAP.get(hf_model_type)
+        return None
+
     @property
     def ft_model_type(self) -> Optional[str]:
         if self.model_info:
-            # Assume ModelDict.get_ft_model_type_by_hf_repo() is a valid method
             ft_type = ModelDict.get_ft_model_type_by_hf_repo(self.model_info.modelId)
             if ft_type is not None:
                 return ft_type
-        return ModelDict.get_ft_model_type_by_config(self.model_config)
+        return self._resolve_ft_model_type(self.model_config)
 
     @staticmethod
     def is_from_hf(model_path: str) -> bool:

@@ -28,7 +28,7 @@ def _parse_hf_model_type(model_link):
 def parse_ft_model_type(model_path):
     # load config.json
     config = _get_raw_config(model_path)
-    ft_model_type = ModelDict.get_ft_model_type_by_config(config)
+    ft_model_type = HfStyleModelInfo._resolve_ft_model_type(config)
     return {"ft_model_type": ft_model_type}
 
 
@@ -116,9 +116,12 @@ def _load_as_hf_style(model_path, ft_model_type, env_params) -> ModelBasicInfo:
     # config = PretrainedConfig.from_dict(config_dict)
     logging.info(f"config:{config}")
     hidden_size = config.hidden_size if hasattr(config, "hidden_size") else None
-    # num_hidden_layers = config.num_hidden_layers
-    # num_attention_heads = config.num_attention_heads
-    # vocab_size = config.vocab_size
+    if hidden_size is None and hasattr(config, "text_config"):
+        text_cfg = config.text_config
+        if isinstance(text_cfg, dict):
+            hidden_size = text_cfg.get("hidden_size")
+        elif hasattr(text_cfg, "hidden_size"):
+            hidden_size = text_cfg.hidden_size
     quant_config = None
     is_quant_weight = False
     if hasattr(config, "quantization_config"):
