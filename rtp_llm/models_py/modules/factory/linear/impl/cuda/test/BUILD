@@ -39,3 +39,11 @@ py_test(
     tags = ["SM100_ARM"],
     exec_properties = {'gpu':'SM100_ARM'},
 )
+
+py_test(
+    name = "fp8_vllm_blockwise_sm120_linear_test",
+    srcs = ["fp8_vllm_blockwise_sm120_linear_test.py"],
+    deps = py_test_deps,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {'gpu':'RTX_5000_PRO'},
+)

@@ -15,10 +15,23 @@ from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.models_py.utils.arch import is_cuda, is_sm12x
 from rtp_llm.ops import HWKernelConfig
 
-if is_cuda() and is_sm12x():
-    from rtp_llm.ops.compute_ops import cutlass_scaled_mm_blockwise_sm120_fp8
-else:
-    cutlass_scaled_mm_blockwise_sm120_fp8 = None
+
+def _get_cutlass_scaled_mm_blockwise_sm120_fp8():
+    if not (is_cuda() and is_sm12x()):
+        return None
+    try:
+        from rtp_llm.ops.compute_ops import cutlass_scaled_mm_blockwise_sm120_fp8
+
+        return cutlass_scaled_mm_blockwise_sm120_fp8
+    except ImportError:
+        return None
+
+
+def _has_cutlass_scaled_mm_blockwise_sm120_fp8() -> bool:
+    return _get_cutlass_scaled_mm_blockwise_sm120_fp8() is not None
+
+
+cutlass_scaled_mm_blockwise_sm120_fp8 = _get_cutlass_scaled_mm_blockwise_sm120_fp8()
 
 
 class CudaFp8VllmBlockwiseLinear(LinearBase):
@@ -50,6 +63,8 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             return False
         if not is_sm12x():
             return False
+        if not _has_cutlass_scaled_mm_blockwise_sm120_fp8():
+            return False
         if weight.dtype != torch.float8_e4m3fn:
             return False
         # vLLM kernel wants float32 PER_BLOCK scales — UE8M0 (int32) is a
@@ -71,7 +86,8 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         super().__init__(
             weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
         )
-        if cutlass_scaled_mm_blockwise_sm120_fp8 is None:
+        self._gemm_op = _get_cutlass_scaled_mm_blockwise_sm120_fp8()
+        if self._gemm_op is None:
             raise RuntimeError(
                 "cutlass_scaled_mm_blockwise_sm120_fp8 op is not available; "
                 "this backend requires a cuda12_9_x86 build with -DENABLE_FP8_SM120."
@@ -128,6 +144,11 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
                 )
             if self.bias.dtype != torch.bfloat16:
                 raise ValueError(f"Bias dtype must be bfloat16, got {self.bias.dtype}")
+            self._bias_flat = self.bias.reshape(-1).contiguous()
+            if self._bias_flat.device != self.weight.device:
+                self._bias_flat = self._bias_flat.to(self.weight.device)
+        else:
+            self._bias_flat = None
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if input.dtype != torch.bfloat16:
@@ -152,17 +173,12 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         )
 
         output = torch.empty(M, self.N, dtype=torch.bfloat16, device=input.device)
-        # Bias is fused into the GEMM epilogue (per-output-channel add) instead
-        # of a separate elementwise add kernel.
-        bias = None
-        if self.bias is not None:
-            bias = self.bias.reshape(-1).to(dtype=output.dtype, device=output.device)
-        cutlass_scaled_mm_blockwise_sm120_fp8(
+        self._gemm_op(
             output,
             input_fp8,
             self.weight,
             input_scales,
             self.weight_scales,
-            bias,
+            self._bias_flat,
         )
         return output

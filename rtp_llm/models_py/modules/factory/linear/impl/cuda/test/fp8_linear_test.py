@@ -22,10 +22,7 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear im
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
     CudaFp8GEMMLinear,
 )
-from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_vllm_blockwise_sm120_linear import (
-    CudaFp8VllmBlockwiseLinear,
-    cutlass_scaled_mm_blockwise_sm120_fp8,
-)
+from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.test.utils.bench_util import bench
 from rtp_llm.test.utils.numeric_util import calc_diff, per_block_cast_to_fp8
 
@@ -1050,17 +1047,23 @@ class CudaFp8GEMMDispatchTest(CudaFp8LinearTestBase, unittest.TestCase):
             self.assertIsNone(linear._flashinfer_linear)
 
 
-@unittest.skipIf(
-    cutlass_scaled_mm_blockwise_sm120_fp8 is None,
-    "SM120 FP8 blockwise op is only available on sm12x CUDA builds",
+@unittest.skipUnless(
+    torch.cuda.is_available() and not is_sm12x(),
+    "Non-SM120 direct binding guard requires a non-sm12x CUDA device",
 )
-class CudaFp8VllmBlockwiseSM120BoundaryTest(unittest.TestCase):
+class CudaFp8VllmBlockwiseNonSM120GuardTest(unittest.TestCase):
 
     def setUp(self):
-        if not torch.cuda.is_available():
-            self.skipTest("SM120 FP8 blockwise tests require CUDA")
+        try:
+            from rtp_llm.ops.compute_ops import cutlass_scaled_mm_blockwise_sm120_fp8
+        except ImportError:
+            self.skipTest("SM120 FP8 blockwise binding is not compiled in this build")
+
         torch.manual_seed(42)
         torch.cuda.manual_seed(42)
+        self.cutlass_scaled_mm_blockwise_sm120_fp8 = (
+            cutlass_scaled_mm_blockwise_sm120_fp8
+        )
         self.device = "cuda"
         self.M = 8
         self.K = 128
@@ -1086,36 +1089,10 @@ class CudaFp8VllmBlockwiseSM120BoundaryTest(unittest.TestCase):
         D = torch.empty(self.M, self.N, dtype=torch.bfloat16, device=self.device)
         return D, A, B, A_sf, B_sf
 
-    def test_rejects_wrong_input_scale_stride(self):
+    def test_direct_binding_rejects_non_sm120_before_launch(self):
         D, A, B, A_sf, B_sf = self._make_op_inputs()
-        bad_A_sf = A_sf.contiguous()
-        with self.assertRaisesRegex(RuntimeError, "A_sf must use MN-major"):
-            cutlass_scaled_mm_blockwise_sm120_fp8(D, A, B, bad_A_sf, B_sf)
-
-    def test_rejects_cpu_bias_at_pybind_boundary(self):
-        D, A, B, A_sf, B_sf = self._make_op_inputs()
-        bias = torch.randn(self.N, dtype=torch.bfloat16)
-        with self.assertRaisesRegex(RuntimeError, "bias must be a CUDA tensor"):
-            cutlass_scaled_mm_blockwise_sm120_fp8(D, A, B, A_sf, B_sf, bias)
-
-    def test_wrapper_moves_cpu_bias_to_output_device(self):
-        weight = torch.randn(
-            self.K, self.N, dtype=torch.float32, device=self.device
-        ).to(torch.float8_e4m3fn)
-        weight_scales = torch.rand(
-            (self.K + 127) // 128,
-            (self.N + 127) // 128,
-            dtype=torch.float32,
-            device=self.device,
-        )
-        bias = torch.randn(self.N, dtype=torch.bfloat16)
-        linear = CudaFp8VllmBlockwiseLinear(weight, weight_scales, bias=bias)
-        input_tensor = torch.randn(
-            self.M, self.K, dtype=torch.bfloat16, device=self.device
-        )
-        output = linear(input_tensor)
-        self.assertEqual(output.shape, (self.M, self.N))
-        self.assertEqual(output.device.type, "cuda")
+        with self.assertRaisesRegex(RuntimeError, "requires sm_120 family"):
+            self.cutlass_scaled_mm_blockwise_sm120_fp8(D, A, B, A_sf, B_sf)
 
 
 CudaFp8DeepGEMMLinearTestBase = CudaFp8GEMMLinearTestBase
