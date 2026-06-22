@@ -733,22 +733,47 @@ class RemoteExecutor:
         return None
 
     def _parse(self, op) -> ExecutionResult:
+        # LRO operation errors indicate infrastructure-level failures; fail fast
+        # instead of trying to unpack a response that may be of the wrong type.
+        if op.error and op.error.code != 0:
+            err_msg = f"LRO operation failed: code={op.error.code}, message={op.error.message!r}"
+            log.error(err_msg)
+            return ExecutionResult(
+                exit_code=1,
+                stderr_raw=err_msg.encode("utf-8"),
+            )
+
         resp = re_pb2.ExecuteResponse()
-        try:
-            # Try Unpack first (handles type_url matching)
-            op.response.Unpack(resp)
-        except Exception:
+        # Unpack returns False when the type_url does not match ExecuteResponse.
+        if not op.response.Unpack(resp):
             try:
-                # Fallback: parse raw value bytes
+                # Fallback: parse raw value bytes (older REAPI endpoints may not
+                # set type_url correctly).
                 resp.ParseFromString(op.response.value)
             except Exception:
                 return ExecutionResult(
                     exit_code=-1,
                     stderr_raw=(
-                        b"Failed to unpack response\n[reapi-targets] "
+                        b"Failed to unpack response as ExecuteResponse\n[reapi-targets] "
                         + self.reapi_targets_combined.encode()
                     ),
                 )
+
+        # An ExecuteResponse without a result is not a successful execution.
+        if not resp.HasField("result"):
+            status_code = resp.status.code if resp.HasField("status") else None
+            status_message = resp.status.message if resp.HasField("status") else ""
+            err_msg = (
+                f"ExecuteResponse has no result: status={status_code}, "
+                f"message={status_message!r}"
+            )
+            log.error(err_msg)
+            return ExecutionResult(
+                exit_code=1,
+                stderr_raw=err_msg.encode("utf-8"),
+                response_status_code=status_code,
+                response_status_message=status_message,
+            )
 
         r = resp.result
         log.info(

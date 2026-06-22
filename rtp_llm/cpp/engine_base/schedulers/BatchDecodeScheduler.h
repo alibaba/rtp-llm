@@ -138,7 +138,7 @@ public:
         waiting_streams_.remove_if([](const auto& s) { return s->hasError(); });
 
         // Group streams by ReturnAllProbsMode to avoid mixing DEFAULT and ORIGINAL
-        // in one batch.  NONE streams can join any group.
+        // in one batch.  NONE streams are wildcards and can join either group.
         std::map<ReturnAllProbsMode, std::list<GenerateStreamPtr>> mode_groups;
         for (auto& s : waiting_streams_) {
             if (!s->hasError()) {
@@ -146,25 +146,41 @@ public:
             }
         }
 
-        // Select the group that can fill batch_size_.  Prefer the group with the
-        // most streams to avoid starvation.  If none can fill a full batch, pick
-        // the largest and schedule a smaller batch (better than blocking forever).
-        ReturnAllProbsMode           selected_mode = ReturnAllProbsMode::NONE;
-        size_t                       max_count     = 0;
+        // Pick the non-NONE group with the most streams.  If only NONE streams
+        // are waiting, treat NONE as the selected group.
+        ReturnAllProbsMode selected_mode = ReturnAllProbsMode::NONE;
+        size_t             max_count     = 0;
         for (auto& [mode, streams] : mode_groups) {
+            if (mode == ReturnAllProbsMode::NONE) {
+                continue;
+            }
             if (streams.size() > max_count) {
                 max_count     = streams.size();
                 selected_mode = mode;
             }
+        }
+        auto& none_streams = mode_groups[ReturnAllProbsMode::NONE];
+        if (selected_mode == ReturnAllProbsMode::NONE && !none_streams.empty()) {
+            selected_mode = ReturnAllProbsMode::NONE;
+            max_count     = none_streams.size();
         }
 
         if (max_count == 0) {
             return;
         }
 
+        // Build the candidate list from the selected concrete mode plus all NONE
+        // streams.  This lets compatible wildcard requests batch together instead
+        // of being stranded in their own group.
+        std::list<GenerateStreamPtr> candidates;
+        if (selected_mode != ReturnAllProbsMode::NONE) {
+            auto& selected_group = mode_groups[selected_mode];
+            candidates.splice(candidates.end(), selected_group);
+        }
+        candidates.splice(candidates.end(), none_streams);
+
         std::list<GenerateStreamPtr> new_streams;
-        auto& group = mode_groups[selected_mode];
-        for (auto& s : group) {
+        for (auto& s : candidates) {
             new_streams.push_back(s);
             if (new_streams.size() >= batch_size_) {
                 break;

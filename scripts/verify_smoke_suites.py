@@ -36,14 +36,20 @@ def _load_cases(path: Path) -> Mapping[str, Any]:
 
 
 def _validate_dir(suites_dir: Path, data_root_dir: str) -> List[str]:
-    """Find all *_cases.py files under suites_dir and validate them."""
+    """Find all test_smoke_*.py files under suites_dir and validate them."""
     sys.path.insert(0, str(suites_dir.parents[2] / "smoke_framework"))
     import validation  # type: ignore[import-not-found]
 
     errors: List[str] = []
     smoke_tests: Dict[str, Mapping[str, Any]] = {}
-    for cases_path in sorted(suites_dir.glob("*_cases.py")):
-        suite_name = cases_path.stem.removesuffix("_cases")
+    case_files = sorted(suites_dir.glob("test_smoke_*.py"))
+    if not case_files:
+        errors.append(f"no test_smoke_*.py files found in {suites_dir}")
+        return errors
+
+    for cases_path in case_files:
+        # test_smoke_<suite>.py -> <suite>
+        suite_name = cases_path.stem.removeprefix("test_smoke_")
         try:
             smoke_tests[suite_name] = _load_cases(cases_path)
         except Exception as e:

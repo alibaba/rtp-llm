@@ -422,7 +422,12 @@ class CASClient:
                 )
                 offset = end
 
-        self.bs_stub.Write(_chunks(), metadata=self.metadata)
+        resp = self.bs_stub.Write(_chunks(), metadata=self.metadata)
+        if resp.committed_size != digest.size_bytes:
+            raise RuntimeError(
+                f"ByteStream Write committed size mismatch for {digest.hash[:12]}: "
+                f"expected {digest.size_bytes}, got {resp.committed_size}"
+            )
 
     def _send_batch(self, requests):
         resp = self.stub.BatchUpdateBlobs(
@@ -431,11 +436,18 @@ class CASClient:
             ),
             metadata=self.metadata,
         )
+        failed = []
         for r in resp.responses:
             if r.status.code != 0:
+                failed.append(r)
                 log.warning(
                     "BatchUpdateBlobs failed for %s: code=%d msg=%s",
                     r.digest.hash[:12],
                     r.status.code,
                     r.status.message,
                 )
+        if failed:
+            hashes = ", ".join(r.digest.hash[:12] for r in failed)
+            raise RuntimeError(
+                f"BatchUpdateBlobs failed for {len(failed)} blob(s): {hashes}"
+            )

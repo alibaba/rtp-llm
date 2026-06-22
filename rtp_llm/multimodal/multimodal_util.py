@@ -8,7 +8,6 @@ from enum import IntEnum
 from io import BytesIO
 from typing import Optional
 
-import requests
 import torch
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
@@ -22,27 +21,23 @@ from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
 logger = logging.getLogger(__name__)
 
-REQUEST_GET = None
+_request_get_impl = None
 
 
 def request_get(url, headers):
-    global REQUEST_GET
-    if REQUEST_GET is None:
+    global _request_get_impl
+    if _request_get_impl is None:
         try:
             from rtp_llm.utils.ssrf_check import safe_request_get
 
-            REQUEST_GET = safe_request_get
+            _request_get_impl = safe_request_get
         except ImportError as e:
-            # Fail-closed: do NOT fall back to bare requests.get without SSRF
-            # protection.  Missing the security module means URL validation is
-            # unavailable, which is a deployment error that must be fixed rather
-            # than silently bypassed.
             raise ImportError(
                 f"rtp_llm.utils.ssrf_check is required for safe URL downloading "
                 f"but could not be imported: {e}. "
                 f"Please ensure the ssrf_check module is installed."
             ) from e
-    return REQUEST_GET(url, headers)
+    return _request_get_impl(url, headers)
 
 
 def _get_http_heads(download_headers: str = ""):
@@ -90,20 +85,20 @@ class MMPreprocessConfig:
 class MultimodalInput:
     url: str
     mm_type: MMUrlType
-    config: MMPreprocessConfig
+    mm_preprocess_config: MMPreprocessConfig
     tensor: torch.Tensor
 
     def __init__(
         self,
         url: str,
         mm_type: MMUrlType = MMUrlType.DEFAULT,
-        config: MMPreprocessConfig = MMPreprocessConfig(),
-        tensor: torch.Tensor = torch.empty(1),
+        mm_preprocess_config: Optional[MMPreprocessConfig] = None,
+        tensor: Optional[torch.Tensor] = None,
     ):
         self.url = url
         self.mm_type = mm_type
-        self.config = config
-        self.tensor = tensor
+        self.mm_preprocess_config = mm_preprocess_config or MMPreprocessConfig()
+        self.tensor = tensor or torch.empty(1)
 
 
 class IgraphItemKeyCountMismatchError(Exception):
@@ -152,7 +147,7 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
     headers = _get_http_heads(download_headers)
     try:
         if url.startswith("http") or url.startswith("https"):
-            response = requests.get(url, stream=True, headers=headers, timeout=10)
+            response = request_get(url, headers)
             if response.status_code == 200:
                 res = response.content.decode("utf-8")
             else:

@@ -744,7 +744,13 @@ class PyFlashinferDecodeAttnOp(object):
         return self.fmha_params
 
     def prepare_for_cuda_graph_replay(self, attn_inputs: PyAttentionInputs) -> None:
-        """Refresh FlashInfer runtime buffers before replaying the captured graph."""
+        """Refresh FlashInfer runtime buffers before replaying the captured graph.
+
+        Do NOT call plan() here: the decode wrapper was already planned during
+        graph capture, and the fixed workspace buffers / page indices captured in
+        the graph must remain stable.  fill_params() updates the bound tensors
+        in-place, which is sufficient for replay.
+        """
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
@@ -753,8 +759,6 @@ class PyFlashinferDecodeAttnOp(object):
             self.seq_size_per_block,
             forbid_realloc=True,
         )
-        if self._requires_fa2_cuda_graph_replan():
-            self._plan_decode_wrapper(attn_inputs)
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True

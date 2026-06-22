@@ -1723,7 +1723,15 @@ class RemoteREAPIPlugin:
             print("::endgroup::", file=_sys.stderr)
 
         exit_code = result.exit_code
-        if "EXIT_CODE=" in stdout:
+        # Do NOT let the remote worker's EXIT_CODE override a non-OK REAPI
+        # response status.  A status code != 0 means the execution itself failed
+        # at the REAPI layer, regardless of what the worker claims.
+        if (
+            result.response_status_code is not None
+            and result.response_status_code != 0
+        ):
+            exit_code = result.exit_code or 1
+        elif "EXIT_CODE=" in stdout:
             try:
                 exit_code = int(stdout.rsplit("EXIT_CODE=", 1)[1].strip().split()[0])
             except (ValueError, IndexError):

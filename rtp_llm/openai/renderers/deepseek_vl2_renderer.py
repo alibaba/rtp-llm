@@ -9,7 +9,8 @@ from enum import IntEnum, auto
 from typing import Any, Dict, List, Optional
 
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
-from rtp_llm.multimodal.multimodal_util import MMPreprocessConfig, MMUrlType
+from rtp_llm.multimodal.multimodal_util import MMUrlType
+from rtp_llm.ops import MMPreprocessConfig
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
