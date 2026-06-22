@@ -33,6 +33,7 @@ namespace rtp_llm {
 GreedyOutput     sampleGreedy(const GreedyParams& params);
 BeamSearchOutput sampleBeamSearch(BeamSearchParams params);
 void             chainSpeculativeSampling(const SpeculativeSamplingParams& params);
+void             rejectionSampling(const RejectionSamplingParams& params);
 void             multiMergeCopy(const MultiMergeCopyParams& params);
 }  // namespace rtp_llm
 
@@ -425,6 +426,10 @@ BeamSearchOutput execSampleBeamSearch(BeamSearchParams params) {
 
 void execChainSpeculativeSampling(const SpeculativeSamplingParams& params) {
     chainSpeculativeSampling(params);
+}
+
+void execRejectionSampling(const RejectionSamplingParams& params) {
+    rejectionSampling(params);
 }
 
 // === Communication ops (Python callbacks via pybind11) ===
