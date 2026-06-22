@@ -21,8 +21,8 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     // mirrors here, then publish mutated model inputs back to CUDA.
     auto total_input_tokens =
         model_input.combo_tokens.is_cuda() ? model_input.combo_tokens.cpu().pin_memory() : model_input.combo_tokens;
-    auto& total_hidden_states      = model_input.last_hidden_states;
-    auto input_lengths =
+    auto& total_hidden_states = model_input.last_hidden_states;
+    auto  input_lengths =
         model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().pin_memory() : model_input.input_lengths;
     auto& sequence_lengths         = model_input.sequence_lengths;
     auto  input_lengths_cpu_tensor = input_lengths.clone().pin_memory();
@@ -52,12 +52,11 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         torch::empty({(int64_t)(num_decode_stream + prefill_cp_split_tokens_size)}, pinned_i32);
     auto prefill_shuffle_indices = torch::empty({(int64_t)prefill_cp_split_tokens_size}, pinned_i32);
 
-    const bool has_hidden_states = total_hidden_states.defined() && total_hidden_states.numel() > 0;
+    const bool has_hidden_states   = total_hidden_states.defined() && total_hidden_states.numel() > 0;
     bool       split_hidden_states = false;
     if (has_hidden_states) {
-        RTP_LLM_CHECK_WITH_INFO(total_hidden_states.dim() == 2,
-                                "CP MTP hidden states must be 2-D, got dim=%ld",
-                                total_hidden_states.dim());
+        RTP_LLM_CHECK_WITH_INFO(
+            total_hidden_states.dim() == 2, "CP MTP hidden states must be 2-D, got dim=%ld", total_hidden_states.dim());
         const int64_t global_token_num = total_input_tokens.numel();
         const int64_t local_token_num  = cp_split_input_tokens.numel();
         if (total_hidden_states.size(0) == global_token_num) {
@@ -71,11 +70,19 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
                                     local_token_num);
         }
     }
-    std::vector<int64_t> hidden_select_indices;
-    std::vector<uint8_t> hidden_valid_mask;
-    if (split_hidden_states) {
-        hidden_select_indices.reserve(cp_split_input_tokens.numel());
-        hidden_valid_mask.reserve(cp_split_input_tokens.numel());
+    // Per-local-token remap: for each token this rank keeps after the CP split,
+    // record its global source index + validity. Reused to CP-split every per-token
+    // side input the same way as combo_tokens: MTP hidden states, text_tokens_mask
+    // and combo_tokens_type_ids. Without splitting the mask/type_ids, the embedding
+    // op would read a global-length mask misaligned with this rank's token chunk
+    // (multimodal placeholder ids stay -1 but get unmasked -> out-of-bounds).
+    const bool need_token_remap =
+        split_hidden_states || model_input.text_tokens_mask.defined() || model_input.combo_tokens_type_ids.defined();
+    std::vector<int64_t> cp_select_indices;
+    std::vector<uint8_t> cp_valid_mask;
+    if (need_token_remap) {
+        cp_select_indices.reserve(cp_split_input_tokens.numel());
+        cp_valid_mask.reserve(cp_split_input_tokens.numel());
     }
 
     int* input_token_ptr             = cp_split_input_tokens.data_ptr<int>();
@@ -89,10 +96,10 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         std::memcpy(input_token_ptr,
                     total_input_tokens.data_ptr<int32_t>() + total_input_token_idx,
                     num_decode_stream * sizeof(int));
-        if (split_hidden_states) {
+        if (need_token_remap) {
             for (size_t i = 0; i < num_decode_stream; ++i) {
-                hidden_select_indices.push_back(static_cast<int64_t>(i));
-                hidden_valid_mask.push_back(1);
+                cp_select_indices.push_back(static_cast<int64_t>(i));
+                cp_valid_mask.push_back(1);
             }
         }
         input_token_idx += num_decode_stream;
@@ -123,15 +130,15 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         std::memcpy(prefill_shuffle_indices_ptr + input_token_idx - num_decode_stream,
                     shuffle_index.data(),
                     input_chunk_length * sizeof(int));
-        if (split_hidden_states) {
+        if (need_token_remap) {
             for (int i = 0; i < input_chunk_length; ++i) {
                 const int src_idx = shuffle_index[i];
                 if (src_idx >= 0 && src_idx < input_length) {
-                    hidden_select_indices.push_back(static_cast<int64_t>(hidden_src_offset + src_idx));
-                    hidden_valid_mask.push_back(1);
+                    cp_select_indices.push_back(static_cast<int64_t>(hidden_src_offset + src_idx));
+                    cp_valid_mask.push_back(1);
                 } else {
-                    hidden_select_indices.push_back(0);
-                    hidden_valid_mask.push_back(0);
+                    cp_select_indices.push_back(0);
+                    cp_valid_mask.push_back(0);
                 }
             }
         }
@@ -140,24 +147,115 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         input_length_ptr[num_decode_stream + p] = input_chunk_length;
     }
 
-    if (split_hidden_states) {
-        auto select_indices = torch::from_blob(hidden_select_indices.data(),
-                                               {(int64_t)hidden_select_indices.size()},
+    if (need_token_remap) {
+        auto select_indices = torch::from_blob(cp_select_indices.data(),
+                                               {(int64_t)cp_select_indices.size()},
                                                torch::TensorOptions(torch::kInt64))
                                   .clone();
-        auto valid_mask = torch::from_blob(
-                              hidden_valid_mask.data(),
-                              {(int64_t)hidden_valid_mask.size()},
-                              torch::TensorOptions(torch::kUInt8))
-                              .clone()
-                              .to(torch::kBool);
-        if (total_hidden_states.is_cuda()) {
-            select_indices = select_indices.to(total_hidden_states.device(), true);
-            valid_mask     = valid_mask.to(total_hidden_states.device(), true);
+        auto valid_mask =
+            torch::from_blob(cp_valid_mask.data(), {(int64_t)cp_valid_mask.size()}, torch::TensorOptions(torch::kUInt8))
+                .clone()
+                .to(torch::kBool);
+
+        if (split_hidden_states) {
+            auto hidden_indices = select_indices;
+            auto hidden_valid   = valid_mask;
+            if (total_hidden_states.is_cuda()) {
+                hidden_indices = hidden_indices.to(total_hidden_states.device(), true);
+                hidden_valid   = hidden_valid.to(total_hidden_states.device(), true);
+            }
+            auto split_hidden = total_hidden_states.index_select(0, hidden_indices);
+            split_hidden.masked_fill_(hidden_valid.logical_not().unsqueeze(1), 0);
+            model_input.last_hidden_states = split_hidden;
         }
-        auto split_hidden = total_hidden_states.index_select(0, select_indices);
-        split_hidden.masked_fill_(valid_mask.logical_not().unsqueeze(1), 0);
-        model_input.last_hidden_states = split_hidden;
+
+        // CP-split the per-token side inputs the same way as combo_tokens, so the
+        // embedding op sees a mask / type_ids aligned with this rank's token chunk.
+        // Padding positions (valid_mask == 0) -> 0: a 0 text_tokens_mask makes the
+        // embedding kernel skip the word-table lookup for the junk padded id, and a
+        // 0 token-type is the natural default.
+        auto remap_token_field = [&](torch::Tensor& field) {
+            if (!field.defined() || field.numel() == 0) {
+                return;
+            }
+            auto src = field.is_cuda() ? field.cpu() : field;
+            auto out = src.index_select(0, select_indices).contiguous();
+            out.masked_fill_(valid_mask.logical_not(), 0);
+            field = out.to(torch::kCUDA, /*non_blocking=*/true);
+        };
+        remap_token_field(model_input.text_tokens_mask);
+        remap_token_field(model_input.combo_tokens_type_ids);
+
+        // CP-split multimodal features + locs. The injector overwrites local rows
+        // [loc, loc+feature_rows) with feature rows; with CP, each global image
+        // ends up at the local positions where cp_select_indices falls in the
+        // image's global range. Zigzag CP gives each rank up to 2 contiguous local
+        // runs per image (one from the even half, one from the odd half), so we
+        // emit one (sliced_feature, local_loc) per run and keep the injector's
+        // contiguous-narrow contract intact.
+        if (model_input.multimodal_features.has_value() && !model_input.multimodal_features.value().empty()
+            && model_input.mm_features_locs.defined() && model_input.mm_features_locs.numel() > 0) {
+            auto&      orig_features = model_input.multimodal_features.value();
+            auto       orig_locs_cpu = model_input.mm_features_locs.is_cuda() ?
+                                           model_input.mm_features_locs.cpu().contiguous() :
+                                           model_input.mm_features_locs.contiguous();
+            const auto orig_locs_acc = orig_locs_cpu.accessor<int32_t, 1>();
+            const auto num_features  = orig_features.size();
+            RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(num_features) == orig_locs_cpu.size(0),
+                                    "multimodal_features (%zu) and mm_features_locs (%ld) length mismatch",
+                                    num_features,
+                                    static_cast<int64_t>(orig_locs_cpu.size(0)));
+
+            const int64_t              local_tokens = static_cast<int64_t>(cp_select_indices.size());
+            std::vector<torch::Tensor> new_features;
+            std::vector<int32_t>       new_locs;
+            // Reserve worst-case 2 runs per image (zigzag's even + odd halves).
+            new_features.reserve(num_features * 2);
+            new_locs.reserve(num_features * 2);
+
+            for (size_t f = 0; f < num_features; ++f) {
+                const int     g_start = orig_locs_acc[f];
+                const int64_t g_len   = orig_features[f].size(0);
+                const int64_t g_end   = static_cast<int64_t>(g_start) + g_len;
+
+                int64_t i = 0;
+                while (i < local_tokens) {
+                    const bool in_range = cp_valid_mask[i] != 0 && static_cast<int64_t>(cp_select_indices[i]) >= g_start
+                                          && static_cast<int64_t>(cp_select_indices[i]) < g_end;
+                    if (!in_range) {
+                        ++i;
+                        continue;
+                    }
+                    const int64_t run_local_start = i;
+                    const int64_t run_feat_start  = static_cast<int64_t>(cp_select_indices[i]) - g_start;
+                    int64_t       expected_feat   = run_feat_start;
+                    int64_t       j               = i;
+                    while (j < local_tokens && cp_valid_mask[j] != 0
+                           && static_cast<int64_t>(cp_select_indices[j]) >= g_start
+                           && static_cast<int64_t>(cp_select_indices[j]) < g_end
+                           && (static_cast<int64_t>(cp_select_indices[j]) - g_start) == expected_feat) {
+                        ++j;
+                        ++expected_feat;
+                    }
+                    const int64_t run_len = j - run_local_start;
+                    new_features.push_back(
+                        orig_features[f].slice(0, run_feat_start, run_feat_start + run_len).contiguous());
+                    new_locs.push_back(static_cast<int32_t>(run_local_start));
+                    i = j;
+                }
+            }
+
+            orig_features = std::move(new_features);
+            if (new_locs.empty()) {
+                model_input.mm_features_locs = torch::empty({0}, pinned_i32);
+            } else {
+                auto locs_cpu = torch::from_blob(new_locs.data(),
+                                                 {static_cast<int64_t>(new_locs.size())},
+                                                 torch::TensorOptions(torch::kInt32))
+                                    .clone();
+                model_input.mm_features_locs = locs_cpu.to(torch::kCUDA, /*non_blocking=*/true);
+            }
+        }
     }
 
     model_input.combo_tokens  = cp_split_input_tokens.to(torch::kCUDA, /*non_blocking=*/true);
