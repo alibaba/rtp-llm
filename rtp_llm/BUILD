@@ -224,9 +224,7 @@ py_library(
         ":protobuf",
         ":pyOpenSSL",
     ] + select({
-        "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
-        "@//:using_cpu": [],
         "@//:using_cuda12_arm": [],
         "//conditions:default": ["flash_attn"]
     }) + arch_dep,
