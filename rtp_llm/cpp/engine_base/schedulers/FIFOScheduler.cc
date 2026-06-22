@@ -206,6 +206,15 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
 
     int64_t           force_batch_group_id       = -1;
     ReturnAllProbsMode batch_return_all_probs_mode = ReturnAllProbsMode::NONE;
+    // Initialise the batch mode from existing RUNNING streams so that new
+    // waiting streams with an incompatible mode are not mixed in.
+    for (const auto& s : running_streams_) {
+        auto mode = s->getReturnAllProbs();
+        if (mode != ReturnAllProbsMode::NONE) {
+            batch_return_all_probs_mode = mode;
+            break;
+        }
+    }
 
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
         auto& stream      = *it;

@@ -37,7 +37,7 @@ def get_mla_impl(
         if not impl.support_parallelism_config(parallelism_config):
             continue
 
-        cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
+        cos_sin_cache = weight.get_global_weight_or_none(W.rope_cos_sin_cache)
         use_fast_path = (
             attn_inputs.is_prefill
             and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
@@ -172,6 +172,36 @@ def get_fmha_impl(
     if backends == ["none"]:
         raise Exception("Attention is disabled (attn_backend=none)")
 
+    # Build registry metadata and validate explicit backend names.
+    registered_names = set()
+    name_to_impls: Dict[str, List[type[FMHAImplBase]]] = {}
+    for impl in mha_impls:
+        name = getattr(impl, "NAME", None)
+        if name:
+            registered_names.add(name)
+            name_to_impls.setdefault(name, []).append(impl)
+
+    # Public alias: "flashinfer" refers to the Python FlashInfer backend.
+    if "py_flashinfer" in registered_names:
+        name_to_impls.setdefault("flashinfer", []).extend(
+            name_to_impls.get("py_flashinfer", [])
+        )
+
+    # Validate explicit backend list / blocklist names early so typos fail-fast.
+    known_names = registered_names | {"auto", "none", "flashinfer"}
+    for backend_name in backends:
+        if backend_name not in known_names:
+            raise ValueError(
+                f"Unknown attention backend {backend_name!r}. "
+                f"Registered backends: {sorted(registered_names)}"
+            )
+    for blocked_name in blocked:
+        if blocked_name not in known_names:
+            raise ValueError(
+                f"Unknown attention backend in disable_attn_backends: {blocked_name!r}. "
+                f"Registered backends: {sorted(registered_names)}"
+            )
+
     if backends == ["auto"]:
         # Auto mode: iterate impls in registration order, check legacy flags + blocklist
         for impl in mha_impls:
@@ -188,16 +218,11 @@ def get_fmha_impl(
     else:
         # Explicit backend list: iterate in user-specified order.
         # For each backend name, find all matching impls and try them.
-        name_to_impls = {}
-        for impl in mha_impls:
-            name = getattr(impl, "NAME", None)
-            if name:
-                name_to_impls.setdefault(name, []).append(impl)
-
         for backend_name in backends:
             if backend_name in blocked:
                 continue
-            for impl in name_to_impls.get(backend_name, []):
+            resolved_name = "py_flashinfer" if backend_name == "flashinfer" else backend_name
+            for impl in name_to_impls.get(resolved_name, []):
                 instance = _try_instantiate(
                     impl, attn_configs, attn_inputs, parallelism_config, is_cuda_graph
                 )

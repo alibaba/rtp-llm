@@ -238,6 +238,7 @@ class CaseRunner(object):
             env_dict["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
         task_states = TaskStates()
         logging.info(f"smoke_args_str: {self.smoke_args_str}")
+        server_manager = None
         try:
             server_manager = self.start_server(
                 env_dict,
@@ -249,15 +250,19 @@ class CaseRunner(object):
                 task_states.ret = False
                 return task_states
             task_states = self.curl_server(server_manager)
-            if task_states.ret != True:
-                return task_states
-            assert server_manager is not None, "server manager should not be None"
-            server_manager.stop_server()
-            if enable_remote_cache and self.remote_kvcm_server is not None:
-                self.remote_kvcm_server.stop_server()
-                self.remote_kvcm_server.copy_logs()
             return task_states
         finally:
+            if server_manager is not None:
+                try:
+                    server_manager.stop_server()
+                except Exception as e:
+                    logging.warning("server_manager.stop_server failed: %s", e)
+            if enable_remote_cache and self.remote_kvcm_server is not None:
+                try:
+                    self.remote_kvcm_server.stop_server()
+                    self.remote_kvcm_server.copy_logs()
+                except Exception as e:
+                    logging.warning("remote_kvcm_server cleanup failed: %s", e)
             _summarize_and_cleanup_coredumps(
                 os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "")
             )

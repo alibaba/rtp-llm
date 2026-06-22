@@ -16,23 +16,33 @@ Exit 0 on success, 1 on errors.
 
 from __future__ import annotations
 
-import importlib.util
+import ast
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
 
 def _load_cases(path: Path) -> Mapping[str, Any]:
-    """Import a `<suite>_cases.py` file and return its SMOKE_CASES dict."""
-    spec = importlib.util.spec_from_file_location(path.stem, str(path))
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load {path}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    cases = getattr(mod, "SMOKE_CASES", None)
-    if cases is None:
-        raise AttributeError(f"{path} missing SMOKE_CASES dict")
-    return cases
+    """Parse a ``test_smoke_*.py`` file and return its SMOKE_CASES dict.
+
+    Uses AST parsing so the script stays stdlib-only and does not execute
+    the suite's top-level imports (pytest, torch, etc.).
+    """
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "SMOKE_CASES":
+                    return ast.literal_eval(node.value)
+        elif isinstance(node, ast.AnnAssign):
+            if (
+                isinstance(node.target, ast.Name)
+                and node.target.id == "SMOKE_CASES"
+                and node.value is not None
+            ):
+                return ast.literal_eval(node.value)
+    raise AttributeError(f"{path} missing SMOKE_CASES dict")
 
 
 def _validate_dir(suites_dir: Path, data_root_dir: str) -> List[str]:

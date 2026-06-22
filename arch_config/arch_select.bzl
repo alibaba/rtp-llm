@@ -80,3 +80,33 @@ def torch_deps():
         "@torch//:torch",
         "@torch//:torch_libs",
     ]
+
+# ---------------------------------------------------------------------------
+# Compatibility shims for legacy BUILD files that still call requirement(),
+# internal_deps(), or triton_deps().  Python packages are now managed by
+# pip/pyproject.toml; these functions create empty placeholder targets so
+# Bazel package loading does not break while callers are migrated.
+# ---------------------------------------------------------------------------
+
+def requirement(packages):
+    """Create empty py_library aliases for each pip package name.
+
+    Callers reference them as ':<package>' in deps.  The actual packages are
+    installed via pip; these targets only exist to satisfy Bazel's loading
+    phase.
+    """
+    for pkg in packages:
+        safe_name = pkg.replace("-", "_").replace(".", "_")
+        native.py_library(
+            name = safe_name,
+            srcs = [],
+            visibility = ["//visibility:public"],
+        )
+
+def internal_deps():
+    """Return an empty dependency list (legacy compatibility)."""
+    return []
+
+def triton_deps():
+    """Return an empty dependency list (legacy compatibility)."""
+    return []

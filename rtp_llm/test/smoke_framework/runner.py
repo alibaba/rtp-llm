@@ -71,9 +71,12 @@ def _build_env_args(
     """
     if isinstance(smoke_args, dict):
         env_args: Dict[str, List[str]] = {}
+        # Shared env list applies to every role unless overridden per-role.
+        shared_envs = list(envs) if isinstance(envs, list) else []
         envs_dict = envs if isinstance(envs, dict) else {}
         for role, args_str in smoke_args.items():
-            role_envs = list(envs_dict.get(role, []))
+            role_envs = list(shared_envs)
+            role_envs.extend(envs_dict.get(role, []))
             ws = _parse_world_size(args_str)
             role_envs.append(f"WORLD_SIZE={ws}")
             role_envs.append("DETERMINISTIC_GEMM=1")

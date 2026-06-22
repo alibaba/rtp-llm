@@ -2,11 +2,13 @@ import ipaddress
 import logging
 import socket
 from typing import Dict
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+_MAX_REDIRECTS = 5
 
 
 def _is_private_host(hostname: str) -> bool:
@@ -34,13 +36,8 @@ def _is_private_host(hostname: str) -> bool:
     return False
 
 
-def safe_request_get(url: str, headers: Dict[str, str], timeout: int = 10):
-    """Fetch *url* with SSRF protection.
-
-    Only http/https schemes are allowed and the resolved host must not be a
-    private/internal address.  The function is intentionally restrictive and can
-    be expanded later (e.g. explicit allow-lists) without breaking callers.
-    """
+def _validate_url(url: str) -> str:
+    """Validate scheme and host of *url*.  Returns the URL if safe, else raises."""
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"URL scheme {parsed.scheme!r} is not allowed for safe download")
@@ -49,4 +46,33 @@ def safe_request_get(url: str, headers: Dict[str, str], timeout: int = 10):
             f"URL host {parsed.hostname!r} resolves to a private/internal address "
             f"and is not allowed for safe download"
         )
-    return requests.get(url, stream=True, headers=headers, timeout=timeout)
+    return url
+
+
+def safe_request_get(url: str, headers: Dict[str, str], timeout: int = 10):
+    """Fetch *url* with SSRF protection.
+
+    Only http/https schemes are allowed and the resolved host must not be a
+    private/internal address.  Redirects are followed manually so that every
+    intermediate Location is re-validated before the request is made, preventing
+    SSRF via open-redirect or 3xx to internal hosts.  Relative Location headers
+    are resolved against the previous request URL.
+    """
+    current_url = _validate_url(url)
+    for _ in range(_MAX_REDIRECTS):
+        response = requests.get(
+            current_url,
+            stream=True,
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+        if response.is_redirect:
+            location = response.headers.get("Location", "")
+            if not location:
+                break
+            next_url = urljoin(current_url, location)
+            current_url = _validate_url(next_url)
+            continue
+        return response
+    raise ValueError(f"Exceeded maximum redirects ({_MAX_REDIRECTS}) for {url}")

@@ -227,7 +227,12 @@ class MMDataCache(object):
 
     def resize_cache(self, cache_size: int):
         with self.cache_lock:
-            self.mm_data_cache.set_size(cache_size)
+            if cache_size <= 0:
+                self.mm_data_cache = None
+            elif self.mm_data_cache is None:
+                self.mm_data_cache = LruDict(cache_size)
+            else:
+                self.mm_data_cache.set_size(cache_size)
 
 
 # Global cache instance for VIT embeddings

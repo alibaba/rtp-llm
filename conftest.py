@@ -115,7 +115,12 @@ if _xdist_worker:
 # deferral, importing torch BEFORE the worker's own conftest runs. That's
 # exactly the bug run 39345025 ut-sm8x reproduced. sys attribute is per-
 # Python-process so each worker correctly starts with it unset.
-_sys._RTP_CONFTEST_DONE = True  # type: ignore[attr-defined]
+#
+# In collect-only / CPU-only modes we also skip the flag so that
+# rtp_llm/__init__.py keeps heavy imports (torch/triton/ops) deferred.
+_collect_only = "--collect-only" in _sys.argv
+if not _collect_only:
+    _sys._RTP_CONFTEST_DONE = True  # type: ignore[attr-defined]
 
 # ============================================================================
 # GPU isolation is handled by:

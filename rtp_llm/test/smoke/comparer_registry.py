@@ -80,3 +80,31 @@ def _reset_for_tests() -> None:
     global _FALLBACK
     _REGISTRY.clear()
     _FALLBACK = None
+
+
+def _try_register_mainse_comparers() -> None:
+    """Auto-register internal mainse comparers when the internal package exists.
+
+    Registered before any OSS fallback so mainse-flagged cases pick the
+    internal comparer first.
+    """
+    try:
+        from rtp_llm.test.smoke.mainse_comparer import (
+            MainseArpcComparer,
+            MainseComparer,
+        )
+
+        register_comparer(
+            lambda q_r, ep: q_r.get("mainse_module", False)
+            or q_r.get("mainse", False),
+            MainseComparer,
+        )
+        register_comparer(
+            lambda q_r, ep: q_r.get("mainse_arpc", False),
+            MainseArpcComparer,
+        )
+    except Exception:
+        pass
+
+
+_try_register_mainse_comparers()

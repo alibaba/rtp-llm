@@ -186,8 +186,12 @@ public:
                 break;
             }
         }
-        // 凑到batch_size_个stream再统一入队
-        if (new_streams.size() >= batch_size_) {
+        // 凑到batch_size_个stream再统一入队。  如果候选不够 batch_size_
+        // 但总 waiting 数已 >= batch_size_，说明不兼容模式的 stream 阻止了
+        // 凑满全批——此时降级为部分 batch 以避免永久阻塞。
+        bool should_schedule = new_streams.size() >= batch_size_
+            || (new_streams.size() > 0 && waiting_streams_.size() >= batch_size_);
+        if (should_schedule) {
             for (auto& stream : new_streams) {
                 stream->reportEvent(StreamEvents::CanRun);
                 // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
