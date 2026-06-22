@@ -12,7 +12,11 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
+    CompressorFP8,
+    CompressorMeta,
+    _select_cp_state_read_tail_blocks,
+)
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 # CP gather is mocked here, so the workspace only needs to flow through the
@@ -82,6 +86,40 @@ def _make_cp_ctx() -> CPContext:
 
 
 class CompressorFP8CPMergedGatherTest(unittest.TestCase):
+    def test_cp_state_read_selection_handles_mixed_prefix_batch(self) -> None:
+        block_table = torch.tensor(
+            [
+                [11, 12, 13, 14],
+                [21, 22, 23, 24],
+                [31, 32, 33, 34],
+                [41, 42, 43, 44],
+            ],
+            dtype=torch.int32,
+        )
+        seq_start_per_req = torch.tensor([0, 8, 0, 16], dtype=torch.int32)
+        state_cache = torch.empty((64, 2, 4), dtype=torch.float32)
+
+        selection = _select_cp_state_read_tail_blocks(
+            state_cache,
+            block_table,
+            seq_start_per_req=seq_start_per_req,
+            token_count=4,
+            state_tokens_per_block=8,
+        )
+
+        self.assertIsNotNone(selection)
+        self.assertTrue(
+            torch.equal(
+                selection.block_ids,
+                torch.tensor([0, 21, 0, 42], dtype=torch.long),
+            )
+        )
+        zero_row = torch.zeros(4, dtype=torch.int32)
+        self.assertTrue(torch.equal(selection.read_block_table[0], zero_row))
+        self.assertTrue(torch.equal(selection.read_block_table[2], zero_row))
+        self.assertEqual(int(selection.read_block_table[1, 0]), 2)
+        self.assertEqual(int(selection.read_block_table[3, 1]), 4)
+
     def test_cp_prefill_gathers_fused_projection_once_and_launches_flat(self) -> None:
         torch.manual_seed(0)
         dim = 8

@@ -33,6 +33,7 @@ Public API:
 
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -81,7 +82,6 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
     run_save_partial_states,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
-from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 # Process-local cache for the device-side cos_sin tensor derived from a
 # given freqs_cis source. DSV4 has ~91 CompressorFP8 instances (main +
@@ -96,19 +96,166 @@ _SHARED_COS_SIN_CACHE: Dict[
 ] = {}
 
 
+@dataclass(frozen=True)
+class _CPStateReadSelection:
+    block_ids: torch.Tensor
+    read_block_table: torch.Tensor
+
+
+def _select_cp_state_read_tail_blocks(
+    state_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    *,
+    seq_start_per_req: torch.Tensor,
+    token_count: int,
+    state_tokens_per_block: int,
+) -> Optional[_CPStateReadSelection]:
+    if (
+        token_count <= 1
+        or state_tokens_per_block <= 0
+        or block_table.dim() != 2
+        or int(block_table.shape[1]) <= 0
+    ):
+        return None
+
+    bt = block_table.to(device=state_cache.device, dtype=torch.long).contiguous()
+    B = min(int(bt.shape[0]), int(seq_start_per_req.numel()))
+    max_blocks = int(bt.shape[1])
+    read_bt = torch.zeros_like(bt)
+    if B <= 0:
+        return _CPStateReadSelection(
+            block_ids=torch.empty((0,), device=bt.device, dtype=torch.long),
+            read_block_table=read_bt.to(dtype=block_table.dtype),
+        )
+
+    suffix_len = int(token_count) - 1
+    block_tokens = int(state_tokens_per_block)
+    # Correctness relies on prefix-cache match producing reuse lengths aligned
+    # to the state block size. With that invariant, the prefix suffix window
+    # [seq_start - suffix_len, seq_start) is fully covered by the tail state
+    # block below. If the cache match granularity is changed to allow
+    # unaligned seq_start_per_req, this must be changed back to a multi-block
+    # selector. Do not add a runtime alignment check here: seq_start_per_req is
+    # a CUDA tensor on the hot path, and checking it on host would reintroduce
+    # the device-host sync this path is meant to avoid.
+    starts = seq_start_per_req[:B].to(device=bt.device, dtype=torch.long).reshape(B)
+    last_pos = (starts - 1).clamp_min(0)
+    last_block = last_pos // block_tokens
+    cols = (last_block % max_blocks).view(B, 1)
+
+    block_ids = bt[:B].gather(1, cols).reshape(-1)
+    slot_valid = (starts > 0) & (block_ids > 0)
+    block_ids = torch.where(slot_valid, block_ids, torch.zeros_like(block_ids))
+    block_ids = block_ids.contiguous()
+
+    slot_ids = torch.arange(1, B + 1, device=bt.device, dtype=torch.long)
+    slot_ids = torch.where(slot_valid, slot_ids, torch.zeros_like(slot_ids))
+    read_bt[:B].scatter_(1, cols, slot_ids.view(B, 1).to(dtype=read_bt.dtype))
+    return _CPStateReadSelection(
+        block_ids=block_ids,
+        read_block_table=read_bt.to(dtype=block_table.dtype),
+    )
+
+
+def _select_cp_state_read_blocks(
+    state_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    *,
+    seq_start_per_req: Optional[torch.Tensor],
+    token_count: int,
+    state_tokens_per_block: int,
+) -> _CPStateReadSelection:
+    if seq_start_per_req is not None:
+        selection = _select_cp_state_read_tail_blocks(
+            state_cache,
+            block_table,
+            seq_start_per_req=seq_start_per_req,
+            token_count=token_count,
+            state_tokens_per_block=state_tokens_per_block,
+        )
+        if selection is not None:
+            return selection
+
+    bt = block_table.to(device=state_cache.device, dtype=torch.long).contiguous()
+    # Conservative fallback for legacy callers without per-request prefix
+    # metadata. The optimized CP prefill path should provide seq_start_per_req
+    # and return above.
+    flat_ids = bt.reshape(-1)
+    valid = flat_ids > 0
+    block_ids = flat_ids[valid]
+    needed_valid = valid.view_as(bt)
+
+    read_bt = torch.zeros_like(bt)
+    if int(block_ids.numel()) > 0:
+        inverse = torch.arange(
+            int(block_ids.numel()), device=bt.device, dtype=torch.long
+        )
+        read_bt[needed_valid] = (inverse + 1).to(read_bt.dtype)
+    return _CPStateReadSelection(
+        block_ids=block_ids,
+        read_block_table=read_bt.to(dtype=block_table.dtype),
+    )
+
+
+def _fill_cp_state_read_cache(
+    read_cache: torch.Tensor,
+    gathered: torch.Tensor,
+    cp_size: int,
+    num_blocks: int,
+    local_eb: int,
+    hidden: int,
+) -> torch.Tensor:
+    read_cache[0].zero_()
+    if num_blocks <= 0:
+        return read_cache
+    dst = read_cache[1:].view(num_blocks, cp_size, local_eb, hidden)
+    src = gathered.view(cp_size, num_blocks, local_eb, hidden)
+    # One strided copy beats the per-rank loop (cp_size separate kernel
+    # launches accumulate to ~cp_size * 50us of launch overhead per layer).
+    dst.copy_(src.permute(1, 0, 2, 3))
+    return read_cache
+
+
+# Selections only depend on (block_table, seq_start_per_req, token_count,
+# state_tokens_per_block, state_cache.shape[1]); all of these are the same
+# across every layer that shares the same CompressorMeta (i.e. all layers of
+# the same attention-type within a single prefill). Cache by meta identity so
+# layers 2..N reuse layer 1's tail-block selection instead of relaunching
+# small tensor ops per layer.
+# A WeakKeyDictionary auto-evicts when the per-forward meta is garbage
+# collected, so we don't need explicit invalidation.
+_CP_STATE_READ_SELECTION_CACHE: (
+    "weakref.WeakKeyDictionary[Any, _CPStateReadSelection]"
+) = weakref.WeakKeyDictionary()
+
+
 def _build_cp_full_state_read_cache(
     state_cache: torch.Tensor,
     block_table: torch.Tensor,
     cp_size: int,
+    *,
+    seq_start_per_req: Optional[torch.Tensor] = None,
+    token_count: int = 0,
+    state_tokens_per_block: int = 0,
+    selection_cache_key: Optional[Any] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Gather CP-sliced fixed-state blocks into a compact full-ring read cache.
 
     CP prefill stores INDEXER/CSA/HCA state as intra-block slices: each rank
     owns ``local_eb`` rows of the full ``local_eb * cp_size`` state ring.
     The fused compressor may still need to read prefix-cache history that
-    spans all state-ring rows.  For that read path only, gather the rows for
-    the current request block table into compact block ids while keeping the
-    write path local/sliced.
+    spans all state-ring rows. For that read path only, gather the state
+    blocks the current compressor window can touch (``[seq_start -
+    token_count + 1, seq_start)`` per request) and keep the write path
+    local/sliced. When ``seq_start_per_req`` / ``token_count`` are not
+    provided the conservative full-table gather is used.
+
+    ``selection_cache_key`` (typically the per-attention-type
+    ``CompressorMeta``) is used to dedup the ``_select_cp_state_read_blocks``
+    work across the ~40 layers of a prefill: the selection only depends on
+    inputs that are invariant within a forward, so all layers sharing the
+    same key reuse the first layer's selection. Passing ``None`` disables
+    the cache.
     """
     if cp_size <= 1:
         return state_cache, block_table
@@ -117,45 +264,45 @@ def _build_cp_full_state_read_cache(
     if not state_cache.is_cuda:
         raise RuntimeError("CP-sliced DSV4 state-cache read requires CUDA state pools")
 
-    bt = block_table.to(device=state_cache.device, dtype=torch.long).contiguous()
-    rows = int(bt.numel())
-    if rows == 0:
-        return state_cache, block_table
-
     local_eb = int(state_cache.shape[1])
     hidden = int(state_cache.shape[2])
-    flat_ids = bt.reshape(-1)
-    valid = flat_ids > 0
-    safe_ids = torch.where(valid, flat_ids, torch.zeros_like(flat_ids))
+    selection: Optional[_CPStateReadSelection] = None
+    if selection_cache_key is not None:
+        selection = _CP_STATE_READ_SELECTION_CACHE.get(selection_cache_key)
+    if selection is None:
+        selection = _select_cp_state_read_blocks(
+            state_cache,
+            block_table,
+            seq_start_per_req=seq_start_per_req,
+            token_count=token_count,
+            state_tokens_per_block=state_tokens_per_block,
+        )
+        if selection_cache_key is not None:
+            try:
+                _CP_STATE_READ_SELECTION_CACHE[selection_cache_key] = selection
+            except TypeError:
+                # Some keys (e.g. tuples of tensors) aren't weak-referencable;
+                # gracefully fall back to recomputing on every layer.
+                pass
+    num_blocks = int(selection.block_ids.numel())
 
-    local_blocks = state_cache.index_select(0, safe_ids)
-    local_blocks = torch.where(
-        valid.view(rows, 1, 1),
-        local_blocks,
-        torch.zeros((), dtype=state_cache.dtype, device=state_cache.device),
-    )
-
-    gathered = all_gather(
-        local_blocks.reshape(rows * local_eb, hidden).contiguous(),
-        group=Group.TP,
-    )
-    full = (
-        gathered.view(cp_size, rows, local_eb, hidden)
-        .permute(1, 0, 2, 3)
-        .reshape(rows, cp_size * local_eb, hidden)
-        .contiguous()
-    )
-
-    zero = torch.zeros(
-        (1, cp_size * local_eb, hidden),
+    read_cache = torch.empty(
+        (num_blocks + 1, cp_size * local_eb, hidden),
         dtype=state_cache.dtype,
         device=state_cache.device,
     )
-    read_cache = torch.cat([zero, full], dim=0)
+    if num_blocks == 0:
+        read_cache.zero_()
+        return read_cache, selection.read_block_table
 
-    compact = torch.arange(1, rows + 1, device=bt.device, dtype=bt.dtype).view_as(bt)
-    read_bt = torch.where(bt > 0, compact, torch.zeros_like(compact))
-    return read_cache, read_bt.to(dtype=block_table.dtype)
+    local_blocks = state_cache.index_select(0, selection.block_ids)
+    local_2d = local_blocks.reshape(num_blocks * local_eb, hidden).contiguous()
+    with record_function_range("dsv4.cp.all_gather.state_read_cache.sync.launch"):
+        gathered = all_gather(local_2d, group=Group.TP)
+    _fill_cp_state_read_cache(
+        read_cache, gathered, cp_size, num_blocks, local_eb, hidden
+    )
+    return read_cache, selection.read_block_table
 
 
 def _cp_sliced_state_read_needed(
@@ -207,6 +354,36 @@ class CompressorMeta:
     # ``floor((position + 1) / ratio)``. Built once in decode metadata so
     # CSA indexer layers do not relaunch tiny add/div kernels.
     compressed_lens_per_token: Optional[torch.Tensor] = None
+
+
+def _cache_cp_state_read_selection(
+    meta: CompressorMeta,
+    state_cache: Optional[torch.Tensor],
+    block_table: Optional[torch.Tensor],
+    *,
+    cp_ctx: Optional[CPContext],
+    token_count: int,
+    state_tokens_per_block: int,
+) -> CompressorMeta:
+    if (
+        state_cache is None
+        or block_table is None
+        or meta.seq_start_per_req is None
+        or not _cp_sliced_state_read_needed(meta, cp_ctx, raw_disabled=False)
+    ):
+        return meta
+    try:
+        with record_function_range("dsv4.fp8.compressor.meta.cp_state_read_selection"):
+            _CP_STATE_READ_SELECTION_CACHE[meta] = _select_cp_state_read_blocks(
+                state_cache,
+                block_table,
+                seq_start_per_req=meta.seq_start_per_req,
+                token_count=token_count,
+                state_tokens_per_block=state_tokens_per_block,
+            )
+    except TypeError:
+        pass
+    return meta
 
 
 @dataclass
@@ -507,16 +684,23 @@ class CompressorFP8(PoolBackedModule):
             kv_slots = self._compute_kv_slot_mapping(positions, b_idx)
         with record_function_range("dsv4.fp8.compressor.meta.token_to_req"):
             token_to_req = b_idx.to(torch.int32)
-        return CompressorMeta(
-            positions=positions,
-            b_idx=b_idx,
-            state_slots=state_slots,
-            kv_slots=kv_slots,
-            token_to_req=token_to_req,
-            has_prefix=has_prefix,
-            is_batched=is_batched,
-            seq_start_per_req=seq_start_per_req,
-            cu_seq_per_req=cu_seq_per_req,
+        return _cache_cp_state_read_selection(
+            CompressorMeta(
+                positions=positions,
+                b_idx=b_idx,
+                state_slots=state_slots,
+                kv_slots=kv_slots,
+                token_to_req=token_to_req,
+                has_prefix=has_prefix,
+                is_batched=is_batched,
+                seq_start_per_req=seq_start_per_req,
+                cu_seq_per_req=cu_seq_per_req,
+            ),
+            self._state_pool_3d,
+            self._state_block_table,
+            cp_ctx=self._cp_ctx,
+            token_count=(1 + int(self.overlap)) * self.compress_ratio,
+            state_tokens_per_block=self._state_tokens_per_block,
         )
 
     # ----------------------------------------------------------------------
@@ -740,6 +924,15 @@ class CompressorFP8(PoolBackedModule):
                         self._state_pool_3d,
                         self._state_block_table,
                         int(self._cp_ctx.cp_size),
+                        seq_start_per_req=(
+                            meta.seq_start_per_req if use_varlen_raw else None
+                        ),
+                        token_count=(1 + int(self.overlap)) * self.compress_ratio,
+                        state_tokens_per_block=self._state_tokens_per_block,
+                        # All layers of the same attention-type share this
+                        # meta object per forward, so layer 1 builds the
+                        # selection and layers 2..N reuse it.
+                        selection_cache_key=meta,
                     )
                 )
 
