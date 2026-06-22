@@ -7,7 +7,6 @@ Covers:
   - Fused vs non-fused forward equivalence (GenericMoeLayer topk extension)
 """
 
-import os
 import unittest
 from typing import Dict, List
 from unittest.mock import MagicMock, patch
@@ -196,12 +195,10 @@ def _should_fuse_shared_expert(wi) -> bool:
     """Pure-Python replica of Qwen3NextBaseWeight._should_fuse_shared_expert."""
     if not (hasattr(torch.version, "hip") and torch.version.hip is not None):
         return False
-    if os.environ.get("DISABLE_SHARED_EXPERT_FUSION", "0") == "1":
-        return False
     mc = wi.model_config
-    if getattr(mc, "moe_style", 0) != 2:
+    if mc.moe_style != 2:
         return False
-    if getattr(mc, "inter_size", 0) != getattr(mc, "moe_inter_size", 0):
+    if mc.inter_size != mc.moe_inter_size:
         return False
     if not (wi.ep_size == 1 and wi.dp_size == 1
             and wi.ffn_tp_size == wi.tp_size):
@@ -212,8 +209,9 @@ def _should_fuse_shared_expert(wi) -> bool:
         quant_type = type(wi._quant_config).__name__
         if quant_type not in _FUSION_SUPPORTED_QUANT_TYPES:
             return False
-        exclude = getattr(wi._quant_config, "exclude_modules", None)
-        if exclude and any("mlp.shared_expert" in m for m in exclude):
+        if wi._quant_config.exclude_modules and any(
+            "mlp.shared_expert" in m for m in wi._quant_config.exclude_modules
+        ):
             return False
     return True
 
@@ -265,11 +263,6 @@ class TestFusionConditions(unittest.TestCase):
 
     @patch.object(torch.version, "hip", None, create=True)
     def test_non_rocm_returns_false(self):
-        self.assertFalse(_should_fuse_shared_expert(self._make_wi()))
-
-    @patch.object(torch.version, "hip", "6.0", create=True)
-    @patch.dict(os.environ, {"DISABLE_SHARED_EXPERT_FUSION": "1"})
-    def test_env_disable(self):
         self.assertFalse(_should_fuse_shared_expert(self._make_wi()))
 
     @patch.object(torch.version, "hip", "6.0", create=True)

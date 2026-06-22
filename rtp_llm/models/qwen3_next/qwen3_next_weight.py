@@ -1,5 +1,4 @@
 import functools
-import os
 from typing import Any, Dict, List
 
 import torch
@@ -327,12 +326,10 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
     def _should_fuse_shared_expert(self) -> bool:
         if not (hasattr(torch.version, "hip") and torch.version.hip is not None):
             return False
-        if os.environ.get("DISABLE_SHARED_EXPERT_FUSION", "0") == "1":
-            return False
         mc = self.model_config
-        if getattr(mc, "moe_style", 0) != 2:
+        if mc.moe_style != 2:
             return False
-        if getattr(mc, "inter_size", 0) != getattr(mc, "moe_inter_size", 0):
+        if mc.inter_size != mc.moe_inter_size:
             return False
         # TP-only: no EP, no DP, ffn_tp == attn_tp, no EPLB redundant experts
         if not (self.ep_size == 1 and self.dp_size == 1
@@ -344,8 +341,9 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
             quant_type = type(self._quant_config).__name__
             if quant_type not in self._FUSION_SUPPORTED_QUANT_TYPES:
                 return False
-            exclude = getattr(self._quant_config, "exclude_modules", None)
-            if exclude and any("mlp.shared_expert" in m for m in exclude):
+            if self._quant_config.exclude_modules and any(
+                "mlp.shared_expert" in m for m in self._quant_config.exclude_modules
+            ):
                 return False
         return True
 
