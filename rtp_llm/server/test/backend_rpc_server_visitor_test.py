@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import patch
 
@@ -15,19 +16,28 @@ class _FakeTokenIds:
 
 
 class _FakeGenerateConfig:
-    def __init__(self):
+    def __init__(self, is_streaming=False):
         self.role_addrs = []
+        self.is_streaming = is_streaming
+        self.max_new_tokens = 16
+
+    def validate(self):
+        return None
 
 
 class _FakeInput:
     request_id = 123
+    prompt_length = 17
     token_ids = _FakeTokenIds()
+    headers = None
 
-    def __init__(self):
-        self.generate_config = _FakeGenerateConfig()
+    def __init__(self, is_streaming=False):
+        self.generate_config = _FakeGenerateConfig(is_streaming=is_streaming)
 
 
 class _FakeHostService:
+    service_available = False
+
     def get_master_addr(self):
         return "master:1234"
 
@@ -128,6 +138,144 @@ class BackendRPCServerVisitorFrontendStopIdsTest(unittest.TestCase):
 
         self.assertEqual(first.output_ids.tolist(), [[7]])
         self.assertEqual(second.output_ids.tolist(), [[]])
+
+
+class _RetryingModelRpcClient:
+    def __init__(self):
+        self.attempts = 0
+
+    async def enqueue(self, _input):
+        self.attempts += 1
+        attempt = self.attempts
+        if attempt == 1:
+            yield "partial-output-from-failed-attempt"
+            raise RuntimeError("StatusCode.UNAVAILABLE recvmsg:Connection timed out")
+        yield "successful-output"
+
+
+class _SuccessfulModelRpcClient:
+    def __init__(self, outputs):
+        self.outputs = outputs
+        self.attempts = 0
+
+    async def enqueue(self, _input):
+        self.attempts += 1
+        for output in self.outputs:
+            yield output
+
+
+class _AlwaysFailingModelRpcClient:
+    def __init__(self, error):
+        self.error = error
+        self.attempts = 0
+
+    async def enqueue(self, _input):
+        self.attempts += 1
+        yield "partial-output-from-failed-attempt"
+        raise self.error
+
+
+class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
+    def _visitor(self, model_rpc_client) -> BackendRPCServerVisitor:
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.max_seq_len = 1024
+        visitor.model_rpc_client = model_rpc_client
+        visitor.host_service = _FakeHostService()
+        visitor.pd_route_retry_on_unavailable = 3
+        visitor.frontend_stop_word_ids_list = []
+        visitor.fill_request_info = lambda _input: None
+        visitor.check_sp_supported = lambda _input: None
+        return visitor
+
+    async def test_non_streaming_discards_partial_attempt_before_retry(self):
+        client = _RetryingModelRpcClient()
+        visitor = self._visitor(client)
+
+        stream = await visitor.enqueue(_FakeInput(is_streaming=False))
+        outputs = [output async for output in stream]
+
+        self.assertEqual(outputs, ["successful-output"])
+        self.assertEqual(client.attempts, 2)
+
+    async def test_non_streaming_replays_successful_outputs_in_order(self):
+        client = _SuccessfulModelRpcClient(["first-output", "second-output"])
+        visitor = self._visitor(client)
+
+        stream = await visitor.enqueue(_FakeInput(is_streaming=False))
+        outputs = [output async for output in stream]
+
+        self.assertEqual(outputs, ["first-output", "second-output"])
+        self.assertEqual(client.attempts, 1)
+
+    async def test_non_streaming_strips_stop_sequence_across_buffered_outputs(self):
+        first = GenerateOutput(
+            output_ids=torch.tensor([[7, 8]], dtype=torch.int32),
+            finished=False,
+        )
+        second = GenerateOutput(
+            output_ids=torch.tensor([[9]], dtype=torch.int32),
+            finished=True,
+        )
+        client = _SuccessfulModelRpcClient(
+            [
+                GenerateOutputs(generate_outputs=[first]),
+                GenerateOutputs(generate_outputs=[second]),
+            ]
+        )
+        visitor = self._visitor(client)
+        visitor.frontend_stop_word_ids_list = [[8, 9]]
+
+        with patch.dict(
+            os.environ, {"RTP_LLM_STRIP_FRONTEND_STOP_TOKEN_IDS": "1"}
+        ):
+            stream = await visitor.enqueue(_FakeInput(is_streaming=False))
+            outputs = [output async for output in stream]
+
+        self.assertEqual(len(outputs), 2)
+        self.assertEqual(first.output_ids.tolist(), [[7]])
+        self.assertEqual(second.output_ids.tolist(), [[]])
+
+    async def test_non_streaming_raises_after_retry_budget_exhausted(self):
+        client = _AlwaysFailingModelRpcClient(
+            RuntimeError("StatusCode.UNAVAILABLE recvmsg:Connection timed out")
+        )
+        visitor = self._visitor(client)
+        visitor.pd_route_retry_on_unavailable = 1
+
+        stream = await visitor.enqueue(_FakeInput(is_streaming=False))
+        outputs = []
+        with self.assertRaisesRegex(RuntimeError, "StatusCode.UNAVAILABLE"):
+            async for output in stream:
+                outputs.append(output)
+
+        self.assertEqual(outputs, [])
+        self.assertEqual(client.attempts, 2)
+
+    async def test_non_streaming_non_retryable_error_does_not_retry(self):
+        client = _AlwaysFailingModelRpcClient(ValueError("bad output"))
+        visitor = self._visitor(client)
+
+        stream = await visitor.enqueue(_FakeInput(is_streaming=False))
+        outputs = []
+        with self.assertRaisesRegex(ValueError, "bad output"):
+            async for output in stream:
+                outputs.append(output)
+
+        self.assertEqual(outputs, [])
+        self.assertEqual(client.attempts, 1)
+
+    async def test_streaming_does_not_retry_after_partial_output_yielded(self):
+        client = _RetryingModelRpcClient()
+        visitor = self._visitor(client)
+
+        stream = await visitor.enqueue(_FakeInput(is_streaming=True))
+        outputs = []
+        with self.assertRaisesRegex(RuntimeError, "StatusCode.UNAVAILABLE"):
+            async for output in stream:
+                outputs.append(output)
+
+        self.assertEqual(outputs, ["partial-output-from-failed-attempt"])
+        self.assertEqual(client.attempts, 1)
 
 
 if __name__ == "__main__":
