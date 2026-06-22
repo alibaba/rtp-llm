@@ -129,3 +129,22 @@ py_test(
     ],
     timeout = "short",
 )
+
+py_test(
+    name = "rocm_allreduce_perf_test",
+    srcs = [
+        "rocm_allreduce_perf_lib.py",
+        "rocm_allreduce_perf_test.py",
+    ],
+    imports = ["."],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/modules/base/rocm:quick_reduce",
+        "//rtp_llm/models_py/modules/base/rocm:trt_allreduce",
+        "//rtp_llm/models_py/modules/base/rocm:vllm_custom_allreduce",
+    ],
+    timeout = "eternal",
+    env = {"GPU_COUNT": "2"},
+    tags = ["manual", "rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7", "gpu_count": "2"},
+)
