@@ -1,9 +1,28 @@
+import json
 import math
-from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Tuple
+import os
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 KB = 1024
 MB = 1024 * KB
+
+DEFAULT_BACKENDS = [
+    "rccl",
+    "trt",
+    "vllm_custom",
+    "quick_reduce_fp",
+    "quick_reduce_int8",
+    "quick_reduce_int6",
+    "quick_reduce_int4",
+]
+
+QUICK_REDUCE_QUANTIZATION = {
+    "quick_reduce_fp": "FP",
+    "quick_reduce_int8": "INT8",
+    "quick_reduce_int6": "INT6",
+    "quick_reduce_int4": "INT4",
+}
 
 
 @dataclass(frozen=True)
@@ -24,6 +43,29 @@ class BenchShape:
     @property
     def shape_label(self) -> str:
         return f"{self.rows}x{self.hidden_size}"
+
+
+@dataclass(frozen=True)
+class BackendSpec:
+    name: str
+    quantization: Optional[str]
+
+
+@dataclass
+class ResultRow:
+    backend: str
+    dtype: str
+    target: str
+    shape: str
+    bytes: int
+    status: str
+    avg_us: Optional[float]
+    p50_us: Optional[float]
+    p90_us: Optional[float]
+    min_us: Optional[float]
+    max_us: Optional[float]
+    algbw_GBps: Optional[float]
+    note: str
 
 
 def parse_byte_target(value: str) -> Tuple[str, int]:
@@ -147,3 +189,89 @@ def generate_shapes(
             if shape.actual_bytes <= max_bytes:
                 shapes.append(shape)
     return unique_shapes(shapes)
+
+
+def parse_backends(value: str) -> List[BackendSpec]:
+    names = [item.strip() for item in value.split(",") if item.strip()]
+    if not names:
+        raise ValueError("at least one backend is required")
+    valid = set(DEFAULT_BACKENDS)
+    result: List[BackendSpec] = []
+    for name in names:
+        if name not in valid:
+            raise ValueError(f"unsupported backend: {name}")
+        result.append(
+            BackendSpec(
+                name=name,
+                quantization=QUICK_REDUCE_QUANTIZATION.get(name),
+            )
+        )
+    return result
+
+
+def percentile(sorted_values: Sequence[float], pct: float) -> float:
+    if not sorted_values:
+        raise ValueError("cannot compute percentile of empty values")
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    rank = (len(sorted_values) - 1) * pct
+    lower = int(math.floor(rank))
+    upper = int(math.ceil(rank))
+    if lower == upper:
+        return sorted_values[lower]
+    weight = rank - lower
+    return sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight
+
+
+def summarize_us(values: Sequence[float]) -> Dict[str, float]:
+    if not values:
+        raise ValueError("at least one timing value is required")
+    sorted_values = sorted(float(value) for value in values)
+    return {
+        "avg_us": sum(sorted_values) / len(sorted_values),
+        "p50_us": percentile(sorted_values, 0.5),
+        "p90_us": percentile(sorted_values, 0.9),
+        "min_us": sorted_values[0],
+        "max_us": sorted_values[-1],
+    }
+
+
+def _format_float(value: Optional[float]) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.3f}"
+
+
+def format_result_header() -> str:
+    return (
+        f"{'backend':<20} {'dtype':<7} {'target':<10} {'shape':<12} "
+        f"{'bytes':>10} {'status':<6} {'avg_us':>10} {'p50_us':>10} "
+        f"{'p90_us':>10} {'min_us':>10} {'max_us':>10} {'algbw_GBps':>12} note"
+    )
+
+
+def format_result_row(row: ResultRow) -> str:
+    return (
+        f"{row.backend:<20} {row.dtype:<7} {row.target:<10} {row.shape:<12} "
+        f"{row.bytes:>10} {row.status:<6} {_format_float(row.avg_us):>10} "
+        f"{_format_float(row.p50_us):>10} {_format_float(row.p90_us):>10} "
+        f"{_format_float(row.min_us):>10} {_format_float(row.max_us):>10} "
+        f"{_format_float(row.algbw_GBps):>12} {row.note}"
+    )
+
+
+def write_results_json(
+    args: Dict[str, Any], rows: Sequence[ResultRow]
+) -> Optional[str]:
+    output_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
+    if not output_dir:
+        return None
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, "rocm_allreduce_perf_results.json")
+    payload = {
+        "args": args,
+        "rows": [asdict(row) for row in rows],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+    return path

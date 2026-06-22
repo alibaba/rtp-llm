@@ -1,10 +1,15 @@
 import unittest
 
 from rocm_allreduce_perf_lib import (
+    BackendSpec,
     BenchShape,
+    ResultRow,
+    format_result_row,
     generate_shapes,
+    parse_backends,
     parse_byte_target,
     parse_shapes,
+    summarize_us,
 )
 
 
@@ -73,6 +78,69 @@ class RocmAllReducePerfShapeTest(unittest.TestCase):
                 BenchShape(target="2x4096", rows=2, hidden_size=4096, dtype_size=2),
             ],
         )
+
+
+class RocmAllReducePerfBackendAndRowTest(unittest.TestCase):
+    def test_parse_backends_maps_quick_reduce_quantization(self):
+        specs = parse_backends("rccl,trt,vllm_custom,quick_reduce_int6")
+        self.assertEqual(
+            specs,
+            [
+                BackendSpec(name="rccl", quantization=None),
+                BackendSpec(name="trt", quantization=None),
+                BackendSpec(name="vllm_custom", quantization=None),
+                BackendSpec(name="quick_reduce_int6", quantization="INT6"),
+            ],
+        )
+
+    def test_parse_backends_rejects_unknown_backend(self):
+        with self.assertRaises(ValueError):
+            parse_backends("rccl,bad_backend")
+
+    def test_summarize_us_returns_avg_percentiles_and_extremes(self):
+        summary = summarize_us([4.0, 1.0, 3.0, 2.0])
+        self.assertEqual(summary["avg_us"], 2.5)
+        self.assertEqual(summary["p50_us"], 2.5)
+        self.assertEqual(summary["p90_us"], 3.7)
+        self.assertEqual(summary["min_us"], 1.0)
+        self.assertEqual(summary["max_us"], 4.0)
+
+    def test_format_result_row_includes_ok_and_skip_fields(self):
+        ok_row = ResultRow(
+            backend="rccl",
+            dtype="fp16",
+            target="1_token",
+            shape="1x5120",
+            bytes=10240,
+            status="OK",
+            avg_us=12.3,
+            p50_us=12.0,
+            p90_us=13.0,
+            min_us=11.0,
+            max_us=14.0,
+            algbw_GBps=0.83,
+            note="",
+        )
+        skip_row = ResultRow(
+            backend="quick_reduce_int8",
+            dtype="fp16",
+            target="1_token",
+            shape="1x5120",
+            bytes=10240,
+            status="SKIP",
+            avg_us=None,
+            p50_us=None,
+            p90_us=None,
+            min_us=None,
+            max_us=None,
+            algbw_GBps=None,
+            note="below min size",
+        )
+
+        self.assertIn("rccl", format_result_row(ok_row))
+        self.assertIn("12.300", format_result_row(ok_row))
+        self.assertIn("quick_reduce_int8", format_result_row(skip_row))
+        self.assertIn("below min size", format_result_row(skip_row))
 
 
 if __name__ == "__main__":
