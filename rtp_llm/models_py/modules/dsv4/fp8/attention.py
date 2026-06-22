@@ -163,10 +163,6 @@ def _prefill_cp_overlap_enabled() -> bool:
     return os.environ.get("DSV4_PREFILL_CP_OVERLAP", "0") == "1"
 
 
-def _prefill_cp_state_read_prefetch_enabled() -> bool:
-    return os.environ.get("DSV4_PREFILL_CP_STATE_READ_PREFETCH", "1") == "1"
-
-
 _CP_POST_GATHER_STREAMS: Dict[int, torch.cuda.Stream] = {}
 _CP_GATHER_STREAMS: Dict[int, torch.cuda.Stream] = {}
 _SWA_CP_GATHER_STREAMS: Dict[int, torch.cuda.Stream] = {}
