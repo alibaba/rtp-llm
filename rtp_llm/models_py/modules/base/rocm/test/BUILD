@@ -116,3 +116,16 @@ py_test(
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
 )
+
+py_test(
+    name = "rocm_allreduce_perf_unit_test",
+    srcs = [
+        "rocm_allreduce_perf_lib.py",
+        "rocm_allreduce_perf_unit_test.py",
+    ],
+    imports = ["."],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+)
