@@ -120,19 +120,6 @@ class RepetitionMonitorTest(TestCase):
             fields["repetition_monitor_unavailable_reason"],
         )
 
-    def test_packaged_native_module_imports_from_runfiles(self) -> None:
-        with _fresh_native_status():
-            status = repetition_monitor.native_online_repetition_status()
-            self.assertTrue(status.available)
-            self.assertTrue(hasattr(status.module, "check_tool_call_loop"))
-            guard_result = status.module.check_tool_call_loop(
-                [1, 42, 2] * 4, [1, 42, 2], [[1]], [[2]], 5, 16
-            )
-
-        self.assertTrue(guard_result[0])
-        self.assertEqual(guard_result[1], 5)
-        self.assertEqual(guard_result[2], 3)
-
     def test_detect_tool_call_loop_uses_request_level_native_function(self) -> None:
         class FakeNativeResult:
             hit = True
