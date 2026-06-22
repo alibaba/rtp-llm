@@ -152,7 +152,7 @@ def sm120_suites():
                 name="dense_fp8pt_dynamic_sm120",
                 task_info="data/model/qwen3/q_r_h20_per_tensor_w13.json",
                 envs=["LOAD_PYTHON_MODEL=1"],
-                smoke_args="--quantization FP8_DYNAMIC_PER_TENSOR --act_type BF16",
+                smoke_args="--quantization FP8_DYNAMIC_PER_TENSOR --act_type BF16 --warm_up 0",
                 gpu_type=["RTX_5000_PRO"],
             ),
             smoke_test(
@@ -174,7 +174,7 @@ def sm120_suites():
                 name="qwen2_0_5b_fp8pt_sm120",
                 task_info="data/model/qwen2/q_r_fp8pt_sm120.json",
                 envs=["LOAD_PYTHON_MODEL=1"],
-                smoke_args="--quantization FP8_DYNAMIC_PER_TENSOR --act_type BF16",
+                smoke_args="--quantization FP8_DYNAMIC_PER_TENSOR --act_type BF16 --warm_up 0",
                 gpu_type=["RTX_5000_PRO"],
             ),
             smoke_test(
@@ -188,7 +188,7 @@ def sm120_suites():
                 name="qwen2_5_0_5b_fp8pt_sm120",
                 task_info="data/model/qwen25/q_r_fp8pt_sm120.json",
                 envs=["LOAD_PYTHON_MODEL=1"],
-                smoke_args="--quantization FP8_DYNAMIC_PER_TENSOR --act_type BF16",
+                smoke_args="--quantization FP8_DYNAMIC_PER_TENSOR --act_type BF16 --warm_up 0",
                 gpu_type=["RTX_5000_PRO"],
             ),
             smoke_test(
@@ -202,7 +202,7 @@ def sm120_suites():
                 name="qwen3_8b_fp8pt_sm120",
                 task_info="data/model/qwen3/q_r_8b_fp8pt_sm120.json",
                 envs=["LOAD_PYTHON_MODEL=1"],
-                smoke_args="--quantization FP8_DYNAMIC_PER_TENSOR --act_type BF16",
+                smoke_args="--quantization FP8_DYNAMIC_PER_TENSOR --act_type BF16 --warm_up 0",
                 gpu_type=["RTX_5000_PRO"],
             ),
             # ========== PR-5 扩展 (Tier 2: 预量化 FP8 model load 路径) ==========
