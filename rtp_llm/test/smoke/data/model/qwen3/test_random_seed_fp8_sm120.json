@@ -18,10 +18,10 @@
             "result": {
                 "response_batch": [
                     {
-                        "response": " I've been exploring Flask and am interested in a"
+                        "response": " I'm currently developing a script that involves a lot"
                     },
                     {
-                        "response": " I've been exploring Flask and am interested in a"
+                        "response": " I'm currently developing a script that involves a lot"
                     }
                 ]
             }
@@ -39,8 +39,8 @@
             },
             "result": {
                 "response": [
-                    " I know that Flask has a built-in ORM,",
-                    " Can anyone provide the one with the cleanest code"
+                    " I've heard that this is a flask framework that",
+                    " - Tech\n\nWhich recommended Flask alternative is most similar"
                 ],
                 "iter_count": 10,
                 "finished": true
