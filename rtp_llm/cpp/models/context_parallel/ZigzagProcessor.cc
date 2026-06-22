@@ -3,6 +3,7 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include <ATen/ops/searchsorted.h>
 #include <numeric>
 #include <vector>
 
@@ -154,28 +155,23 @@ torch::Tensor ZigZagProcessor::computeLocalLastHidden(const torch::Tensor&      
     // offset r * chunk_len, so a chunk-concat flat index g decomposes as
     // g = owner_rank * chunk_len + local_off (see handleOutputs / generateQKVRestoreIndices).
     const int64_t chunk_len = hidden_states.size(0);
-    const int64_t hidden    = hidden_states.size(1);
 
-    // Map each requested output row (in restored valid-seq order) to its
-    // chunk-concat flat index, without ever materializing the full sequence.
-    torch::Tensor valid_indices = torch::nonzero(cp_params.prefill_qkv_padding_mask).squeeze(-1);
-    torch::Tensor combined      = cp_params.prefill_qkv_restore_indice.index_select(0, valid_indices);
-    torch::Tensor sel           = combined.index_select(0, inputs.lm_output_indexes.to(torch::kLong)).to(torch::kLong);
-
-    const int64_t num_lm = sel.size(0);
+    // Equivalent to nonzero(padding_mask)[lm_output_indexes], but keeps the
+    // output shape fixed and avoids the CUDA nonzero host sync.
+    torch::Tensor lm_output_indexes = inputs.lm_output_indexes.to(torch::kLong);
+    torch::Tensor valid_indices     = at::searchsorted(cp_params.prefill_qkv_padding_mask.cumsum(0),
+                                                   lm_output_indexes + 1,
+                                                   /*out_int32=*/false,
+                                                   /*right=*/false);
+    torch::Tensor sel = cp_params.prefill_qkv_restore_indice.index_select(0, valid_indices).to(torch::kLong);
 
     // sel is non-negative kLong; floor-division and the residual recover (rank, offset).
     torch::Tensor owner     = sel.div(chunk_len, c10::string_view("floor"));
     torch::Tensor local_off = sel - owner.mul(chunk_len);
     torch::Tensor mine      = (owner == static_cast<int64_t>(parallelism_config_.tp_rank));
-    torch::Tensor mine_rows = torch::nonzero(mine).squeeze(-1);  // positions in [0, num_lm) this rank owns
 
-    torch::Tensor local_buf = torch::zeros({num_lm, hidden}, hidden_states.options());
-    if (mine_rows.size(0) > 0) {
-        torch::Tensor my_local_off = local_off.index_select(0, mine_rows);
-        local_buf.index_copy_(0, mine_rows, hidden_states.index_select(0, my_local_off));
-    }
-    return local_buf;
+    torch::Tensor local_selected = hidden_states.index_select(0, local_off);
+    return torch::where(mine.unsqueeze(-1), local_selected, torch::zeros_like(local_selected));
 }
 
 void ZigZagProcessor::handleOutputsLastHidden(torch::Tensor&                            hidden_states,
