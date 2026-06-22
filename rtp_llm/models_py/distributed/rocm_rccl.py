@@ -478,6 +478,10 @@ def _init_optional_ar_backends(
     parallelism_config: ParallelismConfig,
     tp_metadata_group: Optional[torch.distributed.ProcessGroup],
 ) -> None:
+    global _optional_ar_backends_initialized, _vllm_custom_ar_backend
+
+    if _optional_ar_backends_initialized:
+        return
     if not (
         _rocm_ar_config.enable_vllm_custom_ar or _rocm_ar_config.enable_quick_reduce
     ):
@@ -487,7 +491,31 @@ def _init_optional_ar_backends(
             "ROCm optional TP all-reduce backends are enabled but no TP metadata "
             "group is available"
         )
+        _optional_ar_backends_initialized = True
         return
+
+    if _rocm_ar_config.enable_vllm_custom_ar:
+        try:
+            from rtp_llm.models_py.modules.base.rocm.vllm_custom_allreduce import (
+                RocmVllmCustomAllReduce,
+            )
+
+            local_rank = getattr(
+                parallelism_config, "local_rank", torch.cuda.current_device()
+            )
+            _vllm_custom_ar_backend = RocmVllmCustomAllReduce(
+                tp_metadata_group, device=local_rank
+            )
+            if getattr(_vllm_custom_ar_backend, "disabled", True):
+                _vllm_custom_ar_backend = None
+                logging.warning("ROCm vLLM CustomAllreduce initialized disabled")
+            else:
+                logging.info("ROCm vLLM CustomAllreduce initialized")
+        except Exception as exc:
+            _vllm_custom_ar_backend = None
+            logging.warning("ROCm vLLM CustomAllreduce init failed: %s", exc)
+
+    _optional_ar_backends_initialized = True
 
 
 def enter_hipgraph_capture_mode(

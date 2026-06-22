@@ -108,3 +108,12 @@ cc_library(
     copts = rocm_copts(),
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "rocm_vllm_custom_allreduce",
+    srcs = ["vllm_custom_allreduce.cu"],
+    hdrs = ["vllm_custom_allreduce.cuh"],
+    deps = rocm_deps + torch_deps(),
+    copts = rocm_copts() + ["-DUSE_ROCM=1"],
+    visibility = ["//visibility:public"],
+)
