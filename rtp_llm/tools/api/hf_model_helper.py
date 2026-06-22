@@ -176,7 +176,7 @@ class HfStyleModelInfo:
         return None
 
     @classmethod
-    def _resolve_ft_model_type(cls, config: dict) -> Optional[str]:
+    def resolve_ft_model_type(cls, config: dict) -> Optional[str]:
         ft_type = ModelDict.get_ft_model_type_by_config(config)
         if ft_type:
             return ft_type
@@ -194,7 +194,7 @@ class HfStyleModelInfo:
             ft_type = ModelDict.get_ft_model_type_by_hf_repo(self.model_info.modelId)
             if ft_type is not None:
                 return ft_type
-        return self._resolve_ft_model_type(self.model_config)
+        return self.resolve_ft_model_type(self.model_config)
 
     @staticmethod
     def is_from_hf(model_path: str) -> bool:

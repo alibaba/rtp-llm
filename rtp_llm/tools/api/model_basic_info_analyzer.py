@@ -28,7 +28,7 @@ def _parse_hf_model_type(model_link):
 def parse_ft_model_type(model_path):
     # load config.json
     config = _get_raw_config(model_path)
-    ft_model_type = HfStyleModelInfo._resolve_ft_model_type(config)
+    ft_model_type = HfStyleModelInfo.resolve_ft_model_type(config)
     return {"ft_model_type": ft_model_type}
 
 
