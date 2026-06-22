@@ -93,6 +93,19 @@ py_test(
 )
 
 py_test(
+    name = "quick_reduce_test",
+    srcs = ["quick_reduce_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/modules/base/rocm:quick_reduce",
+    ],
+    timeout = "moderate",
+    env = {"GPU_COUNT": "2"},
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
+)
+
+py_test(
     name = "test_unified_allreduce_tp",
     srcs = ["test_unified_allreduce_tp.py"],
     deps = py_test_deps + [

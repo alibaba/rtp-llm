@@ -479,6 +479,7 @@ def _init_optional_ar_backends(
     tp_metadata_group: Optional[torch.distributed.ProcessGroup],
 ) -> None:
     global _optional_ar_backends_initialized, _vllm_custom_ar_backend
+    global _quick_reduce_backend
 
     if _optional_ar_backends_initialized:
         return
@@ -514,6 +515,30 @@ def _init_optional_ar_backends(
         except Exception as exc:
             _vllm_custom_ar_backend = None
             logging.warning("ROCm vLLM CustomAllreduce init failed: %s", exc)
+
+    if _rocm_ar_config.enable_quick_reduce:
+        try:
+            from rtp_llm.models_py.modules.base.rocm.quick_reduce import RocmQuickReduce
+
+            local_rank = getattr(
+                parallelism_config, "local_rank", torch.cuda.current_device()
+            )
+            _quick_reduce_backend = RocmQuickReduce(
+                tp_metadata_group,
+                device=local_rank,
+                quantization=_rocm_ar_config.quick_reduce_quantization,
+            )
+            if getattr(_quick_reduce_backend, "disabled", True):
+                _quick_reduce_backend = None
+                logging.warning("ROCm QuickReduce initialized disabled")
+            else:
+                logging.info(
+                    "ROCm QuickReduce initialized (quantization=%s)",
+                    _rocm_ar_config.quick_reduce_quantization,
+                )
+        except Exception as exc:
+            _quick_reduce_backend = None
+            logging.warning("ROCm QuickReduce init failed: %s", exc)
 
     _optional_ar_backends_initialized = True
 

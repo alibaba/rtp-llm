@@ -3,6 +3,7 @@ py_library(
     srcs = glob(
         ["*.py"],
         exclude = [
+            "quick_reduce.py",
             "trt_allreduce.py",
             "vllm_custom_allreduce.py",
         ],
@@ -31,6 +32,18 @@ py_library(
 py_library(
     name = "vllm_custom_allreduce",
     srcs = ["vllm_custom_allreduce.py"],
+    deps = [
+        "//rtp_llm:torch",
+    ],
+    data = [
+        "//:rtp_compute_ops",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "quick_reduce",
+    srcs = ["quick_reduce.py"],
     deps = [
         "//rtp_llm:torch",
     ],

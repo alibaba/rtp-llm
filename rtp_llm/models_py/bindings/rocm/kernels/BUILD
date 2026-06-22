@@ -117,3 +117,16 @@ cc_library(
     copts = rocm_copts() + ["-DUSE_ROCM=1"],
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "rocm_quick_reduce",
+    srcs = ["rocm_quick_reduce.cu"],
+    hdrs = [
+        "quickreduce/base.h",
+        "quickreduce/quick_reduce.h",
+        "quickreduce/quick_reduce_impl.cuh",
+    ],
+    deps = rocm_deps + torch_deps(),
+    copts = rocm_copts() + ["-DUSE_ROCM=1"],
+    visibility = ["//visibility:public"],
+)

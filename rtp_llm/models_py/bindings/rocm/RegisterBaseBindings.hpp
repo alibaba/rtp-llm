@@ -5,6 +5,7 @@
 #include "rtp_llm/models_py/bindings/rocm/Gemm.h"
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
+#include "rtp_llm/models_py/bindings/rocm/RocmQuickReduce.h"
 #include "rtp_llm/models_py/bindings/rocm/TrtllmAllReduceFusion.h"
 #include "rtp_llm/models_py/bindings/rocm/VllmCustomAllReduce.h"
 #include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
@@ -119,6 +120,7 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
     // TRT-LLM AllReduce Fusion — registered as a pybind11 class
     registerTrtllmArFusionHandle(rtp_ops_m);
     registerVllmCustomAllReduce(rtp_ops_m);
+    registerRocmQuickReduce(rtp_ops_m);
 
     // Fake balance expert kernel for MoE load-balance testing
     rtp_ops_m.def("fake_balance_expert",
