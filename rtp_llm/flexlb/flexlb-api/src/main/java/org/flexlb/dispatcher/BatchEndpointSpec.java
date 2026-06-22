@@ -24,6 +24,15 @@ import java.util.stream.Collectors;
  */
 @Value
 public class BatchEndpointSpec {
+
+    /**
+     * Request array field of the rtp_llm generation endpoints (root {@code /} and
+     * {@code /batch_infer}). Load-bearing beyond the {@link #SPECS} rows: {@link
+     * #requiresWholeBody} keys off it to scope the sample-aligned companion-field check to
+     * exactly these endpoints.
+     */
+    public static final String PROMPT_BATCH_FIELD = "prompt_batch";
+
     String path;
     String requestArrayField;
     String responseArrayField;
@@ -66,6 +75,35 @@ public class BatchEndpointSpec {
             }
         }
         return true;
+    }
+
+    /**
+     * Whether this body must be forwarded whole instead of split, because it carries a
+     * companion field that FE positionally aligns to the request array but the dispatcher does
+     * not slice.
+     *
+     * <p>Only the {@code prompt_batch} endpoints (root {@code /} and {@code /batch_infer}) carry
+     * such companions. FE's root {@code /} handler validates top-level {@code images}/{@code
+     * urls} (each a {@code list[list]} indexed by prompt) and a list-form {@code
+     * generate_config.adapter_name} against the prompt count
+     * ({@code request_extractor._get_urls} / {@code _get_adapter}). A split chunk would carry the
+     * full-length companion against a shorter prompt slice, so FE would reject every chunk.
+     * Forwarding the intact body to one FE keeps such requests correct, at the cost of fanout.
+     */
+    public boolean requiresWholeBody(JSONObject body) {
+        if (!PROMPT_BATCH_FIELD.equals(requestArrayField)) {
+            return false;
+        }
+        if (body.get("images") != null || body.get("urls") != null) {
+            return true;
+        }
+        if (!(body.get("generate_config") instanceof JSONObject gc)) {
+            return false;
+        }
+        // A scalar (String) adapter_name applies to the whole batch and is safe to split; a
+        // list-form adapter_name is one entry per prompt and FE rejects a length mismatch.
+        Object adapter = gc.get("adapter_name");
+        return adapter != null && !(adapter instanceof String);
     }
 
     /**
@@ -115,10 +153,10 @@ public class BatchEndpointSpec {
      */
     public static final List<BatchEndpointSpec> SPECS = List.of(
             new BatchEndpointSpec("/",
-                    "prompt_batch", "response_batch",
+                    PROMPT_BATCH_FIELD, "response_batch",
                     FailedItemFactory.NULL, null, false, false),
             new BatchEndpointSpec("/batch_infer",
-                    "prompt_batch", "response_batch",
+                    PROMPT_BATCH_FIELD, "response_batch",
                     FailedItemFactory.NULL, null, false, false),
             new BatchEndpointSpec("/v1/batch/chat/completions",
                     "requests", "responses",

@@ -125,6 +125,37 @@ class BatchHandlerContractTest {
     }
 
     @Test
+    void promptBatchWithSampleAlignedImagesFallsThroughToPassthrough() {
+        // Root `/` and /batch_infer accept top-level `images`/`urls` positionally aligned to
+        // prompt_batch; the dispatcher does not slice them, so a split would mis-align every
+        // chunk. Forward the intact body to one FE instead.
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
+        stubBody("{\"prompt_batch\":[\"a\",\"b\"],"
+                + "\"images\":[[\"http://x/0.png\"],[\"http://x/1.png\"]]}");
+        ServerResponse passthroughResponse = stubPassthroughResponse();
+
+        ServerResponse out = handler.handle(serverRequest, spec).block();
+
+        assertSame(passthroughResponse, out,
+                "a prompt_batch body carrying sample-aligned images must be forwarded whole");
+        verifyNoInteractions(fanoutService, batchScheduleClient);
+    }
+
+    @Test
+    void promptBatchWithListAdapterNameFallsThroughToPassthrough() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
+        stubBody("{\"prompt_batch\":[\"a\",\"b\"],"
+                + "\"generate_config\":{\"adapter_name\":[\"lora0\",\"lora1\"]}}");
+        ServerResponse passthroughResponse = stubPassthroughResponse();
+
+        ServerResponse out = handler.handle(serverRequest, spec).block();
+
+        assertSame(passthroughResponse, out,
+                "a list-form adapter_name is aligned to prompt_batch and must be forwarded whole");
+        verifyNoInteractions(fanoutService, batchScheduleClient);
+    }
+
+    @Test
     void stringListEmbeddingsInputStillSplits() {
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/embeddings");
         stubBody("{\"model\":\"m\",\"input\":[\"a\",\"b\",\"c\"]}");
