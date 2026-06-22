@@ -215,6 +215,59 @@ class ServerArgsSetTest(TestCase):
             32,
         )
 
+    def test_rocm_allreduce_hw_kernel_env_config(self):
+        os.environ["ENABLE_ROCM_VLLM_CUSTOM_AR"] = "1"
+        os.environ["ENABLE_ROCM_QUICK_REDUCE"] = "true"
+        os.environ["ROCM_QUICK_REDUCE_QUANTIZATION"] = "int8"
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        hw = py_env_configs.py_hw_kernel_config
+        self.assertEqual(hw.enable_rocm_vllm_custom_ar, True)
+        self.assertEqual(hw.enable_rocm_quick_reduce, True)
+        self.assertEqual(hw.rocm_quick_reduce_quantization, "INT8")
+
+    def test_rocm_allreduce_hw_kernel_cmd_config_overrides_env(self):
+        os.environ["ENABLE_ROCM_VLLM_CUSTOM_AR"] = "0"
+        os.environ["ENABLE_ROCM_QUICK_REDUCE"] = "0"
+        os.environ["ROCM_QUICK_REDUCE_QUANTIZATION"] = "INT4"
+        sys.argv = [
+            "prog",
+            "--enable_rocm_vllm_custom_ar",
+            "1",
+            "--enable_rocm_quick_reduce",
+            "1",
+            "--rocm_quick_reduce_quantization",
+            "fp",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        hw = py_env_configs.py_hw_kernel_config
+        self.assertEqual(hw.enable_rocm_vllm_custom_ar, True)
+        self.assertEqual(hw.enable_rocm_quick_reduce, True)
+        self.assertEqual(hw.rocm_quick_reduce_quantization, "FP")
+
+    def test_rocm_quick_reduce_quantization_rejects_invalid_value(self):
+        sys.argv = [
+            "prog",
+            "--rocm_quick_reduce_quantization",
+            "BAD",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertRaises(SystemExit):
+            rtp_llm.server.server_args.server_args.setup_args()
+
     def test_batch_decode_scheduler_config(self):
         """Test that batch_decode_scheduler_config is correctly set."""
         sys.argv = [

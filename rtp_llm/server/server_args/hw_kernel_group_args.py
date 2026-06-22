@@ -1,7 +1,18 @@
+import argparse
 import logging
 from typing import List
 
 from rtp_llm.server.server_args.util import str2bool
+
+
+def _parse_rocm_quick_reduce_quantization(value: str) -> str:
+    normalized = value.upper()
+    allowed = ("FP", "INT8", "INT6", "INT4")
+    if normalized not in allowed:
+        raise argparse.ArgumentTypeError(
+            f"ROCM_QUICK_REDUCE_QUANTIZATION must be one of {allowed}, got {value}"
+        )
+    return normalized
 
 
 def init_hw_kernel_group_args(parser, hw_kernel_config):
@@ -144,6 +155,33 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         type=str2bool,
         default=None,
         help="设置为 `True` 时，禁用ROCm平台自定义的 AllGather (AG) 实现，可能回退到标准库（如 RCCL）的 AllGather。",
+    )
+
+    hw_kernel_group.add_argument(
+        "--enable_rocm_vllm_custom_ar",
+        env_name="ENABLE_ROCM_VLLM_CUSTOM_AR",
+        bind_to=(hw_kernel_config, "enable_rocm_vllm_custom_ar"),
+        type=str2bool,
+        default=False,
+        help="设置为 `True` 时，启用ROCm平台移植自vLLM的自定义 AllReduce 实现。",
+    )
+
+    hw_kernel_group.add_argument(
+        "--enable_rocm_quick_reduce",
+        env_name="ENABLE_ROCM_QUICK_REDUCE",
+        bind_to=(hw_kernel_config, "enable_rocm_quick_reduce"),
+        type=str2bool,
+        default=False,
+        help="设置为 `True` 时，启用ROCm平台 QuickReduce AllReduce 实现。",
+    )
+
+    hw_kernel_group.add_argument(
+        "--rocm_quick_reduce_quantization",
+        env_name="ROCM_QUICK_REDUCE_QUANTIZATION",
+        bind_to=(hw_kernel_config, "rocm_quick_reduce_quantization"),
+        type=_parse_rocm_quick_reduce_quantization,
+        default="FP",
+        help="指定ROCm QuickReduce量化等级，可选 FP、INT8、INT6、INT4。",
     )
 
 

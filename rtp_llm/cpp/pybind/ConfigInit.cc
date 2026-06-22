@@ -502,6 +502,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("decode_capture_batch_sizes", &HWKernelConfig::decode_capture_batch_sizes)
         .def_readwrite("disable_dpc_random", &HWKernelConfig::disable_dpc_random)
         .def_readwrite("rocm_disable_custom_ag", &HWKernelConfig::rocm_disable_custom_ag)
+        .def_readwrite("enable_rocm_vllm_custom_ar", &HWKernelConfig::enable_rocm_vllm_custom_ar)
+        .def_readwrite("enable_rocm_quick_reduce", &HWKernelConfig::enable_rocm_quick_reduce)
+        .def_readwrite("rocm_quick_reduce_quantization", &HWKernelConfig::rocm_quick_reduce_quantization)
         .def("to_string", &HWKernelConfig::to_string)
         .def(py::pickle(
             [](const HWKernelConfig& self) {
@@ -518,27 +521,33 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.prefill_capture_seq_lens,
                                       self.decode_capture_batch_sizes,
                                       self.disable_dpc_random,
-                                      self.rocm_disable_custom_ag);
+                                      self.rocm_disable_custom_ag,
+                                      self.enable_rocm_vllm_custom_ar,
+                                      self.enable_rocm_quick_reduce,
+                                      self.rocm_quick_reduce_quantization);
             },
             [](py::tuple t) {
-                if (t.size() != 14)
+                if (t.size() != 17)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
-                    c.deep_gemm_num_sm             = t[0].cast<int>();
-                    c.arm_gemm_use_kai             = t[1].cast<bool>();
-                    c.enable_multi_block_mode      = t[2].cast<bool>();
-                    c.ft_disable_custom_ar         = t[3].cast<bool>();
-                    c.rocm_hipblaslt_config        = t[4].cast<std::string>();
-                    c.use_swizzleA                 = t[5].cast<bool>();
-                    c.enable_cuda_graph            = t[6].cast<bool>();
-                    c.enable_cuda_graph_debug_mode = t[7].cast<bool>();
-                    c.enable_native_cuda_graph     = t[8].cast<bool>();
-                    c.num_native_cuda_graph        = t[9].cast<int>();
-                    c.prefill_capture_seq_lens     = t[10].cast<std::vector<int>>();
-                    c.decode_capture_batch_sizes   = t[11].cast<std::vector<int>>();
-                    c.disable_dpc_random           = t[12].cast<bool>();
-                    c.rocm_disable_custom_ag       = t[13].cast<bool>();
+                    c.deep_gemm_num_sm               = t[0].cast<int>();
+                    c.arm_gemm_use_kai               = t[1].cast<bool>();
+                    c.enable_multi_block_mode        = t[2].cast<bool>();
+                    c.ft_disable_custom_ar           = t[3].cast<bool>();
+                    c.rocm_hipblaslt_config          = t[4].cast<std::string>();
+                    c.use_swizzleA                   = t[5].cast<bool>();
+                    c.enable_cuda_graph              = t[6].cast<bool>();
+                    c.enable_cuda_graph_debug_mode   = t[7].cast<bool>();
+                    c.enable_native_cuda_graph       = t[8].cast<bool>();
+                    c.num_native_cuda_graph          = t[9].cast<int>();
+                    c.prefill_capture_seq_lens       = t[10].cast<std::vector<int>>();
+                    c.decode_capture_batch_sizes     = t[11].cast<std::vector<int>>();
+                    c.disable_dpc_random             = t[12].cast<bool>();
+                    c.rocm_disable_custom_ag         = t[13].cast<bool>();
+                    c.enable_rocm_vllm_custom_ar     = t[14].cast<bool>();
+                    c.enable_rocm_quick_reduce       = t[15].cast<bool>();
+                    c.rocm_quick_reduce_quantization = t[16].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());
                 }

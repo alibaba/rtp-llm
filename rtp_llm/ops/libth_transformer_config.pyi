@@ -708,12 +708,15 @@ class HWKernelConfig:
     enable_cuda_graph_debug_mode: bool
     enable_multi_block_mode: bool
     enable_native_cuda_graph: bool
+    enable_rocm_quick_reduce: bool
+    enable_rocm_vllm_custom_ar: bool
     enable_stable_scatter_add: bool
     ft_disable_custom_ar: bool
     num_native_cuda_graph: int
     prefill_capture_seq_lens: list[int]
     rocm_disable_custom_ag: bool
     rocm_hipblaslt_config: str
+    rocm_quick_reduce_quantization: str
     use_swizzleA: bool
 
     def __getstate__(self) -> tuple:

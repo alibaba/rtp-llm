@@ -228,8 +228,11 @@ struct HWKernelConfig {
     // Decode CUDA Graph capture configuration
     // Comma-separated list of batch sizes, e.g., "1,2,4,8,16,32"
     std::vector<int> decode_capture_batch_sizes;
-    bool             disable_dpc_random     = false;
-    bool             rocm_disable_custom_ag = true;
+    bool             disable_dpc_random             = false;
+    bool             rocm_disable_custom_ag         = true;
+    bool             enable_rocm_vllm_custom_ar     = false;
+    bool             enable_rocm_quick_reduce       = false;
+    std::string      rocm_quick_reduce_quantization = "FP";
     std::string      to_string() const;
 };
 
