@@ -87,6 +87,27 @@ class BatchChunkAssemblerTest {
     }
 
     @Test
+    void buildChunkBodiesStampsForceBatchOnlyForPromptBatchEndpoints() {
+        JSONObject envelope = new JSONObject();
+        envelope.put("input", JSONArray.of("a", "b"));
+        List<JSONArray> chunks = List.of(JSONArray.of("a"), JSONArray.of("b"));
+
+        // prompt_batch generation endpoint: force_batch is stamped on every chunk.
+        List<JSONObject> promptBodies = BatchChunkAssembler.buildChunkBodies(
+                envelope, chunks, "prompt_batch");
+        assertTrue(promptBodies.get(0).getJSONObject("generate_config").getBoolean("force_batch"));
+
+        // Non-prompt_batch endpoints (embedding "input", openai "requests"): force_batch is a
+        // generation generate_config flag with no meaning here, so no generate_config is fabricated.
+        List<JSONObject> embeddingBodies = BatchChunkAssembler.buildChunkBodies(
+                envelope, chunks, "input");
+        assertFalse(embeddingBodies.get(0).containsKey("generate_config"));
+        List<JSONObject> openaiBodies = BatchChunkAssembler.buildChunkBodies(
+                envelope, chunks, "requests");
+        assertFalse(openaiBodies.get(0).containsKey("generate_config"));
+    }
+
+    @Test
     void injectForceBatchAddsWhenAbsent() {
         JSONObject body = new JSONObject();
         BatchChunkAssembler.injectForceBatch(body);

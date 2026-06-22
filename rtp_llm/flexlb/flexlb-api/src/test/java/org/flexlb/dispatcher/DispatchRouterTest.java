@@ -109,6 +109,23 @@ class DispatchRouterTest {
     }
 
     @Test
+    void tokenIsReleasedWhenHandlerErrors() {
+        ActiveRequestCounter counter = new ActiveRequestCounter();
+        BatchHandler batch = mock(BatchHandler.class);
+        when(batch.handle(any(), eq(BATCH_INFER)))
+                .thenReturn(Mono.error(new IllegalStateException("boom")));
+        PassthroughClient passthrough = mock(PassthroughClient.class);
+        RouterFunction<ServerResponse> routes = new DispatchRouter(
+                batch, passthrough, mock(DispatcherInspectionHandler.class), counter, List.of(BATCH_INFER)).routes();
+        WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
+
+        client.post().uri("/dispatcher/batch_infer").bodyValue("{}").exchange().expectStatus().is5xxServerError();
+
+        assertEquals(0, counter.getCount(),
+                "token must be released on the error path, otherwise a leaked in-flight token blocks graceful drain forever");
+    }
+
+    @Test
     void streamingPassthroughStaysCountedUntilResponseBodyCompletes() {
         ActiveRequestCounter counter = new ActiveRequestCounter();
         List<Long> countsWhileBodyStreaming = new CopyOnWriteArrayList<>();

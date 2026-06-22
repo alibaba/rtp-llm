@@ -133,6 +133,13 @@ public class RoundRobinLoadBalancer implements BatchLoadBalancer {
         worker.putLocalTask(requestId, task);
     }
 
+    /**
+     * Single-call {@code /schedule} result. Always reports {@code grpcPort}: {@link ServerStatus}
+     * has no {@code arpcPort} slot, so this path cannot express the gRPC-vs-ARPC distinction that
+     * {@link #buildTarget} draws for embedding workers. Embedding traffic is routed through
+     * {@link #selectBatch} / {@code /batch_schedule} (which picks ARPC) — keep it off the
+     * single-call path, or its port label will be wrong.
+     */
     private ServerStatus buildServerStatus(WorkerStatus worker, RoleType roleType, long requestId) {
         ServerStatus result = new ServerStatus();
         try {

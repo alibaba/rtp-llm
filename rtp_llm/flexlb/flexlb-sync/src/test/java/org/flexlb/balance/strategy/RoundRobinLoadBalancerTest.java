@@ -17,10 +17,12 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -109,6 +111,29 @@ class RoundRobinLoadBalancerTest {
         }
         Assertions.assertEquals(4, workers.size(),
                 "8 slots over 4 workers should hit all 4 (cursor wraps)");
+    }
+
+    @Test
+    void selectBatch_stays_in_range_after_cursor_overflows_past_max_value() throws Exception {
+        // The cursor is an AtomicInteger that getAndAdd()s without bound; once it crosses
+        // Integer.MAX_VALUE it goes negative. Math.floorMod (not %) is what keeps the index
+        // non-negative through that wrap — seed the cursor at the boundary to exercise it.
+        seedCursor(RoleType.PDFUSION, Integer.MAX_VALUE - 1);
+
+        List<BatchScheduleTarget> targets = rr.selectBatch(8, RoleType.PDFUSION, null);
+
+        Assertions.assertEquals(8, targets.size());
+        Set<String> poolWorkers =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().keySet();
+        Set<String> picked = new HashSet<>();
+        for (BatchScheduleTarget t : targets) {
+            String ipPort = t.getServerIp() + ":" + t.getHttpPort();
+            Assertions.assertTrue(poolWorkers.contains(ipPort),
+                    "index must stay valid after the cursor overflows to negative: " + ipPort);
+            picked.add(ipPort);
+        }
+        Assertions.assertEquals(4, picked.size(),
+                "8 slots over 4 workers must still hit all 4 across the overflow boundary");
     }
 
     @Test
@@ -270,6 +295,14 @@ class RoundRobinLoadBalancerTest {
         rr.rollBack(ipPort, 5000L);
 
         Assertions.assertNull(worker.getLocalTaskMap().get(5000L), "rollBack must remove the local task");
+    }
+
+    @SuppressWarnings("unchecked")
+    private void seedCursor(RoleType role, int value) throws Exception {
+        Field f = RoundRobinLoadBalancer.class.getDeclaredField("cursors");
+        f.setAccessible(true);
+        Map<RoleType, AtomicInteger> cursors = (Map<RoleType, AtomicInteger>) f.get(rr);
+        cursors.get(role).set(value);
     }
 
     private BalanceContext newSingleContext(long requestId) {

@@ -3,6 +3,7 @@ package org.flexlb.dispatcher;
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
@@ -137,6 +138,33 @@ class FanoutServiceTest {
                     assertTrue(subs.get(0).reason().contains("IllegalStateException"));
                 })
                 .verifyComplete();
+    }
+
+    @Test
+    void fanoutWriteNullsControlsNullPreservationInChunkPayload() {
+        // /v1/embeddings sets fanoutWriteNulls=true so a user-supplied explicit null reaches FE
+        // byte-for-byte; /batch_infer sets it false and drops the null (the common-wire-shape win).
+        FeClient feClient = mock(FeClient.class);
+        FePool pool = fePool(List.of("http://a"));
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        when(feClient.postBytes(anyString(), anyString(), payload.capture()))
+                .thenReturn(Mono.just(responseBatchBytes("r0")));
+        FanoutService svc = new FanoutService(feClient, pool);
+
+        JSONObject embeddingBody = new JSONObject();
+        embeddingBody.put("input", JSONArray.of("a"));
+        embeddingBody.put("user", null);
+        svc.dispatchChunks("/v1/embeddings", List.of(embeddingBody),
+                BatchEndpointSpec.BY_PATH.get("/v1/embeddings")).block();
+        assertTrue(new String(payload.getValue(), StandardCharsets.UTF_8).contains("\"user\":null"),
+                "fanoutWriteNulls=true must preserve the explicit null");
+
+        JSONObject promptBody = new JSONObject();
+        promptBody.put("prompt_batch", JSONArray.of("a"));
+        promptBody.put("user", null);
+        svc.dispatchChunks("/batch_infer", List.of(promptBody), BATCH_INFER).block();
+        assertFalse(new String(payload.getValue(), StandardCharsets.UTF_8).contains("\"user\""),
+                "fanoutWriteNulls=false must drop the explicit null");
     }
 
     private static FePool fePool(List<String> staticUrls) {

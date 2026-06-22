@@ -19,7 +19,6 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
@@ -38,9 +37,6 @@ class WorkerAddressServiceTest {
 
     @Mock
     private ServiceDiscovery serviceDiscovery;
-
-    @Mock
-    private ExecutorService serviceDiscoveryExecutor;
 
     @InjectMocks
     private WorkerAddressService workerAddressService;
@@ -71,7 +67,10 @@ class WorkerAddressServiceTest {
 
     @Test
     void testGetHosts_TimeoutThrows() throws Exception {
-        // Arrange - discovery hangs past the 500ms budget
+        // Discovery hangs well past WorkerAddressService's hardcoded 500ms future.get budget. The
+        // sleep is comfortably > 500ms so the get() timeout always fires first; this ordering holds
+        // even under uniform JVM/CI slowdown (both clocks dilate together). If that budget is ever
+        // made configurable, inject a smaller value here instead of relying on the wall-clock gap.
         when(serviceDiscovery.getHosts(anyString())).thenAnswer(invocation -> {
             TimeUnit.MILLISECONDS.sleep(800);
             return Collections.emptyList();

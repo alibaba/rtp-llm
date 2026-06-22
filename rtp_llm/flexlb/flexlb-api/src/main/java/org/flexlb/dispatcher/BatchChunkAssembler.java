@@ -11,7 +11,8 @@ import java.util.List;
  * Pure-function helpers for chunk assembly on the dispatcher batch path. Splits the request
  * array per {@link SubBatchSpec}, builds the per-chunk request body (shallow copy of the
  * envelope with the chunk slice swapped in and a fresh {@code generate_config} per chunk),
- * stamps {@code generate_config.force_batch} and any pre-resolved BE targets.
+ * stamps {@code generate_config.force_batch} (only on the {@code prompt_batch} generation
+ * endpoints) and any pre-resolved BE targets.
  *
  * <p>Per-chunk isolation strategy: every chunk gets a shallow-copy of the top-level envelope
  * (so {@code model} and other non-mutated fields share references) and a per-chunk copy of
@@ -92,7 +93,11 @@ public final class BatchChunkAssembler {
      * Builds per-chunk request bodies. Each is a <em>shallow</em> copy of {@code envelope} with
      * the {@code requestArrayField} replaced by the chunk slice and {@code generate_config}
      * replaced by a per-chunk copy of the source {@code generate_config}, then
-     * {@code force_batch} stamped per {@link #injectForceBatch} contract.
+     * {@code force_batch} stamped per {@link #injectForceBatch} contract. {@code force_batch}
+     * is only stamped on the {@code prompt_batch} generation endpoints (root {@code /} and
+     * {@code /batch_infer}); it is an rtp_llm generation {@code generate_config} flag with no
+     * meaning for the embedding / OpenAI-chat batch shapes, whose chunk bodies carry no
+     * {@code generate_config} of their own.
      *
      * <p>{@code generate_config} is copied per chunk because it's the one sub-tree that per-chunk
      * writes ({@code force_batch}, {@code role_addrs} append) mutate. A shallow {@code new
@@ -108,6 +113,7 @@ public final class BatchChunkAssembler {
                                                     String requestArrayField) {
         JSONObject sourceGc = envelope.getJSONObject("generate_config");
         boolean gcNeedsDeepCopy = sourceGc != null && sourceGc.containsKey("role_addrs");
+        boolean stampForceBatch = BatchEndpointSpec.PROMPT_BATCH_FIELD.equals(requestArrayField);
         List<JSONObject> chunkBodies = new ArrayList<>(chunks.size());
         for (JSONArray chunk : chunks) {
             JSONObject copy = new JSONObject(envelope);
@@ -117,7 +123,9 @@ public final class BatchChunkAssembler {
                         ? BatchBodyParser.deepCopy(sourceGc)
                         : new JSONObject(sourceGc));
             }
-            injectForceBatch(copy);
+            if (stampForceBatch) {
+                injectForceBatch(copy);
+            }
             chunkBodies.add(copy);
         }
         return chunkBodies;

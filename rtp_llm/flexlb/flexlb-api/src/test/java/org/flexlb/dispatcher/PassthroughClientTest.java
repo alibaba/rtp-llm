@@ -73,6 +73,33 @@ class PassthroughClientTest {
     }
 
     @Test
+    void forwardsFeNon2xxStatusVerbatim() throws Exception {
+        // A reachable FE returning 404/500 is the FE's own answer, not a dispatcher failure — it
+        // must pass through with the original status (502 is reserved for "could not reach any FE").
+        server.enqueue(new MockResponse()
+                .setResponseCode(404)
+                .setBody("{\"error\":\"no such model\"}")
+                .setHeader("Content-Type", "application/json"));
+        String base = "http://" + server.getHostName() + ":" + server.getPort();
+        FePool pool = DispatcherTestSupport.fePool(() -> List.of(base), url -> true);
+        PassthroughClient client =
+                new PassthroughClient(WebClient.builder().build(), pool);
+
+        MockServerRequest request = MockServerRequest.builder()
+                .method(HttpMethod.GET)
+                .uri(URI.create("/v1/models/missing"))
+                .body(Flux.empty());
+
+        StepVerifier.create(client.forward(request))
+                .assertNext(r -> Assertions.assertEquals(404, r.statusCode().value(),
+                        "FE 404 must pass through verbatim, not be remapped to 502"))
+                .verifyComplete();
+
+        RecordedRequest rec = takeRequestWithin(server);
+        Assertions.assertEquals("/v1/models/missing", rec.getPath());
+    }
+
+    @Test
     void emptyFePoolBecomes502JsonError() {
         FePool pool = DispatcherTestSupport.fePool(List::of, url -> true);
         PassthroughClient client =

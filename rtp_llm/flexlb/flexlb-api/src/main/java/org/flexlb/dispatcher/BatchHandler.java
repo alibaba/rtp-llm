@@ -128,7 +128,11 @@ public class BatchHandler {
     private Mono<ServerResponse> errorResponse(ResponseMerger.MergedResponse merged) {
         JSONObject body = new JSONObject();
         body.put("error", "all_sub_batches_failed");
-        body.put("failed_count", merged.failedIndices().size());
+        // Item units, matching the success-path _partial_failure block; every item failed so
+        // failed_count == total_count. total_chunks is sub-batch units.
+        int failedItems = merged.failedIndices().size();
+        body.put("failed_count", failedItems);
+        body.put("total_count", failedItems);
         body.put("total_chunks", merged.totalChunks());
         JSONArray reasons = new JSONArray();
         merged.failedReasons().stream().distinct().forEach(reasons::add);

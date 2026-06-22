@@ -198,6 +198,8 @@ class BatchHandlerContractTest {
         ObjectNode body = parseBody(out);
         assertEquals("all_sub_batches_failed", body.get("error").asText());
         assertEquals(4, body.get("failed_count").asInt(), "failed_count counts items");
+        assertEquals(4, body.get("total_count").asInt(),
+                "total_count is item units (matches _partial_failure); all items failed here");
         assertEquals(2, body.get("total_chunks").asInt());
         assertEquals(1, body.get("failed_reasons").size(),
                 "identical reasons must be deduplicated: " + body.get("failed_reasons"));

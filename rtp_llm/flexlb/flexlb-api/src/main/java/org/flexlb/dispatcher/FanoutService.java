@@ -72,6 +72,11 @@ public class FanoutService {
      * picks the FE in declaration order, keeping round-robin assignment deterministic. The FE
      * response is parsed on a {@link Schedulers#parallel()} worker rather than the Netty event
      * loop, so a large embedding response cannot stall the I/O thread serving other connections.
+     *
+     * <p>Threading note: the per-chunk {@code JSON.toJSONBytes} serialize (and the inbound parse +
+     * chunk-body build in {@link BatchHandler}) deliberately stay on the event loop — byte-array
+     * work over a shallow-copied envelope, cheaper than a scheduler hand-off. Only the FE-response
+     * parse and downstream merge are offloaded.
      */
     private Mono<SubBatchResult> dispatchOne(String fePath, ChunkPlan plan, JSONWriter.Feature[] features) {
         return Mono.fromCallable(() -> new Pick(fePool.next(), JSON.toJSONBytes(plan.body(), features)))

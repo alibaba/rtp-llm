@@ -63,6 +63,26 @@ class FeClientTest {
     }
 
     @Test
+    void feNon2xxResponseErrorsWithExtractableStatus() {
+        // .retrieve() turns a 5xx into a WebClientResponseException; the fanout path relies on
+        // DispatcherResponses.httpStatusOf recovering the status so a chunk degrades to a failed
+        // SubBatchResult carrying the real FE status (which the all-failed merge can then surface).
+        server.enqueue(new MockResponse()
+                .setResponseCode(500)
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"error\":\"backend boom\"}"));
+        DispatchConfig cfg = new DispatchConfig();
+        cfg.setBatchTimeoutMs(5000);
+        FeClient client = new FeClient(WebClient.builder(), connectionProvider, cfg);
+
+        String base = "http://" + server.getHostName() + ":" + server.getPort();
+        StepVerifier.create(client.postBytes(base, "/batch_infer", "{}".getBytes()))
+                .expectErrorSatisfies(e ->
+                        Assertions.assertEquals(500, DispatcherResponses.httpStatusOf(e)))
+                .verify(java.time.Duration.ofSeconds(5));
+    }
+
+    @Test
     void feSlowerThanBatchTimeoutFailsTheCall() {
         // batchTimeoutMs is the header-wait budget: an FE that has not started responding
         // within it must fail the sub-call (the chunk then degrades to SubBatchResult.failed
