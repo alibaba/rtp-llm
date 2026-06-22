@@ -56,8 +56,8 @@ def subscribe_deps():
 def whl_deps():
     return select({
         "@rtp_llm//:using_rocm": ["pyrsmi==0.2.0", "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar", "aiter@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.13.dev14%2Bgfa35072d0.d20260402-cp310-cp310-linux_x86_64.whl"],
-        # Default covers cuda12_9_x86, cuda12_9_arm (both use torch 2.8+cu129).
-        # CPU-only and ARM-CPU wheel targets were removed.
+        "@rtp_llm//:using_cuda12_arm": ["torch==2.9.0+cu129"],
+        # Default covers x86 cuda12_9 only.
         "//conditions:default": ["torch==2.8.0+cu129"],
     })
 
