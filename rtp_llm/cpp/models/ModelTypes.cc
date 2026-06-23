@@ -65,9 +65,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
-    execBroadcast({{shape_hints_t}, 0});
-    execSyncCommunication(false);
-    cudaSyncAndCheck();
+    execBroadcastCpu({{shape_hints_t}, 0});
 
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;
@@ -89,9 +87,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             mm_features_shape_ptr[i] =
                 inputs.multimodal_features.has_value() ? inputs.multimodal_features.value()[i].size(0) : 0;
         }
-        execBroadcast({{mm_features_shape_t}, 0});
-        execSyncCommunication(false);
-        cudaSyncAndCheck();
+        execBroadcastCpu({{mm_features_shape_t}, 0});
     }
 
     // extra-input element counts broadcast: each extra-input is an opaque flat 1-D tensor,
@@ -104,9 +100,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             mm_extra_input_shape_ptr[i] =
                 inputs.mm_extra_input.has_value() ? inputs.mm_extra_input.value()[i].numel() : 0;
         }
-        execBroadcast({{mm_extra_input_shape_t}, 0});
-        execSyncCommunication(false);
-        cudaSyncAndCheck();
+        execBroadcastCpu({{mm_extra_input_shape_t}, 0});
     }
 
     auto   max_kernel_blocks       = (size_t)shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch];
@@ -130,7 +124,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         std::vector<int64_t> dims64(dims.begin(), dims.end());
         auto                 tensor = torch::empty(dims64, options);
-        // NCCL broadcast requires pinned memory for CPU buffers
+        // Keep host tensors pinned to match downstream H2D copy assumptions.
         if (atype != rtp_llm::AllocationType::DEVICE) {
             tensor = tensor.pin_memory();
         }
@@ -301,7 +295,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     bool is_root = parallelism_config.tp_rank == 0;
 
     // Allocate one packed buffer per device type.
-    // CPU buffer uses pinned memory (required by NCCL for host-side broadcast).
+    // CPU buffer stays on the host and is sent through execBroadcastCpu.
     torch::Tensor cpu_packed, gpu_packed;
 
     if (cpu_total_bytes > 0) {
@@ -327,16 +321,17 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
     }
 
-    // Broadcast at most 2 packed buffers instead of N individual tensors.
-    std::vector<torch::Tensor> packed_buffers;
+    // Broadcast CPU buffers through execBroadcastCpu. Keep GPU buffers on the
+    // existing NCCL path.
     if (cpu_packed.defined()) {
-        packed_buffers.push_back(cpu_packed);
+        execBroadcastCpu({{cpu_packed}, 0});
     }
     if (gpu_packed.defined()) {
-        packed_buffers.push_back(gpu_packed);
+        // execBroadcast guarantees stream-ordered GPU consumption and propagates
+        // c10d errors. Avoid cudaSyncAndCheck here: device-wide sync serializes
+        // the decode path and hurts TP broadcast latency.
+        execBroadcast({{gpu_packed}, 0});
     }
-    execBroadcast({packed_buffers, 0});
-    cudaSyncAndCheck();
 
     // Unpack from packed buffers back to each tensor's original storage.
     if (!is_root) {
