@@ -79,6 +79,7 @@ class DenseMLP(nn.Module):
                 hw_kernel_config=hw_kernel_config,
                 weight_scale_2_key=W.ffn_w3_s2,
                 input_scale_key=W.ffn_w3_i_s,
+                activation_type="gelu" if activation_type == ActivationType.Gelu else None,
             )
 
         self.down_proj = LinearFactory.create_linear_from_weights(
@@ -92,9 +93,11 @@ class DenseMLP(nn.Module):
             input_scale_key=W.ffn_w2_i_s,
         )
 
+        self.activation_fused = getattr(self.up_proj, 'use_gelu', False)
+
     def forward(self, x: torch.Tensor, skip_allreduce: bool = False) -> torch.Tensor:
         up = self.up_proj(x)
-        activated = self.act_fn(up)
+        activated = up if self.activation_fused else self.act_fn(up)
         output = self.down_proj(activated)
         if not skip_allreduce and self.parallelism_config.get_ffn_tp_size() > 1:
             output = all_reduce(output, group=Group.TP)

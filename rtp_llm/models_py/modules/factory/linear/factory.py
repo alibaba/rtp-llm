@@ -65,6 +65,7 @@ class LinearFactory:
         hw_kernel_config: Optional['HWKernelConfig'] = None,
         weight_scale_2_key: Optional[str] = None,
         input_scale_key: Optional[str] = None,
+        activation_type: Optional[str] = None,
     ) -> LinearBase:
         """Create Linear layer from weight dictionary
 
@@ -90,7 +91,7 @@ class LinearFactory:
         input_scale = weights.get(input_scale_key, None) if input_scale_key else None
 
         return cls.create_linear(weight, bias, weight_scales, quant_config, hw_kernel_config,
-                                 weight_scale_2, input_scale)
+                                 weight_scale_2, input_scale, activation_type)
 
     @classmethod
     def create_linear(
@@ -102,6 +103,7 @@ class LinearFactory:
         hw_kernel_config: Optional['HWKernelConfig'] = None,
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
+        activation_type: Optional[str] = None,
     ):
         candidates = [
             strategy_class
@@ -140,6 +142,7 @@ class LinearFactory:
             bias=bias,
             quant_config=quant_config,
             weight_scale_2=weight_scale_2,
+            activation_type=activation_type,
         )
 
         return instance

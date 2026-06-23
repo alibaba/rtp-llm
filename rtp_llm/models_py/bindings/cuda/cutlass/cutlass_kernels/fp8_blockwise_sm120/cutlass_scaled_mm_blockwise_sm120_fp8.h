@@ -29,4 +29,5 @@ void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&                      D
                                            torch::Tensor const&                B,
                                            torch::Tensor const&                A_sf,
                                            torch::Tensor const&                B_sf,
-                                           std::optional<torch::Tensor> const& bias = std::nullopt);
+                                           std::optional<torch::Tensor> const& bias     = std::nullopt,
+                                           bool                                use_gelu = false);

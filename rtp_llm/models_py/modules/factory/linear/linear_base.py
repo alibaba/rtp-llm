@@ -53,6 +53,7 @@ class LinearBase(nn.Module, ABC):
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
+        activation_type: Optional[str] = None,
     ):
         """Initialize the Linear module with weights
 
@@ -61,8 +62,9 @@ class LinearBase(nn.Module, ABC):
             weight_scales: Weight scales tensor
             input_scales: Input scales tensor
             bias: Bias tensor
-            quant_config: Quantization configuration (required)ers
+            quant_config: Quantization configuration (required)
             weight_scale_2: Second weight scale tensor (for FP4, can be None)
+            activation_type: Activation to fuse into GEMM epilogue (e.g. "gelu")
         """
         super().__init__()
 
