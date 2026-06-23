@@ -168,17 +168,24 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     return config;
 }
 
-static void setExplicitBlocksForTag(CacheConfig& config, const std::string& tag, uint32_t block_num) {
+static void setExplicitBlocksForGroup(CacheConfig& config, size_t group_id, uint32_t block_num) {
     ASSERT_EQ(config.group_policies.size(), config.group_tags.size());
+    ASSERT_LT(group_id, config.group_policies.size());
     auto policies = config.group_policies;
-    for (size_t gid = 0; gid < config.group_tags.size(); ++gid) {
-        if (config.group_tags[gid] == tag) {
-            policies[gid].explicit_block_num = block_num;
-            config.setGroupPolicies(policies);
-            return;
+    policies[group_id].explicit_block_num = block_num;
+    config.setGroupPolicies(policies);
+}
+
+static size_t firstExplicitIndependentGroup(const CacheConfig& config) {
+    EXPECT_EQ(config.group_policies.size(), config.group_tags.size());
+    for (size_t gid = 0; gid < config.group_policies.size(); ++gid) {
+        if (config.group_policies[gid].evict_policy == CacheEvictPolicy::INDEPENDENT
+            && config.group_policies[gid].explicit_block_num > 0) {
+            return gid;
         }
     }
-    FAIL() << "missing tag " << tag;
+    ADD_FAILURE() << "missing explicit independent cache group";
+    return 0;
 }
 
 static CompleteTokenIdsPtr makeCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block) {
@@ -1053,23 +1060,18 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigUsesOnlyPagedGroupsForBlockSize
     ASSERT_EQ(config.group_tags.size(), 7u);
     ASSERT_EQ(config.group_block_size_bytes.size(), 7u);
 
-    size_t expected_state_bytes = 0;
-    size_t expected_swa_bytes   = 0;
-    size_t expected_full_bytes  = 0;
+    size_t expected_non_full_bytes = 0;
+    size_t expected_full_bytes     = 0;
     for (size_t gid = 0; gid < config.group_tags.size(); ++gid) {
-        const auto& tag  = config.group_tags[gid];
-        const auto  type = config.group_types[gid];
-        if (tag == "indexer_state" || tag == "csa_state" || tag == "hca_state") {
-            expected_state_bytes += config.group_block_size_bytes[gid];
-        } else if (type == CacheGroupType::SWA) {
-            expected_swa_bytes += config.group_block_size_bytes[gid];
-        } else {
+        const auto type = config.group_types[gid];
+        if (type == CacheGroupType::FULL) {
             expected_full_bytes += config.group_block_size_bytes[gid];
+        } else {
+            expected_non_full_bytes += config.group_block_size_bytes[gid];
         }
     }
 
-    EXPECT_GT(expected_state_bytes, 0u);
-    EXPECT_GT(expected_swa_bytes, 0u);
+    EXPECT_GT(expected_non_full_bytes, 0u);
     EXPECT_GT(expected_full_bytes, 0u);
 
     EXPECT_EQ(config.block_size_bytes, expected_full_bytes);
@@ -1077,24 +1079,25 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigUsesOnlyPagedGroupsForBlockSize
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesHcaStatePoolBlocks) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
-    setExplicitBlocksForTag(config, "hca_state", 50);
+    const size_t explicit_gid = firstExplicitIndependentGroup(config);
+    setExplicitBlocksForGroup(config, explicit_gid, 50);
 
     RuntimeConfig rt;  // unused inside finalizeBlockNums today
     config.finalizeBlockNums(/*global_block_num=*/200, rt);
 
     ASSERT_EQ(config.group_block_nums.size(), config.group_tags.size());
     for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
-        const uint32_t expected = config.group_tags[gid] == "hca_state" ? 50u : 200u;
+        const uint32_t expected = config.policyForGroup(gid).explicit_block_num > 0 ? 50u : 200u;
         EXPECT_EQ(config.group_block_nums[gid], expected) << "gid=" << gid;
     }
 
-    const size_t expected_reserve = 50u * config.group_block_size_bytes[5];
+    const size_t expected_reserve = 50u * config.group_block_size_bytes[explicit_gid];
     EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, expected_reserve);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesGlobalBlocksWhenHcaStateBlocksDisabled) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/123);
-    setExplicitBlocksForTag(config, "hca_state", 0);
+    setExplicitBlocksForGroup(config, firstExplicitIndependentGroup(config), 0);
 
     RuntimeConfig rt;
     config.finalizeBlockNums(/*global_block_num=*/123, rt);
@@ -1107,16 +1110,17 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesGlobalBlocksWhen
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuHcaStatePoolIncludesFixedReserve) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
-    setExplicitBlocksForTag(config, "hca_state", 50);
+    const size_t explicit_gid = firstExplicitIndependentGroup(config);
+    setExplicitBlocksForGroup(config, explicit_gid, 50);
 
     RuntimeConfig rt;
     config.finalizeBlockNums(/*global_block_num=*/200, rt);
 
     for (size_t gid = 0; gid < config.group_block_nums.size(); ++gid) {
-        const uint32_t expected = config.group_tags[gid] == "hca_state" ? 50u : 200u;
+        const uint32_t expected = config.policyForGroup(gid).explicit_block_num > 0 ? 50u : 200u;
         EXPECT_EQ(config.group_block_nums[gid], expected) << "gid=" << gid;
     }
-    const size_t expected_reserve = 50u * config.group_block_size_bytes[5];
+    const size_t expected_reserve = 50u * config.group_block_size_bytes[explicit_gid];
     EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, expected_reserve);
 }
 

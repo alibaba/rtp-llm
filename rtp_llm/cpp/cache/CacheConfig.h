@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <map>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -10,6 +11,7 @@
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -575,6 +577,71 @@ struct CacheConfig {
         return policy;
     }
 
+    static CacheGroupPolicy policyFromSpecDesc(const KVCacheSpecDesc& desc) {
+        CacheGroupPolicy policy = defaultCacheGroupPolicy(SpecBuilder::groupType(desc));
+        if (desc.is_state_cache) {
+            policy.evict_policy = CacheEvictPolicy::INDEPENDENT;
+        }
+        if (desc.skip_prefix_reuse) {
+            policy.reuse_policy         = CacheReusePolicy::NON_REUSABLE;
+            policy.active_tail_blocks   = 1;
+            policy.validate_tail_blocks = false;
+        }
+        if (desc.has_reuse_policy) {
+            policy.reuse_policy = desc.reuse_policy;
+        }
+        if (desc.has_evict_policy) {
+            policy.evict_policy = desc.evict_policy;
+        }
+        if (desc.has_active_tail_blocks) {
+            policy.active_tail_blocks = desc.active_tail_blocks;
+        }
+        if (desc.has_validate_tail_blocks) {
+            policy.validate_tail_blocks = desc.validate_tail_blocks;
+        }
+        policy.explicit_block_num        = desc.explicit_block_num;
+        policy.reserve_from_paged_budget = desc.reserve_from_paged_budget;
+        if (desc.has_prefix_reusable) {
+            policy.prefix_reusable = desc.prefix_reusable;
+        }
+        policy.uses_pinned_cpu_backing   = desc.uses_pinned_cpu_backing;
+        if (desc.has_is_cp_shardable) {
+            policy.is_cp_shardable = desc.is_cp_shardable;
+        }
+        if (desc.has_sparse_slots) {
+            policy.has_sparse_slots = desc.sparse_slots;
+        }
+        if (desc.has_kernel_block_subdiv) {
+            policy.has_kernel_block_subdiv = desc.kernel_block_subdiv;
+        }
+        if (desc.has_cp_compact_tail_blocks) {
+            policy.cp_compact_tail_blocks = desc.cp_compact_tail_blocks;
+        }
+        if (desc.has_is_reservable) {
+            policy.is_reservable = desc.is_reservable;
+        }
+        return policy;
+    }
+
+    static CacheGroupPolicy cacheGroupPolicyForDesc(const KVCacheSpecDesc& desc, const KVCacheSpecPtr& /*spec*/) {
+        return policyFromSpecDesc(desc);
+    }
+
+    static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs) {
+        return lhs.reuse_policy == rhs.reuse_policy && lhs.evict_policy == rhs.evict_policy
+               && lhs.active_tail_blocks == rhs.active_tail_blocks
+               && lhs.validate_tail_blocks == rhs.validate_tail_blocks
+               && lhs.explicit_block_num == rhs.explicit_block_num
+               && lhs.reserve_from_paged_budget == rhs.reserve_from_paged_budget
+               && lhs.prefix_reusable == rhs.prefix_reusable
+               && lhs.uses_pinned_cpu_backing == rhs.uses_pinned_cpu_backing
+               && lhs.is_cp_shardable == rhs.is_cp_shardable
+               && lhs.has_sparse_slots == rhs.has_sparse_slots
+               && lhs.has_kernel_block_subdiv == rhs.has_kernel_block_subdiv
+               && lhs.cp_compact_tail_blocks == rhs.cp_compact_tail_blocks
+               && lhs.is_reservable == rhs.is_reservable;
+    }
+
     void fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&             specs,
                           const std::vector<std::vector<int>>&          layers_by_group,
                           const std::vector<CacheGroupType>&            types,
@@ -738,6 +805,61 @@ struct CacheConfig {
         }
 
         fromGroupedSpecs(specs, layers_by_group, types, tags);
+    }
+
+    void fromLayerDescs(const std::map<int64_t, std::vector<KVCacheSpecDesc>>& layer_descs,
+                        const SpecBuildContext&                                ctx) {
+        RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "CacheConfig::fromLayerDescs requires positive layer_num");
+        RTP_LLM_CHECK_WITH_INFO(layer_descs.size() == static_cast<size_t>(layer_num),
+                                "CacheConfig::fromLayerDescs layer map size %zu != layer_num %u",
+                                layer_descs.size(),
+                                layer_num);
+
+        std::map<int64_t, std::vector<KVCacheSpecPtr>> layer_specs;
+        std::map<std::string, CacheGroupPolicy>        policy_by_tag;
+
+        for (uint32_t layer = 0; layer < layer_num; ++layer) {
+            const auto it = layer_descs.find(static_cast<int64_t>(layer));
+            RTP_LLM_CHECK_WITH_INFO(it != layer_descs.end(),
+                                    "CacheConfig::fromLayerDescs missing descs for layer %u",
+                                    layer);
+            RTP_LLM_CHECK_WITH_INFO(!it->second.empty(),
+                                    "CacheConfig::fromLayerDescs layer %u has no descs",
+                                    layer);
+            auto& specs_for_layer = layer_specs[static_cast<int64_t>(layer)];
+            specs_for_layer.reserve(it->second.size());
+            std::set<std::string> layer_tags;
+            for (const auto& desc : it->second) {
+                auto spec = SpecBuilder::build(desc, ctx);
+                RTP_LLM_CHECK_WITH_INFO(layer_tags.insert(spec->tag).second,
+                                        "CacheConfig::fromLayerDescs layer %u has duplicate tag=%s",
+                                        layer,
+                                        spec->tag.c_str());
+                const auto policy = cacheGroupPolicyForDesc(desc, spec);
+                const auto policy_it = policy_by_tag.find(spec->tag);
+                if (policy_it == policy_by_tag.end()) {
+                    policy_by_tag.emplace(spec->tag, policy);
+                } else {
+                    RTP_LLM_CHECK_WITH_INFO(samePolicy(policy_it->second, policy),
+                                            "CacheConfig::fromLayerDescs tag=%s has inconsistent policy",
+                                            spec->tag.c_str());
+                }
+                specs_for_layer.push_back(std::move(spec));
+            }
+        }
+
+        fromLayerSpecs(layer_specs);
+
+        std::vector<CacheGroupPolicy> policies;
+        policies.reserve(group_tags.size());
+        for (const auto& tag : group_tags) {
+            const auto it = policy_by_tag.find(tag);
+            RTP_LLM_CHECK_WITH_INFO(it != policy_by_tag.end(),
+                                    "CacheConfig::fromLayerDescs missing policy for tag=%s",
+                                    tag.c_str());
+            policies.push_back(it->second);
+        }
+        setGroupPolicies(policies);
     }
 
     void finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {

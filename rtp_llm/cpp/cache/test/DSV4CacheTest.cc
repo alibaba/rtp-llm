@@ -316,6 +316,139 @@ TEST(CacheConfigTest, FromLayerSpecsAllowsDifferentLayerTags) {
     EXPECT_EQ(config.layer_to_group_ids[0].size(), 2u);
 }
 
+TEST(CacheConfigTest, FromLayerDescsBuildsDeclarativeSpecsAndPolicies) {
+    CacheConfig config;
+    config.layer_num     = 2;
+    config.layer_all_num = 2;
+
+    KVCacheSpecDesc mha;
+    mha.tag                = "default";
+    mha.cache_type         = CacheType::MHA;
+    mha.local_head_num_kv  = 2;
+    mha.seq_size_per_block = 8;
+    mha.dtype              = DataType::TYPE_FP16;
+    mha.size_per_head      = 16;
+
+    KVCacheSpecDesc fixed;
+    fixed.tag                      = "state";
+    fixed.cache_type               = CacheType::FIXED_STATE;
+    fixed.seq_size_per_block       = 8;
+    fixed.entry_elems              = 4;
+    fixed.entries_per_block        = 2;
+    fixed.store_dtype              = DataType::TYPE_UINT8;
+    fixed.skip_prefix_reuse        = true;
+    fixed.explicit_block_num       = 7;
+    fixed.reserve_from_paged_budget = true;
+    fixed.uses_pinned_cpu_backing  = true;
+    fixed.has_is_cp_shardable      = true;
+    fixed.is_cp_shardable          = false;
+    fixed.has_sparse_slots         = true;
+    fixed.sparse_slots             = true;
+    fixed.has_kernel_block_subdiv  = true;
+    fixed.kernel_block_subdiv      = false;
+
+    KVCacheSpecDesc linear;
+    linear.tag               = "linear";
+    linear.cache_type        = CacheType::LINEAR;
+    linear.local_head_num_kv = 1;
+    linear.seq_size_per_block = 8;
+    linear.dtype             = DataType::TYPE_BF16;
+    linear.local_num_k_heads = 1;
+    linear.local_num_v_heads = 1;
+    linear.head_k_dim        = 4;
+    linear.head_v_dim        = 4;
+    linear.conv_kernel_dim   = 3;
+    linear.ssm_state_dtype   = DataType::TYPE_BF16;
+    linear.conv_state_dtype  = DataType::TYPE_BF16;
+
+    std::map<int64_t, std::vector<KVCacheSpecDesc>> descs;
+    descs[0] = {mha, fixed};
+    descs[1] = {mha, linear};
+    config.fromLayerDescs(descs, SpecBuildContext{});
+
+    EXPECT_EQ(config.group_tags, std::vector<std::string>({"default", "state", "linear"}));
+    EXPECT_EQ(config.group_types,
+              std::vector<CacheGroupType>({CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::LINEAR}));
+    EXPECT_EQ(config.groupIdForLayerTag(0, "default"), 0);
+    EXPECT_EQ(config.groupIdForLayerTag(0, "state"), 1);
+    EXPECT_EQ(config.groupIdForLayerTag(1, "default"), 0);
+    EXPECT_EQ(config.groupIdForLayerTag(1, "linear"), 2);
+
+    ASSERT_NE(dynamic_cast<MHAKVCacheSpec*>(config.cache_specs[0].get()), nullptr);
+    ASSERT_NE(dynamic_cast<FixedStateCacheSpec*>(config.cache_specs[1].get()), nullptr);
+    ASSERT_NE(dynamic_cast<LinearKVCacheSpec*>(config.cache_specs[2].get()), nullptr);
+    EXPECT_EQ(config.group_policies[1].reuse_policy, CacheReusePolicy::NON_REUSABLE);
+    EXPECT_EQ(config.group_policies[1].evict_policy, CacheEvictPolicy::INDEPENDENT);
+    EXPECT_EQ(config.group_policies[1].active_tail_blocks, 1);
+    EXPECT_FALSE(config.group_policies[1].validate_tail_blocks);
+    EXPECT_EQ(config.group_policies[1].explicit_block_num, 7u);
+    EXPECT_TRUE(config.group_policies[1].reserve_from_paged_budget);
+    EXPECT_TRUE(config.group_policies[1].uses_pinned_cpu_backing);
+    EXPECT_FALSE(config.group_policies[1].is_cp_shardable);
+    EXPECT_TRUE(config.group_policies[1].has_sparse_slots);
+    EXPECT_FALSE(config.group_policies[1].has_kernel_block_subdiv);
+    EXPECT_TRUE(config.group_policies[0].is_cp_shardable);
+    EXPECT_FALSE(config.group_policies[0].has_sparse_slots);
+    EXPECT_TRUE(config.group_policies[0].has_kernel_block_subdiv);
+}
+
+TEST(CacheConfigTest, FromLayerDescsBuildsMlaAndCompressedKvSpecs) {
+    CacheConfig config;
+    config.layer_num     = 1;
+    config.layer_all_num = 1;
+
+    KVCacheSpecDesc mla;
+    mla.tag                = "mla";
+    mla.cache_type         = CacheType::MLA;
+    mla.seq_size_per_block = 16;
+    mla.dtype              = DataType::TYPE_BF16;
+    mla.kv_lora_rank       = 8;
+    mla.rope_head_dim      = 4;
+
+    KVCacheSpecDesc compressed;
+    compressed.tag                        = "compressed";
+    compressed.cache_type                 = CacheType::COMPRESSED_KV;
+    compressed.seq_size_per_block         = 16;
+    compressed.entry_elems                = 3;
+    compressed.entries_per_block          = 5;
+    compressed.store_dtype                = DataType::TYPE_UINT8;
+    compressed.compression_ratio          = 2;
+    compressed.block_size_bytes_alignment = 16;
+
+    std::map<int64_t, std::vector<KVCacheSpecDesc>> descs;
+    descs[0] = {mla, compressed};
+    config.fromLayerDescs(descs, SpecBuildContext{});
+
+    ASSERT_NE(dynamic_cast<MLAKVCacheSpec*>(config.cache_specs[0].get()), nullptr);
+    auto* compressed_spec = dynamic_cast<CompressedKVCacheSpec*>(config.cache_specs[1].get());
+    ASSERT_NE(compressed_spec, nullptr);
+    EXPECT_EQ(compressed_spec->compression_ratio, 2u);
+    EXPECT_EQ(compressed_spec->block_size_bytes(), 16u);
+}
+
+TEST(CacheConfigTest, FromLayerDescsRejectsInconsistentTagPolicy) {
+    CacheConfig config;
+    config.layer_num     = 2;
+    config.layer_all_num = 2;
+
+    KVCacheSpecDesc first;
+    first.tag                = "state";
+    first.cache_type         = CacheType::FIXED_STATE;
+    first.seq_size_per_block = 8;
+    first.entry_elems        = 4;
+    first.entries_per_block  = 2;
+    first.store_dtype        = DataType::TYPE_UINT8;
+    first.explicit_block_num = 7;
+
+    KVCacheSpecDesc second = first;
+    second.explicit_block_num = 8;
+
+    std::map<int64_t, std::vector<KVCacheSpecDesc>> descs;
+    descs[0] = {first};
+    descs[1] = {second};
+    EXPECT_THROW(config.fromLayerDescs(descs, SpecBuildContext{}), std::exception);
+}
+
 TEST(HybridPoolConfigCreatorTest, Dsv4ModelProvidedAlignmentPropagatesToCacheSpecs) {
     auto mc = makeFlashModelConfig();
     for (auto& layer_specs : mc.kv_cache_specs) {
@@ -929,6 +1062,13 @@ TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksOverridesOnlyHcaState) {
 
     const size_t expected_reserve = 350u * config.group_block_size_bytes[5];
     EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, expected_reserve);
+    ASSERT_EQ(config.group_policies.size(), static_cast<size_t>(kDsv4PoolNum));
+    EXPECT_EQ(config.group_policies[5].explicit_block_num, 350u);
+    for (size_t gid = 0; gid < config.group_policies.size(); ++gid) {
+        if (gid != 5) {
+            EXPECT_EQ(config.group_policies[gid].explicit_block_num, 0u) << "gid=" << gid;
+        }
+    }
 }
 
 TEST(CacheConfigTest, DSV4KernelSeqSizeAllowsDecoupledPhysicalBlocks) {

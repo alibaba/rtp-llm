@@ -118,6 +118,10 @@ CacheEvictPolicy KVCacheGroup::evictPolicy() const {
     return policy_.evict_policy;
 }
 
+uint32_t KVCacheGroup::explicitBlockNum() const {
+    return policy_.explicit_block_num;
+}
+
 size_t KVCacheGroup::activeTailBlocks() const {
     return policy_.active_tail_blocks > 0 ? static_cast<size_t>(policy_.active_tail_blocks) : 0;
 }
@@ -157,19 +161,19 @@ void KVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
 }
 
 bool KVCacheGroup::isCpShardable() const {
-    return true;
+    return policy_.is_cp_shardable;
 }
 
 bool KVCacheGroup::prefixReusable() const {
-    return policy_.reuse_policy == CacheReusePolicy::REUSABLE;
+    return policy_.prefix_reusable && policy_.reuse_policy == CacheReusePolicy::REUSABLE;
 }
 
 bool KVCacheGroup::hasSparseSlots() const {
-    return false;
+    return policy_.has_sparse_slots;
 }
 
 bool KVCacheGroup::hasKernelBlockSubdiv() const {
-    return true;
+    return policy_.has_kernel_block_subdiv;
 }
 
 bool KVCacheGroup::transferTailBlocks() const {
@@ -177,15 +181,15 @@ bool KVCacheGroup::transferTailBlocks() const {
 }
 
 bool KVCacheGroup::cpCompactTailBlocks() const {
-    return false;
+    return policy_.cp_compact_tail_blocks;
 }
 
 bool KVCacheGroup::isReservable() const {
-    return true;
+    return policy_.is_reservable;
 }
 
 bool KVCacheGroup::usesPinnedCpuBacking() const {
-    return false;
+    return policy_.uses_pinned_cpu_backing;
 }
 
 }  // namespace rtp_llm

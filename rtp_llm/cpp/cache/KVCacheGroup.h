@@ -71,6 +71,7 @@ public:
     const CacheGroupPolicy& policy() const;
     CacheReusePolicy        reusePolicy() const;
     CacheEvictPolicy        evictPolicy() const;
+    uint32_t                explicitBlockNum() const;
     size_t                  activeTailBlocks() const;
 
     virtual bool isCpShardable() const;

@@ -15,7 +15,7 @@ public:
                     int                                    linear_step      = 0,
                     SharedBlockCache*                      shared_cache     = nullptr,
                     const kmonitor::MetricsReporterPtr&    metrics_reporter = nullptr,
-                    CacheGroupPolicy                       policy           = CacheGroupPolicy{}):
+                    CacheGroupPolicy policy = defaultCacheGroupPolicy(CacheGroupType::SWA)):
         KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, shared_cache, metrics_reporter),
         linear_step_(linear_step) {}
 
@@ -30,12 +30,6 @@ public:
                                  int  reserve_step,
                                  int  reuse_blocks_len,
                                  bool reuse_enabled = false) const override;
-    bool           isCpShardable() const override { return false; }
-    bool           prefixReusable() const override { return false; }
-    bool           hasSparseSlots() const override { return true; }
-    bool           hasKernelBlockSubdiv() const override { return false; }
-    bool           transferTailBlocks() const override { return true; }
-    bool           cpCompactTailBlocks() const override { return true; }
 
 private:
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;

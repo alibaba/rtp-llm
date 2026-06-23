@@ -32,6 +32,7 @@ cc_library(
     hdrs = [
         "KVCacheSpec.h",
         "KVCacheSpecBase.h",
+        "KVCacheSpecDesc.h",
         "MHAKVCacheSpec.h",
         "LinearKVCacheSpec.h",
         "MLAKVCacheSpec.h",
@@ -62,6 +63,7 @@ cc_library(
         "CacheGroupType.h",
         "KVCacheSpec.h",
         "KVCacheSpecBase.h",
+        "KVCacheSpecDesc.h",
         "MHAKVCacheSpec.h",
         "LinearKVCacheSpec.h",
         "MLAKVCacheSpec.h",

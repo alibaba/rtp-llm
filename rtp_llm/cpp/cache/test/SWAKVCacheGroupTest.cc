@@ -97,6 +97,21 @@ protected:
     bool                old_core_dump_on_exception_{false};
 };
 
+TEST_F(SWAKVCacheGroupTest, DefaultPolicyDrivesBehaviorInterfaces) {
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block = 4;
+    SWAKVCacheGroup group({}, spec, block_pool_, 0, 0, shared_cache_.get());
+
+    EXPECT_FALSE(group.prefixReusable());
+    EXPECT_FALSE(group.isCpShardable());
+    EXPECT_TRUE(group.hasSparseSlots());
+    EXPECT_FALSE(group.hasKernelBlockSubdiv());
+    EXPECT_TRUE(group.transferTailBlocks());
+    EXPECT_TRUE(group.cpCompactTailBlocks());
+    EXPECT_TRUE(group.isReservable());
+    EXPECT_FALSE(group.usesPinnedCpuBacking());
+}
+
 // ==================== needBlocksNum ====================
 
 TEST_F(SWAKVCacheGroupTest, NeedBlocksNum_Basic) {

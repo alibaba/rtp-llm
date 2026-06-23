@@ -32,6 +32,13 @@ struct CacheGroupPolicy {
     bool             validate_tail_blocks      = true;
     uint32_t         explicit_block_num        = 0;
     bool             reserve_from_paged_budget = false;
+    bool             prefix_reusable           = true;
+    bool             uses_pinned_cpu_backing   = false;
+    bool             is_cp_shardable           = true;
+    bool             has_sparse_slots          = false;
+    bool             has_kernel_block_subdiv   = true;
+    bool             cp_compact_tail_blocks    = false;
+    bool             is_reservable             = true;
 };
 
 inline const char* cacheGroupTypeName(CacheGroupType group_type) {
@@ -61,6 +68,11 @@ inline const char* cacheEvictPolicyName(CacheEvictPolicy evict_policy) {
 inline CacheGroupPolicy defaultCacheGroupPolicy(CacheGroupType group_type) {
     CacheGroupPolicy policy;
     policy.active_tail_blocks = group_type == CacheGroupType::LINEAR ? 1 : (group_type == CacheGroupType::SWA ? 2 : 0);
+    policy.prefix_reusable = group_type == CacheGroupType::FULL;
+    policy.is_cp_shardable = group_type == CacheGroupType::FULL;
+    policy.has_sparse_slots = group_type != CacheGroupType::FULL;
+    policy.has_kernel_block_subdiv = group_type == CacheGroupType::FULL;
+    policy.cp_compact_tail_blocks = group_type == CacheGroupType::SWA;
     return policy;
 }
 

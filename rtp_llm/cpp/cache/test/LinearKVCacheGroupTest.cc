@@ -26,6 +26,23 @@ static std::shared_ptr<LinearKVCacheSpec> makeLinearSpec(uint32_t seq_size_per_b
 
 class LinearKVCacheGroupTest: public ::testing::Test {};
 
+TEST_F(LinearKVCacheGroupTest, DefaultPolicyDrivesBehaviorInterfaces) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+
+    EXPECT_FALSE(group.prefixReusable());
+    EXPECT_FALSE(group.isCpShardable());
+    EXPECT_TRUE(group.hasSparseSlots());
+    EXPECT_FALSE(group.hasKernelBlockSubdiv());
+    EXPECT_TRUE(group.transferTailBlocks());
+    EXPECT_FALSE(group.cpCompactTailBlocks());
+    EXPECT_TRUE(group.isReservable());
+    EXPECT_FALSE(group.usesPinnedCpuBacking());
+}
+
 TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseDisabledCountsLastTwoTailAndReserveStep) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());

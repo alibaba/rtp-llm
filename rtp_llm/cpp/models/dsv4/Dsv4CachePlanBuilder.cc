@@ -43,6 +43,8 @@ struct DSV4PoolDesc {
     size_t                  block_size_bytes_override       = 0;
     size_t                  block_size_bytes_alignment      = 0;
     uint32_t                block_alignment_min_entries     = 0;
+    uint32_t                explicit_block_num              = 0;
+    bool                    reserve_from_paged_budget       = false;
 };
 
 struct ExpectedDSV4Spec {
@@ -364,6 +366,7 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
                                              uint32_t                 kernel_tokens_per_block,
                                              uint32_t                 physical_tokens_per_block,
                                              const ParallelismConfig& parallelism_config,
+                                             uint32_t                 hca_state_pool_blocks,
                                              int                      gen_num_per_cycle) {
     const uint32_t csa_state_eb =
         maybeAdjustFixedEntriesForCpSharding(
@@ -433,7 +436,9 @@ std::vector<DSV4PoolDesc> buildDSV4PoolDescs(const DSV4LayerSets&     sets,
                                 (std::string(tag) == "swa_kv" && entry_elems == DSV4_FP8_KV_ENTRY_BYTES
                                      ? DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES
                                      : 0),
-                min_entries > 0 ? min_entries : DSV4_SWA_WINDOW_ENTRIES};
+                min_entries > 0 ? min_entries : DSV4_SWA_WINDOW_ENTRIES,
+                std::string(tag) == "hca_state" ? hca_state_pool_blocks : 0,
+                false};
     };
 
     return {
@@ -475,11 +480,10 @@ KVCacheSpecPtr makeDSV4Spec(const DSV4PoolDesc& pool) {
     return spec;
 }
 
-CacheGroupPolicy dsv4PolicyForTag(const KVCacheSpecPtr& spec, CacheGroupType group_type, uint32_t hca_state_blocks) {
-    CacheGroupPolicy policy = CacheConfig::cacheGroupPolicyForSpec(spec, group_type);
-    if (spec && spec->tag == "hca_state") {
-        policy.explicit_block_num = hca_state_blocks;
-    }
+CacheGroupPolicy dsv4PolicyForPool(const KVCacheSpecPtr& spec, CacheGroupType group_type, const DSV4PoolDesc& pool) {
+    CacheGroupPolicy policy          = CacheConfig::cacheGroupPolicyForSpec(spec, group_type);
+    policy.explicit_block_num        = pool.explicit_block_num;
+    policy.reserve_from_paged_budget = pool.reserve_from_paged_budget;
     return policy;
 }
 
@@ -530,6 +534,7 @@ void Dsv4CachePlanBuilder::applyConfig(CacheConfig&             config,
                                           kernel_tokens_per_block,
                                           physical_tokens_per_block,
                                           parallelism_config,
+                                          kv_cache_config.dsv4_hca_state_pool_blocks,
                                           gen_num_per_cycle);
     RTP_LLM_CHECK_WITH_INFO(pools.size() == kDsv4PoolNum, "DSV4 must produce %zu pools", kDsv4PoolNum);
 
@@ -543,20 +548,18 @@ void Dsv4CachePlanBuilder::applyConfig(CacheConfig&             config,
     config.use_opaque_kv_cache_store                = true;
     config.disable_decode_first_malloc_device_reuse = true;
 
-    config.cache_specs.clear();
-    config.global_layer_ids.clear();
-    config.layer_ids.clear();
-    config.group_types.clear();
-    config.group_policies.clear();
-    config.group_tags.clear();
-    config.group_seq_size_per_block.clear();
-    config.group_seq_size_per_block.reserve(pools.size());
-    config.cache_specs.reserve(pools.size());
-    config.global_layer_ids.reserve(pools.size());
-    config.layer_ids.reserve(pools.size());
-    config.group_types.reserve(pools.size());
-    config.group_policies.reserve(pools.size());
-    config.group_tags.reserve(pools.size());
+    std::vector<KVCacheSpecPtr>    specs;
+    std::vector<std::vector<int>>  layers_by_group;
+    std::vector<CacheGroupType>    types;
+    std::vector<CacheGroupPolicy>  policies;
+    std::vector<std::string>       tags;
+    std::vector<size_t>            group_seq_size_per_block;
+    specs.reserve(pools.size());
+    layers_by_group.reserve(pools.size());
+    types.reserve(pools.size());
+    policies.reserve(pools.size());
+    tags.reserve(pools.size());
+    group_seq_size_per_block.reserve(pools.size());
     for (size_t gid = 0; gid < pools.size(); ++gid) {
         const auto& pool = pools[gid];
         auto        spec = makeDSV4Spec(pool);
@@ -574,16 +577,17 @@ void Dsv4CachePlanBuilder::applyConfig(CacheConfig&             config,
                          physical_tokens_per_block,
                          isPrefillCpSliced(parallelism_config));
 
-        config.cache_specs.push_back(spec);
-        config.group_seq_size_per_block.push_back(pool.tokens_per_block);
-        config.global_layer_ids.push_back(*pool.layer_ids);
-        config.layer_ids.push_back(*pool.layer_ids);
         const auto group_type = pool.is_paged ? CacheGroupType::FULL : CacheGroupType::SWA;
-        config.group_types.push_back(group_type);
-        config.group_policies.push_back(
-            dsv4PolicyForTag(spec, group_type, kv_cache_config.dsv4_hca_state_pool_blocks));
-        config.group_tags.push_back(pool.tag);
+        specs.push_back(spec);
+        layers_by_group.push_back(*pool.layer_ids);
+        types.push_back(group_type);
+        policies.push_back(dsv4PolicyForPool(spec, group_type, pool));
+        tags.push_back(pool.tag);
+        group_seq_size_per_block.push_back(pool.tokens_per_block);
     }
+    config.fromGroupedSpecs(specs, layers_by_group, types, tags);
+    config.setGroupPolicies(policies);
+    config.group_seq_size_per_block = std::move(group_seq_size_per_block);
 }
 
 }  // namespace rtp_llm

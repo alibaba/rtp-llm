@@ -12,14 +12,14 @@ class LinearKVCacheGroup: public KVCacheGroup {
 public:
     LinearKVCacheGroup(const LayerIdsType&          layer_ids,
                        std::shared_ptr<KVCacheSpec> kvcache_spec,
-	                       BlockPoolPtr                 block_pool,
-	                       int                          group_id,
-	                       int                          linear_step  = 0,
-	                       SharedBlockCache*            shared_cache = nullptr,
-	                       const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr,
-	                       CacheGroupPolicy             policy       = CacheGroupPolicy{}):
-	        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, shared_cache, metrics_reporter),
-	        linear_step_(linear_step) {}
+                       BlockPoolPtr                 block_pool,
+                       int                          group_id,
+                       int                          linear_step      = 0,
+                       SharedBlockCache*            shared_cache     = nullptr,
+                       const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr,
+                       CacheGroupPolicy policy = defaultCacheGroupPolicy(CacheGroupType::LINEAR)):
+        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, shared_cache, metrics_reporter),
+        linear_step_(linear_step) {}
 
     // Match a single cache key (used by Hybrid allocator to do right-to-left joint matching).
     MatchResult matchSingleKey(CacheKeyType cache_key) const override;
@@ -35,11 +35,6 @@ public:
                                  int  reuse_blocks_len,
                                  bool reuse_enabled = false) const override;
     bool           shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const;
-    bool           isCpShardable() const override { return false; }
-    bool           prefixReusable() const override { return false; }
-    bool           hasSparseSlots() const override { return true; }
-    bool           hasKernelBlockSubdiv() const override { return false; }
-    bool           transferTailBlocks() const override { return true; }
 
 private:
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
