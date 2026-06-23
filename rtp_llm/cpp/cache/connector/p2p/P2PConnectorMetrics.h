@@ -99,6 +99,15 @@ public:
     int64_t stream_wait_time_us = 0;
 };
 
+class HandleReadMetricsCollector final {
+public:
+    bool    success                = true;
+    int64_t wait_resource_entry_us = 0;
+    int64_t send_kv_cache_us       = 0;
+    int64_t wait_side_channel_us   = 0;
+    int64_t total_cost_time_us     = 0;
+};
+
 /// @brief P2P connector 指标上报，聚合 Decode/Prefill 两侧的调度和传输指标
 class P2PConnectorMetrics: public kmonitor::MetricsGroup {
 public:
@@ -116,8 +125,17 @@ public:
     void report(const kmonitor::MetricsTags* tags, PrefillWorkerSendMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, PrefillWorkerStatusMetricsCollector* collector);
     void report(const kmonitor::MetricsTags* tags, PrefillWorkerStoreMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, HandleReadMetricsCollector* collector);
 
 private:
+    // handleRead phase metrics
+    kmonitor::MutableMetric* handle_read_qps_metric                    = nullptr;
+    kmonitor::MutableMetric* handle_read_failed_qps_metric             = nullptr;
+    kmonitor::MutableMetric* handle_read_wait_resource_entry_us_metric = nullptr;
+    kmonitor::MutableMetric* handle_read_send_kv_cache_us_metric       = nullptr;
+    kmonitor::MutableMetric* handle_read_wait_side_channel_us_metric   = nullptr;
+    kmonitor::MutableMetric* handle_read_total_cost_time_us_metric     = nullptr;
+
     // decode schedule metrics
     kmonitor::MutableMetric* decode_schedule_qps_metric          = nullptr;
     kmonitor::MutableMetric* decode_schedule_failed_qps_metric   = nullptr;

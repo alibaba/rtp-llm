@@ -3,6 +3,18 @@
 namespace rtp_llm {
 
 bool P2PConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    // handleRead phase metrics
+    REGISTER_QPS_MUTABLE_METRIC(handle_read_qps_metric, "rtp_llm_p2p_connector_handle_read_qps");
+    REGISTER_QPS_MUTABLE_METRIC(handle_read_failed_qps_metric, "rtp_llm_p2p_connector_handle_read_failed_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(handle_read_wait_resource_entry_us_metric,
+                                  "rtp_llm_p2p_connector_handle_read_wait_resource_entry_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(handle_read_send_kv_cache_us_metric,
+                                  "rtp_llm_p2p_connector_handle_read_send_kv_cache_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(handle_read_wait_side_channel_us_metric,
+                                  "rtp_llm_p2p_connector_handle_read_wait_side_channel_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(handle_read_total_cost_time_us_metric,
+                                  "rtp_llm_p2p_connector_handle_read_total_cost_time_us");
+
     // decode schedule metrics
     REGISTER_QPS_MUTABLE_METRIC(decode_schedule_qps_metric, "rtp_llm_p2p_connector_decode_schedule_qps");
     REGISTER_QPS_MUTABLE_METRIC(decode_schedule_failed_qps_metric, "rtp_llm_p2p_connector_decode_schedule_failed_qps");
@@ -159,6 +171,25 @@ void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, PrefillWorke
     }
     if (collector->store_wait_done_time_us > 0) {
         REPORT_MUTABLE_METRIC(prefill_worker_store_store_wait_done_time_us_metric, collector->store_wait_done_time_us);
+    }
+}
+
+void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, HandleReadMetricsCollector* collector) {
+    REPORT_MUTABLE_QPS(handle_read_qps_metric);
+    if (!collector->success) {
+        REPORT_MUTABLE_QPS(handle_read_failed_qps_metric);
+    }
+    if (collector->wait_resource_entry_us > 0) {
+        REPORT_MUTABLE_METRIC(handle_read_wait_resource_entry_us_metric, collector->wait_resource_entry_us);
+    }
+    if (collector->send_kv_cache_us > 0) {
+        REPORT_MUTABLE_METRIC(handle_read_send_kv_cache_us_metric, collector->send_kv_cache_us);
+    }
+    if (collector->wait_side_channel_us > 0) {
+        REPORT_MUTABLE_METRIC(handle_read_wait_side_channel_us_metric, collector->wait_side_channel_us);
+    }
+    if (collector->total_cost_time_us > 0) {
+        REPORT_MUTABLE_METRIC(handle_read_total_cost_time_us_metric, collector->total_cost_time_us);
     }
 }
 }  // namespace rtp_llm

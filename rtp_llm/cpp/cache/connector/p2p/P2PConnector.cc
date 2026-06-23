@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorLayerContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorScheduler.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorker.h"
@@ -122,10 +123,24 @@ P2PConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConne
 void P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
                               P2PConnectorStartLoadResponsePB&      response,
                               std::function<bool()>                 is_cancelled) {
+    HandleReadMetricsCollector metrics_collector;
+    const int64_t              handle_read_begin_us = currentTimeUs();
+    bool                       metrics_reported     = false;
+    auto report_metrics = [&](bool success) {
+        if (metrics_reported || !metrics_reporter_) {
+            return;
+        }
+        metrics_collector.success            = success;
+        metrics_collector.total_cost_time_us = currentTimeUs() - handle_read_begin_us;
+        metrics_reporter_->report<P2PConnectorMetrics, HandleReadMetricsCollector>(nullptr, &metrics_collector);
+        metrics_reported = true;
+    };
+
     if (scheduler_ == nullptr) {
         RTP_LLM_LOG_WARNING("handleRead failed, scheduler not initialized (only tp_rank 0 has scheduler)");
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
         response.set_error_message("scheduler not initialized");
+        report_metrics(false);
         return;
     }
 
@@ -143,13 +158,16 @@ void P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
                      decode_transfer_servers.size());
 
     std::shared_ptr<P2PConnectorResourceEntry> resource_entry = nullptr;
-    grpc::Status wait_status = waitForResourceEntry(unique_key, deadline_ms, is_cancelled, resource_entry);
+    int64_t      phase_begin_us = currentTimeUs();
+    grpc::Status wait_status    = waitForResourceEntry(unique_key, deadline_ms, is_cancelled, resource_entry);
+    metrics_collector.wait_resource_entry_us = currentTimeUs() - phase_begin_us;
     if (!wait_status.ok()) {
         RTP_LLM_LOG_WARNING("handleRead [P2P]: waitForResourceEntry failed, unique_key=%s, status=%s",
                             unique_key.c_str(),
                             wait_status.error_message().c_str());
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
         response.set_error_message("waitForResourceEntry failed: " + wait_status.error_message());
+        report_metrics(false);
         return;
     }
 
@@ -157,18 +175,24 @@ void P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
     RTP_LLM_LOG_INFO("handleRead [P2P]: resource ready, unique_key=%s, request_id=%ld, sending KV cache",
                      unique_key.c_str(),
                      request_id);
+    phase_begin_us        = currentTimeUs();
     ErrorInfo error_info = scheduler_->sendKVCache(
         resource_entry->kv_cache_resource, unique_key, request_id, decode_transfer_servers, deadline_ms, is_cancelled);
+    metrics_collector.send_kv_cache_us = currentTimeUs() - phase_begin_us;
     if (error_info.hasError()) {
         RTP_LLM_LOG_ERROR("handleRead failed: worker handleRead failed, unique_key: %s, error: %s",
                           unique_key.c_str(),
                           error_info.ToString().c_str());
         response.set_error_code(transErrorCodeToRPC(error_info.code()));
         response.set_error_message(error_info.ToString());
+        report_metrics(false);
         return;
     }
 
+    phase_begin_us = currentTimeUs();
     waitAndFillResponse(resource_entry, response, is_cancelled);
+    metrics_collector.wait_side_channel_us = currentTimeUs() - phase_begin_us;
+    report_metrics(response.error_code() == ErrorCodePB::NONE_ERROR);
 }
 
 void P2PConnector::waitAndFillResponse(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
