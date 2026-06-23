@@ -282,7 +282,7 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         auto cfg = CacheConfigCreator::createBasicConfig(
             model_config_, parallelism_config, kv_cache_config, false, cache_gen_num_per_cycle);
         kv_cache_group_num_      = cfg.groupNums();
-        kv_cache_layer_to_group_ = cfg.layer_to_group_id;
+        kv_cache_layer_to_group_ = cfg.primaryLayerGroupIdsSnapshot();
     }
     executor_.reset(new NormalExecutor(
         params, nullptr, true, false, 0, mla_ops_type_, kv_cache_group_num_, kv_cache_layer_to_group_));
@@ -328,7 +328,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     // path then asserts on pool_block_tables=None during the dtype-check
     // forward inside initCapture.
     kv_cache_group_num_      = cache_config.groupNums();
-    kv_cache_layer_to_group_ = cache_config.layer_to_group_id;
+    kv_cache_layer_to_group_ = cache_config.primaryLayerGroupIdsSnapshot();
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
     auto              cache_manager = make_shared<KVCacheManager>(
@@ -415,7 +415,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
 
         const auto& cache_cfg    = resource_context_.cache_manager->cacheConfig();
         kv_cache_group_num_      = cache_cfg.groupNums();
-        kv_cache_layer_to_group_ = cache_cfg.layer_to_group_id;
+        kv_cache_layer_to_group_ = cache_cfg.primaryLayerGroupIdsSnapshot();
     } else {
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
@@ -440,7 +440,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         }
         const auto& cache_cfg    = resource_context_.cache_manager->cacheConfig();
         kv_cache_group_num_      = cache_cfg.groupNums();
-        kv_cache_layer_to_group_ = cache_cfg.layer_to_group_id;
+        kv_cache_layer_to_group_ = cache_cfg.primaryLayerGroupIdsSnapshot();
     }
 }
 

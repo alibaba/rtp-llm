@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/model_utils/layernorm_types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/model_utils/RopeCache.h"
 #include "pybind11/pybind11.h"
@@ -48,6 +49,26 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("LinearAttention", KVCacheSpecType::LinearAttention)
         .value("OpaqueKV", KVCacheSpecType::OpaqueKV)
         .value("OpaqueState", KVCacheSpecType::OpaqueState);
+
+    py::enum_<CacheType>(m, "CacheType")
+        .value("MHA", CacheType::MHA)
+        .value("MLA", CacheType::MLA)
+        .value("LINEAR", CacheType::LINEAR)
+        .value("COMPRESSED_KV", CacheType::COMPRESSED_KV)
+        .value("FIXED_STATE", CacheType::FIXED_STATE);
+
+    py::enum_<CacheGroupType>(m, "CacheGroupType", py::module_local())
+        .value("LINEAR", CacheGroupType::LINEAR)
+        .value("FULL", CacheGroupType::FULL)
+        .value("SWA", CacheGroupType::SWA);
+
+    py::enum_<CacheReusePolicy>(m, "CacheReusePolicy")
+        .value("REUSABLE", CacheReusePolicy::REUSABLE)
+        .value("NON_REUSABLE", CacheReusePolicy::NON_REUSABLE);
+
+    py::enum_<CacheEvictPolicy>(m, "CacheEvictPolicy")
+        .value("CHAIN", CacheEvictPolicy::CHAIN)
+        .value("INDEPENDENT", CacheEvictPolicy::INDEPENDENT);
 
     py::enum_<CPRotateMethod>(m, "CPRotateMethod")
         .value("DISABLED", CPRotateMethod::DISABLED)
@@ -1550,6 +1571,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("seq_size_per_block", &KVCacheSpec::seq_size_per_block)
         .def_readwrite("type", &KVCacheSpec::type)
         .def_readwrite("dtype", &KVCacheSpec::dtype)
+        .def_readwrite("is_state_cache", &KVCacheSpec::is_state_cache)
+        .def_readwrite("skip_prefix_reuse", &KVCacheSpec::skip_prefix_reuse)
         .def_readwrite("lifecycle", &KVCacheSpec::lifecycle);
 
     py::class_<MHAKVCacheSpec, KVCacheSpec, std::shared_ptr<MHAKVCacheSpec>>(m, "MHAKVCacheSpec")
@@ -1591,6 +1614,56 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("block_size_bytes_alignment", &FixedStateCacheSpec::block_size_bytes_alignment)
         .def_readwrite("block_size_alignment_min_entries", &FixedStateCacheSpec::block_size_alignment_min_entries);
 
+    py::class_<KVCacheSpecDesc>(m, "KVCacheSpecDesc")
+        .def(py::init<>())
+        .def_readwrite("tag", &KVCacheSpecDesc::tag)
+        .def_readwrite("cache_type", &KVCacheSpecDesc::cache_type)
+        .def_readwrite("local_head_num_kv", &KVCacheSpecDesc::local_head_num_kv)
+        .def_readwrite("seq_size_per_block", &KVCacheSpecDesc::seq_size_per_block)
+        .def_readwrite("dtype", &KVCacheSpecDesc::dtype)
+        .def_readwrite("size_per_head", &KVCacheSpecDesc::size_per_head)
+        .def_readwrite("kv_lora_rank", &KVCacheSpecDesc::kv_lora_rank)
+        .def_readwrite("rope_head_dim", &KVCacheSpecDesc::rope_head_dim)
+        .def_readwrite("local_num_k_heads", &KVCacheSpecDesc::local_num_k_heads)
+        .def_readwrite("local_num_v_heads", &KVCacheSpecDesc::local_num_v_heads)
+        .def_readwrite("head_k_dim", &KVCacheSpecDesc::head_k_dim)
+        .def_readwrite("head_v_dim", &KVCacheSpecDesc::head_v_dim)
+        .def_readwrite("conv_kernel_dim", &KVCacheSpecDesc::conv_kernel_dim)
+        .def_readwrite("ssm_state_dtype", &KVCacheSpecDesc::ssm_state_dtype)
+        .def_readwrite("conv_state_dtype", &KVCacheSpecDesc::conv_state_dtype)
+        .def_readwrite("entry_elems", &KVCacheSpecDesc::entry_elems)
+        .def_readwrite("entries_per_block", &KVCacheSpecDesc::entries_per_block)
+        .def_readwrite("store_dtype", &KVCacheSpecDesc::store_dtype)
+        .def_readwrite("compression_ratio", &KVCacheSpecDesc::compression_ratio)
+        .def_readwrite("block_size_bytes_override", &KVCacheSpecDesc::block_size_bytes_override)
+        .def_readwrite("block_size_bytes_alignment", &KVCacheSpecDesc::block_size_bytes_alignment)
+        .def_readwrite("block_size_alignment_min_entries", &KVCacheSpecDesc::block_size_alignment_min_entries)
+        .def_readwrite("is_state_cache", &KVCacheSpecDesc::is_state_cache)
+        .def_readwrite("skip_prefix_reuse", &KVCacheSpecDesc::skip_prefix_reuse)
+        .def_readwrite("has_reuse_policy", &KVCacheSpecDesc::has_reuse_policy)
+        .def_readwrite("reuse_policy", &KVCacheSpecDesc::reuse_policy)
+        .def_readwrite("has_evict_policy", &KVCacheSpecDesc::has_evict_policy)
+        .def_readwrite("evict_policy", &KVCacheSpecDesc::evict_policy)
+        .def_readwrite("has_active_tail_blocks", &KVCacheSpecDesc::has_active_tail_blocks)
+        .def_readwrite("active_tail_blocks", &KVCacheSpecDesc::active_tail_blocks)
+        .def_readwrite("has_validate_tail_blocks", &KVCacheSpecDesc::has_validate_tail_blocks)
+        .def_readwrite("validate_tail_blocks", &KVCacheSpecDesc::validate_tail_blocks)
+        .def_readwrite("explicit_block_num", &KVCacheSpecDesc::explicit_block_num)
+        .def_readwrite("reserve_from_paged_budget", &KVCacheSpecDesc::reserve_from_paged_budget)
+        .def_readwrite("has_prefix_reusable", &KVCacheSpecDesc::has_prefix_reusable)
+        .def_readwrite("prefix_reusable", &KVCacheSpecDesc::prefix_reusable)
+        .def_readwrite("uses_pinned_cpu_backing", &KVCacheSpecDesc::uses_pinned_cpu_backing)
+        .def_readwrite("has_is_cp_shardable", &KVCacheSpecDesc::has_is_cp_shardable)
+        .def_readwrite("is_cp_shardable", &KVCacheSpecDesc::is_cp_shardable)
+        .def_readwrite("has_sparse_slots", &KVCacheSpecDesc::has_sparse_slots)
+        .def_readwrite("sparse_slots", &KVCacheSpecDesc::sparse_slots)
+        .def_readwrite("has_kernel_block_subdiv", &KVCacheSpecDesc::has_kernel_block_subdiv)
+        .def_readwrite("kernel_block_subdiv", &KVCacheSpecDesc::kernel_block_subdiv)
+        .def_readwrite("has_cp_compact_tail_blocks", &KVCacheSpecDesc::has_cp_compact_tail_blocks)
+        .def_readwrite("cp_compact_tail_blocks", &KVCacheSpecDesc::cp_compact_tail_blocks)
+        .def_readwrite("has_is_reservable", &KVCacheSpecDesc::has_is_reservable)
+        .def_readwrite("is_reservable", &KVCacheSpecDesc::is_reservable);
+
     // Register ModelConfig
     py::class_<ModelConfig>(m, "ModelConfig")
         .def(py::init<>())
@@ -1606,6 +1679,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("quant_algo", &ModelConfig::quant_algo)
         .def_readwrite("eplb_config", &ModelConfig::eplb_config)
         .def_readwrite("kv_cache_specs", &ModelConfig::kv_cache_specs)
+        .def_readwrite("kv_cache_spec_descs", &ModelConfig::kv_cache_spec_descs)
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)
         .def_readwrite("tokenizer_path", &ModelConfig::tokenizer_path)

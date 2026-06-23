@@ -19,20 +19,20 @@ size_t steppedBytes(size_t bytes, int step) {
 }
 
 size_t nonExplicitFixedPoolHbmBytes(const CacheConfig& config) {
-    // Only independent-pool configs populate group_block_size_bytes;
-    // SingleConfig and HybridConfig leave it empty, so this returns 0 for them.
-    if (config.cache_specs.size() != config.group_block_size_bytes.size()) {
+    // Only independent-pool configs use per-group HBM accounting; SingleConfig
+    // and HybridConfig leave use_independent_block_pools false.
+    if (!config.use_independent_block_pools) {
         return 0;
     }
 
     size_t bytes = 0;
-    for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
-        const auto& spec = config.cache_specs[gid];
+    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+        const auto& spec = config.specForGroup(gid);
         if (spec == nullptr || !spec->isFixedCache()) {
             continue;
         }
         if (!config.usesExplicitIndependentBlocks(gid)) {
-            bytes += config.group_block_size_bytes[gid];
+            bytes += config.blockSizeBytesForGroup(gid);
         }
     }
     return bytes;

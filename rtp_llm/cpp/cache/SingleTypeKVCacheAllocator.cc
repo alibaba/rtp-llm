@@ -369,7 +369,7 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
     };
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
     selected_resource->initGroups(
-        1, config_.layer_all_num, config_.layer_to_group_id, config_.kernelBlocksPerKvBlock());
+        1, config_.layer_all_num, config_.primaryLayerGroupIdsSnapshot(), config_.kernelBlocksPerKvBlock());
 
     CacheKeysType          selected_cache_keys;
     BlockDependenciesType  selected_dependencies;
@@ -495,7 +495,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv
 
     // init for all batch
     kv_cache_resource->initGroups(
-        1, config_.layer_all_num, config_.layer_to_group_id, config_.kernelBlocksPerKvBlock());
+        1, config_.layer_all_num, config_.primaryLayerGroupIdsSnapshot(), config_.kernelBlocksPerKvBlock());
 
     for (int new_batch_idx = 0; new_batch_idx < new_batch_size; ++new_batch_idx) {
         const int old_batch_idx = block_src_batch[new_batch_idx];

@@ -161,7 +161,7 @@ KVCacheManager::~KVCacheManager() {
 bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(!allocator_ && !coordinator_ && !metrics_reporter_thread_.joinable(),
                             "KVCacheManager::init called more than once");
-    RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "cache specs must not be empty");
+    RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
 
     auto shared_cache = std::make_shared<SharedBlockCache>();
     shared_cache->setPrefixTreeEnabled(kv_cache_config_.enable_gpu_prefix_tree);
@@ -312,6 +312,20 @@ std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(
     return allocator_->convertIndexToBuffer(layer_id, group_id, block_index, partition_count, partition_id);
 }
 
+BlockAddrInfo KVCacheManager::convertIndexToAddrByTag(int block_index, int layer_id, const std::string& tag) const {
+    return allocator_->convertIndexToAddrByTag(layer_id, tag, block_index);
+}
+
+std::vector<BlockInfo>
+KVCacheManager::convertIndexToBufferByTag(int block_index, int layer_id, const std::string& tag) const {
+    return allocator_->convertIndexToBufferByTag(layer_id, tag, block_index);
+}
+
+std::vector<BlockInfo> KVCacheManager::convertIndexToBufferByTag(
+    int block_index, int layer_id, const std::string& tag, int partition_count, int partition_id) const {
+    return allocator_->convertIndexToBufferByTag(layer_id, tag, block_index, partition_count, partition_id);
+}
+
 CacheLayerLayout KVCacheManager::allLayerCacheBase() const {
     return allocator_->allLayerCacheBase();
 }
@@ -330,8 +344,10 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
         layout.layers_to_scale_buffer_ptrs.resize(config_.layer_num);
     }
 
-    layout.group_types              = config_.group_types;
-    layout.group_tags               = config_.group_tags;
+    const auto layer_group_ids      = config_.layerGroupIdsSnapshot();
+    const auto layer_tag_to_gid     = config_.layerTagToGroupIdSnapshot();
+    layout.group_types              = config_.groupTypesSnapshot();
+    layout.group_tags               = config_.groupTagsSnapshot();
     layout.layer_tag_to_group_id.resize(config_.layer_num);
     layout.group_seq_size_per_block = config_.group_seq_size_per_block;
     layout.layer_group_types.resize(config_.layer_num, CacheGroupType::FULL);
@@ -360,14 +376,15 @@ CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
                 RTP_LLM_CHECK(false);
             }
         }
-        if (static_cast<size_t>(layer_id) < config_.layer_group_types.size()) {
-            layout.layer_group_types[layer_id] = config_.layer_group_types[static_cast<size_t>(layer_id)];
+        if (static_cast<size_t>(layer_id) < layer_group_ids.size()) {
+            layout.layer_to_group_ids[layer_id] = layer_group_ids[static_cast<size_t>(layer_id)];
+            if (!layout.layer_to_group_ids[layer_id].empty()) {
+                layout.layer_group_types[layer_id] =
+                    config_.typeForGroup(static_cast<size_t>(layout.layer_to_group_ids[layer_id].front()));
+            }
         }
-        if (static_cast<size_t>(layer_id) < config_.layer_to_group_ids.size()) {
-            layout.layer_to_group_ids[layer_id] = config_.layer_to_group_ids[static_cast<size_t>(layer_id)];
-        }
-        if (static_cast<size_t>(layer_id) < config_.layer_tag_to_group_id.size()) {
-            layout.layer_tag_to_group_id[layer_id] = config_.layer_tag_to_group_id[static_cast<size_t>(layer_id)];
+        if (static_cast<size_t>(layer_id) < layer_tag_to_gid.size()) {
+            layout.layer_tag_to_group_id[layer_id] = layer_tag_to_gid[static_cast<size_t>(layer_id)];
         }
         if (static_cast<size_t>(layer_id) < all_layout.layers_to_kv_buffer_ptrs_by_group.size()) {
             layout.layers_to_kv_buffer_ptrs_by_group[layer_id] =
@@ -392,17 +409,14 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
 
     const auto& mtp_sub_config = config_.mtp_sub_configs[mtp_module_id];
     RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
-    RTP_LLM_CHECK_WITH_INFO(
-        !mtp_sub_config->global_layer_ids.empty(), "mtp_sub_configs[%d]->global_layer_ids is empty", mtp_module_id);
-
     // Flatten across all groups: SWA-only DSV4 propose configs put the
     // single MTP layer in the SWA group (gid=6), not FULL[0], so reading
     // group 0 alone would be empty.  Walk every group and collect any
-    // global_layer_ids it contributed so this layout is independent of
+    // group-layer ids it contributed so this layout is independent of
     // which pool the propose layer lives in.
     std::vector<int> mtp_global_layer_ids;
-    for (const auto& group_ids : mtp_sub_config->global_layer_ids) {
-        for (int lid : group_ids) {
+    for (size_t gid = 0; gid < static_cast<size_t>(mtp_sub_config->groupNums()); ++gid) {
+        for (int lid : mtp_sub_config->layerIdsForGroup(gid)) {
             mtp_global_layer_ids.push_back(lid);
         }
     }
@@ -426,8 +440,8 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     // without these, ``build_metadata_eager`` finds an empty
     // ``group_tags`` and emits zero ``paged_block_tables``,
     // which trips Attention.forward_decode's "no paged metadata" gate.
-    layout.group_tags               = mtp_sub_config->group_tags;
-    layout.group_types              = mtp_sub_config->group_types;
+    layout.group_tags               = mtp_sub_config->groupTagsSnapshot();
+    layout.group_types              = mtp_sub_config->groupTypesSnapshot();
     layout.group_seq_size_per_block = mtp_sub_config->group_seq_size_per_block;
     // Typed-pool views are indexed by LOCAL layer id from the MTP model's
     // attention modules (self.layer_id ∈ [0, mtp_layer_num)).  The full
@@ -436,7 +450,7 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     // arrays verbatim makes local index 0 return main layer 0's typed
     // buffers, which causes the draft to write into the main model's KV
     // pool and corrupts target verify (0% acceptance regression).
-    const size_t group_count = mtp_sub_config->group_tags.size();
+    const size_t group_count = layout.group_tags.size();
     layout.layers_to_kv_buffer_ptrs_by_group.assign(mtp_layer_num, std::vector<torch::Tensor>(group_count));
     layout.layers_to_scale_buffer_ptrs_by_group.assign(mtp_layer_num, std::vector<torch::Tensor>(group_count));
     layout.layer_to_group_ids.resize(mtp_layer_num);
@@ -460,10 +474,6 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
                     RTP_LLM_CHECK(false);
                 }
             }
-            if (local_layer_id < mtp_sub_config->layer_group_types.size()) {
-                layout.layer_group_types[local_layer_id] = mtp_sub_config->layer_group_types[local_layer_id];
-            }
-
             // Remap typed-pool buffers from GLOBAL layer id row to the MTP
             // model's LOCAL layer id row. Each group slot is copied as-is
             // (it points at the per-group BlockPool's per-layer slice that
@@ -485,6 +495,10 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
             }
             if (gid < all_layout.layer_to_group_ids.size()) {
                 layout.layer_to_group_ids[local_layer_id] = all_layout.layer_to_group_ids[gid];
+                if (!layout.layer_to_group_ids[local_layer_id].empty()) {
+                    layout.layer_group_types[local_layer_id] = mtp_sub_config->typeForGroup(
+                        static_cast<size_t>(layout.layer_to_group_ids[local_layer_id].front()));
+                }
             }
             if (gid < all_layout.layer_tag_to_group_id.size()) {
                 layout.layer_tag_to_group_id[local_layer_id] = all_layout.layer_tag_to_group_id[gid];
@@ -709,7 +723,7 @@ bool KVCacheManager::writeKVBlockForTest(int                  block_index,
                                           const torch::Tensor& k_buffer,
                                           const torch::Tensor& v_buffer) {
     // Basic size/type validation to prevent out-of-bounds copy
-    auto&  spec             = config_.cache_specs[0];
+    auto&  spec             = config_.specForGroup(0);
     size_t expected_k_bytes = spec->k_block_size_bytes();
     size_t expected_v_bytes = spec->v_block_size_bytes();
     size_t src_k_bytes      = k_buffer.nbytes();

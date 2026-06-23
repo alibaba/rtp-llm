@@ -48,7 +48,6 @@ private:
                                       const KVCacheSpecPtr&                full_spec);
     static void
     setupPhysicalSizes(CacheConfig& config, const KVCacheSpecPtr& full_spec, const KVCacheSpecPtr& linear_spec);
-    static void setupLayerToGroupMapping(CacheConfig& config);
 };
 
 }  // namespace rtp_llm

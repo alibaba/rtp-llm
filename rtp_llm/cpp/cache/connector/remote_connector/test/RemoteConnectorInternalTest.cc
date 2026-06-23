@@ -1,6 +1,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <numeric>
+
 #include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -134,13 +136,17 @@ public:
         mha_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
         mha_spec->type               = KVCacheSpecType::MultiHeadAttention;
         cache_config_.block_num      = 8;
-        cache_config_.cache_specs.push_back(mha_spec);
         byte_size_per_block_           = static_cast<size_t>(mha_spec->block_size_bytes() * layer_num_);
         cache_config_.block_size_bytes = byte_size_per_block_;
         cache_config_.dtype            = rtp_llm::DataType::TYPE_FP16;
-        cache_config_.group_types.push_back(CacheGroupType::FULL);
-        cache_config_.group_types.push_back(CacheGroupType::LINEAR);
-        cache_config_.group_types.push_back(CacheGroupType::LINEAR);
+        cache_config_.layer_num        = layer_num_;
+        cache_config_.layer_all_num    = layer_num_;
+        std::vector<int> layers(layer_num_);
+        std::iota(layers.begin(), layers.end(), 0);
+        cache_config_.fromGroupedSpecs({mha_spec, mha_spec, mha_spec},
+                                       {layers, layers, layers},
+                                       {CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::LINEAR},
+                                       {"F0", "L1", "L2"});
     }
 
     void TearDown() override {}

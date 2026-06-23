@@ -581,10 +581,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             model_init_params, params.py_model, false, true, target_cache_layer_layout.layer_to_groups));
     }
 
-    is_linear_attention_model_ =
-        std::find(target_cache_config.group_types.begin(),
-                  target_cache_config.group_types.end(),
-                  CacheGroupType::LINEAR) != target_cache_config.group_types.end();
+    const auto target_group_types = target_cache_config.groupTypesSnapshot();
+    is_linear_attention_model_    = std::find(target_group_types.begin(),
+                                           target_group_types.end(),
+                                           CacheGroupType::LINEAR) != target_group_types.end();
     batch_stream_processor_.reset(new MtpBatchStreamProcessor(params.model_config_,
                                                               params.pd_sep_config,
                                                               params.profiling_debug_logging_config,

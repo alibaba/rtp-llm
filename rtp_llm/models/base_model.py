@@ -19,9 +19,11 @@ from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelW
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
+    CacheType,
     DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
+    KVCacheSpecDesc,
     KVCacheSpecType,
     MHAKVCacheSpec,
     MLAKVCacheSpec,
@@ -226,14 +228,27 @@ class BaseModel(object):
             spec = MLAKVCacheSpec()
             spec.kv_lora_rank = int(model_config.attn_config.kv_lora_rank)
             spec.rope_head_dim = int(model_config.attn_config.rope_head_dim)
+            desc = KVCacheSpecDesc()
+            desc.cache_type = CacheType.MLA
+            desc.kv_lora_rank = int(model_config.attn_config.kv_lora_rank)
+            desc.rope_head_dim = int(model_config.attn_config.rope_head_dim)
+            desc.local_head_num_kv = 1
         else:
             spec = MHAKVCacheSpec()
             spec.size_per_head = int(model_config.attn_config.size_per_head)
+            desc = KVCacheSpecDesc()
+            desc.cache_type = CacheType.MHA
+            desc.size_per_head = int(model_config.attn_config.size_per_head)
 
         spec.tag = "default"
         spec.seq_size_per_block = int(model_config.attn_config.tokens_per_block)
+        desc.tag = "default"
+        desc.seq_size_per_block = int(model_config.attn_config.tokens_per_block)
         model_config.kv_cache_specs = {
             layer_id: [spec] for layer_id in range(model_config.num_layers)
+        }
+        model_config.kv_cache_spec_descs = {
+            layer_id: [desc] for layer_id in range(model_config.num_layers)
         }
 
     @classmethod

@@ -32,7 +32,15 @@ from typing import Dict, List
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.ops import CompressedKVCacheSpec, DataType, FixedStateCacheSpec, KVCacheSpec, KvCacheDataType
+from rtp_llm.ops import (
+    CacheType,
+    CompressedKVCacheSpec,
+    DataType,
+    FixedStateCacheSpec,
+    KVCacheSpec,
+    KVCacheSpecDesc,
+    KvCacheDataType,
+)
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
@@ -130,6 +138,41 @@ def _build_dsv4_kv_cache_specs(config: ModelConfig) -> Dict[int, List[KVCacheSpe
     return layer_specs
 
 
+def _kv_cache_spec_to_desc(spec: KVCacheSpec) -> KVCacheSpecDesc:
+    desc = KVCacheSpecDesc()
+    desc.tag = spec.tag
+    desc.seq_size_per_block = int(spec.seq_size_per_block)
+    desc.dtype = spec.dtype
+    if hasattr(spec, "compression_ratio"):
+        desc.cache_type = CacheType.COMPRESSED_KV
+        desc.entry_elems = int(spec.entry_elems)
+        desc.compression_ratio = int(spec.compression_ratio)
+        desc.store_dtype = spec.store_dtype
+        desc.block_size_bytes_alignment = int(spec.block_size_bytes_alignment)
+    else:
+        desc.cache_type = CacheType.FIXED_STATE
+        desc.entry_elems = int(spec.state_dim)
+        desc.entries_per_block = int(spec.entries_per_block)
+        desc.store_dtype = spec.store_dtype
+        desc.block_size_bytes_override = int(spec.block_size_bytes_override)
+        desc.block_size_bytes_alignment = int(spec.block_size_bytes_alignment)
+        desc.block_size_alignment_min_entries = int(
+            spec.block_size_alignment_min_entries
+        )
+        desc.is_state_cache = spec.tag != "swa_kv"
+        desc.skip_prefix_reuse = bool(spec.skip_prefix_reuse)
+    return desc
+
+
+def _build_dsv4_kv_cache_spec_descs(
+    layer_specs: Dict[int, List[KVCacheSpec]]
+) -> Dict[int, List[KVCacheSpecDesc]]:
+    return {
+        layer_id: [_kv_cache_spec_to_desc(spec) for spec in specs]
+        for layer_id, specs in layer_specs.items()
+    }
+
+
 def _refresh_dsv4_kv_cache_specs(config: ModelConfig) -> None:
     expected_tags = [
         "csa_kv",
@@ -190,6 +233,10 @@ def _refresh_dsv4_kv_cache_specs(config: ModelConfig) -> None:
             spec.state_dim = 2 * head_dim
             spec.store_dtype = DataType.TYPE_FP32
             spec.dtype = DataType.TYPE_FP32
+
+    config.kv_cache_spec_descs = _build_dsv4_kv_cache_spec_descs(
+        config.kv_cache_specs
+    )
 
 
 
@@ -754,6 +801,9 @@ class DeepSeekV4(DeepSeekV2):
         config.attn_config.indexer_head_num = int(config_json["index_n_heads"])
         config.attn_config.indexer_topk = int(config_json["index_topk"])
         config.kv_cache_specs = _build_dsv4_kv_cache_specs(config)
+        config.kv_cache_spec_descs = _build_dsv4_kv_cache_spec_descs(
+            config.kv_cache_specs
+        )
 
         # ---- MoE ----
         scoring_func = config_json.get("scoring_func", "softmax")
@@ -937,6 +987,9 @@ class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
         config.num_layers = 1
         config.attn_config.layer_compress_ratios = [0]
         config.kv_cache_specs = _build_dsv4_kv_cache_specs(config)
+        config.kv_cache_spec_descs = _build_dsv4_kv_cache_spec_descs(
+            config.kv_cache_specs
+        )
         config.moe_layer_index = list(range(config.num_layers))
         config.reverse_e_h_norm = True
         config.is_mtp = True

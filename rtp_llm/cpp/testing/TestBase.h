@@ -203,7 +203,8 @@ protected:
 
         auto batch_kv_cache = std::make_shared<rtp_llm::BatchKVCacheResource>();
         batch_kv_cache->resetBatchSize(batch_size);
-        batch_kv_cache->initGroups(1, cache_config.layer_all_num, cache_config.layer_to_group_id);
+        batch_kv_cache->initGroups(
+            1, cache_config.layer_all_num, cache_config.primaryLayerGroupIdsSnapshot());
 
         auto complete_token_ids =
             std::make_shared<rtp_llm::CompleteTokenIds>(static_cast<int>(batch_size),
@@ -261,9 +262,9 @@ protected:
                                              torch::indexing::Slice()})
                                      .reshape({2,
                                                static_cast<int64_t>(cache_config.seq_size_per_block),
-                                               static_cast<int64_t>(cache_config.cache_specs[0]->local_head_num_kv),
+                                               static_cast<int64_t>(cache_config.specForGroup(0)->local_head_num_kv),
                                                static_cast<int64_t>(
-                                                   static_cast<rtp_llm::MHAKVCacheSpec&>(*cache_config.cache_specs[0])
+                                                   static_cast<rtp_llm::MHAKVCacheSpec&>(*cache_config.specForGroup(0))
                                                        .size_per_head)})
                                      .transpose(2, 1)
                                      .contiguous();
@@ -275,9 +276,9 @@ protected:
                                              torch::indexing::Slice(block_start, block_end),
                                              torch::indexing::Slice()})
                                      .reshape({static_cast<int64_t>(cache_config.seq_size_per_block),
-                                               static_cast<int64_t>(cache_config.cache_specs[0]->local_head_num_kv),
+                                               static_cast<int64_t>(cache_config.specForGroup(0)->local_head_num_kv),
                                                static_cast<int64_t>(
-                                                   static_cast<rtp_llm::MHAKVCacheSpec&>(*cache_config.cache_specs[0])
+                                                   static_cast<rtp_llm::MHAKVCacheSpec&>(*cache_config.specForGroup(0))
                                                        .size_per_head)})
                                      .transpose(1, 0)
                                      .contiguous();

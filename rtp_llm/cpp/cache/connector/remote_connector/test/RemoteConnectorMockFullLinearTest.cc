@@ -118,36 +118,37 @@ private:
         linear_spec->local_head_num_kv  = 1;
         linear_spec->seq_size_per_block = seq_size_per_block;
 
+        std::vector<KVCacheSpecPtr>    specs;
+        std::vector<std::vector<int>>  layers_by_group;
+        std::vector<CacheGroupType>    types;
+        std::vector<std::string>       tags;
+
         for (size_t i = 0; i < full_group_ids_.size(); i++) {
-            cache_config_.global_layer_ids.push_back({});
-            cache_config_.layer_ids.push_back({});
-            cache_config_.group_types.push_back(CacheGroupType::FULL);
-            cache_config_.cache_specs.push_back(full_spec);
+            specs.push_back(full_spec);
+            layers_by_group.emplace_back();
+            types.push_back(CacheGroupType::FULL);
+            tags.push_back("full_" + std::to_string(i));
             for (int j = 0; j < layer_num; j++) {
-                cache_config_.layer_to_group_id.push_back(full_group_ids_[i]);
-                cache_config_.global_layer_ids.back().push_back(unique_layer_id);
-                cache_config_.layer_ids.back().push_back(unique_layer_id);
+                layers_by_group.back().push_back(unique_layer_id);
                 unique_layer_id++;
             }
         }
 
         for (size_t i = 0; i < other_group_ids_.size(); i++) {
-            cache_config_.global_layer_ids.push_back({});
-            cache_config_.layer_ids.push_back({});
-            cache_config_.group_types.push_back(CacheGroupType::LINEAR);
-            cache_config_.cache_specs.push_back(linear_spec);
+            specs.push_back(linear_spec);
+            layers_by_group.emplace_back();
+            types.push_back(CacheGroupType::LINEAR);
+            tags.push_back("linear_" + std::to_string(i));
             for (int j = 0; j < layer_num; j++) {
-                cache_config_.layer_to_group_id.push_back(other_group_ids_[i]);
-                cache_config_.global_layer_ids.back().push_back(unique_layer_id);
-                cache_config_.layer_ids.back().push_back(unique_layer_id);
+                layers_by_group.back().push_back(unique_layer_id);
                 unique_layer_id++;
             }
         }
 
-        cache_config_.layer_ids          = cache_config_.global_layer_ids;
         cache_config_.block_num          = block_num;
         cache_config_.seq_size_per_block = seq_size_per_block;
         cache_config_.dtype              = rtp_llm::DataType::TYPE_FP16;
+        cache_config_.fromGroupedSpecs(specs, layers_by_group, types, tags);
 
         const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
         const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();

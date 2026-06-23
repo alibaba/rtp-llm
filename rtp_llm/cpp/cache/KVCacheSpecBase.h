@@ -4,6 +4,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
@@ -43,6 +44,11 @@ enum KVCacheSpecType {
     LinearAttention,           // LinearKVCacheSpec: linear / SSM attention state cache
     OpaqueKV,                  // Byte-addressed opaque paged KV pool
     OpaqueState,               // Fixed-allocation opaque state / SWA-like pool
+};
+
+enum class CPTransferPolicy {
+    NONE,
+    INTRA_BLOCK_SLICE,
 };
 
 inline const char* KVCacheSpecTypeToString(KVCacheSpecType t) {
@@ -107,12 +113,26 @@ struct KVCacheSpec {
 
     virtual KVCacheSpecPtr clone() const = 0;
 
-    virtual std::vector<BlockInfo> sliceBlockForPeer(std::vector<BlockInfo> parts,
-                                                     size_t                 cp_size,
-                                                     size_t                 peer_idx) const {
+    virtual CPTransferPolicy cpTransferPolicy() const {
+        return CPTransferPolicy::NONE;
+    }
+
+    bool supportsCpSlice() const {
+        return cpTransferPolicy() == CPTransferPolicy::INTRA_BLOCK_SLICE;
+    }
+
+    virtual std::vector<BlockInfo> cpSliceDestination(std::vector<BlockInfo> parts,
+                                                      size_t                 cp_size,
+                                                      size_t                 peer_idx) const {
         (void)cp_size;
         (void)peer_idx;
         return parts;
+    }
+
+    virtual std::vector<BlockInfo> sliceBlockForPeer(std::vector<BlockInfo> parts,
+                                                     size_t                 cp_size,
+                                                     size_t                 peer_idx) const {
+        return cpSliceDestination(std::move(parts), cp_size, peer_idx);
     }
 
     std::string fingerprint() const {

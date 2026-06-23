@@ -174,7 +174,6 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    cache_config.group_types = {CacheGroupType::FULL};
 
     model_config.max_seq_len    = 2048;
     model_config.vocab_size     = 4;
@@ -226,7 +225,6 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     model_config.vocab_size     = 16;
     model_config.num_layers     = 1;
     sp_config.gen_num_per_cycle = 2;
-    cache_config.group_types    = {CacheGroupType::FULL};
 
     ResourceContext resource_context;
     auto stream = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1, {7}, {8, 9});
@@ -262,7 +260,6 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    cache_config.group_types = {CacheGroupType::FULL};
 
     model_config.max_seq_len    = 2048;
     model_config.vocab_size     = 4;
@@ -311,7 +308,6 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchUsesDraftLastHiddenOverri
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
-    cache_config.group_types = {CacheGroupType::FULL};
 
     model_config.max_seq_len    = 2048;
     model_config.vocab_size     = 4;
@@ -391,8 +387,6 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     draft_prefill_output.sampler_output.token_ids = torch::tensor({0L, 3L}, torch::kInt64).reshape({2, 1});
     draft_prefill_output.sampler_output.all_probs =
         torch::tensor({0.2f, 0.1f, 0.3f, 0.5f, 0.3f, 0.1f, 0.4f, 0.2f}, torch::kFloat32).reshape({2, 4});
-
-    cache_config.group_types = {CacheGroupType::FULL};
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
 
@@ -445,8 +439,6 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
     stream2->getSPOutputBuffer()->hidden_states = torch::tensor({{1.1f, 1.2f}});
 
     auto stream_groups = StreamGroups({stream1, stream2});
-
-    cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     TensorHolder holder;
@@ -523,8 +515,6 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
     stream2->getSPOutputBuffer()->tokens = torch::tensor(propose_tokens_2, torch::kInt32).reshape({1, 2});
 
     auto stream_groups = StreamGroups({stream1, stream2});
-
-    cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     TensorHolder holder;
@@ -630,8 +620,6 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
     stream2->setMtpAsyncDeviceState(std::move(state2));
 
     auto stream_groups = StreamGroups({stream1, stream2});
-
-    cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     TensorHolder holder;
@@ -724,8 +712,6 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     stream2->getSPOutputBuffer()->hidden_states = torch::tensor({{1.1f, 1.2f}});
 
     auto stream_groups = StreamGroups({stream1, stream2});
-
-    cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     TensorHolder holder;
@@ -781,8 +767,6 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
 
     auto stream_groups = StreamGroups({stream1, stream2});
-
-    cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     TensorHolder holder;
@@ -840,8 +824,6 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
 
     auto stream_groups = StreamGroups({stream1, stream2});
-
-    cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     TensorHolder holder;

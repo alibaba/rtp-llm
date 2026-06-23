@@ -25,7 +25,7 @@ bool HybridTypeKVCacheAllocator::doInit() {
     const int group_nums = config_.groupNums();
     kv_cache_groups_.reserve(group_nums);
 
-    layer_to_group_id_ = config_.layer_to_group_id;
+    layer_to_group_id_ = config_.primaryLayerGroupIdsSnapshot();
 
     SharedBlockCache* shared_cache_raw = shared_block_cache_ ? shared_block_cache_.get() : nullptr;
 

@@ -8,6 +8,7 @@ from rtp_llm.models.deepseek_v4 import (
 )
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3NextBase
 from rtp_llm.ops import (
+    CacheType,
     CompressedKVCacheSpec,
     DataType,
     FixedStateCacheSpec,
@@ -43,14 +44,21 @@ class KVCacheSpecsTest(TestCase):
         BaseModel._post_build_model_config(config)
 
         self.assertEqual(sorted(config.kv_cache_specs.keys()), [0, 1, 2])
+        self.assertEqual(sorted(config.kv_cache_spec_descs.keys()), [0, 1, 2])
         for layer_id in range(3):
             self.assertEqual(len(config.kv_cache_specs[layer_id]), 1)
+            self.assertEqual(len(config.kv_cache_spec_descs[layer_id]), 1)
             spec = config.kv_cache_specs[layer_id][0]
+            desc = config.kv_cache_spec_descs[layer_id][0]
             self.assertIsInstance(spec, MHAKVCacheSpec)
             self.assertEqual(spec.tag, "default")
             self.assertEqual(spec.type, KVCacheSpecType.MultiHeadAttention)
             self.assertEqual(spec.seq_size_per_block, 8)
             self.assertEqual(spec.size_per_head, 16)
+            self.assertEqual(desc.tag, "default")
+            self.assertEqual(desc.cache_type, CacheType.MHA)
+            self.assertEqual(desc.seq_size_per_block, 8)
+            self.assertEqual(desc.size_per_head, 16)
 
     def test_qwen3_next_builds_one_spec_per_layer(self):
         config = self._basic_model_config()
@@ -68,8 +76,13 @@ class KVCacheSpecsTest(TestCase):
         Qwen3NextBase._post_build_model_config(config)
 
         self.assertEqual(sorted(config.kv_cache_specs.keys()), [0, 1, 2, 3])
+        self.assertEqual(sorted(config.kv_cache_spec_descs.keys()), [0, 1, 2, 3])
         self.assertEqual(
             [config.kv_cache_specs[i][0].tag for i in range(4)],
+            ["linear", "full", "linear", "full"],
+        )
+        self.assertEqual(
+            [config.kv_cache_spec_descs[i][0].tag for i in range(4)],
             ["linear", "full", "linear", "full"],
         )
         full_spec = config.kv_cache_specs[1][0]
@@ -83,6 +96,8 @@ class KVCacheSpecsTest(TestCase):
         self.assertEqual(linear_spec.head_k_dim, 32)
         self.assertEqual(linear_spec.head_v_dim, 32)
         self.assertEqual(linear_spec.conv_kernel_dim, 4)
+        self.assertEqual(config.kv_cache_spec_descs[1][0].cache_type, CacheType.MHA)
+        self.assertEqual(config.kv_cache_spec_descs[0][0].cache_type, CacheType.LINEAR)
 
     def test_deepseek_v4_builds_layer_wise_spec_declarations(self):
         config = self._basic_model_config()
@@ -132,6 +147,7 @@ class KVCacheSpecsTest(TestCase):
         _refresh_dsv4_kv_cache_specs(config)
 
         by_tag = _by_tag(config.kv_cache_specs)
+        desc_by_tag = _by_tag(config.kv_cache_spec_descs)
         self.assertEqual(by_tag["csa_kv"].entry_elems, 584)
         self.assertEqual(by_tag["hca_kv"].entry_elems, 584)
         self.assertEqual(by_tag["swa_kv"].state_dim, 584)
@@ -139,6 +155,11 @@ class KVCacheSpecsTest(TestCase):
         self.assertEqual(by_tag["indexer_state"].state_dim, 512)
         self.assertEqual(by_tag["csa_state"].state_dim, 2048)
         self.assertEqual(by_tag["hca_state"].state_dim, 1024)
+        self.assertEqual(desc_by_tag["csa_kv"].cache_type, CacheType.COMPRESSED_KV)
+        self.assertEqual(desc_by_tag["csa_kv"].entry_elems, 584)
+        self.assertEqual(desc_by_tag["swa_kv"].cache_type, CacheType.FIXED_STATE)
+        self.assertFalse(desc_by_tag["swa_kv"].is_state_cache)
+        self.assertEqual(desc_by_tag["hca_state"].entry_elems, 1024)
 
     def test_deepseek_v4_refresh_accepts_reordered_layer_specs(self):
         config = self._basic_model_config()

@@ -57,6 +57,10 @@ public:
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id) const;
     virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int group_id, int block_id, int partition_count, int partition_id) const;
+    virtual BlockAddrInfo convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const;
+    virtual std::vector<BlockInfo> convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const;
+    virtual std::vector<BlockInfo> convertIndexToBufferByTag(
+        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const;
     virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
                                                             const CacheKeysType&   cache_keys,
                                                             bool                   is_connector = false) = 0;

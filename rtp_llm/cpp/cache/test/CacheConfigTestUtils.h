@@ -168,22 +168,11 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     spec->seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
     spec->local_head_num_kv  = local_head_num_kv;
     spec->size_per_head      = size_per_head;
-    config.cache_specs.push_back(spec);
-
     std::vector<int> layer_ids(layer_num);
     for (int i = 0; i < layer_num; ++i) {
         layer_ids[i] = i;
     }
-    config.layer_ids.push_back(layer_ids);
-    config.global_layer_ids.push_back(layer_ids);
-    config.layer_to_group_id.assign(layer_num, 0);
-    config.layer_to_group_ids.assign(static_cast<size_t>(layer_num), std::vector<int>{0});
-    config.layer_tag_to_group_id.assign(static_cast<size_t>(layer_num), {});
-    config.group_tags.push_back("default");
-    for (int i = 0; i < layer_num; ++i) {
-        config.layer_tag_to_group_id[static_cast<size_t>(i)]["default"] = 0;
-    }
-    config.layer_group_types.assign(layer_num, CacheGroupType::FULL);
+    config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
 
     config.kv_block_stride_bytes = spec->block_size_bytes();
     config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * spec->block_size_bytes();
@@ -258,15 +247,14 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     full_spec->local_head_num_kv  = local_head_num_kv;
     full_spec->size_per_head      = size_per_head;
 
-    config.layer_ids.clear();
-    config.global_layer_ids.clear();
-    config.cache_specs.clear();
-    config.group_types.clear();
-
-    config.layer_to_group_id.assign(static_cast<size_t>(layer_num), 0);
-    config.layer_to_group_ids.assign(static_cast<size_t>(layer_num), {});
-    config.layer_tag_to_group_id.assign(static_cast<size_t>(layer_num), {});
-    config.layer_group_types.assign(static_cast<size_t>(layer_num), CacheGroupType::FULL);
+    std::vector<KVCacheSpecPtr>    specs;
+    std::vector<std::vector<int>>  layers_by_group;
+    std::vector<CacheGroupType>    types;
+    std::vector<std::string>       tags;
+    specs.reserve(static_cast<size_t>(group_cnt));
+    layers_by_group.reserve(static_cast<size_t>(group_cnt));
+    types.reserve(static_cast<size_t>(group_cnt));
+    tags.reserve(static_cast<size_t>(group_cnt));
 
     // Build groups: gid=0 linear, gid>=1 full.
     for (int gid = 0; gid < group_cnt; ++gid) {
@@ -275,25 +263,19 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
         for (int local = 0; local < config.group_layer_num; ++local) {
             const int layer_id = gid * config.group_layer_num + local;
             group_layers.push_back(layer_id);
-            config.layer_to_group_id[static_cast<size_t>(layer_id)] = gid;
-            config.layer_to_group_ids[static_cast<size_t>(layer_id)] = {gid};
-            config.layer_tag_to_group_id[static_cast<size_t>(layer_id)]["default"] = gid;
-            config.layer_group_types[static_cast<size_t>(layer_id)] =
-                (gid == 0) ? CacheGroupType::LINEAR : CacheGroupType::FULL;
         }
-        config.layer_ids.push_back(group_layers);
-        config.global_layer_ids.push_back(group_layers);
+        layers_by_group.push_back(group_layers);
 
         if (gid == 0) {
-            config.cache_specs.push_back(linear_spec);
-            config.group_types.push_back(CacheGroupType::LINEAR);
-            config.group_tags.push_back("default");
+            specs.push_back(linear_spec);
+            types.push_back(CacheGroupType::LINEAR);
         } else {
-            config.cache_specs.push_back(full_spec);
-            config.group_types.push_back(CacheGroupType::FULL);
-            config.group_tags.push_back("default");
+            specs.push_back(full_spec);
+            types.push_back(CacheGroupType::FULL);
         }
+        tags.push_back("default");
     }
+    config.fromGroupedSpecs(specs, layers_by_group, types, tags);
 
     // Physical sizes for hybrid memory layout: one group (group_layer_num) worth of layers.
     config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());

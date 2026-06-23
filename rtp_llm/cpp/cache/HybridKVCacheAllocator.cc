@@ -468,15 +468,6 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                 continue;
             }
             const int  raw_group_seq = kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock();
-            const auto group_type    = static_cast<size_t>(gid) < config_.group_types.size() ?
-                                           config_.group_types[static_cast<size_t>(gid)] :
-                                           (containsGroupId(linear_group_ids_, gid) ?
-                                                CacheGroupType::LINEAR :
-                                                (containsGroupId(swa_group_ids_, gid) ? CacheGroupType::SWA :
-                                                                                        CacheGroupType::FULL));
-            if (static_cast<size_t>(gid) >= config_.group_types.size() && group_type != CacheGroupType::FULL) {
-                continue;
-            }
             const bool gp_sharded = cpShardThisGroup(cp_mapper, kv_cache_groups_[static_cast<size_t>(gid)]);
             const bool           compact_swa   = cpCompactSwaGroup(gid, cp_mapper);
             const bool           use_cp_keys   = cp_active && (gp_sharded || compact_swa);
@@ -503,9 +494,6 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                 std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_nums), NULL_BLOCK_IDX);
                 std::vector<bool>         matchable_slots(static_cast<size_t>(group_nums), true);
                 group_slots[static_cast<size_t>(gid)] = blocks[i];
-                if (static_cast<size_t>(gid) >= config_.group_types.size() && group_type != CacheGroupType::FULL) {
-                    matchable_slots[static_cast<size_t>(gid)] = false;
-                }
                 const auto dependency =
                     i < dependencies.size() ? dependencies[i] : BlockDependency{false, 0, static_cast<uint32_t>(i)};
                 shared_block_cache_->put(
@@ -536,10 +524,10 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
     selected_resource->initGroups(kvcache_resource.groupNums(),
                                   static_cast<int>(config_.layer_all_num),
-                                  config_.layer_to_group_id,
+                                  config_.primaryLayerGroupIdsSnapshot(),
                                   config_.kernelBlocksPerKvBlock(),
-                                  config_.group_types,
-                                  config_.layer_to_group_ids);
+                                  config_.groupTypesSnapshot(),
+                                  config_.layerGroupIdsSnapshot());
 
     CacheKeysType                 selected_keys;
     BlockDependenciesType         selected_dependencies;

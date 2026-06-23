@@ -7,6 +7,37 @@
 
 namespace rtp_llm {
 
+namespace {
+
+LayerKVCacheSpecs layerSpecsFromDescs(const ModelConfig& model_config, rtp_llm::DataType dtype) {
+    SpecBuildContext ctx;
+    ctx.dtype = dtype;
+    ctx.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+
+    LayerKVCacheSpecs layer_specs;
+    for (const auto& [layer_id, layer_descs] : model_config.kv_cache_spec_descs) {
+        auto& specs = layer_specs[layer_id];
+        specs.reserve(layer_descs.size());
+        for (auto desc : layer_descs) {
+            desc.dtype = desc.dtype == DataType::TYPE_INVALID ? dtype : desc.dtype;
+            desc.seq_size_per_block = desc.seq_size_per_block == 0 ? ctx.seq_size_per_block : desc.seq_size_per_block;
+            specs.push_back(SpecBuilder::build(desc, ctx));
+        }
+    }
+    return layer_specs;
+}
+
+ModelConfig modelConfigWithDescSpecs(const ModelConfig& model_config, rtp_llm::DataType dtype) {
+    if (model_config.kv_cache_spec_descs.empty()) {
+        return model_config;
+    }
+    auto model_copy = model_config;
+    model_copy.kv_cache_specs = layerSpecsFromDescs(model_config, dtype);
+    return model_copy;
+}
+
+}  // namespace
+
 std::vector<std::vector<int>> HybridConfigCreator::splitIntoGroups(const std::vector<int>& ids, int group_layer_num) {
     std::vector<std::vector<int>> groups;
     if (ids.empty()) {
@@ -73,11 +104,6 @@ CacheConfig HybridConfigCreator::initializeConfig(const ModelConfig&      model_
     config.use_mla            = model_config.attn_config.use_mla;
     config.dtype              = dtype;
     config.linear_step        = 1;
-
-    config.global_layer_ids.push_back(linear_layers);
-    config.global_layer_ids.push_back(full_layers);
-    config.layer_ids.push_back(linear_layers);
-    config.layer_ids.push_back(full_layers);
 
     return config;
 }
@@ -236,21 +262,11 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
     config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 }
 
-void HybridConfigCreator::setupLayerToGroupMapping(CacheConfig& config) {
-    config.layer_to_group_id.assign(config.layer_num, 0);
-    for (size_t gid = 0; gid < config.layer_ids.size(); ++gid) {
-        for (int layer_id : config.layer_ids[gid]) {
-            if (layer_id >= 0 && static_cast<size_t>(layer_id) < config.layer_num) {
-                config.layer_to_group_id[static_cast<size_t>(layer_id)] = static_cast<int32_t>(gid);
-            }
-        }
-    }
-}
-
 CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       model_config,
                                                     const ParallelismConfig& parallelism_config,
                                                     bool                     is_mtp) {
     auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
+    auto spec_model_config = modelConfigWithDescSpecs(model_config, dtype);
 
     // Split layers by attention type
     auto [linear_layers, full_layers] = HybridConfigCreator::splitLayersByAttentionType(model_config);
@@ -258,8 +274,8 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     // Initialize config
     CacheConfig config = HybridConfigCreator::initializeConfig(model_config, linear_layers, full_layers, dtype);
 
-    auto full_spec   = HybridConfigCreator::getSpecFromLayers(model_config, full_layers, "full attention");
-    auto linear_spec = HybridConfigCreator::getSpecFromLayers(model_config, linear_layers, "linear attention");
+    auto full_spec   = HybridConfigCreator::getSpecFromLayers(spec_model_config, full_layers, "full attention");
+    auto linear_spec = HybridConfigCreator::getSpecFromLayers(spec_model_config, linear_layers, "linear attention");
 
     // Create layer groups and calculate group layer number
     int group_layer_num = 0;

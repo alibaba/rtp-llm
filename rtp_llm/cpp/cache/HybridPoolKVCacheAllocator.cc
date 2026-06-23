@@ -185,13 +185,21 @@ void HybridPoolKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesTy
 
 CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     CacheLayerLayout layout;
-    layout.layer_to_groups          = config_.layer_to_group_id;
-    layout.layer_to_group_ids       = config_.layer_to_group_ids;
-    layout.group_types              = config_.group_types;
-    layout.group_tags               = config_.group_tags;
-    layout.layer_tag_to_group_id    = config_.layer_tag_to_group_id;
+    const auto layer_group_ids      = config_.layerGroupIdsSnapshot();
+    layout.layer_to_groups          = config_.primaryLayerGroupIdsSnapshot();
+    layout.layer_to_group_ids       = layer_group_ids;
+    layout.group_types              = config_.groupTypesSnapshot();
+    layout.group_tags               = config_.groupTagsSnapshot();
+    layout.layer_tag_to_group_id    = config_.layerTagToGroupIdSnapshot();
     layout.group_seq_size_per_block = config_.group_seq_size_per_block;
-    layout.layer_group_types        = config_.layer_group_types;
+    layout.layer_group_types.resize(config_.layer_all_num, CacheGroupType::FULL);
+    for (size_t layer_id = 0; layer_id < layer_group_ids.size() && layer_id < layout.layer_group_types.size();
+        ++layer_id) {
+        if (!layer_group_ids[layer_id].empty()) {
+            layout.layer_group_types[layer_id] =
+                config_.typeForGroup(static_cast<size_t>(layer_group_ids[layer_id].front()));
+        }
+    }
 
     layout.layers_to_kv_buffer_ptrs.resize(config_.layer_all_num);
     layout.layers_to_scale_buffer_ptrs.resize(config_.layer_all_num);
@@ -204,10 +212,10 @@ CacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     }
 
     for (size_t layer_id = 0; layer_id < static_cast<size_t>(config_.layer_all_num); ++layer_id) {
-        if (layer_id >= config_.layer_to_group_ids.size() || config_.layer_to_group_ids[layer_id].size() != 1) {
+        if (layer_id >= layer_group_ids.size() || layer_group_ids[layer_id].size() != 1) {
             continue;
         }
-        const int  gid           = config_.layer_to_group_ids[layer_id][0];
+        const int  gid           = layer_group_ids[layer_id][0];
         RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < static_cast<int>(kv_cache_groups_.size()),
                                 "invalid single-tag group id %d for layer %zu",
                                 gid,
@@ -389,10 +397,10 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
     batch_resource->resetBatchSize(1);
     batch_resource->initGroups(config_.groupNums(),
                                static_cast<int>(config_.layer_all_num),
-                               config_.layer_to_group_id,
+                               config_.primaryLayerGroupIdsSnapshot(),
                                config_.kernelBlocksPerKvBlock(),
-                               config_.group_types,
-                               config_.layer_to_group_ids);
+                               config_.groupTypesSnapshot(),
+                               config_.layerGroupIdsSnapshot());
     batch_resource->setLastBlockAligned(true);
 
     for (int gid = 0; gid < config_.groupNums(); ++gid) {

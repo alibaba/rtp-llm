@@ -10,6 +10,49 @@ namespace rtp_llm {
 
 namespace {
 
+uint32_t localKvHeads(const ModelConfig& model_config, const ParallelismConfig& parallelism_config) {
+    return static_cast<uint32_t>(
+        (model_config.attn_config.kv_head_num % parallelism_config.get_attn_tp_size() == 0) ?
+            model_config.attn_config.kv_head_num / parallelism_config.get_attn_tp_size() :
+            model_config.attn_config.kv_head_num
+                / std::gcd(model_config.attn_config.kv_head_num, parallelism_config.get_attn_tp_size()));
+}
+
+LayerKVCacheSpecDescs preparedSingleDescs(const ModelConfig&       model_config,
+                                          const ParallelismConfig& parallelism_config,
+                                          rtp_llm::DataType        dtype) {
+    RTP_LLM_CHECK_WITH_INFO(model_config.kv_cache_spec_descs.size() == static_cast<size_t>(model_config.num_layers),
+                            "single cache config requires layer-wise kv_cache_spec_descs for every layer, got %zu/%ld",
+                            model_config.kv_cache_spec_descs.size(),
+                            model_config.num_layers);
+    auto descs = model_config.kv_cache_spec_descs;
+    for (int64_t layer_id = 0; layer_id < model_config.num_layers; ++layer_id) {
+        auto it = descs.find(layer_id);
+        RTP_LLM_CHECK_WITH_INFO(it != descs.end(),
+                                "single cache config missing kv_cache_spec_descs for layer %ld",
+                                layer_id);
+        RTP_LLM_CHECK_WITH_INFO(it->second.size() == 1,
+                                "single cache config requires exactly one desc for layer %ld, got %zu",
+                                layer_id,
+                                it->second.size());
+        auto& desc = it->second[0];
+        RTP_LLM_CHECK_WITH_INFO(desc.tag == "default",
+                                "single cache config requires desc tag=default for layer %ld, got=%s",
+                                layer_id,
+                                desc.tag.c_str());
+        desc.dtype              = dtype;
+        desc.seq_size_per_block = desc.seq_size_per_block == 0 ?
+                                      static_cast<uint32_t>(model_config.attn_config.tokens_per_block) :
+                                      desc.seq_size_per_block;
+        if (desc.cache_type == CacheType::MHA && desc.local_head_num_kv == 0) {
+            desc.local_head_num_kv = localKvHeads(model_config, parallelism_config);
+        } else if (desc.cache_type == CacheType::MLA && desc.local_head_num_kv == 0) {
+            desc.local_head_num_kv = 1;
+        }
+    }
+    return descs;
+}
+
 KVCacheSpecPtr getLayerDefaultSpec(const ModelConfig& model_config, int64_t layer_id) {
     const auto it = model_config.kv_cache_specs.find(layer_id);
     RTP_LLM_CHECK_WITH_INFO(it != model_config.kv_cache_specs.end(),
@@ -55,11 +98,7 @@ KVCacheSpecPtr getDefaultSpecFromModel(const ModelConfig&       model_config,
         RTP_LLM_CHECK_WITH_INFO(mha_spec != nullptr && spec->type == KVCacheSpecType::MultiHeadAttention,
                                 "default kv_cache spec must be MHAKVCacheSpec for MHA/GQA model");
         // local_head_num_kv depends on TP and cannot be provided by Python-side spec.
-        spec->local_head_num_kv = static_cast<uint32_t>(
-            (model_config.attn_config.kv_head_num % parallelism_config.get_attn_tp_size() == 0) ?
-                model_config.attn_config.kv_head_num / parallelism_config.get_attn_tp_size() :
-                model_config.attn_config.kv_head_num
-                    / std::gcd(model_config.attn_config.kv_head_num, parallelism_config.get_attn_tp_size()));
+        spec->local_head_num_kv = localKvHeads(model_config, parallelism_config);
         // size_per_head is already populated by Python.
     }
     // dtype depends on runtime quantization config and cannot be provided by Python-side spec.
@@ -91,7 +130,18 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.dtype     = dtype;
     config.is_sparse = model_config.attn_config.is_sparse;
 
-    KVCacheSpecPtr spec = getDefaultSpecFromModel(model_config, parallelism_config, dtype);
+    KVCacheSpecPtr spec;
+    if (!model_config.kv_cache_spec_descs.empty()) {
+        const auto descs = preparedSingleDescs(model_config, parallelism_config, dtype);
+        SpecBuildContext ctx;
+        ctx.dtype              = dtype;
+        ctx.seq_size_per_block = config.seq_size_per_block;
+        config.fromLayerDescs(descs, ctx);
+        RTP_LLM_CHECK_WITH_INFO(config.groupNums() == 1, "single desc config expected one cache group");
+        spec = config.specForGroup(0);
+    } else {
+        spec = getDefaultSpecFromModel(model_config, parallelism_config, dtype);
+    }
 
     // Using spec interface for block size and scale
     config.kv_block_stride_bytes = spec->block_size_bytes();
@@ -115,11 +165,13 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
                                               static_cast<int>(per_layer_stride_bytes));
 
-    LayerKVCacheSpecs layer_specs;
-    for (int layer_id : all_layer_ids) {
-        layer_specs[static_cast<int64_t>(layer_id)] = {spec};
+    if (model_config.kv_cache_spec_descs.empty()) {
+        LayerKVCacheSpecs layer_specs;
+        for (int layer_id : all_layer_ids) {
+            layer_specs[static_cast<int64_t>(layer_id)] = {spec};
+        }
+        config.fromLayerSpecs(layer_specs);
     }
-    config.fromLayerSpecs(layer_specs);
     return config;
 }
 

@@ -19,6 +19,19 @@ cc_library(
 )
 
 cc_library(
+    name = "kv_cache_spec_desc_types",
+    hdrs = [
+        "KVCacheSpecDescTypes.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_group_type",
+        "//rtp_llm/models_py/bindings/core:types",
+    ],
+)
+
+cc_library(
     name = "block_info",
     hdrs = [
         "BlockInfo.h",
@@ -33,6 +46,7 @@ cc_library(
         "KVCacheSpec.h",
         "KVCacheSpecBase.h",
         "KVCacheSpecDesc.h",
+        "KVCacheSpecDescTypes.h",
         "MHAKVCacheSpec.h",
         "LinearKVCacheSpec.h",
         "MLAKVCacheSpec.h",
@@ -64,6 +78,7 @@ cc_library(
         "KVCacheSpec.h",
         "KVCacheSpecBase.h",
         "KVCacheSpecDesc.h",
+        "KVCacheSpecDescTypes.h",
         "MHAKVCacheSpec.h",
         "LinearKVCacheSpec.h",
         "MLAKVCacheSpec.h",

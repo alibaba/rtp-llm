@@ -252,9 +252,9 @@ void StreamCacheResource::init(int batch_size) {
         const auto& cache_config   = resource_context_.cache_manager->cacheConfig();
         group_nums                 = cache_config.groupNums();
         layer_all_num              = static_cast<int>(cache_config.layer_all_num);
-        layer_to_group             = cache_config.layer_to_group_id;
-        group_types                = cache_config.group_types;
-        layer_to_groups      = cache_config.layer_to_group_ids;
+        layer_to_group             = cache_config.primaryLayerGroupIdsSnapshot();
+        group_types                = cache_config.groupTypesSnapshot();
+        layer_to_groups            = cache_config.layerGroupIdsSnapshot();
         kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
     }
 
@@ -587,9 +587,9 @@ void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
         const auto& cache_config   = resource_context_.cache_manager->cacheConfig();
         group_nums                 = cache_config.groupNums();
         layer_all_num              = static_cast<int>(cache_config.layer_all_num);
-        layer_to_group             = cache_config.layer_to_group_id;
-        group_types                = cache_config.group_types;
-        layer_to_groups      = cache_config.layer_to_group_ids;
+        layer_to_group             = cache_config.primaryLayerGroupIdsSnapshot();
+        group_types                = cache_config.groupTypesSnapshot();
+        layer_to_groups            = cache_config.layerGroupIdsSnapshot();
         kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
     }
     batch_kv_cache_resource_->initGroups(
@@ -764,7 +764,7 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
         return;
     }
 
-    auto type_list = resource_context_.cache_manager->cacheConfig().group_types;
+    auto type_list = resource_context_.cache_manager->cacheConfig().groupTypesSnapshot();
 
     for (size_t i = 0; i < type_list.size(); i++) {
         if (type_list[i] == CacheGroupType::LINEAR) {

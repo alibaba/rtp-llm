@@ -212,6 +212,16 @@ struct FixedStateCacheSpec: public OpaqueKVCacheSpec {
     std::vector<BlockInfo> sliceBlockForPeer(std::vector<BlockInfo> parts,
                                              size_t                 cp_size,
                                              size_t                 peer_idx) const override {
+        return cpSliceDestination(std::move(parts), cp_size, peer_idx);
+    }
+
+    CPTransferPolicy cpTransferPolicy() const override {
+        return CPTransferPolicy::INTRA_BLOCK_SLICE;
+    }
+
+    std::vector<BlockInfo> cpSliceDestination(std::vector<BlockInfo> parts,
+                                              size_t                 cp_size,
+                                              size_t                 peer_idx) const override {
         if (cp_size <= 1) {
             return parts;
         }

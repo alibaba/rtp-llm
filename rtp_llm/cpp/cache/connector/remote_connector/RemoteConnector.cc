@@ -181,8 +181,8 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                             register_buffer_size};
     init_params_ = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
     std::vector<int32_t> full_group_ids, linear_group_ids;
-    for (int32_t group_id = 0; static_cast<size_t>(group_id) < cache_config.group_types.size(); group_id++) {
-        if (cache_config.group_types[group_id] == CacheGroupType::FULL) {
+    for (int32_t group_id = 0; group_id < cache_config.groupNums(); group_id++) {
+        if (cache_config.typeForGroup(static_cast<size_t>(group_id)) == CacheGroupType::FULL) {
             full_group_ids.push_back(group_id);
         } else {
             linear_group_ids.push_back(group_id);

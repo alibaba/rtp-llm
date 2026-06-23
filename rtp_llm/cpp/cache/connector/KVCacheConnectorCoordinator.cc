@@ -18,15 +18,19 @@ namespace rtp_llm {
 namespace {
 
 CacheGroupType groupTypeForConnector(const CacheConfig& cache_config, int group_id) {
-    if (group_id >= 0 && static_cast<size_t>(group_id) < cache_config.group_types.size()) {
-        return cache_config.group_types[static_cast<size_t>(group_id)];
+    if (group_id >= 0 && group_id < cache_config.groupNums()) {
+        return cache_config.typeForGroup(static_cast<size_t>(group_id));
     }
     return CacheGroupType::FULL;
 }
 
-bool isCpCompactFixedGroup(const CacheConfig& cache_config, int group_id, int cp_size) {
-    if (cp_size <= 1 || groupTypeForConnector(cache_config, group_id) == CacheGroupType::FULL || group_id < 0
+bool isCpCompactSliceGroup(const CacheConfig& cache_config, int group_id, int cp_size) {
+    if (cp_size <= 1 || group_id < 0 || group_id >= cache_config.groupNums()
         || static_cast<size_t>(group_id) >= cache_config.group_seq_size_per_block.size()) {
+        return false;
+    }
+    const auto& spec = cache_config.specForGroup(static_cast<size_t>(group_id));
+    if (!spec || !spec->supportsCpSlice()) {
         return false;
     }
     const auto row_tokens = cache_config.group_seq_size_per_block[static_cast<size_t>(group_id)];
@@ -65,10 +69,10 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
     KVCacheResource selected = source;
     selected.initGroups(source.groupNums(),
                         static_cast<int>(cache_config.layer_all_num),
-                        cache_config.layer_to_group_id,
+                        cache_config.primaryLayerGroupIdsSnapshot(),
                         cache_config.kernelBlocksPerKvBlock(),
                         group_types,
-                        cache_config.layer_to_group_ids);
+                        cache_config.layerGroupIdsSnapshot());
     selected.setCacheKeys(selected_keys);
     const bool selected_aligned = selectedLastRankKeysAreAligned(source, cp_size);
     selected.setLastBlockAligned(selected_aligned);
@@ -89,10 +93,10 @@ KVCacheResource makeCpShardedConnectorResource(const KVCacheResource& source,
         BlockIndicesType dst_blocks;
         dst_blocks.reserve(selected_keys.size());
 
-        if (isCpCompactFixedGroup(cache_config, gid, cp_size)) {
-            // DSV4 fixed/SWA groups can be CP-compact by using a row size of
-            // seq_size_per_block * cp_size, so their block list is already in
-            // the canonical last-rank key namespace.
+        if (isCpCompactSliceGroup(cache_config, gid, cp_size)) {
+            // Intra-block CP-sliced groups can be compact by using a row size
+            // of seq_size_per_block * cp_size, so their block list is already
+            // in the canonical last-rank key namespace.
             for (size_t i = 0; i < selected_keys.size(); ++i) {
                 dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
             }

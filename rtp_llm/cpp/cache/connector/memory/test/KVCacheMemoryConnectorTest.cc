@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <execinfo.h>
 #include <map>
+#include <numeric>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -115,6 +116,45 @@ std::string joinPaths(const std::vector<std::string>& paths) {
     return joined;
 }
 
+void initResourceGroupsForConfig(KVCacheResource& resource, const CacheConfig& config) {
+    resource.initGroups(config.groupNums(),
+                        static_cast<int>(config.layer_all_num),
+                        config.primaryLayerGroupIdsSnapshot(),
+                        /*kernel_blocks_per_kv_block=*/1,
+                        config.groupTypesSnapshot(),
+                        config.layerGroupIdsSnapshot());
+}
+
+void setGroupStridesForConfig(CacheConfig& config,
+                              const std::vector<size_t>& kv_block_stride_bytes,
+                              const std::vector<size_t>& kv_scale_stride_bytes) {
+    std::vector<uint32_t> block_nums = config.groupBlockNumsSnapshot();
+    if (block_nums.empty()) {
+        block_nums.assign(static_cast<size_t>(config.groupNums()), config.block_num);
+    }
+    std::vector<size_t> block_size_bytes;
+    block_size_bytes.reserve(kv_block_stride_bytes.size());
+    for (size_t gid = 0; gid < kv_block_stride_bytes.size(); ++gid) {
+        block_size_bytes.push_back(
+            (kv_block_stride_bytes[gid] + kv_scale_stride_bytes[gid]) * config.layerIdsForGroup(gid).size());
+    }
+    config.setGroupBlockLayout(block_nums, kv_block_stride_bytes, kv_scale_stride_bytes, block_size_bytes);
+}
+
+void makeConfigUseZeroStrideSpec(CacheConfig& config) {
+    auto spec                = std::make_shared<FixedStateCacheSpec>();
+    spec->type               = KVCacheSpecType::OpaqueState;
+    spec->dtype              = config.dtype;
+    spec->store_dtype        = config.dtype;
+    spec->state_dim          = 0;
+    spec->entries_per_block  = 1;
+    spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);
+    std::vector<int> layer_ids(static_cast<size_t>(config.layer_all_num));
+    std::iota(layer_ids.begin(), layer_ids.end(), 0);
+    config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    setGroupStridesForConfig(config, {0}, {0});
+}
+
 CacheConfig createDsv4TypedConnectorConfig() {
     constexpr size_t kDsv4PoolNum = 7;
 
@@ -129,39 +169,33 @@ CacheConfig createDsv4TypedConnectorConfig() {
     config.use_typed_cache_regions      = true;
     config.use_opaque_kv_cache_store    = true;
     config.is_sparse                    = true;
-    config.group_tags                   = {
+    const std::vector<std::string> group_tags = {
         "csa_kv", "hca_kv", "indexer_kv", "indexer_state", "csa_state", "hca_state", "swa_kv"};
-    config.group_types                  = {CacheGroupType::FULL,
-                                           CacheGroupType::FULL,
-                                           CacheGroupType::FULL,
-                                           CacheGroupType::SWA,
-                                           CacheGroupType::SWA,
-                                           CacheGroupType::SWA,
-                                           CacheGroupType::SWA};
+    const std::vector<CacheGroupType> group_types = {CacheGroupType::FULL,
+                                                     CacheGroupType::FULL,
+                                                     CacheGroupType::FULL,
+                                                     CacheGroupType::SWA,
+                                                     CacheGroupType::SWA,
+                                                     CacheGroupType::SWA,
+                                                     CacheGroupType::SWA};
+    std::vector<CacheGroupPolicy> group_policies;
     for (size_t gid = 0; gid < kDsv4PoolNum; ++gid) {
-        config.group_policies.push_back(defaultCacheGroupPolicy(config.group_types[gid]));
+        group_policies.push_back(defaultCacheGroupPolicy(group_types[gid]));
     }
-    config.group_policies[5].reuse_policy         = CacheReusePolicy::NON_REUSABLE;
-    config.group_policies[5].active_tail_blocks   = 1;
-    config.group_policies[5].validate_tail_blocks = false;
+    group_policies[5].reuse_policy         = CacheReusePolicy::NON_REUSABLE;
+    group_policies[5].active_tail_blocks   = 1;
+    group_policies[5].validate_tail_blocks = false;
     for (size_t gid : {3u, 4u, 5u, 6u}) {
-        config.group_policies[gid].evict_policy = CacheEvictPolicy::INDEPENDENT;
+        group_policies[gid].evict_policy = CacheEvictPolicy::INDEPENDENT;
     }
-    config.group_kv_block_stride_bytes  = {16, 24, 32, 8, 12, 20, 28};
-    config.group_kv_scale_stride_bytes  = std::vector<size_t>(kDsv4PoolNum, 0);
-    config.layer_to_group_id            = {6, 6};
-    config.layer_to_group_ids           = {{1, 5, 6}, {0, 2, 3, 4, 6}};
-    config.layer_group_types            = {CacheGroupType::SWA, CacheGroupType::SWA};
-    config.layer_to_block_stride_bytes  = {72, 96};
-    config.cache_specs                  = std::vector<std::shared_ptr<KVCacheSpec>>(kDsv4PoolNum);
-    config.layer_ids                    = std::vector<std::vector<int>>(kDsv4PoolNum);
-    config.global_layer_ids             = std::vector<std::vector<int>>(kDsv4PoolNum);
-    config.layer_tag_to_group_id        = std::vector<std::map<std::string, int>>(config.layer_all_num);
+    const std::vector<size_t> group_kv_block_stride_bytes = {16, 24, 32, 8, 12, 20, 28};
+    const std::vector<size_t> group_kv_scale_stride_bytes(kDsv4PoolNum, 0);
+    std::vector<std::vector<int>> layers_by_group(kDsv4PoolNum);
+    config.layer_to_block_stride_bytes = {72, 96};
 
     auto add_tag = [&](int layer, const std::string& tag, int gid) {
-        config.layer_tag_to_group_id[static_cast<size_t>(layer)][tag] = gid;
-        config.layer_ids[static_cast<size_t>(gid)].push_back(layer);
-        config.global_layer_ids[static_cast<size_t>(gid)].push_back(layer);
+        (void)tag;
+        layers_by_group[static_cast<size_t>(gid)].push_back(layer);
     };
     add_tag(0, "hca_kv", 1);
     add_tag(0, "hca_state", 5);
@@ -172,29 +206,38 @@ CacheConfig createDsv4TypedConnectorConfig() {
     add_tag(1, "csa_state", 4);
     add_tag(1, "swa_kv", 6);
 
+    std::vector<KVCacheSpecPtr> specs(kDsv4PoolNum);
+    std::vector<size_t>         group_block_size_bytes(kDsv4PoolNum, 0);
     for (size_t gid = 0; gid < kDsv4PoolNum; ++gid) {
-        if (config.group_types[gid] == CacheGroupType::FULL) {
+        if (group_types[gid] == CacheGroupType::FULL) {
             auto spec                = std::make_shared<CompressedKVCacheSpec>();
-            spec->tag                = config.group_tags[gid];
+            spec->tag                = group_tags[gid];
             spec->type               = KVCacheSpecType::OpaqueKV;
             spec->dtype              = DataType::TYPE_UINT8;
             spec->store_dtype        = DataType::TYPE_UINT8;
-            spec->entry_elems        = static_cast<uint32_t>(config.group_kv_block_stride_bytes[gid]);
+            spec->entry_elems        = static_cast<uint32_t>(group_kv_block_stride_bytes[gid]);
             spec->entries_per_block  = 1;
             spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);
-            config.cache_specs[gid]  = spec;
+            specs[gid]               = spec;
         } else {
             auto spec                = std::make_shared<FixedStateCacheSpec>();
-            spec->tag                = config.group_tags[gid];
+            spec->tag                = group_tags[gid];
             spec->type               = KVCacheSpecType::OpaqueState;
             spec->dtype              = DataType::TYPE_UINT8;
             spec->store_dtype        = DataType::TYPE_UINT8;
-            spec->state_dim          = static_cast<uint32_t>(config.group_kv_block_stride_bytes[gid]);
+            spec->state_dim          = static_cast<uint32_t>(group_kv_block_stride_bytes[gid]);
             spec->entries_per_block  = 1;
             spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);
-            config.cache_specs[gid]  = spec;
+            specs[gid]               = spec;
         }
+        group_block_size_bytes[gid] = group_kv_block_stride_bytes[gid] * layers_by_group[gid].size();
     }
+    config.fromGroupedSpecs(specs, layers_by_group, group_types, group_tags);
+    config.setGroupPolicies(group_policies);
+    config.setGroupBlockLayout(std::vector<uint32_t>(kDsv4PoolNum, config.block_num),
+                               group_kv_block_stride_bytes,
+                               group_kv_scale_stride_bytes,
+                               group_block_size_bytes);
 
     return config;
 }
@@ -297,7 +340,6 @@ private:
         mha_spec->seq_size_per_block = seq_size_per_block;
         mha_spec->dtype              = mha_dtype;
         mha_spec->type               = KVCacheSpecType::MultiHeadAttention;
-        config.cache_specs.push_back(mha_spec);
         // Keep CacheConfig sizes consistent with current business definition (see CacheConfig.h):
         // - kv_block_stride_bytes / kv_scale_stride_bytes are "per-layer" strides for one logical block
         // - kv_block_size_bytes / kv_scale_size_bytes are "all layers" totals for one logical block
@@ -317,10 +359,7 @@ private:
         for (int i = 0; i < layer_num; ++i) {
             layer_ids[i] = i;
         }
-        config.layer_ids.push_back(layer_ids);
-        // SingleTypeKVCacheAllocator::init() expects global_layer_ids[0] to exist.
-        // In these unit tests we only have one "model group", so keep it consistent with layer_ids.
-        config.global_layer_ids.push_back(layer_ids);
+        config.fromGroupedSpecs({mha_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
 
         return config;
     }
@@ -736,8 +775,7 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSyncTimeoutMs
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenBlockSizeBytesZero) {
     auto cfg = cache_config_;
     cfg.layer_to_block_stride_bytes.clear();
-    cfg.group_kv_block_stride_bytes.clear();
-    cfg.group_kv_scale_stride_bytes.clear();
+    makeConfigUseZeroStrideSpec(cfg);
     cfg.kv_block_stride_bytes = 0;
     cfg.kv_scale_stride_bytes = 0;
     cfg.kv_block_size_bytes   = 0;
@@ -756,6 +794,9 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenPoolTooSmallForBlockSize
     auto cfg = cache_config_;
     // Make sure pool_size_mb * 1MB / total_stride_bytes == 0 -> createBlockPool() should fail with CHECK.
     cfg.layer_to_block_stride_bytes.assign(static_cast<size_t>(cfg.layer_num), 1024 * 1024);  // 1MB per layer
+    setGroupStridesForConfig(cfg,
+                             std::vector<size_t>(static_cast<size_t>(cfg.groupNums()), 1024 * 1024),
+                             std::vector<size_t>(static_cast<size_t>(cfg.groupNums()), 0));
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 1;     // 1MB
@@ -1004,8 +1045,7 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenMemoryCacheSizeMbZero
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenBlockSizeBytesZero) {
     auto cfg = cache_config_;
     cfg.layer_to_block_stride_bytes.clear();
-    cfg.group_kv_block_stride_bytes.clear();
-    cfg.group_kv_scale_stride_bytes.clear();
+    makeConfigUseZeroStrideSpec(cfg);
     cfg.kv_block_stride_bytes = 0;
     cfg.kv_scale_stride_bytes = 0;
     cfg.kv_block_size_bytes   = 0;
@@ -1025,6 +1065,9 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenCreateBlockPoolFails)
     // Force createBlockPool() to compute block_num=0:
     // block_num = pool_size_mb * 1MB / total_stride_bytes.
     cfg.layer_to_block_stride_bytes.assign(static_cast<size_t>(cfg.layer_num), 1024 * 1024);  // 1MB per layer
+    setGroupStridesForConfig(cfg,
+                             std::vector<size_t>(static_cast<size_t>(cfg.groupNums()), 1024 * 1024),
+                             std::vector<size_t>(static_cast<size_t>(cfg.groupNums()), 0));
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 1;     // 1MB
@@ -1078,9 +1121,12 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_PrefixPoolRatioChangesStateCapa
 
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_PrefixPoolRejectsRatioWithNoUsableBlocks) {
     auto cfg = createDsv4TypedConnectorConfig();
-    cfg.group_kv_block_stride_bytes[0] = 400 * 1024;
-    cfg.group_kv_block_stride_bytes[1] = 400 * 1024;
-    cfg.group_kv_block_stride_bytes[2] = 400 * 1024;
+    auto kv_strides = cfg.groupKvBlockStrideBytesSnapshot();
+    auto scale_strides = cfg.groupKvScaleStrideBytesSnapshot();
+    kv_strides[0] = 400 * 1024;
+    kv_strides[1] = 400 * 1024;
+    kv_strides[2] = 400 * 1024;
+    setGroupStridesForConfig(cfg, kv_strides, scale_strides);
 
     auto kv_cfg = kv_cache_config_;
     kv_cfg.memory_cache_size_mb                    = 1;
@@ -1300,14 +1346,10 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForRead_HandlesDiskPartial
     auto make_resource = [&](CacheKeyType key, bool compressed_required, bool state_required) {
         auto res = std::make_shared<KVCacheResource>();
         res->cacheKeys() = {key};
-        res->initGroups(/*group_num=*/7,
-                        /*layer_num=*/cfg.layer_all_num,
-                        cfg.layer_to_group_id,
-                        /*kernel_blocks_per_kv_block=*/1,
-                        cfg.group_types,
-                        cfg.layer_to_group_ids);
+        initResourceGroupsForConfig(*res, cfg);
+        const auto layer_group_ids = cfg.layerGroupIdsSnapshot();
         for (int layer = 0; layer < cfg.layer_all_num; ++layer) {
-            for (const int gid : cfg.layer_to_group_ids[static_cast<size_t>(layer)]) {
+            for (const int gid : layer_group_ids[static_cast<size_t>(layer)]) {
                 res->mutableBlockIds(layer, gid).assign({NULL_BLOCK_IDX});
             }
         }
@@ -1521,14 +1563,10 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsPartialMe
 
     auto resource         = std::make_shared<KVCacheResource>();
     resource->cacheKeys() = {key};
-    resource->initGroups(/*group_num=*/7,
-                         /*layer_num=*/cfg.layer_all_num,
-                         cfg.layer_to_group_id,
-                         /*kernel_blocks_per_kv_block=*/1,
-                         cfg.group_types,
-                         cfg.layer_to_group_ids);
+    initResourceGroupsForConfig(*resource, cfg);
+    const auto layer_group_ids = cfg.layerGroupIdsSnapshot();
     for (int layer = 0; layer < cfg.layer_all_num; ++layer) {
-        for (const int gid : cfg.layer_to_group_ids[static_cast<size_t>(layer)]) {
+        for (const int gid : layer_group_ids[static_cast<size_t>(layer)]) {
             resource->mutableBlockIds(layer, gid).assign({NULL_BLOCK_IDX});
         }
     }
@@ -1646,14 +1684,10 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForWrite_ProtectsDiskParti
 
     auto resource         = std::make_shared<KVCacheResource>();
     resource->cacheKeys() = {key};
-    resource->initGroups(/*group_num=*/7,
-                         /*layer_num=*/cfg.layer_all_num,
-                         cfg.layer_to_group_id,
-                         /*kernel_blocks_per_kv_block=*/1,
-                         cfg.group_types,
-                         cfg.layer_to_group_ids);
+    initResourceGroupsForConfig(*resource, cfg);
+    const auto layer_group_ids = cfg.layerGroupIdsSnapshot();
     for (int layer = 0; layer < cfg.layer_all_num; ++layer) {
-        for (const int gid : cfg.layer_to_group_ids[static_cast<size_t>(layer)]) {
+        for (const int gid : layer_group_ids[static_cast<size_t>(layer)]) {
             resource->mutableBlockIds(layer, gid).assign({NULL_BLOCK_IDX});
         }
     }
@@ -1709,12 +1743,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatchPrefixStopsWhenRequiredStateSwaMiss
     CacheKeysType cache_keys{83001, 83002, 83999};
     auto          resource = std::make_shared<KVCacheResource>();
     resource->cacheKeys()  = cache_keys;
-    resource->initGroups(/*group_num=*/7,
-                         /*layer_num=*/cfg.layer_all_num,
-                         cfg.layer_to_group_id,
-                         /*kernel_blocks_per_kv_block=*/1,
-                         cfg.group_types,
-                         cfg.layer_to_group_ids);
+    initResourceGroupsForConfig(*resource, cfg);
     for (const auto& slot : slots) {
         resource->mutableBlockIds(slot.layer_id, slot.group_id)
             .assign({static_cast<BlockIdxType>(100 + slot.group_id),
@@ -1771,13 +1800,9 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndGroupSlots)
     auto cfg          = cache_config_;
     cfg.layer_num     = 1;
     cfg.layer_all_num = 1;
-    cfg.layer_to_group_id.assign(1, 0);
-    cfg.layer_to_group_ids.assign(1, std::vector<int>{0, 1});
-    cfg.layer_tag_to_group_id.assign(1, std::map<std::string, int>{{"csa_kv", 0}, {"swa_kv", 1}});
-    cfg.group_tags                  = {"csa_kv", "swa_kv"};
-    cfg.group_types                 = {CacheGroupType::FULL, CacheGroupType::FULL};
-    cfg.group_kv_block_stride_bytes = {16, 32};
-    cfg.group_kv_scale_stride_bytes = {0, 0};
+    auto spec = cfg.specForGroup(0);
+    cfg.fromGroupedSpecs({spec, spec}, {{0}, {0}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"csa_kv", "swa_kv"});
+    setGroupStridesForConfig(cfg, {16, 32}, {0, 0});
     cfg.layer_to_block_stride_bytes = {999};
 
     auto kv_cfg                         = kv_cache_config_;
@@ -1800,12 +1825,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_UsesLayerAndGroupSlots)
 
     auto resource         = std::make_shared<KVCacheResource>();
     resource->cacheKeys() = {101, 102, 103};
-    resource->initGroups(/*group_num=*/2,
-                         /*layer_num=*/1,
-                         cfg.layer_to_group_id,
-                         /*kernel_blocks_per_kv_block=*/1,
-                         cfg.group_types,
-                         cfg.layer_to_group_ids);
+    initResourceGroupsForConfig(*resource, cfg);
     resource->mutableBlockIds(/*group_id=*/0).assign({11, 12, 13});
     resource->mutableBlockIds(/*group_id=*/1).assign({21, NULL_BLOCK_IDX, 23});
 
@@ -1844,12 +1864,7 @@ TEST_F(KVCacheMemoryConnectorTest, buildCopyPlanForWrite_SkipsHCAStateSlots) {
 
     auto resource         = std::make_shared<KVCacheResource>();
     resource->cacheKeys() = {1001, 1002};
-    resource->initGroups(/*group_num=*/7,
-                         /*layer_num=*/cfg.layer_all_num,
-                         cfg.layer_to_group_id,
-                         /*kernel_blocks_per_kv_block=*/1,
-                         cfg.group_types,
-                         cfg.layer_to_group_ids);
+    initResourceGroupsForConfig(*resource, cfg);
     resource->mutableBlockIds(0, 1).assign({11, 12});
     resource->mutableBlockIds(0, 5).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
     resource->mutableBlockIds(0, 6).assign({61, 62});
@@ -2997,7 +3012,6 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     cache_config_.use_mla               = true;
     cache_config_.is_sparse             = false;
     cache_config_.dtype                 = mla_spec->dtype;
-    cache_config_.cache_specs           = {mla_spec};
     cache_config_.kv_block_stride_bytes = kKvBytesPerTok * kSeqPerBlock;
     cache_config_.kv_scale_stride_bytes = kScaleBytesPerTok * kSeqPerBlock;
     cache_config_.kv_block_size_bytes   = static_cast<size_t>(kLayerNum) * cache_config_.kv_block_stride_bytes;
@@ -3010,10 +3024,8 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     for (int i = 0; i < kLayerNum; ++i) {
         layer_ids[i] = i;
     }
-    cache_config_.layer_ids.clear();
-    cache_config_.global_layer_ids.clear();
-    cache_config_.layer_ids.push_back(layer_ids);
-    cache_config_.global_layer_ids.push_back(layer_ids);
+    cache_config_.fromGroupedSpecs({mla_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    setGroupStridesForConfig(cache_config_, {cache_config_.kv_block_stride_bytes}, {cache_config_.kv_scale_stride_bytes});
 
     ASSERT_EQ(mla_spec->block_size_bytes(), cache_config_.kv_block_stride_bytes);
 
@@ -3296,14 +3308,8 @@ protected:
         swa_spec->seq_size_per_block = seq_size_per_block;
         swa_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
 
-        config.cache_specs        = {full_spec, swa_spec};
-        config.group_types        = {CacheGroupType::FULL, CacheGroupType::SWA};
-        config.group_tags         = {"default", "swa_kv"};
-
         const size_t full_stride           = full_spec->block_size_bytes();
         const size_t swa_stride            = swa_spec->block_size_bytes();
-        config.group_kv_block_stride_bytes = {full_stride, swa_stride};
-        config.group_kv_scale_stride_bytes = {0, 0};
 
         config.dtype                 = full_spec->dtype;
         config.kv_block_stride_bytes = std::max(full_stride, swa_stride);
@@ -3318,18 +3324,11 @@ protected:
             full_layer_ids[i] = i;
             swa_layer_ids[i]  = i;
         }
-        config.layer_ids        = {full_layer_ids, swa_layer_ids};
-        config.global_layer_ids = {full_layer_ids, swa_layer_ids};
-
-        config.layer_to_group_id.assign(layer_num, 0);
-        config.layer_to_group_ids.resize(layer_num);
-        config.layer_tag_to_group_id.assign(layer_num, {});
-        for (int i = 0; i < layer_num; ++i) {
-            config.layer_to_group_ids[i]                = {0, 1};
-            config.layer_tag_to_group_id[i]["default"] = 0;
-            config.layer_tag_to_group_id[i]["swa_kv"]  = 1;
-        }
-        config.layer_group_types.assign(layer_num, CacheGroupType::FULL);
+        config.fromGroupedSpecs({full_spec, swa_spec},
+                                {full_layer_ids, swa_layer_ids},
+                                {CacheGroupType::FULL, CacheGroupType::SWA},
+                                {"default", "swa_kv"});
+        setGroupStridesForConfig(config, {full_stride, swa_stride}, {0, 0});
         config.layer_to_block_stride_bytes.assign(layer_num, static_cast<int>(full_stride));
 
         config.use_independent_block_pools = true;
@@ -3370,13 +3369,7 @@ protected:
         auto         res       = std::make_shared<KVCacheResource>();
         const size_t layer_num = static_cast<size_t>(cfg.layer_all_num);
 
-        res->initGroups(
-            /*group_num=*/2,
-            /*layer_num=*/cfg.layer_all_num,
-            cfg.layer_to_group_id,
-            /*kernel_blocks_per_kv_block=*/1,
-            cfg.group_types,
-            cfg.layer_to_group_ids);
+        initResourceGroupsForConfig(*res, cfg);
 
         res->resizeBlocks(static_cast<int>(cache_keys.size()), NULL_BLOCK_IDX);
 
@@ -3471,7 +3464,6 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_PureFullUsesSinglePool) {
     spec->size_per_head          = 128;
     spec->seq_size_per_block     = 8;
     spec->dtype                  = rtp_llm::DataType::TYPE_FP16;
-    config.cache_specs           = {spec};
     config.dtype                 = spec->dtype;
     config.kv_block_stride_bytes = spec->block_size_bytes();
     config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
@@ -3481,8 +3473,7 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_PureFullUsesSinglePool) {
     const size_t per_layer       = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
     config.layer_to_block_stride_bytes.assign(4, static_cast<int>(per_layer));
     std::vector<int> ids = {0, 1, 2, 3};
-    config.layer_ids.push_back(ids);
-    config.global_layer_ids.push_back(ids);
+    config.fromGroupedSpecs({spec}, {ids}, {CacheGroupType::FULL}, {"default"});
 
     allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator_->init());

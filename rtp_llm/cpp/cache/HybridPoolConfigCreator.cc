@@ -73,6 +73,33 @@ KVCacheSpecPtr getHybridSpecByTag(const ModelConfig& model_config, const std::st
     return result->clone();
 }
 
+LayerKVCacheSpecs layerSpecsFromDescs(const ModelConfig& model_config, rtp_llm::DataType dtype) {
+    SpecBuildContext ctx;
+    ctx.dtype = dtype;
+    ctx.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+
+    LayerKVCacheSpecs layer_specs;
+    for (const auto& [layer_id, layer_descs] : model_config.kv_cache_spec_descs) {
+        auto& specs = layer_specs[layer_id];
+        specs.reserve(layer_descs.size());
+        for (auto desc : layer_descs) {
+            desc.dtype = desc.dtype == DataType::TYPE_INVALID ? dtype : desc.dtype;
+            desc.seq_size_per_block = desc.seq_size_per_block == 0 ? ctx.seq_size_per_block : desc.seq_size_per_block;
+            specs.push_back(SpecBuilder::build(desc, ctx));
+        }
+    }
+    return layer_specs;
+}
+
+ModelConfig modelConfigWithDescSpecs(const ModelConfig& model_config, rtp_llm::DataType dtype) {
+    if (model_config.kv_cache_spec_descs.empty()) {
+        return model_config;
+    }
+    auto model_copy = model_config;
+    model_copy.kv_cache_specs = layerSpecsFromDescs(model_config, dtype);
+    return model_copy;
+}
+
 void prepareFullAttentionSpec(KVCacheSpecPtr            spec,
                               const ModelConfig&       model_config,
                               const ParallelismConfig& parallelism_config,
@@ -139,23 +166,26 @@ void prepareLinearAttentionSpec(KVCacheSpecPtr            spec,
     // ssm_state_dtype, conv_state_dtype are already populated by Python.
 }
 
-void appendGroup(CacheConfig&            config,
-                 const std::vector<int>& layer_ids,
-                 CacheGroupType          group_type,
-                 KVCacheSpecPtr          spec,
-                 std::string             tag = "") {
+void appendGroup(std::vector<KVCacheSpecPtr>&    specs,
+                 std::vector<std::vector<int>>&  layers_by_group,
+                 std::vector<CacheGroupType>&    types,
+                 std::vector<CacheGroupPolicy>&  policies,
+                 std::vector<std::string>&       tags,
+                 const std::vector<int>&         layer_ids,
+                 CacheGroupType                  group_type,
+                 KVCacheSpecPtr                  spec,
+                 std::string                     tag = "") {
     if (layer_ids.empty()) {
         return;
     }
     if (tag.empty() && spec != nullptr) {
         tag = spec->tag;
     }
-    config.global_layer_ids.push_back(layer_ids);
-    config.layer_ids.push_back(layer_ids);
-    config.cache_specs.push_back(spec);
-    config.group_types.push_back(group_type);
-    config.group_policies.push_back(CacheConfig::cacheGroupPolicyForSpec(spec, group_type));
-    config.group_tags.push_back(std::move(tag));
+    specs.push_back(spec);
+    layers_by_group.push_back(layer_ids);
+    types.push_back(group_type);
+    policies.push_back(CacheConfig::cacheGroupPolicyForSpec(spec, group_type));
+    tags.push_back(std::move(tag));
 }
 
 size_t kernelBlocksPerKvBlockForGroup(const CacheConfig& config, size_t group_id) {
@@ -233,13 +263,6 @@ void populateHybridAttentionGroups(CacheConfig&             config,
     const auto dtype  = MemoryEvaluationHelper::getDataTypeForCache(model_config);
     const auto layers = splitHybridPoolLayers(model_config);
 
-    config.cache_specs.clear();
-    config.global_layer_ids.clear();
-    config.layer_ids.clear();
-    config.group_types.clear();
-    config.group_policies.clear();
-    config.group_tags.clear();
-
     auto full_spec   = getHybridSpecByTag(model_config, "full");
     auto swa_spec    = full_spec->clone();
     auto linear_spec = getHybridSpecByTag(model_config, "linear");
@@ -248,9 +271,19 @@ void populateHybridAttentionGroups(CacheConfig&             config,
     prepareFullAttentionSpec(swa_spec, model_config, parallelism_config, dtype);
     prepareLinearAttentionSpec(linear_spec, model_config, parallelism_config, dtype);
 
-    appendGroup(config, layers.full_layers, CacheGroupType::FULL, full_spec);
-    appendGroup(config, layers.swa_layers, CacheGroupType::SWA, swa_spec);
-    appendGroup(config, layers.linear_layers, CacheGroupType::LINEAR, linear_spec);
+    std::vector<KVCacheSpecPtr>    specs;
+    std::vector<std::vector<int>>  layers_by_group;
+    std::vector<CacheGroupType>    types;
+    std::vector<CacheGroupPolicy>  policies;
+    std::vector<std::string>       tags;
+
+    appendGroup(specs, layers_by_group, types, policies, tags, layers.full_layers, CacheGroupType::FULL, full_spec);
+    appendGroup(specs, layers_by_group, types, policies, tags, layers.swa_layers, CacheGroupType::SWA, swa_spec);
+    appendGroup(
+        specs, layers_by_group, types, policies, tags, layers.linear_layers, CacheGroupType::LINEAR, linear_spec);
+
+    config.fromGroupedSpecs(specs, layers_by_group, types, tags);
+    config.setGroupPolicies(policies);
 }
 
 CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_config,
@@ -259,6 +292,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
                                             bool                     is_mtp,
                                             int                      gen_num_per_cycle) {
     const auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
+    const auto spec_model_config = modelConfigWithDescSpecs(model_config, dtype);
 
     CacheConfig config;
     config.layer_num          = static_cast<uint32_t>(model_config.num_layers);
@@ -276,27 +310,17 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     // kv_cache_specs are present and well-formed.
     const bool use_dsv4_cache_plan = !model_config.attn_config.layer_compress_ratios.empty();
     if (use_dsv4_cache_plan) {
-        RTP_LLM_CHECK_WITH_INFO(!model_config.kv_cache_specs.empty(),
-                                "DSV4 cache config requires model_config.kv_cache_specs; "
-                                "layer_compress_ratios fallback is disabled");
+        RTP_LLM_CHECK_WITH_INFO(!spec_model_config.kv_cache_specs.empty(),
+                                "DSV4 cache config requires model_config.kv_cache_spec_descs or kv_cache_specs");
         Dsv4CachePlanBuilder::applyConfig(
-            config, model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+            config, spec_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     } else {
         RTP_LLM_CHECK_WITH_INFO(model_config.hybrid_attention_config.enable_hybrid_attention,
                                 "HybridPoolConfigCreator requires DSV4 kv_cache_specs or hybrid attention");
-        populateHybridAttentionGroups(config, model_config, parallelism_config);
+        populateHybridAttentionGroups(config, spec_model_config, parallelism_config);
     }
 
-    RTP_LLM_CHECK_WITH_INFO(!config.cache_specs.empty(), "hybrid-pool config produced no cache specs");
-    auto specs           = config.cache_specs;
-    auto layers_by_group = config.layer_ids;
-    auto types           = config.group_types;
-    auto tags            = config.group_tags;
-    auto policies        = config.group_policies;
-    config.fromGroupedSpecs(specs, layers_by_group, types, tags);
-    if (policies.size() == config.group_policies.size()) {
-        config.setGroupPolicies(policies);
-    }
+    RTP_LLM_CHECK_WITH_INFO(config.groupNums() > 0, "hybrid-pool config produced no cache specs");
     setupIndependentPoolSizes(config, is_mtp);
     return config;
 }

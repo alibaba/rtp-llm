@@ -54,9 +54,10 @@ CacheConfig makeCPHybridConfig() {
     full_spec->size_per_head      = 1;
     full_spec->seq_size_per_block = static_cast<uint32_t>(config.seq_size_per_block);
 
-    config.layer_ids        = {{0, 1}, {2, 3}};
-    config.global_layer_ids = config.layer_ids;
-    config.cache_specs      = {linear_spec, full_spec};
+    config.fromGroupedSpecs({linear_spec, full_spec},
+                            {{0, 1}, {2, 3}},
+                            {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                            {"linear", "full"});
 
     config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
@@ -64,12 +65,6 @@ CacheConfig makeCPHybridConfig() {
     config.kv_scale_size_bytes   = 0;
     config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 
-    config.layer_to_group_id.assign(static_cast<size_t>(config.layer_num), 0);
-    for (size_t gid = 0; gid < config.layer_ids.size(); ++gid) {
-        for (int layer_id : config.layer_ids[gid]) {
-            config.layer_to_group_id[static_cast<size_t>(layer_id)] = static_cast<int>(gid);
-        }
-    }
     return config;
 }
 
@@ -87,11 +82,12 @@ CompleteTokenIdsPtr makeTokens(int batch_size, int seq_length, int seq_size_per_
     return tokens;
 }
 
-BatchKVCacheResourcePtr makeBatchRes(
-    int batch_size, int group_nums, int layer_num, const std::vector<int>& layer_to_group_id, CacheKeysType keys) {
+BatchKVCacheResourcePtr makeBatchRes(int batch_size, const CacheConfig& config, CacheKeysType keys) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(batch_size);
-    res->initGroups(group_nums, layer_num, layer_to_group_id);
+    res->initGroups(config.groupNums(),
+                    static_cast<int>(config.layer_all_num),
+                    config.primaryLayerGroupIdsSnapshot());
     for (int b = 0; b < batch_size; ++b) {
         res->setBatchCacheKeys(b, keys);
     }
@@ -131,11 +127,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, NullMapperIsPassthrough) {
     ASSERT_TRUE(allocator->init());
 
     const int gid_full  = 1;
-    auto      batch_res = makeBatchRes(/*batch_size=*/1,
-                                  /*group_nums=*/2,
-                                  /*layer_num=*/static_cast<int>(config.layer_all_num),
-                                  /*layer_to_group_id=*/config.layer_to_group_id,
-                                  CacheKeysType{100, 101, 102, 103});
+    auto      batch_res = makeBatchRes(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
     // seq_len=16 => 4 slots @ block_size=4
     auto       tokens = makeTokens(/*batch=*/1, /*seq_len=*/16, /*sspb=*/4);
     MallocInfo info{batch_res, tokens};
@@ -156,8 +148,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocHalvesFullGroup) {
     ASSERT_TRUE(allocator->init());
 
     const int gid_full  = 1;
-    auto      batch_res = makeBatchRes(
-        1, 2, static_cast<int>(config.layer_all_num), config.layer_to_group_id, CacheKeysType{100, 101, 102, 103});
+    auto      batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
     auto tokens = makeTokens(1, 16, 4);  // 4 logical blocks worth
 
     MallocInfo info{batch_res, tokens};
@@ -193,8 +184,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ReuseHitOnLastRankCanonicalKey) {
     seedCache(block_pool, shared_cache, group_num, gid_full, CacheKeysType{101});
     seedCache(block_pool, shared_cache, group_num, gid_linear, CacheKeysType{101});
 
-    auto batch_res = makeBatchRes(
-        1, 2, static_cast<int>(config.layer_all_num), config.layer_to_group_id, CacheKeysType{100, 101, 102, 103});
+    auto batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
     auto tokens = makeTokens(1, 16, 4);
 
     MallocInfo info{batch_res, tokens};
@@ -223,8 +213,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocSkipsReuseWhenDisabled) {
     const int gid_full = 1;
     seedCache(block_pool, shared_cache, /*group_num=*/2, gid_full, CacheKeysType{101});
 
-    auto batch_res = makeBatchRes(
-        1, 2, static_cast<int>(config.layer_all_num), config.layer_to_group_id, CacheKeysType{100, 101, 102, 103});
+    auto batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
     auto tokens = makeTokens(1, 16, 4);
 
     MallocInfo info{batch_res, tokens};
@@ -250,8 +239,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, InsertIntoCacheUsesCanonicalKeysAndVir
     ASSERT_NE(shared_cache, nullptr);
 
     const int gid_full  = 1;
-    auto      batch_res = makeBatchRes(
-        1, 2, static_cast<int>(config.layer_all_num), config.layer_to_group_id, CacheKeysType{100, 101, 102, 103});
+    auto      batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
 
     // seq_len=16 => allocator computes 4 logical blocks; cp_size=2 keeps 2 per rank.
     auto       tokens = makeTokens(1, 16, 4);
@@ -286,7 +274,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocCpSize4) {
     for (int i = 0; i < 8; ++i) {
         keys.push_back(200 + i);
     }
-    auto batch_res = makeBatchRes(1, 2, static_cast<int>(config.layer_all_num), config.layer_to_group_id, keys);
+    auto batch_res = makeBatchRes(1, config, keys);
     auto tokens    = makeTokens(1, /*seq_len=*/32, 4);  // 8 logical blocks
 
     MallocInfo info{batch_res, tokens};

@@ -153,6 +153,23 @@ std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(
     return convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
 
+BlockAddrInfo KVCacheAllocator::convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const {
+    const int group_id = config_.groupIdForLayerTag(layer_id, tag);
+    return convertIndexToAddr(layer_id, group_id, block_id);
+}
+
+std::vector<BlockInfo>
+KVCacheAllocator::convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const {
+    const int group_id = config_.groupIdForLayerTag(layer_id, tag);
+    return convertIndexToBuffer(layer_id, group_id, block_id);
+}
+
+std::vector<BlockInfo> KVCacheAllocator::convertIndexToBufferByTag(
+    int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const {
+    const int group_id = config_.groupIdForLayerTag(layer_id, tag);
+    return convertIndexToBuffer(layer_id, group_id, block_id, partition_count, partition_id);
+}
+
 void KVCacheAllocator::blockCopy(int src_block_index, int dest_block_index) {
     BlockIdPair copy_mapping{src_block_index, dest_block_index};
     blockBatchCopy(&copy_mapping, &copy_mapping + 1);
@@ -260,10 +277,10 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
     batch_resource->resetBatchSize(1);
     batch_resource->initGroups(config_.groupNums(),
                                static_cast<int>(config_.layer_all_num),
-                               config_.layer_to_group_id,
+                               config_.primaryLayerGroupIdsSnapshot(),
                                config_.kernelBlocksPerKvBlock(),
-                               config_.group_types,
-                               config_.layer_to_group_ids);
+                               config_.groupTypesSnapshot(),
+                               config_.layerGroupIdsSnapshot());
     batch_resource->setLastBlockAligned(true);
 
     for (int gid = 0; gid < config_.groupNums(); ++gid) {
