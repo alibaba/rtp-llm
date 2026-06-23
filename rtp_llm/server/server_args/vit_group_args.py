@@ -215,3 +215,76 @@ def init_vit_group_args(parser, vit_config):
         default="round_robin",
         help="VIT代理服务器的负载均衡策略，可选值: 'round_robin' 或 'least_connections'",
     )
+    # ---- Encoder(ViT)<->LLM embedding transport over GPUDirect RDMA ----
+    vit_group.add_argument(
+        "--mm_rdma_enable",
+        env_name="MM_RDMA_ENABLE",
+        bind_to=(vit_config, "mm_rdma_enable"),
+        type=str2bool,
+        default=False,
+        help="开启 encoder<->LLM 多模态 embedding 的 GPUDirect RDMA 数据面（关闭时回退 bytes）",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_bind_ip",
+        env_name="MM_RDMA_BIND_IP",
+        bind_to=(vit_config, "mm_rdma_bind_ip"),
+        type=str,
+        default="",
+        help="encoder 侧 RdmaServer 的 OOB 监听 IP，空表示自动探测（getBindIp）；多网卡机器可显式指定",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_port",
+        env_name="MM_RDMA_PORT",
+        bind_to=(vit_config, "mm_rdma_port"),
+        type=int,
+        default=0,
+        help="encoder 侧 RdmaServer 监听端口，0 表示随机端口",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_min_bytes",
+        env_name="MM_RDMA_MIN_BYTES",
+        bind_to=(vit_config, "mm_rdma_min_bytes"),
+        type=int,
+        default=256 * 1024,
+        help="只有大于该字节数的 embedding 才走 RDMA，更小的走 bytes",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_connect_timeout_ms",
+        env_name="MM_RDMA_CONNECT_TIMEOUT_MS",
+        bind_to=(vit_config, "mm_rdma_connect_timeout_ms"),
+        type=int,
+        default=250,
+        help="RDMA 连接超时（毫秒）",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_read_timeout_ms",
+        env_name="MM_RDMA_READ_TIMEOUT_MS",
+        bind_to=(vit_config, "mm_rdma_read_timeout_ms"),
+        type=int,
+        default=30 * 1000,
+        help="LLM 侧单次 RDMA READ 完成的最大等待时间（毫秒）",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_release_timeout_ms",
+        env_name="MM_RDMA_RELEASE_TIMEOUT_MS",
+        bind_to=(vit_config, "mm_rdma_release_timeout_ms"),
+        type=int,
+        default=1000,
+        help="LLM 侧 ReleaseMultimodalEmbedding RPC 的 deadline（毫秒），位于推理路径上需保持较短，超时由 encoder 侧 slot GC 兜底",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_slot_gc_timeout_ms",
+        env_name="MM_RDMA_SLOT_GC_TIMEOUT_MS",
+        bind_to=(vit_config, "mm_rdma_slot_gc_timeout_ms"),
+        type=int,
+        default=60 * 1000,
+        help="encoder 侧 slot 在无 Release 时强制回收的超时（毫秒）",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_max_inflight_bytes",
+        env_name="MM_RDMA_MAX_INFLIGHT_BYTES",
+        bind_to=(vit_config, "mm_rdma_max_inflight_bytes"),
+        type=int,
+        default=8 * 1024 * 1024 * 1024,
+        help="encoder 侧在途（已注册未释放）embedding slot 的总字节软上限，超过则该次回退 bytes；0 表示不限制",
+    )
