@@ -47,9 +47,10 @@ class RocmFp8PTPCLinear(LinearBase):
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
+        activation_type: Optional[str] = None,
     ):
         super().__init__(weight, weight_scales, input_scales,
-                         bias, quant_config, weight_scale_2)
+                         bias, quant_config, weight_scale_2, activation_type)
         self.hidden_size = weight.shape[0]  # k
         self.output_size = weight.shape[1]  # n
         # Reshape weight from [k, n] to [n, k] as done in C++ code
