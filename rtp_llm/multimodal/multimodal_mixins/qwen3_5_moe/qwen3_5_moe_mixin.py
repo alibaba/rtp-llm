@@ -26,6 +26,9 @@ from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
+from rtp_llm.utils.database import CkptDatabase
+from rtp_llm.model_loader.multimodal_mixin_loader import MultimodalMixinLoader
+
 
 default_attn_impl = "sdpa"
 try:
@@ -149,12 +152,38 @@ class Qwen3_5MoeVitWeight(BaseVitWeights):
         self._ckpt_prefix = "model.visual."
         self._ft_prefix = "self.mm_part.visual."
 
+    def detect_ckpt_prefix(self, tensor_names: list):
+        suffix = "blocks.0.norm1.weight"
+        for name in tensor_names:
+            if name.endswith(suffix) and "visual." in name:
+                # Extract everything up to and including 'visual.'
+                idx = name.index("visual.")
+                self._ckpt_prefix = name[: idx + len("visual.")]
+                return
+
 
 class Qwen3_5MoeMixin(Qwen3_VLMixin):
     def _init_multimodal(self):
         self.mm_part = Qwen3_5MoeImageEmbedding(self.mm_related_params)
         self.mm_related_params.vit_weights = Qwen3_5MoeVitWeight(
             {"vit": self.mm_part.visual}
+        )
+
+    def create_mm_mixin_loader(self):
+        database = CkptDatabase(self.ckpt_path)
+        vit_weights = self.mm_related_params.vit_weights
+        if isinstance(vit_weights, Qwen3_5MoeVitWeight):
+            vit_weights.detect_ckpt_prefix(database.get_pretrain_tensor_names())
+
+        weights_info = self.get_multimodal_mixin_weight_info()(
+            vit_weights=vit_weights,
+            vit_config=self.vit_config,
+        )
+
+        return MultimodalMixinLoader(
+            weights_info,
+            database,
+            load_method=self.load_method,
         )
 
     @classmethod

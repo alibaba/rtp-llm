@@ -2,7 +2,7 @@ import json
 import os
 from typing import Any, Dict, List
 
-from transformers import AutoTokenizer, PreTrainedTokenizerFast
+from transformers import PreTrainedTokenizerFast
 
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory_register import (
     register_tokenizer,
@@ -192,9 +192,7 @@ class QWenTokenizer(BaseTokenizer):
 class QWenV2Tokenizer(BaseTokenizer):
     def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any] = {}):
         try:
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                tokenizer_path, verbose=False, trust_remote_code=True
-            )
+            super().init_tokenizer(tokenizer_path, config_json)
         except ValueError as e:
             if "TokenizersBackend" not in str(e):
                 raise

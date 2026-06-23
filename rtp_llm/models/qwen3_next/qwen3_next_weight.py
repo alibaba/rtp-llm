@@ -550,18 +550,18 @@ class Qwen3NextWeight(Qwen3NextBaseWeight):
 
 
 class Qwen35MoeWeight(Qwen3NextBaseWeight):
-    """Qwen3.5 MoE weight loading (model.language_model. prefix, separate weight format, stackwd support)."""
+    """Qwen3.5 MoE weight loading (dynamic prefix detection, separate weight format, stacked support)."""
 
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)
-        self.prefix = "model.language_model."
         self._has_stacked_ckpt = False
 
     def _process_meta(self, meta_dict: Any, weight_keys: List[str]):
-        """Detect whether stackwd format is used.
-
-        Qwen3.5 bf16 uses stackwd moe weight while fp8 uses splited moe weights.
-        """
+        suffix = "layers.0.input_layernorm.weight"
+        for key in weight_keys:
+            if key.endswith(suffix) and "mtp." not in key:
+                self.prefix = key[: -len(suffix)]
+                break
         if self._contains(weight_keys, "layers.0.mlp.experts.gate_up_proj"):
             self._has_stacked_ckpt = True
 
@@ -644,7 +644,7 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
 
 
 class Qwen35DenseWeight(Qwen35MoeWeight):
-    """Qwen3.5 Dense weight loading (model.language_model. prefix, separate weight format, stackwd support)."""
+    """Qwen3.5 Dense weight loading (dynamic prefix detection, separate weight format, stacked support)."""
 
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)

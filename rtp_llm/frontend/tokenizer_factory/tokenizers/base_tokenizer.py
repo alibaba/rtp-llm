@@ -1,4 +1,6 @@
 import functools
+import json
+import os
 from typing import Any, Dict, List, Union
 
 from transformers import AutoTokenizer
@@ -11,9 +13,99 @@ class BaseTokenizer:
         self.init_tokenizer(tokenizer_path, self.config_json)
 
     def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any]):
+        tokenizer_json_path = os.path.join(tokenizer_path, "tokenizer.json")
+        tokenizer_obj = None
+        if os.path.exists(tokenizer_json_path):
+            from tokenizers import Tokenizer as TokenizerFast
+
+            tokenizer_obj = TokenizerFast.from_file(tokenizer_json_path)
+
+        extra_kwargs = self._transformers_v5_kwargs(tokenizer_path, tokenizer_obj)
+        extra_kwargs.update(self._additional_kwargs(tokenizer_path))
         self.tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_path, trust_remote_code=True, verbose=False, use_fast=True
+            tokenizer_path,
+            trust_remote_code=True,
+            verbose=False,
+            use_fast=True,
+            **extra_kwargs,
         )
+        self._fix_post_processor(tokenizer_obj, extra_kwargs)
+
+    def _additional_kwargs(self, tokenizer_path: str) -> Dict[str, Any]:
+        """Hook for subclasses to inject extra kwargs before from_pretrained."""
+        return {}
+
+    @staticmethod
+    def _transformers_v5_kwargs(
+        tokenizer_path: str, tokenizer_obj=None
+    ) -> Dict[str, Any]:
+        """Workaround for transformers==5.2.0 from_pretrained regressions.
+
+        Transformers 5.2.0 rewrote tokenizer loading via TokenizersBackend. Two issues
+        require explicit kwargs to preserve correct behavior:
+
+        1. add_eos_token / add_bos_token (found on gte-Qwen2-7B-instruct and
+           DeepSeek-V2-Lite-Chat respectively):
+           from_pretrained no longer passes these from tokenizer_config.json to
+           custom tokenizer __init__. The custom class falls back to its default
+           (False), so BOS/EOS is not appended during encode — breaking embedding
+           models (last-token pooling) and chat models (missing BOS changes output).
+           Fix: explicitly pass add_eos_token/add_bos_token from tokenizer_config.json.
+           NOTE: upstream main (fd6bc380c8) intentionally pops these when
+           tokenizer.json exists, expecting post_processor to handle it — but models
+           like gte-Qwen2 have no EOS in post_processor. This workaround is needed
+           long-term unless the model's tokenizer.json is updated.
+
+        2. tokenizer_object (affects models with tokenizer_class: LlamaTokenizerFast,
+           e.g. DeepSeek-R1 series):
+           Class-specific __init__ (LlamaTokenizer) unconditionally rebuilds the
+           internal _tokenizer with Metaspace pre_tokenizer, overriding what
+           tokenizer.json defines (e.g. regex Split). This causes whitespace/newlines
+           to be silently dropped during encode ("\\n\\n" -> []).
+           Fix: pass tokenizer_object loaded directly from tokenizer.json.
+           TokenizersBackend.__init__ uses this object to overwrite the class-built
+           _tokenizer, preserving the correct pre_tokenizer/decoder from the file.
+           NOTE: upstream tracks this as huggingface/transformers#45488.
+           Our fix is model-agnostic and stable — keep until upstream is reliable.
+        """
+        kwargs: Dict[str, Any] = {}
+        config_path = os.path.join(tokenizer_path, "tokenizer_config.json")
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                tc = json.load(f)
+            if "add_eos_token" in tc:
+                kwargs["add_eos_token"] = tc["add_eos_token"]
+            if "add_bos_token" in tc:
+                kwargs["add_bos_token"] = tc["add_bos_token"]
+
+        if tokenizer_obj is not None:
+            kwargs["tokenizer_object"] = tokenizer_obj
+        return kwargs
+
+    def _fix_post_processor(self, tokenizer_obj, extra_kwargs):
+        """Workaround for transformers==5.2.0 post_processor override.
+
+        Transformers 5.2.0 tokenizer classes (e.g. XLMRobertaTokenizer) overwrite
+        the post_processor in __init__ with a hardcoded template AFTER super().__init__()
+        has already restored the correct one from tokenizer_object. This means
+        tokenizer.json's post_processor (e.g. double </s></s> for RoBERTa pair inputs)
+        is lost and replaced by the class's default (single </s>).
+
+        Fix: two-phase restore:
+        1. Unconditionally restore post_processor from tokenizer.json (undoes class
+           __init__ corruption).
+        2. If add_eos_token/add_bos_token was passed in extra_kwargs, call
+           update_post_processor() to re-inject BOS/EOS via transformers' standard
+           mechanism. This rebuilds a TemplateProcessing that includes the special tokens.
+        """
+        if tokenizer_obj is None:
+            return
+        if not hasattr(self.tokenizer, "_tokenizer"):
+            return
+        if tokenizer_obj.post_processor is not None:
+            self.tokenizer._tokenizer.post_processor = tokenizer_obj.post_processor
+        if extra_kwargs.get("add_eos_token") or extra_kwargs.get("add_bos_token"):
+            self.tokenizer.update_post_processor()
 
     def encode(self, prompt: str, **kwargs):
         return self.tokenizer.encode(prompt, **kwargs)
