@@ -27,6 +27,7 @@ struct StreamThinkInfo {
     std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr;
     std::vector<int>                               pending_forced_think_end_token_ids;
     ThinkProcessState                              process_state = ThinkProcessState::NO_THINK;
+    int64_t                                        eos_token_id  = -1;
 
     StreamThinkInfo() = default;
 
@@ -37,7 +38,8 @@ struct StreamThinkInfo {
                     int32_t                                        input_length,
                     int32_t                                        output_length,
                     bool                                           is_beam_search,
-                    std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr):
+                    std::shared_ptr<StringContainDFA<size_t, int>> dfa_ptr,
+                    int64_t                                        eos_token_id = -1):
         in_think_mode(think_mode),
         max_thinking_tokens(max_thinking_tokens),
         begin_think_token_ids(begin_think_token_ids),
@@ -45,7 +47,8 @@ struct StreamThinkInfo {
         input_length(input_length),
         current_output_length(output_length),
         is_beam_search(is_beam_search),
-        dfa_ptr(dfa_ptr) {
+        dfa_ptr(dfa_ptr),
+        eos_token_id(eos_token_id) {
         if (think_mode && max_thinking_tokens > 0 && dfa_ptr) {
             process_state = ThinkProcessState::IN_THINK;
         }
@@ -62,6 +65,7 @@ struct StreamThinkInfo {
         think_info.is_beam_search                     = is_beam_search;
         think_info.pending_forced_think_end_token_ids = pending_forced_think_end_token_ids;
         think_info.process_state                      = process_state;
+        think_info.eos_token_id                       = eos_token_id;
         if (dfa_ptr) {
             think_info.dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(*dfa_ptr);
         }
@@ -82,16 +86,16 @@ public:
     virtual ~ThinkModeLogitsProcessor() {}
 
 public:
-    static std::shared_ptr<ThinkModeLogitsProcessor> fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,
-                                                                       int32_t                        num);
+    static std::shared_ptr<ThinkModeLogitsProcessor>
+    fromGenerateInput(std::shared_ptr<GenerateInput> generate_input, int32_t num, int64_t eos_token_id = -1);
 
 public:
-    void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
-    void updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
-    void updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
-    bool isSpecVerifyEligible() const override;
-    int  tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
-    bool isStateful() const override;
+    void    process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
+    void    updateMultiSeqStatus(const std::vector<int>& src_batch_indices) override;
+    void    updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
+    bool    isSpecVerifyEligible() const override;
+    int     tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override;
+    bool    isStateful() const override;
     int64_t acceptedTokenLen() const override;
 
 private:
