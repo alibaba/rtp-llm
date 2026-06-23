@@ -628,17 +628,20 @@ def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
         All-reduced tensor (same as input tensor)
     """
     rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
+    process_group = _get_group(group)
     if rocm_rccl.should_use_capture_collectives(group == Group.TP):
-        return rocm_rccl.capture_all_reduce(tensor, _get_group(group))
+        return rocm_rccl.capture_all_reduce(tensor, process_group)
 
     if group == Group.TP:
+        out = rocm_rccl.try_non_capture_all_reduce(tensor, process_group)
+        if out is not None:
+            return out
         symm_mem_comm = get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(
             tensor
         ):
             return symm_mem_comm.all_reduce(tensor)
 
-    process_group = _get_group(group)
     torch.distributed.all_reduce(
         tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
     )

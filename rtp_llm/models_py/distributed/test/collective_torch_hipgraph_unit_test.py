@@ -218,6 +218,25 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         custom.assert_not_called()
         trt.assert_not_called()
 
+    def test_non_capture_all_reduce_uses_quick_reduce_when_enabled(self):
+        hr._is_rocm_runtime = True
+        hr._rocm_ar_config = hr.RocmAllReduceConfig(
+            enable_vllm_custom_ar=False,
+            enable_quick_reduce=True,
+            quick_reduce_quantization="INT8",
+        )
+        tensor = torch.zeros((8,), dtype=torch.float16)
+        process_group = object()
+        qr_out = torch.ones_like(tensor)
+
+        with patch.object(
+            hr, "_is_hipgraph_capture_active", return_value=False
+        ), patch.object(hr, "_try_quick_reduce_all_reduce", return_value=qr_out) as qr:
+            result = hr.try_non_capture_all_reduce(tensor, process_group)
+
+        self.assertIs(result, qr_out)
+        qr.assert_called_once_with(tensor, process_group)
+
     def test_capture_all_reduce_uses_custom_when_quick_reduce_disabled(self):
         hr._is_rocm_runtime = True
         hr._rccl_comm = ctypes.c_void_p(999)
@@ -366,6 +385,35 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
 
         self.assertIs(result, tensor)  # in-place: same object returned
         fake_lib.ncclAllReduce.assert_called_once()
+
+    def test_all_reduce_dispatches_to_quick_reduce_without_capture(self):
+        """TP all_reduce should use ROCm QuickReduce on the non-capture path."""
+        hr._is_rocm_runtime = True
+        hr._rocm_ar_config = hr.RocmAllReduceConfig(
+            enable_vllm_custom_ar=False,
+            enable_quick_reduce=True,
+            quick_reduce_quantization="INT8",
+        )
+
+        tensor = torch.zeros((4,), dtype=torch.float16)
+        quick_reduce_out = torch.ones_like(tensor)
+        mock_group = object()
+        with patch.object(
+            hr, "try_non_capture_all_reduce", return_value=quick_reduce_out
+        ) as quick_reduce, patch(
+            "rtp_llm.models_py.distributed.collective_torch._get_group",
+            return_value=mock_group,
+        ), patch(
+            "rtp_llm.models_py.distributed.collective_torch.get_symm_mem_communicator"
+        ) as symm_mem, patch(
+            "torch.distributed.all_reduce"
+        ) as torch_all_reduce:
+            result = ct.all_reduce(tensor, ct.Group.TP)
+
+        self.assertIs(result, quick_reduce_out)
+        quick_reduce.assert_called_once_with(tensor, mock_group)
+        symm_mem.assert_not_called()
+        torch_all_reduce.assert_not_called()
 
     def test_all_gather_dispatches_to_rccl_during_capture(self):
         """collective_torch.all_gather routes through RCCL when capture is active."""

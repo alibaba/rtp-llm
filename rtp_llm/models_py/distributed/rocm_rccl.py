@@ -741,6 +741,26 @@ def hipgraph_capture_all_reduce(
     return _rccl_all_reduce_inplace(tensor, process_group)
 
 
+def try_non_capture_all_reduce(
+    tensor: torch.Tensor,
+    process_group: Optional[torch.distributed.ProcessGroup] = None,
+) -> Optional[torch.Tensor]:
+    """Try ROCm TP all-reduce backends outside HIPGraph capture."""
+    if not _is_rocm_runtime:
+        return None
+    if process_group is None:
+        return None
+    if _is_hipgraph_capture_active():
+        return None
+
+    if _rocm_ar_config.enable_quick_reduce:
+        out = _try_quick_reduce_all_reduce(tensor, process_group)
+        if out is not None:
+            return out
+
+    return None
+
+
 def hipgraph_capture_all_gather(
     tensor: torch.Tensor,
     process_group: Optional[torch.distributed.ProcessGroup] = None,
