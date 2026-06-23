@@ -77,8 +77,6 @@ public:
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getPythonDebugTensor(const std::string& name, int64_t num_rows);
     torch::Tensor   getPythonDebugKvCache(int64_t layer_idx, int64_t max_blocks);
-    void            selectMtpIterationTopkCache(const torch::Tensor& select_indices, int64_t total_tokens) override;
-    void            copyMtpIterationTopkCacheFrom(const ModelBase& source) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;

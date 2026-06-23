@@ -254,42 +254,6 @@ torch::Tensor PyWrappedModel::getPythonDebugKvCache(int64_t layer_idx, int64_t m
     return result.cast<torch::Tensor>();
 }
 
-void PyWrappedModel::selectMtpIterationTopkCache(const torch::Tensor& select_indices, int64_t total_tokens) {
-    if (!py_model_ || !select_indices.defined()) {
-        return;
-    }
-    py::gil_scoped_acquire gil;
-    if (!py::hasattr(py_model_, "select_mtp_iteration_topk_cache")) {
-        return;
-    }
-    try {
-        py_model_.attr("select_mtp_iteration_topk_cache")(select_indices, total_tokens);
-    } catch (const py::error_already_set& e) {
-        RTP_LLM_LOG_ERROR("Python error selecting MTP iteration top-k cache:\n%s", e.what());
-        throw;
-    }
-}
-
-void PyWrappedModel::copyMtpIterationTopkCacheFrom(const ModelBase& source) {
-    if (!py_model_) {
-        return;
-    }
-    const auto* source_py_model = dynamic_cast<const PyWrappedModel*>(&source);
-    if (source_py_model == nullptr || !source_py_model->py_model_) {
-        return;
-    }
-    py::gil_scoped_acquire gil;
-    if (!py::hasattr(py_model_, "copy_mtp_iteration_topk_cache_from")) {
-        return;
-    }
-    try {
-        py_model_.attr("copy_mtp_iteration_topk_cache_from")(source_py_model->py_model_);
-    } catch (const py::error_already_set& e) {
-        RTP_LLM_LOG_ERROR("Python error copying MTP iteration top-k cache:\n%s", e.what());
-        throw;
-    }
-}
-
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
@@ -390,13 +354,12 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     }
 
     // Calculate cu_seqlens
-    int    batch_size                 = py_attn_inputs.input_lengths.size(0);
-    size_t context_batch_size         = py_attn_inputs.prefix_lengths.size(0);
-    size_t decode_batch_size          = py_attn_inputs.sequence_lengths.size(0);
-    py_attn_inputs.dtype              = dataTypeToTorchType(description_.data_type);
-    py_attn_inputs.is_prefill         = !decode_batch_size;
-    py_attn_inputs.is_target_verify   = inputs.is_target_verify;
-    py_attn_inputs.mtp_iteration_step = inputs.mtp_iteration_step;
+    int    batch_size               = py_attn_inputs.input_lengths.size(0);
+    size_t context_batch_size       = py_attn_inputs.prefix_lengths.size(0);
+    size_t decode_batch_size        = py_attn_inputs.sequence_lengths.size(0);
+    py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
+    py_attn_inputs.is_prefill       = !decode_batch_size;
+    py_attn_inputs.is_target_verify = inputs.is_target_verify;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
@@ -1125,13 +1088,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             cache_store_async_writer_->waitAllDone();
         }
 
-        const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
-        if (!(device_props_.enable_prefill_cp && has_context_request) && inputs.mtp_iteration_step == 0
-            && inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.numel() > 0 && hidden_states.defined()
-            && hidden_states.dim() > 0) {
-            selectMtpIterationTopkCache(inputs.lm_output_indexes, hidden_states.size(0));
-        }
-
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
         // CP exit-gather + strip-padding must only run when there's an
         // actual CP-split prefill stream present.  A pure-decode batch
@@ -1141,6 +1097,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // downstream Sampler::forward fail with a narrow OOB.  Detect
         // this by reusing the standard "has any context stream" test
         // already used by callForwardPostLayers.
+        const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
         if (device_props_.enable_prefill_cp && has_context_request) {
             // REBASE CONFLICT CONTEXT(3a29591e6): new base added the
             // last-hidden-only CP gather fast path; source branch gathered the
