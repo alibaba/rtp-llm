@@ -744,6 +744,8 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
     ) -> bool:
         if attn_configs.use_mla:
             return False
+        if force_py_flashinfer():
+            return False
         fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 

@@ -607,9 +607,19 @@ class PyFlashinferDecodeAttnOp(object):
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
 
+    def _prefix_lengths_for_decode(
+        self, attn_inputs: PyAttentionInputs
+    ) -> torch.Tensor:
+        # Plain decode leaves prefix_lengths undefined in CudaGraphRunner.
+        # The C++ MHA planner uses an empty tensor as the decode sentinel and
+        # derives positions/page lengths from sequence_lengths.
+        prefix_lengths = attn_inputs.prefix_lengths
+        if prefix_lengths is not None:
+            return prefix_lengths
+        ref = attn_inputs.input_lengths
+        return torch.empty(0, dtype=torch.int32, device=ref.device)
+
     def prepare(self, attn_inputs: PyAttentionInputs):
-        # from rtp_llm.models_py.utils.debug import set_trace_on_tty
-        # set_trace_on_tty()
         # Convert kv_cache_dtype to torch dtype
         if self.kv_cache_dtype == KvCacheDataType.INT8:
             kv_datatype = torch.int8
@@ -620,7 +630,7 @@ class PyFlashinferDecodeAttnOp(object):
 
         # Steady-state decode drops the host metadata loop and H2D copy.
         self.fmha_params.fill_params_mha_device(
-            attn_inputs.prefix_lengths,
+            self._prefix_lengths_for_decode(attn_inputs),
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
             attn_inputs.kv_cache_kernel_block_id_device,
@@ -661,7 +671,7 @@ class PyFlashinferDecodeAttnOp(object):
 
         # CUDA graph replay fallback when sequence_lengths_plus_1_d is absent.
         self.fmha_params.fill_params_mha_device(
-            attn_inputs.prefix_lengths,
+            self._prefix_lengths_for_decode(attn_inputs),
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
             attn_inputs.kv_cache_kernel_block_id_device,
@@ -731,6 +741,31 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
         return not attn_configs.use_mla
+
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        replay_params = self.fmha_impl.prepare_for_cuda_graph_replay(attn_inputs)
+        if replay_params is not None:
+            self.fmha_params = replay_params
+        if self.need_rope_kv_cache and self.rope_kvcache_impl is not None:
+            new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+            if self.rope_params is None:
+                self.rope_params = new_rope_params
+            else:
+                common.copy_kv_cache_offset(
+                    self.rope_params.kv_cache_offset,
+                    new_rope_params.kv_cache_offset,
+                )
+                if new_rope_params.position_ids is not None:
+                    if (
+                        self.rope_params.position_ids is not None
+                        and self.rope_params.position_ids.shape
+                        == new_rope_params.position_ids.shape
+                    ):
+                        self.rope_params.position_ids.copy_(
+                            new_rope_params.position_ids
+                        )
+                    else:
+                        self.rope_params.position_ids = new_rope_params.position_ids
 
     def forward(
         self,
