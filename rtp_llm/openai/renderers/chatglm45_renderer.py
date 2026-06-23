@@ -23,11 +23,6 @@ class ChatGlm45Renderer(ReasoningToolBaseRenderer):
     """ChatGLM45Renderer 使用 GLM4MoeDetector 进行工具调用解析"""
 
     @override
-    def _setup_stop_words(self):
-        """设置GLM45特定的停止词"""
-        self.add_extra_stop_words(["<|user|>", "<|observation|>"])
-
-    @override
     def _preprocess_messages(self, messages: list[dict]) -> list[dict]:
         """预处理消息，确保 tool_calls 中的 arguments 是字典对象"""
         processed_messages = []
