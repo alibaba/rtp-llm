@@ -218,7 +218,9 @@ class VitEndpointServer:
         if self.mm_process_engine is None:
             return
 
-        self.mm_rpc_server = MultimodalRpcServer(self.mm_process_engine)
+        self.mm_rpc_server = MultimodalRpcServer(
+            self.mm_process_engine, getattr(py_env_configs, "vit_config", None)
+        )
         self.rpc_server = create_rpc_server()
         add_MultimodalRpcServiceServicer_to_server(self.mm_rpc_server, self.rpc_server)
         kmonitor.init()
