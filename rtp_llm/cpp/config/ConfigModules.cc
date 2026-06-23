@@ -321,7 +321,13 @@ std::string VitConfig::to_string() const {
             vit_sep_str = "UNKNOWN(" + std::to_string(static_cast<int>(vit_separation)) + ")";
             break;
     }
-    oss << "vit_separation: " << vit_sep_str;
+    oss << "vit_separation: " << vit_sep_str << ", mm_rdma_enable: " << mm_rdma_enable
+        << ", mm_rdma_bind_ip: " << mm_rdma_bind_ip << ", mm_rdma_port: " << mm_rdma_port
+        << ", mm_rdma_connect_timeout_ms: " << mm_rdma_connect_timeout_ms
+        << ", mm_rdma_read_timeout_ms: " << mm_rdma_read_timeout_ms
+        << ", mm_rdma_release_timeout_ms: " << mm_rdma_release_timeout_ms
+        << ", mm_rdma_slot_gc_timeout_ms: " << mm_rdma_slot_gc_timeout_ms
+        << ", mm_rdma_max_inflight_bytes: " << mm_rdma_max_inflight_bytes;
     return oss.str();
 }
 

@@ -45,6 +45,12 @@ def cache_store_deps():
         actual = "//rtp_llm/cpp/disaggregate/cache_store:cache_store_base_impl"
     )
 
+def mm_rdma_deps():
+    native.alias(
+        name = "mm_rdma_arch_select_impl",
+        actual = "//rtp_llm/cpp/multimodal_processor:mm_rdma_no_impl",
+    )
+
 def transfer_rdma_deps():
     native.alias(
         name = "transfer_rdma_impl",
