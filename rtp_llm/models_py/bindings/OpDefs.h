@@ -216,6 +216,11 @@ struct BertEmbeddingInputs {
     torch::Tensor combo_tokens_type_ids;
     torch::Tensor token_type_embedding;
     float         input_embedding_scalar{1.0};
+    // Multimodal (vision) embeddings to be spliced into hidden states after pre-LN.
+    // Each tensor in multimodal_features is shape [seq_len_i, hidden_size].
+    // mm_features_locs is the flat token index where each multimodal feature should be placed.
+    std::vector<torch::Tensor> multimodal_features;
+    torch::Tensor              mm_features_locs;
 };
 
 struct PyEmbeddingInputs {
