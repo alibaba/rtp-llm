@@ -26,4 +26,7 @@ public class Request {
 
     @JsonProperty("request_time_ms")
     private long requestTimeMs;
+
+    @JsonProperty("chat_id")
+    private String chatId;
 }

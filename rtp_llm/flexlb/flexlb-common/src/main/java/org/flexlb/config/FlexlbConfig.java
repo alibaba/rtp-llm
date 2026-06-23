@@ -98,6 +98,11 @@ public class FlexlbConfig {
      */
     private int maxPrefillQueueSize = 20;
 
+    /**
+     * Chat sticky mapping TTL for FORCE_CHAT_STICKY strategy, in milliseconds.
+     */
+    private long chatStickyTtlMs = 10 * 60 * 1000;
+
     // ========== Resource Water Level Configuration ==========
 
     /**

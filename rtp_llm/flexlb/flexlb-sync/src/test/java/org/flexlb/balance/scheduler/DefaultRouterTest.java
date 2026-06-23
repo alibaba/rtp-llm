@@ -17,8 +17,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.annotation.DependsOn;
 
 import java.lang.reflect.Field;
+import java.util.Arrays;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -128,6 +130,14 @@ class DefaultRouterTest {
         } catch (Exception e) {
             fail("Failed to mock LoadBalanceStrategyFactory: " + e.getMessage());
         }
+    }
+
+    @Test
+    void shouldDependOnForceChatStickyStrategyBeforeRouterConstruction() {
+        DependsOn dependsOn = DefaultRouter.class.getAnnotation(DependsOn.class);
+
+        assertNotNull(dependsOn);
+        assertTrue(Arrays.asList(dependsOn.value()).contains("forceChatStickyStrategy"));
     }
 
     @Test

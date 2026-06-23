@@ -23,3 +23,15 @@ py_test(
     ],
     tags = ["manual"],
 )
+
+py_test(
+    name = "master_client_test",
+    srcs = ["master_client_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/server:server",
+        "//rtp_llm:config_ops",
+        "//rtp_llm:pydantic",
+    ],
+    tags = ["manual"],
+)

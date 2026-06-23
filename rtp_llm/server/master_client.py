@@ -258,6 +258,9 @@ class MasterClient:
             "request_id": request_id,
             "request_time_ms": int(start * 1000),
         }
+        chat_id = getattr(input.generate_config, "chat_id", None)
+        if chat_id:
+            payload["chat_id"] = chat_id
 
         resp = await self._send_schedule_request(
             master_addr, payload, ttft_timeout_ms, request_id

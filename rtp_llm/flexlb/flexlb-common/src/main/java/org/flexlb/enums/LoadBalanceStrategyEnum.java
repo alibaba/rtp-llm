@@ -9,7 +9,9 @@ public enum LoadBalanceStrategyEnum {
 
     SHORTEST_TTFT("ShortestTTFT"),  // Shortest Time-To-First-Token
 
-    WEIGHTED_CACHE("WeightedCache")  // Lowest cache usage strategy
+    WEIGHTED_CACHE("WeightedCache"),  // Lowest cache usage strategy
+
+    FORCE_CHAT_STICKY("ForceChatSticky")  // Force prefill requests with same chat id to previous worker
 
     ;
     private final String name;
