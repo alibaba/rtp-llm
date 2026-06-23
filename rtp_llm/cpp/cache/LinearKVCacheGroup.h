@@ -28,6 +28,7 @@ public:
     void free(const BlockIndicesType& block_indices) override;
     void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
     int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
+    int  estimatePeakBlocks(int seq_len, int current_blocks, int remaining_tokens, int reserve_step) const override;
     NeedBlocksInfo getNeedBlocks(int  common_seq_len,
                                  int  seq_len,
                                  int  reserve_step,

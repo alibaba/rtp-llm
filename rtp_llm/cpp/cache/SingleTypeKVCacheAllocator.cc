@@ -423,4 +423,12 @@ int SingleTypeKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResource
     return full_kv_cache_group_->needBlocksNum(seq_len, 0, reserve_step);
 }
 
+int SingleTypeKVCacheAllocator::estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                       int                            seq_len,
+                                                       int                            remaining_tokens,
+                                                       int                            reserve_step) const {
+    const int cur_blocks = batch_kv_cache_resource->blocksNum(0, 0);
+    return full_kv_cache_group_->estimatePeakBlocks(seq_len, cur_blocks, remaining_tokens, reserve_step);
+}
+
 }  // namespace rtp_llm

@@ -315,6 +315,10 @@ int StreamCacheResource::singleBatchNeedBlocks(int seq_len, int reserve_step) co
     return resource_context_.cache_manager->singleBatchNeedBlocks(batch_kv_cache_resource_, seq_len, reserve_step);
 }
 
+int StreamCacheResource::estimatePeakNeedBlocks(int seq_len, int remaining_tokens, int reserve_step) const {
+    return resource_context_.cache_manager->estimatePeakNeedBlocks(batch_kv_cache_resource_, seq_len, remaining_tokens, reserve_step);
+}
+
 // TODO(xinfei.sxf) 保证这个函数的原子性
 absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     RTP_LLM_PROFILE_FUNCTION();

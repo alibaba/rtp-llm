@@ -705,6 +705,46 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DecodeIncrMallocAppliesSparseCleanupOnLin
     }
 }
 
+TEST_F(HybridTypeKVCacheAllocatorTest, EstimatePeakNeedBlocks) {
+    // Config: [0,1]=linear group (gid=0), [2,3]=full group (gid=1). seq_size_per_block=4.
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    const int group_nums = 2;
+    const int blk = config.seq_size_per_block;  // 4
+
+    // New resource (cur_slots=0 for both groups):
+    // full=ceil(108/4)=27, linear=ceil(108/4)=27 → total=54
+    auto new_res = makeBatchResource(1, group_nums, config.layer_num, config.layer_to_group_id, {});
+    EXPECT_EQ(allocator->estimatePeakNeedBlocks(new_res, 8, 100, 0), 54);
+
+    // With reserve_step=3: full=ceil(111/4)=28, linear=ceil(108/4)+(3-1)=29 → total=57
+    EXPECT_EQ(allocator->estimatePeakNeedBlocks(new_res, 8, 100, 3), 57);
+
+    // Allocate blocks to simulate running decode (seqLen=8 → 2 slots per group)
+    auto token_ids = makeCompleteTokenIds(1, /*seq_length=*/8, config.seq_size_per_block);
+    MallocInfo mi{new_res, token_ids};
+    auto result = allocator->malloc(mi);
+    ASSERT_TRUE(result.success);
+
+    const int full_slots   = new_res->blocksNum(0, 1);   // full group slots after malloc
+    const int linear_slots = new_res->blocksNum(0, 0);   // linear group slots after malloc
+
+    // remaining=0: no more slots needed for either group
+    EXPECT_EQ(allocator->estimatePeakNeedBlocks(new_res, 8, 0, 0), 0);
+
+    // remaining=4: ceil((8+4)/4)=3 per group, minus cur_slots
+    int expect_per_group = (8 + 4 + blk - 1) / blk;
+    EXPECT_EQ(allocator->estimatePeakNeedBlocks(new_res, 8, 4, 0),
+              std::max(expect_per_group - full_slots, 0) + std::max(expect_per_group - linear_slots, 0));
+
+    // Large remaining: linear grows with remaining (slot-based), NOT capped at steady state
+    int expect_large = (8 + 100 + blk - 1) / blk;
+    EXPECT_EQ(allocator->estimatePeakNeedBlocks(new_res, 8, 100, 0),
+              std::max(expect_large - full_slots, 0) + std::max(expect_large - linear_slots, 0));
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 

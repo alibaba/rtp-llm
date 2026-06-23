@@ -150,6 +150,11 @@ int GenerateStream::nextNeedBlockNums(int reserve_step) const {
     return stream_cache_resource_->singleBatchNeedBlocks(seqLength(), reserve_step) * nextBatchSize();
 }
 
+int GenerateStream::estimatePeakNeedBlocks(int remaining_tokens) const {
+    const int reserve_step = complete_token_ids_->getReserveStep();
+    return stream_cache_resource_->estimatePeakNeedBlocks(seqLength(), remaining_tokens, reserve_step) * nextBatchSize();
+}
+
 std::shared_ptr<GenerateInput> GenerateStream::generateInput() const {
     return generate_input_;
 }

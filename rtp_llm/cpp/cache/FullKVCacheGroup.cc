@@ -7,6 +7,10 @@ int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve
     return std::max((seq_len + reserve_step + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
 }
 
+int FullKVCacheGroup::estimatePeakBlocks(int seq_len, int current_blocks, int remaining_tokens, int reserve_step) const {
+    return std::max((seq_len + remaining_tokens + reserve_step + seq_size_per_block_ - 1) / seq_size_per_block_ - current_blocks, 0);
+}
+
 NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
     (void)reuse_blocks_len;
