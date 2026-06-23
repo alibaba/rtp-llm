@@ -23,7 +23,7 @@ namespace rtp_llm {
 
 namespace {
 
-using JsonMap   = autil::legacy::json::JsonMap;
+using JsonMap = autil::legacy::json::JsonMap;
 using JsonArray = autil::legacy::json::JsonArray;
 
 std::mutex            g_grammar_backend_mutex;
@@ -141,7 +141,7 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
                                               int64_t                               eos_token_id,
                                               const GrammarKeyCpp&                  key,
                                               LogitsProcessorFactory::ErrorReporter error_reporter) {
-    auto                  config = generate_input->generate_config;
+    auto config = generate_input->generate_config;
     XGrammarBackendCppPtr backend;
     {
         std::lock_guard<std::mutex> lock(g_grammar_backend_mutex);
@@ -179,8 +179,8 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
 
     const bool terminate_without_stop_token = key.key_type == "json";
     if (config->in_think_mode) {
-        auto matcher =
-            backend->createMatcher(compiled, /*require_reasoning=*/false, std::nullopt, terminate_without_stop_token);
+        auto matcher = backend->createMatcher(
+            compiled, /*require_reasoning=*/false, std::nullopt, terminate_without_stop_token);
         return std::make_shared<ReasoningGrammarLogitsProcessor>(std::move(matcher),
                                                                  eos_token_id,
                                                                  config->max_thinking_tokens,
@@ -190,26 +190,25 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
                                                                  std::move(error_reporter));
     }
 
-    auto matcher =
-        backend->createMatcher(compiled, /*require_reasoning=*/false, std::nullopt, terminate_without_stop_token);
+    auto matcher = backend->createMatcher(
+        compiled, /*require_reasoning=*/false, std::nullopt, terminate_without_stop_token);
     return std::make_shared<GrammarLogitsProcessor>(std::move(matcher), eos_token_id, std::move(error_reporter));
 }
 
 void appendThinkProcessor(std::vector<BaseLogitsProcessorPtr>& result,
                           std::shared_ptr<GenerateInput>       generate_input,
-                          int32_t                              max_batch_size,
-                          int64_t                              eos_token_id) {
-    auto think_processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, max_batch_size, eos_token_id);
+                          int32_t                              max_batch_size) {
+    auto think_processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, max_batch_size);
     if (think_processor != nullptr) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(think_processor));
     }
 }
 
-void appendGrammarProcessor(std::vector<BaseLogitsProcessorPtr>&  result,
-                            std::shared_ptr<GenerateInput>        generate_input,
-                            int64_t                               eos_token_id,
-                            const GrammarKeyCpp&                  grammar_key,
-                            LogitsProcessorFactory::ErrorReporter error_reporter) {
+void appendGrammarProcessor(std::vector<BaseLogitsProcessorPtr>&       result,
+                            std::shared_ptr<GenerateInput>             generate_input,
+                            int64_t                                    eos_token_id,
+                            const GrammarKeyCpp&                       grammar_key,
+                            LogitsProcessorFactory::ErrorReporter      error_reporter) {
     auto grammar_processor = createGrammarProcessor(generate_input, eos_token_id, grammar_key, error_reporter);
     if (grammar_processor != nullptr) {
         result.push_back(std::move(grammar_processor));
@@ -302,7 +301,7 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
     }
 
     if (grammar_key.empty()) {
-        appendThinkProcessor(result, generate_input, max_batch_size, eos_token_id);
+        appendThinkProcessor(result, generate_input, max_batch_size);
     } else if (config->in_think_mode) {
         if (config->hasNumBeams() || config->num_return_sequences > 1) {
             if (error_reporter) {
