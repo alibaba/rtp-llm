@@ -52,18 +52,18 @@ class WriteCacheStoreOp(nn.Module):
             return self.kv_cache_block_id_host
         gid = getattr(kv_cache, "group_id", -1)
         layer_id = getattr(kv_cache, "layer_id", -1)
-        region_name = getattr(kv_cache, "region_name", None)
+        tag = getattr(kv_cache, "tag", None)
         if gid < 0 or gid >= len(self._block_ids_by_group):
             raise RuntimeError(
-                "missing cache-store block table for owned KV cache region: "
-                f"layer_id={layer_id}, region_name={region_name}, group_id={gid}, "
+                "missing cache-store block table for owned KV cache group: "
+                f"layer_id={layer_id}, tag={tag}, group_id={gid}, "
                 f"group_count={len(self._block_ids_by_group)}"
             )
         block_ids = self._block_ids_by_group[gid]
         if block_ids is None or block_ids.numel() == 0:
             raise RuntimeError(
-                "empty cache-store block table for owned KV cache region: "
-                f"layer_id={layer_id}, region_name={region_name}, group_id={gid}"
+                "empty cache-store block table for owned KV cache group: "
+                f"layer_id={layer_id}, tag={tag}, group_id={gid}"
             )
         return block_ids
 
@@ -107,12 +107,12 @@ def create_write_cache_store_impl(
     if prefix_lengths is None or not prefix_lengths.numel():
         prefix_lengths = attn_inputs.prefix_lengths
 
-    has_multi_region = (
+    has_multi_group = (
         kv_cache is not None
-        and bool(getattr(kv_cache, "layer_region_to_group_id", None))
+        and bool(getattr(kv_cache, "layer_to_group_ids", None))
         and bool(getattr(attn_inputs, "kv_cache_kernel_block_id_host_by_group", None))
     )
-    if has_multi_region:
+    if has_multi_group:
         return WriteCacheStoreOp(
             input_lengths,
             prefix_lengths,

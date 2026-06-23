@@ -89,7 +89,6 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_prefix_lengths,
                                 captured_kv_cache_block_id_host,
                                 captured_cache_store.kv_cache_layer_to_group,
-                                captured_cache_store.kv_cache_layer_region_to_group,
                                 captured_cache_store.kv_cache_group_types,
                                 captured_cache_store.context_batch_size,
                                 captured_cache_store.decoder_batch_size,
@@ -105,7 +104,8 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.warmup,
                                 captured_cache_store.use_opaque_kv_cache_store,
                                 captured_kv_cache.layer_id,
-                                captured_kv_cache.region_name,
+                                captured_kv_cache.group_id,
+                                captured_kv_cache.tag,
                                 captured_cache_store.cp_rank,
                                 captured_cache_store.cp_size,
                                 std::move(event)};

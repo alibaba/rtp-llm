@@ -18,6 +18,10 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const override;
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override;
+    BlockAddrInfo          convertIndexToAddr(int layer_id, int group_id, int block_id) const override;
+    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id) const override;
+    std::vector<BlockInfo> convertIndexToBuffer(
+        int layer_id, int group_id, int block_id, int partition_count, int partition_id) const override;
     CacheLayerLayout allLayerCacheBase() const override;
 
 private:
@@ -25,6 +29,9 @@ private:
 
     void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const override;
     void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) override;
+
+    int defaultGroupIdForLayer(int layer_id) const;
+    int validateGroupIdForLayer(int layer_id, int group_id) const;
 
     // global layer id -> group id
     std::vector<int> layer_to_group_id_;

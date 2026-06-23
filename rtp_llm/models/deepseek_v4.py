@@ -32,7 +32,7 @@ from typing import Dict, List
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.ops import DSV4KVSpec, DSV4StateSpec, DataType, KVCacheSpec, KvCacheDataType
+from rtp_llm.ops import CompressedKVCacheSpec, DataType, FixedStateCacheSpec, KVCacheSpec, KvCacheDataType
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
@@ -67,12 +67,12 @@ def _make_kv_cache_spec(
     compression_ratio: int = 1,
 ) -> KVCacheSpec:
     if kind == "compressed_kv":
-        spec = DSV4KVSpec()
+        spec = CompressedKVCacheSpec()
         spec.entry_elems = int(entry_elems)
         spec.compression_ratio = int(compression_ratio)
         spec.store_dtype = dtype
     else:
-        spec = DSV4StateSpec()
+        spec = FixedStateCacheSpec()
         spec.state_dim = int(entry_elems)
         spec.store_dtype = dtype
     spec.tag = tag

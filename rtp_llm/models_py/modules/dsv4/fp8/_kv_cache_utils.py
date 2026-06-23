@@ -15,6 +15,7 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
     INDEXER_KV,
     INDEXER_STATE,
     SWA_KV,
+    TAG_BY_ATTN_TYPE,
 )
 
 _PHYSICAL_ROW_REGIONS = {
@@ -40,7 +41,10 @@ def _positive_int(value: Any) -> Optional[int]:
     return ivalue if ivalue > 0 else None
 
 
-def _region_for_group_or_region(
+_ATTN_TYPE_BY_TAG = {tag: attn_type for attn_type, tag in TAG_BY_ATTN_TYPE.items()}
+
+
+def _attn_type_for_group_or_region(
     kv_cache: Any,
     group: Optional[int] = None,
     region: Optional[int] = None,
@@ -49,19 +53,20 @@ def _region_for_group_or_region(
         return int(region)
     if group is None:
         return None
-    group_region_names = getattr(kv_cache, "group_region_names", None)
-    if not group_region_names or group < 0 or group >= len(group_region_names):
+    group_tags = getattr(kv_cache, "group_tags", None)
+    if not group_tags or group < 0 or group >= len(group_tags):
         return None
-    return int(group_region_names[group])
+    return _ATTN_TYPE_BY_TAG.get(str(group_tags[group]))
 
 
 def _group_for_region(kv_cache: Any, region: int) -> Optional[int]:
-    group_region_names = getattr(kv_cache, "group_region_names", None)
-    if not group_region_names:
+    group_tags = getattr(kv_cache, "group_tags", None)
+    if not group_tags:
         return None
     region = int(region)
-    for gid, group_region in enumerate(group_region_names):
-        if int(group_region) == region:
+    expected_tag = TAG_BY_ATTN_TYPE.get(region)
+    for gid, group_tag in enumerate(group_tags):
+        if str(group_tag) == expected_tag:
             return gid
     return None
 
@@ -87,26 +92,26 @@ def require_pool_tokens_per_block(
     ``kernel_seq_size_per_block``; SWA_KV and state pools use
     ``seq_size_per_block``.
     """
-    region_id = _region_for_group_or_region(kv_cache, group=group, region=region)
-    if region_id in _PHYSICAL_ROW_REGIONS:
+    attn_type = _attn_type_for_group_or_region(kv_cache, group=group, region=region)
+    if attn_type in _PHYSICAL_ROW_REGIONS:
         value = _group_tokens_per_block(
             kv_cache,
-            group if group is not None else _group_for_region(kv_cache, int(region_id)),
+            group if group is not None else _group_for_region(kv_cache, int(attn_type)),
         )
         if value is not None:
             return value
         value = _positive_int(getattr(kv_cache, "seq_size_per_block", None))
         if value is not None:
             return value
-    if region_id in _KERNEL_ROW_REGIONS:
+    if attn_type in _KERNEL_ROW_REGIONS:
         value = _positive_int(getattr(kv_cache, "kernel_seq_size_per_block", None))
         if value is not None:
             return value
 
     raise RuntimeError(
         "DSV4 KVCache pool tokens-per-block cannot be inferred. "
-        "group=%r, region=%r, group_region_names=%r"
-        % (group, region, getattr(kv_cache, "group_region_names", None))
+        "group=%r, region=%r, group_tags=%r"
+        % (group, region, getattr(kv_cache, "group_tags", None))
     )
 
 

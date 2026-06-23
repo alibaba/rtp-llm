@@ -53,11 +53,10 @@ public:
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const = 0;
     virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const = 0;
-    virtual BlockAddrInfo convertIndexToAddr(int layer_id, KVCacheRegionName region_name, int block_id) const;
+    virtual BlockAddrInfo convertIndexToAddr(int layer_id, int group_id, int block_id) const;
+    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id) const;
     virtual std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id, KVCacheRegionName region_name, int block_id) const;
-    virtual std::vector<BlockInfo> convertIndexToBuffer(
-        int layer_id, KVCacheRegionName region_name, int block_id, int partition_count, int partition_id) const;
+    convertIndexToBuffer(int layer_id, int group_id, int block_id, int partition_count, int partition_id) const;
     virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
                                                             const CacheKeysType&   cache_keys,
                                                             bool                   is_connector = false) = 0;
@@ -127,6 +126,7 @@ public:
     virtual size_t                  maxAvailableTokensNum() const;
     virtual KVCacheTokenCapacity    tokenCapacity(size_t default_seq_size_per_block) const;
     virtual std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const;
+    virtual std::vector<int> independentEvictionGroupIds() const;
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
     uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 

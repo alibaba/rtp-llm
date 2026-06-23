@@ -140,10 +140,9 @@ cc_library(
 cc_library(
     name = "dsv4_cache_specs",
     hdrs = [
-        "dsv4/Dsv4KVCacheSpec.h",
+        "dsv4/Dsv4CacheLayout.h",
     ],
     deps = [
-        "//rtp_llm/cpp/cache:kv_cache_specs",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

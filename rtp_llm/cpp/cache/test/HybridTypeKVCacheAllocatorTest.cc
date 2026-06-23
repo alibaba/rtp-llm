@@ -3,6 +3,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -69,9 +70,13 @@ static CacheConfig makeTinyHybridConfig() {
     config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 
     config.layer_to_group_id.assign(static_cast<size_t>(config.layer_num), 0);
+    config.layer_to_group_ids.assign(static_cast<size_t>(config.layer_num), {});
+    config.layer_tag_to_group_id.assign(static_cast<size_t>(config.layer_num), {});
     for (size_t gid = 0; gid < config.layer_ids.size(); ++gid) {
         for (int layer_id : config.layer_ids[gid]) {
-            config.layer_to_group_id[static_cast<size_t>(layer_id)] = static_cast<int>(gid);
+            config.layer_to_group_id[static_cast<size_t>(layer_id)]  = static_cast<int>(gid);
+            config.layer_to_group_ids[static_cast<size_t>(layer_id)] = {static_cast<int>(gid)};
+            config.layer_tag_to_group_id[static_cast<size_t>(layer_id)][std::to_string(gid)] = static_cast<int>(gid);
         }
     }
     return config;

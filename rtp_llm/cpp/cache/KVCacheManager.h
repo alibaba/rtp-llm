@@ -67,10 +67,10 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
     std::vector<BlockInfo>
                   convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
-    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id, KVCacheRegionName region_name) const;
-    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, KVCacheRegionName region_name) const;
-    std::vector<BlockInfo> convertIndexToBuffer(
-        int block_index, int layer_id, KVCacheRegionName region_name, int partition_count, int partition_id) const;
+    BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id, int group_id) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, int group_id) const;
+    std::vector<BlockInfo>
+    convertIndexToBuffer(int block_index, int layer_id, int group_id, int partition_count, int partition_id) const;
 
     CacheLayerLayout allLayerCacheBase() const;
 

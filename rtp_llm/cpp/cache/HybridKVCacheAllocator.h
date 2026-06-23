@@ -33,6 +33,7 @@ public:
     int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                               int                            seq_len,
                               int                            reserve_step) const override;
+    std::vector<int> independentEvictionGroupIds() const override;
 
 protected:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;

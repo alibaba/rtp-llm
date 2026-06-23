@@ -177,19 +177,10 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const size_t group_num = param.kv_cache_group_types_host.defined() ? param.kv_cache_group_types_host.size(0) : 1;
     const bool   use_group_cache_transfer_policy = group_num > 1;
 
-    int  gid             = 0;
-    auto mapped_group_id = [&param, group_num]() -> int {
-        if (param.kv_cache_layer_region_to_group_host.defined() && param.kv_cache_layer_region_to_group_host.dim() == 2
-            && param.layer_id >= 0
-            && static_cast<int64_t>(param.layer_id) < param.kv_cache_layer_region_to_group_host.size(0)) {
-            const auto region = static_cast<int64_t>(param.region_name);
-            if (region >= 0 && region < param.kv_cache_layer_region_to_group_host.size(1)) {
-                const int candidate = param.kv_cache_layer_region_to_group_host.data_ptr<
-                    int32_t>()[param.layer_id * param.kv_cache_layer_region_to_group_host.size(1) + region];
-                if (candidate >= 0) {
-                    return candidate;
-                }
-            }
+    int  gid             = param.group_id;
+    auto mapped_group_id = [&param, group_num, gid]() -> int {
+        if (gid >= 0) {
+            return gid;
         }
         if (param.kv_cache_layer_to_group_host.defined() && param.layer_id >= 0
             && static_cast<size_t>(param.layer_id) < static_cast<size_t>(param.kv_cache_layer_to_group_host.numel())) {
@@ -247,10 +238,14 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                                 "failed to get prefix_length_host and input_length_host for cache store");
         RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.data_ptr<int>()[batch_id] % seq_size_per_block == 0,
                                 "prefix_length %% seq_size_per_block != 0");
-        const bool is_cp_compact_fixed_region =
-            param.cp_size > 1 && isDsv4FixedRegion(param.region_name) && seq_size_per_block % param.cp_size == 0;
+        CacheGroupType group_type = CacheGroupType::FULL;
+        if (param.kv_cache_group_types_host.defined()) {
+            group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
+        }
+        const bool is_cp_compact_fixed_group =
+            param.cp_size > 1 && group_type == CacheGroupType::SWA && seq_size_per_block % param.cp_size == 0;
         const size_t canonical_seq_size_per_block =
-            is_cp_compact_fixed_region ? seq_size_per_block / static_cast<size_t>(param.cp_size) : seq_size_per_block;
+            is_cp_compact_fixed_group ? seq_size_per_block / static_cast<size_t>(param.cp_size) : seq_size_per_block;
         int reuse_block_num = param.prefix_lengths_host.data_ptr<int>()[batch_id] / seq_size_per_block;
         int block_num =
             (param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id] + seq_size_per_block - 1)
@@ -266,11 +261,6 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
         RTP_LLM_LOG_DEBUG(
             "write cache store, request id is %ld, blocks num is %ld", request_id, block_num + reuse_block_num);
-
-        CacheGroupType group_type = CacheGroupType::FULL;
-        if (param.kv_cache_group_types_host.defined()) {
-            group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
-        }
 
         const int total_blocks           = block_num + reuse_block_num;
         const int canonical_total_blocks = canonical_block_num + canonical_reuse_block_num;
@@ -291,24 +281,24 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                 *(offset_addr + (param.decoder_batch_size + batch_id) * max_blocks_per_batch + offset_index);
             if (isNullBlockIdx(block_id)) {
                 RTP_LLM_LOG_DEBUG(
-                    "skip null kv cache block, request id [%ld], layer id [%d], region [%d], offset_index [%d]",
+                    "skip null kv cache block, request id [%ld], layer id [%d], group [%d], offset_index [%d]",
                     request_id,
                     param.layer_id,
-                    static_cast<int>(param.region_name),
+                    gid,
                     offset_index);
                 return;
             }
             std::string cache_key = makeCacheKey(param.model_id,
                                                  param.cache_keys[batch_id * cache_keys_per_batch + key_index],
                                                  param.layer_id,
-                                                 param.region_name);
+                                                 param.tag);
 
             void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
             std::shared_ptr<void> kv_block_addr(kv_cache_owner, kv_addr);
 
             constexpr size_t kDsv4SwaFp8EntryBytes  = 584;
             constexpr size_t kDsv4SwaTokenDataBytes = 576;
-            const bool       is_swa_cp_slice        = param.region_name == KVCacheRegionName::SWA_KV && param.cp_size > 1
+            const bool       is_swa_cp_slice        = param.tag == "swa_kv" && param.cp_size > 1
                                                && param.kv_block_stride_bytes % kDsv4SwaFp8EntryBytes == 0;
 
             // Some layouts treat the block as a single opaque KV chunk. Only

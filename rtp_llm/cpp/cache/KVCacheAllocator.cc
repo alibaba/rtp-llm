@@ -136,20 +136,19 @@ uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_lay
     return std::numeric_limits<uint32_t>::max();
 }
 
-BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, KVCacheRegionName region_name, int block_id) const {
-    (void)region_name;
+BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, int group_id, int block_id) const {
+    (void)group_id;
     return convertIndexToAddr(layer_id, block_id);
 }
 
-std::vector<BlockInfo>
-KVCacheAllocator::convertIndexToBuffer(int layer_id, KVCacheRegionName region_name, int block_id) const {
-    (void)region_name;
+std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(int layer_id, int group_id, int block_id) const {
+    (void)group_id;
     return convertIndexToBuffer(layer_id, block_id);
 }
 
 std::vector<BlockInfo> KVCacheAllocator::convertIndexToBuffer(
-    int layer_id, KVCacheRegionName region_name, int block_id, int partition_count, int partition_id) const {
-    (void)region_name;
+    int layer_id, int group_id, int block_id, int partition_count, int partition_id) const {
+    (void)group_id;
     return convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
 
@@ -263,7 +262,7 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
                                config_.layer_to_group_id,
                                config_.kernelBlocksPerKvBlock(),
                                config_.group_types,
-                               config_.layer_region_to_group_id);
+                               config_.layer_to_group_ids);
     batch_resource->setLastBlockAligned(true);
 
     for (int gid = 0; gid < config_.groupNums(); ++gid) {
@@ -396,6 +395,10 @@ KVCacheTokenCapacity KVCacheAllocator::tokenCapacity(size_t default_seq_size_per
 }
 
 std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots() const {
+    return {};
+}
+
+std::vector<int> KVCacheAllocator::independentEvictionGroupIds() const {
     return {};
 }
 

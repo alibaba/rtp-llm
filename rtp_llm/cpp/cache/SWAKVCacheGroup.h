@@ -16,9 +16,8 @@ public:
                     SharedBlockCache*                      shared_cache     = nullptr,
                     const kmonitor::MetricsReporterPtr&    metrics_reporter = nullptr,
                     CacheGroupPolicy                       policy           = CacheGroupPolicy{}):
-        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, shared_cache, metrics_reporter),
-        linear_step_(linear_step),
-        policy_(policy) {}
+        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, shared_cache, metrics_reporter),
+        linear_step_(linear_step) {}
 
     MatchResult matchSingleKey(CacheKeyType cache_key) const override;
     bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) override;
@@ -40,13 +39,12 @@ public:
 
 private:
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
-    int  activeTailBlocks() const;
+    int  activeTailBlockCount() const;
     bool effectiveReuseCacheForAllocation(bool enable_reuse_cache) const;
     bool shouldCheckSWATailBlockIds() const;
     void checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const;
 
     int linear_step_ = 0;
-    CacheGroupPolicy policy_;
 };
 
 using SWAKVCacheGroupPtr = std::shared_ptr<SWAKVCacheGroup>;

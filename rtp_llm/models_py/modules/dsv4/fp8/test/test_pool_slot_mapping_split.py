@@ -4,7 +4,7 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, SWA_KV
+from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, SWA_KV, TAG_BY_ATTN_TYPE
 from rtp_llm.models_py.modules.dsv4.decode.forward import build_paged_pool_specs
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
@@ -21,7 +21,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
 class PoolSlotMappingSplitTest(unittest.TestCase):
     def test_require_pool_tokens_per_block_inferrs_from_scalar_region(self) -> None:
         class FakeKVCache:
-            group_region_names = [1, 7]
+            group_tags = [TAG_BY_ATTN_TYPE[HCA_KV], TAG_BY_ATTN_TYPE[SWA_KV]]
             seq_size_per_block = 16384
             kernel_seq_size_per_block = 128
 
@@ -32,7 +32,7 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
 
     def test_require_pool_tokens_per_block_prefers_group_override(self) -> None:
         class FakeKVCache:
-            group_region_names = [int(HCA_KV), int(SWA_KV)]
+            group_tags = [TAG_BY_ATTN_TYPE[HCA_KV], TAG_BY_ATTN_TYPE[SWA_KV]]
             group_seq_size_per_block = [256, 1024]
             seq_size_per_block = 256
             kernel_seq_size_per_block = 256
@@ -73,7 +73,7 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
 
     def test_build_paged_pool_specs_uses_dsv4_pool_tokens(self) -> None:
         class FakeKVCache:
-            group_region_names = [int(HCA_KV), int(SWA_KV)]
+            group_tags = [TAG_BY_ATTN_TYPE[HCA_KV], TAG_BY_ATTN_TYPE[SWA_KV]]
             seq_size_per_block = 128
             kernel_seq_size_per_block = 128
 
@@ -100,7 +100,7 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
 
     def test_require_pool_tokens_per_block_rejects_unknown_region(self) -> None:
         class FakeKVCache:
-            group_region_names = [99]
+            group_tags = ["unknown"]
             seq_size_per_block = 16384
             kernel_seq_size_per_block = 128
 
