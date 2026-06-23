@@ -78,10 +78,7 @@ def auto_configure_deepep(
     prefill_cp_enabled = parallelism_config.prefill_cp_config.is_enabled()
     is_single_gpu = ep_size == 1
     is_pure_tp = (
-        tp_size > 1
-        and dp_size == 1
-        and ep_size == tp_size
-        and not prefill_cp_enabled
+        tp_size > 1 and dp_size == 1 and ep_size == tp_size and not prefill_cp_enabled
     )
     # Explicit opt-in via --moe_strategy must preserve use_all_gather, otherwise
     # the matching strategy's check_conditions (which requires use_all_gather)
@@ -417,6 +414,22 @@ def setup_default_args(py_env_configs):
         logging.info("set SEQ_SIZE_PER_BLOCK 256 by default")
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 64
+
+    fp8_kv_cache_scale_mode = py_env_configs.kv_cache_config.fp8_kv_cache_scale_mode
+    if fp8_kv_cache_scale_mode not in ("per_tensor", "per_token_head"):
+        raise ValueError(
+            "fp8_kv_cache_scale_mode must be one of: per_tensor, per_token_head"
+        )
+    if fp8_kv_cache_scale_mode == "per_token_head":
+        if not py_env_configs.kv_cache_config.fp8_kv_cache:
+            raise ValueError(
+                "fp8_kv_cache_scale_mode=per_token_head requires --fp8_kv_cache 1"
+            )
+        raise ValueError(
+            "fp8_kv_cache_scale_mode=per_token_head is not supported by the current "
+            "attention backends yet; use per_tensor or route to a backend that consumes "
+            "per-token per-head K/V scale caches."
+        )
 
     # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
     # Frontend doesn't need this setting

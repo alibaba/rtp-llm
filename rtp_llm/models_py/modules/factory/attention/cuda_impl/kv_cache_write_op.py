@@ -58,6 +58,15 @@ class KVCacheWriteOp:
                 :, 1, :, :, :
             ]  # [num_pages, num_kv_heads, page_size, head_dim]
 
+            # flashinfer.page.append_paged_kv_cache does a raw element copy and
+            # does not cast dtypes. RoPE produces BF16/FP16 K/V while an FP8 KV
+            # cache stores e4m3, so cast before appending; otherwise activation
+            # bytes are reinterpreted as FP8 and freshly-written cache tokens are
+            # corrupted. Stage 1 uses scale 1.0, matching the read path.
+            if key.dtype != k_cache.dtype:
+                key = key.to(k_cache.dtype)
+                value = value.to(v_cache.dtype)
+
             # Append K and V to paged cache using HND layout
             page.append_paged_kv_cache(  # type: ignore
                 key,  # append_key: [total_tokens, num_kv_heads, head_dim]

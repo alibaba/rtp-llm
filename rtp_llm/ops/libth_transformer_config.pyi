@@ -639,6 +639,7 @@ class KVCacheConfig:
     enable_memory_cache_sm_copy: bool
     enable_remote_cache: bool
     fp8_kv_cache: int
+    fp8_kv_cache_scale_mode: str
     int8_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int

@@ -208,6 +208,24 @@ def h20_oss_suites():
                 gpu_type=["H20"],
             ),
             smoke_test(
+                name="dense_qwen35_fp8kv_per_tensor",
+                task_info="data/model/qwen35/qwen35_dense_fp8_kv_cache_no_reuse.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 1024 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --fp8_kv_cache_scale_mode per_tensor",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="dense_qwen35_fp8kv_per_tensor_reuse",
+                task_info="data/model/qwen35/qwen35_dense_fp8_kv_cache.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 1024 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --fp8_kv_cache_scale_mode per_tensor --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --write_cache_sync 1",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="dense_qwen35_fp8kv_per_token_head_reuse",
+                task_info="data/model/qwen35/qwen35_dense_fp8_kv_cache.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 1024 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --fp8_kv_cache_scale_mode per_token_head --reuse_cache 1 --disable_flash_infer 1",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
                 name="dense_fp8_prequant_tp2",
                 task_info="data/model/qwen3/q_r_block_fp8.json",
                 smoke_args="--disable_flash_infer 1 --act_type BF16 --reserver_runtime_mem_mb 8192 --tp_size 2 --warm_up 0",
@@ -489,4 +507,3 @@ def h20_oss_suites():
             ),
         ],
     )
-

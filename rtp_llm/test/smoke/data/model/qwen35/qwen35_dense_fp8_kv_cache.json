@@ -1,0 +1,81 @@
+{
+    "_comment": "Qwen3-5-Dense-4B FP8 KV-cache reuse smoke. The prompt is longer than seq_size_per_block=1024 and expected reuse length is aligned to 10 blocks.",
+    "model_type": "qwen35_dense",
+    "model_path": "/mnt/nas1/hf/Qwen3-5-Dense-4B",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:x6",
+                "generate_config": {
+                    "max_new_tokens": 5,
+                    "top_k": 1,
+                    "top_p": 0
+                },
+                "_prompt_source": "$prompt:x6 (char_len 19437; input length must be >1024 tokens for seq_size_per_block=1024 reuse coverage)"
+            },
+            "result": {
+                "response": "跻身全国百强城市行列",
+                "finished": true,
+                "aux_info": {
+                    "input_len": 10913,
+                    "reuse_len": 0,
+                    "prefix_len": 0,
+                    "iter_count": 5,
+                    "output_len": 5
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:x6",
+                "generate_config": {
+                    "max_new_tokens": 5,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "enable_device_cache": true,
+                    "enable_memory_cache": false
+                },
+                "_prompt_source": "$prompt:x6 (char_len 19437; input length must be >1024 tokens for seq_size_per_block=1024 reuse coverage)"
+            },
+            "result": {
+                "response": "综合竞争力指数由2",
+                "finished": true,
+                "aux_info": {
+                    "input_len": 10913,
+                    "reuse_len": 10240,
+                    "memory_reuse_len": 0,
+                    "local_reuse_len": 10240,
+                    "prefix_len": 0,
+                    "iter_count": 5,
+                    "output_len": 5
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:x6",
+                "generate_config": {
+                    "max_new_tokens": 5,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "enable_device_cache": false,
+                    "enable_memory_cache": true
+                },
+                "_prompt_source": "$prompt:x6 (char_len 19437; input length must be >1024 tokens for seq_size_per_block=1024 reuse coverage)"
+            },
+            "result": {
+                "response": "综合竞争力指数由2",
+                "finished": true,
+                "aux_info": {
+                    "input_len": 10913,
+                    "reuse_len": 10240,
+                    "memory_reuse_len": 10240,
+                    "local_reuse_len": 10240,
+                    "prefix_len": 0,
+                    "iter_count": 5,
+                    "output_len": 5
+                }
+            }
+        }
+    ]
+}

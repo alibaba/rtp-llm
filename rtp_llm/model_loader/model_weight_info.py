@@ -413,7 +413,10 @@ class ModelDeployWeightInfo:
                     attn_q_weight_info = weight.weights[0]
                     break
 
-            assert attn_q_weight_info is not None
+            # Hybrid linear-attention layers have no QKV weights and do not use
+            # paged KV-cache attention-output static quant scales.
+            if attn_q_weight_info is None:
+                continue
             weights.append(
                 AtomicWeight(
                     W.attention_output_static_quant_reciprocal,

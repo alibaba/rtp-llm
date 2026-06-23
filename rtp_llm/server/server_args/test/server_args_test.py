@@ -256,6 +256,41 @@ class ServerArgsSetTest(TestCase):
             1,
         )
 
+    def test_fp8_kv_cache_scale_mode_env(self):
+        os.environ["FP8_KV_CACHE"] = "1"
+        os.environ["FP8_KV_CACHE_SCALE_MODE"] = "per_tensor"
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(py_env_configs.kv_cache_config.fp8_kv_cache, 1)
+        self.assertEqual(
+            py_env_configs.kv_cache_config.fp8_kv_cache_scale_mode, "per_tensor"
+        )
+
+    def test_fp8_kv_cache_scale_mode_cmd(self):
+        sys.argv = [
+            "prog",
+            "--fp8_kv_cache",
+            "1",
+            "--fp8_kv_cache_scale_mode",
+            "per_token_head",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(py_env_configs.kv_cache_config.fp8_kv_cache, 1)
+        self.assertEqual(
+            py_env_configs.kv_cache_config.fp8_kv_cache_scale_mode,
+            "per_token_head",
+        )
+
 
 if __name__ == "__main__":
     main()

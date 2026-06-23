@@ -51,6 +51,37 @@ class GenerateConfigTest(TestCase):
     @patch.dict(
         "os.environ",
         {
+            "MODEL_TYPE": "fake_model",
+            "FP8_KV_CACHE_SCALE_MODE": "per_token_head",
+            "USE_ALL_GATHER": "0",
+        },
+        clear=True,
+    )
+    def test_fp8_kv_cache_per_token_head_requires_fp8_kv_cache(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+
+        with self.assertRaisesRegex(ValueError, "requires --fp8_kv_cache 1"):
+            setup_and_configure_server(py_env_configs)
+
+    @patch.dict(
+        "os.environ",
+        {
+            "MODEL_TYPE": "fake_model",
+            "FP8_KV_CACHE": "1",
+            "FP8_KV_CACHE_SCALE_MODE": "per_token_head",
+            "USE_ALL_GATHER": "0",
+        },
+        clear=True,
+    )
+    def test_fp8_kv_cache_per_token_head_fails_for_unsupported_backends(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+
+        with self.assertRaisesRegex(ValueError, "not supported"):
+            setup_and_configure_server(py_env_configs)
+
+    @patch.dict(
+        "os.environ",
+        {
             "TP_SIZE": "2",
             "PP_SIZE": "1",
             "WORLD_SIZE": "2",

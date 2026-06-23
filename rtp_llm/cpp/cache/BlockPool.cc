@@ -39,8 +39,14 @@ void BlockPool::validateConfig() const {
 void BlockPool::initializeCacheBuffer() {
     if (allocation_type_ == AllocationType::HOST) {
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU))
-                                    .pin_memory();
+                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
+        try {
+            cache_aligned_buffer_ = cache_aligned_buffer_.pin_memory();
+        } catch (const c10::Error& e) {
+            RTP_LLM_LOG_WARNING("failed to pin host block pool (%zu bytes), fallback to pageable host memory: %s",
+                                config_.total_size_bytes,
+                                e.what());
+        }
     } else {
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));

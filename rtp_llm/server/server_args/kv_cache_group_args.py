@@ -69,6 +69,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         help="是否开启FP8的KV_CACHE",
     )
+    kv_cache_group.add_argument(
+        "--fp8_kv_cache_scale_mode",
+        env_name="FP8_KV_CACHE_SCALE_MODE",
+        bind_to=(kv_cache_config, "fp8_kv_cache_scale_mode"),
+        type=str,
+        choices=["per_tensor", "per_token_head"],
+        default="per_tensor",
+        help="FP8 KV cache scale mode. per_tensor uses scale 1.0; per_token_head requires a backend with per-token per-head scale support.",
+    )
     # compatible with old version
     kv_cache_group.add_argument(
         "--blockwise_use_fp8_kv_cache",
