@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
+#include "rtp_llm/cpp/multimodal_processor/MMRdmaEncoderOp.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpEmbeddingOp.h"
@@ -43,6 +44,7 @@ PYBIND11_MODULE(libth_transformer, m) {
     registerXGrammarBootstrap(m);
     registerRtpEmbeddingOp(m);
     registerEmbeddingOutput(m);
+    registerMMRdmaEncoderOp(m);
 }
 
 }  // namespace rtp_llm
