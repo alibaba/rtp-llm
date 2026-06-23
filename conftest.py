@@ -100,8 +100,19 @@ if _xdist_worker:
     _fault_path = f"{_fault_dir}/{_xdist_worker}.fault"
     _fault_file = open(_fault_path, "w")
     _fh.enable(file=_fault_file, all_threads=True)
-    _sys.stderr.write(f"[conftest] faulthandler → {_fault_path}\n")
+    _sys.stderr.write(f"[conftest] faulthandler \u2192 {_fault_path}\n")
     _sys.stderr.flush()
+    
+    import atexit as _atexit
+    
+    def _close_fault_file():
+        try:
+            _fault_file.flush()
+            _fault_file.close()
+        except Exception:
+            pass
+    
+    _atexit.register(_close_fault_file)
 
 
 # Signal to rtp_llm/__init__.py that conftest has run (xdist or not); eager
@@ -210,8 +221,8 @@ def _gpu_mem_monitor(request):
         # collective_torch_test) would otherwise pollute subsequent tests,
         # causing CP attention tests to hang or crash.
         torch.set_default_device("cpu")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("GPU memory cleanup error: %s", e)
 
     after = _get_gpu_mem_mb()
 

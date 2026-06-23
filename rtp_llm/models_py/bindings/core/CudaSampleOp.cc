@@ -474,10 +474,10 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         // with GPU memory access faults in multi-GPU (TP>1) configurations.
         // torch::multinomial is well-tested and handles all cases correctly.
         //
-        // Clone before any in-place top_k/top_p filtering so the ORIGINAL
+        // Clone only when return_original_all_probs is set, so the ORIGINAL
         // all-probs output can be generated from the untouched softmax
-        // distribution in return_original_all_probs below.
-        filtered_probs = probs_t.clone();
+        // distribution. Otherwise reuse probs_t in-place to avoid the copy.
+        filtered_probs = params.return_original_all_probs ? probs_t.clone() : probs_t;
 
         // Apply top_k filtering if needed
         bool has_top_k = !std::all_of(top_k_ptr, top_k_ptr + batch_size, [](auto t) { return t <= 0; });

@@ -30,9 +30,8 @@ def trans_tensor(t: TensorPB):
     # Handle default-constructed (empty) TensorPB where data_type is not set.
     # trans_from_tensor returns TensorPB() for empty tensors, so data_type == 0.
     if not (len(t.shape) > 0 and t.shape[0] > 0):
-        if t.data_type == 0:
-            return torch.empty(0, dtype=torch.float32)
-        return torch.tensor([], dtype=trans_grpc_dtype(t.data_type))
+        dtype = torch.float32 if t.data_type == 0 else trans_grpc_dtype(t.data_type)
+        return torch.empty(list(t.shape), dtype=dtype) if t.shape else torch.empty(0, dtype=dtype)
     if t.data_type == TensorPB.DataType.FP32:
         return torch.frombuffer(t.fp32_data, dtype=torch.float32).reshape(list(t.shape))
     elif t.data_type == TensorPB.DataType.INT32:
@@ -63,7 +62,8 @@ def trans_from_tensor(t: torch.Tensor):
         elif t.dtype == torch.bfloat16:
             res.data_type = TensorPB.DataType.BF16
         else:
-            raise Exception("unknown tensor data type")
+            # Graceful degradation for unsupported empty tensor dtypes
+            return TensorPB()
         return res
     t = t.cpu()
     if t.dtype == torch.float32:

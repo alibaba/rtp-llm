@@ -1,4 +1,4 @@
-from typing import List, Sequence
+from typing import List, Sequence, Union
 
 import torch
 from torch import nn
@@ -61,7 +61,7 @@ class MultimodalEmbeddingInjector(nn.Module):
         self,
         embeddings: torch.Tensor,
         multimodal_features: Sequence[torch.Tensor],
-        multimodal_locs: torch.Tensor,
+        multimodal_locs: Union[torch.Tensor, Sequence[int]],
     ) -> torch.Tensor:
         if not multimodal_features:
             return embeddings

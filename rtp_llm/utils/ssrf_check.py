@@ -199,4 +199,6 @@ def safe_request_get(url: str, headers: Dict[str, str], timeout: int = 10):
             current_url = _validate_url(next_url)
             continue
         return response
+    if 'response' in locals() and response is not None:
+        response.close()
     raise ValueError(f"Exceeded maximum redirects ({_MAX_REDIRECTS}) for {url}")

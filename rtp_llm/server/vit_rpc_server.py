@@ -66,6 +66,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 grpc.StatusCode.INTERNAL,
                 "VIT engine returned empty multimodal embeddings",
             )
+            return
         res = trans_output(res)
         return res
 

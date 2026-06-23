@@ -594,13 +594,13 @@ class MMProcessEngine:
                     )
 
             for (idx, work_item), result in zip(pending_items, batch_outputs):
-                    work_item.embedding_result = result
-                    if work_item.need_check_cache:
-                        vit_emb_cache_.insert_cache(work_item.cache_key, result)
-                    ordered_emb[idx] = result[0]
-                    ordered_pos[idx] = result[1]
-                    if len(result) > 2:
-                        ordered_tensor[idx] = result[2]
+                work_item.embedding_result = result
+                if work_item.need_check_cache:
+                    vit_emb_cache_.insert_cache(work_item.cache_key, result)
+                ordered_emb[idx] = result[0]
+                ordered_pos[idx] = result[1]
+                if len(result) > 2:
+                    ordered_tensor[idx] = result[2]
 
         for emb, pos, tensor in zip(ordered_emb, ordered_pos, ordered_tensor):
             emb_res.extend(self._maybe_tensor_to_list(emb, dim=2))

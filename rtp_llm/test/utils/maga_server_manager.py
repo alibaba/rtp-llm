@@ -29,17 +29,17 @@ long_live_port_locks = []
 class MagaServerManager(object):
     def __init__(
         self,
-        env_args: Optional[Dict[str, Any]] = {},
+        env_args: Optional[Dict[str, Any]] = None,
         port: Optional[str] = None,
-        device_ids: List[int] = [],
+        device_ids: Optional[List[int]] = None,
         role_name: str = "main",
         process_file_name: str = "process.log",
         smoke_args_str: str = "",
     ):
         self._username = os.getenv("USER")
-        self._env_args = env_args
+        self._env_args = env_args if env_args is not None else {}
         self._log_file = None
-        self._device_ids = device_ids
+        self._device_ids = device_ids if device_ids is not None else []
         self._server_process = None
         self._role_name = role_name
         self._file_stream = None

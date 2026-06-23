@@ -91,6 +91,7 @@ _EMBEDDING_ENDPOINTS = {
     "/v1/embeddings/sparse",
     "/v1/embeddings/colbert",
 }
+register_comparer(lambda q_r, ep: q_r.get("tau2_bench", False), Tau2BenchComparer)
 register_comparer(lambda q_r, ep: "messages" in q_r.get("query", {}), OpenaiComparer)
 register_comparer(lambda q_r, ep: ep in _EMBEDDING_ENDPOINTS, EmbeddingComparer)
 register_comparer(
@@ -102,7 +103,6 @@ register_comparer(
 register_comparer(lambda q_r, ep: ep == "/v1/embeddings/similarity", SimilarityComparer)
 register_comparer(lambda q_r, ep: ep == "/v1/classifier", ClassifierComparer)
 register_comparer(lambda q_r, ep: ep == "/v1/reranker", RerankerComparer)
-register_comparer(lambda q_r, ep: q_r.get("tau2_bench", False), Tau2BenchComparer)
 set_default_comparer(NormalComparer)
 
 
@@ -682,7 +682,7 @@ class CaseRunner(object):
 
             # 收集结果
             results = {}
-            for future in concurrent.futures.as_completed(future_to_config):
+            for future in concurrent.futures.as_completed(future_to_config, timeout=3600):
                 config = future_to_config[future]
                 try:
                     server_manager, task_states = future.result()

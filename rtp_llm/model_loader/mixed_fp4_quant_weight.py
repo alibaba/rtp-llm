@@ -253,6 +253,12 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
         stacking is required.
         """
         ckpt_infos: List[CkptWeightInfo] = []
+        # Defensive check: all weights should be consistently stacked or per-expert
+        _w_suffix_matches = [w.name.endswith(W_SUFFIX) for w in src_weight_info.weights]
+        if _w_suffix_matches:
+            assert not (any(_w_suffix_matches) and any(not m for m in _w_suffix_matches)), (
+                f"Mixed stacked/per-expert weights: some end with '{W_SUFFIX}', others don't"
+            )
         is_stacked = False
         for w in src_weight_info.weights:
             if w.name.endswith(W_SUFFIX):

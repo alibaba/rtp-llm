@@ -94,7 +94,7 @@ from ctypes import cdll
 try:
     _pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
     cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + f"/libpython{_pyver}.so")
-except OSError:
+except (OSError, TypeError):
     pass
 
 try:

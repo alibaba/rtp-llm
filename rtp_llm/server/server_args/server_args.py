@@ -162,13 +162,13 @@ class EnvArgumentGroup:
 
 
 class EnvArgumentParser(argparse.ArgumentParser):
-    _env_mappings: Dict[str, str] = {}
 
     def __init__(self, *args, env_prefix: str = "", **kwargs):
         self.env_prefix = env_prefix.upper()
         self._groups: Dict[str, EnvArgumentGroup] = {}
         self._config_bindings: List[ConfigBinding] = []  # 配置绑定列表
         self._root_config: Optional[Any] = None  # 根配置对象（PyEnvConfigs）
+        self._env_mappings: Dict[str, str] = {}
 
         super().__init__(*args, **kwargs)
 

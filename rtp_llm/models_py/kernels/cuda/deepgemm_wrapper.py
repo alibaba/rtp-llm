@@ -143,7 +143,7 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
     try:
         _prepare_deep_gemm_jit_env()
         import deep_gemm
-    except (AssertionError, RuntimeError, OSError) as e:
+    except (ImportError, AssertionError, RuntimeError, OSError) as e:
         # deep_gemm found by find_spec but fails to import
         # (e.g. CUDA_HOME not set, missing shared libs)
         import logging
