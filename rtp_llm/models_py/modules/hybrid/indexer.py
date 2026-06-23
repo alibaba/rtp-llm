@@ -244,16 +244,11 @@ class Indexer(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None
-            slot_mapping = (
-                cp_params.sharded_slot_mapping
-                if bool(getattr(cp_params, "kv_cache_sharded", False))
-                else fmha_params.slot_mapping
-            )
             return self.indexer_op.quant_q_k_cp(
                 query,
                 key,
                 kv_cache,
-                slot_mapping,
+                fmha_params.slot_mapping,
                 cp_params.kv_restore_unpad_indices,
             )
         return self.indexer_op.quant_q_k(query, key, kv_cache, fmha_params.slot_mapping)
@@ -288,9 +283,6 @@ class Indexer(nn.Module):
                 cp_params.precomputed_ke,
                 cp_params.precomputed_lengths,
                 cp_params.precomputed_topk_off,
-                bool(getattr(cp_params, "kv_cache_sharded", False)),
-                int(getattr(cp_params, "cp_size", 1)),
-                int(getattr(cp_params, "cp_rank", 0)),
             )
         return self.indexer_op._get_topk_ragged(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs
