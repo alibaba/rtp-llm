@@ -79,10 +79,13 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
+        activation_type: Optional[str] = None,
     ):
         super().__init__(
-            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
+            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2,
+            activation_type,
         )
+        self.use_gelu = activation_type == "gelu"
         self._gemm_op = _get_cutlass_scaled_mm_blockwise_sm120_fp8()
         if self._gemm_op is None:
             raise RuntimeError(
@@ -142,7 +145,7 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         else:
             self._bias_flat = None
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def _forward_impl(self, input: torch.Tensor, use_gelu: bool) -> torch.Tensor:
         if input.dtype != torch.bfloat16:
             raise ValueError(f"Input tensor dtype must be bfloat16, got {input.dtype}")
         if input.dim() != 2:
@@ -172,5 +175,12 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             input_scales,
             self.weight_scales,
             self._bias_flat,
+            use_gelu,
         )
         return output
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return self._forward_impl(input, self.use_gelu)
+
+    def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
+        return self._forward_impl(input, True)

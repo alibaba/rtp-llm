@@ -31,10 +31,11 @@ class CudaF16Linear(LinearBase):
         input_scales: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
-        weight_scale_2: Optional[torch.Tensor] = None
+        weight_scale_2: Optional[torch.Tensor] = None,
+        activation_type: Optional[str] = None,
     ):
         super().__init__(weight, weight_scales, input_scales,
-                         bias, quant_config, weight_scale_2)
+                         bias, quant_config, weight_scale_2, activation_type)
         self.weight = weight.T
         self.bias = bias
 

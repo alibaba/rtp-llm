@@ -72,7 +72,8 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("B"),
                   py::arg("A_sf"),
                   py::arg("B_sf"),
-                  py::arg("bias") = std::nullopt);
+                  py::arg("bias") = std::nullopt,
+                  py::arg("use_gelu") = false);
 #endif
 
     rtp_ops_m.def("moe_pre_reorder",

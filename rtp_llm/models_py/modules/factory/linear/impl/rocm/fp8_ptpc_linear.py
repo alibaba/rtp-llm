@@ -58,9 +58,16 @@ class RocmFp8PTPCLinearBase(LinearBase):
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
+        activation_type: Optional[str] = None,
     ):
         super().__init__(
-            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
+            weight,
+            weight_scales,
+            input_scales,
+            bias,
+            quant_config,
+            weight_scale_2,
+            activation_type,
         )
         self.hidden_size = weight.shape[0]  # K
         self.output_size = weight.shape[1]  # N
@@ -133,9 +140,16 @@ class RocmFp8PTPCLinearNoSwizzle(RocmFp8PTPCLinearBase):
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
+        activation_type: Optional[str] = None,
     ):
         super().__init__(
-            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
+            weight,
+            weight_scales,
+            input_scales,
+            bias,
+            quant_config,
+            weight_scale_2,
+            activation_type,
         )
         self.weight = weight.reshape([weight.shape[1], weight.shape[0]])
         self.weight_scales = weight_scales.reshape(
@@ -203,9 +217,16 @@ class RocmFp8PTPCLinearWithSwizzle(RocmFp8PTPCLinearBase):
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
+        activation_type: Optional[str] = None,
     ):
         super().__init__(
-            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
+            weight,
+            weight_scales,
+            input_scales,
+            bias,
+            quant_config,
+            weight_scale_2,
+            activation_type,
         )
         self.weight = self._as_hipb_weight_view(weight)
         self.weight_scales = self._as_hipb_scale_b(weight_scales, self.output_size)

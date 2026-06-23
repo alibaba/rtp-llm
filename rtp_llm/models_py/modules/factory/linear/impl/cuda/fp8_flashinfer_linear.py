@@ -65,9 +65,11 @@ class CudaFp8FlashinferLinear(LinearBase):
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
+        activation_type: Optional[str] = None,
     ):
         super().__init__(
-            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
+            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2,
+            activation_type,
         )
         self._fi_gemm = _get_flashinfer_sm90_fp8_gemm()
         if self._fi_gemm is None:
