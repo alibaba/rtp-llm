@@ -633,6 +633,64 @@ TEST_F(SamplerTest, testUpdateStatusAllowsPartialCommitWindow) {
     EXPECT_EQ(processor.thinkEndTokensStatus()[0], 1);
 }
 
+TEST_F(SamplerTest, testSpecEosDraftTokenBlockedDuringThinking) {
+    const int                    EOS_TOKEN_ID        = 2;
+    std::vector<int>             end_think_token_ids = {8, 9};
+    StreamThinkInfo              info(true,
+                         100,
+                                      {7},
+                         end_think_token_ids,
+                         0,
+                         0,
+                         false,
+                         std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids),
+                         EOS_TOKEN_ID);
+    std::vector<StreamThinkInfo> infos = {info};
+    ThinkModeLogitsProcessor     processor(infos);
+
+    const int            P     = 3;
+    const size_t         V     = 16;
+    const size_t         W     = SpecLogitsProcessor::bitmaskWordCount(V);
+    std::vector<int32_t> draft = {5, EOS_TOKEN_ID, 6};
+    std::vector<int32_t> bitmask((P + 1) * W, SpecLogitsProcessor::kBitmaskAllowAll);
+
+    SpecLogitsProcessorRequest request;
+    request.draft_tokens       = draft.data();
+    request.propose_step       = P;
+    request.bitmask_cpu_out    = bitmask.data();
+    request.bitmask_size_int32 = W;
+    request.vocab_size         = V;
+
+    EXPECT_EQ(processor.tryAcceptAndFillBitmask(request), 1);
+}
+
+TEST_F(SamplerTest, testThinkingMasksEosDuringInThink) {
+    SamplerDataBuilder builder;
+    const int64_t      EOS_TOKEN_ID = 10;
+
+    auto generate_input                                    = std::make_shared<GenerateInput>();
+    generate_input->generate_config                        = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode         = true;
+    generate_input->generate_config->max_thinking_tokens   = 100;
+    generate_input->generate_config->begin_think_token_ids = {7};
+    generate_input->generate_config->end_think_token_ids   = {8, 9};
+    generate_input->input_ids                              = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1, EOS_TOKEN_ID);
+    ASSERT_NE(processor, nullptr);
+
+    SamplerInputs sampler_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
+    sampler_inputs.input_lengths    = torch::tensor({3}, torch::kInt32);
+    sampler_inputs.sequence_lengths = torch::tensor({3}, torch::kInt32);
+    processor->process(sampler_inputs, 0, 1);
+
+    float neg_inf = -std::numeric_limits<float>::max();
+    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][7].item<float>());
+    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][10].item<float>());
+    EXPECT_EQ(0, sampler_inputs.logits[0][8].item<float>());
+    EXPECT_EQ(0, sampler_inputs.logits[0][5].item<float>());
+}
+
 #undef EXPECT_SIMILAR
 
 }  // namespace rtp_llm
