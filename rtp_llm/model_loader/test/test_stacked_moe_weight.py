@@ -25,7 +25,7 @@ from rtp_llm.model_loader.ffn_weight import (
 )
 from rtp_llm.model_loader.offline_modelopt_fp4_quant_weight import (
     OfflineMegaMoeFp4MoeWeight,
-    OfflineMegaMoeFp4SharedExpertWeight,
+    OfflineMegaMoeFp8SharedExpertWeight,
     wrap_for_offline_fp4,
     wrap_shared_expert_for_offline_fp4,
 )
@@ -131,33 +131,35 @@ class TestOfflineFp4SharedExpertWeight(unittest.TestCase):
             config=config,
         )
 
-    def test_unwraps_fp8_shared_w13_to_offline_fp4_scale_names(self):
+    def test_unwraps_fp8_shared_w13_to_offline_fp8_scale_names(self):
         ffn = self._make_shared_ffn()
         fp8_wrapped = ffn.w13.create(ffn.w13, Fp8BlockWiseQuantConfig(is_quanted=True))
 
         self.assertIsInstance(fp8_wrapped, PerBlockFp8Weight)
         offline = wrap_shared_expert_for_offline_fp4(fp8_wrapped)
 
-        self.assertIsInstance(offline, OfflineMegaMoeFp4SharedExpertWeight)
+        self.assertIsInstance(offline, OfflineMegaMoeFp8SharedExpertWeight)
+        self.assertEqual(offline.kernel.data_type, torch.float8_e4m3fn)
         self.assertEqual(
             [w.name for w in offline.scale.weights],
             [
-                "model.layers.{i}.mlp.shared_experts.gate_proj.weight_scale",
-                "model.layers.{i}.mlp.shared_experts.up_proj.weight_scale",
+                "model.layers.{i}.mlp.shared_experts.gate_proj.weight_scale_inv",
+                "model.layers.{i}.mlp.shared_experts.up_proj.weight_scale_inv",
             ],
         )
 
-    def test_unwraps_fp8_shared_w2_to_offline_fp4_scale_name(self):
+    def test_unwraps_fp8_shared_w2_to_offline_fp8_scale_name(self):
         ffn = self._make_shared_ffn()
         fp8_wrapped = ffn.w2.create(ffn.w2, Fp8BlockWiseQuantConfig(is_quanted=True))
 
         self.assertIsInstance(fp8_wrapped, PerBlockFp8Weight)
         offline = wrap_shared_expert_for_offline_fp4(fp8_wrapped)
 
-        self.assertIsInstance(offline, OfflineMegaMoeFp4SharedExpertWeight)
+        self.assertIsInstance(offline, OfflineMegaMoeFp8SharedExpertWeight)
+        self.assertEqual(offline.kernel.data_type, torch.float8_e4m3fn)
         self.assertEqual(
             [w.name for w in offline.scale.weights],
-            ["model.layers.{i}.mlp.shared_experts.down_proj.weight_scale"],
+            ["model.layers.{i}.mlp.shared_experts.down_proj.weight_scale_inv"],
         )
 
     def test_strategy_wrapper_skips_shared_expert_unless_requested(self):
@@ -167,7 +169,7 @@ class TestOfflineFp4SharedExpertWeight(unittest.TestCase):
         self.assertIs(wrap_for_offline_fp4(fp8_wrapped), fp8_wrapped)
 
         offline = wrap_for_offline_fp4(fp8_wrapped, include_shared_expert=True)
-        self.assertIsInstance(offline, OfflineMegaMoeFp4SharedExpertWeight)
+        self.assertIsInstance(offline, OfflineMegaMoeFp8SharedExpertWeight)
 
     def test_strategy_wrapper_always_wraps_routed_moe(self):
         moe = MoeAtomicWeight(

@@ -14,8 +14,10 @@ class MegaMoeFusedWrapper(MegaMoeWrapper):
     """FusedMoe-compatible wrapper for ``fp8_fp4_mega_moe_fused``.
 
     The routed expert weights use the same load-time FP4 layout as
-    :class:`MegaMoeWrapper`. The shared expert weights are pre-quantized FP4
-    tensors loaded from ``shared_experts.*.{weight,weight_scale}``.
+    :class:`MegaMoeWrapper`. The shared expert weights are pre-quantized **FP8
+    e4m3 per-block** tensors loaded from
+    ``shared_experts.*.{weight,weight_scale_inv}`` (``mega_moe_fused`` no longer
+    supports FP4 shared-expert weights).
     """
 
     def _get_mega_moe_cls(self):
@@ -50,17 +52,17 @@ class MegaMoeFusedWrapper(MegaMoeWrapper):
 
         if w1 is None or s1 is None or w2 is None or s2 is None:
             raise ValueError(
-                "MegaMoeFusedWrapper requires load-time FP4 shared expert weights "
-                "(ffn_w13, ffn_w2, ffn_s13, ffn_s2)."
+                "MegaMoeFusedWrapper requires load-time FP8 per-block shared "
+                "expert weights (ffn_w13, ffn_w2, ffn_s13, ffn_s2)."
             )
-        if w1.dtype != torch.int8 or w2.dtype != torch.int8:
+        if w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn:
             raise ValueError(
-                "MegaMoeFusedWrapper only accepts load-time FP4 int8 shared "
+                "MegaMoeFusedWrapper only accepts load-time FP8 e4m3 shared "
                 f"expert weights. Got ffn_w13 dtype={w1.dtype}, "
                 f"ffn_w2 dtype={w2.dtype}."
             )
 
-        self.mega_moe.setup_shared_expert_from_fp4(
+        self.mega_moe.setup_shared_expert_from_fp8(
             w1_w=w1,
             w1_s=s1,
             w2_w=w2,

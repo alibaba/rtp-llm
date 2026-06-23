@@ -1,4 +1,10 @@
-"""GLM-5 MegaMoE: fused routed experts plus FP4 shared expert."""
+"""GLM-5 MegaMoE: fused routed experts plus FP8 shared expert.
+
+``deep_gemm.fp8_fp4_mega_moe_fused`` keeps the routed experts in FP4
+(per-group, gran_k=32) but consumes the shared expert as **FP8 e4m3 weights
+with 128×128 per-block UE8M0 scale factors**. The FP8 shared-expert weight
+transform + scratch workspace live in :mod:`.mega_fused_buf`.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +13,14 @@ from typing import Optional
 
 import torch
 
+from .input_packer import get_mega_moe_input_packer
 from .jit_warmup import format_token_counts, mega_moe_jit_warmup_enabled
+from .mega_buf import get_or_create_mega_output
+from .mega_fused_buf import (
+    get_or_create_mega_buf_fused,
+    make_shared_mid_workspace,
+    transform_shared_expert_fp8_for_fused,
+)
 from .mega_moe import (
     GLM5MegaMoE,
     GLM5MegaMoeCfg,
@@ -19,17 +32,46 @@ from .quant_layouts import FP4_BLOCK
 logger = logging.getLogger(__name__)
 
 _MEGA_MOE_FUSED_JIT_WARMED_KEYS: set[tuple] = set()
+_CUDA_GRAPH_CLONE_FUSED_BUF_CACHE: dict[tuple, object] = {}
 
 
-def _as_packed_fp4_weight(weight: torch.Tensor) -> torch.Tensor:
-    fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
-    if weight.dtype == torch.int8:
-        return weight.contiguous()
-    if fp4_dtype is not None and weight.dtype == fp4_dtype:
-        return weight.contiguous().view(torch.int8)
-    raise TypeError(
-        "shared expert FP4 weights must be int8 packed tensors, got " f"{weight.dtype}"
+def _get_or_create_cuda_graph_clone_buf_fused(src_buf, group, cfg: GLM5MegaMoeCfg):
+    if src_buf is None or group is None:
+        return src_buf
+    key = (
+        id(src_buf),
+        id(group),
+        cfg.n_routed_experts,
+        cfg.max_tokens_per_rank,
+        cfg.n_activated_experts,
+        cfg.dim,
+        cfg.moe_inter_dim,
     )
+    cached = _CUDA_GRAPH_CLONE_FUSED_BUF_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    import deep_gemm
+
+    cached = deep_gemm.get_symm_buffer_for_mega_moe_fused(
+        group=group,
+        num_experts=cfg.n_routed_experts,
+        num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
+        num_topk=cfg.n_activated_experts,
+        hidden=cfg.dim,
+        intermediate_hidden=cfg.moe_inter_dim,
+        use_fp8_dispatch=True,
+        activation="swiglu",
+    )
+    _CUDA_GRAPH_CLONE_FUSED_BUF_CACHE[key] = cached
+    logger.info(
+        "[GLM5 MegaMoE Fused] allocated CUDA graph clone symm buffer: layer=%d "
+        "max_tokens_per_rank=%d hidden=%d",
+        cfg.layer_id,
+        cfg.max_tokens_per_rank,
+        cfg.dim,
+    )
+    return cached
 
 
 class GLM5MegaMoEFused(GLM5MegaMoE):
@@ -44,8 +86,49 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
         self._shared_mid_fp8: Optional[torch.Tensor] = None
         self._shared_mid_sf: Optional[torch.Tensor] = None
 
+    def _setup_buffer_and_warmup(self) -> None:
+        """Allocate the fused symmetric-memory buffer (``SymmBufferFused``).
+
+        ``fp8_fp4_mega_moe_fused`` needs its own buffer type, distinct from the
+        routed ``fp8_fp4_mega_moe`` buffer the base class allocates. The JIT
+        warmup is deferred to :meth:`maybe_warmup_fused_shared_jit_once` (it must
+        run after the shared-expert weights are set up, since the fused kernel
+        consumes both routed and shared weights together).
+        """
+        import torch.distributed as dist
+
+        cfg = self.cfg
+        device = self._mega_l1_w.device
+
+        assert (
+            dist.is_initialized()
+        ), "GLM5 MegaMoE Fused requires torch.distributed initialised"
+        group = dist.group.WORLD
+        self._mega_group = group
+
+        self._mega_buf = get_or_create_mega_buf_fused(
+            group=group,
+            num_experts=cfg.n_routed_experts,
+            num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
+            num_topk=cfg.n_activated_experts,
+            hidden=cfg.dim,
+            intermediate_hidden=cfg.moe_inter_dim,
+            use_fp8_dispatch=True,
+            activation="swiglu",
+        )
+        self._mega_y = get_or_create_mega_output(
+            _mega_output_capacity(self._mega_buf, cfg.max_tokens_per_rank),
+            cfg.dim,
+            torch.bfloat16,
+            device,
+        )
+        self._input_packer = get_mega_moe_input_packer()
+
     def clone_for_cuda_graph(self) -> "GLM5MegaMoEFused":
         clone = super().clone_for_cuda_graph()
+        clone._mega_buf = _get_or_create_cuda_graph_clone_buf_fused(
+            self._mega_buf, self._mega_group, self.cfg
+        )
         clone._shared_l1_w = self._shared_l1_w
         clone._shared_l1_sf = self._shared_l1_sf
         clone._shared_l2_w = self._shared_l2_w
@@ -62,63 +145,22 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
         )
         return clone
 
-    def setup_shared_expert_from_fp4(
+    def setup_shared_expert_from_fp8(
         self,
-        w1_w: torch.Tensor,  # [2*inter, dim//2] int8 (FP4 packed, gate+up)
-        w1_s: torch.Tensor,  # [2*inter, dim//FP4_BLOCK] float32
-        w2_w: torch.Tensor,  # [dim, inter//2] int8 (FP4 packed)
-        w2_s: torch.Tensor,  # [dim, inter//FP4_BLOCK] float32
+        w1_w: torch.Tensor,  # [2*inter, dim] float8_e4m3fn (gate||up stacked on N)
+        w1_s: torch.Tensor,  # [2*inter//128, dim//128] float32 per-block SF
+        w2_w: torch.Tensor,  # [dim, inter] float8_e4m3fn
+        w2_s: torch.Tensor,  # [dim//128, inter//128] float32 per-block SF
     ) -> None:
-        """Setup pre-quantized FP4 shared-expert weights for fused MegaMoE."""
-        import deep_gemm
-
+        """Setup pre-quantized FP8 per-block shared-expert weights for fused MegaMoE."""
         cfg = self.cfg
-        D = cfg.dim
-        inter = cfg.moe_inter_dim
-        if w1_w.shape != (2 * inter, D // 2):
-            raise ValueError(
-                "shared expert w1 FP4 weight shape mismatch: "
-                f"expected {(2 * inter, D // 2)}, got {tuple(w1_w.shape)}"
-            )
-        if w1_s.shape != (2 * inter, D // FP4_BLOCK):
-            raise ValueError(
-                "shared expert w1 FP4 scale shape mismatch: "
-                f"expected {(2 * inter, D // FP4_BLOCK)}, got {tuple(w1_s.shape)}"
-            )
-        if w2_w.shape != (D, inter // 2):
-            raise ValueError(
-                "shared expert w2 FP4 weight shape mismatch: "
-                f"expected {(D, inter // 2)}, got {tuple(w2_w.shape)}"
-            )
-        if w2_s.shape != (D, inter // FP4_BLOCK):
-            raise ValueError(
-                "shared expert w2 FP4 scale shape mismatch: "
-                f"expected {(D, inter // FP4_BLOCK)}, got {tuple(w2_s.shape)}"
-            )
-        w1_w = _as_packed_fp4_weight(w1_w)
-        w2_w = _as_packed_fp4_weight(w2_w)
-
-        w1_sf_int = deep_gemm.transform_sf_into_required_layout(
-            w1_s.float(),
-            2 * inter,
-            D,
-            (1, 1, FP4_BLOCK),
-            num_groups=None,
-            is_sfa=False,
-        )
-        w2_sf_int = deep_gemm.transform_sf_into_required_layout(
-            w2_s.float(),
-            D,
-            inter,
-            (1, 1, FP4_BLOCK),
-            num_groups=None,
-            is_sfa=False,
-        )
-        (l1_w, l1_sf), (l2_w, l2_sf) = (
-            deep_gemm.transform_shared_expert_weights_for_mega_moe_fused(
-                (w1_w, w1_sf_int),
-                (w2_w, w2_sf_int),
-            )
+        (l1_w, l1_sf), (l2_w, l2_sf) = transform_shared_expert_fp8_for_fused(
+            w1_w,
+            w1_s,
+            w2_w,
+            w2_s,
+            dim=cfg.dim,
+            inter=cfg.moe_inter_dim,
         )
         self._shared_l1_w = l1_w
         self._shared_l1_sf = l1_sf
@@ -127,8 +169,6 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
         self._setup_shared_expert_workspace()
 
     def _setup_shared_expert_workspace(self) -> None:
-        import deep_gemm
-
         if self._mega_buf is None:
             raise RuntimeError(
                 "setup routed MegaMoE weights before shared expert weights"
@@ -136,20 +176,11 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
         cfg = self.cfg
         device = self._mega_l1_w.device
         capacity = _mega_output_capacity(self._mega_buf, cfg.max_tokens_per_rank)
-        self._shared_mid_fp8 = torch.empty(
-            (capacity, cfg.moe_inter_dim),
-            dtype=torch.float8_e4m3fn,
-            device=device,
+        self._shared_mid_fp8, self._shared_mid_sf = make_shared_mid_workspace(
+            capacity,
+            cfg.moe_inter_dim,
+            device,
         )
-        t_pad = max(
-            deep_gemm.get_tma_aligned_size(capacity, 4),
-            ((capacity + 255) // 256) * 256,
-        )
-        self._shared_mid_sf = torch.empty(
-            (cfg.moe_inter_dim // 128, t_pad),
-            dtype=torch.int32,
-            device=device,
-        ).T
 
     def _check_shared_expert_ready(self) -> None:
         if (
@@ -160,7 +191,7 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
             or self._shared_mid_fp8 is None
             or self._shared_mid_sf is None
         ):
-            raise RuntimeError("shared expert FP4 weights/workspace are not set up")
+            raise RuntimeError("shared expert FP8 weights/workspace are not set up")
 
     def maybe_warmup_fused_shared_jit_once(self) -> None:
         """Compile fused routed+shared MegaMoE JIT buckets once per shape."""
@@ -257,7 +288,7 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
         weights: torch.Tensor,  # [T, topk] FP32 router weights
         indices: torch.Tensor,  # [T, topk] int64 GLOBAL expert IDs
     ) -> torch.Tensor:
-        """Run fused routed MegaMoE plus the FP4 shared expert in one kernel."""
+        """Run fused routed MegaMoE plus the FP8 shared expert in one kernel."""
         import deep_gemm
 
         self._check_shared_expert_ready()
@@ -302,7 +333,7 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
             buf,
             recipe=(1, 1, FP4_BLOCK),
             activation="swiglu",
-            activation_clamp=None, #(self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None),
+            activation_clamp=None,  # (self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None),
             fast_math=False,
         )
         return y
