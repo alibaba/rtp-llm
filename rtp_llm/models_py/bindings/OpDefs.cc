@@ -142,6 +142,12 @@ void registerPyOpDefs(pybind11::module& m) {
             "token_type_embedding", &BertEmbeddingInputs::token_type_embedding, "Token type embedding tensor")
         .def_readwrite(
             "input_embedding_scalar", &BertEmbeddingInputs::input_embedding_scalar, "Input embedding scalar value")
+        .def_readwrite("multimodal_features",
+                       &BertEmbeddingInputs::multimodal_features,
+                       "Optional list of multimodal feature tensors to splice into hidden states")
+        .def_readwrite("mm_features_locs",
+                       &BertEmbeddingInputs::mm_features_locs,
+                       "Token-index locations for multimodal features splicing")
         .def("__repr__", [](const BertEmbeddingInputs& self) { return "BertEmbeddingInputs"; });
 
     pybind11::class_<PyEmbeddingInputs>(m, "PyEmbeddingInputs")
