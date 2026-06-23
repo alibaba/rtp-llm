@@ -56,7 +56,9 @@ if _xdist_worker:
 
     _cvd = _os.environ.get("CUDA_VISIBLE_DEVICES")
     _hvd = _os.environ.get("HIP_VISIBLE_DEVICES")
-    _pool = _cvd or _hvd or ""
+    # Treat an explicitly empty CUDA_VISIBLE_DEVICES as an empty pool rather
+    # than falling back to HIP, so CUDA workers do not silently pick up HIP GPUs.
+    _pool = _cvd if _cvd is not None else (_hvd if _hvd is not None else "")
     if _pool:
         _all_gpus = [g.strip() for g in _pool.split(",") if g.strip()]
         _gpu_per_worker = int(_os.environ.get("GPU_COUNT_PER_WORKER", "1"))

@@ -91,7 +91,7 @@ _EMBEDDING_ENDPOINTS = {
     "/v1/embeddings/sparse",
     "/v1/embeddings/colbert",
 }
-register_comparer(lambda q_r, ep: "messages" in q_r["query"], OpenaiComparer)
+register_comparer(lambda q_r, ep: "messages" in q_r.get("query", {}), OpenaiComparer)
 register_comparer(lambda q_r, ep: ep in _EMBEDDING_ENDPOINTS, EmbeddingComparer)
 register_comparer(
     lambda q_r, ep: ep.startswith("/rtp_llm/worker_status"), WorkerStatusComparer
@@ -314,8 +314,11 @@ class CaseRunner(object):
                     task_states = results[0]
                 else:
                     for result in results:
-                        if str(result) != str(str(results[0])):
-                            task_states = result
+                        if str(result) != str(results[0]):
+                            task_states.ret = False
+                            task_states.err_msg = (
+                                f"concurrency results differ: {result} vs {results[0]}"
+                            )
         else:
             task_states = self._curl_server_impl(server_manager, self.task_info)
         return task_states
@@ -589,7 +592,7 @@ class CaseRunner(object):
                 )
                 if (
                     exp_update_status != update_status
-                    and update_response != exp_update_response
+                    or update_response != exp_update_response
                 ):
                     task_states.ret = False
                     task_states.err_msg = f"failed to update lora, real response is {update_response}, exp response is {exp_update_response}"

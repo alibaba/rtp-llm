@@ -52,16 +52,19 @@ def _resolve_and_validate_host(hostname: str) -> str:
         raise ValueError("URL host is empty")
 
     # If hostname is already an IP, validate it directly.
+    # Only the ip_address() parse error is caught here; private-IP validation
+    # must raise ValueError that propagates to the caller.
     try:
         ip_obj = ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    else:
         if _is_private_ip(hostname):
             raise ValueError(
                 f"URL host {hostname!r} is a private/internal address "
                 f"and is not allowed for safe download"
             )
         return str(ip_obj)
-    except ValueError:
-        pass
 
     try:
         addr_info = socket.getaddrinfo(hostname, None)

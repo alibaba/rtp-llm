@@ -103,7 +103,8 @@ def _try_register_mainse_comparers() -> None:
             lambda q_r, ep: q_r.get("mainse_arpc", False),
             MainseArpcComparer,
         )
-    except Exception:
+    except (ImportError, ModuleNotFoundError):
+        # OSS-only checkouts legitimately lack internal mainse comparers.
         pass
 
 

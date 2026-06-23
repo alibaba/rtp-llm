@@ -242,7 +242,7 @@ public:
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
-        cond_.wait_for(lock, kFlushTimeoutMs, [this] {
+        bool woken = cond_.wait_for(lock, kFlushTimeoutMs, [this] {
             return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
                    || !loading_cache_streams_.empty();
         });
@@ -252,7 +252,11 @@ public:
         evaluateAndUpdateStreams(loading_cache_streams_);
         evaluateAndUpdateStreams(running_streams_);
 
-        if (running_streams_.empty() && waiting_streams_.size() >= batch_size_) {
+        // If no running work and there are waiting streams, schedule them.
+        // When the flush timeout fires (!woken), run a partial batch so low-traffic
+        // or mixed ReturnAllProbsMode groups never wait forever for batch_size_.
+        if (running_streams_.empty() && !waiting_streams_.empty()
+            && (waiting_streams_.size() >= batch_size_ || !woken)) {
             evaluateWaitingStreams();
             if (!running_streams_.empty()) {
                 initRunningStreams();

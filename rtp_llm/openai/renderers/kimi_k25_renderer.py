@@ -65,9 +65,9 @@ class KimiK25Renderer(KimiK2Renderer):
                     assert part.image_url is not None
                     urls.append(part.image_url.url)
                     types.append(MMUrlType.IMAGE)
-                    if part.image_url.preprocess_config is not None:
+                    if part.preprocess_config is not None:
                         preprocess_configs.append(
-                            get_preprocess_config(part.image_url.preprocess_config)
+                            get_preprocess_config(part.preprocess_config)
                         )
                     else:
                         preprocess_configs.append(
