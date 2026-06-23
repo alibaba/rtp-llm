@@ -34,6 +34,10 @@ _SHARED_EXPERT_KERNEL_NAMES = (W.ffn_w13, W.ffn_w2)
 
 _FP4_W_SUFFIX = ".weight"
 _FP4_S_SUFFIX = ".weight_scale"
+# Shared experts in the GLM-5.2 FP4-MoE/FP8 checkpoint are FP8 per-block:
+# ``.weight`` is float8_e4m3fn and the per-block (128x128) UE8M0 scale is stored
+# under ``.weight_scale_inv`` (DeepSeek FP8 convention), not ``.weight_scale``.
+_FP8_S_SUFFIX = ".weight_scale_inv"
 
 
 def _mega_moe_scale_name(name: str) -> str:
@@ -167,8 +171,15 @@ class OfflineMegaMoeFp4MoeWeight(CompositeWeight, QuantWeight):
         }
 
 
-class OfflineMegaMoeFp4SharedExpertWeight(CompositeWeight, QuantWeight):
-    """Load pre-quantized FP4 shared-expert weights for fused MegaMoE."""
+class OfflineMegaMoeFp8SharedExpertWeight(CompositeWeight, QuantWeight):
+    """Load pre-quantized FP8 per-block shared-expert weights for fused MegaMoE.
+
+    The shared expert in the GLM-5.2 FP4-MoE checkpoint is FP8 e4m3 with 128x128
+    per-block UE8M0 scale (``.weight`` + ``.weight_scale_inv``). gate/up are
+    stacked along the output dim (``W.ffn_w13``); down is loaded as-is
+    (``W.ffn_w2``). No transpose: the kernel consumes the native ``[N, K]``
+    orientation. ``mega_moe_fused`` only supports FP8 shared-expert weights.
+    """
 
     shared_weight_list = list(_SHARED_EXPERT_KERNEL_NAMES)
 
@@ -185,7 +196,7 @@ class OfflineMegaMoeFp4SharedExpertWeight(CompositeWeight, QuantWeight):
     ):
         if not _is_shared_expert_weight(src_weight_info):
             raise ValueError(
-                "OfflineMegaMoeFp4SharedExpertWeight only wraps shared_experts "
+                "OfflineMegaMoeFp8SharedExpertWeight only wraps shared_experts "
                 f"{_SHARED_EXPERT_KERNEL_NAMES}, got {src_weight_info}"
             )
 
@@ -196,12 +207,12 @@ class OfflineMegaMoeFp4SharedExpertWeight(CompositeWeight, QuantWeight):
             name=src_weight_info.name,
             weights=src_weight_info.weights,
             process_fun=process_fun,
-            data_type=torch.int8,
+            data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
         )
         scale_weights = [
             CkptWeightInfo(
-                w.name[: -len(_FP4_W_SUFFIX)] + _FP4_S_SUFFIX,
+                w.name[: -len(_FP4_W_SUFFIX)] + _FP8_S_SUFFIX,
                 w.merge_fun,
             )
             for w in src_weight_info.weights
@@ -342,7 +353,12 @@ def wrap_moe_for_offline_fp4(weight: WeightModule) -> WeightModule:
 
 
 def wrap_shared_expert_for_offline_fp4(weight: WeightModule) -> WeightModule:
-    """Replace shared-expert FFN weights with offline FP4 loaders."""
+    """Replace shared-expert FFN weights with the offline FP8 per-block loader.
+
+    ``mega_moe_fused`` consumes the shared expert as FP8 e4m3 per-block weights
+    (``deep_gemm.fp8_fp4_mega_moe_fused``); FP4 shared-expert weights are no
+    longer supported.
+    """
     from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
 
     if (
@@ -353,9 +369,9 @@ def wrap_shared_expert_for_offline_fp4(weight: WeightModule) -> WeightModule:
         if kernel is None or not isinstance(kernel, FfnAtomicWeight):
             return weight
         if _is_shared_expert_weight(kernel):
-            return OfflineMegaMoeFp4SharedExpertWeight(kernel)
+            return OfflineMegaMoeFp8SharedExpertWeight(kernel)
     if _is_shared_expert_weight(weight):
-        return OfflineMegaMoeFp4SharedExpertWeight(weight)
+        return OfflineMegaMoeFp8SharedExpertWeight(weight)
     return weight
 
 

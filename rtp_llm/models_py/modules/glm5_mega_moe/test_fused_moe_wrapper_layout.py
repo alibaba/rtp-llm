@@ -28,8 +28,8 @@ class _FakeMegaMoE:
     def setup_weights_from_fp8(self, **kwargs):
         self.fp8_kwargs = kwargs
 
-    def setup_shared_expert_from_fp4(self, **kwargs):
-        self.shared_fp4_kwargs = kwargs
+    def setup_shared_expert_from_fp8(self, **kwargs):
+        self.shared_fp8_kwargs = kwargs
 
     def maybe_warmup_fused_shared_jit_once(self):
         self.fused_shared_jit_warmed = True
@@ -213,16 +213,18 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
 
         self.assertEqual(_FakeMegaMoE.instance.params["max_tokens_per_rank"], 32)
 
-    def test_fused_wrapper_loads_shared_expert_fp4(self):
+    def test_fused_wrapper_loads_shared_expert_fp8(self):
         config = _config(hidden_size=8, inter=4)
+        w1_w = torch.full((8, 8), 3, dtype=torch.float32).to(torch.float8_e4m3fn)
+        w2_w = torch.full((8, 4), 7, dtype=torch.float32).to(torch.float8_e4m3fn)
         weights = {
             W.moe_w1: torch.zeros((2, 8, 4), dtype=torch.int8),
             W.moe_s1: torch.ones((2, 8, 2), dtype=torch.float32),
             W.moe_w2: torch.ones((2, 8, 2), dtype=torch.int8),
             W.moe_s2: torch.ones((2, 8, 1), dtype=torch.float32),
-            W.ffn_w13: torch.full((8, 4), 3, dtype=torch.int8),
+            W.ffn_w13: w1_w,
             W.ffn_s13: torch.full((8, 2), 5, dtype=torch.float32),
-            W.ffn_w2: torch.full((8, 2), 7, dtype=torch.int8),
+            W.ffn_w2: w2_w,
             W.ffn_s2: torch.full((8, 1), 11, dtype=torch.float32),
         }
 
@@ -231,17 +233,13 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
                 config, _parallelism(), weights, moe_config=None, layer_idx=0
             )
 
-        captured = _FakeMegaMoE.instance.shared_fp4_kwargs
+        captured = _FakeMegaMoE.instance.shared_fp8_kwargs
         self.assertTrue(_FakeMegaMoE.instance.fused_shared_jit_warmed)
-        torch.testing.assert_close(
-            captured["w1_w"], torch.full((8, 4), 3, dtype=torch.int8)
-        )
+        torch.testing.assert_close(captured["w1_w"], w1_w)
         torch.testing.assert_close(
             captured["w1_s"], torch.full((8, 2), 5, dtype=torch.float32)
         )
-        torch.testing.assert_close(
-            captured["w2_w"], torch.full((8, 2), 7, dtype=torch.int8)
-        )
+        torch.testing.assert_close(captured["w2_w"], w2_w)
         torch.testing.assert_close(
             captured["w2_s"], torch.full((8, 1), 11, dtype=torch.float32)
         )

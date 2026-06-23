@@ -82,7 +82,7 @@ def _apply_mega_moe_fp4_wrappers(
         logging.info(
             "[mega_moe] offline FP4 MoE detected in ckpt; using "
             "OfflineMegaMoeFp4MoeWeight%s (skip online quantization)",
-            " and OfflineMegaMoeFp4SharedExpertWeight" if include_shared_expert else "",
+            " and OfflineMegaMoeFp8SharedExpertWeight" if include_shared_expert else "",
         )
 
     from rtp_llm.model_loader.ffn_weight import FfnWeight, MoeWeight
