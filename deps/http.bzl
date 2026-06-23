@@ -66,6 +66,11 @@ def http_deps():
         build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
     )
 
+    # TODO(pip_unify Phase 5): aiter http_archive (C++ headers/runtime) is
+    # 0.1.14rc1 while requirements_rocm.txt / requirements_lock_rocm.txt pin
+    # 0.1.13.dev14. Unify both to the same version once the matching wheel URL
+    # and sha256 are available, or regenerate the ROCm lockfile with 0.1.14rc1.
+    # Until then, keep the archive at the newer version but note the ABI gap.
     http_archive(
         name = "aiter",
         sha256 = "83c6bf067f94f8ca901a7d0526c51835c615feae9e9299f0371daef53e55bdd2",

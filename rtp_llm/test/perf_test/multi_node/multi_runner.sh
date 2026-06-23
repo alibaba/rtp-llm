@@ -132,6 +132,10 @@ multi_test_script() {
     echo "WORLD_SIZE should be multiple of NUM_WORKERS"
     exit 1
   fi
+  # Export essential environment variables
+  export BAZEL_BUILD_ARGS=${BAZEL_BUILD_ARGS:-" --jobs 64 --verbose_failures --config=cuda12_9 "}
+  export FRONTEND_SERVER_COUNT=${FRONTEND_SERVER_COUNT:-16}
+  export START_PORT=${START_PORT:-12333}
   # Generate GANG_CONFIG_STRING: join ip list with server ports
   GANG_CONFIG_STRING=""
   WORKER_RANK=0
@@ -151,18 +155,14 @@ multi_test_script() {
     echo "OPEN_SOURCE_REF should be set"
     exit 1
   fi
-  if [ -z "$TP_SIZE"] || [ -z "$DP_SIZE" ] || [ -z "$EP_SIZE" ] || [ -z "$WORLD_SIZE" ] || [ -z "$LOCAL_WORLD_SIZE" ] || [ -z "$GANG_CONFIG_STRING" ]; then
+  if [ -z "$TP_SIZE" ] || [ -z "$DP_SIZE" ] || [ -z "$EP_SIZE" ] || [ -z "$WORLD_SIZE" ] || [ -z "$LOCAL_WORLD_SIZE" ] || [ -z "$GANG_CONFIG_STRING" ]; then
     echo "Parallel parameters are not set"
     exit 1
   fi
-  if [ -z "$MODEL_TYPE"] || [ -z "$TOKENIZER_PATH" ] || [ -z "$CHECKPOINT_PATH" ]; then
+  if [ -z "$MODEL_TYPE" ] || [ -z "$TOKENIZER_PATH" ] || [ -z "$CHECKPOINT_PATH" ]; then
     echo "Model parameters are not set"
     exit 1
   fi
-  # Export essential environment variables
-  export BAZEL_BUILD_ARGS=${BAZEL_BUILD_ARGS:-" --jobs 64 --verbose_failures --config=cuda12_9 "}
-  export FRONTEND_SERVER_COUNT=${FRONTEND_SERVER_COUNT:-16}
-  export START_PORT=${START_PORT:-12333}
   export WARM_UP=${WARM_UP:-1}
   export RESERVER_RUNTIME_MEM_MB=${RESERVER_RUNTIME_MEM_MB:-0}
   export LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -173,18 +173,24 @@ multi_test_script() {
   (
     trap 'kill 0' SIGINT;
     export WORLD_RANK=0;
+    PIDS=()
     for IP in "${IP_ARRAY[@]}"
     do
       (
-        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh;
-        # Concat all environment variables
-        ENV_STR=$(printenv | paste -sd " ");
-        echo "Environment variables: $ENV_STR";
+        set -e
+        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh && \
+        ENV_STR=$(printenv | paste -sd " "); \
+        echo "Environment variables: $ENV_STR"; \
         ssh ${RUN_USER}@${IP} -p ${SSH_PORT} "$ENV_STR bash /tmp/multi_local_executor.sh";
       ) &
+      PIDS+=("$!")
       export WORLD_RANK=$((WORLD_RANK + LOCAL_WORLD_SIZE));
     done;
-    wait;
+    EXIT_CODE=0
+    for PID in "${PIDS[@]}"; do
+      wait "$PID" || EXIT_CODE=$?
+    done;
+    exit $EXIT_CODE
   )
 }
 
