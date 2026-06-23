@@ -5,8 +5,8 @@
 # │   → native "build" check run created on PR HEAD SHA             │
 # │   → resolve-context: check for fresh LGTM review/comment       │
 # │   → no fresh LGTM                                              │
-# │       → resolve-context exit 1                                  │
-# │       → build check = failure (blocks merge)                    │
+# │       → resolve-context marks qualified=false (exit 0)          │
+# │       → internal CI steps are skipped                           │
 # │       → when LGTM arrives, CI-event-dispatcher.yml reruns this  │
 # │   → has fresh LGTM                                             │
 # │       → pre-check internal CI status                            │

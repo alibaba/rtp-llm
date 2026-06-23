@@ -179,6 +179,9 @@ def resolve_context(args):
     qualified = check_review_qualified(pr_number, repo, head_sha, args.github_token, args.lgtm_user)
     write_output("qualified", "true" if qualified else "false", args.output_file)
     if not qualified:
+        if event_name == "pull_request":
+            log("::warning::No qualifying review yet — skipping CI trigger")
+            return 0
         log("::error::No qualifying review — build check will report failure")
         return 1
     return 0

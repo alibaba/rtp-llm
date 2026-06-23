@@ -424,11 +424,10 @@ class TestResolveContextIssueComment(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# review.resolve_context — qualified=false must return 1 (not 0!)
+# review.resolve_context — pull_request can skip when qualified=false
 # ---------------------------------------------------------------------------
 class TestResolveContext(unittest.TestCase):
-    """Verify that resolve_context returns 1 (failure) whenever qualified=false,
-    so the GitHub Actions job does NOT report SUCCESS for unapproved code."""
+    """Verify resolve_context behavior across review-qualification outcomes."""
 
     def _base_args(self, **overrides):
         defaults = {
@@ -449,8 +448,8 @@ class TestResolveContext(unittest.TestCase):
 
     @patch("ci_gate.review.github_get_pages")
     @patch("ci_gate.review.github_get")
-    def test_no_review_returns_1(self, mock_get, mock_pages):
-        """synchronize with no fresh review → exit 1 (FAILED check)."""
+    def test_no_review_returns_0(self, mock_get, mock_pages):
+        """synchronize with no fresh review → skip CI trigger without failing."""
         mock_get.return_value = {
             "user": {"login": "author"},
             "head": {"sha": "aaa111", "repo": {"clone_url": "url"}},
@@ -458,7 +457,7 @@ class TestResolveContext(unittest.TestCase):
         }
         mock_pages.return_value = []
         result = resolve_context(self._base_args())
-        self.assertEqual(result, 1)
+        self.assertEqual(result, 0)
 
     @patch("ci_gate.review.github_get_pages")
     @patch("ci_gate.review.github_get")
