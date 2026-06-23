@@ -97,6 +97,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)
         .def_readwrite("input_lengths", &PyAttentionInputs::input_lengths)
+        .def_readwrite("attention_mask", &PyAttentionInputs::attention_mask)
         .def_readwrite("kv_cache_kernel_block_id_host", &PyAttentionInputs::kv_cache_kernel_block_id_host)
         .def_readwrite("kv_cache_kernel_block_id_device", &PyAttentionInputs::kv_cache_kernel_block_id_device)
         .def_readwrite("kv_cache_block_id_host", &PyAttentionInputs::kv_cache_block_id_host)

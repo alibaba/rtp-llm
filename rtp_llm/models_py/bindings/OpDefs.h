@@ -163,6 +163,7 @@ struct PyAttentionInputs {
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor input_lengths;
+    torch::Tensor attention_mask;
     // Kernel-granularity block IDs for attention compute.
     // Shape: [group, batch, max_kernel_blocks] or [batch, max_kernel_blocks].
     torch::Tensor kv_cache_kernel_block_id_host;

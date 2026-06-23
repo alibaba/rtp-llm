@@ -82,6 +82,9 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.prefix_lengths   = inputs.prefix_lengths;
     py_attn_inputs.sequence_lengths = inputs.sequence_lengths;
     py_attn_inputs.input_lengths    = inputs.input_lengths;
+    if (inputs.attention_mask.defined()) {
+        py_attn_inputs.attention_mask = tensorHoldHostAndToCuda(inputs.attention_mask);
+    }
 
     if (inputs.kv_cache_kernel_block_id.defined()) {
         py_attn_inputs.kv_cache_kernel_block_id_host = inputs.kv_cache_kernel_block_id.clone().pin_memory();
@@ -510,10 +513,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                         bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
+        const bool     dense_attention_mask = inputs.attention_mask.defined() && inputs.attention_mask.numel() > 0;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
         CudaGraphState graph_state;
-        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state)) {
+        if (!dense_attention_mask && enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state)) {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");

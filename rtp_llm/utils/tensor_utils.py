@@ -4,7 +4,7 @@ import torch
 def get_first_token_from_combo_tokens(
     tensor: torch.Tensor, lengths: torch.Tensor
 ) -> torch.Tensor:
-    start_indices = torch.cumsum(torch.cat((torch.tensor([0]), lengths[:-1])), dim=0)
+    start_indices = torch.cumsum(torch.cat((lengths.new_zeros(1), lengths[:-1])), dim=0)
     return tensor[start_indices]
 
 

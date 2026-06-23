@@ -23,6 +23,7 @@ enum class Arg : uint32_t {
     INPUT_IDS,
     ATTENTION_MASK,
     MOE_GATING,
+    CLS_UQI_POS,
     // reserve as number marker
     NUM_INPUT_TYPES
 };
@@ -32,6 +33,11 @@ constexpr size_t NUM_INPUT_TYPES = static_cast<size_t>(Arg::NUM_INPUT_TYPES);
 using Flag = std::bitset<NUM_INPUT_TYPES>;
 
 }  // namespace HandlerArgs
+
+struct EmbeddingModelInput {
+    GptModelInputs model_input;
+    torch::Tensor  cls_uqi_pos;  // [batch_size], int32, -1 for rows without UQI metadata
+};
 
 class EmbeddingExecutor {
 public:
@@ -50,8 +56,8 @@ private:
     ParallelismConfig            parallelism_config;
     EPLBConfig                   eplb_config;
 
-    ModelRequest                     generateOldModelRequest(GptModelInputs& model_input);
-    absl::StatusOr<GptModelInputs>   gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const;
+    ModelRequest generateOldModelRequest(GptModelInputs& model_input, const torch::Tensor& cls_uqi_pos);
+    absl::StatusOr<EmbeddingModelInput> gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const;
     std::unique_ptr<GptModelOutputs> copyResultToCPU(th::Tensor gpu_outputs) const;
     absl::Status                     updateStreams(py::object                           post_process_output,
                                                    const std::list<EmbeddingStreamPtr>& streams,

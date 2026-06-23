@@ -18,6 +18,7 @@ public:
     torch::Tensor kv_cache_blocks;       // [layer_id, batch_size, 2, block_num_per_seq]
     torch::Tensor kv_cache_scales;       // [layer_id, batch_size, 2, block_num_per_seq]
     torch::Tensor attention_mask;        // [batch_size, max_seq_len, max_seq_len + max_reuse_len]
+    torch::Tensor cls_uqi_pos;           // [batch_size], int32, -1 for old mode
 
     torch::Tensor kv_cache_block_id;  // [batch_size, block_nums], kv cache block block id
     torch::Tensor kv_cache_buffer;    // [layer_num, block_nums, head, seq_size_per_block, size_per_head]

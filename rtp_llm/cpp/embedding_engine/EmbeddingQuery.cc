@@ -11,7 +11,9 @@ EmbeddingInput::EmbeddingInput(const std::vector<int32_t>&             token_ids
                                const std::vector<int32_t>&             input_lengths_param,
                                int64_t                                 request_id_param,
                                const std::optional<MultimodalFeature>& multimodal_features_param,
-                               std::optional<torch::Tensor>            input_embeddings_param) {
+                               std::optional<torch::Tensor>            input_embeddings_param,
+                               std::optional<torch::Tensor>            attention_mask_param,
+                               std::optional<torch::Tensor>            cls_uqi_pos_param) {
 
     token_ids =
         torch::from_blob(const_cast<int32_t*>(token_ids_param.data()), {(int64_t)token_ids_param.size()}, torch::kInt32)
@@ -32,6 +34,8 @@ EmbeddingInput::EmbeddingInput(const std::vector<int32_t>&             token_ids
     request_id          = request_id_param;
     multimodal_features = multimodal_features_param;
     input_embeddings    = input_embeddings_param;
+    attention_mask      = attention_mask_param;
+    cls_uqi_pos         = cls_uqi_pos_param;
     checkVaild();
 }
 
@@ -40,7 +44,9 @@ EmbeddingInput::EmbeddingInput(const torch::Tensor&                    token_ids
                                const torch::Tensor&                    input_lengths_,
                                int64_t                                 request_id_,
                                const std::optional<MultimodalFeature>& multimodal_features_,
-                               std::optional<torch::Tensor>            input_embeddings_) {
+                               std::optional<torch::Tensor>            input_embeddings_,
+                               std::optional<torch::Tensor>            attention_mask_,
+                               std::optional<torch::Tensor>            cls_uqi_pos_) {
     token_ids      = token_ids_;
     token_type_ids = token_type_ids_;
 
@@ -51,6 +57,8 @@ EmbeddingInput::EmbeddingInput(const torch::Tensor&                    token_ids
     request_id          = request_id_;
     multimodal_features = multimodal_features_;
     input_embeddings    = input_embeddings_;
+    attention_mask      = attention_mask_;
+    cls_uqi_pos         = cls_uqi_pos_;
     checkVaild();
 }
 
@@ -72,6 +80,18 @@ void EmbeddingInput::checkVaild() {
     }
     if (input_embeddings.has_value() && total_length != input_embeddings.value().size(0)) {
         throw std::runtime_error("sum of token length don't equal to total_length");
+    }
+    if (attention_mask.has_value()) {
+        RTP_LLM_CHECK_WITH_INFO(attention_mask.value().dim() == 3, "attention_mask must be rank 3");
+        RTP_LLM_CHECK_WITH_INFO(
+            attention_mask.value().size(0) == input_lengths.size(0),
+            "attention_mask batch dim must equal input_lengths size");
+    }
+    if (cls_uqi_pos.has_value()) {
+        RTP_LLM_CHECK_WITH_INFO(cls_uqi_pos.value().dim() == 1, "cls_uqi_pos must be rank 1");
+        RTP_LLM_CHECK_WITH_INFO(
+            cls_uqi_pos.value().size(0) == input_lengths.size(0),
+            "cls_uqi_pos size must equal input_lengths size");
     }
 }
 

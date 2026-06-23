@@ -73,9 +73,18 @@ std::shared_ptr<EmbeddingOutput> EmbeddingEngine::decode(th::Tensor             
                                                          th::Tensor                       input_lengths,
                                                          int64_t                          request_id,
                                                          std::optional<MultimodalFeature> multimodal_features,
-                                                         std::optional<th::Tensor>        input_embeddings) {
+                                                         std::optional<th::Tensor>        input_embeddings,
+                                                         std::optional<th::Tensor>        attention_mask,
+                                                         std::optional<th::Tensor>        cls_uqi_pos) {
     auto input = std::make_shared<EmbeddingInput>(
-        token_ids, token_type_ids, input_lengths, request_id, multimodal_features, input_embeddings);
+        token_ids,
+        token_type_ids,
+        input_lengths,
+        request_id,
+        multimodal_features,
+        input_embeddings,
+        attention_mask,
+        cls_uqi_pos);
     return decode(input);
 }
 

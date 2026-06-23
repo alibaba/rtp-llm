@@ -26,6 +26,7 @@ static const char* names[] = {
     "input_ids",
     "attention_mask",
     "moe_gating",
+    "cls_uqi_pos",
 };
 static_assert(sizeof(names) / sizeof(names[0]) <= NUM_INPUT_TYPES, "redundant handler arg name");
 static_assert(sizeof(names) / sizeof(names[0]) >= NUM_INPUT_TYPES, "missing handler arg name");
@@ -88,7 +89,8 @@ void EmbeddingExecutor::init_position_ids(int max_seq_len) {
     max_position_ids_tensor_ = torch::arange(max_seq_len, torch::kInt32);
 }
 
-absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const {
+absl::StatusOr<EmbeddingModelInput>
+EmbeddingExecutor::gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const {
     int64_t token_num  = 0;
     int64_t batch_size = 0;
     calcTokenNum(streams, token_num, batch_size);
@@ -117,6 +119,8 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     std::vector<int>           merged_text_mask;
     std::vector<torch::Tensor> gathered_input_embeddings;
     std::vector<int>           gathered_input_embeddings_locs;
+    bool                       has_attention_mask = false;
+    bool                       has_cls_uqi_pos    = false;
     merged_text_mask.resize(token_num, 1);
     for (auto& stream : streams) {
         int         length     = stream->inputLength();
@@ -140,6 +144,12 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         if (stream->embeddingInput()->input_embeddings.has_value()) {
             gathered_input_embeddings.emplace_back(stream->embeddingInput()->input_embeddings.value().cpu());
             gathered_input_embeddings_locs.push_back(token_idx);
+        }
+        if (stream->embeddingInput()->attention_mask.has_value()) {
+            has_attention_mask = true;
+        }
+        if (stream->embeddingInput()->cls_uqi_pos.has_value()) {
+            has_cls_uqi_pos = true;
         }
         memcpy(
             merged_tokens + (int)token_idx, stream->embeddingInput()->token_ids.data_ptr(), length * sizeof(int32_t));
@@ -186,14 +196,75 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     }
 
     size_t max_seq_len = *std::max_element(input_lengths, input_lengths + batch_size);
+    if (has_attention_mask) {
+        std::vector<torch::Tensor> padded_attention_masks;
+        padded_attention_masks.reserve(streams.size());
+        for (auto& stream : streams) {
+            auto embedding_input = stream->embeddingInput();
+            auto stream_batch    = stream->batchSize();
+            if (embedding_input->attention_mask.has_value()) {
+                auto mask = embedding_input->attention_mask.value().cpu().to(torch::kInt32).contiguous();
+                RTP_LLM_CHECK_WITH_INFO(mask.dim() == 3, "attention_mask must be rank 3");
+                RTP_LLM_CHECK_WITH_INFO(mask.size(0) == stream_batch,
+                                        "attention_mask batch dim must equal stream batch size");
+                RTP_LLM_CHECK_WITH_INFO(mask.size(1) == mask.size(2), "attention_mask must be square");
+                RTP_LLM_CHECK_WITH_INFO(mask.size(1) <= (int64_t)max_seq_len,
+                                        "attention_mask local max length exceeds gathered max length");
+                auto stream_lengths = embedding_input->input_lengths.cpu();
+                for (int i = 0; i < stream_batch; ++i) {
+                    const int seq_len = stream_lengths.data_ptr<int32_t>()[i];
+                    RTP_LLM_CHECK_WITH_INFO(seq_len <= mask.size(1),
+                                            "attention_mask local max length must cover every stream row");
+                }
+                if (mask.size(1) == (int64_t)max_seq_len) {
+                    padded_attention_masks.emplace_back(mask);
+                } else {
+                    auto padded = torch::zeros({stream_batch, (int64_t)max_seq_len, (int64_t)max_seq_len},
+                                               torch::TensorOptions(torch::kInt32).pinned_memory(true));
+                    padded.index_put_({Slice(), Slice(0, mask.size(1)), Slice(0, mask.size(2))}, mask);
+                    padded_attention_masks.emplace_back(padded);
+                }
+            } else {
+                auto padded = torch::zeros({stream_batch, (int64_t)max_seq_len, (int64_t)max_seq_len},
+                                           torch::TensorOptions(torch::kInt32).pinned_memory(true));
+                auto stream_lengths = embedding_input->input_lengths.cpu();
+                for (int i = 0; i < stream_batch; ++i) {
+                    const int seq_len = stream_lengths.data_ptr<int32_t>()[i];
+                    padded.index({i, Slice(0, seq_len), Slice(0, seq_len)}).fill_(1);
+                }
+                padded_attention_masks.emplace_back(padded);
+            }
+        }
+        model_input.attention_mask = torch::cat(padded_attention_masks, 0).contiguous();
+    }
+    torch::Tensor cls_uqi_pos;
+    if (has_attention_mask || has_cls_uqi_pos) {
+        std::vector<torch::Tensor> gathered_cls_uqi_pos;
+        gathered_cls_uqi_pos.reserve(streams.size());
+        for (auto& stream : streams) {
+            auto embedding_input = stream->embeddingInput();
+            auto stream_batch    = stream->batchSize();
+            if (embedding_input->cls_uqi_pos.has_value()) {
+                auto cls_uqi_pos = embedding_input->cls_uqi_pos.value().cpu().to(torch::kInt32).contiguous();
+                RTP_LLM_CHECK_WITH_INFO(cls_uqi_pos.dim() == 1, "cls_uqi_pos must be rank 1");
+                RTP_LLM_CHECK_WITH_INFO(cls_uqi_pos.size(0) == stream_batch,
+                                        "cls_uqi_pos size must equal stream batch size");
+                gathered_cls_uqi_pos.emplace_back(cls_uqi_pos);
+            } else {
+                gathered_cls_uqi_pos.emplace_back(
+                    torch::full({stream_batch}, -1, torch::TensorOptions(torch::kInt32).pinned_memory(true)));
+            }
+        }
+        cls_uqi_pos = torch::cat(gathered_cls_uqi_pos, 0).contiguous();
+    }
     if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::MOE_GATING)) {
         model_input.need_moe_gating = true;
     }
     reportMetrics(batch_size, token_num, max_seq_len);
-    return model_input;
+    return EmbeddingModelInput{std::move(model_input), cls_uqi_pos};
 }
 
-ModelRequest EmbeddingExecutor::generateOldModelRequest(GptModelInputs& model_input) {
+ModelRequest EmbeddingExecutor::generateOldModelRequest(GptModelInputs& model_input, const torch::Tensor& cls_uqi_pos) {
     ModelRequest model_request;
     model_request.generate_batch_size  = 0;
     model_request.context_batch_size   = model_input.input_lengths.size(0);
@@ -204,6 +275,7 @@ ModelRequest EmbeddingExecutor::generateOldModelRequest(GptModelInputs& model_in
     model_request.sequence_lengths     = model_input.sequence_lengths;
     model_request.prefix_lengths       = model_input.prefix_lengths;
     model_request.attention_mask       = model_input.attention_mask;
+    model_request.cls_uqi_pos          = cls_uqi_pos;
     return model_request;
 }
 
@@ -307,7 +379,8 @@ absl::StatusOr<py::object> EmbeddingExecutor::postProcess(const ModelRequest&   
             kwargs[get_name(Arg::INPUT_IDS)] = model_request.combo_tokens;
         }
         if (has_arg(handler_args_, Arg::ATTENTION_MASK)) {
-            kwargs[get_name(Arg::ATTENTION_MASK)] = py::none();  // mark to be generated by python
+            kwargs[get_name(Arg::ATTENTION_MASK)] =
+                model_request.attention_mask.defined() ? py::cast(model_request.attention_mask) : py::none();
         }
         if (has_arg(handler_args_, Arg::MOE_GATING)) {
             py::list moe_gating;
@@ -320,6 +393,10 @@ absl::StatusOr<py::object> EmbeddingExecutor::postProcess(const ModelRequest&   
             }
             kwargs[get_name(Arg::MOE_GATING)] = moe_gating;
         }
+        if (has_arg(handler_args_, Arg::CLS_UQI_POS)) {
+            kwargs[get_name(Arg::CLS_UQI_POS)] =
+                model_request.cls_uqi_pos.defined() ? py::cast(model_request.cls_uqi_pos) : py::none();
+        }
 
         py::object output = handler_.attr("extend_forward")(**kwargs);
         return output;
@@ -329,10 +406,11 @@ absl::StatusOr<py::object> EmbeddingExecutor::postProcess(const ModelRequest&   
 }
 
 absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& streams) {
-    CHECK_AND_RETURN_REF(model_input, gatherModelInput(streams));
+    CHECK_AND_RETURN_REF(embedding_model_input, gatherModelInput(streams));
     auto            merged_output = std::make_unique<MergedOutput>();
     GptModelOutputs model_output;
-    ModelRequest    model_request    = generateOldModelRequest(model_input);
+    auto&           model_input      = embedding_model_input.model_input;
+    ModelRequest    model_request    = generateOldModelRequest(model_input, embedding_model_input.cls_uqi_pos);
     auto            total_batch_size = model_request.context_batch_size;
     model_->releaseBuffers();
     model_output = std::move(model_->forward(model_input));

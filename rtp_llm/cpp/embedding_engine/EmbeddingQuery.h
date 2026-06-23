@@ -18,14 +18,18 @@ public:
                             const torch::Tensor&                    input_lengths,
                             int64_t                                 request_id,
                             const std::optional<MultimodalFeature>& multimodal_features = std::nullopt,
-                            std::optional<torch::Tensor>            input_embeddings    = std::nullopt);
+                            std::optional<torch::Tensor>            input_embeddings    = std::nullopt,
+                            std::optional<torch::Tensor>            attention_mask      = std::nullopt,
+                            std::optional<torch::Tensor>            cls_uqi_pos         = std::nullopt);
 
     explicit EmbeddingInput(const std::vector<int32_t>&             token_ids,
                             const std::vector<int32_t>&             token_type_ids,
                             const std::vector<int32_t>&             input_lengths,
                             int64_t                                 request_id,
                             const std::optional<MultimodalFeature>& multimodal_features = std::nullopt,
-                            std::optional<torch::Tensor>            input_embeddings    = std::nullopt);
+                            std::optional<torch::Tensor>            input_embeddings    = std::nullopt,
+                            std::optional<torch::Tensor>            attention_mask      = std::nullopt,
+                            std::optional<torch::Tensor>            cls_uqi_pos         = std::nullopt);
 
     torch::Tensor                               token_ids;
     torch::Tensor                               token_type_ids;
@@ -35,6 +39,8 @@ public:
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;
     std::optional<MultimodalFeature>            multimodal_features;
     std::optional<torch::Tensor>                input_embeddings;
+    std::optional<torch::Tensor>                attention_mask;
+    std::optional<torch::Tensor>                cls_uqi_pos;
 
     void        checkVaild();
     std::string debugString() const {
