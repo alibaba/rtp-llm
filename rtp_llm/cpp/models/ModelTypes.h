@@ -156,10 +156,6 @@ public:
         return torch::Tensor();
     }
 
-    virtual void selectMtpIterationTopkCache(const torch::Tensor& /*select_indices*/, int64_t /*total_tokens*/) {}
-
-    virtual void copyMtpIterationTopkCacheFrom(const ModelBase& /*source*/) {}
-
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;
     size_t                      model_id_ = 0;

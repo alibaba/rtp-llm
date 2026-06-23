@@ -91,7 +91,6 @@ class ModelConfig(CppModelConfig):
         "index_skip_topk_offset",
         "index_topk_pattern",
         "indexer_types",
-        "index_share_for_mtp_iteration",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)

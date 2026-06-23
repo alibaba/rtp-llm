@@ -74,18 +74,9 @@ def get_mla_impl(
             continue
 
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
-        # GLM-5.2 MTP draft must materialize sparse DSA top-k on every draft
-        # step. The dense short-prefill fast path only writes indexer K cache
-        # and returns no top-k, which would violate the draft model contract.
-        mtp_iteration_step_attr = getattr(attn_inputs, "mtp_iteration_step", -1)
-        mtp_iteration_step = (
-            -1 if mtp_iteration_step_attr is None else int(mtp_iteration_step_attr)
-        )
-        force_sparse_for_mtp_draft = attn_configs.is_sparse and mtp_iteration_step >= 0
         use_fast_path = (
             attn_inputs.is_prefill
             and not is_target_verify
-            and not force_sparse_for_mtp_draft
             and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
             and not (
                 parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
