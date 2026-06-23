@@ -183,7 +183,7 @@ class TRTAttnTestBase(BaseAttentionTest):
         cu_seqlens = [0]
         for seq_len in input_lengths:
             cu_seqlens.append(cu_seqlens[-1] + seq_len)
-        attn_inputs.cu_seqlens = torch.tensor(
+        attn_inputs.cu_seqlens_device = torch.tensor(
             cu_seqlens, dtype=torch.int32, device=self.device
         )
 
@@ -191,7 +191,7 @@ class TRTAttnTestBase(BaseAttentionTest):
         for i in range(batch_size):
             total_kv = prefix_lens[i] + input_lengths[i]
             cu_kv_seqlens.append(cu_kv_seqlens[-1] + total_kv)
-        attn_inputs.cu_kv_seqlens = torch.tensor(
+        attn_inputs.cu_kv_seqlens_device = torch.tensor(
             cu_kv_seqlens, dtype=torch.int32, device=self.device
         )
 
@@ -242,9 +242,9 @@ class TRTAttnTestBase(BaseAttentionTest):
             flush=True,
         )
 
-        attn_inputs.kv_cache_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_block_id = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
-        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id = kv_cache_block_id
         attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
 
         return attn_inputs
@@ -300,9 +300,9 @@ class TRTAttnTestBase(BaseAttentionTest):
             flush=True,
         )
 
-        attn_inputs.kv_cache_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_block_id = kv_cache_block_id
         attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
-        attn_inputs.kv_cache_kernel_block_id_host = kv_cache_block_id
+        attn_inputs.kv_cache_kernel_block_id = kv_cache_block_id
         attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
         attn_inputs.is_s_padded = True
         return attn_inputs
