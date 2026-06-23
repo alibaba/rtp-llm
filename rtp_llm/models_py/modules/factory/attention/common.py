@@ -57,7 +57,7 @@ def create_write_cache_store_impl(
         return WriteCacheStoreOp(
             attn_inputs.input_lengths,
             attn_inputs.prefix_lengths,
-            attn_inputs.kv_cache_block_id_host,
+            attn_inputs.kv_cache_block_id,
             attn_inputs.cache_store_inputs,
         )
     return None

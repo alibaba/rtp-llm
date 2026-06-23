@@ -134,28 +134,28 @@ def print_attn_inputs_detail(attn_inputs: PyAttentionInputs, qkv: torch.Tensor =
     print(f"  values: {attn_inputs.input_lengths.cpu().tolist()}", flush=True)
 
     print(
-        f"cu_seqlens: shape={attn_inputs.cu_seqlens.shape}, dtype={attn_inputs.cu_seqlens.dtype}",
+        f"cu_seqlens: shape={attn_inputs.cu_seqlens_device.shape}, dtype={attn_inputs.cu_seqlens_device.dtype}",
         flush=True,
     )
-    print(f"  tensor: {attn_inputs.cu_seqlens}", flush=True)
-    print(f"  values: {attn_inputs.cu_seqlens.cpu().tolist()}", flush=True)
+    print(f"  tensor: {attn_inputs.cu_seqlens_device}", flush=True)
+    print(f"  values: {attn_inputs.cu_seqlens_device.cpu().tolist()}", flush=True)
 
     print(
-        f"cu_kv_seqlens: shape={attn_inputs.cu_kv_seqlens.shape}, dtype={attn_inputs.cu_kv_seqlens.dtype}",
+        f"cu_kv_seqlens: shape={attn_inputs.cu_kv_seqlens_device.shape}, dtype={attn_inputs.cu_kv_seqlens_device.dtype}",
         flush=True,
     )
-    print(f"  tensor: {attn_inputs.cu_kv_seqlens}", flush=True)
-    print(f"  values: {attn_inputs.cu_kv_seqlens.cpu().tolist()}", flush=True)
+    print(f"  tensor: {attn_inputs.cu_kv_seqlens_device}", flush=True)
+    print(f"  values: {attn_inputs.cu_kv_seqlens_device.cpu().tolist()}", flush=True)
 
     print(f"context_total_kv_length: {attn_inputs.context_total_kv_length}", flush=True)
     print(f"total_tokens: {attn_inputs.total_tokens}", flush=True)
 
     print(
-        f"kv_cache_block_id_host: shape={attn_inputs.kv_cache_block_id_host.shape}, dtype={attn_inputs.kv_cache_block_id_host.dtype}",
+        f"kv_cache_block_id: shape={attn_inputs.kv_cache_block_id.shape}, dtype={attn_inputs.kv_cache_block_id.dtype}",
         flush=True,
     )
-    print(f"  tensor:\n{attn_inputs.kv_cache_block_id_host}", flush=True)
-    print(f"  values: {attn_inputs.kv_cache_block_id_host.cpu().tolist()}", flush=True)
+    print(f"  tensor:\n{attn_inputs.kv_cache_block_id}", flush=True)
+    print(f"  values: {attn_inputs.kv_cache_block_id.cpu().tolist()}", flush=True)
 
     print(
         f"kv_cache_kernel_block_id_device: shape={attn_inputs.kv_cache_kernel_block_id_device.shape}, device={attn_inputs.kv_cache_kernel_block_id_device.device}",

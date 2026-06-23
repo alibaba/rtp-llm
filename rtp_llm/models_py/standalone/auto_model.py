@@ -157,7 +157,7 @@ class AutoModel:
         attention_inputs = PyAttentionInputs()
         attention_inputs.input_lengths = torch.tensor([input_length], dtype=torch.int32)
         attention_inputs.sequence_lengths = torch.tensor([], dtype=torch.int32)
-        attention_inputs.cu_seqlens = torch.tensor(
+        attention_inputs.cu_seqlens_device = torch.tensor(
             [0, input_length], dtype=torch.int32, device=self.device
         )
         attention_inputs.prefix_lengths = torch.tensor([0], dtype=torch.int32)
@@ -172,11 +172,11 @@ class AutoModel:
         attention_inputs.kv_cache_kernel_block_id_device = (
             attention_inputs.kv_cache_block_id_device
         )
-        attention_inputs.kv_cache_block_id_host = torch.tensor(
+        attention_inputs.kv_cache_block_id = torch.tensor(
             [[i for i in range(1, need_block_nums + 1)]], dtype=torch.int32
         )
-        attention_inputs.kv_cache_kernel_block_id_host = (
-            attention_inputs.kv_cache_block_id_host
+        attention_inputs.kv_cache_kernel_block_id = (
+            attention_inputs.kv_cache_block_id
         )
         attention_inputs.dtype = get_typemeta(self.kv_cache.kv_cache_base_by_layer[0])
         attention_inputs.is_prefill = True
@@ -211,11 +211,11 @@ class AutoModel:
         attention_inputs.kv_cache_kernel_block_id_device = (
             attention_inputs.kv_cache_block_id_device
         )
-        attention_inputs.kv_cache_block_id_host = torch.tensor(
+        attention_inputs.kv_cache_block_id = torch.tensor(
             [[i for i in range(1, need_block_nums + 1)]], dtype=torch.int32
         )
-        attention_inputs.kv_cache_kernel_block_id_host = (
-            attention_inputs.kv_cache_block_id_host
+        attention_inputs.kv_cache_kernel_block_id = (
+            attention_inputs.kv_cache_block_id
         )
         attention_inputs.dtype = get_typemeta(self.kv_cache.kv_cache_base_by_layer[0])
         return attention_inputs

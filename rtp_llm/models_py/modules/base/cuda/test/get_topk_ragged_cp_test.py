@@ -102,13 +102,13 @@ class GetTopkRaggedCPTest(TestCase):
         kv_cache.kv_scale_base = kv_scale_base
 
         attn_inputs = PyAttentionInputs()
-        attn_inputs.kv_cache_kernel_block_id_host = torch.tensor(
+        attn_inputs.kv_cache_kernel_block_id = torch.tensor(
             [[0]], dtype=torch.int32, device=torch.device("cpu")
         )
         attn_inputs.kv_cache_kernel_block_id_device = torch.tensor(
             [[0]], dtype=torch.int32, device=device
         )
-        attn_inputs.cu_kv_seqlens = torch.tensor(
+        attn_inputs.cu_kv_seqlens_device = torch.tensor(
             [0, total_tokens], dtype=torch.int32, device=device
         )
         cp_params = PyContextParallelParams()
@@ -242,7 +242,7 @@ class GetTopkRaggedCPTest(TestCase):
         attn_inputs.kv_cache_kernel_block_id_device = torch.arange(
             num_blocks, dtype=torch.int32, device=device
         ).unsqueeze(0)
-        attn_inputs.cu_kv_seqlens = torch.tensor(
+        attn_inputs.cu_kv_seqlens_device = torch.tensor(
             [0, total_kv_tokens], dtype=torch.int32, device=device
         )
         cp_params = PyContextParallelParams()
