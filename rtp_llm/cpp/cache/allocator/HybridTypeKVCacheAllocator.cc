@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/allocator/HybridTypeKVCacheAllocator.h"
 
 #include <algorithm>
 #include <utility>

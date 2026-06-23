@@ -4,7 +4,7 @@
 #include <vector>
 #include <cstdint>
 
-#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/group/KVCacheGroup.h"
 
 namespace rtp_llm {
 

@@ -4,7 +4,7 @@
 #include <numeric>
 
 #include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "autil/EnvUtil.h"

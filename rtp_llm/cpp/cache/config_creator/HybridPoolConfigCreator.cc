@@ -1,11 +1,11 @@
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
+#include "rtp_llm/cpp/cache/config_creator/HybridPoolConfigCreator.h"
 
 #include <algorithm>
 #include <numeric>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/KVCacheSpec.h"
-#include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/config_creator/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {

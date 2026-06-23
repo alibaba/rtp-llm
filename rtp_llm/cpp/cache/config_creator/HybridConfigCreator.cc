@@ -1,9 +1,9 @@
-#include "rtp_llm/cpp/cache/HybridConfigCreator.h"
+#include "rtp_llm/cpp/cache/config_creator/HybridConfigCreator.h"
 
 #include <numeric>
 
-#include "rtp_llm/cpp/cache/KVCacheSpec.h"
-#include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/config_creator/MemoryEvaluationHelper.h"
 
 namespace rtp_llm {
 

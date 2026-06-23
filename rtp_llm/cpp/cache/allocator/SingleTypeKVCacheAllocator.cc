@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/allocator/SingleTypeKVCacheAllocator.h"
 
 #include <algorithm>
 #include <unordered_map>

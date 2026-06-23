@@ -9,10 +9,10 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
-#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
-#include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
-#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/spec/LinearKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/spec/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/spec/MLAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/spec/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 

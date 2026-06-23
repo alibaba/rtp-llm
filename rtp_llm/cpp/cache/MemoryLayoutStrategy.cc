@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/cache/KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpec.h"
 
 namespace rtp_llm {
 

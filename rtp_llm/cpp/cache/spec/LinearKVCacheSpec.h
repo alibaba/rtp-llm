@@ -4,7 +4,7 @@
 #include <sstream>
 #include <string>
 
-#include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"

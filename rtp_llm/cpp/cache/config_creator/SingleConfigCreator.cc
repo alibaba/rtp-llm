@@ -1,7 +1,7 @@
-#include "rtp_llm/cpp/cache/SingleConfigCreator.h"
+#include "rtp_llm/cpp/cache/config_creator/SingleConfigCreator.h"
 
-#include "rtp_llm/cpp/cache/KVCacheSpec.h"
-#include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/config_creator/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #include <numeric>

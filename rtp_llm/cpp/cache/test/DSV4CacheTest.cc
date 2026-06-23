@@ -4,14 +4,14 @@
 #include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/config_creator/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/config_creator/HybridPoolConfigCreator.h"
+#include "rtp_llm/cpp/cache/allocator/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/allocator/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
-#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/spec/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"

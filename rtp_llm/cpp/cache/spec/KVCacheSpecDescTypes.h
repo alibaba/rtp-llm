@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <string>
 
-#include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/spec/CacheGroupType.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {

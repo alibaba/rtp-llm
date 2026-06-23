@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <cassert>
 
-#include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/spec/CacheGroupType.h"
 
 namespace rtp_llm {
 

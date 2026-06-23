@@ -12,9 +12,9 @@
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/config_creator/HybridPoolConfigCreator.h"
+#include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/spec/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"

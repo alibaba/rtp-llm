@@ -11,7 +11,7 @@
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/SpecialTokens.h"
-#include "rtp_llm/cpp/cache/KVCacheSpecDescTypes.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpecDescTypes.h"
 #include <vector>
 #include <string>
 #include <map>

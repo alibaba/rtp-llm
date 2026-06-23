@@ -2,7 +2,7 @@
 
 #include <utility>
 
-#include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {

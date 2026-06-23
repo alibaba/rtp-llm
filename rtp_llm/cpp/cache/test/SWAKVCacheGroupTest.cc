@@ -5,8 +5,8 @@
 #include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
-#include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/spec/OpaqueKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/group/SWAKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"

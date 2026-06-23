@@ -3,7 +3,7 @@
 #include <memory>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/HybridKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/allocator/HybridKVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {

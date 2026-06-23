@@ -2,8 +2,8 @@
 
 #include <memory>
 
-#include "rtp_llm/cpp/cache/KVCacheSpecDescTypes.h"
-#include "rtp_llm/cpp/cache/KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpecDescTypes.h"
+#include "rtp_llm/cpp/cache/spec/KVCacheSpec.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 

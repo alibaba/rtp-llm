@@ -6,7 +6,7 @@
 #include <string>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/group/SWAKVCacheGroup.h"
 
 namespace rtp_llm {
 namespace test {

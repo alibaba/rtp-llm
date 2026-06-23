@@ -1,8 +1,8 @@
 #pragma once
 
 #include <memory>
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/group/FullKVCacheGroup.h"
 
 namespace rtp_llm {
 

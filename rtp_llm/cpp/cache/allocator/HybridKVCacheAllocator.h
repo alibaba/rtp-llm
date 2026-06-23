@@ -3,10 +3,10 @@
 #include <memory>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/LinearKVCacheGroup.h"
-#include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/group/FullKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/allocator/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/group/LinearKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/group/SWAKVCacheGroup.h"
 
 namespace rtp_llm {
 

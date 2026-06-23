@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/allocator/HybridPoolKVCacheAllocator.h"
 
 #include <algorithm>
 #include <iomanip>
