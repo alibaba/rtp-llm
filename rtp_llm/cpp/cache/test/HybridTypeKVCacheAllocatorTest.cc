@@ -55,8 +55,6 @@ static CacheConfig makeTinyHybridConfig() {
     config.layer_ids        = {{0, 1}, {2, 3}};
     config.global_layer_ids = config.layer_ids;
     config.cache_specs      = {linear_spec, full_spec};
-    config.linear_group_num = 1;
-    config.full_group_num   = 1;
     config.group_types      = {CacheGroupType::LINEAR, CacheGroupType::FULL};
 
     // Physical block strides: take max between full and linear.

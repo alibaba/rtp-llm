@@ -94,9 +94,7 @@ private:
     }
 
     void initHybridLayerCacheConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
-        cache_config_.linear_group_num = other_group_ids_.size();
-        cache_config_.full_group_num   = full_group_ids_.size();
-        size_t all_group_num           = cache_config_.linear_group_num + cache_config_.full_group_num;
+        size_t all_group_num           = other_group_ids_.size() + full_group_ids_.size();
         cache_config_.layer_num        = all_group_num * layer_num;
         cache_config_.layer_all_num    = all_group_num * layer_num;
         cache_config_.group_layer_num  = layer_num;
@@ -120,12 +118,11 @@ private:
         linear_spec->local_head_num_kv  = 1;
         linear_spec->seq_size_per_block = seq_size_per_block;
 
-        for (int i = 0; i < cache_config_.full_group_num; i++) {
+        for (size_t i = 0; i < full_group_ids_.size(); i++) {
             cache_config_.global_layer_ids.push_back({});
             cache_config_.layer_ids.push_back({});
             cache_config_.group_types.push_back(CacheGroupType::FULL);
             cache_config_.cache_specs.push_back(full_spec);
-            cache_config_.full_groups.push_back({});
             for (int j = 0; j < layer_num; j++) {
                 cache_config_.layer_to_group_id.push_back(full_group_ids_[i]);
                 cache_config_.global_layer_ids.back().push_back(unique_layer_id);
@@ -134,12 +131,11 @@ private:
             }
         }
 
-        for (int i = 0; i < cache_config_.linear_group_num; i++) {
+        for (size_t i = 0; i < other_group_ids_.size(); i++) {
             cache_config_.global_layer_ids.push_back({});
             cache_config_.layer_ids.push_back({});
             cache_config_.group_types.push_back(CacheGroupType::LINEAR);
             cache_config_.cache_specs.push_back(linear_spec);
-            cache_config_.linear_groups.push_back({});
             for (int j = 0; j < layer_num; j++) {
                 cache_config_.layer_to_group_id.push_back(other_group_ids_[i]);
                 cache_config_.global_layer_ids.back().push_back(unique_layer_id);

@@ -13,24 +13,6 @@ namespace rtp_llm {
 
 namespace {
 
-bool hasDsv4KvCacheSpecs(const ModelConfig& model_config) {
-    constexpr const char* kExpectedTags[] = {
-        "csa_kv", "hca_kv", "indexer_kv", "indexer_state", "csa_state", "hca_state", "swa_kv"};
-    for (const auto& layer_specs : model_config.kv_cache_specs) {
-        for (const auto& spec : layer_specs.second) {
-            if (spec == nullptr) {
-                continue;
-            }
-            for (const char* expected_tag : kExpectedTags) {
-                if (spec->tag == expected_tag) {
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
 struct HybridPoolLayers {
     std::vector<int> full_layers;
     std::vector<int> linear_layers;
@@ -177,22 +159,18 @@ void appendGroup(CacheConfig&            config,
 }
 
 size_t kernelBlocksPerKvBlockForGroup(const CacheConfig& config, size_t group_id) {
-    RTP_LLM_CHECK_WITH_INFO(group_id < config.group_types.size(),
-                            "missing cache group type for group %zu (group_types.size=%zu)",
-                            group_id,
-                            config.group_types.size());
-    const bool is_full = config.group_types[group_id] == CacheGroupType::FULL;
+    const bool is_full = config.typeForGroup(group_id) == CacheGroupType::FULL;
     return is_full ? config.kernelBlocksPerKvBlock() : 1;
 }
 
 void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.use_independent_block_pools = true;
     const auto group_num               = static_cast<size_t>(config.groupNums());
-    config.group_block_nums.resize(group_num, 0);
+    std::vector<uint32_t> group_block_nums(group_num, 0);
     config.group_seq_size_per_block.resize(group_num, config.seq_size_per_block);
-    config.group_kv_block_stride_bytes.resize(group_num, 0);
-    config.group_kv_scale_stride_bytes.resize(group_num, 0);
-    config.group_block_size_bytes.resize(group_num, 0);
+    std::vector<size_t> group_kv_block_stride_bytes(group_num, 0);
+    std::vector<size_t> group_kv_scale_stride_bytes(group_num, 0);
+    std::vector<size_t> group_block_size_bytes(group_num, 0);
 
     size_t   max_kv_stride           = 0;
     size_t   max_scale_stride        = 0;
@@ -201,19 +179,19 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     uint32_t max_group_layers        = 0;
 
     config.layer_to_block_stride_bytes.assign(config.layer_all_num, 0);
-    for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
-        const auto& spec = config.cache_specs[gid];
+    for (size_t gid = 0; gid < group_num; ++gid) {
+        const auto& spec = config.specForGroup(gid);
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", gid);
-        const auto   layer_count                = static_cast<uint32_t>(config.global_layer_ids[gid].size());
+        const auto   layer_count                = static_cast<uint32_t>(config.layerIdsForGroup(gid).size());
         const size_t kernel_kv_stride           = spec->block_size_bytes();
         const auto   kernel_scale               = spec->scale_block_size_bytes();
         const size_t group_bpk                  = kernelBlocksPerKvBlockForGroup(config, gid);
         const size_t kv_stride                  = kernel_kv_stride * group_bpk;
         const size_t scale_stride               = kernel_scale * group_bpk;
-        config.group_kv_block_stride_bytes[gid] = kv_stride;
-        config.group_kv_scale_stride_bytes[gid] = scale_stride;
-        config.group_block_size_bytes[gid]      = static_cast<size_t>(layer_count) * (kv_stride + scale_stride);
-        const auto type     = gid < config.group_types.size() ? config.group_types[gid] : spec->lifecycle;
+        group_kv_block_stride_bytes[gid]        = kv_stride;
+        group_kv_scale_stride_bytes[gid]        = scale_stride;
+        group_block_size_bytes[gid]             = static_cast<size_t>(layer_count) * (kv_stride + scale_stride);
+        const auto type     = config.typeForGroup(gid);
         const bool is_state = spec->is_state_cache;
         if (!is_state && type == CacheGroupType::FULL) {
             total_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
@@ -223,7 +201,7 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         max_scale_stride = std::max(max_scale_stride, scale_stride);
         max_group_layers = std::max(max_group_layers, layer_count);
 
-        for (int layer_id : config.global_layer_ids[gid]) {
+        for (int layer_id : config.layerIdsForGroup(gid)) {
             config.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)] =
                 static_cast<int>(kv_stride + scale_stride);
         }
@@ -245,6 +223,8 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         config.block_size_bytes = paged_block_bytes;
     }
     config.explicitly_sized_pool_reserve_bytes = 0;
+    config.setGroupBlockLayout(
+        group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes, group_block_size_bytes);
 }
 
 void populateHybridAttentionGroups(CacheConfig&             config,
@@ -273,21 +253,6 @@ void populateHybridAttentionGroups(CacheConfig&             config,
     appendGroup(config, layers.linear_layers, CacheGroupType::LINEAR, linear_spec);
 }
 
-void setupGroupCounts(CacheConfig& config) {
-    config.full_group_num   = 0;
-    config.swa_group_num    = 0;
-    config.linear_group_num = 0;
-    for (auto group_type : config.group_types) {
-        if (group_type == CacheGroupType::FULL) {
-            ++config.full_group_num;
-        } else if (group_type == CacheGroupType::SWA) {
-            ++config.swa_group_num;
-        } else {
-            ++config.linear_group_num;
-        }
-    }
-}
-
 CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_config,
                                             const ParallelismConfig& parallelism_config,
                                             const KVCacheConfig&     kv_cache_config,
@@ -305,11 +270,15 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     config.linear_step        = 1;
     config.is_sparse          = model_config.attn_config.is_sparse;
 
-    RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.layer_compress_ratios.empty() || hasDsv4KvCacheSpecs(model_config),
-                            "DSV4 cache config requires model_config.kv_cache_specs; "
-                            "layer_compress_ratios fallback is disabled");
-
-    if (hasDsv4KvCacheSpecs(model_config)) {
+    // Route between DSV4 typed-pool plan and generic hybrid-attention groups.
+    // layer_compress_ratios is the model-declared indicator: DSV4 sets it,
+    // Qwen3-Next does not.  Dsv4CachePlanBuilder internally validates that
+    // kv_cache_specs are present and well-formed.
+    const bool use_dsv4_cache_plan = !model_config.attn_config.layer_compress_ratios.empty();
+    if (use_dsv4_cache_plan) {
+        RTP_LLM_CHECK_WITH_INFO(!model_config.kv_cache_specs.empty(),
+                                "DSV4 cache config requires model_config.kv_cache_specs; "
+                                "layer_compress_ratios fallback is disabled");
         Dsv4CachePlanBuilder::applyConfig(
             config, model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     } else {
@@ -319,7 +288,6 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     }
 
     RTP_LLM_CHECK_WITH_INFO(!config.cache_specs.empty(), "hybrid-pool config produced no cache specs");
-    setupGroupCounts(config);
     auto specs           = config.cache_specs;
     auto layers_by_group = config.layer_ids;
     auto types           = config.group_types;
@@ -327,7 +295,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     auto policies        = config.group_policies;
     config.fromGroupedSpecs(specs, layers_by_group, types, tags);
     if (policies.size() == config.group_policies.size()) {
-        config.group_policies = std::move(policies);
+        config.setGroupPolicies(policies);
     }
     setupIndependentPoolSizes(config, is_mtp);
     return config;

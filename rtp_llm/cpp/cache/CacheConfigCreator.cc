@@ -14,43 +14,16 @@ namespace rtp_llm {
 
 namespace {
 
-bool hasDsv4KvCacheSpecs(const ModelConfig& model_config) {
-    constexpr const char* kExpectedTags[] = {
-        "csa_kv", "hca_kv", "indexer_kv", "indexer_state", "csa_state", "hca_state", "swa_kv"};
-    for (const auto& layer_specs : model_config.kv_cache_specs) {
-        for (const auto& spec : layer_specs.second) {
-            if (spec == nullptr) {
-                continue;
-            }
-            for (const char* expected_tag : kExpectedTags) {
-                if (spec->tag == expected_tag) {
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
-bool hasTypedHybridPoolLayout(const ModelConfig& model_config) {
-    RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.layer_compress_ratios.empty() || hasDsv4KvCacheSpecs(model_config),
-                            "DSV4 cache config requires model_config.kv_cache_specs; "
-                            "layer_compress_ratios fallback is disabled");
-    return hasDsv4KvCacheSpecs(model_config);
-}
-
 size_t steppedBytes(size_t bytes, int step) {
     return (bytes > 0 && step > 1) ? bytes / static_cast<size_t>(step) : bytes;
 }
 
-size_t nonExplicitDsv4IndependentPoolHbmBytes(const CacheConfig& config) {
-    if (!config.use_typed_cache_regions) {
+size_t nonExplicitFixedPoolHbmBytes(const CacheConfig& config) {
+    // Only independent-pool configs populate group_block_size_bytes;
+    // SingleConfig and HybridConfig leave it empty, so this returns 0 for them.
+    if (config.cache_specs.size() != config.group_block_size_bytes.size()) {
         return 0;
     }
-    RTP_LLM_CHECK_WITH_INFO(config.cache_specs.size() == config.group_block_size_bytes.size(),
-                            "typed cache config requires cache_specs.size(%zu) == group_block_size_bytes.size(%zu)",
-                            config.cache_specs.size(),
-                            config.group_block_size_bytes.size());
 
     size_t bytes = 0;
     for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
@@ -66,25 +39,60 @@ size_t nonExplicitDsv4IndependentPoolHbmBytes(const CacheConfig& config) {
 }
 
 size_t effectivePagedBlockBytes(const CacheConfig& config, int step) {
-    return config.block_size_bytes + steppedBytes(nonExplicitDsv4IndependentPoolHbmBytes(config), step);
+    return config.block_size_bytes + steppedBytes(nonExplicitFixedPoolHbmBytes(config), step);
 }
 
-void validateDsv4KernelSeqSize(size_t seq_size_per_block, size_t kernel_seq_size_per_block, const char* config_name) {
-    constexpr size_t kDsv4KernelSeqSizeAlignment = 128;
-    RTP_LLM_CHECK_WITH_INFO(kernel_seq_size_per_block >= kDsv4KernelSeqSizeAlignment
-                                && kernel_seq_size_per_block % kDsv4KernelSeqSizeAlignment == 0,
-                            "%s DSV4 kernel_seq_size_per_block(%zu) must be >= %zu and a multiple of %zu",
-                            config_name,
-                            kernel_seq_size_per_block,
-                            kDsv4KernelSeqSizeAlignment,
-                            kDsv4KernelSeqSizeAlignment);
-    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block >= kernel_seq_size_per_block
-                                && seq_size_per_block % kernel_seq_size_per_block == 0,
-                            "%s DSV4 seq_size_per_block(%zu) must be >= kernel_seq_size_per_block(%zu) "
-                            "and divisible by it",
-                            config_name,
-                            seq_size_per_block,
-                            kernel_seq_size_per_block);
+void setupKernelSeqSize(CacheConfig& config, const KVCacheConfig& kv_cache_config, const char* config_name) {
+    if (kv_cache_config.kernel_seq_size_per_block > 0) {
+        const auto kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
+        // Generic divisibility check. Sub-creators that need stricter alignment
+        // (e.g. Dsv4CachePlanBuilder requires 128-token alignment) validate
+        // their own constraints during createBasicConfig().
+        RTP_LLM_CHECK_WITH_INFO(config.seq_size_per_block % kernel_seq_size_per_block == 0,
+                                "%s seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
+                                config_name,
+                                config.seq_size_per_block,
+                                kernel_seq_size_per_block);
+        config.kernel_seq_size_per_block = kernel_seq_size_per_block;
+    } else if (config.kernel_seq_size_per_block == 0 || config.kernel_seq_size_per_block == config.seq_size_per_block) {
+        config.kernel_seq_size_per_block = config.seq_size_per_block;
+    }
+}
+
+uint32_t computeBlockNum(CacheConfig&                                     config,
+                         const ModelConfig&                               model_config,
+                         const RuntimeConfig&                             runtime_config,
+                         const KVCacheConfig&                             kv_cache_config,
+                         const ParallelismConfig&                         parallelism_config,
+                         const std::optional<WarmUpResult>&               warm_up_result,
+                         const std::optional<SpeculativeExecutionConfig>& sp_config) {
+    if (kv_cache_config.test_block_num > 0) {
+        RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
+        config.finalizeBlockNums(kv_cache_config.test_block_num, runtime_config);
+        return static_cast<uint32_t>(kv_cache_config.test_block_num);
+    }
+
+    const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
+        runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
+    // Explicitly-sized pool reservation depends on runtime scheduler limits,
+    // so finalize it here after RuntimeConfig is available.
+    config.finalizeBlockNums(0, runtime_config);
+
+    size_t paged_budget = kv_cache_mem_size;
+    if (config.explicitly_sized_pool_reserve_bytes > 0) {
+        RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > config.explicitly_sized_pool_reserve_bytes,
+                                "kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "
+                                "(reduce explicitly sized pool blocks if needed)",
+                                kv_cache_mem_size / 1024 / 1024,
+                                config.explicitly_sized_pool_reserve_bytes / 1024 / 1024);
+        paged_budget = kv_cache_mem_size - config.explicitly_sized_pool_reserve_bytes;
+        RTP_LLM_LOG_INFO("kv cache: total budget %zu MiB, explicitly-sized pool reserve %zu MiB, paged budget %zu MiB",
+                         kv_cache_mem_size / 1024 / 1024,
+                         config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
+                         paged_budget / 1024 / 1024);
+    }
+    const int joint_step = std::max(1, config.linear_step);
+    return static_cast<uint32_t>(paged_budget / effectivePagedBlockBytes(config, joint_step));
 }
 
 }  // namespace
@@ -98,10 +106,6 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
     //   1. enable_independent_kv_cache_pools=true  → HybridPool (independent BlockPool per group)
     //   2. enable_hybrid_attention=true             → HybridType  (shared BlockPool across groups)
     //   3. else                                     → Single       (standard MHA/MLA path)
-    //
-    // enable_independent_kv_cache_pools is the model-declared flag that replaces
-    // the old shouldUseHybridPoolLayout() which inferred pool strategy indirectly
-    // by inspecting layer_compress_ratios / kv_cache_specs tags.
     if (model_config.hybrid_attention_config.enable_independent_kv_cache_pools) {
         RTP_LLM_CHECK_WITH_INFO(!model_config.kv_cache_specs.empty(),
                                 "enable_independent_kv_cache_pools=true requires model_config.kv_cache_specs "
@@ -123,55 +127,12 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const std::optional<SpeculativeExecutionConfig>& sp_config) {
     CacheConfig config =
         CacheConfigCreator::createBasicConfig(model_config, parallelism_config, kv_cache_config, false, 0);
-    uint32_t block_num = 0;
 
     config.linear_step = kv_cache_config.linear_step;
-    if (kv_cache_config.kernel_seq_size_per_block > 0) {
-        const auto kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
-        if (hasTypedHybridPoolLayout(model_config)) {
-            validateDsv4KernelSeqSize(config.seq_size_per_block, kernel_seq_size_per_block, "cache");
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block % kv_cache_config.kernel_seq_size_per_block == 0,
-                                    "seq_size_per_block(%d) must be divisible by kernel_seq_size_per_block(%d)",
-                                    kv_cache_config.seq_size_per_block,
-                                    kv_cache_config.kernel_seq_size_per_block);
-        }
-        config.kernel_seq_size_per_block = kernel_seq_size_per_block;
-    } else if (config.kernel_seq_size_per_block == 0 || config.kernel_seq_size_per_block == config.seq_size_per_block) {
-        // Default: kernel block size == physical block size (no split). Keep
-        // any explicit value already set by createBasicConfig (e.g. DSV4 forces
-        // kernel_seq_size_per_block = 256 even when physical seq_size > 256).
-        config.kernel_seq_size_per_block = config.seq_size_per_block;
-    }
+    setupKernelSeqSize(config, kv_cache_config, "cache");
 
-    if (kv_cache_config.test_block_num > 0) {
-        RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
-        block_num = kv_cache_config.test_block_num;
-        config.finalizeBlockNums(block_num, runtime_config);
-    } else {
-        const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
-            runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
-        // Explicitly-sized pool reservation depends on runtime scheduler limits,
-        // so finalize it here after RuntimeConfig is available. The temporary
-        // global block number is only used for groups without explicit sizes.
-        config.finalizeBlockNums(0, runtime_config);
-        // Deduct explicitly-sized pool reservation so paged pools don't overcommit HBM.
-        size_t paged_budget = kv_cache_mem_size;
-        if (config.explicitly_sized_pool_reserve_bytes > 0) {
-            RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > config.explicitly_sized_pool_reserve_bytes,
-                                    "kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "
-                                    "(reduce explicitly sized pool blocks if needed)",
-                                    kv_cache_mem_size / 1024 / 1024,
-                                    config.explicitly_sized_pool_reserve_bytes / 1024 / 1024);
-            paged_budget = kv_cache_mem_size - config.explicitly_sized_pool_reserve_bytes;
-            RTP_LLM_LOG_INFO("kv cache: total budget %zu MiB, explicitly-sized pool reserve %zu MiB, paged budget %zu MiB",
-                             kv_cache_mem_size / 1024 / 1024,
-                             config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
-                             paged_budget / 1024 / 1024);
-        }
-        const int  joint_step       = std::max(1, config.linear_step);
-        block_num = paged_budget / effectivePagedBlockBytes(config, joint_step);
-    }
+    uint32_t block_num = computeBlockNum(config, model_config, runtime_config, kv_cache_config,
+                                         parallelism_config, warm_up_result, sp_config);
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
                             block_num,
@@ -205,42 +166,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     CacheConfig propose_config = CacheConfigCreator::createBasicConfig(
         propose_model_config, parallelism_config, kv_cache_config, is_mtp, sp_config.gen_num_per_cycle);
 
-    if (kv_cache_config.kernel_seq_size_per_block > 0) {
-        const size_t kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
-        if (hasTypedHybridPoolLayout(score_model_config)) {
-            validateDsv4KernelSeqSize(score_config.seq_size_per_block, kernel_seq_size_per_block, "score");
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(score_config.seq_size_per_block % kernel_seq_size_per_block == 0,
-                                    "score seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                                    score_config.seq_size_per_block,
-                                    kernel_seq_size_per_block);
-        }
-        if (hasTypedHybridPoolLayout(propose_model_config)) {
-            validateDsv4KernelSeqSize(propose_config.seq_size_per_block, kernel_seq_size_per_block, "propose");
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(
-                propose_config.seq_size_per_block % kernel_seq_size_per_block == 0,
-                "propose seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                propose_config.seq_size_per_block,
-                kernel_seq_size_per_block);
-        }
-        score_config.kernel_seq_size_per_block   = kernel_seq_size_per_block;
-        propose_config.kernel_seq_size_per_block = kernel_seq_size_per_block;
-    } else {
-        // Default: kernel block size == physical block size (no split). Keep
-        // any explicit value already set by createBasicConfig (e.g. DSV4
-        // forces kernel_seq_size_per_block = 256 even when physical
-        // seq_size_per_block > 256); only fill in when unset or already
-        // matches the physical block.
-        if (score_config.kernel_seq_size_per_block == 0
-            || score_config.kernel_seq_size_per_block == score_config.seq_size_per_block) {
-            score_config.kernel_seq_size_per_block = score_config.seq_size_per_block;
-        }
-        if (propose_config.kernel_seq_size_per_block == 0
-            || propose_config.kernel_seq_size_per_block == propose_config.seq_size_per_block) {
-            propose_config.kernel_seq_size_per_block = propose_config.seq_size_per_block;
-        }
-    }
+    setupKernelSeqSize(score_config, kv_cache_config, "score");
+    setupKernelSeqSize(propose_config, kv_cache_config, "propose");
 
     int num_mtp_modules = 1;
     if (is_mtp) {
@@ -251,8 +178,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     }
 
     // Fixed-pool block counts depend on runtime scheduler limits. Finalize the
-    // score and propose configs before sizing the shared paged budget so DSV4
-    // state/SWA pools are accounted outside the paged KV-cache block budget.
+    // score and propose configs before sizing the shared paged budget so fixed
+    // state pools are accounted outside the paged KV-cache block budget.
     score_config.finalizeBlockNums(0, runtime_config);
     propose_config.finalizeBlockNums(0, runtime_config);
 
@@ -317,28 +244,11 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     const uint32_t main_layer_num = score_config.layer_num;
     const uint32_t mtp_layer_num  = propose_config.layer_num;
 
-    size_t full_gid = 0;
-    if (config.group_types.size() > 1) {
-        for (size_t gid = 0; gid < config.group_types.size(); ++gid) {
-            if (config.group_types[gid] == CacheGroupType::FULL) {
-                full_gid = gid;
-                break;
-            }
-        }
-    }
-
     // Each sub-model needs an independent CacheConfig because global_layer_ids differs per module.
     config.mtp_sub_configs.clear();
     config.mtp_sub_configs.reserve(num_mtp_modules);
-    config.layer_to_group_id.resize(total_layer_num, 0);
-    config.layer_group_types.resize(total_layer_num, CacheGroupType::FULL);
+    config.resizeLayerRoutes(static_cast<size_t>(total_layer_num));
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(total_layer_num), 0);
-    if (!config.layer_tag_to_group_id.empty()) {
-        config.layer_tag_to_group_id.resize(static_cast<size_t>(total_layer_num));
-    }
-    if (!config.layer_to_group_ids.empty()) {
-        config.layer_to_group_ids.resize(static_cast<size_t>(total_layer_num));
-    }
 
     // Main(score) model per-layer stride (kv + scale).
     // This is expected to be fully populated by createBasicConfig() (Single/Hybrid creators).
@@ -349,77 +259,14 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                             score_layers);
     for (size_t l = 0; l < score_layers; ++l) {
         config.layer_to_block_stride_bytes[l] = score_config.layer_to_block_stride_bytes[l];
-        if (l < score_config.layer_group_types.size()) {
-            config.layer_group_types[l] = score_config.layer_group_types[l];
-        }
     }
 
     for (int m = 0; m < num_mtp_modules; ++m) {
-        auto sub_cfg           = std::make_shared<CacheConfig>(propose_config);
-        sub_cfg->block_num     = block_num;
-        sub_cfg->layer_all_num = sub_cfg->layer_num;
-
-        const std::vector<std::vector<int>> propose_per_group = propose_config.global_layer_ids;
-        sub_cfg->global_layer_ids.assign(propose_per_group.size(), {});
-        RTP_LLM_CHECK_WITH_INFO(sub_cfg->layer_to_block_stride_bytes.size() == static_cast<size_t>(mtp_layer_num),
+        RTP_LLM_CHECK_WITH_INFO(propose_config.layer_to_block_stride_bytes.size() == static_cast<size_t>(mtp_layer_num),
                                 "sub_cfg.layer_to_block_stride_bytes size mismatch, got=%zu need=%u",
-                                sub_cfg->layer_to_block_stride_bytes.size(),
+                                propose_config.layer_to_block_stride_bytes.size(),
                                 mtp_layer_num);
-        for (size_t g = 0; g < propose_per_group.size(); ++g) {
-            for (int local_lid : propose_per_group[g]) {
-                if (local_lid < 0 || local_lid >= static_cast<int>(mtp_layer_num)) {
-                    continue;
-                }
-                const int global_layer_id = main_layer_num + m * mtp_layer_num + local_lid;
-                sub_cfg->global_layer_ids[g].push_back(global_layer_id);
-
-                // Keep the propose model's group placement. DSV4 MTP is
-                // SWA-only and lives in the SWA typed pool, not the first FULL
-                // pool. Non-typed hybrid configs fall back to the full group.
-                const int target_gid =
-                    (g < config.global_layer_ids.size()) ? static_cast<int>(g) : static_cast<int>(full_gid);
-                config.layer_to_group_id[global_layer_id] = target_gid;
-                if (target_gid >= 0 && target_gid < static_cast<int>(config.global_layer_ids.size())) {
-                    config.global_layer_ids[static_cast<size_t>(target_gid)].push_back(global_layer_id);
-                }
-                if (!config.layer_to_group_ids.empty()
-                    && static_cast<size_t>(global_layer_id) < config.layer_to_group_ids.size()) {
-                    config.layer_to_group_ids[static_cast<size_t>(global_layer_id)].push_back(target_gid);
-                }
-                if (!config.layer_tag_to_group_id.empty()
-                    && static_cast<size_t>(global_layer_id) < config.layer_tag_to_group_id.size()
-                    && g < propose_config.group_tags.size() && !propose_config.group_tags[g].empty()) {
-                    config.layer_tag_to_group_id[static_cast<size_t>(global_layer_id)][propose_config.group_tags[g]] =
-                        target_gid;
-                }
-                if (target_gid >= 0 && static_cast<size_t>(target_gid) < config.group_block_size_bytes.size()) {
-                    size_t stride_bytes = 0;
-                    if (g < propose_config.group_kv_block_stride_bytes.size()) {
-                        stride_bytes += propose_config.group_kv_block_stride_bytes[g];
-                    }
-                    if (g < propose_config.group_kv_scale_stride_bytes.size()) {
-                        stride_bytes += propose_config.group_kv_scale_stride_bytes[g];
-                    }
-                    config.group_block_size_bytes[static_cast<size_t>(target_gid)] += stride_bytes;
-                }
-
-                const int stride_bytes = sub_cfg->layer_to_block_stride_bytes[static_cast<size_t>(local_lid)];
-                config.layer_to_block_stride_bytes[static_cast<size_t>(global_layer_id)] = stride_bytes;
-                if (static_cast<size_t>(local_lid) < sub_cfg->layer_group_types.size()) {
-                    config.layer_group_types[static_cast<size_t>(global_layer_id)] =
-                        sub_cfg->layer_group_types[static_cast<size_t>(local_lid)];
-                }
-            }
-        }
-
-        sub_cfg->layer_to_group_id.assign(static_cast<size_t>(sub_cfg->layer_num), -1);
-        for (size_t g = 0; g < propose_per_group.size(); ++g) {
-            for (int local_lid : propose_per_group[g]) {
-                if (local_lid >= 0 && static_cast<size_t>(local_lid) < sub_cfg->layer_to_group_id.size()) {
-                    sub_cfg->layer_to_group_id[static_cast<size_t>(local_lid)] = static_cast<int>(g);
-                }
-            }
-        }
+        auto sub_cfg = config.mergeMTPModule(propose_config, m, main_layer_num);
         sub_cfg->finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
         config.mtp_sub_configs.push_back(sub_cfg);
     }

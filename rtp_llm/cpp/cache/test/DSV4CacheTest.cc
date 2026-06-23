@@ -240,7 +240,7 @@ TEST(CacheConfigTest, FromLayerSpecsBuildsTagAndGroupTopology) {
     EXPECT_EQ(config.layer_to_group_ids[1], std::vector<int>({0, 1}));
 }
 
-TEST(CacheConfigTest, FromLayerSpecsGroupsSameTagWithDifferentPhysicalSignatureSeparately) {
+TEST(CacheConfigTest, FromLayerSpecsRejectsSameTagWithDifferentPhysicalSignature) {
     CacheConfig config;
     config.layer_num     = 2;
     config.layer_all_num = 2;
@@ -257,13 +257,7 @@ TEST(CacheConfigTest, FromLayerSpecsGroupsSameTagWithDifferentPhysicalSignatureS
     LayerKVCacheSpecs layer_specs;
     layer_specs[0] = {spec0};
     layer_specs[1] = {spec1};
-    config.fromLayerSpecs(layer_specs);
-
-    ASSERT_EQ(config.group_tags, std::vector<std::string>({"dup", "dup"}));
-    ASSERT_EQ(config.layer_to_group_ids[0], std::vector<int>({0}));
-    ASSERT_EQ(config.layer_to_group_ids[1], std::vector<int>({1}));
-    EXPECT_EQ(config.groupIdForLayerTag(0, "dup"), 0);
-    EXPECT_EQ(config.groupIdForLayerTag(1, "dup"), 1);
+    EXPECT_THROW(config.fromLayerSpecs(layer_specs), std::exception);
 }
 
 TEST(CacheConfigTest, FromLayerSpecsRejectsDuplicateLayerTag) {
@@ -654,8 +648,8 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolCo
 
     EXPECT_TRUE(config.use_independent_block_pools);
     ASSERT_EQ(config.groupNums(), 2);
-    EXPECT_EQ(config.full_group_num, 1);
-    EXPECT_EQ(config.linear_group_num, 1);
+    EXPECT_EQ(std::count(config.group_types.begin(), config.group_types.end(), CacheGroupType::FULL), 1);
+    EXPECT_EQ(std::count(config.group_types.begin(), config.group_types.end(), CacheGroupType::LINEAR), 1);
     ASSERT_EQ(config.cache_specs.size(), 2u);
     EXPECT_LT(config.cache_specs[0]->block_size_bytes(), config.cache_specs[1]->block_size_bytes());
     EXPECT_EQ(config.group_block_nums.size(), 2u);

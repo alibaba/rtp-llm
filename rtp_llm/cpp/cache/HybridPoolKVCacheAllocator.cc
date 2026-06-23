@@ -58,13 +58,9 @@ HybridPoolKVCacheAllocator::HybridPoolKVCacheAllocator(const CacheConfig&       
     HybridKVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio), role_type_(role_type) {}
 
 bool HybridPoolKVCacheAllocator::doInit() {
-    RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "no cache_specs found in CacheConfig");
-    RTP_LLM_CHECK_WITH_INFO(config_.cache_specs.size() == config_.global_layer_ids.size(),
-                            "cache_specs size %zu != global_layer_ids size %zu",
-                            config_.cache_specs.size(),
-                            config_.global_layer_ids.size());
+    RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "no cache groups found in CacheConfig");
 
-    const int group_nums = static_cast<int>(config_.cache_specs.size());
+    const int group_nums = config_.groupNums();
     group_block_pools_.reserve(static_cast<size_t>(group_nums));
     kv_cache_groups_.reserve(static_cast<size_t>(group_nums));
 
@@ -79,11 +75,8 @@ bool HybridPoolKVCacheAllocator::doInit() {
     group_pool_configs.reserve(static_cast<size_t>(group_nums));
     for (int gid = 0; gid < group_nums; ++gid) {
         auto pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(gid));
-        const auto tag = static_cast<size_t>(gid) < config_.group_tags.size() ? config_.group_tags[gid] :
-                                                                                 std::string("group_") + std::to_string(gid);
-        const auto group_type = static_cast<size_t>(gid) < config_.group_types.size() ?
-                                    config_.group_types[static_cast<size_t>(gid)] :
-                                    CacheGroupType::FULL;
+        const auto tag        = config_.tagForGroup(static_cast<size_t>(gid));
+        const auto group_type = config_.typeForGroup(static_cast<size_t>(gid));
         appendPoolSummary(pool_summary, has_pool, gid, tag, group_type, pool_config);
         pool_total_bytes += pool_config.total_size_bytes;
         pool_total_blocks += pool_config.block_num;
@@ -102,11 +95,7 @@ bool HybridPoolKVCacheAllocator::doInit() {
 
     for (int gid = 0; gid < group_nums; ++gid) {
         const auto& pool_config = group_pool_configs[static_cast<size_t>(gid)];
-        RTP_LLM_CHECK_WITH_INFO(gid < static_cast<int>(config_.group_types.size()),
-                                "missing group type for pool %s(group %d) in HybridPoolKVCacheAllocator",
-                                pool_config.pool_name.c_str(),
-                                gid);
-        const auto group_type = config_.group_types[static_cast<size_t>(gid)];
+        const auto  group_type = config_.typeForGroup(static_cast<size_t>(gid));
 
         auto group_pool = std::make_shared<BlockPool>(pool_config,
                                                       allocation_type_,
@@ -115,8 +104,8 @@ bool HybridPoolKVCacheAllocator::doInit() {
         RTP_LLM_CHECK_WITH_INFO(
             group_pool->init(), "Failed to initialize block pool %s(group %d)", pool_config.pool_name.c_str(), gid);
 
-        const auto& ids  = config_.global_layer_ids[static_cast<size_t>(gid)];
-        auto        spec = config_.cache_specs[static_cast<size_t>(gid)];
+        const auto& ids    = config_.layerIdsForGroup(static_cast<size_t>(gid));
+        auto        spec   = config_.specForGroup(static_cast<size_t>(gid));
         const auto  policy = config_.policyForGroup(static_cast<size_t>(gid));
 
         KVCacheGroupPtr group;
@@ -148,7 +137,7 @@ bool HybridPoolKVCacheAllocator::doInit() {
 }
 
 int HybridPoolKVCacheAllocator::defaultGroupIdForLayer(int layer_id) const {
-    if (layer_id < 0 || static_cast<size_t>(layer_id) >= config_.layer_to_group_id.size()) {
+    if (layer_id < 0 || static_cast<size_t>(layer_id) >= config_.layer_all_num) {
         RTP_LLM_FAIL("invalid layer_id=%d", layer_id);
     }
     const int gid = config_.groupIdFor(layer_id);
@@ -164,11 +153,11 @@ int HybridPoolKVCacheAllocator::validateGroupIdForLayer(int layer_id, int group_
                             "invalid group id %d for layer %d",
                             group_id,
                             layer_id);
-    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < config_.layer_to_group_ids.size(),
-                            "invalid layer id %d for layer_to_group_ids.size=%zu",
+    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < config_.layer_all_num,
+                            "invalid layer id %d for layer_all_num=%u",
                             layer_id,
-                            config_.layer_to_group_ids.size());
-    const auto& group_ids = config_.layer_to_group_ids[static_cast<size_t>(layer_id)];
+                            config_.layer_all_num);
+    const auto& group_ids = config_.groupIdsForLayer(layer_id);
     RTP_LLM_CHECK_WITH_INFO(std::find(group_ids.begin(), group_ids.end(), group_id) != group_ids.end(),
                             "layer %d does not own cache group %d",
                             layer_id,
@@ -304,15 +293,11 @@ void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, co
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
         RTP_LLM_CHECK_WITH_INFO(
             static_cast<size_t>(gid) < group_block_pools_.size(), "missing block pool for group %d", gid);
-        RTP_LLM_CHECK_WITH_INFO(
-            static_cast<size_t>(gid) < config_.cache_specs.size(), "missing cache spec for group %d", gid);
-        RTP_LLM_CHECK_WITH_INFO(
-            static_cast<size_t>(gid) < config_.global_layer_ids.size(), "missing layer ids for group %d", gid);
         const auto   copy_type = BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(gid)]->where(),
                                                               group_block_pools_[static_cast<size_t>(gid)]->where());
-        const auto&  spec      = config_.cache_specs[static_cast<size_t>(gid)];
+        const auto&  spec      = config_.specForGroup(static_cast<size_t>(gid));
         const size_t buffers_per_layer = spec->scale_block_size_bytes() > 0 ? 2 : 1;
-        copy_nums[copy_type] += config_.global_layer_ids[static_cast<size_t>(gid)].size()
+        copy_nums[copy_type] += config_.layerIdsForGroup(static_cast<size_t>(gid)).size()
                                 * static_cast<size_t>(end_ptr - begin_ptr) * buffers_per_layer;
     }
 
@@ -325,18 +310,14 @@ void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, co
         auto [src_block_index, dest_block_index] = *it;
 
         for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
-            RTP_LLM_CHECK_WITH_INFO(
-                static_cast<size_t>(gid) < config_.cache_specs.size(), "missing cache spec for group %d", gid);
-            RTP_LLM_CHECK_WITH_INFO(
-                static_cast<size_t>(gid) < config_.global_layer_ids.size(), "missing layer ids for group %d", gid);
-
-            const size_t kv_block_size_bytes = config_.cache_specs[static_cast<size_t>(gid)]->block_size_bytes();
-            const size_t scale_block_bytes   = config_.cache_specs[static_cast<size_t>(gid)]->scale_block_size_bytes();
+            const auto&  spec                = config_.specForGroup(static_cast<size_t>(gid));
+            const size_t kv_block_size_bytes = spec->block_size_bytes();
+            const size_t scale_block_bytes   = spec->scale_block_size_bytes();
             const auto   copy_type =
                 BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(gid)]->where(),
                                                group_block_pools_[static_cast<size_t>(gid)]->where());
 
-            for (int layer_id : config_.global_layer_ids[static_cast<size_t>(gid)]) {
+            for (int layer_id : config_.layerIdsForGroup(static_cast<size_t>(gid))) {
                 auto src_addr_info =
                     kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, src_block_index);
                 auto dst_addr_info =
@@ -515,8 +496,7 @@ size_t HybridPoolKVCacheAllocator::minTokenCapacity(bool use_available_blocks, b
         size_t min_tokens = std::numeric_limits<size_t>::max();
         bool   saw_group  = false;
         for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
-            if (only_full_groups && gid < config_.group_types.size()
-                && config_.group_types[gid] != CacheGroupType::FULL) {
+            if (only_full_groups && config_.typeForGroup(gid) != CacheGroupType::FULL) {
                 continue;
             }
             if (!group_block_pools_[gid]) {
@@ -663,9 +643,7 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
     const size_t total_reservable_available_blocks = totalReservableAvailableBlocks();
 
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
-        const auto group_type             = static_cast<size_t>(gid) < config_.group_types.size() ?
-                                                config_.group_types[static_cast<size_t>(gid)] :
-                                                CacheGroupType::FULL;
+        const auto group_type             = config_.typeForGroup(static_cast<size_t>(gid));
         const int  group_common_seq       = cpEffectiveSeqLenForReserve(cp_mapper, group_type, raw_common_seq_len);
         const int  group_seq_len          = cpEffectiveSeqLenForReserve(cp_mapper, group_type, raw_seq_len);
         const int  group_reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;

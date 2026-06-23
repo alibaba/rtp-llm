@@ -238,8 +238,6 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     }
 
     const int group_cnt     = layer_num / config.group_layer_num;
-    const int linear_groups = 1;
-    const int full_groups   = group_cnt - 1;
 
     // Specs.
     auto linear_spec                = std::make_shared<LinearKVCacheSpec>();
@@ -262,8 +260,6 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
 
     config.layer_ids.clear();
     config.global_layer_ids.clear();
-    config.linear_groups.clear();
-    config.full_groups.clear();
     config.cache_specs.clear();
     config.group_types.clear();
 
@@ -292,17 +288,12 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
             config.cache_specs.push_back(linear_spec);
             config.group_types.push_back(CacheGroupType::LINEAR);
             config.group_tags.push_back("default");
-            config.linear_groups.push_back(group_layers);
         } else {
             config.cache_specs.push_back(full_spec);
             config.group_types.push_back(CacheGroupType::FULL);
             config.group_tags.push_back("default");
-            config.full_groups.push_back(group_layers);
         }
     }
-
-    config.linear_group_num = linear_groups;
-    config.full_group_num   = full_groups;
 
     // Physical sizes for hybrid memory layout: one group (group_layer_num) worth of layers.
     config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());

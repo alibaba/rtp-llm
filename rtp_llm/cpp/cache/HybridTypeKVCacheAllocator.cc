@@ -15,15 +15,14 @@ HybridTypeKVCacheAllocator::HybridTypeKVCacheAllocator(const CacheConfig&       
     HybridKVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
 
 bool HybridTypeKVCacheAllocator::doInit() {
-    RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "no cache_specs found in CacheConfig");
+    RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "no cache groups found in CacheConfig");
 
     auto pool_config = BlockPoolConfigHelper::createConfig(config_);
     block_pool_      = std::make_shared<BlockPool>(
         pool_config, allocation_type_, /*use_pinned_cpu_backing=*/false, use_cuda_malloc_block_pool_);
     RTP_LLM_CHECK_WITH_INFO(block_pool_->init(), "Failed to initialize block pool for HybridTypeKVCacheAllocator");
 
-    const auto& layer_groups = config_.global_layer_ids;
-    const int   group_nums   = static_cast<int>(layer_groups.size());
+    const int group_nums = config_.groupNums();
     kv_cache_groups_.reserve(group_nums);
 
     layer_to_group_id_ = config_.layer_to_group_id;
@@ -36,17 +35,15 @@ bool HybridTypeKVCacheAllocator::doInit() {
     }
 
     for (int gid = 0; gid < group_nums; ++gid) {
-        KVCacheSpecPtr spec = config_.cache_specs[static_cast<size_t>(gid)];
-        const auto&    ids  = layer_groups[static_cast<size_t>(gid)];
+        KVCacheSpecPtr spec = config_.specForGroup(static_cast<size_t>(gid));
+        const auto&    ids  = config_.layerIdsForGroup(static_cast<size_t>(gid));
 
         KVCacheGroupPtr group;
-        const auto      group_type = gid < static_cast<int>(config_.group_types.size()) ?
-                                         config_.group_types[static_cast<size_t>(gid)] :
-                                         CacheGroupType::FULL;
-        const auto policy = config_.policyForGroup(static_cast<size_t>(gid));
+        const auto      group_type = config_.typeForGroup(static_cast<size_t>(gid));
+        const auto      policy     = config_.policyForGroup(static_cast<size_t>(gid));
         if (group_type == CacheGroupType::SWA) {
-            group =
-                std::make_shared<SWAKVCacheGroup>(ids, spec, block_pool_, gid, config_.linear_step, shared_cache_raw, nullptr, policy);
+            group = std::make_shared<SWAKVCacheGroup>(
+                ids, spec, block_pool_, gid, config_.linear_step, shared_cache_raw, nullptr, policy);
             swa_group_ids_.push_back(gid);
         } else if (group_type == CacheGroupType::LINEAR || (spec && spec->type == KVCacheSpecType::LinearAttention)) {
             group = std::make_shared<LinearKVCacheGroup>(
@@ -62,7 +59,8 @@ bool HybridTypeKVCacheAllocator::doInit() {
     }
 
     global_layer_to_local_id_.assign(static_cast<size_t>(config_.layer_all_num), -1);
-    for (const auto& cur_group_layers : layer_groups) {
+    for (int gid = 0; gid < group_nums; ++gid) {
+        const auto& cur_group_layers = config_.layerIdsForGroup(static_cast<size_t>(gid));
         for (size_t local_layer_idx = 0; local_layer_idx < cur_group_layers.size(); ++local_layer_idx) {
             const int global_layer_idx = cur_group_layers[local_layer_idx];
             if (global_layer_idx >= 0 && static_cast<size_t>(global_layer_idx) < global_layer_to_local_id_.size()) {
@@ -135,11 +133,11 @@ int HybridTypeKVCacheAllocator::validateGroupIdForLayer(int layer_id, int group_
                             "invalid group id %d for layer %d",
                             group_id,
                             layer_id);
-    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < config_.layer_to_group_ids.size(),
-                            "invalid layer id %d for layer_to_group_ids.size=%zu",
+    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < config_.layer_all_num,
+                            "invalid layer id %d for layer_all_num=%u",
                             layer_id,
-                            config_.layer_to_group_ids.size());
-    const auto& group_ids = config_.layer_to_group_ids[static_cast<size_t>(layer_id)];
+                            config_.layer_all_num);
+    const auto& group_ids = config_.groupIdsForLayer(layer_id);
     RTP_LLM_CHECK_WITH_INFO(std::find(group_ids.begin(), group_ids.end(), group_id) != group_ids.end(),
                             "layer %d does not own cache group %d",
                             layer_id,

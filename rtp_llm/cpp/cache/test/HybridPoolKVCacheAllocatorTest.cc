@@ -71,8 +71,6 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t linear_block_num = 6, 
     config.cache_specs                 = {linear_spec, full_spec};
     config.group_types                 = {CacheGroupType::LINEAR, CacheGroupType::FULL};
     config.group_tags                  = {"linear", "full"};
-    config.linear_group_num            = 1;
-    config.full_group_num              = 1;
     config.use_independent_block_pools = true;
 
     config.layer_to_group_id.assign(static_cast<size_t>(config.layer_num), 0);
@@ -108,9 +106,6 @@ static CacheConfig makeTinySwaMultiPoolHybridConfig(uint32_t linear_block_num = 
     auto config = makeTinyMultiPoolHybridConfig(linear_block_num, swa_block_num);
 
     config.group_types      = {CacheGroupType::LINEAR, CacheGroupType::SWA};
-    config.linear_group_num = 1;
-    config.full_group_num   = 0;
-    config.swa_group_num    = 1;
     for (int layer_id : config.layer_ids[1]) {
         config.layer_group_types[static_cast<size_t>(layer_id)] = CacheGroupType::SWA;
     }
@@ -175,9 +170,11 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
 
 static void setExplicitBlocksForTag(CacheConfig& config, const std::string& tag, uint32_t block_num) {
     ASSERT_EQ(config.group_policies.size(), config.group_tags.size());
+    auto policies = config.group_policies;
     for (size_t gid = 0; gid < config.group_tags.size(); ++gid) {
         if (config.group_tags[gid] == tag) {
-            config.group_policies[gid].explicit_block_num = block_num;
+            policies[gid].explicit_block_num = block_num;
+            config.setGroupPolicies(policies);
             return;
         }
     }

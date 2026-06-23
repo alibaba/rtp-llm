@@ -82,27 +82,34 @@ CacheConfig HybridConfigCreator::initializeConfig(const ModelConfig&      model_
     return config;
 }
 
-KVCacheSpecPtr HybridConfigCreator::getSpecByTag(const ModelConfig& model_config, const std::string& tag) {
+KVCacheSpecPtr HybridConfigCreator::getSpecFromLayers(const ModelConfig&      model_config,
+                                                      const std::vector<int>& layer_ids,
+                                                      const char*              spec_role) {
     KVCacheSpecPtr result;
     std::string    fingerprint;
-    for (const auto& layer_specs : model_config.kv_cache_specs) {
-        for (const auto& spec : layer_specs.second) {
-            RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "hybrid kv_cache_specs must not contain null specs");
-            RTP_LLM_CHECK_WITH_INFO(!spec->tag.empty(), "hybrid kv_cache_specs must not contain empty tags");
-            if (spec->tag == tag) {
-                const auto current_fingerprint = spec->fingerprint();
-                if (result == nullptr) {
-                    result      = spec;
-                    fingerprint = current_fingerprint;
-                } else {
-                    RTP_LLM_CHECK_WITH_INFO(fingerprint == current_fingerprint,
-                                            "duplicate hybrid kv_cache spec tag=%s has different prototype",
-                                            tag.c_str());
-                }
-            }
+    for (int layer_id : layer_ids) {
+        const auto it = model_config.kv_cache_specs.find(layer_id);
+        RTP_LLM_CHECK_WITH_INFO(it != model_config.kv_cache_specs.end() && !it->second.empty(),
+                                "missing kv_cache_specs for %s layer %d",
+                                spec_role,
+                                layer_id);
+        RTP_LLM_CHECK_WITH_INFO(it->second.size() == 1,
+                                "%s layer %d must have exactly one kv_cache spec, got %zu",
+                                spec_role,
+                                layer_id,
+                                it->second.size());
+        const auto& spec = it->second[0];
+        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "%s layer %d has null kv_cache spec", spec_role, layer_id);
+        if (result == nullptr) {
+            result      = spec;
+            fingerprint = spec->fingerprint();
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(fingerprint == spec->fingerprint(),
+                                    "%s layers have different kv_cache spec fingerprints",
+                                    spec_role);
         }
     }
-    RTP_LLM_CHECK_WITH_INFO(result != nullptr, "missing hybrid kv_cache spec tag=%s", tag.c_str());
+    RTP_LLM_CHECK_WITH_INFO(result != nullptr, "no %s layers found", spec_role);
     return result->clone();
 }
 
@@ -209,8 +216,6 @@ void HybridConfigCreator::setupCacheConfigSpecs(CacheConfig&                    
         types.push_back(CacheGroupType::LINEAR);
     }
     config.fromGroupedSpecs(specs, layers_by_group, types);
-    config.linear_group_num = static_cast<int>(linear_groups.size());
-    config.full_group_num   = static_cast<int>(full_groups.size());
 }
 
 void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
@@ -253,8 +258,8 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     // Initialize config
     CacheConfig config = HybridConfigCreator::initializeConfig(model_config, linear_layers, full_layers, dtype);
 
-    auto full_spec   = HybridConfigCreator::getSpecByTag(model_config, "full");
-    auto linear_spec = HybridConfigCreator::getSpecByTag(model_config, "linear");
+    auto full_spec   = HybridConfigCreator::getSpecFromLayers(model_config, full_layers, "full attention");
+    auto linear_spec = HybridConfigCreator::getSpecFromLayers(model_config, linear_layers, "linear attention");
 
     // Create layer groups and calculate group layer number
     int group_layer_num = 0;

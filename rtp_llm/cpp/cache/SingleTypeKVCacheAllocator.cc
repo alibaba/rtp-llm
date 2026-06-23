@@ -68,8 +68,8 @@ SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&       
     KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
 
 bool SingleTypeKVCacheAllocator::doInit() {
-    RTP_LLM_CHECK_WITH_INFO(!config_.cache_specs.empty(), "cache specs must not be empty");
-    auto& spec = config_.cache_specs[0];
+    RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache groups must not be empty");
+    auto& spec = config_.specForGroup(0);
     RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache spec[0] is null");
     RTP_LLM_CHECK_WITH_INFO(spec->type == rtp_llm::KVCacheSpecType::MultiHeadAttention
                                 || spec->type == rtp_llm::KVCacheSpecType::MultiHeadLatentAttention,
@@ -92,7 +92,7 @@ bool SingleTypeKVCacheAllocator::doInit() {
         shared_block_cache_->init(1, group_pools);
     }
 
-    std::vector<int> layer_ids(config_.global_layer_ids[0]);
+    std::vector<int> layer_ids(config_.layerIdsForGroup(0));
     full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(layer_ids, spec, block_pool_, 0, shared_cache_raw);
 
     if (!full_kv_cache_group_->init()) {

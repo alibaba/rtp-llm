@@ -18,13 +18,13 @@ public:
      * @param cache_config The CacheConfig containing main model and optional MTP modules
      */
     static BlockPoolConfig createConfig(const CacheConfig& cache_config) {
-        RTP_LLM_CHECK_WITH_INFO(!cache_config.cache_specs.empty(), "cache_specs must not be empty");
+        RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() > 0, "cache groups must not be empty");
         BlockPoolConfig config;
         config.pool_name      = "default";
         config.block_num      = cache_config.block_num;
         const bool  is_hybrid = cache_config.groupNums() > 1;
         auto        layer_num = is_hybrid ? cache_config.group_layer_num : cache_config.layer_num;
-        const auto& main_spec = cache_config.cache_specs[0];
+        const auto& main_spec = cache_config.specForGroup(0);
         // linear block size is same with full block block size
         MemoryLayoutConfig main_layout = createMemoryLayoutConfig(is_hybrid,
                                                                   layer_num,
@@ -45,12 +45,13 @@ public:
         for (size_t i = 0; i < cache_config.mtp_sub_configs.size(); ++i) {
             const auto& mtp_sub_config = cache_config.mtp_sub_configs[i];
             RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%zu] is null", i);
-            RTP_LLM_CHECK_WITH_INFO(
-                !mtp_sub_config->cache_specs.empty(), "MTP module %zu cache_specs must not be empty", i);
+            RTP_LLM_CHECK_WITH_INFO(mtp_sub_config->groupNums() > 0,
+                                    "MTP module %zu cache groups must not be empty",
+                                    i);
 
             const auto mtp_layer_num = mtp_sub_config->layer_num;
 
-            const auto& mtp_spec = mtp_sub_config->cache_specs[0];
+            const auto& mtp_spec = mtp_sub_config->specForGroup(0);
             // mtp block size is not same with main model block size
             MemoryLayoutConfig mtp_layout = createMemoryLayoutConfig(false,
                                                                      mtp_layer_num,
@@ -83,44 +84,35 @@ public:
     }
 
     static BlockPoolConfig createConfigForGroup(const CacheConfig& cache_config, size_t group_id) {
-        RTP_LLM_CHECK_WITH_INFO(group_id < cache_config.cache_specs.size(),
-                                "group_id %zu out of range, cache_specs.size=%zu",
+        RTP_LLM_CHECK_WITH_INFO(group_id < static_cast<size_t>(cache_config.groupNums()),
+                                "group_id %zu out of range, groupNums=%d",
                                 group_id,
-                                cache_config.cache_specs.size());
-        RTP_LLM_CHECK_WITH_INFO(group_id < cache_config.global_layer_ids.size(),
-                                "group_id %zu out of range, global_layer_ids.size=%zu",
-                                group_id,
-                                cache_config.global_layer_ids.size());
-        const auto& spec = cache_config.cache_specs[group_id];
+                                cache_config.groupNums());
+        const auto& spec = cache_config.specForGroup(group_id);
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", group_id);
 
         BlockPoolConfig config;
         config.pool_name = "group_" + std::to_string(group_id);
-        if (group_id < cache_config.group_tags.size() && !cache_config.group_tags[group_id].empty()) {
-            config.pool_name = cache_config.group_tags[group_id];
+        const auto& tag = cache_config.tagForGroup(group_id);
+        if (!tag.empty()) {
+            config.pool_name = tag;
         }
-        const bool has_group_blocks =
-            group_id < cache_config.group_block_nums.size() && cache_config.group_block_nums[group_id] > 0;
-        config.block_num = has_group_blocks ? cache_config.group_block_nums[group_id] : cache_config.block_num;
+        config.block_num = cache_config.blockNumForGroup(group_id);
+        const bool has_group_blocks = config.block_num != cache_config.block_num;
         RTP_LLM_LOG_INFO("createConfigForGroup: pool_name=%s gid=%zu block_num=%d (has_group_blocks=%d, "
-                         "group_block_nums.size=%zu, global_block_num=%d)",
+                         "groupNums=%d, global_block_num=%d)",
                          config.pool_name.c_str(),
                          group_id,
                          config.block_num,
                          has_group_blocks,
-                         cache_config.group_block_nums.size(),
+                         cache_config.groupNums(),
                          cache_config.block_num);
 
-        const uint32_t layer_num = static_cast<uint32_t>(cache_config.global_layer_ids[group_id].size());
+        const uint32_t layer_num = static_cast<uint32_t>(cache_config.layerIdsForGroup(group_id).size());
         RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "group %zu has no layers", group_id);
 
-        const size_t kv_stride    = (group_id < cache_config.group_kv_block_stride_bytes.size()
-                                  && cache_config.group_kv_block_stride_bytes[group_id] > 0) ?
-                                        cache_config.group_kv_block_stride_bytes[group_id] :
-                                        spec->block_size_bytes();
-        const size_t scale_stride = (group_id < cache_config.group_kv_scale_stride_bytes.size()) ?
-                                        cache_config.group_kv_scale_stride_bytes[group_id] :
-                                        spec->scale_block_size_bytes();
+        const size_t kv_stride    = cache_config.kvBlockStrideBytesForGroup(group_id);
+        const size_t scale_stride = cache_config.kvScaleStrideBytesForGroup(group_id);
 
         CacheConfig group_cache_config = cache_config;
         group_cache_config.block_num   = config.block_num;
@@ -131,11 +123,7 @@ public:
 
         MemoryLayoutConfig layout =
             createMemoryLayoutConfig(false, layer_num, kv_stride, scale_stride, spec, group_cache_config);
-        RTP_LLM_CHECK_WITH_INFO(group_id < cache_config.group_types.size(),
-                                "missing cache group type for group %zu (group_types.size=%zu)",
-                                group_id,
-                                cache_config.group_types.size());
-        const bool is_full_group          = cache_config.group_types[group_id] == CacheGroupType::FULL;
+        const bool is_full_group          = cache_config.typeForGroup(group_id) == CacheGroupType::FULL;
         layout.kernel_blocks_per_kv_block = is_full_group ? cache_config.kernelBlocksPerKvBlock() : 1;
         layout.kv_cache_offset_bytes      = 0;
         layout.kv_scale_offset_bytes      = layout.kv_cache_offset_bytes + layout.kv_block_pool_size_bytes;

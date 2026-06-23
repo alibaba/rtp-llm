@@ -141,8 +141,6 @@ public:
         cache_config_.group_types.push_back(CacheGroupType::FULL);
         cache_config_.group_types.push_back(CacheGroupType::LINEAR);
         cache_config_.group_types.push_back(CacheGroupType::LINEAR);
-        cache_config_.full_group_num   = 1;
-        cache_config_.linear_group_num = 2;
     }
 
     void TearDown() override {}

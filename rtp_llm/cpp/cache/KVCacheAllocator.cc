@@ -116,15 +116,16 @@ uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_lay
         RTP_LLM_LOG_ERROR("convertToGlobalLayerId: mtp_sub_configs[%zu] is null", model_id - 1);
         return std::numeric_limits<uint32_t>::max();
     }
-    if (sub->global_layer_ids.empty()) {
-        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: mtp_sub_configs[%zu] global_layer_ids is empty", model_id - 1);
+    if (sub->groupNums() <= 0) {
+        RTP_LLM_LOG_ERROR("convertToGlobalLayerId: mtp_sub_configs[%zu] cache groups are empty", model_id - 1);
         return std::numeric_limits<uint32_t>::max();
     }
     // SWA-only DSV4 propose configs put the single MTP layer in the SWA group
     // (gid=6), not FULL[0], so ``global_layer_ids[0]`` is empty.  Flatten across
     // all groups — matches ``KVCacheManager::getMTPModuleCacheLayerLayout``.
     size_t flat_idx = 0;
-    for (const auto& group_ids : sub->global_layer_ids) {
+    for (int gid = 0; gid < sub->groupNums(); ++gid) {
+        const auto& group_ids = sub->layerIdsForGroup(static_cast<size_t>(gid));
         for (int gid_val : group_ids) {
             if (static_cast<int>(flat_idx) == local_layer_id) {
                 return static_cast<uint32_t>(gid_val);
@@ -189,7 +190,7 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
         copy_params.reserve(static_cast<CopyType>(i), copy_nums[i]);
     }
 
-    auto&  spec                = config_.cache_specs[0];
+    auto&  spec                = config_.specForGroup(0);
     size_t kv_block_size_bytes = spec->block_size_bytes();
 
     for (auto it = begin_ptr; it != end_ptr; ++it) {
@@ -212,7 +213,7 @@ void KVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockI
             if (src_addr_info.kv_scale_addr && dst_addr_info.kv_scale_addr) {
                 copy_params.add(dst_addr_info.kv_scale_addr,
                                 src_addr_info.kv_scale_addr,
-                                static_cast<size_t>(config_.kv_scale_stride_bytes),
+                                config_.kvScaleStrideBytesForGroup(0),
                                 copy_type);
             }
         }
@@ -362,7 +363,7 @@ bool KVCacheAllocator::cpShardThisGroupForCapacity(size_t gid) const {
     if (!cp_slot_mapper_ || !cp_slot_mapper_->isSharded()) {
         return false;
     }
-    return gid >= config_.group_types.size() || config_.group_types[gid] == CacheGroupType::FULL;
+    return gid >= static_cast<size_t>(config_.groupNums()) || config_.typeForGroup(gid) == CacheGroupType::FULL;
 }
 
 size_t KVCacheAllocator::logicalSeqSizePerBlockForCapacity(size_t gid) const {

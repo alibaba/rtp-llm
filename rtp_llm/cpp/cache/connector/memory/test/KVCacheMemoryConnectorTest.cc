@@ -3281,7 +3281,6 @@ protected:
         config.seq_size_per_block                     = seq_size_per_block;
         config.linear_step                            = linear_step;
         config.group_layer_num                        = layer_num;
-        config.full_group_num                         = 1;
         kv_cache_config_.memory_cache_size_mb         = kTestMemoryCacheSizeMb;
         kv_cache_config_.memory_cache_sync_timeout_ms = kTestMemoryCacheSyncTimeout;
 

@@ -57,8 +57,6 @@ CacheConfig makeCPHybridConfig() {
     config.layer_ids        = {{0, 1}, {2, 3}};
     config.global_layer_ids = config.layer_ids;
     config.cache_specs      = {linear_spec, full_spec};
-    config.linear_group_num = 1;
-    config.full_group_num   = 1;
 
     config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;

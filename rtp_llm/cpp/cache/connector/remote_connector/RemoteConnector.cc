@@ -181,18 +181,20 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                             register_buffer_size};
     init_params_ = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
     std::vector<int32_t> full_group_ids, linear_group_ids;
-    if (cache_config.linear_group_num == 0) {
-        full_group_ids.push_back(0);
+    for (int32_t group_id = 0; static_cast<size_t>(group_id) < cache_config.group_types.size(); group_id++) {
+        if (cache_config.group_types[group_id] == CacheGroupType::FULL) {
+            full_group_ids.push_back(group_id);
+        } else {
+            linear_group_ids.push_back(group_id);
+        }
+    }
+    if (linear_group_ids.empty()) {
+        if (full_group_ids.empty()) {
+            full_group_ids.push_back(0);
+        }
         group_policy_ =
             std::make_unique<remote_connector::FullLayerGroupPolicy>(allocator, full_group_ids, linear_group_ids);
     } else {
-        for (int32_t group_id = 0; static_cast<size_t>(group_id) < cache_config.group_types.size(); group_id++) {
-            if (cache_config.group_types[group_id] == CacheGroupType::FULL) {
-                full_group_ids.push_back(group_id);
-            } else {
-                linear_group_ids.push_back(group_id);
-            }
-        }
         group_policy_ = std::make_unique<remote_connector::FullLinearLayerGroupPolicy>(
             allocator, full_group_ids, linear_group_ids, std::max(1, cache_config.linear_step));
     }
