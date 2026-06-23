@@ -29,6 +29,7 @@ EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object hand
     executor_.reset(new EmbeddingExecutor(params, handler));
     scheduler_.reset(
         new EmbeddingScheduler(model_config_, concurrency_config, params.runtime_config, metrics_reporter_));
+    step_profiler_.configureFromConfig(params.profiling_debug_logging_config);
 
     (void)startLoop();
 }
@@ -103,29 +104,32 @@ absl::Status EmbeddingEngine::step() {
         RTP_LLM_LOG_INFO("no query run and sleep");
         return absl::OkStatus();
     }
-    step_profiler_.tick();
-    try {
-        auto status = executor_->process(streams);
-        if (!status.ok()) {
+    {
+        auto profile_step = step_profiler_.stepScope();
+        try {
+            auto status = executor_->process(streams);
+            if (!status.ok()) {
+                for (auto& stream : streams) {
+                    stream->setError(status.ToString());
+                    RTP_LLM_LOG_WARNING("error_stream_info: length: %d, exception: %s",
+                                        stream->inputLength(),
+                                        status.ToString().c_str());
+                }
+            }
+        } catch (const exception& e) {
+            std::string error_msg = e.what();
+            RTP_LLM_LOG_WARNING("run engine failed, stream size: %d, error: %s", streams.size(), error_msg.c_str());
             for (auto& stream : streams) {
-                stream->setError(status.ToString());
-                RTP_LLM_LOG_WARNING(
-                    "error_stream_info: length: %d, exception: %s", stream->inputLength(), status.ToString().c_str());
+                stream->setError(error_msg);
+                RTP_LLM_LOG_WARNING("error_stream_info: length: %d", stream->inputLength());
+            }
+            if (error_msg.find("CUDA Driver error") != string::npos || error_msg.find("CUDA error") != string::npos) {
+                RTP_LLM_LOG_ERROR("detect CUDA error, do abort");
+                abort();
             }
         }
-    } catch (const exception& e) {
-        std::string error_msg = e.what();
-        RTP_LLM_LOG_WARNING("run engine failed, stream size: %d, error: %s", streams.size(), error_msg.c_str());
-        for (auto& stream : streams) {
-            stream->setError(error_msg);
-            RTP_LLM_LOG_WARNING("error_stream_info: length: %d", stream->inputLength());
-        }
-        if (error_msg.find("CUDA Driver error") != string::npos || error_msg.find("CUDA error") != string::npos) {
-            RTP_LLM_LOG_ERROR("detect CUDA error, do abort");
-            abort();
-        }
+        cudaSyncAndCheck();
     }
-    cudaSyncAndCheck();
     return absl::OkStatus();
 }
 

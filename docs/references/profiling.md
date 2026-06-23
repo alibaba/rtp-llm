@@ -22,7 +22,7 @@ The generated timeline json file is located at the workdir where you started rtp
 
 ### Service-Wide Timeline
 
-You may use start arg `--gen_timeline_sync` or specify env `GEN_TIMELINE_SYNC=1` to enable service level timeline profiling. When this option is used, every model request would generate a profiling timeline.
+You may use start arg `--gen_timeline_sync` or specify env `GEN_TIMELINE_SYNC=1` to enable service level timeline profiling. This captures a window of inference engine steps and saves the trace as a perfetto-compatible JSON file.
 
 ### How to visualize timeline
 
