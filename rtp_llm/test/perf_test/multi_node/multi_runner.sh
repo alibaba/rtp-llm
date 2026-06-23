@@ -19,6 +19,7 @@ multi_build_script() {
   # Run build script on each ip with environment variables
   (
     trap 'kill 0' SIGINT;
+    PIDS=()
     for IP in "${IP_ARRAY[@]}"
     do
       (
@@ -28,8 +29,13 @@ multi_build_script() {
         echo "Environment variables: $ENV_STR";
         ssh ${RUN_USER}@${IP} -p ${SSH_PORT} "$ENV_STR bash /tmp/multi_local_executor.sh";
       ) &
+      PIDS+=($!)
     done;
-    wait;
+    EXIT_CODE=0
+    for PID in "${PIDS[@]}"; do
+      wait "${PID}" || EXIT_CODE=$?
+    done
+    exit ${EXIT_CODE}
   )
 }
 
@@ -44,6 +50,7 @@ multi_kill_script() {
   # Run kill script on each ip with environment variables
   (
     trap 'kill 0' SIGINT;
+    PIDS=()
     for IP in "${IP_ARRAY[@]}"
     do
       (
@@ -53,8 +60,13 @@ multi_kill_script() {
         echo "Environment variables: $ENV_STR";
         ssh ${RUN_USER}@${IP} -p ${SSH_PORT} "$ENV_STR bash /tmp/multi_local_executor.sh";
       ) &
+      PIDS+=($!)
     done;
-    wait;
+    EXIT_CODE=0
+    for PID in "${PIDS[@]}"; do
+      wait "${PID}" || EXIT_CODE=$?
+    done
+    exit ${EXIT_CODE}
   )
 }
 
@@ -74,6 +86,7 @@ multi_copy_script() {
   (
     trap 'kill 0' SIGINT;
     export WORLD_RANK=0;
+    PIDS=()
     for IP in "${IP_ARRAY[@]}"
     do
       (
@@ -89,9 +102,14 @@ multi_copy_script() {
           scp -P ${SSH_PORT} ${RUN_USER}@${IP}:${TEST_OUTPUT_PATH}/*Result.json ${TASK_OUTPUT_DIR}/;
         fi
       ) &
+      PIDS+=($!)
       export WORLD_RANK=$((WORLD_RANK + 8));
     done;
-    wait;
+    EXIT_CODE=0
+    for PID in "${PIDS[@]}"; do
+      wait "${PID}" || EXIT_CODE=$?
+    done
+    exit ${EXIT_CODE}
   )
 }
 
@@ -106,6 +124,7 @@ multi_clean_script() {
   # Run clean script on each ip with environment variables
   (
     trap 'kill 0' SIGINT;
+    PIDS=()
     for IP in "${IP_ARRAY[@]}"
     do
       (
@@ -115,8 +134,13 @@ multi_clean_script() {
         echo "Environment variables: $ENV_STR";
         ssh ${RUN_USER}@${IP} -p ${SSH_PORT} "$ENV_STR bash /tmp/multi_local_executor.sh";
       ) &
+      PIDS+=($!)
     done;
-    wait;
+    EXIT_CODE=0
+    for PID in "${PIDS[@]}"; do
+      wait "${PID}" || EXIT_CODE=$?
+    done
+    exit ${EXIT_CODE}
   )
 }
 
@@ -151,11 +175,11 @@ multi_test_script() {
     echo "OPEN_SOURCE_REF should be set"
     exit 1
   fi
-  if [ -z "$TP_SIZE"] || [ -z "$DP_SIZE" ] || [ -z "$EP_SIZE" ] || [ -z "$WORLD_SIZE" ] || [ -z "$LOCAL_WORLD_SIZE" ] || [ -z "$GANG_CONFIG_STRING" ]; then
+  if [ -z "$TP_SIZE" ] || [ -z "$DP_SIZE" ] || [ -z "$EP_SIZE" ] || [ -z "$WORLD_SIZE" ] || [ -z "$LOCAL_WORLD_SIZE" ] || [ -z "$GANG_CONFIG_STRING" ]; then
     echo "Parallel parameters are not set"
     exit 1
   fi
-  if [ -z "$MODEL_TYPE"] || [ -z "$TOKENIZER_PATH" ] || [ -z "$CHECKPOINT_PATH" ]; then
+  if [ -z "$MODEL_TYPE" ] || [ -z "$TOKENIZER_PATH" ] || [ -z "$CHECKPOINT_PATH" ]; then
     echo "Model parameters are not set"
     exit 1
   fi
@@ -173,6 +197,7 @@ multi_test_script() {
   (
     trap 'kill 0' SIGINT;
     export WORLD_RANK=0;
+    PIDS=()
     for IP in "${IP_ARRAY[@]}"
     do
       (
@@ -182,9 +207,14 @@ multi_test_script() {
         echo "Environment variables: $ENV_STR";
         ssh ${RUN_USER}@${IP} -p ${SSH_PORT} "$ENV_STR bash /tmp/multi_local_executor.sh";
       ) &
+      PIDS+=($!)
       export WORLD_RANK=$((WORLD_RANK + LOCAL_WORLD_SIZE));
     done;
-    wait;
+    EXIT_CODE=0
+    for PID in "${PIDS[@]}"; do
+      wait "${PID}" || EXIT_CODE=$?
+    done
+    exit ${EXIT_CODE}
   )
 }
 

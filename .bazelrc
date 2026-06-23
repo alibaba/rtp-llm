@@ -54,6 +54,9 @@ build:cuda --action_env TF_NCCL_VERSION="2"
 build:cuda --action_env CUDNN_INSTALL_PATH="/usr/local/cuda/"
 
 # 6.0 = P100, 7.0 = V100, 7.5 = T4, 8.6 = A10, 8.0 = A100 8.9 = L, 9.0 = H800
+# NOTE: cuda12 is a shared base config. Do not use it directly; it lacks the
+# platform-specific torch_deps/torch_libs selection. Use cuda12_6, cuda12_9, or
+# cuda12_9_arm instead.
 build:cuda12 --config=cuda
 build:cuda12 --action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0"
 build:cuda12 --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0"

@@ -24,6 +24,8 @@ rocm = [
     "triton @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton-3.5.1%2Brocm7.2.0.gita272dfa8-cp310-cp310-linux_x86_64.whl",
     "pyrsmi==0.2.0",
     "pyyaml==6.0.2",
+    # aiter is pinned to 0.1.13.dev14 for ROCm 7.2 ABI stability. Do not bump
+    # without validating aiter C++ headers / JIT kernels on all ROCm smoke targets.
     "aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/RTP/aiter-0.1.13.dev14%2Bgfa35072d0.d20260402-cp310-cp310-linux_x86_64.whl",
 ]
 
