@@ -5,7 +5,10 @@ from typing import Any, Optional, Tuple
 import flashinfer.page as page
 import torch
 
+from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import LayerKVCache
+
+FP8_E4M3_MAX = 448.0
 
 
 class KVCacheWriteOp:
@@ -16,6 +19,8 @@ class KVCacheWriteOp:
         num_kv_heads: int,
         head_size: int,
         token_per_block: int,
+        fp8_kv_cache_scale_mode: str = "per_tensor",
+        kv_cache_dtype: KvCacheDataType = KvCacheDataType.BASE,
     ) -> None:
         """
         Initialize KV Cache Write operator.
@@ -28,6 +33,8 @@ class KVCacheWriteOp:
         self.num_kv_heads = num_kv_heads
         self.head_size = head_size
         self.token_per_block = token_per_block
+        self.fp8_kv_cache_scale_mode = fp8_kv_cache_scale_mode
+        self.kv_cache_dtype = kv_cache_dtype
         self.params = None
 
     def set_params(self, params: Any):
@@ -57,6 +64,9 @@ class KVCacheWriteOp:
             v_cache = kv_cache.kv_cache_base[
                 :, 1, :, :, :
             ]  # [num_pages, num_kv_heads, page_size, head_dim]
+
+            if self._use_fp8_per_token_head(kv_cache):
+                key, value = self._quantize_and_store_scales(key, value, kv_cache)
 
             # flashinfer.page.append_paged_kv_cache does a raw element copy and
             # does not cast dtypes. RoPE produces BF16/FP16 K/V while an FP8 KV
@@ -124,6 +134,71 @@ class KVCacheWriteOp:
                 kv_last_page_len,
                 "HND",  # kv_layout: HND layout (num_pages, num_kv_heads, page_size, head_dim)
             )
+
+    def _use_fp8_per_token_head(self, kv_cache: LayerKVCache) -> bool:
+        return (
+            self.kv_cache_dtype == KvCacheDataType.FP8
+            and self.fp8_kv_cache_scale_mode == "per_token_head"
+            and kv_cache.kv_scale_base is not None
+            and kv_cache.kv_scale_base.numel() > 0
+        )
+
+    def _scale_views(self, kv_cache: LayerKVCache) -> tuple[torch.Tensor, torch.Tensor]:
+        scale = kv_cache.kv_scale_base
+        num_blocks = scale.size(0)
+        scale_flat = scale.reshape(num_blocks, -1)
+        scale_per_kv = self.num_kv_heads * self.token_per_block
+        k_flat = scale_flat[:, :scale_per_kv]
+        v_flat = scale_flat[:, scale_per_kv : 2 * scale_per_kv]
+        k_scale = torch.as_strided(
+            k_flat,
+            (num_blocks, self.token_per_block, self.num_kv_heads),
+            (scale_flat.stride(0), 1, self.token_per_block),
+        )
+        v_scale = torch.as_strided(
+            v_flat,
+            (num_blocks, self.token_per_block, self.num_kv_heads),
+            (scale_flat.stride(0), 1, self.token_per_block),
+        )
+        return k_scale, v_scale
+
+    def _slot_mapping(self, token_num: int, device: torch.device) -> torch.Tensor:
+        batch_indices = self.params.batch_indice_d[:token_num].to(torch.long)
+        positions = self.params.positions_d[:token_num].to(torch.long)
+        block_offsets = positions // self.token_per_block
+        offsets = positions % self.token_per_block
+        page_indptr = self.params.decode_page_indptr_d.to(torch.long)
+        page_indices = self.params.page_indice_d.to(torch.long)
+        blocks = page_indices[page_indptr[batch_indices] + block_offsets]
+        return blocks.to(device) * self.token_per_block + offsets.to(device)
+
+    def _quantize_and_store_scales(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: LayerKVCache,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        k_scale = torch.clamp(key.float().abs().amax(dim=-1) / FP8_E4M3_MAX, min=1e-6)
+        v_scale = torch.clamp(value.float().abs().amax(dim=-1) / FP8_E4M3_MAX, min=1e-6)
+        k_quant = torch.clamp(
+            key.float() / k_scale.unsqueeze(-1), -FP8_E4M3_MAX, FP8_E4M3_MAX
+        ).to(torch.float8_e4m3fn)
+        v_quant = torch.clamp(
+            value.float() / v_scale.unsqueeze(-1), -FP8_E4M3_MAX, FP8_E4M3_MAX
+        ).to(torch.float8_e4m3fn)
+
+        k_scale_cache, v_scale_cache = self._scale_views(kv_cache)
+        slot_mapping = self._slot_mapping(key.size(0), key.device)
+        block_ids = slot_mapping // self.token_per_block
+        offsets = slot_mapping % self.token_per_block
+        head_ids = torch.arange(self.num_kv_heads, device=key.device, dtype=torch.long)
+        k_scale_cache[block_ids[:, None], offsets[:, None], head_ids[None, :]] = (
+            k_scale.float()
+        )
+        v_scale_cache[block_ids[:, None], offsets[:, None], head_ids[None, :]] = (
+            v_scale.float()
+        )
+        return k_quant, v_quant
 
     def _prepare_warmup_cache_indices(
         self, num_tokens: int, device: torch.device

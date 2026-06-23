@@ -52,6 +52,7 @@ def ssm_state_dtype_str_to_data_type(ssm_state_dtype: str) -> DataType:
         return DataType.TYPE_FP32
     raise ValueError(f"Unsupported ssm_state_dtype: {ssm_state_dtype}")
 
+
 class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
@@ -868,6 +869,9 @@ def build_model_config(
         kv_cache_config.kernel_seq_size_per_block
         if kv_cache_config.kernel_seq_size_per_block > 0
         else kv_cache_config.seq_size_per_block
+    )
+    model_config.attn_config.fp8_kv_cache_scale_mode = (
+        kv_cache_config.fp8_kv_cache_scale_mode
     )
     model_config.linear_attention_config.ssm_state_dtype = (
         ssm_state_dtype_str_to_data_type(kv_cache_config.ssm_state_dtype)

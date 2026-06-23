@@ -59,6 +59,10 @@ else:
             PyFlashinferPagedPrefillImpl,
             PyFlashinferPrefillImpl,
         )
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.triton_fp8_mha import (
+            TritonFp8PagedDecodeImpl,
+            TritonFp8PagedPrefillImpl,
+        )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.trt import (
             TRTMHAImpl,
             TRTPagedMHAImpl,
@@ -75,6 +79,7 @@ else:
 
         PREFILL_MHA_IMPS.extend(
             [
+                TritonFp8PagedPrefillImpl,
                 HeadWiseFP8PrefillImpl,
                 HeadWisePrefillImpl,
                 FlashInferTRTLLMSpecDecodeImpl,
@@ -85,7 +90,7 @@ else:
                 TRTPagedMHAImpl,
             ]
         )
-        DECODE_MHA_IMPS.extend([FlashInferTRTLLMDecodeImpl])
+        DECODE_MHA_IMPS.extend([TritonFp8PagedDecodeImpl, FlashInferTRTLLMDecodeImpl])
         # XQAImpl (TRT GMMA) before XQADecodeImpl (FlashInfer HMMA): different
         # accumulation paths produce <1 ULP divergence that flips tokens in long
         # generations.  Existing golden data was generated with XQAImpl, so keep

@@ -91,6 +91,7 @@ class AttentionConfigs:
     is_causal: bool
     is_sparse: bool
     kv_cache_dtype: KvCacheDataType
+    fp8_kv_cache_scale_mode: str
     kv_head_num: int
     kv_lora_rank: int
     max_seq_len: int

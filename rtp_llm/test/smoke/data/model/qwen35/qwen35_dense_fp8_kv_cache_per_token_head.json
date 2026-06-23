@@ -1,5 +1,5 @@
 {
-    "_comment": "Qwen3-5-Dense-4B FP8 KV-cache reuse smoke. The prompt is longer than seq_size_per_block=1024 and expected device-cache reuse length is aligned to 10 blocks.",
+    "_comment": "Qwen3-5-Dense-4B FP8 KV-cache per-token-head reuse smoke. The prompt is longer than seq_size_per_block=1024 and expected device-cache reuse length is aligned to 10 blocks.",
     "model_type": "qwen35_dense",
     "model_path": "/mnt/nas1/hf/Qwen3-5-Dense-4B",
     "query_result": [
@@ -36,7 +36,7 @@
                 "_prompt_source": "$prompt:x6 (char_len 19437; input length must be >1024 tokens for seq_size_per_block=1024 reuse coverage)"
             },
             "result": {
-                "response": "综合竞争力指数由2",
+                "response": "跻身全国百强城市行列",
                 "finished": true,
                 "aux_info": {
                     "input_len": 10913,

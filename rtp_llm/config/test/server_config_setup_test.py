@@ -73,11 +73,14 @@ class GenerateConfigTest(TestCase):
         },
         clear=True,
     )
-    def test_fp8_kv_cache_per_token_head_fails_for_unsupported_backends(self):
+    def test_fp8_kv_cache_per_token_head_is_accepted_with_fp8_kv_cache(self):
         py_env_configs: PyEnvConfigs = setup_args()
 
-        with self.assertRaisesRegex(ValueError, "not supported"):
-            setup_and_configure_server(py_env_configs)
+        setup_and_configure_server(py_env_configs)
+        self.assertEqual(
+            py_env_configs.kv_cache_config.fp8_kv_cache_scale_mode,
+            "per_token_head",
+        )
 
     @patch.dict(
         "os.environ",

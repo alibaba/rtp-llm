@@ -22,6 +22,11 @@ DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
 PREFILL_MLA_IMPS: List[type[MlaImplBase]] = []
 DECODE_MLA_IMPS: List[type[MlaImplBase]] = []
 
+FP8_PER_TOKEN_HEAD_MHA_IMPS = {
+    "TritonFp8PagedPrefillImpl",
+    "TritonFp8PagedDecodeImpl",
+}
+
 
 def get_mla_impl(
     attn_configs: AttentionConfigs,
@@ -153,17 +158,40 @@ def get_fmha_impl(
     for impl in mha_impls:
         # Check if this FMHA implementation is disabled before creating instance
         impl_class_name = impl.__name__
+        fp8_per_token_head = (
+            attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+            and getattr(attn_configs, "fp8_kv_cache_scale_mode", "per_tensor")
+            == "per_token_head"
+        )
+        if fp8_per_token_head and impl_class_name not in FP8_PER_TOKEN_HEAD_MHA_IMPS:
+            continue
 
         # Skip if this FMHA implementation is disabled in config
         if _is_fmha_impl_disabled(impl_class_name, fmha_config):
+            if fp8_per_token_head:
+                logging.warning(
+                    "skip fp8 per-token-head mha impl [%s]: disabled by fmha_config",
+                    impl_class_name,
+                )
             continue
 
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
+            if fp8_per_token_head:
+                logging.warning(
+                    "skip fp8 per-token-head mha impl [%s]: support=false, is_prefill=%s",
+                    impl_class_name,
+                    attn_inputs.is_prefill,
+                )
             continue
 
         # Check if implementation supports parallelism config
         if not impl.support_parallelism_config(parallelism_config):
+            if fp8_per_token_head:
+                logging.warning(
+                    "skip fp8 per-token-head mha impl [%s]: parallelism_config unsupported",
+                    impl_class_name,
+                )
             continue
         try:
             instance = impl(attn_configs, attn_inputs, parallelism_config)

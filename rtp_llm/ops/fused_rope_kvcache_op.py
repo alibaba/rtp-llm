@@ -55,6 +55,12 @@ class FusedRopeKVCachePrefillOpBase:
         if attn_inputs.context_parallel_info is not None:
             position_ids = attn_inputs.context_parallel_info.prefill_shuffle_indices
 
+        max_prefix_length = (
+            attn_inputs.prefix_lengths.max().item()
+            if attn_inputs.prefix_lengths.numel() > 0
+            else 0
+        )
+
         return FusedRopeAttnParams(
             kv_cache_offset,
             kv_cache_offset_h,
@@ -66,7 +72,7 @@ class FusedRopeKVCachePrefillOpBase:
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths.max().item(),
-            attn_inputs.prefix_lengths.max().item(),
+            max_prefix_length,
             attn_inputs.context_total_kv_length,
             False,
             get_scalar_type(attn_inputs.dtype),

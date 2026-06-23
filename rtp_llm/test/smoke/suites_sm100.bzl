@@ -26,6 +26,18 @@ def sm100_suites():
                 smoke_args="--act_type BF16 --seq_size_per_block 64 --fp8_kv_cache 1 --reserver_runtime_mem_mb 178125 --warm_up 0",
                 gpu_type=["SM100_ARM"],
             ),
+            smoke_test(
+                name="fp8_attention_reuse_sm100",
+                task_info="data/model/qwen3/q_r_block_fp8_reuse_cache.json",
+                smoke_args="--act_type BF16 --seq_size_per_block 64 --fp8_kv_cache 1 --reuse_cache 1 --enable_memory_cache 0 --reserver_runtime_mem_mb 178125 --warm_up 0",
+                gpu_type=["SM100_ARM"],
+            ),
+            smoke_test(
+                name="fp8_attention_per_token_head_reuse_sm100",
+                task_info="data/model/qwen3/q_r_fp8_kv_cache_per_token_head.json",
+                smoke_args="--act_type BF16 --seq_size_per_block 64 --fp8_kv_cache 1 --fp8_kv_cache_scale_mode per_token_head --reuse_cache 1 --enable_memory_cache 0 --reserver_runtime_mem_mb 178125 --warm_up 0",
+                gpu_type=["SM100_ARM"],
+            ),
         ],
     )
 

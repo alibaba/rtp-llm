@@ -425,11 +425,6 @@ def setup_default_args(py_env_configs):
             raise ValueError(
                 "fp8_kv_cache_scale_mode=per_token_head requires --fp8_kv_cache 1"
             )
-        raise ValueError(
-            "fp8_kv_cache_scale_mode=per_token_head is not supported by the current "
-            "attention backends yet; use per_tensor or route to a backend that consumes "
-            "per-token per-head K/V scale caches."
-        )
 
     # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
     # Frontend doesn't need this setting

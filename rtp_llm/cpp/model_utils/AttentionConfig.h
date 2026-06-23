@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
 #include <c10/core/ScalarType.h>
+#include <string>
 
 namespace rtp_llm {
 
@@ -49,9 +50,10 @@ struct AttentionConfigs {
     size_t v_head_dim;
 
     // softmax config
-    float           softmax_extra_scale = 1.0f;
-    KvCacheDataType kv_cache_dtype      = KvCacheDataType::BASE;
-    bool            need_rope_kv_cache  = true;
+    float           softmax_extra_scale     = 1.0f;
+    KvCacheDataType kv_cache_dtype          = KvCacheDataType::BASE;
+    std::string     fp8_kv_cache_scale_mode = "per_tensor";
+    bool            need_rope_kv_cache      = true;
 
     // sparse attention config
     bool is_sparse        = false;
