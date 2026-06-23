@@ -234,6 +234,21 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
 
     // Set input_embedding_scalar
     bert_embedding_inputs.input_embedding_scalar = description_.input_embedding_scalar;
+
+    // Propagate multimodal features so Python BertModel.forward can splice them
+    // into hidden_states (without this, vision token positions get garbage from
+    // placeholder ID lookups in the word embedding table).
+    if (inputs.multimodal_features.has_value()) {
+        std::vector<torch::Tensor> mm_feats;
+        mm_feats.reserve(inputs.multimodal_features.value().size());
+        for (const auto& feature : inputs.multimodal_features.value()) {
+            mm_feats.emplace_back(feature.cuda());
+        }
+        bert_embedding_inputs.multimodal_features = std::move(mm_feats);
+    }
+    if (inputs.mm_features_locs.defined()) {
+        bert_embedding_inputs.mm_features_locs = inputs.mm_features_locs.cuda();
+    }
     return bert_embedding_inputs;
 }
 
