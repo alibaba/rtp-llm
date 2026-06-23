@@ -12,7 +12,10 @@ load("@rules_python//python:pip.bzl", "pip_parse")
 #     hard error and the resolve fails for non-pytorch packages (decord, etc.)
 #     even though they exist on the PyPI mirror.
 #   - mirrors.aliyun.com/pypi/simple: China-friendly PyPI mirror for base packages
-PIP_EXTRA_ARGS = [
+# Shared pip/pip-compile flags. Does NOT include PyTorch indexes, which differ
+# by target config (CUDA vs ROCm). Keeping them separate avoids uv asking every
+# package against both cu129 and rocm7.2 indexes during lockfile regeneration.
+PIP_BASE_ARGS = [
     "--cache-dir=~/.cache/pip",
     # --index-url overrides the env's PIP_INDEX_URL (which intranet containers
     # set to artlab via /etc/profile.d/alibaba_pypi_env.sh). Without this line,
@@ -20,14 +23,19 @@ PIP_EXTRA_ARGS = [
     "--index-url=https://mirrors.aliyun.com/pypi/simple/",
     # Extra indexes (PEP 503), used for transitive resolution:
     "--extra-index-url=https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/",
-    # Only list pytorch indexes for cfg's still in use. cu126 (Phase 2 drop)
-    # and cpu (Phase 2/3 drop) used to be here; removing them halves the
-    # query surface against download.pytorch.org per package and reduces
-    # cross-region timeout flakiness during update_pip.sh regen.
-    "--extra-index-url=https://download.pytorch.org/whl/cu129/",
-    "--extra-index-url=https://download.pytorch.org/whl/rocm7.2/",
     "--verbose",
 ]
+
+PIP_CUDA_EXTRA_ARGS = PIP_BASE_ARGS + [
+    "--extra-index-url=https://download.pytorch.org/whl/cu129/",
+]
+
+PIP_ROCM_EXTRA_ARGS = PIP_BASE_ARGS + [
+    "--extra-index-url=https://download.pytorch.org/whl/rocm7.2/",
+]
+
+# Backwards-compatible alias for callers that do not yet care about config.
+PIP_EXTRA_ARGS = PIP_CUDA_EXTRA_ARGS
 
 def pip_deps():
     # PPU support is internal-only and the opensource-side arch_select.bzl has
@@ -45,7 +53,7 @@ def pip_deps():
         name = "pip_ppu_torch",
         requirements_lock = "@rtp_deps//:requirements_lock_torch_gpu_cuda12_9.txt",
         python_interpreter = "/opt/conda310/bin/python3",
-        extra_pip_args = PIP_EXTRA_ARGS,
+        extra_pip_args = PIP_CUDA_EXTRA_ARGS,
         timeout = 3600,
         quiet = False,
     )
@@ -54,7 +62,7 @@ def pip_deps():
         name = "pip_gpu_cuda12_9_torch",
         requirements_lock = "@rtp_deps//:requirements_lock_torch_gpu_cuda12_9.txt",
         python_interpreter = "/opt/conda310/bin/python3",
-        extra_pip_args = PIP_EXTRA_ARGS,
+        extra_pip_args = PIP_CUDA_EXTRA_ARGS,
         timeout = 3600,
         quiet = False,
     )
@@ -63,7 +71,7 @@ def pip_deps():
         name = "pip_cuda12_arm_torch",
         requirements_lock = "@rtp_deps//:requirements_lock_cuda12_arm.txt",
         python_interpreter = "/opt/conda310/bin/python3",
-        extra_pip_args = PIP_EXTRA_ARGS,
+        extra_pip_args = PIP_CUDA_EXTRA_ARGS,
         timeout = 3600,
         quiet = False,
     )
@@ -72,6 +80,7 @@ def pip_deps():
         name = "pip_gpu_rocm_torch",
         requirements_lock = "@rtp_deps//:requirements_lock_rocm.txt",
         python_interpreter = "/opt/conda310/bin/python3",
-        extra_pip_args = PIP_EXTRA_ARGS,
+        extra_pip_args = PIP_ROCM_EXTRA_ARGS,
         timeout = 12000,
+        quiet = False,
     )

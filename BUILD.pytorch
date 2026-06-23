@@ -92,6 +92,15 @@ cc_library(
             "-lcudnn",
             "-lnvtx3interop",
         ],
+        "@//:using_cuda12_arm": [
+            "-L/usr/local/cuda/lib64",
+            "-L/usr/local/cuda/extras/CUPTI/lib64",
+            "-lcupti",
+            "-lcudart",
+            "-lnccl",
+            "-lcudnn",
+            "-lnvtx3interop",
+        ],
         "//conditions:default": [],
     }),
     deps = [
