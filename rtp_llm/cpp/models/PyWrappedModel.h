@@ -70,7 +70,8 @@ private:
                                       torch::Tensor         merged_eagle3_hidden,
                                       bool                  skip_final_layernorm = false);
     MicroBatchPlan  planMicroBatches(const GptModelInputs& inputs);
-    std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
+    static bool     hasMultimodalInputs(const GptModelInputs& inputs);
+    static std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
          splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
     void holdInputsHostBuffers(const GptModelInputs& inputs);
 
@@ -101,8 +102,9 @@ private:
     FusedD2DCopyParams d2d_copies_;
 
     // is_pinned() is expensive on CPU; only assert during first N forwards as a sanity check.
-    static constexpr int kPinnedCheckForwardCount = 3;
-    int                  pinned_check_remaining_{kPinnedCheckForwardCount};
+    static constexpr int  kPinnedCheckForwardCount = 3;
+    int                   pinned_check_remaining_{kPinnedCheckForwardCount};
+    std::atomic<uint64_t> multimodal_micro_batch_fallback_count_{0};
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.

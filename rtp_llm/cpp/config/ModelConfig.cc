@@ -182,13 +182,9 @@ AttentionConfigs ModelConfig::getAttentionConfigs(int64_t tp_size) const {
         config.kernel_tokens_per_block = config.tokens_per_block;
     }
 
-    // if qk_norm or use embedding model, fuse add bias in gemm
-    config.fuse_qkv_add_bias = qk_norm || (config.rope_config.style == RopeStyle::No && !use_kvcache) ? false : true;
-    // Skip rope+bias+transpose kernel entirely for embedding models (no RoPE, no KV cache).
-    // The GEMM epilogue already handles bias, and PACKED_QKV layout matches FMHA input directly.
-    if (config.rope_config.style == RopeStyle::No && !use_kvcache) {
-        config.need_rope_kv_cache = false;
-    }
+    // Disable QKV add-bias fusion for qk_norm or cacheless rope-less attention.
+    const bool is_embedding_attention = config.rope_config.style == RopeStyle::No && !use_kvcache;
+    config.fuse_qkv_add_bias          = !(qk_norm || is_embedding_attention);
     // Set dtype from model data type
     config.dtype = dataTypeToTorchType(data_type);
 

@@ -45,6 +45,18 @@ cc_test(
     exec_properties = {"gpu": "H20"},
 )
 
+cc_test(
+    name = "py_wrapped_model_test",
+    srcs = ["PyWrappedModelTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/models:models",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    exec_properties = {"gpu": "H20"},
+)
+
 py_test(
     name = "model_inputs_replay_test",
     srcs = ["model_inputs_replay_test.py"],

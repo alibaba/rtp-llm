@@ -16,6 +16,7 @@
 #include <numeric>
 #include "rtp_llm/cpp/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/FallbackLogUtils.h"
 #if USING_CUDA
 #include <c10/cuda/CUDAStream.h>
 #endif
@@ -378,9 +379,13 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     for (size_t i = 0; i < split_inputs.size(); ++i) {
         const auto& micro_inputs =
             split_inputs[i].kv_cache_kernel_block_id.defined() ? split_inputs[i] : split_inputs[0];
-        auto py_attn_inputs        = buildPyAttentionInputs(micro_inputs);
-        auto embedding_inputs      = buildPyEmbeddingInputs(micro_inputs);
-        auto multimodal_inputs     = buildPyMultimodalInputs(micro_inputs);
+        auto py_attn_inputs   = buildPyAttentionInputs(micro_inputs);
+        auto embedding_inputs = buildPyEmbeddingInputs(micro_inputs);
+        // Multimodal inputs never enter an enabled split plan: planMicroBatches
+        // disables it and splitInputsIntoMicroBatches enforces the invariant.
+        // Therefore only the first entry may carry multimodal data; later entries
+        // are either the disabled-plan placeholder or non-multimodal real batches.
+        auto multimodal_inputs     = i == 0 ? buildPyMultimodalInputs(micro_inputs) : torch_ext::PyMultimodalInputs{};
         auto bert_embedding_inputs = buildBertEmbeddingInputs(micro_inputs);
         if (!inputs.warmup && inputs.pd_separation) {
             py_attn_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
@@ -752,9 +757,25 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
     }
 }
 
+bool PyWrappedModel::hasMultimodalInputs(const GptModelInputs& inputs) {
+    const bool has_multimodal_features = inputs.multimodal_features.has_value() && !inputs.multimodal_features->empty();
+    const bool has_mm_extra_input      = inputs.mm_extra_input.has_value() && !inputs.mm_extra_input->empty();
+    return has_multimodal_features || has_mm_extra_input;
+}
+
 MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
     if (!int(device_props_.enable_layer_micro_batch)) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable_layer_micro_batch is false");
+        return {false, {}};
+    }
+
+    if (hasMultimodalInputs(inputs)) {
+        const auto [count, should_log] = recordRateLimitedFallback(multimodal_micro_batch_fallback_count_);
+        if (should_log) {
+            RTP_LLM_LOG_WARNING("multimodal inputs are incompatible with layer micro-batching; using the single-batch "
+                                "execution path (micro_batch_fallback_count=%llu)",
+                                static_cast<unsigned long long>(count));
+        }
         return {false, {}};
     }
 
@@ -833,6 +854,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
     size_t                      sliced_batch_idx       = 0;
     size_t                      decode_batch_idx       = 0;
     size_t                      prefill_batch_idx      = 0;
+
+    RTP_LLM_CHECK_WITH_INFO(
+        !micro_batch_plan.enable || !hasMultimodalInputs(inputs),
+        "multimodal inputs are incompatible with enable_layer_micro_batch; disable it in deployment config");
 
     if (!micro_batch_plan.enable) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable is false, use fake");

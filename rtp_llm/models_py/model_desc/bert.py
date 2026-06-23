@@ -14,6 +14,7 @@ from rtp_llm.models_py.modules import (
     EmbeddingBert,
     FMHAImplBase,
     LayerNorm,
+    MultimodalEmbeddingInjector,
 )
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
@@ -117,6 +118,7 @@ class BertModel(GptModelBase):
             beta=weights.get_global_weight(W.pre_decoder_ln_beta),
             eps=config.layernorm_eps,
         )
+        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
         self.layers = nn.ModuleList(
             [
                 BertDecoderLayer(
@@ -144,6 +146,17 @@ class BertModel(GptModelBase):
             bert_embedding_inputs.input_embedding_scalar,
         )
         hidden_states = self.pre_decoder_layernorm(inputs_embeds)
+
+        # VisionBert's projector produces vectors in the post-embedding-LayerNorm
+        # hidden space, so replacement intentionally happens after pre-LN. This
+        # ordering matches the production reference comparison recorded in the
+        # regression commit; moving it before pre-LN changes the model contract.
+        hidden_states = self.multimodal_embedding_injector(
+            hidden_states,
+            inputs.multimodal_inputs.multimodal_features,
+            inputs.multimodal_inputs.mm_features_locs,
+        )
+
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
